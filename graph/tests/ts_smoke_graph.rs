@@ -20,7 +20,7 @@ use repo_graph_parser_typescript::{FileParse, GRAPH_TYPE, edge_category, node_ki
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap().parent().unwrap().join("tests/fixtures/ts_smoke")
+    here.parent().unwrap().join("tests/fixtures/ts_smoke")
 }
 
 fn repo() -> RepoId {

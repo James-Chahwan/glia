@@ -20,8 +20,6 @@ fn backend_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     here.parent()
         .unwrap()
-        .parent()
-        .unwrap()
         .join("tests/fixtures/http_stack_smoke/backend")
 }
 

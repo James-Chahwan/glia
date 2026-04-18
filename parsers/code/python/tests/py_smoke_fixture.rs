@@ -11,11 +11,9 @@ use repo_graph_parser_python::{
 };
 
 fn fixture_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR = rust/parsers/code/python — walk up 4 levels to the repo root.
+    // CARGO_MANIFEST_DIR = parsers/code/python — walk up 3 levels to the repo root.
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     here.parent()
-        .unwrap()
-        .parent()
         .unwrap()
         .parent()
         .unwrap()

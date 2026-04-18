@@ -28,7 +28,7 @@ const BACKEND_MODULE_PREFIX: &str = "example.com/backend";
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap().parent().unwrap().join("tests/fixtures/http_stack_smoke")
+    here.parent().unwrap().join("tests/fixtures/http_stack_smoke")
 }
 
 fn backend_repo() -> RepoId {

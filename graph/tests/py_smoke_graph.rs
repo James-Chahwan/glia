@@ -13,7 +13,7 @@ use repo_graph_parser_python::{FileParse, GRAPH_TYPE, edge_category, node_kind, 
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap().parent().unwrap().join("tests/fixtures/py_smoke")
+    here.parent().unwrap().join("tests/fixtures/py_smoke")
 }
 
 fn repo() -> RepoId {

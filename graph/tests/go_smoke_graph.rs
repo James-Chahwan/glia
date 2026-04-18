@@ -23,7 +23,7 @@ const MODULE_PREFIX: &str = "example.com/myapp";
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap().parent().unwrap().join("tests/fixtures/go_smoke")
+    here.parent().unwrap().join("tests/fixtures/go_smoke")
 }
 
 fn repo() -> RepoId {
