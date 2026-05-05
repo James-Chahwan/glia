@@ -320,13 +320,35 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible
 wheel matrix. **v0.4.13a/b/c/d:** SWE-bench latent-injection arm
 (marshmallow-1359 SOLVE).
 
+**v0.4.14 (perf + cleanup, between this and v0.5):**
+- **Per-graph-area incremental rebuild** — only re-walk and re-resolve
+  the source regions that actually changed since last build. Currently
+  `glia build` rewalks the whole repo every invocation; on a 100k-LOC
+  monorepo the post-commit hook latency is the bottleneck. Wants:
+  per-file content hashing, dirty-set propagation, partial `.gmap`
+  patching instead of whole-file rewrite.
+- **Iterator parallelisation** — the per-language parser pipeline,
+  cross-cutting extractor pass, and per-resolver index builds are all
+  embarrassingly parallel today and run sequentially. Rayon-ify the
+  walk + parse + extract steps; sharded resolver index construction.
+- **Cleanup** — feature-gate the synth bins as a single `--features
+  research` toggle (currently `driver`); consolidate the 5 bypass
+  branches in `engine/src/lib.rs` behind a uniform "non-tree-sitter
+  source dispatcher" trait; promote the `looks_like_url_path` validator
+  + framework-presence-signals helper into a shared extractor-utils
+  module (currently duplicated across queues/ts_routes/react); pull
+  `engine`'s repeated language-dispatch match arms out into a small
+  registry table.
+
 **v0.5.0:** domain registries for non-code (video, chemistry, policy,
 climate). Code becomes one of N domains. The activation crate is already
 domain-agnostic; the parser+extractor layer is what abstracts.
 
 **v0.5+:** Cross-language taint, contract drift, type propagation;
-node dedupe across repos; incremental `.gmap` rebuild; manifest format
-for `glia merge`; org-internal-package routing (sibling-repo imports).
+node dedupe across repos; manifest format for `glia merge`;
+org-internal-package routing (sibling-repo imports); query-specific
+distillation over composition / sage / synth-cells / vectors (the
+reasoning-layer search direction noted in Experimental notes above).
 
 ## License
 
