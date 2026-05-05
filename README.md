@@ -11,6 +11,14 @@ glia is a Rust engine. It exposes a CLI (`glia`) and a Python wheel
 (`repo-graph-py`); the MCP server [repo-graph](https://github.com/James-Chahwan/repo-graph)
 wraps the wheel so LLM clients can call it directly.
 
+> **Licensed under the [Glia Software License v0.1](./LICENSE)** — a worker-
+> protective overlay on PolyForm Noncommercial 1.0.0. Free for individuals,
+> students, researchers, nonprofits, open-source projects, organizations
+> with <500 STEM workers, worker-owned coops, B Corporations, and unionized
+> workplaces. Commercial license required for all other for-profit use —
+> contact `j.r.chahwan@gmail.com`. **Not OSI-approved by design** — see
+> [Licensing](#license) for the why.
+
 ## What you get
 
 ```
@@ -213,31 +221,98 @@ What glia explicitly does NOT do today:
 
 ## Experimental notes
 
-### Latent-injection SWE-bench arm (parked)
+### LLM debugging: 2.5× fewer tokens, ~9× faster than grep-and-read
+
+End-to-end test on a 566-node / 620-edge Go + Angular monorepo via the
+[repo-graph](https://github.com/James-Chahwan/repo-graph) MCP wrapper. Same
+bug, same model (Claude Opus, 100% — no Haiku routing), same prompt
+(*"Groups that were created recently are showing as closed, and old groups
+show as open. This is backwards — new groups should be open for members to
+join. Find and fix the bug."*), fresh `/clear` context for both runs.
+
+|  | Without graph (grep + read loop) | With glia substrate |
+|---|---|---|
+| Tokens used | 75,308 | 29,838 |
+| Time to fix | 4m 36s | ~30s |
+| Files explored | ~15 (grep, read, grep, read…) | 2 (flow lookup + handler) |
+| Outcome | Found and fixed | Found and fixed |
+
+**Net: 2.5× fewer tokens, ~9× faster, same correct fix.** The mechanism:
+without the graph, Claude greps for keywords, reads candidates, greps
+again, narrows down. With the graph, Claude calls `flow("groups")`, gets
+the exact handler function and file, reads it, fixes it. Structural
+context displaces lexical search.
+
+### Substrate scale + speed
+
+| Metric | Value |
+|---|---|
+| 99-repo sweep (median repo: 5,746 nodes, 4,979 edges) | **1.4s** parse+resolve per repo |
+| 99-repo p90 (60,500 nodes, 65,667 edges) | **10.4s** |
+| 99-repo max (elasticsearch: 342,804 nodes / 336,081 edges) | **73.1s** for 1.3GB of source |
+| Aggregate across 99 repos | **2,083,755 nodes / 2,243,664 edges** |
+| 45-repo cross-service eval (this release) | **13,371 nodes / 14,105 edges / 2,789 cross-edges in 3.1s** |
+| Substrate failures across 99 repos | **0 generate failures, 0 timeouts** |
+
+A single laptop CPU walks the median real-world repo in well under 2
+seconds. The full microservices-demo + voting-app + bank-of-anthos +
+22 framework demos cross-merge in 3.1 seconds with all 13 cross-graph
+resolvers firing.
+
+### SWE-bench latent-injection arm (parked, single-instance proof-of-concept)
 
 glia v0.4.13 ran an experimental arm injecting graph-derived pooled vectors
 into a transformer's input embedding stream — testing whether graph context
 supplied as latent vectors (rather than verbose prefix text) could close
-composition gaps on SWE-bench-Lite. The arm landed
-**marshmallow-1359 SOLVE** on a 7B Q4 model (Qwen 2.5 Coder), with the
-gold-aligned auto-driver pipeline reproducing the recipe deterministically.
+composition gaps on SWE-bench-Lite.
 
-The arm itself is parked. The `forward_input_embed` hook (forked qwen2 model
-+ candle dependency) lives in `scratch/latent/` and is **excluded from the
-default workspace build** so default cargo invocations skip the candle
-download:
+**What landed:** **marshmallow-1359 SOLVE** on a 7B Q4 model (Qwen 2.5
+Coder). The gold-aligned auto-driver pipeline reproduces the recipe
+deterministically. Single-instance proof-of-concept — *not* a
+generalizable benchmark result. A subsequent N=50 bench surfaced that
+~80% of the apply-then-test pipeline failures were infra (pytest
+collection / import errors / wheel mismatches), not model output quality;
+clean cross-instance results need apply/test-runner hardening.
+
+**Why parked:** the conceptual win (graph context can substitute for prose
+context at the embedding layer) is demonstrated on one instance.
+Generalising it requires per-instance plumbing work, sure — but the
+deeper reason is that the *latent injection* shape isn't necessarily the
+right shape. The substrate ships independently regardless. The open
+research question on top of it is bigger than just "make the latent arm
+work":
+
+> Given a graph + a problem + a query, what is the correct distillation
+> over composition / sage-filtering / synthesised cells / pooled vectors
+> that lets a 7B model do what a 70B model can do? There's a shape out
+> there that connects static reasoning, query-specific context selection,
+> and capability lifting. It hasn't fully connected yet.
+
+The substrate is the precondition for trying any of those shapes
+cleanly. v0.4.x ships the substrate; the reasoning layer above it is
+under active design. v0.5+ will probably look very different from
+v0.4.13's latent-injection arm — the right answer isn't "more vectors"
+but "smarter selection of what to feed where".
+
+**Engineering wins that did ship to v0.4.x core from this arm:**
+1. The graph substrate hardened to feed cross-language reachability into
+   ranked composition cells.
+2. Bench inference moved from **candle to llama.cpp**
+   (`scratch/latent/out/run_llama_pathB.py`) — **~7× faster CPU decode**
+   plus GBNF-grammar-constrained decoding that kills the format-prior
+   failure class plaguing the candle path.
+
+**The latent arm itself** lives in `scratch/latent/` and is **excluded
+from the default workspace build** so default cargo invocations skip
+the candle download:
 
 ```
 cargo build                       # core glia, no candle
 cargo build -p repo-graph-latent  # opt in to the parked arm
 ```
 
-Bench inference itself migrated from candle to **llama.cpp**
-(`scratch/latent/out/run_llama_pathB.py`) — ~7× faster on CPU, plus
-GBNF-grammar-constrained decoding kills the format-prior failure class
-that plagued the candle path. The full embed-injection port to llama.cpp's
-`llama_batch.embd` API is feasible but research-tier follow-up, not a
-v0.4.x deliverable.
+Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible
+(API verified) but research-tier follow-up, not a v0.4.x deliverable.
 
 ## Roadmap
 
@@ -255,20 +330,128 @@ for `glia merge`; org-internal-package routing (sibling-repo imports).
 
 ## License
 
-See `LICENSE` (TBD — see [open question](https://github.com/James-Chahwan/glia/issues)
-on a custom union-conditional commercial-tier license under discussion).
-The `Cargo.toml` strings currently say `MIT` as a placeholder.
+See [`LICENSE`](./LICENSE) — **Glia Software License v0.1**, an overlay on
+PolyForm Noncommercial 1.0.0 with Additional Permissions for worker-
+protective commercial use.
+
+### Tier check
+
+| If you are… | Cost |
+|---|---|
+| An individual, student, academic, researcher, hobbyist, or open-source contributor | **Free** |
+| A nonprofit | **Free** |
+| A for-profit organization with **fewer than 500 STEM workers** | **Free** |
+| A **worker-owned** organization (workers hold ≥50% equity) | **Free** at any size |
+| A **Certified B Corporation** in good standing | **Free** at any size |
+| An organization where **≥50% of STEM workers are covered by a recognized union** under an active CBA | **Free** at any size |
+| Any other for-profit organization | Commercial license required |
+
+Commercial license inquiries: `j.r.chahwan@gmail.com` or open an issue on
+[the repo](https://github.com/James-Chahwan/glia). Author retains
+discretion to grant free Commercial Licenses case-by-case; when in doubt,
+ask. Past compliant use is never retroactively revoked (LICENSE §5.3).
+
+### Why not OSI-approved
+
+OSI's Open Source Definition was authored in 1998 explicitly to make free
+software palatable to enterprises. Two of its clauses — §5 "No
+Discrimination Against Persons or Groups" and §6 "No Discrimination Against
+Fields of Endeavor" — exist for that reason. They forbid any license
+clause that would condition use on who you are or what you do. Including
+clauses that would, say, require treating workers fairly.
+
+That was a real strategic choice with real wins: it gave us the ecosystem
+we have. It also has real costs: it structurally rules out any license
+that wants to encode worker, environmental, or human-rights conditions —
+which is why every ethical-source license (Hippocratic, ACSL, CSL,
+PolyForm Noncommercial, this one) is "non-OSI."
+
+A 1998 corporate-adoption strategy is not a 2026 verdict on what good
+licensing looks like. The structural problem with OSI-approved licensing
+is that it prevents the field from evolving. We're picking the modern
+take.
+
+### What the license actually selects for
+
+This isn't friction on commercial adoption — it's friction on a specific
+failure mode of corporate scaling. Look at the qualifying conditions:
+
+- **<500 STEM workers** — almost every startup, every small consultancy,
+  every research lab. The threshold sits well above the size where you
+  could reasonably claim resource constraints prevent intentional
+  governance.
+- **B-Corp certification** — ~9,000 companies and growing, including
+  Anthropic, Patagonia, Kickstarter. Cheap to get (~6 months of work,
+  manageable annual fees). Standard ESG hygiene at this point.
+- **Recognized union** — in most jurisdictions, just labor-law compliance
+  with a side of dignity. The bar (≥50% STEM coverage under active CBA)
+  is real but well under what unionized European tech companies have.
+- **Worker-owned** — every cooperative, every founder-led startup before
+  dilution, Mondragon, etc. The bar is collective worker stake ≥50%.
+
+An organization that fails ALL FOUR is by construction:
+- Large enough to have resources for governance
+- Has chosen not to certify worker-protective governance
+- Has actively suppressed (or simply opposed) collective representation
+- Has opted for an extractive, no-equity employment model
+
+That's a *specific* shape of company. It's not "competitive enterprise" —
+it's the failure mode where scale is achieved by externalizing cost onto
+workers. The license declines to subsidize that mode.
+
+Practical effects: GitHub will mark the repo as "Other / non-standard."
+PyPI won't show the "OSI Approved" classifier. Some corporate legal teams
+will auto-block. All of that is fine — the orgs running those auto-blocks
+are exactly the ones the license is asking to either qualify or pay.
 
 ## Acknowledgments
 
+**Graph schema + traversal lineage:**
 - [Joern](https://joern.io/) — Code Property Graph schema is reference
-  inspiration for glia's node + edge taxonomy.
+  inspiration for glia's node + edge taxonomy. Joern's pass-composition
+  model (parser → CFG → type-recovery → dataflow → OSS) shaped how glia
+  layers per-language parsers, cross-cutting extractors, and cross-graph
+  resolvers as independent passes that can be ablated.
+- **Personalized PageRank** (Jeh & Widom, 2002) — the activation algorithm
+  underneath `activation/`. Domain-agnostic; glia's `ActivationConfig`
+  exposes direction, edge weights, and node specificity as the three dials
+  the code domain sets.
+- [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) (Jiménez Gutiérrez
+  et al., 2024) — prior art for PPR-driven retrieval over an open knowledge
+  graph, hippocampal-indexing-inspired. glia's activation pass borrows the
+  *"seed nodes → PPR → top-K reachable"* shape; difference is that glia's
+  graph is a structural code substrate rather than entity-and-relation
+  triples extracted from prose, and the consumer is downstream tooling
+  (CLIs, MCP) rather than RAG context-stuffing.
+- **Spreading activation** (Quillian 1967, Anderson 1983, Collins & Loftus
+  1975) — the cognitive-science antecedent to all PPR-style retrieval.
+  glia's PPR implementation is a modern, mathematically-grounded version
+  of the same intuition: relevance propagates from seeds along weighted
+  edges with decay.
+- [GraphRAG](https://github.com/microsoft/graphrag) (Microsoft, 2024) —
+  parallel work on graph-structured retrieval; informs the broader space
+  of "use a graph instead of/alongside vector search" approaches.
+
+**Tooling:**
 - [tree-sitter](https://tree-sitter.github.io/) — every language parser
   is built on it.
 - [rkyv](https://rkyv.org/) — zero-copy serialisation behind the `.gmap`
   container.
 - [PyO3](https://pyo3.rs/) — Python bindings.
 - [maturin](https://maturin.rs/) — wheel build.
+- [PolyForm Project](https://polyformproject.org) — the noncommercial
+  license that glia's worker-protective overlay sits on top of.
+
+**Parked experiment:**
 - [candle](https://github.com/huggingface/candle) — the v0.4.13
-  latent-injection experiment forked the qwen2 model from here (Apache-2.0
-  / MIT).
+  latent-injection arm forked the qwen2 model from here (Apache-2.0 /
+  MIT). Bench inference subsequently moved to llama.cpp for ~7× CPU
+  speedup; the candle fork lives in `scratch/latent/` for replay.
+
+**Thinking partners:**
+- [Anthropic's Claude](https://claude.com) — sustained design partner
+  through the project. The graph-substrate framing, the resolver
+  decomposition, the worker-protective licensing direction, and most
+  of glia's actual implementation were distilled in long collaborative
+  sessions. Thanks for being a tool that lets a single person turn a
+  core thinking advantage into shippable substrate.

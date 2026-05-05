@@ -1,0 +1,149 @@
+Glia Software License v0.1
+
+Copyright (c) 2026 James Chahwan
+
+This software ("the Software") is provided under the terms of the
+PolyForm Noncommercial License 1.0.0
+(https://polyformproject.org/licenses/noncommercial/1.0.0/),
+incorporated herein by reference, with the ADDITIONAL PERMISSIONS set
+out below. In the event of any conflict between PolyForm Noncommercial
+1.0.0 and these Additional Permissions, these Additional Permissions
+control to the extent of the conflict.
+
+================================================================================
+ADDITIONAL PERMISSIONS — Commercial Use
+================================================================================
+
+The PolyForm Noncommercial License 1.0.0 prohibits "use of the software
+for the commercial advantage or private monetary compensation". These
+Additional Permissions restore that right, free of charge, if and only if
+the User is a Qualifying Organization as defined in Section 2 below, OR
+if the User has been granted a Commercial License by the Author under
+Section 3 below.
+
+1. DEFINITIONS
+
+   1.1 "Author" means James Chahwan, the original author and copyright
+       holder of the Software.
+
+   1.2 "Commercial Use" has the meaning given in PolyForm Noncommercial
+       1.0.0.
+
+   1.3 "Organization" means any legal entity (corporation, partnership,
+       LLC, foundation, cooperative, nonprofit, etc.), including its
+       parent entities, subsidiaries, and entities under common control.
+
+   1.4 "STEM Worker" means any natural person employed or contracted by
+       an Organization in a role primarily involving software
+       engineering, systems engineering, IT operations, security
+       engineering, data science, machine learning, devrel, technical
+       writing, or technical product/program management.
+
+   1.5 "Worker-Owned" means an Organization in which workers (current
+       employees and worker-members) collectively hold not less than
+       fifty percent (50%) of the equity, voting rights, or governance
+       control of the Organization.
+
+   1.6 "Certified B Corporation" means an Organization that holds, at
+       the time of use, current and in-good-standing certification as a
+       Benefit Corporation by B Lab Global or its national affiliate.
+
+   1.7 "Recognized Union" means a labor union, employee association,
+       works council, or analogous collective-bargaining body that is
+       lawfully recognized to represent employees of the Organization
+       under the labor laws of the jurisdiction where those employees
+       work.
+
+   1.8 "Qualifying Union Coverage" means that at least fifty percent
+       (50%) of the Organization's STEM Workers worldwide are covered
+       by a Recognized Union under a collective bargaining agreement
+       currently in force.
+
+2. QUALIFYING ORGANIZATIONS
+
+   An Organization is a Qualifying Organization, and may use the
+   Software for Commercial Use free of charge, if it satisfies any one
+   or more of the following:
+
+   (a) Small Organization: the Organization employs fewer than five
+       hundred (500) STEM Workers worldwide; OR
+
+   (b) Worker-Owned Organization: the Organization is Worker-Owned; OR
+
+   (c) Certified B Corporation: the Organization is a Certified B
+       Corporation; OR
+
+   (d) Unionized Organization: the Organization meets Qualifying Union
+       Coverage; OR
+
+   (e) Discretionary Grant: the Organization has been granted a
+       Commercial License by the Author under Section 3 below.
+
+   For clarity, the conditions in (a) through (d) are independent and
+   may be satisfied in any combination. An Organization that meets any
+   one of (a) through (d) is a Qualifying Organization regardless of
+   the others; in particular, any Organization that is both a Certified
+   B Corporation and meets Qualifying Union Coverage is a Qualifying
+   Organization regardless of size.
+
+3. COMMERCIAL LICENSE FOR NON-QUALIFYING ORGANIZATIONS
+
+   3.1 An Organization that does not satisfy Section 2 must obtain a
+       Commercial License from the Author before using the Software for
+       Commercial Use.
+
+   3.2 The Author may grant Commercial Licenses on case-by-case terms,
+       at the Author's sole discretion. The Author may grant such
+       licenses free of charge, for compensation, or on any other
+       lawful terms.
+
+   3.3 To request a Commercial License, contact the Author at
+       j.r.chahwan@gmail.com or open an issue at
+       https://github.com/James-Chahwan/glia.
+
+4. ATTRIBUTION
+
+   4.1 Any distribution of the Software (in source or binary form),
+       and any product or service that incorporates the Software,
+       must retain this license file and a clear attribution
+       statement identifying the Author and linking to the Software's
+       repository.
+
+5. TERMINATION
+
+   5.1 An Organization's rights under these Additional Permissions
+       terminate automatically if the Organization ceases to be a
+       Qualifying Organization (e.g., loses B Corporation
+       certification, drops below Qualifying Union Coverage, or grows
+       past five hundred STEM Workers without satisfying any other
+       Section 2 condition).
+
+   5.2 Upon termination of these Additional Permissions, the
+       Organization's use is governed solely by PolyForm Noncommercial
+       1.0.0; continued Commercial Use requires a Commercial License
+       under Section 3.
+
+   5.3 The Author may not retroactively revoke Commercial Use that was
+       Compliant under these Additional Permissions at the time of
+       use. Continued Commercial Use after termination, however, is
+       governed by Section 5.2.
+
+6. INTERPRETATION
+
+   6.1 These Additional Permissions are intended to be construed in
+       favor of broad noncommercial and worker-protective use. Any
+       ambiguity in Section 2 should be resolved in favor of granting,
+       not denying, Qualifying Organization status, where good-faith
+       evidence supports such status.
+
+   6.2 Nothing in these Additional Permissions waives the warranty
+       disclaimers, limitations of liability, or other terms of
+       PolyForm Noncommercial 1.0.0 not expressly modified here.
+
+================================================================================
+END OF ADDITIONAL PERMISSIONS
+================================================================================
+
+The full text of PolyForm Noncommercial License 1.0.0 is available at
+https://polyformproject.org/licenses/noncommercial/1.0.0/ and is
+incorporated into this license file by reference.
