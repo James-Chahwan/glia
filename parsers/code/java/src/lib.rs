@@ -48,6 +48,7 @@ pub fn parse_file(
 
     scan_ktor_routes(source, repo, &mut acc);
     scan_webflux_routes(source, repo, &mut acc);
+    scan_javalin_routes(source, repo, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -56,6 +57,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 
@@ -349,6 +351,61 @@ fn scan_webflux_routes(source: &str, repo: RepoId, acc: &mut Acc) {
             }
             let path = &source[start..j];
             if !path.starts_with('/') {
+                search_from = j + 1;
+                continue;
+            }
+            let key = format!("{method} {path}");
+            if seen.insert(key.clone()) {
+                emit_ktor_route(method, path, repo, acc);
+            }
+            search_from = j + 1;
+        }
+    }
+}
+
+fn scan_javalin_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+    // Javalin: `app.get("/path", handler)` / `app.post("/path", ctx -> {...})`.
+    // Distinct from Ktor (top-level `get("/path") { ... }`): Javalin always has
+    // a receiver (`app.` / `router.`) and never a trailing `{` block — both
+    // ruled out by the Ktor scanner above. Discriminator from `Map.get("k")`
+    // is the path-`/` first-arg filter.
+    let methods: &[(&str, &str)] = &[
+        (".get(\"", "GET"),
+        (".post(\"", "POST"),
+        (".put(\"", "PUT"),
+        (".patch(\"", "PATCH"),
+        (".delete(\"", "DELETE"),
+        (".head(\"", "HEAD"),
+        (".options(\"", "OPTIONS"),
+    ];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let bytes = source.as_bytes();
+    for (needle, method) in methods {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let pos = search_from + rel;
+            let start = pos + needle.len();
+            let mut j = start;
+            while j < bytes.len() && bytes[j] != b'"' {
+                if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            if j >= bytes.len() {
+                break;
+            }
+            let path = &source[start..j];
+            if !path.starts_with('/') {
+                search_from = j + 1;
+                continue;
+            }
+            // Must have a comma after the path (Javalin always takes a handler
+            // as the second arg). Filters out single-arg `.get("/x")` fetcher
+            // calls that happen to use a slash key.
+            let after = source[j + 1..].trim_start();
+            if !after.starts_with(',') {
                 search_from = j + 1;
                 continue;
             }
@@ -684,6 +741,65 @@ public class RouterConfig {
         assert!(routes.contains(&"GET /users"));
         assert!(routes.contains(&"POST /users"));
         assert!(routes.contains(&"DELETE /users/{id}"));
+    }
+
+    #[test]
+    fn javalin_routes() {
+        let source = r#"
+import io.javalin.Javalin;
+
+public class App {
+    public static void main(String[] args) {
+        Javalin app = Javalin.create();
+        app.get("/health", ctx -> ctx.result("ok"));
+        app.post("/users", UserHandler::create);
+        app.put("/users/{id}", UserHandler::update);
+        app.delete("/users/{id}", UserHandler::destroy);
+    }
+}
+"#;
+        let fp = parse_file(source, "App.java", "com::example", repo()).unwrap();
+        let routes: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(routes.contains(&"GET /health"));
+        assert!(routes.contains(&"POST /users"));
+        assert!(routes.contains(&"PUT /users/{id}"));
+        assert!(routes.contains(&"DELETE /users/{id}"));
+    }
+
+    #[test]
+    fn javalin_skips_map_get_with_path_key() {
+        // `cache.get("/users")` shape: path-`/` filter alone would let it
+        // through; the comma-after-path filter rejects it (single-arg call).
+        let source = r#"
+public class Svc {
+    public String load() {
+        return cache.get("/users");
+    }
+}
+"#;
+        let fp = parse_file(source, "Svc.java", "com::example", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "single-arg `.get(\"/key\")` must not emit a route");
+    }
+
+    #[test]
+    fn javalin_skips_non_path_first_arg() {
+        let source = r#"
+public class Svc {
+    public String load() {
+        return cache.get("user-id", fallback);
+    }
+}
+"#;
+        let fp = parse_file(source, "Svc.java", "com::example", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "non-`/` first arg must not emit a route");
     }
 
     #[test]

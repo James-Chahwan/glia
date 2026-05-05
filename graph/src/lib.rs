@@ -43,6 +43,11 @@ pub struct RepoGraph {
     /// `unresolved_calls`. v0.4.4 use case: gin route handler refs that point
     /// at packages the parser couldn't link to a known module.
     pub unresolved_refs: Vec<UnresolvedRef>,
+    /// v0.4.13b — method ids tagged as property-style (read as `self.x`).
+    /// Populated from `FileParse.properties`. Consumed by composition-path
+    /// synthesis to filter method→class hops down to syntactically valid
+    /// attribute reads.
+    pub properties: HashSet<NodeId>,
 }
 
 /// Symbol index built during resolution. Everything keyed by node id so
@@ -162,6 +167,7 @@ fn merge_parses(
         symbols: SymbolTable::default(),
         unresolved_calls: Vec::new(),
         unresolved_refs: Vec::new(),
+        properties: HashSet::new(),
     };
 
     let mut all_imports: Vec<ImportStmt> = Vec::new();
@@ -184,6 +190,7 @@ fn merge_parses(
         all_imports.extend(p.imports);
         all_calls.extend(p.calls);
         all_refs.extend(p.refs);
+        g.properties.extend(p.properties);
     }
 
     (g, all_imports, all_calls, all_refs)
@@ -541,6 +548,13 @@ where
                         .and_then(|m| m.get(name).copied())
                 })
             }
+            // Python `super().m()` — intra-file super calls are resolved by
+            // the Python parser before emitting the CallSite. Anything that
+            // reaches this layer is cross-file (base class imported from
+            // another module) and requires walking the enclosing class's
+            // recorded base-class names through `module_import_bindings`.
+            // Not wired at v0.4.13 — falls through to extra_hook / unresolved.
+            CallQualifier::SuperMethod(_) => None,
             CallQualifier::ComplexReceiver { .. } => None,
         };
 
@@ -593,10 +607,12 @@ fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                         None
                     }
                 }),
-            // SelfMethod and ComplexReceiver are non-sensical for refs at v0.4.4 —
-            // refs come from contexts (Route nodes) that have no `self`. Treat as
-            // unresolved for diagnostics.
-            CallQualifier::SelfMethod(_) | CallQualifier::ComplexReceiver { .. } => None,
+            // SelfMethod / SuperMethod / ComplexReceiver are non-sensical for
+            // refs at v0.4.4 — refs come from contexts (Route nodes) that have
+            // no `self` or enclosing class. Treat as unresolved for diagnostics.
+            CallQualifier::SelfMethod(_)
+            | CallQualifier::SuperMethod(_)
+            | CallQualifier::ComplexReceiver { .. } => None,
         };
 
         match resolved {
@@ -1206,6 +1222,262 @@ impl CrossGraphResolver for SharedSchemaResolver {
     }
 }
 
+// ============================================================================
+// DbResolver — joins services that touch the same Table / Collection /
+// NodeLabel by indexing DATA_ENTITY nodes by their full qname
+// (`data_entity:<flavor>:<name>`) and pairing nodes that live in different
+// repos. Mirrors SharedSchemaResolver's pairwise-pair shape; the qname's
+// flavor segment ensures `users` (SQL table) and `User` (Mongoose model)
+// don't collide.
+// ============================================================================
+
+pub struct DbResolver;
+
+impl CrossGraphResolver for DbResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let mut entity_index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> =
+            HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::DATA_ENTITY) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                entity_index
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((n.id, g.repo, n.confidence));
+            }
+        }
+        for refs in entity_index.values() {
+            if refs.len() < 2 {
+                continue;
+            }
+            let repos: HashSet<RepoId> = refs.iter().map(|(_, r, _)| *r).collect();
+            if repos.len() < 2 {
+                continue;
+            }
+            for i in 0..refs.len() {
+                for j in (i + 1)..refs.len() {
+                    if refs[i].1 != refs[j].1 {
+                        merged.cross_edges.push(Edge {
+                            from: refs[i].0,
+                            to: refs[j].0,
+                            category: edge_category::SHARES_DATA_ENTITY,
+                            confidence: weakest(refs[i].2, refs[j].2),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CronResolver — pairs CRON_JOB nodes that share the full qname
+// (`cron:<schedule>:<target>`) across different repos. Surfaces drift /
+// accidental duplication of scheduled work; pairing on schedule alone is
+// noise (e.g. five unrelated 4am jobs).
+// ============================================================================
+
+pub struct CronResolver;
+
+impl CrossGraphResolver for CronResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let mut index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::CRON_JOB) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                index
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((n.id, g.repo, n.confidence));
+            }
+        }
+        for refs in index.values() {
+            if refs.len() < 2 {
+                continue;
+            }
+            let repos: HashSet<RepoId> = refs.iter().map(|(_, r, _)| *r).collect();
+            if repos.len() < 2 {
+                continue;
+            }
+            for i in 0..refs.len() {
+                for j in (i + 1)..refs.len() {
+                    if refs[i].1 != refs[j].1 {
+                        merged.cross_edges.push(Edge {
+                            from: refs[i].0,
+                            to: refs[j].0,
+                            category: edge_category::SHARES_CRON_SCHEDULE,
+                            confidence: weakest(refs[i].2, refs[j].2),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ConfigResolver — pairs CONFIG_KEY nodes with the same qname across repos.
+// Same env-var name consumed/defined in 2+ services → SHARES_CONFIG edge.
+// Useful drift signal (key renamed in one place but not another) and a
+// substrate query "which services depend on DB_URL?".
+// ============================================================================
+
+pub struct ConfigResolver;
+
+impl CrossGraphResolver for ConfigResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let mut index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::CONFIG_KEY) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                index
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((n.id, g.repo, n.confidence));
+            }
+        }
+        for refs in index.values() {
+            if refs.len() < 2 {
+                continue;
+            }
+            let repos: HashSet<RepoId> = refs.iter().map(|(_, r, _)| *r).collect();
+            if repos.len() < 2 {
+                continue;
+            }
+            for i in 0..refs.len() {
+                for j in (i + 1)..refs.len() {
+                    if refs[i].1 != refs[j].1 {
+                        merged.cross_edges.push(Edge {
+                            from: refs[i].0,
+                            to: refs[j].0,
+                            category: edge_category::SHARES_CONFIG,
+                            confidence: weakest(refs[i].2, refs[j].2),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// IacResolver — pairs INFRA_RESOURCE nodes with the same qname
+// (`infra:<kind>:<name>`) across repos. Captures cross-service
+// container/manifest references — image built in repo A consumed by k8s
+// manifest in repo B; same Service name appearing in compose for one repo and
+// k8s for another (drift signal).
+// ============================================================================
+
+pub struct IacResolver;
+
+impl CrossGraphResolver for IacResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let mut index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::INFRA_RESOURCE) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                index
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((n.id, g.repo, n.confidence));
+            }
+        }
+        for refs in index.values() {
+            if refs.len() < 2 {
+                continue;
+            }
+            let repos: HashSet<RepoId> = refs.iter().map(|(_, r, _)| *r).collect();
+            if repos.len() < 2 {
+                continue;
+            }
+            for i in 0..refs.len() {
+                for j in (i + 1)..refs.len() {
+                    if refs[i].1 != refs[j].1 {
+                        merged.cross_edges.push(Edge {
+                            from: refs[i].0,
+                            to: refs[j].0,
+                            category: edge_category::SHARES_INFRA_REF,
+                            confidence: weakest(refs[i].2, refs[j].2),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// PackageResolver — pairs PACKAGE_DEP nodes with the same qname
+// (`package:<ecosystem>:<name>`) across repos. Surfaces the "two services
+// depend on the same package" signal that would otherwise need an external
+// SCA tool. Cross-language reachability (the differentiator vs Endor / Snyk
+// / Socket.dev) lives in v0.5+ — this resolver only emits the dependency
+// substrate; per-symbol reachability layers on top of it.
+// ============================================================================
+
+pub struct PackageResolver;
+
+impl CrossGraphResolver for PackageResolver {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        let mut index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PACKAGE_DEP) {
+                    continue;
+                }
+                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                    continue;
+                };
+                index
+                    .entry(qname.clone())
+                    .or_default()
+                    .push((n.id, g.repo, n.confidence));
+            }
+        }
+        for refs in index.values() {
+            if refs.len() < 2 {
+                continue;
+            }
+            let repos: HashSet<RepoId> = refs.iter().map(|(_, r, _)| *r).collect();
+            if repos.len() < 2 {
+                continue;
+            }
+            for i in 0..refs.len() {
+                for j in (i + 1)..refs.len() {
+                    if refs[i].1 != refs[j].1 {
+                        merged.cross_edges.push(Edge {
+                            from: refs[i].0,
+                            to: refs[j].0,
+                            category: edge_category::SHARES_DEPENDENCY,
+                            confidence: weakest(refs[i].2, refs[j].2),
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn is_schema_type(qname: &str, kind: Option<NodeKindId>) -> bool {
     let schema_hints = [
         "Schema", "Validator", "Type", "Model", "Entity", "DTO",
@@ -1319,6 +1591,91 @@ impl RepoGraph {
             }
         }
         out
+    }
+
+    /// Backward BFS — node ids that can reach `sink` by following edges in
+    /// `follow` in the reverse direction, up to `max_depth` hops. Sink
+    /// excluded.
+    ///
+    /// Joern-flavored data-flow primitive. Pair it with `reachable_by` to ask
+    /// "which of these candidate sources can reach this sink?" without
+    /// materialising the full predecessor frontier when only a small set is
+    /// of interest.
+    ///
+    /// Cost is O(E * depth) per call (linear scan over edges per visited
+    /// node). For repeated queries against the same graph, build a reverse
+    /// adjacency index out-of-band; this primitive is intentionally
+    /// index-free so it composes with `MergedGraph::all_edges`.
+    pub fn predecessors(
+        &self,
+        sink: NodeId,
+        follow: &[EdgeCategoryId],
+        max_depth: usize,
+    ) -> Vec<NodeId> {
+        let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
+        let mut visited: HashSet<NodeId> = HashSet::from([sink]);
+        let mut out = Vec::new();
+        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(sink, 0)]);
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            for e in self.edges.iter().filter(|e| e.to == node) {
+                if !allow.contains(&e.category) {
+                    continue;
+                }
+                if visited.insert(e.from) {
+                    out.push(e.from);
+                    queue.push_back((e.from, depth + 1));
+                }
+            }
+        }
+        out
+    }
+
+    /// Joern-style `reachableBy` — the subset of `sources` that can reach
+    /// `sink` through reverse traversal along `follow` within `max_depth`
+    /// hops. Returns nodes in stable iteration order over `sources` so
+    /// callers can rely on the result for ranking, not just membership.
+    ///
+    /// When `sources.len() << total predecessors`, prefer this over
+    /// `predecessors` + manual intersection — it short-circuits the BFS as
+    /// soon as every candidate is hit.
+    pub fn reachable_by(
+        &self,
+        sink: NodeId,
+        sources: &[NodeId],
+        follow: &[EdgeCategoryId],
+        max_depth: usize,
+    ) -> Vec<NodeId> {
+        if sources.is_empty() {
+            return Vec::new();
+        }
+        let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
+        let target_set: HashSet<NodeId> = sources.iter().copied().collect();
+        let mut visited: HashSet<NodeId> = HashSet::from([sink]);
+        let mut hit: HashSet<NodeId> = HashSet::new();
+        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(sink, 0)]);
+        while let Some((node, depth)) = queue.pop_front() {
+            if depth >= max_depth || hit.len() == target_set.len() {
+                if hit.len() == target_set.len() {
+                    break;
+                }
+                continue;
+            }
+            for e in self.edges.iter().filter(|e| e.to == node) {
+                if !allow.contains(&e.category) {
+                    continue;
+                }
+                if visited.insert(e.from) {
+                    if target_set.contains(&e.from) {
+                        hit.insert(e.from);
+                    }
+                    queue.push_back((e.from, depth + 1));
+                }
+            }
+        }
+        sources.iter().copied().filter(|s| hit.contains(s)).collect()
     }
 
     /// Walk `parent_of` from `id` to the top. Excludes `id` itself.
@@ -1504,6 +1861,7 @@ mod tests {
             calls: vec![],
             refs: vec![],
             nav: foo_nav,
+            properties: HashSet::new(),
         };
 
         let mut bar_nav = CodeNav::default();
@@ -1519,6 +1877,7 @@ mod tests {
             calls: vec![],
             refs: vec![],
             nav: bar_nav,
+            properties: HashSet::new(),
         };
 
         let g = build_dotted(repo, vec![foo, bar]).unwrap();
@@ -1553,6 +1912,7 @@ mod tests {
             calls: vec![],
             refs: vec![],
             nav: app_nav,
+            properties: HashSet::new(),
         };
 
         let mut foo_bar_nav = CodeNav::default();
@@ -1564,6 +1924,7 @@ mod tests {
             calls: vec![],
             refs: vec![],
             nav: foo_bar_nav,
+            properties: HashSet::new(),
         };
 
         let g = build_ruby(repo, vec![app, foo_bar]).unwrap();
@@ -1573,5 +1934,413 @@ mod tests {
             ),
             "expected IMPORTS edge from app to foo::bar (slash → ::)"
         );
+    }
+
+    /// Build a 4-node `RepoGraph` by hand: A → B → C plus D → C, all CALLS
+    /// edges. Used to exercise the reverse-traversal primitives in isolation
+    /// of any parser quirks.
+    fn flow_graph() -> RepoGraph {
+        let r = repo();
+        let a = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::a");
+        let b = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::b");
+        let c = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::c");
+        let d = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::d");
+        let nodes = vec![
+            Node { id: a, repo: r, confidence: Confidence::Strong, cells: vec![] },
+            Node { id: b, repo: r, confidence: Confidence::Strong, cells: vec![] },
+            Node { id: c, repo: r, confidence: Confidence::Strong, cells: vec![] },
+            Node { id: d, repo: r, confidence: Confidence::Strong, cells: vec![] },
+        ];
+        let edges = vec![
+            Edge { from: a, to: b, category: edge_category::CALLS, confidence: Confidence::Strong },
+            Edge { from: b, to: c, category: edge_category::CALLS, confidence: Confidence::Strong },
+            Edge { from: d, to: c, category: edge_category::CALLS, confidence: Confidence::Strong },
+        ];
+        let mut nav = CodeNav::default();
+        nav.record(a, "a", "m::a", node_kind::FUNCTION, None);
+        nav.record(b, "b", "m::b", node_kind::FUNCTION, None);
+        nav.record(c, "c", "m::c", node_kind::FUNCTION, None);
+        nav.record(d, "d", "m::d", node_kind::FUNCTION, None);
+        RepoGraph {
+            repo: r,
+            nodes,
+            edges,
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn predecessors_walks_backward_along_chosen_categories() {
+        let g = flow_graph();
+        let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
+        let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
+        let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::b");
+        let d = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::d");
+
+        let preds: HashSet<NodeId> = g
+            .predecessors(c, &[edge_category::CALLS], 5)
+            .into_iter()
+            .collect();
+        assert_eq!(preds, HashSet::from([a, b, d]));
+
+        // Depth-bounded — depth=1 only finds direct predecessors of c.
+        let direct: HashSet<NodeId> = g
+            .predecessors(c, &[edge_category::CALLS], 1)
+            .into_iter()
+            .collect();
+        assert_eq!(direct, HashSet::from([b, d]));
+
+        // Wrong category yields nothing — proves filter is enforced.
+        let none = g.predecessors(c, &[edge_category::IMPORTS], 5);
+        assert!(none.is_empty());
+    }
+
+    /// Build a single-node RepoGraph holding one DATA_ENTITY for `qname` in
+    /// `repo_id`. Used to assemble cross-repo fixtures for DbResolver tests.
+    fn graph_with_entity(repo_id: RepoId, qname: &str) -> RepoGraph {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::DATA_ENTITY, qname);
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            qname.rsplit(':').next().unwrap_or(qname),
+            qname,
+            node_kind::DATA_ENTITY,
+            None,
+        );
+        RepoGraph {
+            repo: repo_id,
+            nodes: vec![Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            }],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn db_resolver_pairs_same_entity_across_repos() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_entity(repo_a, "data_entity:sql:users");
+        let g_b = graph_with_entity(repo_b, "data_entity:sql:users");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&DbResolver);
+
+        let edges: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SHARES_DATA_ENTITY)
+            .collect();
+        assert_eq!(edges.len(), 1, "expected one cross-repo SHARES_DATA_ENTITY edge");
+    }
+
+    #[test]
+    fn db_resolver_does_not_pair_within_a_single_repo() {
+        // Two DATA_ENTITY nodes with the same qname inside one repo would
+        // already collapse via NodeId; even if duplicated, no cross-edge.
+        let repo_a = RepoId(11);
+        let g1 = graph_with_entity(repo_a, "data_entity:sql:users");
+        let g2 = graph_with_entity(repo_a, "data_entity:sql:users");
+        let mut merged = MergedGraph::new(vec![g1, g2]);
+        merged.run(&DbResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_DATA_ENTITY),
+            "must not emit SHARES_DATA_ENTITY when all matches share the same repo"
+        );
+    }
+
+    fn graph_with_cron(repo_id: RepoId, qname: &str) -> RepoGraph {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::CRON_JOB, qname);
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            qname.split(':').nth(1).unwrap_or(qname),
+            qname,
+            node_kind::CRON_JOB,
+            None,
+        );
+        RepoGraph {
+            repo: repo_id,
+            nodes: vec![Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            }],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    fn graph_with_package(repo_id: RepoId, qname: &str) -> RepoGraph {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::PACKAGE_DEP, qname);
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            qname.rsplit(':').next().unwrap_or(qname),
+            qname,
+            node_kind::PACKAGE_DEP,
+            None,
+        );
+        RepoGraph {
+            repo: repo_id,
+            nodes: vec![Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            }],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn package_resolver_pairs_same_dep_across_repos() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_package(repo_a, "package:npm:react");
+        let g_b = graph_with_package(repo_b, "package:npm:react");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&PackageResolver);
+        let edges: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SHARES_DEPENDENCY)
+            .collect();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn package_resolver_keeps_ecosystems_separate() {
+        // Same package name, different ecosystems → no pair.
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_package(repo_a, "package:npm:requests");
+        let g_b = graph_with_package(repo_b, "package:pypi:requests");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&PackageResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_DEPENDENCY)
+        );
+    }
+
+    fn graph_with_infra(repo_id: RepoId, qname: &str) -> RepoGraph {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::INFRA_RESOURCE, qname);
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            qname.rsplit(':').next().unwrap_or(qname),
+            qname,
+            node_kind::INFRA_RESOURCE,
+            None,
+        );
+        RepoGraph {
+            repo: repo_id,
+            nodes: vec![Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            }],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn iac_resolver_pairs_same_image_across_repos() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_infra(repo_a, "infra:image:api");
+        let g_b = graph_with_infra(repo_b, "infra:image:api");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&IacResolver);
+        let edges: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SHARES_INFRA_REF)
+            .collect();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn iac_resolver_keeps_kinds_separate() {
+        // `infra:service:api` vs `infra:deployment:api` — same name, different
+        // kind, distinct qnames → no pairing.
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_infra(repo_a, "infra:service:api");
+        let g_b = graph_with_infra(repo_b, "infra:deployment:api");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&IacResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_INFRA_REF)
+        );
+    }
+
+    fn graph_with_config(repo_id: RepoId, qname: &str) -> RepoGraph {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo_id, node_kind::CONFIG_KEY, qname);
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            qname.rsplit(':').next().unwrap_or(qname),
+            qname,
+            node_kind::CONFIG_KEY,
+            None,
+        );
+        RepoGraph {
+            repo: repo_id,
+            nodes: vec![Node {
+                id,
+                repo: repo_id,
+                confidence: Confidence::Medium,
+                cells: vec![],
+            }],
+            edges: vec![],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn config_resolver_pairs_same_key_across_repos() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_config(repo_a, "config:env:DATABASE_URL");
+        let g_b = graph_with_config(repo_b, "config:env:DATABASE_URL");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&ConfigResolver);
+        let edges: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SHARES_CONFIG)
+            .collect();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn config_resolver_does_not_pair_distinct_keys() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_config(repo_a, "config:env:DATABASE_URL");
+        let g_b = graph_with_config(repo_b, "config:env:API_KEY");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&ConfigResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_CONFIG)
+        );
+    }
+
+    #[test]
+    fn cron_resolver_pairs_same_schedule_target_across_repos() {
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_cron(repo_a, "cron:0 4 * * *:cleanup");
+        let g_b = graph_with_cron(repo_b, "cron:0 4 * * *:cleanup");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&CronResolver);
+        let edges: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SHARES_CRON_SCHEDULE)
+            .collect();
+        assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn cron_resolver_does_not_pair_on_schedule_alone() {
+        // Same schedule, different targets — must NOT pair (no drift).
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_cron(repo_a, "cron:0 4 * * *:cleanup");
+        let g_b = graph_with_cron(repo_b, "cron:0 4 * * *:reindex");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&CronResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_CRON_SCHEDULE),
+            "different targets at same schedule must not pair"
+        );
+    }
+
+    #[test]
+    fn db_resolver_keeps_flavors_separate() {
+        // A SQL `users` table and a NoSQL `users` collection have different
+        // qname flavor segments and must not be joined.
+        let repo_a = RepoId(11);
+        let repo_b = RepoId(12);
+        let g_a = graph_with_entity(repo_a, "data_entity:sql:users");
+        let g_b = graph_with_entity(repo_b, "data_entity:nosql:users");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.run(&DbResolver);
+        assert!(
+            merged
+                .cross_edges
+                .iter()
+                .all(|e| e.category != edge_category::SHARES_DATA_ENTITY),
+            "flavor mismatch must not emit a SHARES_DATA_ENTITY edge"
+        );
+    }
+
+    #[test]
+    fn reachable_by_intersects_predecessors_with_sources() {
+        let g = flow_graph();
+        let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
+        let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
+        let d = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::d");
+        let absent =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::ghost");
+
+        // a (transitive via b) and d (direct) both reach c. ghost is not in graph.
+        let hit = g.reachable_by(c, &[a, d, absent], &[edge_category::CALLS], 5);
+        assert_eq!(hit, vec![a, d]);
+
+        // Source order is preserved (d listed first → d listed first).
+        let hit_swapped = g.reachable_by(c, &[d, a], &[edge_category::CALLS], 5);
+        assert_eq!(hit_swapped, vec![d, a]);
+
+        // Empty sources short-circuits.
+        assert!(g.reachable_by(c, &[], &[edge_category::CALLS], 5).is_empty());
     }
 }

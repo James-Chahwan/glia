@@ -1,3 +1,9 @@
 /target/
 nodes.json
 nodes.gmap
+
+# Personal / local tooling
+.venv-eval/
+mempalace.yaml
+entities.json
+

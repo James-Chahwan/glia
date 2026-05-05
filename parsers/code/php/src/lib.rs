@@ -37,6 +37,7 @@ pub fn parse_file(
     visit_children(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
 
     scan_laravel_routes(source, module_id, repo, &mut acc);
+    scan_slim_routes(source, module_id, repo, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -45,6 +46,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 
@@ -477,6 +479,112 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
     }
 }
 
+// ============================================================================
+// Slim route extraction
+// ============================================================================
+//
+// Slim 4 idiom: `$app->get('/path', $handler)`, with verbs `get` / `post` /
+// `put` / `patch` / `delete` / `options` / `any`. Plus `$app->map(['GET', ...],
+// '/path', $h)` for multi-method routes.
+//
+// Substring-driven like the Laravel scanner. The `->get(` literal disambiguates
+// from method-name suffixes (`->getName(` won't match because the `(` follows
+// `getName`, not `get`). Path-must-start-with-`/` filter rejects arbitrary
+// `$cache->get('key')` style false positives.
+//
+// `$app->group('/api', function ($g) { ... })` prefix tracking is skipped —
+// consistent with the Laravel scanner not tracking `Route::prefix(...)`.
+
+fn scan_slim_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+    let methods: &[(&str, &str)] = &[
+        ("->get(", "GET"),
+        ("->post(", "POST"),
+        ("->put(", "PUT"),
+        ("->patch(", "PATCH"),
+        ("->delete(", "DELETE"),
+        ("->options(", "OPTIONS"),
+        ("->any(", "ANY"),
+    ];
+    for (needle, method) in methods {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let start = search_from + rel + needle.len();
+            if let Some((path, consumed)) = extract_first_string(&source[start..]) {
+                if path.starts_with('/') {
+                    emit_route_medium(method, &path, module_id, repo, acc);
+                }
+                search_from = start + consumed.max(1);
+            } else {
+                search_from = start + 1;
+            }
+        }
+    }
+    // `$app->map(['GET', 'POST'], '/path', $h)` — variable methods + one path.
+    let mut search_from = 0;
+    while let Some(rel) = source[search_from..].find("->map(") {
+        let start = search_from + rel + "->map(".len();
+        let tail = &source[start..];
+        if let Some((methods_text, after_methods)) = extract_bracket_list(tail) {
+            // After the closing `]`, find the next `,` then the path string.
+            if let Some(comma_off) = source[start + after_methods..].find(',') {
+                let path_start = start + after_methods + comma_off + 1;
+                if let Some((path, consumed)) = extract_first_string(&source[path_start..]) {
+                    if path.starts_with('/') {
+                        for raw in methods_text.split(',') {
+                            let m = raw
+                                .trim()
+                                .trim_matches(|c| c == '\'' || c == '"')
+                                .to_ascii_uppercase();
+                            if !m.is_empty() {
+                                emit_route_medium(&m, &path, module_id, repo, acc);
+                            }
+                        }
+                    }
+                    search_from = path_start + consumed.max(1);
+                    continue;
+                }
+            }
+        }
+        search_from = start + 1;
+    }
+}
+
+/// Read a bracket-list `[...]` starting at `s[0]` (which must be `[`).
+/// Returns the inner text and the offset just past the closing `]`.
+fn extract_bracket_list(s: &str) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    if bytes.first().copied() != Some(b'[') {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut i = 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((s[1..i].to_string(), i + 1));
+                }
+            }
+            b'\'' | b'"' => {
+                let delim = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != delim {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 fn emit_route_strong(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
@@ -794,6 +902,82 @@ Route::resource('/photos', PhotoController::class);
         assert!(route_names.iter().any(|n| n.starts_with("POST /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("PUT /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("DELETE /photos")));
+    }
+
+    // ========================================================================
+    // Slim route extraction
+    // ========================================================================
+
+    #[test]
+    fn slim_app_verb_routes_emit() {
+        let source = r#"<?php
+$app = AppFactory::create();
+$app->get('/health', function ($req, $res) { return $res; });
+$app->post('/users', UserHandler::class);
+$app->put('/users/{id}', UserHandler::class);
+$app->delete('/users/{id}', UserHandler::class);
+"#;
+        let fp = parse_file(source, "public/index.php", "public::index", repo()).unwrap();
+        let route_names: Vec<&str> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.as_str())
+            .collect();
+        assert!(route_names.contains(&"GET /health"));
+        assert!(route_names.contains(&"POST /users"));
+        assert!(route_names.contains(&"PUT /users/{id}"));
+        assert!(route_names.contains(&"DELETE /users/{id}"));
+    }
+
+    #[test]
+    fn slim_map_emits_one_route_per_method() {
+        let source = r#"<?php
+$app->map(['GET', 'POST', 'PUT'], '/users', UserHandler::class);
+"#;
+        let fp = parse_file(source, "public/index.php", "public::index", repo()).unwrap();
+        let route_names: Vec<&str> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.as_str())
+            .collect();
+        assert!(route_names.contains(&"GET /users"));
+        assert!(route_names.contains(&"POST /users"));
+        assert!(route_names.contains(&"PUT /users"));
+    }
+
+    #[test]
+    fn slim_skips_non_path_first_arg() {
+        // `$cache->get('cache-key')` is the canonical false-positive shape.
+        let source = r#"<?php
+class Svc {
+    public function load(): mixed {
+        return $this->cache->get('cache-key');
+    }
+}
+"#;
+        let fp = parse_file(source, "src/Svc.php", "App", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "non-`/` first arg must not emit a Slim route");
+    }
+
+    #[test]
+    fn slim_does_not_match_method_name_suffix() {
+        // `->getName(` must not match `->get(`. Verifies word-boundary on `(`.
+        let source = r#"<?php
+class Svc {
+    public function display(): void {
+        echo $user->getName();
+        echo $user->getAvatar();
+    }
+}
+"#;
+        let fp = parse_file(source, "src/Svc.php", "App", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "method-name suffix must not match `->get(`");
     }
 
     #[test]

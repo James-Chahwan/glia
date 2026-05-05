@@ -898,6 +898,7 @@ mod tests {
             symbols: SymbolTable::default(),
             unresolved_calls: vec![],
             unresolved_refs: vec![],
+            properties: Default::default(),
         };
         let g2 = RepoGraph {
             repo,
@@ -912,6 +913,7 @@ mod tests {
             symbols: SymbolTable::default(),
             unresolved_calls: vec![],
             unresolved_refs: vec![],
+            properties: Default::default(),
         };
 
         write_sharded(&[("shard_a", &g1), ("shard_b", &g2)], &[], &shard_dir).unwrap();

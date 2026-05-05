@@ -1,0 +1,19 @@
+[package]
+name = "glia-cli"
+version = "0.4.12"
+edition = "2024"
+publish = false
+description = "glia CLI — analyze a repo, query impact reachability, merge multiple .gmap-style scans into a cross-service graph."
+
+[[bin]]
+name = "glia"
+path = "src/main.rs"
+
+[dependencies]
+repo-graph-engine = { path = "../engine" }
+repo-graph-graph = { path = "../graph" }
+repo-graph-store = { path = "../store" }
+repo-graph-core = { path = "../core" }
+repo-graph-code-domain = { path = "../code-domain" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"

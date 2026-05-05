@@ -17,7 +17,7 @@ use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
-    cell_type, edge_category, node_kind,
+    UnresolvedRef, cell_type, edge_category, node_kind,
 };
 
 /// Parse one Python source file.
@@ -142,10 +142,26 @@ struct Acc {
     edges: Vec<Edge>,
     imports: Vec<ImportStmt>,
     unresolved: Vec<UnresolvedCall>,
+    /// v0.4.13a — type-annotation USES refs (cross-file resolvable).
+    refs: Vec<UnresolvedRef>,
     /// module-level functions: bare name → node id
     module_functions: HashMap<String, NodeId>,
+    /// v0.4.13a — module-level classes: bare name → class node id. Needed for
+    /// intra-file super() resolution where the base class is in the same file.
+    module_classes: HashMap<String, NodeId>,
     /// class methods: (class id, method name) → method node id
     class_methods: HashMap<(NodeId, String), NodeId>,
+    /// v0.4.13a — per-class base-class simple names, in declaration order.
+    /// Populated from `class Foo(Bar, Baz):`. Used to resolve super() calls.
+    class_bases: HashMap<NodeId, Vec<String>>,
+    /// v0.4.13 — per-class attribute names already emitted as ATTRIBUTE nodes.
+    /// Dedupe set so `self.x` in `__init__` + `x: int = ...` class-level both
+    /// observing the same attribute produce one node, one HAS_ATTRIBUTE edge.
+    class_attrs: HashMap<NodeId, std::collections::HashSet<String>>,
+    /// v0.4.13b — method ids with `@property` decorator. Read as `self.x`
+    /// (valid attribute access) rather than `self.x()`. Lets composition-path
+    /// synth filter method→class hops to only syntactically valid reads.
+    properties: std::collections::HashSet<NodeId>,
     nav: CodeNav,
 }
 
@@ -185,8 +201,42 @@ fn visit_class(
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
     });
+    acc.module_classes.insert(name.to_string(), class_id);
     acc.nav
         .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
+
+    // v0.4.13a — record base class simple names for super() resolution.
+    // `class Foo(Bar, pkg.Baz, metaclass=Meta):` → record ["Bar", "Baz"].
+    // Attributes (`pkg.Baz`) keep the trailing name; keyword args skipped.
+    //
+    // v0.4.13 — also emit INHERITS_FROM UnresolvedRef per base so the graph
+    // crate's cross-file resolver can wire `Class → base_class` edges. Intra-
+    // file matches are additionally handled here to keep resolution eager.
+    if let Some(bases_list) = n.child_by_field_name("superclasses") {
+        let mut bc = bases_list.walk();
+        let mut out = Vec::new();
+        for arg in bases_list.named_children(&mut bc) {
+            let base_name = match arg.kind() {
+                "identifier" => Some(text(arg, src).to_string()),
+                "attribute" => arg
+                    .child_by_field_name("attribute")
+                    .map(|a| text(a, src).to_string()),
+                _ => None,
+            };
+            if let Some(base) = base_name {
+                acc.refs.push(UnresolvedRef {
+                    from: class_id,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Bare(base.clone()),
+                    category: edge_category::INHERITS_FROM,
+                });
+                out.push(base);
+            }
+        }
+        if !out.is_empty() {
+            acc.class_bases.insert(class_id, out);
+        }
+    }
 
     let Some(body) = n.child_by_field_name("body") else {
         return;
@@ -195,17 +245,185 @@ fn visit_class(
     for member in body.named_children(&mut cursor) {
         match member.kind() {
             "function_definition" => {
-                visit_method(member, src, file_rel, &class_qname, class_id, repo, acc, &[]);
+                visit_method(
+                    member, src, file_rel, &class_qname, class_id, module_id, repo, acc, &[],
+                );
             }
             "decorated_definition" => {
                 let (decos, inner) = split_decorated(member);
                 if let Some(inner) = inner
                     && inner.kind() == "function_definition"
                 {
-                    visit_method(inner, src, file_rel, &class_qname, class_id, repo, acc, &decos);
+                    visit_method(
+                        inner,
+                        src,
+                        file_rel,
+                        &class_qname,
+                        class_id,
+                        module_id,
+                        repo,
+                        acc,
+                        &decos,
+                    );
+                }
+            }
+            // v0.4.13 — class-level attribute declarations.
+            // `x = ...` → expression_statement > assignment > left: identifier
+            // `x: T = ...` / `x: T` → same shape, left is identifier with type
+            "expression_statement" => {
+                let mut ec = member.walk();
+                for child in member.named_children(&mut ec) {
+                    if matches!(child.kind(), "assignment") {
+                        if let Some(lhs) = child.child_by_field_name("left")
+                            && lhs.kind() == "identifier"
+                        {
+                            let attr_name = text(lhs, src);
+                            emit_class_attribute(
+                                class_id,
+                                &class_qname,
+                                attr_name,
+                                file_rel,
+                                module_id,
+                                repo,
+                                acc,
+                            );
+                            // v0.4.13b — typed class attribute `x: T = …` / `x: T`.
+                            // Emit USES refs from the attribute node to each
+                            // class name in the annotation; enables cross-file
+                            // type surfacing for typed attrs even without RHS
+                            // inference.
+                            if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
+                                let attr_qname = format!("{class_qname}::{attr_name}");
+                                let attr_id = NodeId::from_parts(
+                                    GRAPH_TYPE,
+                                    repo,
+                                    node_kind::ATTRIBUTE,
+                                    &attr_qname,
+                                );
+                                if let Some(ty) = child.child_by_field_name("type") {
+                                    collect_attr_type_ref(ty, src, attr_id, module_id, acc);
+                                }
+                                // v0.4.13b — RHS constructor inference for
+                                // class-level `x = Target(...)`.
+                                if let Some(rhs) = child.child_by_field_name("right") {
+                                    emit_rhs_constructor_refs(
+                                        rhs, src, attr_id, module_id, acc,
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// v0.4.13 — create an ATTRIBUTE node + HAS_ATTRIBUTE edge for a class
+/// attribute, deduped per class. Called from both the class-body walker (for
+/// class-level declarations) and from the `self.<attr> = …` scanner in method
+/// bodies. Single entry point keeps the dedupe in one place.
+fn emit_class_attribute(
+    class_id: NodeId,
+    class_qname: &str,
+    attr_name: &str,
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // Skip Python-internal names — `__init__`, `__slots__`, etc. are not
+    // compositional attributes; they're language machinery.
+    if attr_name.starts_with("__") && attr_name.ends_with("__") {
+        return;
+    }
+    let set = acc.class_attrs.entry(class_id).or_default();
+    if !set.insert(attr_name.to_string()) {
+        return; // already emitted for this class
+    }
+    let attr_qname = format!("{class_qname}::{attr_name}");
+    let attr_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &attr_qname);
+    // Minimal cells — position points to the class (attribute spans vary); a
+    // single POSITION cell is enough for projection/activation. No Code cell
+    // since the attribute body is the class body.
+    let pos_json = format!(
+        "{{\"file\":\"{}\"}}",
+        file_rel.replace('\\', "\\\\").replace('"', "\\\""),
+    );
+    acc.nodes.push(Node {
+        id: attr_id,
+        repo,
+        confidence: Confidence::Weak,
+        cells: vec![Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(pos_json),
+        }],
+    });
+    acc.edges.push(Edge {
+        from: class_id,
+        to: attr_id,
+        category: edge_category::HAS_ATTRIBUTE,
+        confidence: Confidence::Strong,
+    });
+    acc.nav.record(
+        attr_id,
+        attr_name,
+        &attr_qname,
+        node_kind::ATTRIBUTE,
+        Some(class_id),
+    );
+    // Silence unused warning for module_id — attribute targets don't need
+    // cross-file resolution (they're always local to their class).
+    let _ = module_id;
+}
+
+/// v0.4.13 — walk a method body scanning for every `self.<attr>` access
+/// (assignment LHS or plain read), and for each, emit ATTRIBUTE + HAS_ATTRIBUTE
+/// via `emit_class_attribute`. Dedupe is handled downstream.
+///
+/// Scanning reads, not just assignments, catches two important patterns:
+///   1. `__init__`-style: `self.opts = SchemaOpts(meta)` — assignment.
+///   2. **Metaclass-attached attributes**: marshmallow's `Schema.opts` is set
+///      via `klass.opts = ...` inside `SchemaMeta.__new__` (line 112 of
+///      schema.py), never through `self.`. But every Schema method reads
+///      `self.opts.X` — so scanning reads surfaces the attribute on Schema.
+/// The read-based signal matches what any reader (human or LLM) infers:
+/// if a class's methods read `self.foo`, the class has an attribute `foo`.
+fn collect_self_attr_assignments(
+    body: TsNode,
+    src: &[u8],
+    class_id: NodeId,
+    class_qname: &str,
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        // Don't descend into nested function/class bodies — `self` there is a
+        // different class's self. Method bodies get their own call.
+        if matches!(node.kind(), "function_definition" | "class_definition") {
+            continue;
+        }
+        // Any `self.<attr>` — assignment LHS, read in an expression, call
+        // receiver — is represented as an `attribute` node in the AST with
+        // `object` = `self` identifier, `attribute` = the attr name.
+        if node.kind() == "attribute"
+            && let Some(obj) = node.child_by_field_name("object")
+            && obj.kind() == "identifier"
+            && text(obj, src) == "self"
+            && let Some(attr) = node.child_by_field_name("attribute")
+        {
+            let attr_name = text(attr, src);
+            emit_class_attribute(
+                class_id, class_qname, attr_name, file_rel, module_id, repo, acc,
+            );
+        }
+        let mut c = node.walk();
+        for child in node.named_children(&mut c) {
+            stack.push(child);
         }
     }
 }
@@ -217,6 +435,7 @@ fn visit_method(
     file_rel: &str,
     class_qname: &str,
     class_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
     decorators: &[TsNode],
@@ -245,10 +464,37 @@ fn visit_method(
 
     for deco in decorators {
         check_route_decorator(*deco, src, method_id, repo, acc);
+        // v0.4.13b — `@property` marks the method as attribute-style.
+        let raw = text(*deco, src);
+        let body = raw.trim_start_matches('@').trim();
+        if body == "property" {
+            acc.properties.insert(method_id);
+        }
     }
+
+    // v0.4.13a — emit USES refs for each type name referenced in parameter
+    // annotations and the return-type annotation. Enables cross-file class
+    // surfacing via PPR on the model's own annotations.
+    collect_type_refs(n, src, method_id, module_id, acc);
+
+    // v0.4.13 — RETURNS_TYPE edge for explicit `def m(self) -> T:` annotations.
+    // Keyed off the method/function node so BFS can jump `method → return class`
+    // when composing access paths.
+    collect_return_type_ref(n, src, method_id, module_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
+        // v0.4.13 — scan for `self.<attr> = …` assignments that define class
+        // attributes via instance-side `__init__`-style initialisation.
+        collect_self_attr_assignments(
+            body, src, class_id, class_qname, file_rel, module_id, repo, acc,
+        );
+        // v0.4.13b — RHS constructor inference: `self.<attr> = Target(...)`
+        // emits USES ref from ATTRIBUTE to Target so PPR can surface the
+        // concrete type when the attribute is activated.
+        collect_self_attr_rhs_types(
+            body, src, class_qname, module_id, repo, acc,
+        );
     }
 }
 
@@ -294,6 +540,12 @@ fn visit_function(
     for deco in decorators {
         check_route_decorator(*deco, src, func_id, repo, acc);
     }
+
+    // v0.4.13a — USES refs from parameter/return type annotations.
+    collect_type_refs(n, src, func_id, module_id, acc);
+
+    // v0.4.13 — RETURNS_TYPE edge for explicit `def f() -> T:` annotations.
+    collect_return_type_ref(n, src, func_id, module_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -471,6 +723,12 @@ fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
                 } else {
                     Some(CallQualifier::Attribute { base, name })
                 }
+            } else if object.kind() == "call" && is_super_call(object, src) {
+                // v0.4.13a — `super().method()` reaches here because the
+                // receiver is a `call` node, not an identifier. Classify it
+                // so resolve_intra_file can walk the enclosing class's base
+                // list instead of dropping this into ComplexReceiver.
+                Some(CallQualifier::SuperMethod(name))
             } else {
                 // Chained / complex receivers — keep the raw text.
                 Some(CallQualifier::ComplexReceiver {
@@ -483,6 +741,297 @@ fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
     }
 }
 
+/// True for the `super()` or `super(Class, self)` call-expression shape —
+/// i.e. the receiver of a `super().m()` attribute chain.
+fn is_super_call(call_node: TsNode, src: &[u8]) -> bool {
+    call_node
+        .child_by_field_name("function")
+        .map(|f| f.kind() == "identifier" && text(f, src) == "super")
+        .unwrap_or(false)
+}
+
+/// v0.4.13a — walk a function/method definition's parameters and return-type
+/// annotations, emit a USES `UnresolvedRef` for each class-like identifier
+/// referenced in those types. Enables PPR to reach class nodes named only in
+/// type annotations (e.g. `def _bind(self, s: Schema)` surfaces `Schema`).
+///
+/// Scope: only bare identifiers and the trailing name of `pkg.Class`
+/// attributes. Does not attempt to unpack generics like `List[Field]` into
+/// `List` + `Field` separately — tree-sitter-python represents those as a
+/// `subscript` node containing identifiers, and walking descendants covers
+/// both. Keyword-argument defaults and string annotations ("Schema") are
+/// skipped (no parse of string contents).
+fn collect_type_refs(def: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc: &mut Acc) {
+    // Parameter annotations: walk `parameters` for `typed_parameter` /
+    // `typed_default_parameter`, read their `type` field.
+    if let Some(params) = def.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for p in params.named_children(&mut cursor) {
+            match p.kind() {
+                "typed_parameter" | "typed_default_parameter" => {
+                    if let Some(ty) = p.child_by_field_name("type") {
+                        emit_type_idents(ty, src, from, module_id, acc);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Return type: `def foo() -> Ret:`.
+    if let Some(ret) = def.child_by_field_name("return_type") {
+        emit_type_idents(ret, src, from, module_id, acc);
+    }
+}
+
+/// Walk a type-annotation subtree, collect every identifier (including the
+/// trailing `.name` of attribute access), dedupe within this call, emit USES
+/// refs. Skips Python built-ins and common typing constructors so we don't
+/// clog the unresolved list with `str`/`int`/`Optional`/`List`.
+fn emit_type_idents(ty: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut stack = vec![ty];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" => {
+                let s = text(n, src);
+                if !is_type_noise(s) && seen.insert(s.to_string()) {
+                    acc.refs.push(UnresolvedRef {
+                        from,
+                        from_module: module_id,
+                        qualifier: CallQualifier::Bare(s.to_string()),
+                        category: edge_category::USES,
+                    });
+                }
+            }
+            "attribute" => {
+                // `pkg.Class` → only the trailing name is the type.
+                if let Some(attr) = n.child_by_field_name("attribute") {
+                    let s = text(attr, src);
+                    if !is_type_noise(s) && seen.insert(s.to_string()) {
+                        acc.refs.push(UnresolvedRef {
+                            from,
+                            from_module: module_id,
+                            qualifier: CallQualifier::Bare(s.to_string()),
+                            category: edge_category::USES,
+                        });
+                    }
+                }
+            }
+            _ => {
+                let mut c = n.walk();
+                for child in n.named_children(&mut c) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+}
+
+/// v0.4.13 — if `def … -> Ret:` has an explicit return-type annotation, emit
+/// a RETURNS_TYPE `UnresolvedRef` per class-like identifier in the annotation.
+/// Parallel to the USES emission in `collect_type_refs`, but tagged with the
+/// composition-edge category so BFS can walk `method → return_class` without
+/// collapsing it into generic semantic references.
+///
+/// Only fires on explicit annotations — `@property` walkers like
+/// `Field.root` that lack a `-> Schema` annotation don't produce edges here.
+/// Those rely on docstring fallback in the A+ cell renderer (step 3).
+fn collect_return_type_ref(
+    def: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let Some(ret) = def.child_by_field_name("return_type") else {
+        return;
+    };
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut stack = vec![ret];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" => {
+                let s = text(n, src);
+                if !is_type_noise(s) && seen.insert(s.to_string()) {
+                    acc.refs.push(UnresolvedRef {
+                        from,
+                        from_module: module_id,
+                        qualifier: CallQualifier::Bare(s.to_string()),
+                        category: edge_category::RETURNS_TYPE,
+                    });
+                }
+            }
+            "attribute" => {
+                if let Some(attr) = n.child_by_field_name("attribute") {
+                    let s = text(attr, src);
+                    if !is_type_noise(s) && seen.insert(s.to_string()) {
+                        acc.refs.push(UnresolvedRef {
+                            from,
+                            from_module: module_id,
+                            qualifier: CallQualifier::Bare(s.to_string()),
+                            category: edge_category::RETURNS_TYPE,
+                        });
+                    }
+                }
+            }
+            _ => {
+                let mut c = n.walk();
+                for child in n.named_children(&mut c) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+}
+
+/// v0.4.13b — walk a `type` annotation subtree (from an annotated assignment
+/// like `x: T = …`) and emit USES refs from the ATTRIBUTE node for each
+/// project-class identifier found. Same traversal shape as
+/// `collect_return_type_ref` but tagged `USES` (attrs aren't callable, so
+/// RETURNS_TYPE doesn't fit without a composition.rs behavior change).
+fn collect_attr_type_ref(
+    ty: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut stack = vec![ty];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" => {
+                let s = text(n, src);
+                if !is_type_noise(s) && seen.insert(s.to_string()) {
+                    acc.refs.push(UnresolvedRef {
+                        from,
+                        from_module: module_id,
+                        qualifier: CallQualifier::Bare(s.to_string()),
+                        category: edge_category::USES,
+                    });
+                }
+            }
+            "attribute" => {
+                if let Some(attr) = n.child_by_field_name("attribute") {
+                    let s = text(attr, src);
+                    if !is_type_noise(s) && seen.insert(s.to_string()) {
+                        acc.refs.push(UnresolvedRef {
+                            from,
+                            from_module: module_id,
+                            qualifier: CallQualifier::Bare(s.to_string()),
+                            category: edge_category::USES,
+                        });
+                    }
+                }
+            }
+            _ => {
+                let mut c = n.walk();
+                for child in n.named_children(&mut c) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+}
+
+/// v0.4.13b — RHS constructor inference. Walks method bodies looking for
+/// `self.<attr> = Target(...)` or `self.<attr> = mod.Target(...)` and emits a
+/// USES ref from the ATTRIBUTE node to the callee name. Enables PPR to
+/// surface concrete types for attributes initialised via constructor calls.
+fn collect_self_attr_rhs_types(
+    body: TsNode,
+    src: &[u8],
+    class_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        if matches!(node.kind(), "function_definition" | "class_definition") {
+            continue;
+        }
+        if node.kind() == "assignment"
+            && let Some(lhs) = node.child_by_field_name("left")
+            && lhs.kind() == "attribute"
+            && let Some(obj) = lhs.child_by_field_name("object")
+            && obj.kind() == "identifier"
+            && text(obj, src) == "self"
+            && let Some(attr) = lhs.child_by_field_name("attribute")
+            && let Some(rhs) = node.child_by_field_name("right")
+        {
+            let attr_name = text(attr, src);
+            if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
+                let attr_qname = format!("{class_qname}::{attr_name}");
+                let attr_id = NodeId::from_parts(
+                    GRAPH_TYPE,
+                    repo,
+                    node_kind::ATTRIBUTE,
+                    &attr_qname,
+                );
+                emit_rhs_constructor_refs(rhs, src, attr_id, module_id, acc);
+            }
+        }
+        let mut c = node.walk();
+        for child in node.named_children(&mut c) {
+            stack.push(child);
+        }
+    }
+}
+
+/// Extract the callee class name from an RHS expression and emit a USES ref.
+/// Handles `Target(...)` (identifier callee) and `mod.Target(...)` (attribute
+/// callee, takes the final segment). Does not recurse into call args — only
+/// the immediate callee is relevant for attribute type inference.
+fn emit_rhs_constructor_refs(
+    rhs: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    if rhs.kind() != "call" {
+        return;
+    }
+    let Some(func) = rhs.child_by_field_name("function") else {
+        return;
+    };
+    let name = match func.kind() {
+        "identifier" => text(func, src),
+        "attribute" => {
+            let Some(attr) = func.child_by_field_name("attribute") else {
+                return;
+            };
+            text(attr, src)
+        }
+        _ => return,
+    };
+    if is_type_noise(name) {
+        return;
+    }
+    acc.refs.push(UnresolvedRef {
+        from,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(name.to_string()),
+        category: edge_category::USES,
+    });
+}
+
+/// Tokens we don't want to churn the unresolved-refs list with. Python
+/// builtins and common `typing` sugar that rarely point at project classes.
+fn is_type_noise(s: &str) -> bool {
+    matches!(
+        s,
+        "str" | "bytes" | "int" | "float" | "bool" | "None" | "object"
+            | "list" | "dict" | "tuple" | "set" | "frozenset"
+            | "Any" | "Optional" | "Union" | "List" | "Dict" | "Tuple" | "Set"
+            | "Callable" | "Iterable" | "Iterator" | "Generator" | "AsyncIterable"
+            | "AsyncIterator" | "AsyncGenerator" | "Awaitable" | "Coroutine"
+            | "Sequence" | "Mapping" | "MutableMapping" | "MutableSequence"
+            | "Type" | "ClassVar" | "Final" | "Literal" | "Self"
+    )
+}
+
 // ============================================================================
 // Intra-file resolution
 // ============================================================================
@@ -493,8 +1042,9 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
         edges: std::mem::take(&mut acc.edges),
         imports: std::mem::take(&mut acc.imports),
         calls: Vec::new(),
-        refs: Vec::new(),
+        refs: std::mem::take(&mut acc.refs),
         nav: std::mem::take(&mut acc.nav),
+        properties: std::mem::take(&mut acc.properties),
     };
     for uc in acc.unresolved {
         let resolved: Option<NodeId> = match &uc.qualifier {
@@ -502,6 +1052,22 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
             CallQualifier::SelfMethod(name) => uc
                 .enclosing_class
                 .and_then(|cid| acc.class_methods.get(&(cid, name.clone())).copied()),
+            // v0.4.13a — `super().m()`: walk the enclosing class's recorded
+            // base names, look each up in the local module's classes, and
+            // return the first match with a method of the given name. If the
+            // base class is imported from another file, this misses and we
+            // fall through to the cross-file CallSite path.
+            CallQualifier::SuperMethod(name) => uc.enclosing_class.and_then(|cid| {
+                acc.class_bases.get(&cid).and_then(|bases| {
+                    bases.iter().find_map(|base_name| {
+                        acc.module_classes
+                            .get(base_name)
+                            .and_then(|base_id| {
+                                acc.class_methods.get(&(*base_id, name.clone())).copied()
+                            })
+                    })
+                })
+            }),
             _ => None,
         };
         match resolved {
@@ -804,6 +1370,77 @@ fn child_text<'a>(n: TsNode, field: &str, src: &'a [u8]) -> Option<&'a str> {
 }
 
 // ============================================================================
+// Call-arg extraction for synth_callsite_argflow
+// ============================================================================
+
+/// Surface info for one Python `call` expression — enough to reason about
+/// usage-typed polymorphism downstream without widening `CallSite` (which
+/// every language parser would need to track in lockstep).
+#[derive(Debug, Clone)]
+pub struct CallArgInfo {
+    pub callee_simple_name: String,
+    pub receiver_text: String,
+    pub args: Vec<String>,
+    pub start_line: usize,
+}
+
+/// Re-parse `source` and return one `CallArgInfo` per `call` node.
+pub fn extract_calls_with_args(source: &str) -> Vec<CallArgInfo> {
+    let mut parser = Parser::new();
+    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    if parser.set_language(&lang).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let src = source.as_bytes();
+    let mut out: Vec<CallArgInfo> = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call"
+            && let Some(info) = collect_call_arg_info(n, src)
+        {
+            out.push(info);
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    out
+}
+
+fn collect_call_arg_info(call: TsNode, src: &[u8]) -> Option<CallArgInfo> {
+    let func = call.child_by_field_name("function")?;
+    let (receiver_text, callee_simple_name) = match func.kind() {
+        "identifier" => (String::new(), text(func, src).to_string()),
+        "attribute" => {
+            let object = func.child_by_field_name("object")?;
+            let attr = func.child_by_field_name("attribute")?;
+            (text(object, src).to_string(), text(attr, src).to_string())
+        }
+        _ => return None,
+    };
+    let mut args: Vec<String> = Vec::new();
+    if let Some(arglist) = call.child_by_field_name("arguments") {
+        let mut cursor = arglist.walk();
+        for child in arglist.named_children(&mut cursor) {
+            if child.kind() == "keyword_argument" {
+                continue;
+            }
+            args.push(text(child, src).to_string());
+        }
+    }
+    Some(CallArgInfo {
+        callee_simple_name,
+        receiver_text,
+        args,
+        start_line: call.start_position().row + 1,
+    })
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1096,5 +1733,275 @@ mod tests {
             .iter()
             .any(|n| matches!(parse.nav.kind_by_id.get(&n.id).copied(), Some(k) if k == node_kind::ROUTE));
         assert!(!has_any_route, "non-route decorator shouldn't emit a Route");
+    }
+
+    // v0.4.13a — super() calls route through the parent class, intra-file.
+    #[test]
+    fn super_call_resolves_to_parent_method_intra_file() {
+        let src = "class Base:\n    def hook(self):\n        return 1\n\n\nclass Child(Base):\n    def hook(self):\n        return super().hook() + 1\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let base_hook = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Base::hook");
+        let child_hook =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Child::hook");
+        assert!(
+            has_edge(&parse, child_hook, base_hook, edge_category::CALLS),
+            "expected super().hook() to resolve to Base::hook, got calls: {:?}",
+            parse
+                .edges
+                .iter()
+                .filter(|e| e.category == edge_category::CALLS)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // v0.4.13a — parameter type annotation emits a USES ref (Bare qualifier)
+    // for later cross-file class resolution.
+    #[test]
+    fn param_type_annotation_emits_uses_ref() {
+        let src = "class Schema:\n    pass\n\n\nclass Field:\n    def bind(self, schema: Schema) -> None:\n        pass\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let bind_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::bind");
+        let has_schema_ref = parse.refs.iter().any(|r| {
+            r.from == bind_id
+                && r.category == edge_category::USES
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Schema")
+        });
+        assert!(
+            has_schema_ref,
+            "expected Schema USES ref from Field::bind, got refs: {:?}",
+            parse.refs
+        );
+        // Return type `None` is in the noise filter — should NOT emit a ref.
+        let has_none_ref = parse
+            .refs
+            .iter()
+            .any(|r| matches!(&r.qualifier, CallQualifier::Bare(n) if n == "None"));
+        assert!(!has_none_ref, "`None` return annotation shouldn't emit a ref");
+    }
+
+    // v0.4.13 — INHERITS_FROM refs for every base class in `class Foo(Bar, Baz)`.
+    #[test]
+    fn class_base_emits_inherits_from_ref() {
+        let src = "class Schema: pass\n\nclass TimeSchema(Schema):\n    pass\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let child_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "m::TimeSchema");
+        let has_ref = parse.refs.iter().any(|r| {
+            r.from == child_id
+                && r.category == edge_category::INHERITS_FROM
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Schema")
+        });
+        assert!(
+            has_ref,
+            "expected INHERITS_FROM ref TimeSchema→Schema, got refs: {:?}",
+            parse.refs
+        );
+    }
+
+    // v0.4.13 — HAS_ATTRIBUTE edges from class-level, __init__ self-assignments,
+    // AND plain self-reads (catches metaclass-attached attrs like Schema.opts).
+    #[test]
+    fn class_attribute_emits_has_attribute_edge() {
+        // Four shapes: class-level, class-level annotated, instance self.assign,
+        // plus a plain read `self.opts.X` (no assignment ever on `self.opts`).
+        let src = "class Schema:\n    name = 'x'\n    meta: dict = {}\n    def __init__(self):\n        self.exclude = None\n        self.exclude = 'dedupe'\n    def render(self):\n        return self.opts.render_module\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "m::Schema");
+
+        for attr in ["name", "meta", "exclude", "opts"] {
+            let attr_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::ATTRIBUTE,
+                &format!("m::Schema::{attr}"),
+            );
+            assert!(
+                parse.nodes.iter().any(|n| n.id == attr_id),
+                "missing ATTRIBUTE node for {attr}"
+            );
+            assert!(
+                has_edge(&parse, class_id, attr_id, edge_category::HAS_ATTRIBUTE),
+                "missing HAS_ATTRIBUTE edge for {attr}"
+            );
+        }
+
+        // `self.exclude = 'dedupe'` is the second self-assign; dedupe must fire.
+        let exclude_count = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.qname_by_id.get(&n.id).map(|s| s.as_str()) == Some("m::Schema::exclude"))
+            .count();
+        assert_eq!(exclude_count, 1, "expected exactly one ATTRIBUTE node for exclude (dedupe)");
+
+        // Dunder names are skipped.
+        let dunder_count = parse
+            .nodes
+            .iter()
+            .filter(|n| {
+                parse.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::ATTRIBUTE)
+                    && parse
+                        .nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .map(|s| s.contains("__"))
+                        .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(dunder_count, 0, "dunder attributes should be skipped");
+    }
+
+    // v0.4.13 — RETURNS_TYPE ref from explicit return-type annotation.
+    #[test]
+    fn return_type_annotation_emits_returns_type_ref() {
+        let src = "class Schema: pass\n\nclass Field:\n    def ensure(self) -> Schema:\n        return self\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let ensure_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::ensure");
+        let has_ref = parse.refs.iter().any(|r| {
+            r.from == ensure_id
+                && r.category == edge_category::RETURNS_TYPE
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Schema")
+        });
+        assert!(
+            has_ref,
+            "expected RETURNS_TYPE ref Field::ensure→Schema, got refs: {:?}",
+            parse.refs
+        );
+    }
+
+    // v0.4.13b — USES ref from class-level typed attribute `x: T = ...`.
+    #[test]
+    fn class_attr_type_annotation_emits_uses_ref() {
+        let src = "class Schema: pass\n\nclass Field:\n    parent: Schema = None\n    name: str = ''\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let parent_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::parent",
+        );
+        let has_schema_ref = parse.refs.iter().any(|r| {
+            r.from == parent_attr
+                && r.category == edge_category::USES
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Schema")
+        });
+        assert!(
+            has_schema_ref,
+            "expected USES ref Field::parent→Schema, got refs: {:?}",
+            parse.refs
+        );
+        // `name: str` — `str` is type-noise, should NOT emit a ref.
+        let name_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::name",
+        );
+        let has_str_ref = parse.refs.iter().any(|r| {
+            r.from == name_attr
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "str")
+        });
+        assert!(
+            !has_str_ref,
+            "str should be filtered as type-noise, got refs: {:?}",
+            parse.refs
+        );
+    }
+
+    #[test]
+    fn property_decorator_marks_method_as_property() {
+        let src = r#"
+class Field:
+    @property
+    def root(self):
+        return self._root
+
+    def from_dict(self):
+        return self._root
+
+    @classmethod
+    def not_a_property(cls):
+        return None
+"#;
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let root = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::root");
+        let from_dict = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::from_dict",
+        );
+        let not_prop = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::METHOD, "m::Field::not_a_property",
+        );
+        assert!(parse.properties.contains(&root), "expected @property root");
+        assert!(!parse.properties.contains(&from_dict), "from_dict is not a property");
+        assert!(!parse.properties.contains(&not_prop), "classmethod is not a property");
+    }
+
+    #[test]
+    fn self_attr_rhs_constructor_emits_uses_ref() {
+        let src = r#"
+class Target:
+    pass
+
+class mod:
+    class QualTarget:
+        pass
+
+class Field:
+    module_attr = Target()
+
+    def __init__(self):
+        self._t = Target()
+        self._q = mod.QualTarget()
+        self._s = "string"
+        self._n = dict()
+"#;
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+
+        // self._t = Target() → USES Target
+        let t_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_t",
+        );
+        assert!(
+            parse.refs.iter().any(|r| {
+                r.from == t_attr
+                    && r.category == edge_category::USES
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Target")
+            }),
+            "expected USES ref Field::_t→Target, got refs: {:?}",
+            parse.refs
+        );
+
+        // self._q = mod.QualTarget() → USES QualTarget (final segment)
+        let q_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_q",
+        );
+        assert!(
+            parse.refs.iter().any(|r| {
+                r.from == q_attr
+                    && r.category == edge_category::USES
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "QualTarget")
+            }),
+            "expected USES ref Field::_q→QualTarget, got refs: {:?}",
+            parse.refs
+        );
+
+        // self._n = dict() → dict is type-noise, NO ref
+        let n_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::_n",
+        );
+        assert!(
+            !parse.refs.iter().any(|r| {
+                r.from == n_attr
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "dict")
+            }),
+            "dict should be filtered as type-noise, got refs: {:?}",
+            parse.refs
+        );
+
+        // Class-level: module_attr = Target() → USES Target
+        let ma_attr = NodeId::from_parts(
+            GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, "m::Field::module_attr",
+        );
+        assert!(
+            parse.refs.iter().any(|r| {
+                r.from == ma_attr
+                    && r.category == edge_category::USES
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Target")
+            }),
+            "expected USES ref Field::module_attr→Target, got refs: {:?}",
+            parse.refs
+        );
     }
 }

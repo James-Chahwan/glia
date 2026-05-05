@@ -65,6 +65,45 @@ pub mod node_kind {
     pub const PIPE: NodeKindId = NodeKindId(32);
     pub const GUARD: NodeKindId = NodeKindId(33);
     pub const COMPOSABLE: NodeKindId = NodeKindId(34);
+
+    // v0.4.13 — attribute entity kind (A+ composition cells)
+    /// A named attribute on a class — qname `Module::Class::attr_name`. Emitted
+    /// by parsers from `self.x = ...` assignments and class-level attribute
+    /// declarations. Enables BFS path synthesis to walk `Class → attr` without
+    /// re-parsing source at activation time.
+    pub const ATTRIBUTE: NodeKindId = NodeKindId(35);
+
+    // v0.4.x — DB resolver entity kind. Single node kind covers SQL Tables,
+    // NoSQL Collections, and Graph-DB NodeLabels via the qname prefix:
+    //   `data_entity:sql:<name>`     — Postgres / MySQL / SQLite tables
+    //   `data_entity:nosql:<name>`   — MongoDB / DynamoDB / Firestore collections
+    //   `data_entity:graph:<name>`   — Neo4j / ArangoDB labels
+    /// A named persistence entity (table, collection, graph-label) that
+    /// `DbResolver` joins across services to surface shared-data dependencies.
+    pub const DATA_ENTITY: NodeKindId = NodeKindId(36);
+
+    // v0.4.x — Cron resolver entity kind. One node per scheduled invocation,
+    // qname `cron:<schedule>` so two services running at the same cadence
+    // pair under `CronResolver`. Source detail (workflow name, target
+    // command/handler) lives on a cell payload.
+    pub const CRON_JOB: NodeKindId = NodeKindId(37);
+
+    // v0.4.x — Config resolver entity kind. One node per env-var name across
+    // the entire merged graph (qname `config:env:<NAME>`); flavor segment
+    // reserves room for future config-file / secrets-manager flavors.
+    pub const CONFIG_KEY: NodeKindId = NodeKindId(38);
+
+    // v0.4.x — IaC resolver entity kind. One node per declared infra resource
+    // (k8s manifest, docker-compose service, Dockerfile-built image), qname
+    // `infra:<kind>:<name>` so a Deployment named `api` and a Service named
+    // `api` each get their own node.
+    pub const INFRA_RESOURCE: NodeKindId = NodeKindId(39);
+
+    // v0.4.x — Package-deps resolver entity kind. One node per declared
+    // ecosystem package, qname `package:<ecosystem>:<name>` (e.g.
+    // `package:npm:react`, `package:cargo:tokio`, `package:gomod:github.com/gin-gonic/gin`).
+    // PackageResolver pairs across repos by full qname.
+    pub const PACKAGE_DEP: NodeKindId = NodeKindId(40);
 }
 
 // ============================================================================
@@ -105,6 +144,57 @@ pub mod edge_category {
 
     // v0.4.11a — module → data-source access (D1)
     pub const ACCESSES_DATA: EdgeCategoryId = EdgeCategoryId(18);
+
+    // v0.4.x — DB resolver cross-service join. Emitted by `DbResolver` when
+    // two services touch a `DATA_ENTITY` with the same (flavor, name).
+    pub const SHARES_DATA_ENTITY: EdgeCategoryId = EdgeCategoryId(22);
+
+    // v0.4.x — Cron resolver. `SCHEDULES` from a `CRON_JOB` to its target
+    // (handler function / CLI command / image entrypoint). `SHARES_CRON_SCHEDULE`
+    // pairs CRON_JOB nodes across repos when the full (schedule, target) match —
+    // drift / accidental duplication signal.
+    pub const SCHEDULES: EdgeCategoryId = EdgeCategoryId(23);
+    pub const SHARES_CRON_SCHEDULE: EdgeCategoryId = EdgeCategoryId(24);
+
+    // v0.4.x — Config resolver. `READS_CONFIG` from a code module to a
+    // `CONFIG_KEY` it dereferences (e.g. `os.environ['DB_URL']`).
+    // `DEFINES_CONFIG` from a Dockerfile / .env / k8s manifest module to a
+    // `CONFIG_KEY` it sets. `SHARES_CONFIG` pairs CONFIG_KEY nodes across
+    // repos when the same key is touched by multiple services.
+    pub const READS_CONFIG: EdgeCategoryId = EdgeCategoryId(25);
+    pub const DEFINES_CONFIG: EdgeCategoryId = EdgeCategoryId(26);
+    pub const SHARES_CONFIG: EdgeCategoryId = EdgeCategoryId(27);
+
+    // v0.4.x — IaC resolver. `INFRA_REFERENCES` from one infra resource to
+    // another inside the same merged graph (Deployment → Image, Service →
+    // Deployment via selector). `SHARES_INFRA_REF` joins INFRA_RESOURCE nodes
+    // across repos when the same name is referenced (image built by repo A
+    // referenced by repo B's k8s manifest).
+    pub const INFRA_REFERENCES: EdgeCategoryId = EdgeCategoryId(28);
+    pub const SHARES_INFRA_REF: EdgeCategoryId = EdgeCategoryId(29);
+
+    // v0.4.x — Package-deps resolver. Module (manifest file) → package node.
+    // SHARES_DEPENDENCY pairs PACKAGE_DEP nodes across repos when multiple
+    // services depend on the same package.
+    pub const DEPENDS_ON: EdgeCategoryId = EdgeCategoryId(30);
+    pub const SHARES_DEPENDENCY: EdgeCategoryId = EdgeCategoryId(31);
+
+    // v0.4.13 — composition edges (A+ access-path synthesis)
+    /// Class → attribute. Emitted when a class body assigns `self.x = ...` or
+    /// declares a class-level attribute. Lets BFS walk `Class → attr_qname`
+    /// without re-parsing source at activation time.
+    pub const HAS_ATTRIBUTE: EdgeCategoryId = EdgeCategoryId(19);
+    /// Class → superclass. Emitted from a class's base-class list (Python
+    /// `class Foo(Bar):`, equivalent in other languages). Lets the synthesizer
+    /// walk inheritance when an attribute is defined on a parent.
+    pub const INHERITS_FROM: EdgeCategoryId = EdgeCategoryId(20);
+    /// Function / property / method → return type class. Emitted when the
+    /// parser can statically identify the returned class (explicit type
+    /// annotation or a cheap `return self.<known-typed-attr>` pattern inside
+    /// an `@property`). Enables A+ to compose `self.root.opts` by jumping
+    /// `Field.root → Schema` via RETURNS_TYPE, then `Schema → opts` via
+    /// HAS_ATTRIBUTE.
+    pub const RETURNS_TYPE: EdgeCategoryId = EdgeCategoryId(21);
 }
 
 // ============================================================================
@@ -227,6 +317,10 @@ pub enum CallQualifier {
     /// `this.m()`, Go `u.m()` where `u` is the method receiver. Resolves
     /// against the enclosing class's method set.
     SelfMethod(String),
+    /// `super().m()` in Python — call on the enclosing class's parent method.
+    /// Resolved against the enclosing class's recorded base class names, then
+    /// the module's symbol table for that base class's methods.
+    SuperMethod(String),
     /// `base.name()` where `base` is a plain identifier. Could be an imported
     /// module, an imported symbol, a struct instance, or a local variable.
     /// Disambiguation lives in the cross-file resolver.
@@ -252,6 +346,12 @@ pub struct FileParse {
     /// resolution into an edge. v0.4.4 use case: route handler references.
     pub refs: Vec<UnresolvedRef>,
     pub nav: CodeNav,
+    /// v0.4.13b — method ids tagged as property-style (read as `self.x`, not
+    /// `self.x()`). Python: `@property` decorator. Other languages: equivalent
+    /// getter annotations (e.g. Kotlin `val x: T get()`). Lets synth path BFS
+    /// filter method→class hops to only those that are syntactically valid
+    /// attribute reads.
+    pub properties: std::collections::HashSet<NodeId>,
 }
 
 /// Code-domain navigation indices — what the strict `Node` shape pushed out of

@@ -851,6 +851,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         calls: Vec::new(),
         refs: Vec::new(),
         nav: std::mem::take(&mut acc.nav),
+        properties: Default::default(),
     };
     for uc in acc.unresolved {
         let resolved: Option<NodeId> = match &uc.qualifier {

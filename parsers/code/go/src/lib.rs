@@ -135,6 +135,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 
@@ -487,20 +488,44 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
 }
 
 // ============================================================================
-// Route extraction (gin-first, generic `.<METHOD>("/path", handler)` shape)
+// Route extraction — covers Gin / Echo (all-caps verbs), Chi / Fiber
+// (Title-case verbs), stdlib `http.HandleFunc`, and Gorilla Mux
+// (`HandleFunc(...).Methods("GET", ...)`).
 // ============================================================================
 //
 // Walks the enclosing fn body once. For each statement of the form
 // `x := y.Group("/prefix")`, records `x` → concatenated prefix in `prefix_map`.
-// For each `<recv>.<METHOD>("/path", handler)` call, builds the full path by
-// prepending `prefix_map[recv]` and emits a Route node with one ROUTE_METHOD
-// cell plus an `UnresolvedRef` (category=HANDLED_BY) for the handler.
+// For each recognised registration call, builds the full path by prepending
+// `prefix_map[recv]` and emits a Route node with one ROUTE_METHOD cell plus an
+// `UnresolvedRef` (category=HANDLED_BY) for the handler.
+//
+// Recognised shapes:
+//   `<recv>.GET("/path", h)` / `<recv>.Get("/path", h)`  → method = GET
+//   `http.HandleFunc("/path", h)` / `<recv>.HandleFunc(...)` standalone
+//                                                         → method = ANY
+//   `<recv>.HandleFunc("/path", h).Methods("GET", "POST")`
+//                                                         → one route per method
 //
 // Routes use path-only NodeIds so that registrations across files in a package
 // (or across methods on the same path) collapse at graph-build time and their
 // cells stack onto one multicellular Route node.
 
-const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+/// Map a Go HTTP method receiver-method name to its canonical upper-case form.
+/// Returns `None` for non-HTTP-method names (`Group`, `HandleFunc`, etc.).
+fn normalize_http_method(s: &str) -> Option<&'static str> {
+    match s {
+        "GET" | "Get" => Some("GET"),
+        "POST" | "Post" => Some("POST"),
+        "PUT" | "Put" => Some("PUT"),
+        "DELETE" | "Delete" => Some("DELETE"),
+        "PATCH" | "Patch" => Some("PATCH"),
+        "HEAD" | "Head" => Some("HEAD"),
+        "OPTIONS" | "Options" => Some("OPTIONS"),
+        // Fiber: `app.All("/", h)` — register on every method.
+        "All" => Some("ANY"),
+        _ => None,
+    }
+}
 
 fn collect_routes_in(
     body: TsNode,
@@ -621,9 +646,152 @@ fn try_emit_route(
         return;
     };
     let method_name = text_of(field, src);
-    if !HTTP_METHODS.contains(&method_name) {
+
+    // Gorilla Mux: `r.HandleFunc("/u", h).Methods("GET", "POST")` — promote
+    // the inner registration to one route per method.
+    if method_name == "Methods" {
+        try_emit_gorilla_methods_chain(call, src, file_rel, module_id, repo, prefix_map, acc);
         return;
     }
+
+    // stdlib + Gorilla Mux: bare `HandleFunc` / `Handle`. Skip when wrapped in
+    // `.Methods(...)` — the wrapping call took the route already. Require the
+    // path to begin with `/` to avoid colliding with stdlib map/method names.
+    if method_name == "HandleFunc" || method_name == "Handle" {
+        if is_inner_of_methods_chain(call, src) {
+            return;
+        }
+        if !first_arg_is_url_path(call, src) {
+            return;
+        }
+        emit_route_from_call(call, "ANY", src, file_rel, module_id, repo, prefix_map, acc);
+        return;
+    }
+
+    // Idiomatic verb form: Gin/Echo (all-caps) and Chi/Fiber (Title-case).
+    // Title-case `Get` / `Post` collide with common getters (`Header.Get(...)`,
+    // `pool.Get()`); require a URL-shaped path. All-caps `GET` is unambiguous
+    // and stays permissive for back-compat with the original Gin scanner.
+    let Some(canonical) = normalize_http_method(method_name) else {
+        return;
+    };
+    let is_title_case = method_name
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_uppercase())
+        .unwrap_or(false)
+        && method_name.chars().skip(1).any(|c| c.is_ascii_lowercase());
+    if is_title_case && !first_arg_is_url_path(call, src) {
+        return;
+    }
+    emit_route_from_call(call, canonical, src, file_rel, module_id, repo, prefix_map, acc);
+}
+
+/// True if the call's first positional argument is a string literal beginning
+/// with `/` — the conventional URL-path shape. Used to discriminate route
+/// registrations from same-shape getters (`Header.Get("X-Foo")`).
+fn first_arg_is_url_path(call: TsNode, src: &[u8]) -> bool {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return false;
+    };
+    let Some(first) = args.named_child(0) else {
+        return false;
+    };
+    let Some(path) = string_literal_text(first, src) else {
+        return false;
+    };
+    path.starts_with('/')
+}
+
+/// True when `call` is the operand of a `<call>.Methods(...)` selector — i.e.
+/// the inner `HandleFunc` of a Gorilla Mux chain. Used to suppress duplicate
+/// emission while the walker descends past both calls.
+fn is_inner_of_methods_chain(call: TsNode, src: &[u8]) -> bool {
+    let Some(parent) = call.parent() else {
+        return false;
+    };
+    if parent.kind() != "selector_expression" {
+        return false;
+    }
+    let Some(field) = parent.child_by_field_name("field") else {
+        return false;
+    };
+    text_of(field, src) == "Methods"
+}
+
+/// Handle `<inner>.Methods("GET", "POST", ...)` where `<inner>` is itself a
+/// `HandleFunc` / `Handle` registration. Emits one Route node per listed
+/// method, all sharing the same path NodeId so cells stack.
+fn try_emit_gorilla_methods_chain(
+    outer: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    prefix_map: &HashMap<String, String>,
+    acc: &mut Acc,
+) {
+    let Some(func) = outer.child_by_field_name("function") else {
+        return;
+    };
+    let Some(inner_call) = func.child_by_field_name("operand") else {
+        return;
+    };
+    if inner_call.kind() != "call_expression" {
+        return;
+    }
+    let Some(inner_func) = inner_call.child_by_field_name("function") else {
+        return;
+    };
+    if inner_func.kind() != "selector_expression" {
+        return;
+    }
+    let Some(inner_field) = inner_func.child_by_field_name("field") else {
+        return;
+    };
+    let inner_method = text_of(inner_field, src);
+    if inner_method != "HandleFunc" && inner_method != "Handle" {
+        return;
+    }
+
+    let Some(method_args) = outer.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = method_args.walk();
+    for arg in method_args.named_children(&mut cursor) {
+        let Some(method_str) = string_literal_text(arg, src) else {
+            continue;
+        };
+        let method_upper = method_str.to_ascii_uppercase();
+        emit_route_from_call(
+            inner_call,
+            &method_upper,
+            src,
+            file_rel,
+            module_id,
+            repo,
+            prefix_map,
+            acc,
+        );
+    }
+}
+
+/// Emit a Route node + ROUTE_METHOD cell + HANDLED_BY ref for a registration
+/// call shaped like `<recv>.<METHOD>("/path", handler)`. `method` is the
+/// canonical upper-case verb (or `"ANY"` for unrouted HandleFunc).
+fn emit_route_from_call(
+    call: TsNode,
+    method: &str,
+    src: &[u8],
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    prefix_map: &HashMap<String, String>,
+    acc: &mut Acc,
+) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
     let Some(operand) = func.child_by_field_name("operand") else {
         return;
     };
@@ -674,7 +842,7 @@ fn try_emit_route(
 
     let start = call.start_position();
     let cell = route_method_cell(
-        method_name,
+        method,
         handler_display.as_deref(),
         file_rel,
         start.row + 1,
@@ -695,7 +863,7 @@ fn try_emit_route(
         acc.nav
             .record(route_id, &full_path, &qname, node_kind::ROUTE, None);
     }
-    seen.insert(method_name.to_string(), ());
+    seen.insert(method.to_string(), ());
 
     if let Some(q) = handler_qualifier {
         acc.refs.push(UnresolvedRef {
@@ -1180,5 +1348,309 @@ func setupRoutes(r *gin.Engine) {
         // parser stores the literal as written.
         let show = route_id(repo(), "/users/:id");
         assert!(parse.nodes.iter().any(|n| n.id == show));
+    }
+
+    // ------------------------------------------------------------------------
+    // Chi / Fiber: Title-case verb form `r.Get("/path", h)`.
+    // ------------------------------------------------------------------------
+
+    const CHI_TITLE_CASE: &str = r#"package server
+
+func setupRoutes(r *chi.Mux) {
+    r.Get("/health", Health)
+    r.Post("/login", Login)
+    r.Delete("/users/:id", DeleteUser)
+}
+"#;
+
+    #[test]
+    fn chi_title_case_verbs_normalize_to_uppercase() {
+        let parse = parse_file(
+            CHI_TITLE_CASE,
+            "server/server.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/health")),
+            vec!["GET".to_string()],
+        );
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/login")),
+            vec!["POST".to_string()],
+        );
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/users/:id")),
+            vec!["DELETE".to_string()],
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // Fiber: `app.All("/", h)` — register on every method, recorded as ANY.
+    // ------------------------------------------------------------------------
+
+    const FIBER_ALL: &str = r#"package server
+
+func setupRoutes(app *fiber.App) {
+    app.All("/wildcard", AnyHandler)
+}
+"#;
+
+    #[test]
+    fn fiber_all_verb_emits_any_method() {
+        let parse = parse_file(
+            FIBER_ALL,
+            "server/server.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/wildcard")),
+            vec!["ANY".to_string()],
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // stdlib: `http.HandleFunc("/path", h)` — bare handler, method = ANY.
+    // ------------------------------------------------------------------------
+
+    const STDLIB_HANDLEFUNC: &str = r#"package server
+
+func main() {
+    http.HandleFunc("/health", Health)
+    http.HandleFunc("/users", controllers.ListUsers)
+}
+"#;
+
+    #[test]
+    fn stdlib_handlefunc_emits_any_route_with_handled_by() {
+        let parse = parse_file(
+            STDLIB_HANDLEFUNC,
+            "server/main.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        let health = route_id(repo(), "/health");
+        let users = route_id(repo(), "/users");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server");
+
+        assert_eq!(route_methods(&parse, health), vec!["ANY".to_string()]);
+        assert_eq!(route_methods(&parse, users), vec!["ANY".to_string()]);
+
+        // Identifier handler retained.
+        assert!(parse.refs.iter().any(|r| {
+            r.from == health
+                && r.from_module == module_id
+                && r.category == edge_category::HANDLED_BY
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Health")
+        }));
+        // Selector handler retained.
+        assert!(parse.refs.iter().any(|r| {
+            r.from == users
+                && r.category == edge_category::HANDLED_BY
+                && matches!(&r.qualifier, CallQualifier::Attribute { base, name }
+                    if base == "controllers" && name == "ListUsers")
+        }));
+    }
+
+    // ------------------------------------------------------------------------
+    // Gorilla Mux: `r.HandleFunc("/u", h).Methods("GET", "POST")` — one route
+    // per method, both stacking cells onto the shared path NodeId. The inner
+    // HandleFunc must NOT also emit an "ANY" route.
+    // ------------------------------------------------------------------------
+
+    const GORILLA_METHODS_CHAIN: &str = r#"package server
+
+func setupRoutes(r *mux.Router) {
+    r.HandleFunc("/users", UsersHandler).Methods("GET", "POST")
+}
+"#;
+
+    #[test]
+    fn gorilla_methods_chain_emits_one_route_per_method_no_any() {
+        let parse = parse_file(
+            GORILLA_METHODS_CHAIN,
+            "server/server.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        let users = route_id(repo(), "/users");
+        let methods = route_methods(&parse, users);
+
+        assert!(methods.contains(&"GET".to_string()));
+        assert!(methods.contains(&"POST".to_string()));
+        assert_eq!(methods.len(), 2, "expected exactly 2 methods, no ANY leak");
+    }
+
+    // ------------------------------------------------------------------------
+    // Gorilla Mux: standalone `r.HandleFunc(...)` (no `.Methods` chain) still
+    // emits a Route with method ANY.
+    // ------------------------------------------------------------------------
+
+    const GORILLA_STANDALONE: &str = r#"package server
+
+func setupRoutes(r *mux.Router) {
+    r.HandleFunc("/legacy", LegacyHandler)
+}
+"#;
+
+    // ------------------------------------------------------------------------
+    // Real-repo eval — ignored by default. Run with:
+    //   cargo test -p repo-graph-parser-go -- --ignored eval --nocapture
+    // Walks several real Go repos in ~/Code, parses every .go file, and
+    // tabulates routes by method (and by inferred shape: HandleFunc / verb).
+    // No assertions — diagnostic only, used to sanity-check the v0.4.x
+    // route-shape additions against real-world code.
+    // ------------------------------------------------------------------------
+
+    fn collect_go_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if path.is_dir() {
+                if name == "vendor" || name == ".git" || name == "node_modules" {
+                    continue;
+                }
+                collect_go_files(&path, out);
+            } else if name.ends_with(".go") && !name.ends_with("_test.go") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn eval_route_extraction_against_real_go_repos() {
+        let repos: &[&str] = &[
+            "/home/ivy/Code/lapse",
+            "/home/ivy/Code/turps",
+            "/home/ivy/Code/Kina/backend",
+            "/home/ivy/Code/websocket",
+        ];
+
+        for repo_root in repos {
+            let path = std::path::Path::new(repo_root);
+            if !path.exists() {
+                println!("SKIP {repo_root} (not found)");
+                continue;
+            }
+            let mut files = Vec::new();
+            collect_go_files(path, &mut files);
+
+            let mut total_routes = 0usize;
+            let mut by_method: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            let mut files_with_routes = 0usize;
+            let mut parse_errors = 0usize;
+
+            for file in &files {
+                let Ok(source) = std::fs::read_to_string(file) else { continue };
+                let rel = file.strip_prefix(path).unwrap_or(file).to_string_lossy();
+                let parse = match parse_file(&source, &rel, "pkg", "github.com/x/y", repo()) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        parse_errors += 1;
+                        continue;
+                    }
+                };
+                let mut had_route = false;
+                for node in &parse.nodes {
+                    for cell in &node.cells {
+                        if cell.kind != cell_type::ROUTE_METHOD {
+                            continue;
+                        }
+                        had_route = true;
+                        total_routes += 1;
+                        if let CellPayload::Json(s) = &cell.payload {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                                if let Some(m) = v.get("method").and_then(|m| m.as_str()) {
+                                    *by_method.entry(m.to_string()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if had_route {
+                    files_with_routes += 1;
+                }
+            }
+
+            println!("\n=== {repo_root} ===");
+            println!(
+                "  files={}  files_with_routes={}  parse_errors={}",
+                files.len(),
+                files_with_routes,
+                parse_errors,
+            );
+            println!("  total route cells: {total_routes}");
+            for (method, count) in &by_method {
+                println!("    {method:<8} {count}");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Negative test: same-shape getters (`Header.Get("X-Foo")`,
+    // `pool.Get("key")`) must NOT emit Route nodes. Path-must-start-with-`/`
+    // is the discriminator. Found in the wild in `/home/ivy/Code/websocket`.
+    // ------------------------------------------------------------------------
+
+    const GETTER_LOOKALIKES: &str = r#"package server
+
+func handle(r *http.Request) string {
+    accept := r.Header.Get("Sec-Websocket-Accept")
+    other := pool.Get("some-key")
+    return accept + other
+}
+"#;
+
+    #[test]
+    fn title_case_getters_with_non_path_strings_do_not_emit_routes() {
+        let parse = parse_file(
+            GETTER_LOOKALIKES,
+            "server/handle.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        let any_route = parse
+            .nodes
+            .iter()
+            .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD));
+        assert!(!any_route, "getters with non-`/` strings must not be routes");
+    }
+
+    #[test]
+    fn gorilla_standalone_handlefunc_emits_any() {
+        let parse = parse_file(
+            GORILLA_STANDALONE,
+            "server/server.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/legacy")),
+            vec!["ANY".to_string()],
+        );
     }
 }

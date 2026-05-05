@@ -96,6 +96,8 @@ pub fn parse_file(
     }
 
     scan_axum_routes(source, repo, &mut acc);
+    scan_at_path_chains(source, repo, &mut acc);
+    scan_salvo_routes(source, repo, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -104,6 +106,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 
@@ -433,6 +436,98 @@ fn contains_method_call(hay: &str, pat: &str) -> bool {
     false
 }
 
+// ----------------------------------------------------------------------------
+// Tide / Poem: `app.at("/path").get(handler).post(other)` chain
+// Salvo:       `Router::with_path("/path").get(h).post(h2)`
+//
+// Common shape: a path-anchor call (`.at(...)` or `Router::with_path(...)`)
+// followed by chained verb method calls. After the anchor's closing paren,
+// scan a small window for `.<verb>(` substrings and emit one Route per
+// matching verb sharing the path's NodeId.
+//
+// Warp (`warp::path!("a" / u32 / "b").and(warp::get())`) is skipped — its
+// macro DSL composes path segments at compile time and would need real
+// expansion to canonicalise. Re-evaluate in v0.5+.
+// ----------------------------------------------------------------------------
+
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// Window size after the path-anchor's closing `)` to scan for chained verbs.
+/// Long enough to cover a multi-verb chain; short enough that we don't bleed
+/// into the next statement.
+const VERB_CHAIN_WINDOW: usize = 256;
+
+fn scan_at_path_chains(source: &str, repo: RepoId, acc: &mut Acc) {
+    scan_path_anchor_chain(source, ".at(", repo, acc);
+}
+
+fn scan_salvo_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+    scan_path_anchor_chain(source, "Router::with_path(", repo, acc);
+}
+
+fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Acc) {
+    // Suppress duplicate (method, path) entries within a single source pass so
+    // that nested `.at(...)` calls in a builder chain don't double-emit.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut search_from = 0;
+    let bytes = source.as_bytes();
+    while let Some(rel) = source[search_from..].find(needle) {
+        let arg_start = search_from + rel + needle.len();
+        // First arg must be a string literal beginning with `/` to qualify as a
+        // URL path (rejects e.g. `slice.at(0)` or `Router::with_path(name)`).
+        let Some(quote_off) = source[arg_start..].find('"') else {
+            search_from = arg_start;
+            continue;
+        };
+        let path_start = arg_start + quote_off + 1;
+        let mut j = path_start;
+        while j < bytes.len() && bytes[j] != b'"' {
+            if bytes[j] == b'\\' && j + 1 < bytes.len() {
+                j += 2;
+            } else {
+                j += 1;
+            }
+        }
+        if j >= bytes.len() {
+            break;
+        }
+        let path = &source[path_start..j];
+        // `/`-prefix is the conventional gate against `.at(0)` etc.
+        if !path.starts_with('/') {
+            search_from = j + 1;
+            continue;
+        }
+        // Find closing paren of the path-anchor call to bound the verb window.
+        let Some(close) = find_matching_paren(&source[arg_start..]) else {
+            search_from = j + 1;
+            continue;
+        };
+        let after = arg_start + close + 1;
+        // Verbs may live inside the call (Poem / Axum-style:
+        // `.at("/p", get(h).post(h2))`) or chained after (Tide / Salvo:
+        // `.at("/p").get(h).post(h2)`). One combined window catches both.
+        let in_args_start = j + 1;
+        let win_end = (after + VERB_CHAIN_WINDOW).min(source.len());
+        let window = &source[in_args_start..win_end];
+
+        for verb in HTTP_VERBS {
+            let pat_dotted = format!(".{verb}(");
+            let pat_bare = format!("{verb}(");
+            // Inside-args style uses bare `get(handler)`; chained style uses
+            // `.get(handler)`. `contains_method_call` enforces a non-word char
+            // before the bare form so it doesn't match `target(` etc.
+            if window.contains(&pat_dotted) || contains_method_call(window, &pat_bare) {
+                let mu = verb.to_ascii_uppercase();
+                let key = format!("{mu} {path}");
+                if seen.insert(key.clone()) {
+                    emit_axum_route(&mu, path, repo, acc);
+                }
+            }
+        }
+        search_from = after;
+    }
+}
+
 fn emit_axum_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
@@ -691,5 +786,79 @@ fn app() -> Router {
         assert!(route_names.contains(&"GET /users"));
         assert!(route_names.contains(&"POST /users"));
         assert!(route_names.contains(&"GET /users/:id"));
+    }
+
+    fn route_names(fp: &FileParse) -> Vec<&str> {
+        fp.nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn tide_at_chain_emits_per_method() {
+        let source = r#"
+fn app() -> tide::Server<()> {
+    let mut app = tide::new();
+    app.at("/health").get(health_handler);
+    app.at("/users").get(list_users).post(create_user);
+    app
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.contains(&"GET /health"));
+        assert!(names.contains(&"GET /users"));
+        assert!(names.contains(&"POST /users"));
+    }
+
+    #[test]
+    fn poem_at_chain_emits_per_method() {
+        let source = r#"
+fn app() -> poem::Route {
+    Route::new()
+        .at("/api/users", get(list_users).post(create_user))
+        .at("/api/users/:id", put(update_user).delete(delete_user))
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.contains(&"GET /api/users"));
+        assert!(names.contains(&"POST /api/users"));
+        assert!(names.contains(&"PUT /api/users/:id"));
+        assert!(names.contains(&"DELETE /api/users/:id"));
+    }
+
+    #[test]
+    fn salvo_with_path_chain_emits_per_method() {
+        let source = r#"
+fn app() -> salvo::Router {
+    Router::with_path("/health").get(health_handler);
+    Router::with_path("/users").get(list).post(create).delete(remove);
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.contains(&"GET /health"));
+        assert!(names.contains(&"GET /users"));
+        assert!(names.contains(&"POST /users"));
+        assert!(names.contains(&"DELETE /users"));
+    }
+
+    #[test]
+    fn at_chain_skips_non_path_first_arg() {
+        // `slice.at(0)`, `vec.at(idx)`, etc. — `.at(...)` is more general than
+        // routes. The path-`/` filter rejects them.
+        let source = r#"
+fn run(items: &[&str]) {
+    let _ = items.at(0).get(0);
+    let _ = lookup.at("cache-key").get();
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.is_empty(), "non-`/` `.at(...)` args must not emit routes");
     }
 }

@@ -55,6 +55,9 @@ pub fn extract_react_nodes(
     // --- React Router routes (browser-side, GET-only by nature).
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in scan_react_router_paths(source) {
+        if !looks_like_url_path(&path) {
+            continue;
+        }
         let canonical = format!("GET {path}");
         if !seen.insert(canonical.clone()) {
             continue;
@@ -145,6 +148,23 @@ fn scan_hook_names(source: &str) -> Vec<String> {
         }
     }
     dedup(out)
+}
+
+/// Reject path strings that look like JS code rather than URLs. The bare
+/// `path:` substring scan in `scan_react_router_paths` catches `path: '/foo'`
+/// in arbitrary JS files (Hapi's `'Invalid path: ...'` error string was the
+/// canonical FP that emitted ~80 garbage routes per hapi/lib file). Url paths
+/// don't contain newlines, parens, semicolons, or quotes.
+fn looks_like_url_path(p: &str) -> bool {
+    if p.is_empty() || p.len() > 256 || !p.starts_with('/') {
+        return false;
+    }
+    p.chars().all(|c| match c {
+        '\n' | '\r' | '\t' | ' ' => false,
+        c if c.is_ascii_control() => false,
+        '(' | ')' | ';' | '"' | '\'' | '`' | ',' => false,
+        _ => true,
+    })
 }
 
 fn scan_react_router_paths(source: &str) -> Vec<String> {

@@ -45,6 +45,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 

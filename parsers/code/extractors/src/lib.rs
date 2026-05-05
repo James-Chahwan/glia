@@ -1,6 +1,11 @@
 pub mod angular;
 pub mod cli;
+pub mod config;
+pub mod cron;
+pub mod data_entities;
 pub mod data_sources;
+pub mod iac;
+pub mod packages;
 pub mod eventbus;
 pub mod graphql;
 pub mod grpc;

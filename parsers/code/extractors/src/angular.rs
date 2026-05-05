@@ -66,46 +66,42 @@ pub fn extract_angular_nodes(
 
 fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
     let mut out: Vec<(String, NodeKindId)> = Vec::new();
-    let lines: Vec<&str> = source.lines().collect();
-    let mut pending: Option<NodeKindId> = None;
-    for line in &lines {
-        let t = line.trim_start();
-        if t.starts_with("@Component(") {
-            pending = Some(node_kind::COMPONENT);
-            continue;
-        }
-        if t.starts_with("@Injectable(") {
-            pending = Some(node_kind::SERVICE);
-            continue;
-        }
-        if t.starts_with("@Directive(") {
-            pending = Some(node_kind::DIRECTIVE);
-            continue;
-        }
-        if t.starts_with("@Pipe(") {
-            pending = Some(node_kind::PIPE);
-            continue;
-        }
-        if let Some(kind) = pending {
-            if let Some(name) = extract_class_name(t) {
+    // Match each `@<Decorator>(` occurrence; balance-skip its parenthesised
+    // metadata (which routinely spans many lines for `@Component({selector,
+    // templateUrl, imports, ...})`); then look for the next `class <Name>`
+    // declaration. Line-based state machines fail here because Angular
+    // decorator metadata is multi-line by convention.
+    const DECORATORS: &[(&str, NodeKindId)] = &[
+        ("@Component(", node_kind::COMPONENT),
+        ("@Injectable(", node_kind::SERVICE),
+        ("@Directive(", node_kind::DIRECTIVE),
+        ("@Pipe(", node_kind::PIPE),
+    ];
+
+    for &(needle, kind) in DECORATORS {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let pos = search_from + rel;
+            let arg_start = pos + needle.len();
+            let close = match find_balanced_paren(&source[arg_start..]) {
+                Some(off) => arg_start + off,
+                None => {
+                    search_from = arg_start;
+                    continue;
+                }
+            };
+            // After `)`, scan forward until we find `class <Name>`. Allow any
+            // amount of whitespace, `export`, `default`, `abstract`, comments.
+            if let Some(name) = find_next_class_name(&source[close + 1..]) {
                 out.push((name, kind));
-                pending = None;
-                continue;
             }
-            // still in between decorator and class — swallow blank/comment lines
-            if t.is_empty() || t.starts_with("//") || t.starts_with("/*") || t.starts_with("*") {
-                continue;
-            }
-            // Decorator didn't immediately precede class — keep pending alive only
-            // across trivial lines; if we hit a non-trivial non-class line, drop it.
-            if !t.starts_with('@') {
-                pending = None;
-            }
+            search_from = close + 1;
         }
     }
+
     // Convention-based: classes ending in `Guard` without a matching @ decorator
     // get GUARD kind.
-    for line in &lines {
+    for line in source.lines() {
         let t = line.trim_start();
         if let Some(name) = extract_class_name(t) {
             if name.ends_with("Guard") && !out.iter().any(|(n, _)| n == &name) {
@@ -116,6 +112,69 @@ fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
     out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
     out.dedup();
     out
+}
+
+/// Given `s` starting after a `(`, return the offset of the matching `)`,
+/// skipping nested parens, brackets, braces, and string literals.
+fn find_balanced_paren(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 1i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 && c == b')' {
+                    return Some(i);
+                }
+            }
+            b'\'' | b'"' | b'`' => {
+                let delim = c;
+                i += 1;
+                while i < bytes.len() && bytes[i] != delim {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Walk forward from `s` to find the first `class <Name>` declaration.
+/// Skips whitespace, line/block comments, and the `export`/`default`/
+/// `abstract` modifiers commonly preceding `class` in TS.
+fn find_next_class_name(s: &str) -> Option<String> {
+    for line in s.lines() {
+        let t = line.trim_start();
+        if t.is_empty()
+            || t.starts_with("//")
+            || t.starts_with("/*")
+            || t.starts_with("*")
+            || t.starts_with(')')
+        {
+            continue;
+        }
+        if let Some(name) = extract_class_name(t) {
+            return Some(name);
+        }
+        // If the line starts with another `@<Decorator>` (additional decorators
+        // are legal in TS), keep scanning rather than aborting.
+        if t.starts_with('@') {
+            continue;
+        }
+        // Otherwise we've gone too far — between this decorator and the next
+        // class declaration there's other code; abort to avoid false attribution.
+        return None;
+    }
+    None
 }
 
 fn extract_class_name(line: &str) -> Option<String> {
@@ -214,6 +273,56 @@ export class UpperPipe {}
         assert!(get(node_kind::SERVICE).contains(&"UserService"));
         assert!(get(node_kind::DIRECTIVE).contains(&"HiDirective"));
         assert!(get(node_kind::PIPE).contains(&"UpperPipe"));
+    }
+
+    #[test]
+    fn detects_multi_line_decorator_metadata() {
+        // Real Angular convention: the @Component arg is a multi-line object
+        // literal between the decorator and the class. Was a hard miss in the
+        // 2026-05-05 framework-coverage check (angular-realworld emitted 0
+        // COMPONENT despite 30+ files using this exact shape).
+        let src = r#"
+import { ChangeDetectionStrategy, Component } from '@angular/core';
+
+@Component({
+  selector: 'app-root',
+  templateUrl: './app.component.html',
+  imports: [HeaderComponent, RouterOutlet, FooterComponent],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class AppComponent {}
+
+@Component({
+  selector: 'app-profile',
+  styleUrl: './profile.component.scss',
+  template: `<div>profile</div>`,
+})
+export class ProfileComponent {}
+
+@Injectable({
+  providedIn: 'root',
+})
+export class JwtService {}
+"#;
+        let r = extract_angular_nodes(src, "test", module_id(), repo());
+        let comps: Vec<&str> = r
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::COMPONENT)
+            .filter_map(|(id, _)| r.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(comps.contains(&"AppComponent"), "got components: {comps:?}");
+        assert!(comps.contains(&"ProfileComponent"), "got components: {comps:?}");
+
+        let services: Vec<&str> = r
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::SERVICE)
+            .filter_map(|(id, _)| r.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(services.contains(&"JwtService"));
     }
 
     #[test]

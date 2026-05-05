@@ -38,6 +38,8 @@ pub fn parse_file(
 
     if is_rails_routes_file(file_rel_path) {
         scan_rails_routes(root, src, repo, &mut acc);
+    } else {
+        scan_sinatra_routes(root, src, repo, &mut acc);
     }
 
     Ok(FileParse {
@@ -47,6 +49,7 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
+        properties: Default::default(),
     })
 }
 
@@ -357,6 +360,105 @@ fn try_emit_rails_route(call: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
     }
 }
 
+// ============================================================================
+// Sinatra route extraction (any .rb file except routes.rb)
+// ============================================================================
+//
+// Sinatra DSL: `get '/path' do ... end`, `post '/users' do ... end`. Same
+// verbs as Rails, but always block-based and registered at top-level (classic
+// app) or inside a `class App < Sinatra::Base` body (modular).
+//
+// Discriminating from arbitrary Ruby calls is a real concern — `cache.get(key)`
+// and `get(:symbol)` share the syntactic shape. Three filters together:
+//   1. No `receiver` field (DSL call, not method-on-object)
+//   2. First arg is a string literal beginning with `/`
+//   3. A trailing `do_block` / `block` exists (handler body)
+//
+// `namespace '/api' do ... end` (sinatra-namespace gem) prefix tracking is
+// skipped — consistent with the existing Rails scanner which doesn't track
+// `scope` / `namespace` either. Routes emit at their literal path.
+
+const SINATRA_VERBS: &[(&str, &str)] = &[
+    ("get", "GET"),
+    ("post", "POST"),
+    ("put", "PUT"),
+    ("patch", "PATCH"),
+    ("delete", "DELETE"),
+    ("head", "HEAD"),
+    ("options", "OPTIONS"),
+    ("link", "LINK"),
+    ("unlink", "UNLINK"),
+];
+
+fn scan_sinatra_routes(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call" {
+            try_emit_sinatra_route(n, src, repo, acc);
+        }
+        let mut cursor = n.walk();
+        for c in n.named_children(&mut cursor) {
+            stack.push(c);
+        }
+    }
+}
+
+fn try_emit_sinatra_route(call: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
+    // Filter 1: no explicit receiver (DSL call, not `obj.get(...)`).
+    if call.child_by_field_name("receiver").is_some() {
+        return;
+    }
+    let method = call
+        .child_by_field_name("method")
+        .map(|n| text_of(n, src))
+        .unwrap_or("");
+    let Some(verb) = SINATRA_VERBS
+        .iter()
+        .find(|(m, _)| *m == method)
+        .map(|(_, v)| *v)
+    else {
+        return;
+    };
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    let Some(first) = args.named_children(&mut cursor).next() else {
+        return;
+    };
+    // Filter 2: first arg is a string literal starting with `/`.
+    if first.kind() != "string" {
+        return;
+    }
+    let raw = text_of(first, src);
+    let path = raw.trim_matches(|c| c == '\'' || c == '"');
+    if !path.starts_with('/') {
+        return;
+    }
+    // Filter 3: a trailing block (handler) is present. Tree-sitter Ruby
+    // surfaces this either as a `block:` field on the call or as a sibling
+    // `do_block` / `block` named child immediately after the call.
+    if !call_has_block(call) {
+        return;
+    }
+
+    emit_rails_route(verb, path, repo, acc);
+}
+
+fn call_has_block(call: TsNode) -> bool {
+    if call.child_by_field_name("block").is_some() {
+        return true;
+    }
+    // Fallback for grammars that attach the block as the last named child
+    // rather than via a labelled field.
+    let count = call.named_child_count();
+    if count == 0 {
+        return false;
+    }
+    let last = call.named_child((count - 1) as u32);
+    matches!(last.map(|n| n.kind()), Some("do_block") | Some("block"))
+}
+
 fn emit_rails_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
     let path = if path.starts_with('/') {
         path.to_string()
@@ -525,5 +627,117 @@ end
             .values()
             .any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "non-routes.rb file should not emit ROUTE nodes");
+    }
+
+    // ========================================================================
+    // Sinatra route extraction
+    // ========================================================================
+
+    #[test]
+    fn sinatra_classic_top_level_routes_emit() {
+        let source = r#"
+require 'sinatra'
+
+get '/health' do
+  'ok'
+end
+
+post '/users' do
+  'created'
+end
+
+delete '/users/:id' do
+  'gone'
+end
+"#;
+        let fp = parse_file(source, "app.rb", "app", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/health")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("DELETE", "/users/:id"))
+        );
+    }
+
+    #[test]
+    fn sinatra_modular_routes_inside_class_emit() {
+        let source = r#"
+require 'sinatra/base'
+
+class App < Sinatra::Base
+  get '/ping' do
+    'pong'
+  end
+
+  put '/items/:id' do
+    'updated'
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/app.rb", "lib::app", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/ping")));
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("PUT", "/items/:id"))
+        );
+    }
+
+    #[test]
+    fn sinatra_skips_call_with_explicit_receiver() {
+        // `cache.get('/users')` looks like a Sinatra route syntactically but
+        // has a receiver; the no-receiver filter must skip it.
+        let source = r#"
+def lookup
+  cache.get('/users') do |row|
+    row.name
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/svc.rb", "lib::svc", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "calls with receivers must not emit Sinatra routes");
+    }
+
+    #[test]
+    fn sinatra_skips_non_path_string_first_arg() {
+        // `get('some-key') do ... end` — string arg, no leading slash → not a route.
+        let source = r#"
+get 'some-key' do
+  'value'
+end
+"#;
+        let fp = parse_file(source, "lib/store.rb", "lib::store", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "non-`/` first arg must not emit a Sinatra route");
+    }
+
+    #[test]
+    fn sinatra_skips_symbol_first_arg() {
+        // `get :user_id` — symbol, not a path string. Common in DSLs.
+        let source = r#"
+get :user_id do
+  42
+end
+"#;
+        let fp = parse_file(source, "lib/dsl.rb", "lib::dsl", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "symbol first arg must not emit a Sinatra route");
+    }
+
+    #[test]
+    fn sinatra_skips_call_without_block() {
+        // `get '/path'` with no trailing block — can't be a Sinatra registration
+        // (always block-based). Could be e.g. a call to a helper that returns
+        // the GET response for a path. Suppressing avoids false positives.
+        let source = r#"
+def fetch
+  get '/path'
+end
+"#;
+        let fp = parse_file(source, "lib/client.rb", "lib::client", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "call without trailing block must not emit a route");
     }
 }
