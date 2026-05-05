@@ -283,6 +283,10 @@ Practical effects: GitHub marks the repo as "Other / non-standard". PyPI won't s
 - **Spreading activation** (Quillian 1967, Anderson 1983, Collins & Loftus 1975). Cognitive-science antecedent to all PPR-style retrieval. glia's PPR implementation is a modern, mathematically-grounded version of the same intuition: relevance propagates from seeds along weighted edges with decay.
 - [GraphRAG](https://github.com/microsoft/graphrag) (Microsoft, 2024). Parallel work on graph-structured retrieval. Informs the broader space of "use a graph instead of/alongside vector search" approaches.
 
+**Graph theory background:**
+- *Introduction to Algorithms*, 4th edition (Cormen, Leiserson, Rivest, Stein). Reference for the graph algorithms underneath glia's traversal primitives.
+- [DanielKeogh/com.danielkeogh.graph](https://github.com/DanielKeogh/com.danielkeogh.graph). Friend's graph library; helped along the way.
+
 **Tooling:**
 - [tree-sitter](https://tree-sitter.github.io/). Every language parser is built on it.
 - [rkyv](https://rkyv.org/). Zero-copy serialisation behind the `.gmap` container.
