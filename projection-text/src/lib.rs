@@ -6,6 +6,14 @@
 //! - `[DEFAULTS]` — majority kind/confidence declared once, nodes only emit deviations
 //! - Module file collapse — multi-file modules render `:files` instead of N×`:code`+`:position`
 
+pub mod composition;
+
+#[cfg(feature = "driver")]
+pub mod driver_utils;
+
+#[cfg(feature = "driver")]
+pub mod passes;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -19,19 +27,33 @@ const LEGEND: &str = "\
 [LEGEND]
 > depends    * entry point    @ external";
 
-/// Render a single-repo graph.
+/// Render a single-repo graph. Code cells are one-line previews.
 pub fn render_repo_graph(g: &RepoGraph) -> String {
     let slice: &[&RepoGraph] = &[g];
-    render(slice, &[])
+    render(slice, &[], false)
+}
+
+/// Render a single-repo graph with full cell bodies (no one-line truncation).
+/// Heavier output but preserves actual source — callers doing LLM context
+/// construction want this; human-readable dumps want the default.
+pub fn render_repo_graph_full(g: &RepoGraph) -> String {
+    let slice: &[&RepoGraph] = &[g];
+    render(slice, &[], true)
 }
 
 /// Render a merged multi-repo graph with cross-repo edges (HTTP_CALLS, etc.).
 pub fn render_merged(m: &MergedGraph) -> String {
     let graphs: Vec<&RepoGraph> = m.graphs.iter().collect();
-    render(&graphs, &m.cross_edges)
+    render(&graphs, &m.cross_edges, false)
 }
 
-fn render(graphs: &[&RepoGraph], cross_edges: &[Edge]) -> String {
+/// Same as [`render_merged`] but preserves full cell bodies.
+pub fn render_merged_full(m: &MergedGraph) -> String {
+    let graphs: Vec<&RepoGraph> = m.graphs.iter().collect();
+    render(&graphs, &m.cross_edges, true)
+}
+
+fn render(graphs: &[&RepoGraph], cross_edges: &[Edge], full_bodies: bool) -> String {
     let scopes = build_scopes(graphs);
     let defaults = compute_defaults(graphs);
 
@@ -61,7 +83,7 @@ fn render(graphs: &[&RepoGraph], cross_edges: &[Edge]) -> String {
     out.push('\n');
     render_topology(&mut out, graphs, cross_edges, &scopes);
     out.push('\n');
-    render_nodes(&mut out, graphs, &scopes, &defaults);
+    render_nodes(&mut out, graphs, &scopes, &defaults, full_bodies);
     out
 }
 
@@ -312,6 +334,7 @@ fn render_nodes(
     graphs: &[&RepoGraph],
     scopes: &[(String, String)],
     defaults: &Defaults,
+    full_bodies: bool,
 ) {
     let mut items: Vec<(&str, &Node, &RepoGraph)> = Vec::new();
     for g in graphs {
@@ -324,7 +347,7 @@ fn render_nodes(
     items.sort_by_key(|(q, _, _)| *q);
 
     for (qname, node, g) in items {
-        render_node_block(out, qname, node, g, scopes, defaults);
+        render_node_block(out, qname, node, g, scopes, defaults, full_bodies);
         out.push('\n');
     }
 }
@@ -336,6 +359,7 @@ fn render_node_block(
     g: &RepoGraph,
     scopes: &[(String, String)],
     defaults: &Defaults,
+    full_bodies: bool,
 ) {
     out.push('[');
     out.push_str(&abbreviate(qname, scopes));
@@ -356,10 +380,10 @@ fn render_node_block(
     }
 
     if kind == Some(node_kind::MODULE) && has_multi_file_code(n) {
-        render_module_files(out, n);
+        render_module_files(out, n, full_bodies);
     } else {
         for cell in &n.cells {
-            render_cell(out, cell);
+            render_cell(out, cell, full_bodies);
         }
     }
 }
@@ -372,7 +396,7 @@ fn has_multi_file_code(n: &Node) -> bool {
         > 1
 }
 
-fn render_module_files(out: &mut String, n: &Node) {
+fn render_module_files(out: &mut String, n: &Node, full_bodies: bool) {
     let mut files: Vec<String> = Vec::new();
     let mut other_cells: Vec<&repo_graph_core::Cell> = Vec::new();
 
@@ -394,7 +418,7 @@ fn render_module_files(out: &mut String, n: &Node) {
         let _ = writeln!(out, ":files      {}", files.join(", "));
     }
     for cell in other_cells {
-        render_cell(out, cell);
+        render_cell(out, cell, full_bodies);
     }
 }
 
@@ -406,7 +430,7 @@ fn extract_filename(json: &str) -> Option<String> {
     path.rsplit('/').next().map(|s| s.to_string())
 }
 
-fn render_cell(out: &mut String, cell: &repo_graph_core::Cell) {
+fn render_cell(out: &mut String, cell: &repo_graph_core::Cell, full_bodies: bool) {
     let label = cell_label(cell.kind);
     if cell.kind == cell_type::POSITION
         && let CellPayload::Json(j) = &cell.payload
@@ -416,14 +440,32 @@ fn render_cell(out: &mut String, cell: &repo_graph_core::Cell) {
     }
     match &cell.payload {
         CellPayload::Text(t) => {
-            let _ = writeln!(out, ":{:<10} {}", label, one_line_preview(t));
+            if full_bodies {
+                write_cell_block(out, label, t);
+            } else {
+                let _ = writeln!(out, ":{:<10} {}", label, one_line_preview(t));
+            }
         }
         CellPayload::Json(j) => {
-            let _ = writeln!(out, ":{:<10} {}", label, one_line_preview(j));
+            if full_bodies {
+                write_cell_block(out, label, j);
+            } else {
+                let _ = writeln!(out, ":{:<10} {}", label, one_line_preview(j));
+            }
         }
         CellPayload::Bytes(b) => {
             let _ = writeln!(out, ":{:<10} <{} bytes>", label, b.len());
         }
+    }
+}
+
+fn write_cell_block(out: &mut String, label: &str, body: &str) {
+    // Multi-line block: header line, indented body, blank terminator.
+    // Keeps the label discoverable; body stays verbatim so downstream LLMs
+    // see actual source, not a truncated signature.
+    let _ = writeln!(out, ":{label}");
+    for line in body.lines() {
+        let _ = writeln!(out, "  {line}");
     }
 }
 
@@ -555,6 +597,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         g.nav.record(mod_id, "a", "m::a", node_kind::MODULE, None);
         g.nav
@@ -610,6 +653,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         g.nav
             .record(route_id, "/x", "route:/x", node_kind::ROUTE, None);
@@ -648,6 +692,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         g.nav
             .record(fn_id, "caller", "m::caller", node_kind::FUNCTION, None);
@@ -684,6 +729,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         be.nav
             .record(route_id, "/api/x", "route:/api/x", node_kind::ROUTE, None);
@@ -701,6 +747,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         fe.nav.record(
             endpoint_id,
@@ -779,6 +826,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         g.nav.record(
             parent,
@@ -828,6 +876,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
 
         // 5 strong Functions + 1 medium Module → Function and strong are defaults
@@ -920,6 +969,7 @@ mod tests {
             symbols: Default::default(),
             unresolved_calls: Vec::new(),
             unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
         };
         let mut gg = g;
         gg.nav

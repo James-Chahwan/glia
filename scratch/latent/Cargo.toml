@@ -1,0 +1,20 @@
+[package]
+name = "repo-graph-latent"
+version = "0.4.13-dev"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
+[dependencies]
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.3", features = ["tokio"] }
+anyhow = "1"
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

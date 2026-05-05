@@ -7,3 +7,8 @@ nodes.gmap
 mempalace.yaml
 entities.json
 
+# SWE-bench experiment artifacts (gold patches, prompts, runlogs, model
+# outputs) — regenerable research data; opt-in via `cargo build -p
+# repo-graph-latent` then re-run the pipeline.
+scratch/latent/out/
+

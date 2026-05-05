@@ -9,5 +9,67 @@ repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
 
+repo-graph-parser-python = { path = "../parsers/code/python", optional = true }
+repo-graph-activation = { path = "../activation", optional = true }
+walkdir = { version = "2", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+anyhow = { version = "1", optional = true }
+regex = { version = "1", optional = true }
+
+[features]
+driver = [
+    "dep:repo-graph-parser-python",
+    "dep:repo-graph-activation",
+    "dep:walkdir",
+    "dep:clap",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:anyhow",
+    "dep:regex",
+]
+
+[[bin]]
+name = "synth_composition"
+required-features = ["driver"]
+
+[[bin]]
+name = "seeds"
+required-features = ["driver"]
+
+[[bin]]
+name = "node_summaries"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_key_symbols"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_callsite_argflow"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_derived_notes"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_call_chain"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_constant_decl"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_source_map"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_reachable_paths"
+required-features = ["driver"]
+
 [dev-dependencies]
 repo-graph-parser-go = { path = "../parsers/code/go" }
+repo-graph-parser-python = { path = "../parsers/code/python" }
