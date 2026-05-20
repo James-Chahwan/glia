@@ -716,7 +716,39 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     prefix_path = workdir / "prefix.txt"
     prefix_path.write_text(prefix)
 
+    # Graph-derived traceback target directive (cycle 0.2/0.3 sage feature).
+    # Calls projection-text/src/bin/synth_traceback_target which reads the
+    # .gmap via build_repo_graph + parses issue.txt traceback regex + emits
+    # a prescriptive directive (target qname, anti-targets, buggy line,
+    # exception parse). When the issue has no parseable Python traceback or
+    # no graph-matched frame, this writes an empty/inert directive and we
+    # fall back to the generic suffix only.
+    #
+    # See cycle/marshmallow_log.md iter5 for the win-condition data;
+    # cycle/full_rust_injection_plan.md for the JSON-removal roadmap.
+    directive_path = workdir / "directive.txt"
+    synth_target_bin = GLIA / "target/release/synth_traceback_target"
+    if synth_target_bin.exists():
+        sh(
+            [str(synth_target_bin),
+             "--src", str(repo_dir),
+             "--issue", str(issue_path),
+             "--text-out", str(directive_path)],
+            capture_output=True, text=True,
+        )
+    directive_text = ""
+    if directive_path.exists():
+        body = directive_path.read_text().strip()
+        # Inert directive when no graph-matched frame (the bin emits a
+        # one-line "(no graph node matched...)" placeholder).
+        if body and "no graph node matched" not in body and "no targeting available" not in body:
+            directive_text = directive_path.read_text() + "\n\n"
+            log(f"traceback directive: {len(directive_text)} chars")
+        else:
+            log("traceback directive: (inert; no graph-matched frame in issue traceback)")
+
     suffix = (
+        f"{directive_text}"
         "Produce a minimal unified git diff that fixes the bug. Output rules:\n"
         "- First line must be `diff --git a/... b/...`.\n"
         "- Do NOT wrap the diff in code fences (no triple backticks).\n"
@@ -907,7 +939,13 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
         # generated diff with shifted/mismatched context still applies via the
         # fuzz fallback path. Confirmed 2026-05-21 with `patch --fuzz=10 --dry-run`
         # succeeding at fuzz=3 on marshmallow-1359 with offset -2.
-        r2 = sh(["patch", "-p1", "--forward", "--quiet", "--fuzz=5", "-d", str(repo_dir), "-i", str(patch_path)],
+        #
+        # `-l` = --ignore-whitespace. Models often output 4-space body indent
+        # for methods inside classes when the actual file uses 8 spaces.
+        # Without `-l` even the fuzz fallback rejects. Confirmed 2026-05-21
+        # cycle 0.3 integration smoke: target line correctly identified
+        # (fields.py:1114) but indent mismatch blocked apply.
+        r2 = sh(["patch", "-p1", "--forward", "--quiet", "--fuzz=5", "-l", "-d", str(repo_dir), "-i", str(patch_path)],
                 capture_output=True, text=True)
         if r2.returncode == 0:
             apply_status = "applied(fuzz)"
