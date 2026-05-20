@@ -11,6 +11,7 @@ pub mod graphql;
 pub mod grpc;
 pub mod queues;
 pub mod react;
+pub mod services;
 pub mod ts_routes;
 pub mod vue;
 pub mod websocket;
