@@ -30,7 +30,9 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::lens::{ForwardPassCaptures, LayerCapture, PositionCapture, UnembedHead};
+use crate::lens::{
+    AutoregressiveCaptures, ForwardPassCaptures, LayerCapture, PositionCapture, UnembedHead,
+};
 
 /// Minimum surface every backend must provide.
 pub trait LensRuntime {
@@ -69,6 +71,31 @@ pub trait LensRuntime {
         output_positions: &[u32],
         run_label: &str,
     ) -> Result<ForwardPassCaptures>;
+
+    /// Cycle 0.4 lens — autoregressive generation with per-step residual
+    /// capture. Greedy sampling (argmax over final-layer logits) for v1.
+    ///
+    /// At each generation step:
+    ///   1. read final-layer logits at the last position
+    ///   2. argmax → next token id
+    ///   3. append to running sequence; feed back through model (single-token
+    ///      decode for incremental KV-cache reuse where possible)
+    ///   4. cb_eval captures l_out-N rows for the new token at every layer
+    ///   5. record `PositionCapture { position: step_idx, layers: [...] }`
+    ///   6. if next token == EOS or step_idx == max_new, stop
+    ///
+    /// Returns the generated token sequence + per-step per-layer residuals.
+    /// This is what the slice-1.5 prompt-position lens couldn't see — the
+    /// cycle 0.3 directive steers DURING DECODING, so differentiation
+    /// between baseline / iter5 conditions is at generated tokens 1..N,
+    /// not at the prompt-encoding stage.
+    fn forward_generate(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+    ) -> Result<AutoregressiveCaptures>;
 }
 
 // ============================================================================
@@ -165,6 +192,56 @@ impl LensRuntime for FakeRuntime {
         Ok(ForwardPassCaptures {
             run: run_label.to_string(),
             positions,
+        })
+    }
+
+    fn forward_generate(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+    ) -> Result<AutoregressiveCaptures> {
+        // Deterministic synthetic generation:
+        //   token_at_step(i) = (last_prompt_token + i + 1) % n_vocab
+        // EOS fires when token equals eos_token_id (if Some). Tests can wire
+        // an early EOS via small n_vocab.
+        let mut generated_tokens: Vec<u32> = Vec::new();
+        let mut steps: Vec<PositionCapture> = Vec::new();
+        let mut stopped_on_eos = false;
+        let mut last = prompt_tokens.last().copied().unwrap_or(0);
+        for step in 0..max_new {
+            let next = (last + 1) % (self.n_vocab as u32);
+            if eos_token_id == Some(next) {
+                stopped_on_eos = true;
+                break;
+            }
+            generated_tokens.push(next);
+            // Per-step residual: bias toward the GENERATED token, sharpening
+            // with depth — mirrors the real lens shape so downstream code
+            // exercising AutoregressiveCaptures works the same in both.
+            let target_dim = (next as usize) % self.n_embd;
+            let layers = (0..self.n_layers)
+                .map(|l| {
+                    let mut r = vec![0.0f32; self.n_embd];
+                    r[target_dim] = 1.0 + (l as f32) * 2.0;
+                    LayerCapture {
+                        layer: l as u32,
+                        residual: r,
+                    }
+                })
+                .collect();
+            steps.push(PositionCapture {
+                position: step,
+                layers,
+            });
+            last = next;
+        }
+        Ok(AutoregressiveCaptures {
+            run: run_label.to_string(),
+            generated_tokens,
+            steps,
+            stopped_on_eos,
         })
     }
 }
@@ -640,6 +717,170 @@ impl LensRuntime for LlamaCppRuntime {
             positions,
         })
     }
+
+    fn forward_generate(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+    ) -> Result<AutoregressiveCaptures> {
+        if prompt_tokens.is_empty() {
+            anyhow::bail!("forward_generate: empty prompt_tokens");
+        }
+        if max_new == 0 {
+            anyhow::bail!("forward_generate: max_new must be > 0");
+        }
+
+        // Reset cb_state (per_layer buffers cleared); clear KV cache so we
+        // start fresh for this generation run.
+        {
+            let mut s = self.cb_state.lock().unwrap();
+            s.reset_for_forward();
+        }
+        unsafe {
+            let mem = llama_cpp_sys_2::llama_get_memory(self.ctx);
+            if !mem.is_null() {
+                llama_cpp_sys_2::llama_memory_clear(mem, true);
+            }
+        }
+
+        let n_prompt = prompt_tokens.len();
+        let n_embd = self.head.n_embd;
+        let n_vocab = self.head.n_vocab as i32;
+
+        // Prompt decode. Only the LAST token gets logits=1 (we sample from
+        // it). KV cache is filled for positions 0..n_prompt.
+        unsafe {
+            let mut batch = llama_cpp_sys_2::llama_batch_init(n_prompt as i32, 0, 1);
+            for (i, &tok) in prompt_tokens.iter().enumerate() {
+                *batch.token.add(i) = tok as i32;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                *(*batch.seq_id.add(i)).add(0) = 0;
+                *batch.logits.add(i) = (i == n_prompt - 1) as i8;
+            }
+            batch.n_tokens = n_prompt as i32;
+            let rc = llama_cpp_sys_2::llama_decode(self.ctx, batch);
+            llama_cpp_sys_2::llama_batch_free(batch);
+            if rc != 0 {
+                anyhow::bail!("llama_decode (prompt) returned {rc}");
+            }
+        }
+
+        // Resolve EOS. Caller-supplied wins; fall back to the model's eos
+        // token id from the vocab.
+        let eos = eos_token_id.unwrap_or_else(|| unsafe {
+            let e = llama_cpp_sys_2::llama_vocab_eos(self.vocab);
+            if e < 0 { u32::MAX } else { e as u32 }
+        });
+
+        // Generation loop. Greedy argmax v1.
+        let mut generated_tokens: Vec<u32> = Vec::with_capacity(max_new as usize);
+        let mut stopped_on_eos = false;
+        let mut cur_pos = n_prompt as i32;
+        for _step in 0..max_new {
+            // Read final-layer logits for the most recent position.
+            // -1 means "the most recent token with logits=1 enabled."
+            let logits_ptr = unsafe { llama_cpp_sys_2::llama_get_logits_ith(self.ctx, -1) };
+            if logits_ptr.is_null() {
+                anyhow::bail!("llama_get_logits_ith returned NULL at gen pos {cur_pos}");
+            }
+            let logits = unsafe {
+                std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
+            };
+            // Argmax (greedy).
+            let next = logits
+                .iter()
+                .enumerate()
+                .fold((0u32, f32::NEG_INFINITY), |acc, (i, &l)| {
+                    if l > acc.1 { (i as u32, l) } else { acc }
+                })
+                .0;
+
+            // EOS check (caller-supplied OR model's vocab EOS OR ggml's eog).
+            let is_eog = unsafe {
+                llama_cpp_sys_2::llama_vocab_is_eog(self.vocab, next as i32)
+            };
+            if next == eos || is_eog {
+                stopped_on_eos = true;
+                break;
+            }
+            generated_tokens.push(next);
+
+            // Single-token decode. KV cache extends to cur_pos.
+            unsafe {
+                let mut batch = llama_cpp_sys_2::llama_batch_init(1, 0, 1);
+                *batch.token.add(0) = next as i32;
+                *batch.pos.add(0) = cur_pos;
+                *batch.n_seq_id.add(0) = 1;
+                *(*batch.seq_id.add(0)).add(0) = 0;
+                *batch.logits.add(0) = 1;
+                batch.n_tokens = 1;
+                let rc = llama_cpp_sys_2::llama_decode(self.ctx, batch);
+                llama_cpp_sys_2::llama_batch_free(batch);
+                if rc != 0 {
+                    anyhow::bail!("llama_decode (gen pos {cur_pos}) returned {rc}");
+                }
+            }
+            cur_pos += 1;
+        }
+
+        // Slice per_layer buffers: the LAST N rows of each layer's buffer
+        // correspond to the N generated tokens, in order. Earlier rows are
+        // the prompt's residuals (we ignore those here — the prompt-position
+        // path is `forward_capture`).
+        let n_gen = generated_tokens.len();
+        let mut steps: Vec<PositionCapture> = Vec::with_capacity(n_gen);
+        {
+            let s = self.cb_state.lock().unwrap();
+            for step_idx in 0..n_gen {
+                let mut layers = Vec::with_capacity(self.n_layers);
+                for l in 0..self.n_layers as u32 {
+                    let Some(buf) = s.per_layer.get(&l) else {
+                        return Err(anyhow!(
+                            "missing l_out-{l} in cb_eval captures during generate (got {} layer keys)",
+                            s.per_layer.len(),
+                        ));
+                    };
+                    let captured_rows = buf.len() / n_embd;
+                    if captured_rows < n_gen {
+                        anyhow::bail!(
+                            "layer {l} has {captured_rows} captured rows, expected at least {n_gen} (one per generated token)",
+                        );
+                    }
+                    let row = captured_rows - n_gen + step_idx;
+                    let row_start = row * n_embd;
+                    let row_end = row_start + n_embd;
+                    let residual = buf[row_start..row_end].to_vec();
+                    layers.push(LayerCapture { layer: l, residual });
+                }
+                steps.push(PositionCapture {
+                    position: step_idx as u32,
+                    layers,
+                });
+            }
+
+            // Promote captured weights if they arrived (same as forward_capture).
+            if self.head.output_norm_weight.is_empty() {
+                if let Some(w) = &s.output_norm_weight {
+                    self.head.output_norm_weight = w.clone();
+                }
+            }
+            if self.head.output_weight.is_empty() {
+                if let Some(w) = &s.output_weight {
+                    self.head.output_weight = w.clone();
+                }
+            }
+        }
+
+        Ok(AutoregressiveCaptures {
+            run: run_label.to_string(),
+            generated_tokens,
+            steps,
+            stopped_on_eos,
+        })
+    }
 }
 
 #[cfg(feature = "real")]
@@ -704,6 +945,59 @@ mod tests {
         for (i, pc) in captures.positions.iter().enumerate() {
             assert_eq!(pc.position, i as u32);
             assert_eq!(pc.layers.len(), 3);
+        }
+    }
+
+    #[test]
+    fn fake_runtime_forward_generate_runs_to_max_new_without_eos() {
+        let mut rt = FakeRuntime::new(4, 32, 8);
+        let cap = rt.forward_generate(&[1, 2, 3], 5, None, "gen-baseline").unwrap();
+        assert_eq!(cap.generated_tokens.len(), 5);
+        assert_eq!(cap.steps.len(), 5);
+        assert!(!cap.stopped_on_eos);
+        for (i, pc) in cap.steps.iter().enumerate() {
+            assert_eq!(pc.position, i as u32);
+            assert_eq!(pc.layers.len(), 4);
+        }
+        assert_eq!(cap.run, "gen-baseline");
+    }
+
+    #[test]
+    fn fake_runtime_forward_generate_stops_on_eos() {
+        let mut rt = FakeRuntime::new(2, 32, 8);
+        // last_prompt=3 → next tokens 4, 5, 6, ...; set EOS=5 so we stop after token 4.
+        let cap = rt.forward_generate(&[1, 2, 3], 100, Some(5), "gen-eos").unwrap();
+        assert!(cap.stopped_on_eos);
+        assert_eq!(cap.generated_tokens.len(), 1, "got {:?}", cap.generated_tokens);
+        assert_eq!(cap.generated_tokens[0], 4);
+        assert_eq!(cap.steps.len(), 1);
+    }
+
+    #[test]
+    fn fake_runtime_forward_generate_residuals_track_generated_tokens() {
+        use crate::lens::{residual_to_logits, softmax};
+        // n_vocab == n_embd so no FakeHead row aliasing (token v's row is
+        // one-hot at e=v%n_embd; vocab>embd would collide).
+        let mut rt = FakeRuntime::new(3, 8, 8);
+        let cap = rt.forward_generate(&[1, 2, 3], 4, None, "gen").unwrap();
+        let head = rt.unembed_head();
+        // Per-step LAST-layer top-1 should be the generated token (synthetic
+        // bias makes it sharpen by depth, peak at the target token's dim).
+        for (i, pc) in cap.steps.iter().enumerate() {
+            let last = pc.layers.last().unwrap();
+            let logits = residual_to_logits(&last.residual, head);
+            let probs = softmax(&logits);
+            let top_idx = probs
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i as u32)
+                .unwrap();
+            assert_eq!(
+                top_idx, cap.generated_tokens[i],
+                "step {i} top-1 = {top_idx}, generated_token = {}",
+                cap.generated_tokens[i],
+            );
         }
     }
 }

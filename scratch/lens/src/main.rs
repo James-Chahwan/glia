@@ -15,9 +15,21 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use glia_lens::jsonl::LensJsonlWriter;
-use glia_lens::lens::compute_lens_steps;
+use glia_lens::lens::{compute_lens_steps, AutoregressiveCaptures, ForwardPassCaptures};
 use glia_lens::runtime::{FakeRuntime, LensRuntime};
 use glia_lens::{render_ascii, render_png};
+
+/// Coerce an `AutoregressiveCaptures` (cycle 0.4 generate mode) into a
+/// `ForwardPassCaptures` so the downstream lens-math + JSONL + renderer
+/// pipeline doesn't need to know about the mode. `position` in the resulting
+/// `LensStep` then means "generated-token index" instead of "prompt offset
+/// from end" — interpretation lives with the renderer / reader.
+fn autoregressive_to_forward_pass(cap: &AutoregressiveCaptures) -> ForwardPassCaptures {
+    ForwardPassCaptures {
+        run: cap.run.clone(),
+        positions: cap.steps.clone(),
+    }
+}
 
 #[cfg(feature = "real")]
 use glia_lens::runtime::LlamaCppRuntime;
@@ -125,6 +137,20 @@ struct Args {
     /// invocations. If set, overrides `--output-positions`.
     #[arg(long)]
     output_position: Option<u32>,
+
+    /// Lens mode. Default is "prompt-position": inspect residuals at the
+    /// specified prompt positions (slice 1.5). "generate" mode does
+    /// autoregressive greedy generation and captures per-generated-token
+    /// residuals (cycle 0.4 — required to see the cycle 0.3 directive's
+    /// actual steering effect during decoding).
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["prompt-position", "generate"]), default_value = "prompt-position")]
+    mode: String,
+
+    /// In `generate` mode: max tokens to generate before stopping. Stops
+    /// earlier on EOS. Default 64 — keeps wall-clock manageable; bump for
+    /// long-diff inspection. Ignored in prompt-position mode.
+    #[arg(long, default_value_t = 64)]
+    max_new: u32,
 
     /// Top-K predictions per layer.
     #[arg(long, default_value_t = 5)]
@@ -239,14 +265,46 @@ fn run<R: LensRuntime>(
         prefix.len(),
         suffix.len()
     );
-    let baseline = rt.forward_capture(&baseline_tokens, &positions, "baseline")?;
 
-    let with_inj = if let Some(inj_text) = injection_text {
-        let inj_tokens = rt.tokenize(&format!("{prefix}{inj_text}{suffix}"))?;
-        tracing::info!("with_injection tokens: {}", inj_tokens.len());
-        Some(rt.forward_capture(&inj_tokens, &positions, "with_injection")?)
+    // Cycle 0.4 generate mode: autoregressive decode + per-step residuals.
+    // Returns ForwardPassCaptures with `position` = generated-token index
+    // (0..n_gen), `run` = baseline / with_injection. Skips the prompt-
+    // position forward_capture path entirely.
+    let (baseline, with_inj) = if args.mode == "generate" {
+        tracing::info!("MODE=generate · max_new={}", args.max_new);
+        let baseline_gen =
+            rt.forward_generate(&baseline_tokens, args.max_new, None, "baseline")?;
+        tracing::info!(
+            "baseline gen: {} tokens (stopped_on_eos={})",
+            baseline_gen.generated_tokens.len(),
+            baseline_gen.stopped_on_eos
+        );
+        let baseline_fpc = autoregressive_to_forward_pass(&baseline_gen);
+
+        let with_inj_fpc = if let Some(inj_text) = injection_text {
+            let inj_tokens = rt.tokenize(&format!("{prefix}{inj_text}{suffix}"))?;
+            let inj_gen =
+                rt.forward_generate(&inj_tokens, args.max_new, None, "with_injection")?;
+            tracing::info!(
+                "with_injection gen: {} tokens (stopped_on_eos={})",
+                inj_gen.generated_tokens.len(),
+                inj_gen.stopped_on_eos
+            );
+            Some(autoregressive_to_forward_pass(&inj_gen))
+        } else {
+            None
+        };
+        (baseline_fpc, with_inj_fpc)
     } else {
-        None
+        let baseline = rt.forward_capture(&baseline_tokens, &positions, "baseline")?;
+        let with_inj = if let Some(inj_text) = injection_text {
+            let inj_tokens = rt.tokenize(&format!("{prefix}{inj_text}{suffix}"))?;
+            tracing::info!("with_injection tokens: {}", inj_tokens.len());
+            Some(rt.forward_capture(&inj_tokens, &positions, "with_injection")?)
+        } else {
+            None
+        };
+        (baseline, with_inj)
     };
 
     // Lens math. baseline first so its per-(pos,layer) probs are available

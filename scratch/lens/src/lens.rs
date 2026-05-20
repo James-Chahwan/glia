@@ -155,6 +155,23 @@ pub struct PositionCapture {
     pub layers: Vec<LayerCapture>,
 }
 
+/// Output from an autoregressive generation run (cycle 0.4 lens). Records the
+/// per-layer residual at each generated token position. This is what the
+/// slice-1.5 prompt-position lens couldn't see: the cycle 0.3 directive
+/// steers DURING DECODING, so the differentiation between conditions is at
+/// generated tokens 1, 5, 20, 50 — not at the first generated token alone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoregressiveCaptures {
+    pub run: String,
+    /// The sequence of token ids the model actually generated (post-prompt).
+    /// `generated_tokens[i]` corresponds to `steps[i]`.
+    pub generated_tokens: Vec<u32>,
+    /// Per-generated-token, per-layer residual stream.
+    pub steps: Vec<PositionCapture>,
+    /// True if generation stopped on EOS rather than hitting max_new.
+    pub stopped_on_eos: bool,
+}
+
 /// Baseline probability lookup indexed by (position, layer). Built from the
 /// baseline pass's `compute_lens_steps` result so the with-injection pass can
 /// look up `(p, l) -> Vec<f32>` for KL divergence at matching coordinates.
