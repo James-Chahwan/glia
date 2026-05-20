@@ -1,0 +1,107 @@
+[
+  {
+    "instance_id": "marshmallow-code__marshmallow-1359",
+    "project": "marshmallow-code",
+    "fixture_dir": "inst-marshmallow-code__marshmallow-1359-7b-q4"
+  },
+  {
+    "instance_id": "django__django-10914",
+    "project": "django",
+    "fixture_dir": "inst-django__django-10914-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "django__django-10924",
+    "project": "django",
+    "fixture_dir": "inst-django__django-10924-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "django__django-11001",
+    "project": "django",
+    "fixture_dir": "inst-django__django-11001-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "django__django-11019",
+    "project": "django",
+    "fixture_dir": "inst-django__django-11019-14b-q4-bench-n20-14b-spec"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-18869",
+    "project": "matplotlib",
+    "fixture_dir": "inst-matplotlib__matplotlib-18869-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-22711",
+    "project": "matplotlib",
+    "fixture_dir": "inst-matplotlib__matplotlib-22711-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-22835",
+    "project": "matplotlib",
+    "fixture_dir": "inst-matplotlib__matplotlib-22835-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-11143",
+    "project": "pytest-dev",
+    "fixture_dir": "inst-pytest-dev__pytest-11143-7b-q4-test4"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-11148",
+    "project": "pytest-dev",
+    "fixture_dir": "inst-pytest-dev__pytest-11148-14b-q4-bench-n20-14b-spec"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-5103",
+    "project": "pytest-dev",
+    "fixture_dir": "inst-pytest-dev__pytest-5103-14b-q4-bench-n20-14b-spec"
+  },
+  {
+    "instance_id": "sphinx-doc__sphinx-10325",
+    "project": "sphinx-doc",
+    "fixture_dir": "inst-sphinx-doc__sphinx-10325-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "sphinx-doc__sphinx-10451",
+    "project": "sphinx-doc",
+    "fixture_dir": "inst-sphinx-doc__sphinx-10451-deepseek-v2-lite-q4-bench-n20-tight-dsv2"
+  },
+  {
+    "instance_id": "scikit-learn__scikit-learn-10297",
+    "project": "scikit-learn",
+    "fixture_dir": "inst-scikit-learn__scikit-learn-10297-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "scikit-learn__scikit-learn-10508",
+    "project": "scikit-learn",
+    "fixture_dir": "inst-scikit-learn__scikit-learn-10508-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "sympy__sympy-11400",
+    "project": "sympy",
+    "fixture_dir": "inst-sympy__sympy-11400-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "sympy__sympy-11870",
+    "project": "sympy",
+    "fixture_dir": "inst-sympy__sympy-11870-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "astropy__astropy-12907",
+    "project": "astropy",
+    "fixture_dir": "inst-astropy__astropy-12907-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "mwaskom__seaborn-2848",
+    "project": "mwaskom",
+    "fixture_dir": "inst-mwaskom__seaborn-2848-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "psf__requests-1963",
+    "project": "psf",
+    "fixture_dir": "inst-psf__requests-1963-14b-q4-bench-n20-14b-spec"
+  },
+  {
+    "instance_id": "pylint-dev__pylint-5859",
+    "project": "pylint-dev",
+    "fixture_dir": "inst-pylint-dev__pylint-5859-7b-q4-bench-n50-fixa"
+  }
+]

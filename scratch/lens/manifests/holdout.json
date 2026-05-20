@@ -1,0 +1,52 @@
+[
+  {
+    "instance_id": "pydata__xarray-4094",
+    "project": "pydata",
+    "fixture_dir": "inst-pydata__xarray-4094-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "pydata__xarray-4248",
+    "project": "pydata",
+    "fixture_dir": "inst-pydata__xarray-4248-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "pallets__flask-4045",
+    "project": "pallets",
+    "fixture_dir": "inst-pallets__flask-4045-7b-q4-bench-n50-fixa"
+  },
+  {
+    "instance_id": "pallets__flask-4992",
+    "project": "pallets",
+    "fixture_dir": "inst-pallets__flask-4992-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "astropy__astropy-14995",
+    "project": "astropy",
+    "fixture_dir": "inst-astropy__astropy-14995-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "django__django-16139",
+    "project": "django",
+    "fixture_dir": "inst-django__django-16139-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-25498",
+    "project": "matplotlib",
+    "fixture_dir": "inst-matplotlib__matplotlib-25498-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "pytest-dev__pytest-7373",
+    "project": "pytest-dev",
+    "fixture_dir": "inst-pytest-dev__pytest-7373-7b-q4-bench-mlikes-postfix"
+  },
+  {
+    "instance_id": "psf__requests-3362",
+    "project": "psf",
+    "fixture_dir": "inst-psf__requests-3362-14b-q4-bench-n20-14b-spec"
+  },
+  {
+    "instance_id": "sympy__sympy-12454",
+    "project": "sympy",
+    "fixture_dir": "inst-sympy__sympy-12454-7b-q4-bench-mlikes-postfix"
+  }
+]
