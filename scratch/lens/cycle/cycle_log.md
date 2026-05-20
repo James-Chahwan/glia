@@ -8,6 +8,30 @@ Conventions:
 - numbers not vibes; no celebration before BREAKTHROUGH (5+ gold pass on working set)
 - regression = call it a regression, no softening
 
+## cycle 0.2 — graph-derived directive · 2026-05-21 ~07:5X · 🟢 PASS
+
+**Real glia win.** Auto-derived directive from `synth_traceback_target.rs --text-out` (new Rust bin in `projection-text/src/bin/`). Reads .gmap POSITION cells + issue.txt traceback/exception regex; emits a graph+issue-derived text directive concatenated into the suffix. NO hand-written instance-specific text.
+
+Marshmallow-1359 on Qwen 2.5 Coder 7B Q4:
+- apply: succeeded with fuzz 1
+- F2P: PASS
+- regression: 77/77 green
+
+Channels (all auto-derived, 5-iter progression iter1→iter5; iter5 was the final lock):
+1. target function = deepest traceback frame matched via POSITION cells
+2. anti-target list = other matched frames (call-stack ancestors)
+3. buggy line = source excerpt parsed from issue traceback
+4. exception info = (class, receiver type, missing attr) parsed from `'X' object has no attribute 'Y'`
+5. substitution hint = template using parsed missing-attr → "e.g. self.root.<attr>"
+
+The L2 (JSON pool injection) test along the way proved the latent pool channel is dead-on-arrival for steering — `run_llama_pathB.py` mean-pools each cell to one anonymous vec; score field unused. The actionable channel is suffix-text. See `cycle/marshmallow_log.md` for the full iter trace, `[[reference-latent-pool-mechanism]]` for mechanism audit, `[[project-graph-text-directive-progression]]` for the channel-by-channel breakdown.
+
+**Cycle 0.3 candidates:**
+1. Integrate synth_traceback_target into run_instance.py (auto-pipe directive into suffix)
+2. Run synth_traceback_target on the 21-instance working set → see how many of those instances have Python tracebacks + how many get gold via this directive alone
+3. Extend exception parsing to TypeError/KeyError/ValueError (only AttributeError works today)
+4. Lens diagnostic comparing iter1/iter4/iter5 generations to see at which layer each channel commits the model
+
 ## cycle 0 — marshmallow calibration · 2026-05-21 (overnight)
 
 **Goal:** establish whether marshmallow-1359 still passes gold on the current pipeline. Discovered the historical sentinel was broken at the apply-path AND semantic levels. Two fixes shipped.
