@@ -89,6 +89,7 @@ fn build_synthetic_frontend() -> (RepoGraph, NodeId) {
         symbols: SymbolTable::default(),
         unresolved_calls: Vec::new(),
         unresolved_refs: Vec::new(),
+        properties: Default::default(),
     };
     (g, endpoint_id)
 }

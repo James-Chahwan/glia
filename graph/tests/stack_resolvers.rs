@@ -18,6 +18,7 @@ fn make_graph(repo: RepoId, nodes: Vec<Node>, nav: CodeNav) -> RepoGraph {
         symbols: Default::default(),
         unresolved_calls: vec![],
         unresolved_refs: vec![],
+        properties: Default::default(),
     }
 }
 
