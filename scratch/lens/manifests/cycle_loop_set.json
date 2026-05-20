@@ -1,0 +1,59 @@
+[
+  {
+    "instance_id": "marshmallow-code__marshmallow-1359",
+    "project": "marshmallow-code",
+    "role": "sentinel",
+    "rationale": "regression alarm + iter5 known-pass via AttributeError directive",
+    "exception_class": "AttributeError",
+    "has_traceback": true,
+    "fixture_dir": "inst-marshmallow-code__marshmallow-1359-7b-q4"
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-22711",
+    "project": "matplotlib",
+    "role": "companion-tb-IndexError",
+    "rationale": "has traceback + IndexError — forces IndexError parsing in synth_traceback_target",
+    "exception_class": "IndexError",
+    "has_traceback": true
+  },
+  {
+    "instance_id": "matplotlib__matplotlib-22835",
+    "project": "matplotlib",
+    "role": "companion-tb-ValueError",
+    "rationale": "has 4 tracebacks + ValueError — tests ValueError variant",
+    "exception_class": "ValueError",
+    "has_traceback": true
+  },
+  {
+    "instance_id": "scikit-learn__scikit-learn-10508",
+    "project": "scikit-learn",
+    "role": "companion-tb-TypeError",
+    "rationale": "5 tracebacks + TypeError — heaviest traceback test",
+    "exception_class": "TypeError",
+    "has_traceback": true
+  },
+  {
+    "instance_id": "django__django-10914",
+    "project": "django",
+    "role": "companion-no-tb",
+    "rationale": "no traceback, common project — control for directive non-fire; baseline behavior",
+    "exception_class": null,
+    "has_traceback": false
+  },
+  {
+    "instance_id": "pytest-dev__pytest-11143",
+    "project": "pytest-dev",
+    "role": "companion-no-tb",
+    "rationale": "no traceback, different shape — tests no-traceback fallback signal need",
+    "exception_class": null,
+    "has_traceback": false
+  },
+  {
+    "instance_id": "sphinx-doc__sphinx-10325",
+    "project": "sphinx-doc",
+    "role": "companion-no-tb",
+    "rationale": "no traceback, third-party shape diversity — additional baseline control",
+    "exception_class": null,
+    "has_traceback": false
+  }
+]

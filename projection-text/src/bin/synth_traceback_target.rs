@@ -150,20 +150,80 @@ fn main() -> Result<()> {
             tracebacks.push((file, lineno, fn_name, src));
         }
     }
-    // Parse the final exception line (after the last traceback File line):
-    // "AttributeError: '<TypeName>' object has no attribute '<attr>'"
-    let exc_re = Regex::new(
+    // Parse the final exception line. We try increasingly specific regexes
+    // for known SWE-bench shapes and fall back to a generic "<Error>: <msg>"
+    // capture if none match. The richer the parse, the more targeted the
+    // substitution-hint we can synthesize in the directive.
+    let attr_re = Regex::new(
         r#"^(\w+Error):\s*'([^']+)'\s+object\s+has\s+no\s+attribute\s+'([^']+)'"#,
     )?;
-    let mut exc_info: Option<(String, String, String)> = None; // (error_class, object_type, missing_attr)
-    for line in &issue_lines {
-        if let Some(c) = exc_re.captures(line.trim()) {
-            exc_info = Some((
-                c.get(1).unwrap().as_str().to_string(),
-                c.get(2).unwrap().as_str().to_string(),
-                c.get(3).unwrap().as_str().to_string(),
-            ));
+    let kwarg_re = Regex::new(
+        r#"^(\w+Error):\s*(?:(\w+)\(\))?\s*got an unexpected keyword argument\s+'([^']+)'"#,
+    )?;
+    let arity_re = Regex::new(
+        r#"^(\w+Error):\s*(?:(\w+)\(\))?\s*takes\s+(\d+)\s+positional\s+arguments?\s+but\s+(\d+)\s+(?:were|was)\s+given"#,
+    )?;
+    let not_subscript_re = Regex::new(
+        r#"^(\w+Error):\s*'([^']+)'\s+object\s+is\s+not\s+subscriptable"#,
+    )?;
+    let not_iter_re = Regex::new(
+        r#"^(\w+Error):\s*(?:cannot unpack non-iterable|')([^']+)(?:'\s+object\s+is\s+not\s+iterable)?"#,
+    )?;
+    let index_range_re = Regex::new(
+        r#"^(IndexError):\s*(list|tuple|string)\s+index\s+out\s+of\s+range"#,
+    )?;
+    let generic_exc_re = Regex::new(r#"^(\w+(?:Error|Exception)):\s*(.+)$"#)?;
+
+    #[derive(Debug, Clone)]
+    enum ExcInfo {
+        Attribute { class: String, obj_type: String, attr: String },
+        UnexpectedKwarg { class: String, callable: Option<String>, kwarg: String },
+        ArityMismatch { class: String, callable: Option<String>, takes: u32, given: u32 },
+        NotSubscriptable { class: String, obj_type: String },
+        IndexOutOfRange { obj_type: String },
+        Generic { class: String, message: String },
+    }
+
+    let mut exc_info: Option<ExcInfo> = None;
+    for raw in &issue_lines {
+        let line = raw.trim();
+        if let Some(c) = attr_re.captures(line) {
+            exc_info = Some(ExcInfo::Attribute {
+                class: c.get(1).unwrap().as_str().to_string(),
+                obj_type: c.get(2).unwrap().as_str().to_string(),
+                attr: c.get(3).unwrap().as_str().to_string(),
+            });
+        } else if let Some(c) = kwarg_re.captures(line) {
+            exc_info = Some(ExcInfo::UnexpectedKwarg {
+                class: c.get(1).unwrap().as_str().to_string(),
+                callable: c.get(2).map(|m| m.as_str().to_string()),
+                kwarg: c.get(3).unwrap().as_str().to_string(),
+            });
+        } else if let Some(c) = arity_re.captures(line) {
+            exc_info = Some(ExcInfo::ArityMismatch {
+                class: c.get(1).unwrap().as_str().to_string(),
+                callable: c.get(2).map(|m| m.as_str().to_string()),
+                takes: c.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0),
+                given: c.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(0),
+            });
+        } else if let Some(c) = not_subscript_re.captures(line) {
+            exc_info = Some(ExcInfo::NotSubscriptable {
+                class: c.get(1).unwrap().as_str().to_string(),
+                obj_type: c.get(2).unwrap().as_str().to_string(),
+            });
+        } else if let Some(c) = index_range_re.captures(line) {
+            exc_info = Some(ExcInfo::IndexOutOfRange {
+                obj_type: c.get(2).unwrap().as_str().to_string(),
+            });
+        } else if exc_info.is_none() {
+            if let Some(c) = generic_exc_re.captures(line) {
+                exc_info = Some(ExcInfo::Generic {
+                    class: c.get(1).unwrap().as_str().to_string(),
+                    message: c.get(2).unwrap().as_str().to_string(),
+                });
+            }
         }
+        let _ = not_iter_re; // reserved for future
     }
     if tracebacks.is_empty() {
         eprintln!(
@@ -182,8 +242,8 @@ fn main() -> Result<()> {
             );
         }
     }
-    if let Some((cls, obj_type, missing_attr)) = &exc_info {
-        eprintln!("[synth_traceback_target] exception: {cls}: '{obj_type}' has no attribute '{missing_attr}'");
+    if let Some(ei) = &exc_info {
+        eprintln!("[synth_traceback_target] exception: {ei:?}");
     }
 
     // 2. Build graph for the repo.
@@ -200,11 +260,12 @@ fn main() -> Result<()> {
     let mut seen_qnames: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for (tb_file, tb_line, tb_fn, _tb_src) in &tracebacks {
-        // The traceback path is usually absolute (e.g. /home/.../fields.py).
-        // Strip leading components to compare against graph's relative paths.
-        let tb_basename = std::path::Path::new(tb_file)
-            .file_name()
-            .and_then(|s| s.to_str())
+        // Traceback paths may be unix-style (/home/.../fields.py) OR
+        // windows-style (C:\Python36\lib\...\label.py) since SWE-bench
+        // issues are copy-pasted from user reports. Split on BOTH separators.
+        let tb_basename = tb_file
+            .rsplit(|c: char| c == '/' || c == '\\')
+            .next()
             .unwrap_or(tb_file.as_str());
         for node in &graph.nodes {
             let Some(pos_json) = extract_position_cell(node) else { continue };
@@ -305,14 +366,23 @@ fn main() -> Result<()> {
             }
         }
 
-        // Pick the DEEPEST traceback frame (last one parsed = innermost call).
-        // For Python tracebacks, this is the frame where the exception throws.
-        let target_match = tracebacks.last().and_then(|(tb_file, tb_line, _, _)| {
-            narrowest_by_loc.get(&(tb_file.clone(), *tb_line)).copied()
-        });
-        let target_src_line: Option<&String> = tracebacks
-            .last()
-            .and_then(|(_, _, _, src)| src.as_ref());
+        // Pick the DEEPEST traceback frame that has a graph match. Python
+        // tracebacks often bottom out in third-party libs (numpy, stdlib)
+        // that aren't in our --src graph. The actual repo-side bug is the
+        // deepest frame WHERE THE GRAPH KNOWS THE FUNCTION. Walk tracebacks
+        // in reverse order to find it.
+        let (target_match, target_src_line): (Option<&TracebackMatch>, Option<&String>) = {
+            let mut tm: Option<&TracebackMatch> = None;
+            let mut tsrc: Option<&String> = None;
+            for (tb_file, tb_line, _tb_fn, src) in tracebacks.iter().rev() {
+                if let Some(m) = narrowest_by_loc.get(&(tb_file.clone(), *tb_line)).copied() {
+                    tm = Some(m);
+                    tsrc = src.as_ref();
+                    break;
+                }
+            }
+            (tm, tsrc)
+        };
 
         // Build anti-target list: all OTHER narrowest matches besides the target.
         let antitarget_qnames: Vec<&String> = narrowest_by_loc
@@ -342,14 +412,50 @@ fn main() -> Result<()> {
                     tm.traceback_line, src,
                 ));
             }
-            if let Some((cls, obj_type, missing_attr)) = &exc_info {
-                s.push_str(&format!(
-                    "\nThe exception is `{cls}: '{obj_type}' object has no attribute '{missing_attr}'`. The receiver of the failing `.{missing_attr}` access is a `{obj_type}` instance at runtime, NOT what the variable name suggests. Replace the failing `<X>.{missing_attr}` access with the access-path that actually resolves to `.{missing_attr}` (consult the '## Reachable access paths:' section in the prefix above; e.g. `self.root.{missing_attr}`).\n",
-                ));
-            } else {
-                s.push_str(
-                    "\nThe prefix lists access-paths under '## Reachable access paths:'. When the issue describes a `<X>.<Y>` attribute access that fails because `<X>` has no `.<Y>`, replace `<X>.<Y>` with the access-path that resolves to `<Y>` (e.g. `self.root.<Y>`).\n",
-                );
+            match &exc_info {
+                Some(ExcInfo::Attribute { class, obj_type, attr }) => {
+                    s.push_str(&format!(
+                        "\nThe exception is `{class}: '{obj_type}' object has no attribute '{attr}'`. The receiver of the failing `.{attr}` access is a `{obj_type}` instance at runtime, NOT what the variable name suggests. Replace the failing `<X>.{attr}` access with the access-path that actually resolves to `.{attr}` (consult the '## Reachable access paths:' section in the prefix above; e.g. `self.root.{attr}`).\n",
+                    ));
+                }
+                Some(ExcInfo::UnexpectedKwarg { class, callable, kwarg }) => {
+                    let callable_text = callable
+                        .as_deref()
+                        .map(|c| format!("`{c}()`"))
+                        .unwrap_or_else(|| "the call".to_string());
+                    s.push_str(&format!(
+                        "\nThe exception is `{class}`: {callable_text} received an unexpected keyword argument `{kwarg}`. Either:\n  (a) Remove the `{kwarg}=...` kwarg from the call site, OR\n  (b) Rename `{kwarg}` to the correct parameter name (check the callable's signature for similar names).\nDo NOT add `{kwarg}` to the callable's signature unless that is the documented fix.\n",
+                    ));
+                }
+                Some(ExcInfo::ArityMismatch { class, callable, takes, given }) => {
+                    let callable_text = callable
+                        .as_deref()
+                        .map(|c| format!("`{c}()`"))
+                        .unwrap_or_else(|| "the call".to_string());
+                    s.push_str(&format!(
+                        "\nThe exception is `{class}`: {callable_text} takes {takes} positional argument(s) but {given} were given. Either:\n  (a) Drop the extra positional arg(s) at the call site, OR\n  (b) Convert extra args to keyword args matching the callable's signature, OR\n  (c) Add the missing parameters to the callable's signature (only if intentional).\n",
+                    ));
+                }
+                Some(ExcInfo::NotSubscriptable { class, obj_type }) => {
+                    s.push_str(&format!(
+                        "\nThe exception is `{class}: '{obj_type}' object is not subscriptable`. The code uses `<X>[idx]` syntax on a `{obj_type}` instance that doesn't support indexing. Replace `<X>[idx]` with the right accessor: `getattr(<X>, ...)`, `<X>.<field>`, or convert to a subscriptable type first.\n",
+                    ));
+                }
+                Some(ExcInfo::IndexOutOfRange { obj_type }) => {
+                    s.push_str(&format!(
+                        "\nThe exception is `IndexError: {obj_type} index out of range`. The index used exceeds the {obj_type}'s length. Either:\n  (a) Add a bounds check (`if idx < len(x):`) before the access, OR\n  (b) Recompute the index from the actual length, OR\n  (c) Fix the upstream cause that produces an out-of-range index.\n",
+                    ));
+                }
+                Some(ExcInfo::Generic { class, message }) => {
+                    s.push_str(&format!(
+                        "\nThe exception is `{class}: {message}`. Examine the buggy line and the access paths in the prefix to determine the correct fix. The variable types at the buggy line may not match what the variable names suggest.\n",
+                    ));
+                }
+                None => {
+                    s.push_str(
+                        "\nThe prefix lists access-paths under '## Reachable access paths:'. Use them when an attribute access fails because the receiver is the wrong type.\n",
+                    );
+                }
             }
             if !antitarget_qnames.is_empty() {
                 s.push_str("\n**Do NOT modify** these functions (they appear earlier in the call stack but the bug is NOT in them):\n");
