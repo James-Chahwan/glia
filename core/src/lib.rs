@@ -241,6 +241,150 @@ impl From<&ArchivedConfidence> for Confidence {
 }
 
 // ============================================================================
+// Project-name derivation (G18)
+// ============================================================================
+
+/// Resolve a human-friendly project name for `repo` by inspecting the
+/// canonical manifest files in priority order:
+///
+/// 1. `Cargo.toml`        — `[package].name`
+/// 2. `package.json`      — `.name`
+/// 3. `pyproject.toml`    — `[project].name`
+/// 4. `composer.json`     — `.name`
+/// 5. `go.mod`            — last `/`-segment of the `module` line
+/// 6. `repo.file_name()`  — fall-back to the directory name
+///
+/// Returns `None` only if every step fails (typically: `repo` is `/` or empty,
+/// has no manifests, and has no directory-name component).
+///
+/// The implementation deliberately avoids pulling in a full TOML / JSON
+/// dependency in the core crate — it does single-key string extraction
+/// scoped to the relevant top-level section.
+pub fn project_name(repo: &std::path::Path) -> Option<String> {
+    if let Some(name) = read_toml_section_key(&repo.join("Cargo.toml"), "package", "name") {
+        return Some(name);
+    }
+    if let Some(name) = read_json_top_string(&repo.join("package.json"), "name") {
+        return Some(name);
+    }
+    if let Some(name) = read_toml_section_key(&repo.join("pyproject.toml"), "project", "name") {
+        return Some(name);
+    }
+    if let Some(name) = read_json_top_string(&repo.join("composer.json"), "name") {
+        return Some(name);
+    }
+    if let Some(name) = read_go_mod_module(&repo.join("go.mod")) {
+        return Some(name);
+    }
+    repo.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+}
+
+/// Pull a `key = "value"` line out of a TOML file scoped to `[section]`.
+/// Stops at the next section header or EOF. Tolerates whitespace and inline
+/// comments; ignores quoted strings spanning lines (the affected manifests
+/// never need that).
+fn read_toml_section_key(path: &std::path::Path, section: &str, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line == header;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(key) {
+            let rest = rest.trim_start();
+            if let Some(after_eq) = rest.strip_prefix('=') {
+                let v = after_eq.trim();
+                if let Some(unquoted) = strip_toml_string(v) {
+                    return Some(unquoted);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip surrounding `"..."` or `'...'` from a TOML scalar, honouring no
+/// escape semantics beyond the literal quote character.
+fn strip_toml_string(v: &str) -> Option<String> {
+    let bytes = v.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let quote = bytes[0];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let end = v[1..].find(quote as char)?;
+    Some(v[1..=end].to_string())
+}
+
+/// Pull a top-level `"key": "value"` string out of a JSON file. Naively
+/// scans for the first occurrence of `"<key>"` followed by a colon then a
+/// quoted string. Returns `None` if not found.
+fn read_json_top_string(path: &std::path::Path, key: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(&needle) {
+        let pos = from + rel;
+        from = pos + needle.len();
+        let after = text[pos + needle.len()..].trim_start();
+        let rest = match after.strip_prefix(':') {
+            Some(r) => r.trim_start(),
+            None => continue,
+        };
+        let rb = rest.as_bytes();
+        if rb.is_empty() || rb[0] != b'"' {
+            continue;
+        }
+        let mut i = 1;
+        let mut value = String::new();
+        while i < rb.len() {
+            if rb[i] == b'\\' && i + 1 < rb.len() {
+                value.push(rb[i + 1] as char);
+                i += 2;
+                continue;
+            }
+            if rb[i] == b'"' {
+                return Some(value);
+            }
+            value.push(rb[i] as char);
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Pull the trailing path-segment of the `module ...` declaration from a
+/// `go.mod` file. The neuropil convention is to use the last `/`-segment as
+/// the human-friendly project name.
+fn read_go_mod_module(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if let Some(rest) = line.strip_prefix("module ") {
+            let module = rest.trim();
+            let last = module.rsplit('/').next().unwrap_or(module);
+            if !last.is_empty() {
+                return Some(last.to_string());
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
 // Errors
 // ============================================================================
 
@@ -344,6 +488,89 @@ mod tests {
         assert_eq!(arch_e.to_id(), NodeId(2));
         assert_eq!(arch_e.category(), EdgeCategoryId(5));
         assert_eq!(arch_e.confidence(), Confidence::Weak);
+    }
+
+    #[test]
+    fn project_name_cargo_toml() {
+        let tmp = std::env::temp_dir().join("glia_pn_cargo");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("Cargo.toml"),
+            "[package]\nname = \"my-lib\"\nversion = \"0.1\"\n",
+        )
+        .unwrap();
+        assert_eq!(project_name(&tmp), Some("my-lib".to_string()));
+    }
+
+    #[test]
+    fn project_name_cargo_skips_other_sections() {
+        let tmp = std::env::temp_dir().join("glia_pn_cargo_other");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("Cargo.toml"),
+            "[workspace]\nname = \"wrong\"\n[package]\nname = \"right\"\n",
+        )
+        .unwrap();
+        assert_eq!(project_name(&tmp), Some("right".to_string()));
+    }
+
+    #[test]
+    fn project_name_package_json() {
+        let tmp = std::env::temp_dir().join("glia_pn_pkg");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("package.json"),
+            r#"{ "version": "1.0", "name": "my-app", "deps": {} }"#,
+        )
+        .unwrap();
+        assert_eq!(project_name(&tmp), Some("my-app".to_string()));
+    }
+
+    #[test]
+    fn project_name_pyproject() {
+        let tmp = std::env::temp_dir().join("glia_pn_py");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("pyproject.toml"),
+            "[build-system]\nrequires = [\"setuptools\"]\n[project]\nname = \"my_py\"\n",
+        )
+        .unwrap();
+        assert_eq!(project_name(&tmp), Some("my_py".to_string()));
+    }
+
+    #[test]
+    fn project_name_go_mod_last_segment() {
+        let tmp = std::env::temp_dir().join("glia_pn_go");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("go.mod"),
+            "module github.com/me/coolservice\n\ngo 1.22\n",
+        )
+        .unwrap();
+        assert_eq!(project_name(&tmp), Some("coolservice".to_string()));
+    }
+
+    #[test]
+    fn project_name_falls_back_to_dirname() {
+        let tmp = std::env::temp_dir().join("glia_pn_fallback");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(project_name(&tmp), Some("glia_pn_fallback".to_string()));
+    }
+
+    #[test]
+    fn project_name_priority_cargo_over_package_json() {
+        let tmp = std::env::temp_dir().join("glia_pn_priority");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("Cargo.toml"), "[package]\nname = \"rust-one\"\n").unwrap();
+        std::fs::write(tmp.join("package.json"), r#"{"name":"js-one"}"#).unwrap();
+        assert_eq!(project_name(&tmp), Some("rust-one".to_string()));
     }
 
     #[test]

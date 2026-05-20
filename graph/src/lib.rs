@@ -586,6 +586,19 @@ fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                         .module_symbols
                         .get(&r.from_module)
                         .and_then(|s| s.get(name).copied())
+                })
+                // Global fallback for HANDLED_BY refs: a route registers
+                // `r.GET("/p", handler)` where `handler` is a top-level fn
+                // in the same package — but `bindings` doesn't see local
+                // package symbols. Scan all module_symbols for a unique
+                // match. Same-name collisions across the repo skip
+                // (better unresolved than wrong).
+                .or_else(|| {
+                    if r.category == edge_category::HANDLED_BY {
+                        unique_global_function(g, name)
+                    } else {
+                        None
+                    }
                 }),
             CallQualifier::Attribute { base, name } => bindings
                 .and_then(|b| b.get(base).copied())
@@ -606,10 +619,20 @@ fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                     } else {
                         None
                     }
+                })
+                // Global fallback for HANDLED_BY: in Go, route handlers
+                // are usually written `h.GetProfile` where `h` is a local
+                // struct-receiver variable (`h *Handlers`), not an import
+                // binding. So binding lookup fails. Scan all class_methods
+                // across the graph for a method matching `name`; emit
+                // only when exactly one match exists.
+                .or_else(|| {
+                    if r.category == edge_category::HANDLED_BY {
+                        unique_global_method(g, name)
+                    } else {
+                        None
+                    }
                 }),
-            // SelfMethod / SuperMethod / ComplexReceiver are non-sensical for
-            // refs at v0.4.4 — refs come from contexts (Route nodes) that have
-            // no `self` or enclosing class. Treat as unresolved for diagnostics.
             CallQualifier::SelfMethod(_)
             | CallQualifier::SuperMethod(_)
             | CallQualifier::ComplexReceiver { .. } => None,
@@ -620,6 +643,36 @@ fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
             None => g.unresolved_refs.push(r.clone()),
         }
     }
+}
+
+/// Search every class/struct's method map for a method named `name`.
+/// Returns the NodeId iff exactly one class has it (avoids fabricating
+/// edges when the same method name lives on multiple types).
+fn unique_global_method(g: &RepoGraph, name: &str) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for methods in g.symbols.class_methods.values() {
+        if let Some(&id) = methods.get(name) {
+            if hit.is_some() {
+                return None; // ambiguous
+            }
+            hit = Some(id);
+        }
+    }
+    hit
+}
+
+/// Same idea for top-level functions across the repo.
+fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for syms in g.symbols.module_symbols.values() {
+        if let Some(&id) = syms.get(name) {
+            if hit.is_some() {
+                return None; // ambiguous
+            }
+            hit = Some(id);
+        }
+    }
+    hit
 }
 
 /// Walk `parent_of` until we hit a module node. For a top-level function this
@@ -694,6 +747,112 @@ impl MergedGraph {
             .flat_map(|g| g.edges.iter())
             .chain(self.cross_edges.iter())
     }
+
+    /// G20 — visit every node of `kind` across every contained repo. Iteration
+    /// order is per-repo, in repo insertion order. The callback receives the
+    /// `(NodeId, &Node)` pair so consumers can read cells / confidence without
+    /// a second lookup.
+    pub fn for_each_node_of_kind<F: FnMut(NodeId, &Node)>(&self, kind: NodeKindId, mut f: F) {
+        for g in &self.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id).copied() == Some(kind) {
+                    f(n.id, n);
+                }
+            }
+        }
+    }
+
+    /// G20 — collect every node of `kind` into a `Vec<NodeId>`. Equivalent to
+    /// `for_each_node_of_kind` but materialised; convenient for callers that
+    /// need to hold the list while doing other graph work.
+    pub fn nodes_of_kind(&self, kind: NodeKindId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        self.for_each_node_of_kind(kind, |id, _| out.push(id));
+        out
+    }
+
+    /// G20 — build a pre-computed kind → `Vec<NodeId>` index spanning every
+    /// repo in the merged graph. Built lazily by callers that want to do many
+    /// kind-scoped walks (e.g. neuropil's OpenAPI catalog touches both
+    /// `ROUTE` and `ENDPOINT`); cache the return on the caller side.
+    pub fn kind_index(&self) -> std::collections::HashMap<NodeKindId, Vec<NodeId>> {
+        let mut out: std::collections::HashMap<NodeKindId, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for g in &self.graphs {
+            for n in &g.nodes {
+                if let Some(&kind) = g.nav.kind_by_id.get(&n.id) {
+                    out.entry(kind).or_default().push(n.id);
+                }
+            }
+        }
+        out
+    }
+
+    /// G22 — resolve a full qualified name to a `NodeId` across every repo.
+    /// Returns `None` if no node carries this exact qname. NodeIds aren't
+    /// stable across rebuilds; qnames are, so this is the canonical re-keying
+    /// path for view-state persistence (e.g. `.neuropil/view_state.json`).
+    pub fn node_id_by_qname(&self, qname: &str) -> Option<NodeId> {
+        for g in &self.graphs {
+            for (id, qn) in &g.nav.qname_by_id {
+                if qn == qname {
+                    return Some(*id);
+                }
+            }
+        }
+        None
+    }
+
+    /// G19 — resolve an OTLP-style dotted span name (`myservice.handlers.users.list_users`)
+    /// to a `NodeId`. First tries an exact match against the qname (after
+    /// converting `.` to `::`); then a suffix match so spans rooted at a
+    /// package the parser doesn't see still bind to the method node.
+    /// Returns the first match in iteration order — when multiple repos
+    /// expose the same qname suffix, consumers should disambiguate by repo.
+    pub fn resolve_span(&self, span_name: &str) -> Option<NodeId> {
+        let normalised = span_name.replace('.', "::");
+        if let Some(id) = self.node_id_by_qname(&normalised) {
+            return Some(id);
+        }
+        let suffix = format!("::{normalised}");
+        for g in &self.graphs {
+            for (id, qn) in &g.nav.qname_by_id {
+                if qn.ends_with(&suffix) {
+                    return Some(*id);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// G17 — derive a stable cluster key for `node_id` at the requested depth.
+/// Splits the node's qname on `::` and returns the first `min(depth, n-1)`
+/// segments rejoined. Capping at `n-1` guarantees the leaf segment never
+/// lands in the key — siblings share the cluster, the node itself doesn't
+/// form a singleton bucket.
+///
+/// Returns the empty string if `node_id` is unknown to `merged`.
+pub fn cluster_key_for(node_id: NodeId, depth: usize, merged: &MergedGraph) -> String {
+    let qname = match find_qname(node_id, merged) {
+        Some(q) => q,
+        None => return String::new(),
+    };
+    let parts: Vec<&str> = qname.split("::").collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let take = depth.min(parts.len().saturating_sub(1));
+    parts[..take].join("::")
+}
+
+fn find_qname(id: NodeId, merged: &MergedGraph) -> Option<String> {
+    for g in &merged.graphs {
+        if let Some(q) = g.nav.qname_by_id.get(&id) {
+            return Some(q.clone());
+        }
+    }
+    None
 }
 
 /// Emits edges that cross `RepoGraph` boundaries. v0.4.10 will add
@@ -2342,5 +2501,141 @@ mod tests {
 
         // Empty sources short-circuits.
         assert!(g.reachable_by(c, &[], &[edge_category::CALLS], 5).is_empty());
+    }
+
+    // ------------------------------------------------------------------------
+    // G17 / G19 / G20 / G22 — MergedGraph helpers
+    // ------------------------------------------------------------------------
+
+    fn synth_repo_graph(repo: RepoId, items: &[(&str, NodeKindId)]) -> RepoGraph {
+        let mut g = RepoGraph {
+            repo,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
+        };
+        for (qname, kind) in items {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, *kind, qname);
+            g.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            });
+            let leaf = qname.rsplit("::").next().unwrap_or(qname);
+            g.nav.record(id, leaf, qname, *kind, None);
+        }
+        g
+    }
+
+    #[test]
+    fn for_each_node_of_kind_walks_every_repo() {
+        let r1 = RepoId::from_canonical("test://r1");
+        let r2 = RepoId::from_canonical("test://r2");
+        let g1 = synth_repo_graph(
+            r1,
+            &[
+                ("a::A", node_kind::CLASS),
+                ("a::B", node_kind::CLASS),
+                ("a::f", node_kind::FUNCTION),
+            ],
+        );
+        let g2 = synth_repo_graph(
+            r2,
+            &[
+                ("b::C", node_kind::CLASS),
+                ("b::g", node_kind::FUNCTION),
+            ],
+        );
+        let merged = MergedGraph::new(vec![g1, g2]);
+        let classes = merged.nodes_of_kind(node_kind::CLASS);
+        assert_eq!(classes.len(), 3);
+        let funcs = merged.nodes_of_kind(node_kind::FUNCTION);
+        assert_eq!(funcs.len(), 2);
+    }
+
+    #[test]
+    fn kind_index_groups_by_kind() {
+        let r = RepoId::from_canonical("test://idx");
+        let g = synth_repo_graph(
+            r,
+            &[
+                ("m::A", node_kind::CLASS),
+                ("m::B", node_kind::CLASS),
+                ("m::f", node_kind::FUNCTION),
+            ],
+        );
+        let merged = MergedGraph::new(vec![g]);
+        let idx = merged.kind_index();
+        assert_eq!(idx.get(&node_kind::CLASS).map(|v| v.len()), Some(2));
+        assert_eq!(idx.get(&node_kind::FUNCTION).map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn node_id_by_qname_resolves_across_repos() {
+        let r1 = RepoId::from_canonical("test://r1");
+        let r2 = RepoId::from_canonical("test://r2");
+        let g1 = synth_repo_graph(r1, &[("a::X", node_kind::CLASS)]);
+        let g2 = synth_repo_graph(r2, &[("b::Y", node_kind::CLASS)]);
+        let merged = MergedGraph::new(vec![g1, g2]);
+        let want_y = NodeId::from_parts(GRAPH_TYPE, r2, node_kind::CLASS, "b::Y");
+        assert_eq!(merged.node_id_by_qname("b::Y"), Some(want_y));
+        assert_eq!(merged.node_id_by_qname("nope"), None);
+    }
+
+    #[test]
+    fn resolve_span_matches_dotted_and_suffix() {
+        let r = RepoId::from_canonical("test://span");
+        let g = synth_repo_graph(
+            r,
+            &[
+                ("svc::handlers::users::list_users", node_kind::FUNCTION),
+                ("other::list_users", node_kind::FUNCTION),
+            ],
+        );
+        let merged = MergedGraph::new(vec![g]);
+        let exact = merged.resolve_span("svc.handlers.users.list_users");
+        assert!(exact.is_some());
+        let suffix = merged.resolve_span("handlers.users.list_users");
+        assert!(suffix.is_some());
+        let miss = merged.resolve_span("nonexistent");
+        assert_eq!(miss, None);
+    }
+
+    #[test]
+    fn cluster_key_for_drops_leaf_segment() {
+        let r = RepoId::from_canonical("test://ck");
+        let g = synth_repo_graph(
+            r,
+            &[
+                ("svc::users::repo::find_one", node_kind::METHOD),
+                ("svc::users::repo", node_kind::CLASS),
+                ("solo", node_kind::MODULE),
+            ],
+        );
+        let merged = MergedGraph::new(vec![g]);
+        let find_one = NodeId::from_parts(
+            GRAPH_TYPE,
+            r,
+            node_kind::METHOD,
+            "svc::users::repo::find_one",
+        );
+        assert_eq!(cluster_key_for(find_one, 0, &merged), "");
+        assert_eq!(cluster_key_for(find_one, 1, &merged), "svc");
+        assert_eq!(cluster_key_for(find_one, 2, &merged), "svc::users");
+        // Depth caps at parts-1; leaf never lands in the key.
+        assert_eq!(
+            cluster_key_for(find_one, 99, &merged),
+            "svc::users::repo"
+        );
+        // Single-segment qname → empty key (no parent cluster).
+        let solo = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "solo");
+        assert_eq!(cluster_key_for(solo, 1, &merged), "");
+        // Unknown node id → empty.
+        assert_eq!(cluster_key_for(NodeId(0xdeadbeef), 1, &merged), "");
     }
 }
