@@ -57,6 +57,19 @@ struct Args {
 
     #[arg(long, default_value = "seeds")]
     repo_canonical: String,
+
+    /// Optional path to the issue text. When supplied, identifiers mentioned
+    /// in the issue prose (CamelCase, `backtick`, snake_case) bias the
+    /// tail-index tie-breaker: matches whose qname tail or enclosing class
+    /// is named in the issue prose win over alphabetic ties.
+    ///
+    /// Cycle 1.1-gpu evidence: pytest-11143 tail-index hit `result` →
+    /// matched both `CallInfo.result` (runner.py) and AssertionRewriter
+    /// (rewrite.py, the gold). With no prose bias, sort-by-shortest picked
+    /// runner.py. With prose bias, "AssertionRewriter" mentioned in issue
+    /// → rewrite.py wins.
+    #[arg(long)]
+    issue: Option<PathBuf>,
 }
 
 /// One hunk of the test_patch: the new line span and the added (`+`-prefixed)
@@ -135,6 +148,29 @@ fn main() -> Result<()> {
         graph.nodes.len()
     );
 
+    // Prose-mention extraction: pull `backtick` + CamelCase identifiers
+    // from the issue text. Used as a tail-index tie-breaker below.
+    let prose_idents: HashSet<String> = match &args.issue {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).unwrap_or_default();
+            let re_backtick = Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)`")?;
+            let re_camel = Regex::new(r"\b([A-Z][a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*)\b")?;
+            let mut s = HashSet::new();
+            for c in re_backtick.captures_iter(&text) {
+                s.insert(c[1].to_string());
+            }
+            for c in re_camel.captures_iter(&text) {
+                s.insert(c[1].to_string());
+            }
+            s
+        }
+        None => HashSet::new(),
+    };
+    if !prose_idents.is_empty() {
+        eprintln!("[synth_test_expectation] {} prose-mentioned identifiers (tie-break bias)",
+                  prose_idents.len());
+    }
+
     let tail_idx = build_tail_index(&graph);
     // file_by_id + start_line_by_id: lookup maps from POSITION cells so the
     // directive can disambiguate package vs module (sphinx-10325) and surface
@@ -178,10 +214,33 @@ fn main() -> Result<()> {
         let Some(matches) = tail_idx.get(ident.as_str()) else {
             continue;
         };
-        // Prefer the shortest qname (least nested) as the canonical resolution.
-        // Tie-break by lexical order for determinism.
+        // Tie-break order (highest priority first):
+        //   1. prose-mention bias: qname segments named in issue prose win.
+        //      For `pkg::Cls::method` we check if `Cls`, `method`, OR
+        //      `pkg.last-segment` appears in prose_idents. This was the
+        //      cycle 1.1-gpu pytest fix — `AssertionRewriter` (in prose)
+        //      should beat `CallInfo.result` (only in test body).
+        //   2. shortest qname (least nested) — captures top-level
+        //      class > nested helper preference.
+        //   3. lexical order for deterministic tie-break.
+        let prose_score = |qn: &str| -> i32 {
+            let mut hits = 0;
+            for seg in qn.split("::") {
+                if prose_idents.contains(seg) {
+                    hits += 1;
+                }
+            }
+            hits
+        };
         let mut sorted = matches.clone();
-        sorted.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.1.cmp(b.1)));
+        sorted.sort_by(|a, b| {
+            let pa = prose_score(a.1);
+            let pb = prose_score(b.1);
+            // Higher prose-score wins → reverse cmp (b before a when b > a).
+            pb.cmp(&pa)
+                .then_with(|| a.1.len().cmp(&b.1.len()))
+                .then_with(|| a.1.cmp(b.1))
+        });
         let (nid, qn) = sorted[0];
         if !seen_qnames.insert(qn.to_string()) {
             continue;

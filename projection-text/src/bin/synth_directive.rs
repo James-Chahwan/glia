@@ -140,6 +140,7 @@ fn main() -> Result<()> {
             .arg("--src").arg(&args.src)
             .arg("--test-patch").arg(tp)
             .arg("--text-out").arg(&te_path)
+            .arg("--issue").arg(&args.issue)
             .arg("--repo-canonical").arg(&args.repo_canonical)
             .status()
             .context("spawn synth_test_expectation")?;
