@@ -179,8 +179,35 @@ if _prompt_bias_path and os.path.exists(_prompt_bias_path) and _prompt_bias_alph
 T_total = all_embeds.shape[0]
 print(f"[pathB-llama] full embed [{T_total}, {D}] = prefix {len(prefix_ids)} + nodes {len(node_vecs)} + suffix {len(suffix_ids)}", file=sys.stderr)
 if T_total > n_ctx:
-    print(f"[pathB-llama] WARN T_total {T_total} > n_ctx {n_ctx}; truncating prefix", file=sys.stderr)
-    sys.exit(3)
+    # Top-K pool cap (cycle 1.2-gpu-14b mid-flight finding): matplotlib-22711
+    # has 1156 entries → 141K tokens, exceeds Qwen's 131K native ctx by ~10K.
+    # Drop pool entries from the TAIL (lowest-score by aplus rank) until the
+    # total fits. Prefix + suffix are load-bearing — never truncate those.
+    overflow = T_total - n_ctx
+    pool_token_lens = [v.shape[0] for v in node_vecs]
+    dropped_idx = []
+    dropped_tokens = 0
+    # Drop from tail; pool entries are pre-sorted by aplus score, so tail is
+    # lowest-relevance. Leave a 256-token margin for safety.
+    while pool_token_lens and (dropped_tokens < overflow + 256):
+        last_len = pool_token_lens.pop()
+        dropped_tokens += last_len
+        dropped_idx.append(len(pool_token_lens))  # index now points to the dropped slot
+    if pool_token_lens:
+        # Rebuild concat with the kept pool subset.
+        node_vecs = node_vecs[:len(pool_token_lens)]
+        # Also trim pool_positions to match if it was populated.
+        if pool_positions:
+            pool_positions = pool_positions[:len(pool_token_lens)]
+        all_embeds = np.concatenate([prefix_emb] + node_vecs + [suffix_emb], axis=0).astype(np.float32)
+        T_total = all_embeds.shape[0]
+        print(f"[pathB-llama] pool capped: dropped {len(dropped_idx)} tail entries "
+              f"({dropped_tokens} tokens) — new T_total={T_total}", file=sys.stderr)
+    if T_total > n_ctx:
+        print(f"[pathB-llama] ERROR T_total {T_total} still > n_ctx {n_ctx} after pool cap; "
+              f"prefix+suffix alone ({len(prefix_ids)+len(suffix_ids)} tok) exceeds ctx",
+              file=sys.stderr)
+        sys.exit(3)
 
 if dry_run:
     print(f"[pathB-llama] DRY_RUN — exit before decode", file=sys.stderr)
