@@ -92,9 +92,21 @@ pip3 install --quiet \
   huggingface_hub
 
 # 5. llama-cpp-python with CUDA.
+# Runpod Pytorch images install cuda-nvcc but DON'T put /usr/local/cuda/bin
+# on PATH for non-interactive shells. The build defaults look for `nvcc` on
+# PATH; without it CMake fails with "CMAKE_CUDA_COMPILER-NOTFOUND". Fix:
+# prepend /usr/local/cuda/bin AND pass -DCMAKE_CUDA_COMPILER explicitly.
 echo
 echo "=== llama-cpp-python with CUDA ==="
-CMAKE_ARGS="-DGGML_CUDA=on -DLLAMA_CUDA_FORCE_MMQ=ON" \
+export PATH="/usr/local/cuda/bin:${PATH}"
+echo 'export PATH="/usr/local/cuda/bin:$PATH"' >> ~/.bashrc
+if ! command -v nvcc >/dev/null 2>&1; then
+  echo "ERROR: nvcc not found even after PATH fix. /usr/local/cuda/bin contents:"
+  ls /usr/local/cuda/bin/ | head
+  exit 3
+fi
+echo "  nvcc: $(nvcc --version | tail -1)"
+CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DLLAMA_CUDA_FORCE_MMQ=ON" \
   pip3 install --quiet --upgrade --force-reinstall --no-cache-dir llama-cpp-python
 
 # 6. Pull glia source from GitHub.
