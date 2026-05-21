@@ -1,0 +1,577 @@
+[2026-05-21T09:10:55+10:00] cycle 0.3 START · model=7b-q4
+[2026-05-21T09:10:55+10:00] cycle 0.3 N=7 instances
+[2026-05-21T09:10:55+10:00] [1/7] cycle=0.3 model=7b-q4 marshmallow-code__marshmallow-1359
+[09:10:56] instance: marshmallow-code__marshmallow-1359 | repo: marshmallow-code/marshmallow @ b40a0f4e
+[09:10:56] F2P: 1 tests; P2P: 76 tests
+[09:10:56] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 fetch --all --quiet
+[09:10:57] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 checkout -f b40a0f4e33823e6d0f341f7e8684e359a99060d1
+[09:10:57] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 clean -fdx --quiet
+[09:10:57] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --repo-canonical marshmallow-code__marshmallow-1359 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/test_patch.patch
+[09:10:57]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:10:57]   [seeds] [seeder] issue-anchor: files=2(0 nodes), dotted=9(25 nodes), backtick=11(18 nodes), tb-frames=0(0 nodes)
+[09:10:57]   [seeds] [seeder] issue-anchor: dropped 9 test-file nodes
+[09:10:57]   [seeds] [seeder] issue-anchor inject: 34 resolved, 15 new (delta=+0.0500 on top=0.0326)
+[09:10:57]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json
+[09:10:57] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json
+[09:10:57] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical marshmallow-code__marshmallow-1359
+[09:10:57]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical marshmallow-code__marshmallow-1359`
+[09:10:57]   [node_summaries] [parse] 34 Python files
+[09:10:57]   [node_summaries] [graph] 1590 nodes, 2016 edges
+[09:10:57]   [node_summaries] [summaries] wrote 135 entries (103 with CODE source, 32 without, 0 skipped)
+[09:10:57]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-atomic.json
+[09:10:57] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical marshmallow-code__marshmallow-1359
+[09:10:57]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: ["src::marshmallow::schema::BaseSchema::opts"]
+[09:10:57]   [synth_composition] [synth] 84 AccessPaths
+[09:10:57]   [synth_composition] [render] 84 CompositionCells
+[09:10:57]   [synth_composition] [append] 135 existing + 84 new = 219
+[09:10:57]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json
+[09:10:57] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical marshmallow-code__marshmallow-1359
+[09:10:58]   [synth_callsite_argflow] [graph] 1590 nodes, 2016 edges
+[09:10:58]   [synth_callsite_argflow] [seeds] 135 activated qnames
+[09:10:58]   [synth_callsite_argflow] [resolve] 135 activated qnames matched
+[09:10:58]   [synth_callsite_argflow] [synth] 5 callsite-argflow cells emitted
+[09:10:58]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json
+[09:10:58] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json
+[09:10:58]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:10:58]   [synth_constant_decl] [constdecl] 1 UPPERCASE issue tokens: SCHEMA_OPTS_VAR_NAME×1
+[09:10:58]   [synth_constant_decl] [constdecl] scanned 34 files, 6 have UPPERCASE constants
+[09:10:58]   [synth_constant_decl] [constdecl] 0 ConstantDecl cells emitted
+[09:10:58]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json (224 total cells)
+[09:10:58] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/chain.json --repo-canonical marshmallow-code__marshmallow-1359
+[09:10:58]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_bind_to_schema (chain 1 methods)
+[09:10:58]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_deserialize (chain 0 methods)
+[09:10:58]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_serialize (chain 0 methods)
+[09:10:58]   [synth_call_chain] [chain] 20 anchors, 7 method records (depth ≤ 4)
+[09:10:58]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/chain.json
+[09:10:58] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_cells.json --repo-canonical marshmallow-code__marshmallow-1359 --chain /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/chain.json
+[09:10:58]   [synth_key_symbols]   #6 [chain-grounding] src::marshmallow::fields::Field::context (src/marshmallow/fields.py)
+[09:10:58]   [synth_key_symbols]   #7 [attr-presence] src::marshmallow::schema::BaseSchema::fields (src/marshmallow/schema.py)
+[09:10:58]   [synth_key_symbols]   #8 [attr-presence] src::marshmallow::schema::BaseSchema::opts (src/marshmallow/schema.py)
+[09:10:58]   [synth_key_symbols]   #9 [chain-grounding] src::marshmallow::fields::Field::root (src/marshmallow/fields.py)
+[09:10:58]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_cells.json
+[09:10:58] source cells: 9
+[09:10:58] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_map.txt --repo-canonical marshmallow-code__marshmallow-1359 --excerpt-context 3
+[09:10:58]   [synth_source_map] [parse] 34 Python files
+[09:10:58]   [synth_source_map] [graph] 1590 nodes, 2016 edges
+[09:10:58]   [synth_source_map] [srcmap] source_cells.json: 9 qnames
+[09:10:58]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): src/marshmallow/fields.py(1.17), src/marshmallow/schema.py(0.10), src/marshmallow/validate.py(0.04), tests/base.py(0.01), tests/test_registry.py(0.01), tests/test_schema.py(0.10)
+[09:10:58]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_map.txt (2042 bytes)
+[09:10:58] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/derived_notes.txt
+[09:10:58]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:10:58]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/derived_notes.txt`
+[09:10:58] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/directive.txt
+[09:10:58] traceback directive: 1216 chars
+[09:10:58] running pathB-llama: model=7b-q4
+[09:10:58] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/out.txt
+[09:13:47] pathB-llama done in 168.3s; out=/home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-cycle-0.3/out.txt
+[09:13:47] heal_diff: applied corrections
+[09:13:47] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:13:47] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:13:47] $ patch -p1 --forward --quiet --fuzz=5 -l -d /home/ivy/swe-work/marshmallow-code__marshmallow-1359 -i /tmp/run_instance.patch
+[09:13:47] test cmd: pytest -rA tests/test_fields.py
+[09:13:47] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 checkout -- .
+{
+  "instance_id": "marshmallow-code__marshmallow-1359",
+  "model": "7b-q4",
+  "wall_s": 168.3,
+  "aplus_cells": 84,
+  "apply": "applied(fuzz)",
+  "f2p": "PASS",
+  "reg": 76,
+  "reg_fail": 0,
+  "f2p_pass": 1,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0
+}
+[2026-05-21T09:13:47+10:00] [1/7] marshmallow-code__marshmallow-1359 PASS wall=172s
+[2026-05-21T09:13:47+10:00] [2/7] cycle=0.3 model=7b-q4 matplotlib__matplotlib-22711
+[09:13:49] instance: matplotlib__matplotlib-22711 | repo: matplotlib/matplotlib @ f670fe78
+[09:13:49] F2P: 2 tests; P2P: 91 tests
+[09:13:49] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 fetch --all --quiet
+[09:13:49] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 checkout -f f670fe78795b18eb1118707721852209cd77ad51
+[09:13:49] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 checkout -f f670fe78795b18eb1118707721852209cd77ad51
+HEAD is now at f670fe7879 Merge pull request #22263 from jklymak/doc-version-switcher-condense
+[09:13:49] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --repo-canonical matplotlib__matplotlib-22711 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/test_patch.patch
+[09:13:51]   [seeds] [seeder] guarantee-included 86 class-expanded methods missing from activated (floor=0.000895)
+[09:13:51]   [seeds] [seeder] issue-anchor: files=1(0 nodes), dotted=33(812 nodes), backtick=36(85 nodes), tb-frames=0(0 nodes)
+[09:13:51]   [seeds] [seeder] issue-anchor: dropped 2 test-file nodes
+[09:13:51]   [seeds] [seeder] issue-anchor inject: 895 resolved, 872 new (delta=+0.0500 on top=0.0062)
+[09:13:51]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json
+[09:13:51] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json
+[09:13:51] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical matplotlib__matplotlib-22711
+[09:13:52]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical matplotlib__matplotlib-22711`
+[09:13:52]   [node_summaries] [parse] 906 Python files
+[09:13:52]   [node_summaries] [graph] 18272 nodes, 24195 edges
+[09:13:52]   [node_summaries] [summaries] wrote 1078 entries (638 with CODE source, 440 without, 0 skipped)
+[09:13:52]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-atomic.json
+[09:13:52] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical matplotlib__matplotlib-22711
+[09:13:54]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: []
+[09:13:54]   [synth_composition] [synth] 1 AccessPaths
+[09:13:54]   [synth_composition] [render] 1 CompositionCells
+[09:13:54]   [synth_composition] [append] 1078 existing + 1 new = 1079
+[09:13:54]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json
+[09:13:54] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical matplotlib__matplotlib-22711
+[09:13:56]   [synth_callsite_argflow] [graph] 18272 nodes, 24195 edges
+[09:13:56]   [synth_callsite_argflow] [seeds] 1078 activated qnames
+[09:13:56]   [synth_callsite_argflow] [resolve] 1078 activated qnames matched
+[09:13:56]   [synth_callsite_argflow] [synth] 76 callsite-argflow cells emitted
+[09:13:56]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json
+[09:13:56] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json
+[09:13:56]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:13:56]   [synth_constant_decl] [constdecl] 1 UPPERCASE issue tokens: OSX×1
+[09:13:56]   [synth_constant_decl] [constdecl] scanned 906 files, 46 have UPPERCASE constants
+[09:13:56]   [synth_constant_decl] [constdecl] 0 ConstantDecl cells emitted
+[09:13:56]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json (1155 total cells)
+[09:13:56] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/chain.json --repo-canonical matplotlib__matplotlib-22711
+[09:13:57]   [synth_call_chain] [tp-anchor] get_ydata → lib::matplotlib::legend_handler::HandlerNpointsYoffsets::get_ydata (chain 0 methods)
+[09:13:57]   [synth_call_chain] [tp-anchor] get_ydata → lib::matplotlib::legend_handler::HandlerStem::get_ydata (chain 0 methods)
+[09:13:57]   [synth_call_chain] [tp-anchor] get_ydata → lib::matplotlib::lines::Line2D::get_ydata (chain 3 methods)
+[09:13:57]   [synth_call_chain] [chain] 6 anchors, 5 method records (depth ≤ 4)
+[09:13:57]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/chain.json
+[09:13:57] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_cells.json --repo-canonical matplotlib__matplotlib-22711 --chain /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/chain.json
+[09:13:59]   [synth_key_symbols]   #2 [activated] lib::matplotlib::widgets::RangeSlider::on_changed (lib/matplotlib/widgets.py)
+[09:13:59]   [synth_key_symbols]   #3 [activated] lib::matplotlib::widgets::Slider::set_val (lib/matplotlib/widgets.py)
+[09:13:59]   [synth_key_symbols]   #4 [activated] lib::matplotlib::widgets::RangeSlider::__init__ (lib/matplotlib/widgets.py)
+[09:13:59]   [synth_key_symbols]   #5 [activated] lib::matplotlib::widgets::RangeSlider::_format (lib/matplotlib/widgets.py)
+[09:13:59]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_cells.json
+[09:13:59] source cells: 5
+[09:13:59] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_map.txt --repo-canonical matplotlib__matplotlib-22711 --excerpt-context 3
+[09:14:01]   [synth_source_map] [parse] 906 Python files
+[09:14:01]   [synth_source_map] [graph] 18272 nodes, 24195 edges
+[09:14:01]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:14:01]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): lib/matplotlib/axis.py(0.13), lib/matplotlib/figure.py(0.21), lib/matplotlib/layout_engine.py(0.15), lib/matplotlib/pyplot.py(9.27), lib/matplotlib/transforms.py(0.16), lib/matplotlib/widgets.py(10.54)
+[09:14:01]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_map.txt (1650 bytes)
+[09:14:01] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/derived_notes.txt
+[09:14:01]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:14:01]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/derived_notes.txt`
+[09:14:01] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/matplotlib__matplotlib-22711 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/directive.txt
+[09:14:02] traceback directive: 883 chars
+[09:14:02] running pathB-llama: model=7b-q4
+[09:14:02] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/out.txt
+[09:17:23] pathB-llama done in 201.1s; out=/home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22711-7b-q4-cycle-0.3/out.txt
+[09:17:23] heal_diff: applied corrections
+[09:17:23] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:17:23] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:17:23] test cmd: pytest -rA lib/matplotlib/tests/test_widgets.py
+[09:18:17]   build_ext --inplace (post-clean) ok
+[09:18:28] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22711 checkout -- .
+{
+  "instance_id": "matplotlib__matplotlib-22711",
+  "model": "7b-q4",
+  "wall_s": 201.1,
+  "aplus_cells": 1,
+  "apply": "applied",
+  "f2p": "FAIL (0/2 pass, 2 fail, 0 missing)",
+  "reg": 91,
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 2,
+  "f2p_missing_n": 0
+}
+[2026-05-21T09:18:28+10:00] [2/7] matplotlib__matplotlib-22711 FAIL wall=281s
+[2026-05-21T09:18:28+10:00] [3/7] cycle=0.3 model=7b-q4 matplotlib__matplotlib-22835
+[09:18:29] instance: matplotlib__matplotlib-22835 | repo: matplotlib/matplotlib @ c33557d1
+[09:18:29] F2P: 1 tests; P2P: 24 tests
+[09:18:29] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22835 fetch --all --quiet
+[09:18:31] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22835 checkout -f c33557d120eefe3148ebfcf2e758ff2357966000
+[09:18:31] $ git -C /home/ivy/swe-work/matplotlib__matplotlib-22835 checkout -f c33557d120eefe3148ebfcf2e758ff2357966000
+HEAD is now at c33557d120 Merge pull request #22707 from aragilar/no_broken_streamlines
+[09:18:31] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --repo-canonical matplotlib__matplotlib-22835 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/test_patch.patch
+[09:18:32]   [seeds] [seeder] activated top-60: 60 nodes
+[09:18:32]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:18:32]   [seeds] [seeder] issue-anchor: files=2(0 nodes), dotted=7(186 nodes), backtick=9(3 nodes), tb-frames=0(0 nodes)
+[09:18:32]   [seeds] [seeder] issue-anchor inject: 189 resolved, 187 new (delta=+0.0500 on top=0.0301)
+[09:18:32]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json
+[09:18:32] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json
+[09:18:32] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical matplotlib__matplotlib-22835
+[09:18:34]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical matplotlib__matplotlib-22835`
+[09:18:34]   [node_summaries] [parse] 922 Python files
+[09:18:34]   [node_summaries] [graph] 18562 nodes, 24559 edges
+[09:18:34]   [node_summaries] [summaries] wrote 307 entries (289 with CODE source, 18 without, 0 skipped)
+[09:18:34]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-atomic.json
+[09:18:34] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical matplotlib__matplotlib-22835
+[09:18:36]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: []
+[09:18:36]   [synth_composition] [synth] 0 AccessPaths
+[09:18:36]   [synth_composition] [render] 0 CompositionCells
+[09:18:36]   [synth_composition] [append] 307 existing + 0 new = 307
+[09:18:36]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json
+[09:18:36] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical matplotlib__matplotlib-22835
+[09:18:37]   [synth_callsite_argflow] [graph] 18562 nodes, 24559 edges
+[09:18:37]   [synth_callsite_argflow] [seeds] 307 activated qnames
+[09:18:37]   [synth_callsite_argflow] [resolve] 307 activated qnames matched
+[09:18:37]   [synth_callsite_argflow] [synth] 16 callsite-argflow cells emitted
+[09:18:37]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json
+[09:18:37] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json
+[09:18:37]   [synth_constant_decl] Finished `release` profile [optimized] target(s) in 0.05s
+[09:18:37]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:18:37]   [synth_constant_decl] [constdecl] 0 UPPERCASE issue tokens: 
+[09:18:37]   [synth_constant_decl] [constdecl] no issue tokens; emitting 0 cells
+[09:18:37] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/chain.json --repo-canonical matplotlib__matplotlib-22835
+[09:18:39]   [synth_call_chain] [tp-anchor] suptitle → lib::matplotlib::figure::FigureBase::suptitle (chain 2 methods)
+[09:18:39]   [synth_call_chain] [tp-anchor] suptitle → lib::matplotlib::pyplot::suptitle (chain 8 methods)
+[09:18:39]   [synth_call_chain] [tp-anchor] to → lib::matplotlib::tests::test_units::Quantity::to (chain 1 methods)
+[09:18:39]   [synth_call_chain] [chain] 32 anchors, 37 method records (depth ≤ 4)
+[09:18:39]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/chain.json
+[09:18:39] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_cells.json --repo-canonical matplotlib__matplotlib-22835 --chain /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/chain.json
+[09:18:40]   [synth_key_symbols]   #2 [activated] lib::matplotlib::artist::Artist::format_cursor_data (lib/matplotlib/artist.py)
+[09:18:40]   [synth_key_symbols]   #3 [activated] lib::matplotlib::pyplot::imshow (lib/matplotlib/pyplot.py)
+[09:18:40]   [synth_key_symbols]   #4 [activated] lib::matplotlib::pyplot::subplots (lib/matplotlib/pyplot.py)
+[09:18:40]   [synth_key_symbols]   #5 [activated] lib::matplotlib::colors::BoundaryNorm::inverse (lib/matplotlib/colors.py)
+[09:18:40]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_cells.json
+[09:18:40] source cells: 5
+[09:18:40] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_map.txt --repo-canonical matplotlib__matplotlib-22835 --excerpt-context 3
+[09:18:42]   [synth_source_map] [parse] 922 Python files
+[09:18:42]   [synth_source_map] [graph] 18562 nodes, 24559 edges
+[09:18:42]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:18:42]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): lib/matplotlib/artist.py(0.35), lib/matplotlib/colors.py(0.07), lib/matplotlib/layout_engine.py(0.01), lib/matplotlib/offsetbox.py(0.01), lib/matplotlib/pyplot.py(9.45), setupext.py(0.08)
+[09:18:42]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_map.txt (1459 bytes)
+[09:18:42] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/derived_notes.txt
+[09:18:42]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:18:42]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/derived_notes.txt`
+[09:18:42] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/matplotlib__matplotlib-22835 --issue /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/directive.txt
+[09:18:43] traceback directive: 1057 chars
+[09:18:43] running pathB-llama: model=7b-q4
+[09:18:43] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/out.txt
+[09:21:10] pathB-llama done in 146.8s; out=/home/ivy/Code/glia/scratch/latent/out/inst-matplotlib__matplotlib-22835-7b-q4-cycle-0.3/out.txt
+{
+  "instance_id": "matplotlib__matplotlib-22835",
+  "model": "7b-q4",
+  "wall_s": 146.8,
+  "aplus_cells": 0,
+  "apply": "NO-DIFF",
+  "f2p": null,
+  "reg": null,
+  "reg_fail": null
+}
+[2026-05-21T09:21:11+10:00] [3/7] matplotlib__matplotlib-22835 FAIL wall=163s
+[2026-05-21T09:21:11+10:00] [4/7] cycle=0.3 model=7b-q4 scikit-learn__scikit-learn-10508
+[09:21:12] instance: scikit-learn__scikit-learn-10508 | repo: scikit-learn/scikit-learn @ c753b77a
+[09:21:12] F2P: 2 tests; P2P: 18 tests
+[09:21:12] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 fetch --all --quiet
+[09:21:14] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 checkout -f c753b77ac49e72ebc0fe5e3c2369fe628f975017
+[09:21:14] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 checkout -f c753b77ac49e72ebc0fe5e3c2369fe628f975017
+HEAD is now at c753b77ac4 DOC mention default base_estimator of AdaBoost (#10501)
+[09:21:14] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --repo-canonical scikit-learn__scikit-learn-10508 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/test_patch.patch
+[09:21:15]   [seeds] [seeder] activated top-60: 60 nodes
+[09:21:15]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:21:15]   [seeds] [seeder] issue-anchor: files=2(0 nodes), dotted=5(0 nodes), backtick=11(3 nodes), tb-frames=0(0 nodes)
+[09:21:15]   [seeds] [seeder] issue-anchor inject: 3 resolved, 2 new (delta=+0.0500 on top=0.0108)
+[09:21:15]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json
+[09:21:15] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json
+[09:21:15] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical scikit-learn__scikit-learn-10508
+[09:21:16]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical scikit-learn__scikit-learn-10508`
+[09:21:16]   [node_summaries] [parse] 682 Python files
+[09:21:16]   [node_summaries] [graph] 11141 nodes, 21380 edges
+[09:21:16]   [node_summaries] [summaries] wrote 122 entries (78 with CODE source, 44 without, 0 skipped)
+[09:21:16]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-atomic.json
+[09:21:16] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical scikit-learn__scikit-learn-10508
+[09:21:17]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: []
+[09:21:17]   [synth_composition] [synth] 0 AccessPaths
+[09:21:17]   [synth_composition] [render] 0 CompositionCells
+[09:21:17]   [synth_composition] [append] 122 existing + 0 new = 122
+[09:21:17]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json
+[09:21:17] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical scikit-learn__scikit-learn-10508
+[09:21:18]   [synth_callsite_argflow] [graph] 11141 nodes, 21380 edges
+[09:21:18]   [synth_callsite_argflow] [seeds] 122 activated qnames
+[09:21:18]   [synth_callsite_argflow] [resolve] 122 activated qnames matched
+[09:21:18]   [synth_callsite_argflow] [synth] 2 callsite-argflow cells emitted
+[09:21:18]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json
+[09:21:18] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json
+[09:21:18]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:21:18]   [synth_constant_decl] [constdecl] 1 UPPERCASE issue tokens: U32×2
+[09:21:18]   [synth_constant_decl] [constdecl] scanned 682 files, 93 have UPPERCASE constants
+[09:21:18]   [synth_constant_decl] [constdecl] 0 ConstantDecl cells emitted
+[09:21:18]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json (124 total cells)
+[09:21:18] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/chain.json --repo-canonical scikit-learn__scikit-learn-10508
+[09:21:20]   [synth_call_chain] [tp-anchor] LabelEncoder → sklearn::preprocessing::label::LabelEncoder::transform (chain 2 methods)
+[09:21:20]   [synth_call_chain] [tp-anchor] assert_raise_message → sklearn::utils::testing::assert_raise_message (chain 0 methods)
+[09:21:20]   [synth_call_chain] [tp-anchor] empty → sklearn::externals::joblib::pool::CustomizablePicklingQueue::empty (chain 0 methods)
+[09:21:20]   [synth_call_chain] [chain] 8 anchors, 3 method records (depth ≤ 4)
+[09:21:20]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/chain.json
+[09:21:20] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_cells.json --repo-canonical scikit-learn__scikit-learn-10508 --chain /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/chain.json
+[09:21:21]   [synth_key_symbols]   #2 [activated] sklearn::preprocessing::label::LabelEncoder::transform (sklearn/preprocessing/label.py)
+[09:21:21]   [synth_key_symbols]   #3 [activated] sklearn::preprocessing::label::LabelEncoder (sklearn/preprocessing/label.py)
+[09:21:21]   [synth_key_symbols]   #4 [activated] sklearn::preprocessing::label::LabelEncoder::inverse_transform (sklearn/preprocessing/label.py)
+[09:21:21]   [synth_key_symbols]   #5 [activated] sklearn::preprocessing::label::LabelEncoder::fit_transform (sklearn/preprocessing/label.py)
+[09:21:21]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_cells.json
+[09:21:21] source cells: 5
+[09:21:21] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_map.txt --repo-canonical scikit-learn__scikit-learn-10508 --excerpt-context 3
+[09:21:22]   [synth_source_map] [parse] 682 Python files
+[09:21:22]   [synth_source_map] [graph] 11141 nodes, 21380 edges
+[09:21:22]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:21:22]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): doc/tutorial/machine_learning_map/pyparsing.py(0.05), sklearn/cross_validation.py(0.01), sklearn/externals/funcsigs.py(0.01), sklearn/linear_model/ridge.py(0.02), sklearn/model_selection/_split.py(0.02), sklearn/preprocessing/label.py(0.10)
+[09:21:22]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_map.txt (1394 bytes)
+[09:21:22] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/derived_notes.txt
+[09:21:22]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:21:22]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/derived_notes.txt`
+[09:21:22] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/scikit-learn__scikit-learn-10508 --issue /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/directive.txt
+[09:21:23] traceback directive: 819 chars
+[09:21:23] running pathB-llama: model=7b-q4
+[09:21:23] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/out.txt
+[09:23:58] pathB-llama done in 155.1s; out=/home/ivy/Code/glia/scratch/latent/out/inst-scikit-learn__scikit-learn-10508-7b-q4-cycle-0.3/out.txt
+[09:23:58] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:23:58] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:23:58] $ patch -p1 --forward --quiet --fuzz=5 -l -d /home/ivy/swe-work/scikit-learn__scikit-learn-10508 -i /tmp/run_instance.patch
+[09:23:58] test cmd: pytest -rA sklearn/preprocessing/tests/test_label.py
+[09:23:59] $ git -C /home/ivy/swe-work/scikit-learn__scikit-learn-10508 checkout -- .
+{
+  "instance_id": "scikit-learn__scikit-learn-10508",
+  "model": "7b-q4",
+  "wall_s": 155.1,
+  "aplus_cells": 0,
+  "apply": "applied(fuzz)",
+  "f2p": "NO-RUN (============================== 2 errors in 0.11s ===============================)",
+  "reg": 0,
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 2
+}
+[2026-05-21T09:23:59+10:00] [4/7] scikit-learn__scikit-learn-10508 FAIL wall=168s
+[2026-05-21T09:23:59+10:00] [5/7] cycle=0.3 model=7b-q4 django__django-10914
+[09:24:00] instance: django__django-10914 | repo: django/django @ e7fd69d0
+[09:24:00] F2P: 1 tests; P2P: 98 tests
+[09:24:00] $ git -C /home/ivy/swe-work/django__django-10914 fetch --all --quiet
+[09:24:02] $ git -C /home/ivy/swe-work/django__django-10914 checkout -f e7fd69d051eaa67cb17f172a39b57253e9cb831a
+[09:24:02] $ git -C /home/ivy/swe-work/django__django-10914 clean -fdx --quiet
+[09:24:02] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --repo-canonical django__django-10914 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/test_patch.patch
+[09:24:05]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:24:05]   [seeds] [seeder] issue-anchor: files=0(0 nodes), dotted=2(0 nodes), backtick=12(16 nodes), tb-frames=0(0 nodes)
+[09:24:05]   [seeds] [seeder] issue-anchor: dropped 1 test-file nodes
+[09:24:05]   [seeds] [seeder] issue-anchor inject: 15 resolved, 13 new (delta=+0.0500 on top=0.0191)
+[09:24:05]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json
+[09:24:05] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json
+[09:24:05] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical django__django-10914
+[09:24:08]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical django__django-10914`
+[09:24:08]   [node_summaries] [parse] 2534 Python files
+[09:24:08]   [node_summaries] [graph] 51090 nodes, 74028 edges
+[09:24:08]   [node_summaries] [summaries] wrote 133 entries (113 with CODE source, 20 without, 0 skipped)
+[09:24:08]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-atomic.json
+[09:24:08] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical django__django-10914
+[09:24:11]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: ["django::contrib::admin::helpers::InlineAdminFormSet::opts", "django::db::models::fields::related::ForeignObject::opts", "django::db::models::fields::related::RelatedField::opts", "django::contrib::admin::views::main::ChangeList::opts", "django::contrib::admin::options::BaseModelAdmin::opts", "django::contrib::admin::options::InlineModelAdmin::opts", "django::db::models::fields::related::ManyToManyField::opts", "django::contrib::admin::options::ModelAdmin::opts"]
+[09:24:11]   [synth_composition] [synth] 0 AccessPaths
+[09:24:11]   [synth_composition] [render] 0 CompositionCells
+[09:24:11]   [synth_composition] [append] 133 existing + 0 new = 133
+[09:24:11]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json
+[09:24:11] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical django__django-10914
+[09:24:14]   [synth_callsite_argflow] [graph] 51090 nodes, 74028 edges
+[09:24:14]   [synth_callsite_argflow] [seeds] 133 activated qnames
+[09:24:14]   [synth_callsite_argflow] [resolve] 133 activated qnames matched
+[09:24:14]   [synth_callsite_argflow] [synth] 10 callsite-argflow cells emitted
+[09:24:14]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json
+[09:24:14] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json
+[09:24:14]   [synth_constant_decl] [constdecl] scanned 2534 files, 234 have UPPERCASE constants
+[09:24:14]   [synth_constant_decl] [constdecl] 2 ConstantDecl cells emitted
+[09:24:14]   [synth_constant_decl]   [constdecl] synth::ConstantDecl::django::conf::global_settings::FILE_UPLOAD_HANDLERS
+[09:24:14]   [synth_constant_decl]   [constdecl] synth::ConstantDecl::django::conf::global_settings::FILE_UPLOAD_PERMISSIONS
+[09:24:14]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json (145 total cells)
+[09:24:14] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/django__django-10914 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/chain.json --repo-canonical django__django-10914
+[09:24:17]   [synth_call_chain] [test_patch] 2 tokens accepted (0 dropped over cap=5)
+[09:24:17]   [synth_call_chain] [tp-anchor] default_storage → django::contrib::messages::storage::__init__::default_storage (chain 1 methods)
+[09:24:17]   [synth_call_chain] [tp-anchor] file_permissions_mode → django::core::files::storage::FileSystemStorage::file_permissions_mode (chain 1 methods)
+[09:24:17]   [synth_call_chain] [chain] 3 anchors, 2 method records (depth ≤ 4)
+[09:24:17]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/chain.json
+[09:24:17] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_cells.json --repo-canonical django__django-10914 --chain /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/chain.json
+[09:24:19]   [synth_key_symbols]   #2 [activated] django::core::files::uploadedfile::TemporaryUploadedFile (django/core/files/uploadedfile.py)
+[09:24:19]   [synth_key_symbols]   #3 [activated] django::contrib::gis::gdal::geomtype::OGRGeomType::django (django/contrib/gis/gdal/geomtype.py)
+[09:24:19]   [synth_key_symbols]   #4 [activated] django::core::management::commands::shell::Command::python (django/core/management/commands/shell.py)
+[09:24:19]   [synth_key_symbols]   #5 [activated] django::core::cache::backends::db::DatabaseCache::set (django/core/cache/backends/db.py)
+[09:24:19]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_cells.json
+[09:24:19] source cells: 5
+[09:24:19] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_map.txt --repo-canonical django__django-10914 --excerpt-context 3
+[09:24:22]   [synth_source_map] [parse] 2534 Python files
+[09:24:22]   [synth_source_map] [graph] 51090 nodes, 74028 edges
+[09:24:22]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:24:22]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): django/contrib/gis/gdal/geomtype.py(0.05), django/core/cache/backends/base.py(0.05), django/core/cache/backends/db.py(0.05), django/core/cache/backends/memcached.py(0.06), django/core/files/storage.py(0.22), django/core/files/uploadedfile.py(0.07)
+[09:24:22]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_map.txt (944 bytes)
+[09:24:22] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/derived_notes.txt
+[09:24:22]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:24:22]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/derived_notes.txt`
+[09:24:22] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/directive.txt
+[09:24:25] traceback directive: (inert; no graph-matched frame in issue traceback)
+[09:24:25] running pathB-llama: model=7b-q4
+[09:24:25] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/out.txt
+[09:27:06] pathB-llama done in 160.7s; out=/home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-cycle-0.3/out.txt
+[09:27:06] $ git -C /home/ivy/swe-work/django__django-10914 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:27:06] $ git -C /home/ivy/swe-work/django__django-10914 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:27:06] $ patch -p1 --forward --quiet --fuzz=5 -l -d /home/ivy/swe-work/django__django-10914 -i /tmp/run_instance.patch
+[09:27:06] test cmd: ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 test_utils.tests
+[09:27:06] $ git -C /home/ivy/swe-work/django__django-10914 checkout -- .
+{
+  "instance_id": "django__django-10914",
+  "model": "7b-q4",
+  "wall_s": 160.7,
+  "aplus_cells": 0,
+  "apply": "applied(fuzz)",
+  "f2p": "FAIL (0/1 pass, 1 fail, 0 missing)",
+  "reg": 95,
+  "reg_fail": 1,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0
+}
+[2026-05-21T09:27:07+10:00] [5/7] django__django-10914 FAIL wall=188s
+[2026-05-21T09:27:07+10:00] [6/7] cycle=0.3 model=7b-q4 pytest-dev__pytest-11143
+[09:27:08] instance: pytest-dev__pytest-11143 | repo: pytest-dev/pytest @ 6995257c
+[09:27:08] F2P: 1 tests; P2P: 114 tests
+[09:27:08] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 fetch --all --quiet
+[09:27:09] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 checkout -f 6995257cf470d2143ad1683824962de4071c0eb7
+[09:27:09] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 clean -fdx --quiet
+[09:27:09] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --repo-canonical pytest-dev__pytest-11143 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/test_patch.patch
+[09:27:10]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:27:10]   [seeds] [seeder] guarantee-included 15 class-expanded methods missing from activated (floor=0.001597)
+[09:27:10]   [seeds] [seeder] issue-anchor: files=6(0 nodes), dotted=13(0 nodes), backtick=28(19 nodes), tb-frames=14(37 nodes)
+[09:27:10]   [seeds] [seeder] issue-anchor inject: 56 resolved, 43 new (delta=+0.0500 on top=0.0096)
+[09:27:10]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json
+[09:27:10] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json
+[09:27:10] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical pytest-dev__pytest-11143
+[09:27:10]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical pytest-dev__pytest-11143`
+[09:27:10]   [node_summaries] [parse] 249 Python files
+[09:27:10]   [node_summaries] [graph] 6588 nodes, 8449 edges
+[09:27:10]   [node_summaries] [summaries] wrote 178 entries (151 with CODE source, 27 without, 0 skipped)
+[09:27:10]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-atomic.json
+[09:27:10] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical pytest-dev__pytest-11143
+[09:27:11]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: []
+[09:27:11]   [synth_composition] [synth] 0 AccessPaths
+[09:27:11]   [synth_composition] [render] 0 CompositionCells
+[09:27:11]   [synth_composition] [append] 178 existing + 0 new = 178
+[09:27:11]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json
+[09:27:11] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical pytest-dev__pytest-11143
+[09:27:11]   [synth_callsite_argflow] [graph] 6588 nodes, 8449 edges
+[09:27:11]   [synth_callsite_argflow] [seeds] 178 activated qnames
+[09:27:11]   [synth_callsite_argflow] [resolve] 178 activated qnames matched
+[09:27:11]   [synth_callsite_argflow] [synth] 13 callsite-argflow cells emitted
+[09:27:11]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json
+[09:27:11] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json
+[09:27:12]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/pytest-dev__pytest-11143 --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:27:12]   [synth_constant_decl] [constdecl] 3 UPPERCASE issue tokens: ERRORS×1, ERROR×1, PYTEST_DONT_REWRITE×1
+[09:27:12]   [synth_constant_decl] [constdecl] scanned 249 files, 34 have UPPERCASE constants
+[09:27:12]   [synth_constant_decl] [constdecl] 0 ConstantDecl cells emitted
+[09:27:12]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json (191 total cells)
+[09:27:12] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/chain.json --repo-canonical pytest-dev__pytest-11143
+[09:27:12]   [synth_call_chain] [tp-anchor] result → src::_pytest::fixtures::wrap_function_to_error_out_if_called_directly::result (chain 0 methods)
+[09:27:12]   [synth_call_chain] [tp-anchor] result → src::_pytest::runner::CallInfo::result (chain 0 methods)
+[09:27:12]   [synth_call_chain] [tp-anchor] runpytest → src::_pytest::legacypath::Testdir::runpytest (chain 0 methods)
+[09:27:12]   [synth_call_chain] [chain] 53 anchors, 83 method records (depth ≤ 4)
+[09:27:12]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/chain.json
+[09:27:12] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_cells.json --repo-canonical pytest-dev__pytest-11143 --chain /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/chain.json
+[09:27:13]   [synth_key_symbols]   #2 [activated] src::_pytest::python::Module::_inject_setup_module_fixture (src/_pytest/python.py)
+[09:27:13]   [synth_key_symbols]   #3 [activated] src::_pytest::assertion::rewrite::AssertionRewriter::is_rewrite_disabled (src/_pytest/assertion/rewrite.py)
+[09:27:13]   [synth_key_symbols]   #4 [activated] src::_pytest::assertion::rewrite::AssertionRewriter::run (src/_pytest/assertion/rewrite.py)
+[09:27:13]   [synth_key_symbols]   #5 [activated] src::_pytest::python::Module::_importtestmodule (src/_pytest/python.py)
+[09:27:13]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_cells.json
+[09:27:13] source cells: 5
+[09:27:13] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/pytest-dev__pytest-11143 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_map.txt --repo-canonical pytest-dev__pytest-11143 --excerpt-context 3
+[09:27:13]   [synth_source_map] [parse] 249 Python files
+[09:27:13]   [synth_source_map] [graph] 6588 nodes, 8449 edges
+[09:27:13]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:27:13]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): src/_pytest/assertion/__init__.py(0.10), src/_pytest/assertion/rewrite.py(0.59), src/_pytest/config/__init__.py(0.17), src/_pytest/python.py(0.35), src/_pytest/runner.py(0.16), testing/test_assertrewrite.py(0.36)
+[09:27:13]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_map.txt (2074 bytes)
+[09:27:13] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/derived_notes.txt
+[09:27:13]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:27:13]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/derived_notes.txt`
+[09:27:13] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/pytest-dev__pytest-11143 --issue /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/directive.txt
+[09:27:14] traceback directive: (inert; no graph-matched frame in issue traceback)
+[09:27:14] running pathB-llama: model=7b-q4
+[09:27:14] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/out.txt
+[09:30:55] pathB-llama done in 221.1s; out=/home/ivy/Code/glia/scratch/latent/out/inst-pytest-dev__pytest-11143-7b-q4-cycle-0.3/out.txt
+[09:30:55] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:30:55] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:30:55] $ patch -p1 --forward --quiet --fuzz=5 -l -d /home/ivy/swe-work/pytest-dev__pytest-11143 -i /tmp/run_instance.patch
+[09:30:55] test cmd: pytest -rA testing/test_assertrewrite.py
+[09:30:55]   rewrote _version.py = 8.0.0 (post-clean)
+[09:30:58] $ git -C /home/ivy/swe-work/pytest-dev__pytest-11143 checkout -- .
+{
+  "instance_id": "pytest-dev__pytest-11143",
+  "model": "7b-q4",
+  "wall_s": 221.1,
+  "aplus_cells": 0,
+  "apply": "applied(fuzz)",
+  "f2p": "FAIL (0/1 pass, 1 fail, 0 missing)",
+  "reg": 113,
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0
+}
+[2026-05-21T09:30:59+10:00] [6/7] pytest-dev__pytest-11143 FAIL wall=232s
+[2026-05-21T09:30:59+10:00] [7/7] cycle=0.3 model=7b-q4 sphinx-doc__sphinx-10325
+[09:31:00] instance: sphinx-doc__sphinx-10325 | repo: sphinx-doc/sphinx @ 7bdc11e8
+[09:31:00] F2P: 1 tests; P2P: 5 tests
+[09:31:00] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 fetch --all --quiet
+[09:31:01] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 checkout -f 7bdc11e87c7d86dcc2a087eccb7a7c129a473415
+[09:31:01] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 clean -fdx --quiet
+[09:31:01] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --repo-canonical sphinx-doc__sphinx-10325 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/test_patch.patch
+[09:31:02]   [seeds] [seeder] activated top-60: 60 nodes
+[09:31:02]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[09:31:02]   [seeds] [seeder] issue-anchor: files=0(0 nodes), dotted=1(1 nodes), backtick=2(0 nodes), tb-frames=0(0 nodes)
+[09:31:02]   [seeds] [seeder] issue-anchor: dropped 1 test-file nodes
+[09:31:02]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json
+[09:31:02] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json
+[09:31:02] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-atomic.json --repo-canonical sphinx-doc__sphinx-10325
+[09:31:02]   [node_summaries] [parse] skip /home/ivy/swe-work/sphinx-doc__sphinx-10325/tests/roots/test-pycode/cp_1251_coded.py: stream did not contain valid UTF-8
+[09:31:02]   [node_summaries] [parse] 550 Python files
+[09:31:02]   [node_summaries] [graph] 11403 nodes, 20261 edges
+[09:31:02]   [node_summaries] [summaries] wrote 120 entries (91 with CODE source, 29 without, 0 skipped)
+[09:31:02]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-atomic.json
+[09:31:02] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical sphinx-doc__sphinx-10325
+[09:31:03]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: ["sphinx::cmd::make_mode::Make::opts"]
+[09:31:03]   [synth_composition] [synth] 0 AccessPaths
+[09:31:03]   [synth_composition] [render] 0 CompositionCells
+[09:31:03]   [synth_composition] [append] 120 existing + 0 new = 120
+[09:31:03]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json
+[09:31:03] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --repo-canonical sphinx-doc__sphinx-10325
+[09:31:04]   [synth_callsite_argflow] [graph] 11403 nodes, 20261 edges
+[09:31:04]   [synth_callsite_argflow] [seeds] 120 activated qnames
+[09:31:04]   [synth_callsite_argflow] [resolve] 120 activated qnames matched
+[09:31:04]   [synth_callsite_argflow] [synth] 11 callsite-argflow cells emitted
+[09:31:04]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json
+[09:31:04] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json
+[09:31:04]   [synth_constant_decl] Finished `release` profile [optimized] target(s) in 0.05s
+[09:31:04]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json`
+[09:31:04]   [synth_constant_decl] [constdecl] 0 UPPERCASE issue tokens: 
+[09:31:04]   [synth_constant_decl] [constdecl] no issue tokens; emitting 0 cells
+[09:31:04] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/chain.json --repo-canonical sphinx-doc__sphinx-10325
+[09:31:05]   [synth_call_chain] [tp-anchor] method → tests::roots::test-ext-autodoc::target::bound_method::Cls::method (chain 0 methods)
+[09:31:05]   [synth_call_chain] [tp-anchor] method → tests::roots::test-ext-autodoc::target::callable::Callable::method (chain 0 methods)
+[09:31:05]   [synth_call_chain] [tp-anchor] testroot → tests::test_directive_code::testroot (chain 0 methods)
+[09:31:05]   [synth_call_chain] [chain] 27 anchors, 2 method records (depth ≤ 4)
+[09:31:05]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/chain.json
+[09:31:05] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_cells.json --repo-canonical sphinx-doc__sphinx-10325 --chain /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/chain.json
+[09:31:06]   [synth_key_symbols]   #2 [activated] tests::roots::test-ext-autodoc::target::inheritance::Base::inheritedclassmeth (tests/roots/test-ext-autodoc/target/inheritance.py)
+[09:31:06]   [synth_key_symbols]   #3 [activated] tests::roots::test-ext-autodoc::target::inheritance::Base::inheritedmeth (tests/roots/test-ext-autodoc/target/inheritance.py)
+[09:31:06]   [synth_key_symbols]   #4 [activated] tests::roots::test-ext-autodoc::target::inheritance::Base::inheritedstaticmeth (tests/roots/test-ext-autodoc/target/inheritance.py)
+[09:31:06]   [synth_key_symbols]   #5 [activated] tests::roots::test-ext-autodoc::target::methods::Base::classmeth (tests/roots/test-ext-autodoc/target/methods.py)
+[09:31:06]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_cells.json
+[09:31:06] source cells: 5
+[09:31:06] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_map.txt --repo-canonical sphinx-doc__sphinx-10325 --excerpt-context 3
+[09:31:06]   [synth_source_map] [parse] 550 Python files
+[09:31:06]   [synth_source_map] [graph] 11403 nodes, 20261 edges
+[09:31:06]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[09:31:06]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): sphinx/builders/latex/transforms.py(0.04), sphinx/directives/other.py(0.06), tests/roots/test-ext-autodoc/target/abstractmethods.py(0.10), tests/roots/test-ext-autodoc/target/inheritance.py(0.07), tests/roots/test-ext-autodoc/target/methods.py(0.11), tests/roots/test-root/autodoc_target.py(0.06)
+[09:31:06]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_map.txt (1491 bytes)
+[09:31:06] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/derived_notes.txt
+[09:31:06]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[09:31:06]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/derived_notes.txt`
+[09:31:06] $ /home/ivy/Code/glia/target/release/synth_traceback_target --src /home/ivy/swe-work/sphinx-doc__sphinx-10325 --issue /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/directive.txt
+[09:31:07] traceback directive: (inert; no graph-matched frame in issue traceback)
+[09:31:07] running pathB-llama: model=7b-q4
+[09:31:07] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/out.txt
+[09:33:03] pathB-llama done in 115.9s; out=/home/ivy/Code/glia/scratch/latent/out/inst-sphinx-doc__sphinx-10325-7b-q4-cycle-0.3/out.txt
+[09:33:03] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[09:33:03] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 apply --recount --whitespace=fix /tmp/run_instance.patch
+[09:33:03] $ patch -p1 --forward --quiet --fuzz=5 -l -d /home/ivy/swe-work/sphinx-doc__sphinx-10325 -i /tmp/run_instance.patch
+[09:33:03] $ git -C /home/ivy/swe-work/sphinx-doc__sphinx-10325 checkout -- .
+{
+  "instance_id": "sphinx-doc__sphinx-10325",
+  "model": "7b-q4",
+  "wall_s": 115.9,
+  "aplus_cells": 0,
+  "apply": "APPLY-FAIL",
+  "f2p": null,
+  "reg": null,
+  "reg_fail": null,
+  "apply_err": "error: sphinx/ext/autodoc.py: No such file or directory\n"
+}
+[2026-05-21T09:33:03+10:00] [7/7] sphinx-doc__sphinx-10325 FAIL wall=124s
+[2026-05-21T09:33:03+10:00] cycle 0.3 DONE · pass=1 fail=6 error=0 total=1328s

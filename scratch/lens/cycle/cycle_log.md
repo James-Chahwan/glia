@@ -1,5 +1,13 @@
 # Overnight loop — cycle log
 
+## cycle 0.7 — 7b-q4 · 2026-05-21T17:10:37+10:00 → 2026-05-21T17:37:19+10:00
+
+- N=7 loop-set instances
+- pass=1 / fail=6 / error=0
+- total wall=1602s
+- per-cycle results: cycle/cycle-0.7-results.jsonl
+
+
 ## cycle 0.3 — 7b-q4 · 2026-05-21T09:10:55+10:00 → 2026-05-21T09:33:03+10:00
 
 - N=7 loop-set instances
@@ -113,3 +121,42 @@ scratch/lens/src/bin/lens-batch.rs                 edit  (D1 generate-mode forwa
 scratch/lens/src/bin/lens-analyze.rs               edit  (D3 layer-of-decision)
 scratch/latent/out/run_instance.py                 edit  (wire B4 composer)
 ```
+
+## cycle 0.7 — multi-channel composer · 2026-05-21 ~17:10 → 17:37 · pass=1 / fail=6
+
+7-instance loop with synth_directive composer (B4) + softened raise-redirect (A2). 27min total wall-clock.
+
+**Results per instance (vs cycle 0.3):**
+
+| instance | 0.3 mode | 0.7 mode | Δ |
+|---|---|---|---|
+| marshmallow-1359 | PASS | PASS | sentinel held |
+| matplotlib-22711 | RIGHT-LINE-WRONG | RIGHT-LINE-WRONG | unchanged |
+| matplotlib-22835 | NO-DIFF | APPLY-FAIL | A2 unstuck → diff emitted, malformed |
+| sklearn-10508 | RIGHT-TARGET-WRONG-EDIT | RIGHT-LINE-WRONG-CONTENT | tighter to gold |
+| django-10914 | RIGHT-LINE-WRONG | APPLY-FAIL | REGRESSED — composer pointed at storage.py, gold is conf/global_settings.py |
+| pytest-11143 | RIGHT-TARGET-WRONG-EDIT | APPLY-FAIL | REGRESSED — malformed diff |
+| sphinx-10325 | APPLY-FAIL | APPLY-FAIL | unchanged |
+
+**Net:** PASS=1 (flat). Composer produced 2 wins + 2 regressions + 3 unchanged. Failure shape shifted: 0/7 NO-DIFF (was 1), 4/7 APPLY-FAIL (was 1), 0/7 RIGHT-TARGET-WRONG-EDIT (was 2). The model is now emitting more structured content but with malformed apply.
+
+**Channel-attribution on the 1 PASS:**
+- marshmallow gold qname `_bind_to_schema` named ONLY by `traceback` channel in the composed directive.
+- test_expectation surfaced CLASSES (`fields::List`, `fields::DateTime`, `fields::Tuple`, `Schema`, `Nested::schema`) but NOT the buggy METHOD.
+- prose_mention surfaced classes only.
+- Composer's score put test_expectation (30) PRIMARY, traceback (19) SECONDARY. Marshmallow PASSed because traceback content was still in the directive (as supporting block), but the PRIMARY/SECONDARY ranking was inverted vs what carried the win.
+
+**Diagnosis:** B4 composer scoring rewards bullet COUNT, not bullet PRECISION. Class-name bullets (test_expectation) are coarser than line-anchored method bullets (traceback). For instances where the bug is in a CLASS-level rewrite (django global_settings default value), composer-PRIMARY = test_expectation → model edits the WRONG file because test_expectation surfaces method-on-class targets, missing settings-module constants entirely. See `[[project-b4-composer-scoring-needs-tuning]]`.
+
+**Action items emerging:**
+1. Fix B4 scoring: +METHOD bullets weighted 2× above CLASS, +line-anchor bonus when traceback has line ranges. Same scoring infra, weight tweak. ~30min.
+2. Address sphinx-10325 APPLY-FAIL: model edits `sphinx/ext/autodoc.py` but gold patches `sphinx/ext/autodoc/__init__.py`. Need a file-existence check in synth bins — when a graph node's POSITION file doesn't exist on disk, skip that bullet.
+3. Sage loop (Bucket C) WOULD HAVE CAUGHT django regression: synth_validator parses model's first-pass diff, sees `storage.py` ≠ `global_settings.py`, emits critique. Second pass with critique would retarget.
+
+**Artefacts:**
+- `cycle/cycle-0.7-results.jsonl` — append-only per-instance
+- `cycle/cycle-0.7-failure-modes.md` — A1 classifier output
+- `cycle/cycle-0.7-channel-attribution.md` — A2 attribution
+- `cycle/cycle-0.7-stderr.log` — per-instance llama.cpp stderr
+
+**Honest framing:** no PASS-count uplift. Sage loop (Bucket C) is now the load-bearing next move — the failure shape shift toward APPLY-FAIL is exactly what a diff-validator critique pass addresses.
