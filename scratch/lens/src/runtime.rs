@@ -128,6 +128,30 @@ pub trait LensRuntime {
         run_label: &str,
         spec: &InjectSpec,
     ) -> Result<AutoregressiveCaptures>;
+
+    /// D2 — toggle attention-output capture. When true, subsequent forward
+    /// calls populate per-layer attention norms accessible via
+    /// `attention_norms()`. Saves the per-row L2 norms only (one f32 per
+    /// token position per layer) to keep memory bounded.
+    fn set_capture_attention(&mut self, on: bool);
+
+    /// D2 — pull per-layer attention norms captured during the most recent
+    /// forward pass. Returns (HashMap<layer, Vec<f32>>, tensor_names_seen).
+    /// Empty when capture_attention was off OR no attention tensors fired.
+    fn attention_norms(&self) -> AttentionCaptures;
+}
+
+/// D2 — attention output captured per layer per token-position. Same
+/// row order as the residual `per_layer` so callers can correlate by index.
+#[derive(Debug, Clone, Default)]
+pub struct AttentionCaptures {
+    /// Layer index → per-row L2 norm of attention output tensor (one f32
+    /// per token position, appended across ubatch firings).
+    pub norms_per_layer: std::collections::HashMap<u32, Vec<f32>>,
+    /// Diagnostic: which attention-stage tensor names actually fired during
+    /// the forward pass. Tells the caller whether `kqv_out-N` /
+    /// `kq_soft_max_ext-N` / etc was the active name in this model arch.
+    pub tensor_names_seen: std::collections::BTreeSet<String>,
 }
 
 /// Injection parameters for `forward_generate_with_inject`. Lives in
@@ -296,6 +320,14 @@ impl LensRuntime for FakeRuntime {
         })
     }
 
+    fn set_capture_attention(&mut self, _on: bool) {
+        // FakeRuntime has no attention; no-op.
+    }
+
+    fn attention_norms(&self) -> AttentionCaptures {
+        AttentionCaptures::default()
+    }
+
     fn forward_generate_with_inject(
         &mut self,
         prompt_tokens: &[u32],
@@ -360,6 +392,21 @@ struct CbState {
     /// `forward_generate_with_inject` before each single-token decode call.
     /// None during prompt prefill or non-inject forward passes.
     inject_active_position: Option<u32>,
+    /// D2 (attention-bloat-ratio metric, cycle 0.6 spitball): when enabled,
+    /// capture per-row L2 norms of the attention output tensor at each
+    /// layer. cb_eval recognizes Qwen2 attention-stage tensor names
+    /// (kqv_out-N, attn_out-N, kq_soft_max_ext-N) and stores per-row norms
+    /// (one f32 per ubatch row) keyed by layer. Saves memory vs storing
+    /// full tensors. When `capture_attention` is false the path is
+    /// short-circuited.
+    capture_attention: bool,
+    /// Per-layer attention output L2 norms. Same row-order as `per_layer`
+    /// so callers can correlate by index.
+    attn_norms_per_layer: HashMap<u32, Vec<f32>>,
+    /// Set of attention-stage tensor names seen during the current forward
+    /// (diagnostic; first-pass tells the caller which tensor names are
+    /// actually populated by the running Qwen2 graph). Cleared on reset.
+    attn_tensor_names_seen: std::collections::BTreeSet<String>,
 }
 
 impl CbState {
@@ -373,10 +420,15 @@ impl CbState {
             scratch: Vec::with_capacity(64 * 1024),
             inject_spec: None,
             inject_active_position: None,
+            capture_attention: false,
+            attn_norms_per_layer: HashMap::new(),
+            attn_tensor_names_seen: std::collections::BTreeSet::new(),
         }
     }
     fn reset_for_forward(&mut self) {
         self.per_layer.clear();
+        self.attn_norms_per_layer.clear();
+        self.attn_tensor_names_seen.clear();
         self.inject_active_position = None;
     }
 }
@@ -425,8 +477,12 @@ unsafe extern "C" fn cb_eval_trampoline(
     let l_out_layer = parse_l_out_layer(name);
     let is_result_norm = name == "result_norm";
     let is_result_output = name == "result_output";
+    // D2 — attention-stage tensor names per Qwen2's graph. The exact name
+    // depends on the model arch's compute graph; we accept any of these and
+    // record which fired in attn_tensor_names_seen for diagnostic.
+    let attn_layer = parse_attn_layer(name);
 
-    if l_out_layer.is_none() && !is_result_norm && !is_result_output {
+    if l_out_layer.is_none() && !is_result_norm && !is_result_output && attn_layer.is_none() {
         return true;
     }
 
@@ -516,6 +572,51 @@ unsafe extern "C" fn cb_eval_trampoline(
                 state.output_weight = Some(w);
             }
         }
+    } else if let Some(layer) = attn_layer {
+        // D2 — attention-output capture. Only when capture_attention is on
+        // (saves ~10-20ms per forward in the default path).
+        if state.capture_attention {
+            state.attn_tensor_names_seen.insert(name.to_string());
+            let nbytes = unsafe { llama_cpp_sys_2::ggml_nbytes(t) };
+            let n_elems = nbytes / std::mem::size_of::<f32>();
+            // Qwen2's `kqv_out-N` is f32 (post-projection attention output);
+            // `kq_soft_max_ext-N` is f32 (softmax weights, shape varies).
+            // For unsupported dtypes skip silently.
+            let dtype = unsafe { (*t).type_ };
+            if dtype != llama_cpp_sys_2::GGML_TYPE_F32 {
+                return true;
+            }
+            state.scratch.resize(nbytes, 0);
+            unsafe {
+                llama_cpp_sys_2::ggml_backend_tensor_get(
+                    t,
+                    state.scratch.as_mut_ptr() as *mut std::os::raw::c_void,
+                    0,
+                    nbytes,
+                );
+            }
+            let data: &[f32] = unsafe {
+                std::slice::from_raw_parts(state.scratch.as_ptr() as *const f32, n_elems)
+            };
+            // Row-wise L2 norm. For attention output tensors (kqv_out, attn_out)
+            // the shape is [n_embd, n_tokens]; columns are tokens, so reshape
+            // by stride n_embd. For softmax tensors [n_head, n_dst, n_src],
+            // we collapse to a single norm per "row" of the leading dim.
+            // Heuristic: use ne[1] (second dim) as row count, fall back to
+            // 1 if not available.
+            let ne0 = unsafe { (*t).ne[0] } as usize;
+            let ne1 = unsafe { (*t).ne[1] } as usize;
+            let row_len = ne0.max(1);
+            let n_rows = if ne1 > 0 { ne1 } else { 1 };
+            let buf = state.attn_norms_per_layer.entry(layer).or_default();
+            for r in 0..n_rows {
+                let start = r * row_len;
+                let end = (start + row_len).min(n_elems);
+                if start >= n_elems { break; }
+                let s: f32 = data[start..end].iter().map(|x| x * x).sum();
+                buf.push(s.sqrt());
+            }
+        }
     }
     true
 }
@@ -524,6 +625,26 @@ unsafe extern "C" fn cb_eval_trampoline(
 fn parse_l_out_layer(name: &str) -> Option<u32> {
     let suffix = name.strip_prefix("l_out-")?;
     suffix.parse::<u32>().ok()
+}
+
+#[cfg(feature = "real")]
+fn parse_attn_layer(name: &str) -> Option<u32> {
+    // Try the Qwen2 attention-stage names. The exact name depends on
+    // llama.cpp's compute graph; we accept any and record which fired in
+    // attn_tensor_names_seen for downstream diagnostic.
+    for prefix in &[
+        "kqv_out-", "attn_out-", "kqv_merged_cont-",
+        "kq_soft_max_ext-", "soft_max-",
+    ] {
+        if let Some(suffix) = name.strip_prefix(*prefix) {
+            // Strip a possible "-pos-N" suffix if present.
+            let layer_str = suffix.split('-').next().unwrap_or(suffix);
+            if let Ok(n) = layer_str.parse::<u32>() {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 /// Walk every src of `t`, return the first one whose name matches `target`,
@@ -713,6 +834,19 @@ impl LensRuntime for LlamaCppRuntime {
     fn n_vocab(&self) -> usize { self.head.n_vocab }
     fn n_embd(&self) -> usize { self.head.n_embd }
     fn unembed_head(&self) -> &UnembedHead { &self.head }
+
+    fn set_capture_attention(&mut self, on: bool) {
+        let mut s = self.cb_state.lock().unwrap();
+        s.capture_attention = on;
+    }
+
+    fn attention_norms(&self) -> AttentionCaptures {
+        let s = self.cb_state.lock().unwrap();
+        AttentionCaptures {
+            norms_per_layer: s.attn_norms_per_layer.clone(),
+            tensor_names_seen: s.attn_tensor_names_seen.clone(),
+        }
+    }
 
     fn forward_capture(
         &mut self,
