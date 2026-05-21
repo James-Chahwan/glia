@@ -74,6 +74,18 @@ required-features = ["driver"]
 name = "synth_traceback_target"
 required-features = ["driver"]
 
+[[bin]]
+name = "synth_test_expectation"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_prose_mention"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_directive"
+required-features = ["driver"]
+
 [dev-dependencies]
 repo-graph-parser-go = { path = "../parsers/code/go" }
 repo-graph-parser-python = { path = "../parsers/code/python" }
