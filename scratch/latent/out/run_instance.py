@@ -179,8 +179,11 @@ def ensure_venv(inst, repo_dir):
     if repo == "astropy/astropy":
         # astropy 5.x setup.py imports extension_helpers at metadata-prep time
         extra_build_deps.append("extension_helpers")
+    # setuptools 71+ dropped pkg_resources — sklearn 0.20 (and other older
+    # repos on Python 3.9) import pkg_resources at setup.py top-level and
+    # ModuleNotFoundError out. Pin <71 globally; newer repos still work.
     sh(["uv", "pip", "install", "--python", str(py_bin),
-        "pip", "setuptools", "wheel", "cython", *extra_build_deps],
+        "pip", "setuptools<71", "wheel", "cython", *extra_build_deps],
        capture_output=True, text=True)
 
     # Install pinned pip_packages (numpy/scipy/etc). Try as-spec'd first;
