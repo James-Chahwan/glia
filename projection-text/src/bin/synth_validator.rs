@@ -165,16 +165,31 @@ fn main() -> Result<()> {
             ));
         }
 
-        // ACCESS-PATH-MISS: if the directive listed `self.root.X` style paths,
-        // verify the diff's added lines USE that prefix.
+        // ACCESS-PATH-MISS: only fire when the diff DROPPED the directive's
+        // access path and replaced it with a bare attr access. Specifically:
+        // removed_text contains `.attr` AND added_text contains `.attr` AND
+        // neither the directive's exact prefix NOR a near-equivalent receiver
+        // (any string ending in `.root.` for self.root.X paths) appears in
+        // added_text. This avoids false positives when the model used
+        // `<receiver>.root.X` instead of `self.root.X` — semantically
+        // equivalent for marshmallow-style fixes.
         for ap in &targets.access_paths {
-            // Pull the "tail" past the last `.` — that's the missing attr.
             if let Some(last_dot) = ap.rfind('.') {
                 let prefix = &ap[..last_dot];
                 let attr = &ap[last_dot + 1..];
-                // If the diff's added text mentions the attr but NOT with the
-                // directive's prefix, flag it.
-                if shape.added_text.contains(attr) && !shape.added_text.contains(prefix) {
+                let attr_access = format!(".{attr}");
+                let added_has_attr = shape.added_text.contains(&attr_access);
+                let added_has_prefix = shape.added_text.contains(prefix);
+                // Near-equivalents: when prefix is `self.root`, any `*.root`
+                // path is functionally the same root-walker pattern.
+                let inner_path = if let Some(idx) = prefix.find('.') {
+                    &prefix[idx + 1..]
+                } else {
+                    prefix
+                };
+                let near_equiv = !inner_path.is_empty()
+                    && shape.added_text.contains(&format!(".{inner_path}."));
+                if added_has_attr && !added_has_prefix && !near_equiv {
                     critiques.push(format!(
                         "**ACCESS-PATH-MISS**: Directive listed access path `{}` \
                          but the added lines reference `.{}` without the `{}.` \
