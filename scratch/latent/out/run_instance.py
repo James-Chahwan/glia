@@ -900,13 +900,16 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         inf_env["PER_TOKEN_POOL"] = "1"
         inf_env["POOL_MARKERS"] = "1"
         # Bump ctx if not already set. Per-token-pool can expand
-        # ~5-7× over mean-pool on cycle_loop_set (saw 25K tokens for
-        # marshmallow in smoke-allfeat). Qwen 2.5 Coder supports 128K
-        # natively; 32K is a safe upper bound that fits all observed
-        # instances + new directive channels (causal chain + exemplars
-        # + file priors + runtime evidence + Lever 3 critique pass-2).
+        # ~5-7× over mean-pool on cycle_loop_set. Cycle 1.1 GPU run
+        # surfaced matplotlib-22711 with 1155 pool entries (~60K
+        # tokens) and matplotlib-22835 with 323 entries (~25K tokens).
+        # 32K wasn't enough — every matplotlib sample exited rc=3
+        # ("T_total > n_ctx"). Bumping to 65536 covers everything seen
+        # so far on cycle_loop_set; Qwen 2.5 Coder supports 128K
+        # natively. VRAM cost on A40 at 64K is ~7GB additional for KV
+        # cache; total ~12GB, fits 48GB comfortably.
         if "N_CTX" not in inf_env:
-            inf_env["N_CTX"] = "32768"
+            inf_env["N_CTX"] = "65536"
 
     # B5 beam-sampling. When GLIA_SAMPLES>1, run N inference passes with
     # SAMPLE_TEMP>0 + per-sample seed, write each candidate diff to
