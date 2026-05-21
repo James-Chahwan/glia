@@ -96,18 +96,31 @@ pip3 install --quiet \
 # on PATH for non-interactive shells. The build defaults look for `nvcc` on
 # PATH; without it CMake fails with "CMAKE_CUDA_COMPILER-NOTFOUND". Fix:
 # prepend /usr/local/cuda/bin AND pass -DCMAKE_CUDA_COMPILER explicitly.
-echo
-echo "=== llama-cpp-python with CUDA ==="
+#
+# Idempotency: skip the build (which takes ~15-20 min) when llama-cpp-python
+# is already importable AND GPU offload is enabled. Re-runs of this script
+# (e.g. after a failure further down the pipeline) MUST NOT trigger a fresh
+# CUDA compile — that wastes 15-20 min for no gain.
 export PATH="/usr/local/cuda/bin:${PATH}"
 echo 'export PATH="/usr/local/cuda/bin:$PATH"' >> ~/.bashrc
-if ! command -v nvcc >/dev/null 2>&1; then
-  echo "ERROR: nvcc not found even after PATH fix. /usr/local/cuda/bin contents:"
-  ls /usr/local/cuda/bin/ | head
-  exit 3
+echo
+if python3 -c "import llama_cpp; assert llama_cpp.llama_supports_gpu_offload()" 2>/dev/null; then
+  echo "=== llama-cpp-python already installed with GPU offload — skipping rebuild ==="
+  python3 -c "import llama_cpp; print('  version:', llama_cpp.__version__, 'gpu:', llama_cpp.llama_supports_gpu_offload())"
+else
+  echo "=== llama-cpp-python with CUDA (BUILD) ==="
+  if ! command -v nvcc >/dev/null 2>&1; then
+    echo "ERROR: nvcc not found even after PATH fix. /usr/local/cuda/bin contents:"
+    ls /usr/local/cuda/bin/ | head
+    exit 3
+  fi
+  echo "  nvcc: $(nvcc --version | tail -1)"
+  # Pin to A40 sm_86 only — cuts build time from ~17min (universal arch) to
+  # ~3-5min. Override via CUDA_ARCH env if running on a different GPU.
+  CUDA_ARCH="${CUDA_ARCH:-86}"
+  CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCH} -DLLAMA_CUDA_FORCE_MMQ=ON" \
+    pip3 install --quiet --upgrade --force-reinstall --no-cache-dir llama-cpp-python
 fi
-echo "  nvcc: $(nvcc --version | tail -1)"
-CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DLLAMA_CUDA_FORCE_MMQ=ON" \
-  pip3 install --quiet --upgrade --force-reinstall --no-cache-dir llama-cpp-python
 
 # 6. Pull glia source from GitHub.
 echo
