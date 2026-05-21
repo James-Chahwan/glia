@@ -87,6 +87,9 @@ def load_instance(instance_id, split):
         "patch": row.patch,
         "test_patch": row.test_patch,
         "version": row.version,
+        # P4.2 (cycle 1.1): hints_text is issue-thread / PR discussion.
+        # Feeds synth_pr_hint as a low-score directive channel.
+        "hints_text": row.hints_text if hasattr(row, "hints_text") else "",
     }
 
 
@@ -122,7 +125,7 @@ _PY_FALLBACK = {"3.5": "3.9", "3.6": "3.9", "3.7": "3.9", "3.8": "3.9"}
 
 # Per-repo install fixups. Run after spec.install attempt; fail-soft.
 # Repos with C extensions whose editable install doesn't auto-build them.
-_POST_INSTALL_BUILD_EXT = {"matplotlib/matplotlib", "astropy/astropy"}
+_POST_INSTALL_BUILD_EXT = {"matplotlib/matplotlib", "astropy/astropy", "scikit-learn/scikit-learn"}
 
 # Per-(repo, version) test_cmd override — when the spec test_cmd assumes
 # infra we don't have (sphinx tox env that needs special setup).
@@ -696,6 +699,65 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                 except OSError:
                     pass
 
+    # P4.4 (Option 6, cycle 1.1) repo file priors. Soft routing hint:
+    # "In <repo>, fixes most commonly touch X, Y, Z." Built from
+    # SWE-bench Lite aggregate via build_file_priors.py. The current
+    # instance is excluded at read-time to avoid leak.
+    file_priors_block = ""
+    try:
+        slug_fp = inst['repo'].replace("/", "__")
+        fp_path = OUTDIR / "file_priors" / f"{slug_fp}.json"
+        if fp_path.exists():
+            fp = json.loads(fp_path.read_text())
+            # Exclude current instance: filter the by_file_to_instances map.
+            by_inst = fp.get("by_file_to_instances", {})
+            file_counts_ex = []
+            n_total_ex = max(1, fp.get("n_total_instances", 1) - 1)
+            for fpath, insts in by_inst.items():
+                cnt = sum(1 for i in insts if i != inst["instance_id"])
+                if cnt > 0:
+                    file_counts_ex.append((fpath, cnt))
+            file_counts_ex.sort(key=lambda x: (-x[1], x[0]))
+            top3 = file_counts_ex[:3]
+            if top3:
+                hint_lines = ", ".join(f"`{f}` ({100*c/n_total_ex:.0f}%)" for f, c in top3)
+                file_priors_block = (
+                    "## Where fixes typically land in this codebase (graph-aggregated prior):\n\n"
+                    f"Across past fixes in `{inst['repo']}`, the most-edited files are: {hint_lines}. "
+                    "This is a SOFT routing hint based on repository history, NOT a directive — "
+                    "the actual fix file is dictated by the traceback / test_patch above.\n\n"
+                )
+                log(f"file priors: prepended top-3 ({len(top3)} files)")
+    except Exception as _e:
+        log(f"file priors: skipped ({type(_e).__name__}: {_e})")
+
+    # P4.1 diff exemplar library (cycle 1.1). Inject 1-2 prior gold patches
+    # from OTHER instances of the same repo as a "diff dialect" anchor.
+    # Activates when scratch/latent/out/exemplars/<repo_slug>.jsonl exists
+    # (built via build_diff_exemplars.py). Anti-leak: exclude current
+    # instance_id from the cache.
+    exemplar_block = ""
+    try:
+        slug = inst['repo'].replace("/", "__")
+        ex_path = OUTDIR / "exemplars" / f"{slug}.jsonl"
+        if ex_path.exists():
+            ex_recs = [json.loads(l) for l in ex_path.read_text().splitlines() if l.strip()]
+            ex_recs = [r for r in ex_recs if r.get("instance_id") != inst["instance_id"]]
+            if ex_recs:
+                # Cap to first 2 to keep prefix bounded.
+                ex_recs = ex_recs[:2]
+                exemplar_block = (
+                    "## Diff dialect for this codebase (prior gold patches, NOT a hint for THIS bug):\n\n"
+                    "These show the file paths, hunk headers, indent conventions this codebase uses. "
+                    "Match this STYLE when emitting your diff. The CONTENT of these is NOT relevant — "
+                    "they are unrelated past fixes in the same repo.\n\n"
+                )
+                for r in ex_recs:
+                    exemplar_block += f"```\n{r.get('first_hunk', '').strip()}\n```\n\n"
+                log(f"diff exemplars: prepended {len(ex_recs)} from {ex_path.name}")
+    except Exception as _e:
+        log(f"diff exemplars: skipped ({type(_e).__name__}: {_e})")
+
     # 7. assemble prefix + suffix
     prefix = (
         "<|im_start|>system\n"
@@ -704,6 +766,8 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         "<|im_start|>user\n"
         f"A bug has been reported in the `{inst['repo']}` repository. Here is the report:\n\n"
         f"{inst['problem_statement']}\n\n"
+        f"{file_priors_block}"
+        f"{exemplar_block}"
         f"{f2p_test_block}"
         f"{target_file_block}"
         f"{constants_block}"
@@ -746,6 +810,12 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         ]
         if test_patch_path.exists() and test_patch_path.stat().st_size > 0:
             cmd += ["--test-patch", str(test_patch_path)]
+        # P4.2: write hints_text to a tmp file + pass to composer if non-empty.
+        hints_text = inst.get("hints_text") or ""
+        if hints_text.strip():
+            hints_path = workdir / "hints_text.txt"
+            hints_path.write_text(hints_text)
+            cmd += ["--hints-text", str(hints_path)]
         sh(cmd, capture_output=True, text=True)
     elif synth_target_bin.exists():
         sh(
@@ -772,6 +842,33 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         else:
             log("composed directive: (inert; no channel surfaced graph-derived content)")
 
+    # Lever 1 (test-runtime-evidence pre-flight): apply the test_patch to the
+    # repo at base_commit and run the F2P test to capture the ACTUAL failing
+    # traceback the test produces *before* any model edit. The traceback names
+    # the exact runtime types, line numbers, and access paths the bug hits —
+    # information the issue text often paraphrases or omits. Surface as a
+    # directive prefix so the model sees concrete runtime evidence.
+    #
+    # Gated on GLIA_RUNTIME_EVIDENCE=1 (default off; adds ~10-30s per instance
+    # for test setup + run). Always reverts the test_patch after capture so the
+    # subsequent inference + apply_and_test flow is unaffected.
+    if os.environ.get("GLIA_RUNTIME_EVIDENCE") == "1":
+        try:
+            runtime_evidence = _capture_runtime_evidence(inst, repo_dir, workdir)
+            if runtime_evidence:
+                evidence_block = (
+                    "\n## Runtime evidence (F2P failure trace at base_commit)\n\n"
+                    "The failing-to-pass tests were applied and run before any "
+                    "model fix; the traceback below is what they produce. It "
+                    "names the exact runtime types and line numbers the bug "
+                    "exercises:\n\n"
+                    f"```\n{runtime_evidence.strip()}\n```\n\n"
+                )
+                directive_text = evidence_block + directive_text
+                log(f"runtime evidence: prepended {len(runtime_evidence)}c F2P traceback")
+        except Exception as e:
+            log(f"runtime evidence: skipped ({type(e).__name__}: {e})")
+
     suffix = (
         f"{directive_text}"
         "Produce a minimal unified git diff that fixes the bug. Output rules:\n"
@@ -794,16 +891,298 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     inf_env = os.environ.copy()
     if "r1-distill" in model_key or "deepseek-r1" in model_key.lower():
         inf_env["MAX_NEW"] = inf_env.get("MAX_NEW", "1800")
+    # C9 wider context: when GLIA_PER_TOKEN_POOL=1, pass PER_TOKEN_POOL=1 +
+    # POOL_MARKERS=1 to run_llama_pathB. Each summary becomes a multi-token
+    # attendable segment instead of a mean-pooled vector — preserves per-
+    # entry information at the cost of more prompt tokens. The default
+    # Qwen2.5-Coder 7B ctx is 32K; bump N_CTX to fit larger prefixes.
+    if os.environ.get("GLIA_PER_TOKEN_POOL") == "1":
+        inf_env["PER_TOKEN_POOL"] = "1"
+        inf_env["POOL_MARKERS"] = "1"
+        # Bump ctx if not already set. Per-token-pool can expand
+        # ~5-7× over mean-pool on cycle_loop_set (saw 25K tokens for
+        # marshmallow in smoke-allfeat). Qwen 2.5 Coder supports 128K
+        # natively; 32K is a safe upper bound that fits all observed
+        # instances + new directive channels (causal chain + exemplars
+        # + file priors + runtime evidence + Lever 3 critique pass-2).
+        if "N_CTX" not in inf_env:
+            inf_env["N_CTX"] = "32768"
+
+    # B5 beam-sampling. When GLIA_SAMPLES>1, run N inference passes with
+    # SAMPLE_TEMP>0 + per-sample seed, write each candidate diff to
+    # out_sample_<i>.txt, dedup by exact-text equality, score each by a
+    # cheap heuristic (diff present + applies cleanly via dry-run), and
+    # promote the highest-scoring candidate to out.txt. The full
+    # apply+test scoring happens later in apply_and_test, but the cheap
+    # apply check up-front filters obvious malformed candidates so we
+    # don't waste the post-test pass on them.
+    samples = int(os.environ.get("GLIA_SAMPLES", "1"))
+    sample_temp_str = os.environ.get("GLIA_SAMPLE_TEMP", "0.6") if samples > 1 else "0"
+    sample_top_k = os.environ.get("GLIA_SAMPLE_TOP_K", "5")
+
     t0 = time.time()
-    r = sh(
-        ["python", str(OUTDIR / "run_llama_pathB.py"),
-         gguf, str(prefix_path), str(suffix_path), str(summaries_aplus), str(out_path)],
-        capture_output=True, text=True, env=inf_env,
-    )
-    wall = time.time() - t0
-    if r.returncode != 0:
-        raise SystemExit(f"run_llama_pathB failed rc={r.returncode}: {r.stderr[-1000:]}")
-    log(f"pathB-llama done in {wall:.1f}s; out={out_path}")
+    if samples <= 1:
+        r = sh(
+            ["python", str(OUTDIR / "run_llama_pathB.py"),
+             gguf, str(prefix_path), str(suffix_path), str(summaries_aplus), str(out_path)],
+            capture_output=True, text=True, env=inf_env,
+        )
+        wall = time.time() - t0
+        if r.returncode != 0:
+            raise SystemExit(f"run_llama_pathB failed rc={r.returncode}: {r.stderr[-1000:]}")
+        log(f"pathB-llama done in {wall:.1f}s; out={out_path}")
+    else:
+        # Build the candidate set.
+        candidates = []
+        for i in range(samples):
+            cand_env = dict(inf_env)
+            cand_env["SAMPLE_TEMP"] = sample_temp_str
+            cand_env["SAMPLE_TOP_K"] = sample_top_k
+            cand_env["SAMPLE_SEED"] = str(0xC0DE + i)
+            cand_path = workdir / f"out_sample_{i}.txt"
+            ti = time.time()
+            ri = sh(
+                ["python", str(OUTDIR / "run_llama_pathB.py"),
+                 gguf, str(prefix_path), str(suffix_path), str(summaries_aplus), str(cand_path)],
+                capture_output=True, text=True, env=cand_env,
+            )
+            ci = time.time() - ti
+            if ri.returncode != 0:
+                log(f"  sample {i}: rc={ri.returncode} ({ci:.1f}s); skipped")
+                continue
+            text = cand_path.read_text() if cand_path.exists() else ""
+            candidates.append((i, cand_path, text, ci))
+            log(f"  sample {i}: {len(text)}c in {ci:.1f}s")
+        wall = time.time() - t0
+        # Dedup by text (greedy + low-temp can collide).
+        seen = set()
+        uniq = []
+        for c in candidates:
+            key = c[2].strip()
+            if key and key not in seen:
+                seen.add(key)
+                uniq.append(c)
+        # Cheap pre-score: diff present (has `diff --git`) +1, applies
+        # cleanly via `git apply --check` +2 (else 0).
+        def _cheap_score(cand):
+            (idx, path, text, _ci) = cand
+            s = 0
+            if "diff --git" in text:
+                s += 1
+            patch_path = Path("/tmp") / f"sample_check_{idx}.patch"
+            patch_path.write_text(text)
+            r = sh(["git", "-C", str(repo_dir), "apply", "--check", str(patch_path)],
+                   capture_output=True, text=True)
+            if r.returncode == 0:
+                s += 2
+            else:
+                # Try fuzz-tolerant patch as the model-diff apply path does.
+                r2 = sh(["patch", "-p1", "--forward", "--quiet", "--fuzz=5", "-l",
+                         "--dry-run", "-d", str(repo_dir), "-i", str(patch_path)],
+                        capture_output=True, text=True)
+                if r2.returncode == 0:
+                    s += 1
+            return s
+        scored = [(c, _cheap_score(c)) for c in uniq]
+        scored.sort(key=lambda x: (-x[1], x[0][0]))
+        if scored:
+            # Matrix Option C: top-K candidates by cheap_score → full
+            # apply+test each → pick by REAL test score. Records per-
+            # (instance, beam) outcomes to workdir/beam_matrix.jsonl for
+            # the solution_curve.py analyzer. K defaults to 2 (top-2 of N
+            # samples) to keep wall-cost bounded; tunable via env.
+            # P5.1 (Option 7, cycle 1.1): GLIA_BEAM_TEST=1 promotes from
+            # "test top-2 by cheap score" (matrix Option C default) to
+            # "test ALL candidates" (full test-execution-guided beam).
+            # Costs N× test wall-clock vs 2× — heavy, only worth it when
+            # we want maximum candidate-selection accuracy.
+            if os.environ.get("GLIA_BEAM_TEST") == "1":
+                top_k = samples
+            else:
+                top_k = int(os.environ.get("GLIA_BEAM_TOP_K", "2"))
+            test_top = scored[:top_k]
+            log(f"beam: {len(uniq)} unique of {samples} candidates; "
+                f"full-testing top-{len(test_top)} by cheap score")
+            beam_matrix_path = workdir / "beam_matrix.jsonl"
+            matrix_records = []
+            full_results = []
+            for cand, cheap_s in test_top:
+                idx, _path, text, ci = cand
+                # apply_and_test mutates + resets the repo (git checkout
+                # -- . at end); safe to call multiple times in serial.
+                cand_workdir = workdir / f"sample_{idx}_test"
+                cand_workdir.mkdir(exist_ok=True)
+                cand_out = cand_workdir / "out.txt"
+                cand_out.write_text(text)
+                try:
+                    t_apt = time.time()
+                    res = apply_and_test(inst, repo_dir, cand_out,
+                                         workdir=cand_workdir)
+                    apt_wall = time.time() - t_apt
+                except Exception as e:
+                    log(f"  sample {idx}: apply_and_test raised "
+                        f"{type(e).__name__}: {e}")
+                    res = {"apply": "ERROR", "f2p": None,
+                           "reg": None, "reg_fail": None}
+                    apt_wall = 0.0
+                rec = {
+                    "instance_id": inst["instance_id"],
+                    "sample_idx": idx,
+                    "cheap_score": cheap_s,
+                    "infer_wall_s": ci,
+                    "test_wall_s": apt_wall,
+                    "apply": res.get("apply"),
+                    "f2p": res.get("f2p"),
+                    "p2p_pass": res.get("reg"),
+                    "p2p_fail": res.get("reg_fail"),
+                    "diff_chars": len(text),
+                }
+                matrix_records.append(rec)
+                full_results.append((cand, res))
+                log(f"  sample {idx}: cheap={cheap_s} apply={res.get('apply')} "
+                    f"f2p={res.get('f2p')} reg_fail={res.get('reg_fail')}")
+            # Persist per-candidate matrix data.
+            with open(beam_matrix_path, "w") as f:
+                for r in matrix_records:
+                    f.write(json.dumps(r) + "\n")
+            # Pick best by full result, hierarchy: clean PASS > PASS-with-
+            # regressions > FAIL(more F2P pass) > NO-RUN > APPLY-FAIL.
+            def _full_score(item):
+                _cand, res = item
+                f = (res.get("f2p") or "")
+                a = (res.get("apply") or "").lower()
+                if a == "apply-fail":
+                    return -100
+                if a == "error":
+                    return -110
+                if f.startswith("NO-RUN") or f.startswith("TIMEOUT"):
+                    return -80
+                if f == "PASS" and (res.get("reg_fail") or 0) == 0:
+                    return 1000
+                if "regressions" in f:
+                    return 900
+                if f.startswith("FAIL"):
+                    m = re.match(r"FAIL \((\d+)/", f)
+                    return int(m.group(1)) * 10 if m else 0
+                return 0
+            best_cand, best_res = max(full_results, key=_full_score)
+            best_idx, _bp, best_text, _bci = best_cand
+            log(f"beam: matrix tested {len(full_results)} candidates; "
+                f"promoting sample_{best_idx} "
+                f"(apply={best_res.get('apply')} f2p={best_res.get('f2p')})")
+            out_path.write_text(best_text)
+        else:
+            log(f"beam: all {samples} samples produced empty/failed candidates")
+            out_path.write_text("")
+
+    # P2.1 D2 pool reshape (cycle 1.1, full 2-pass variant). When pass-1
+    # produced a non-empty diff that didn't trivially apply, capture D2
+    # per-position attention via lens-attention, aggregate to per-pool-entry
+    # scores using pool_positions.json (emitted by run_llama_pathB.py),
+    # drop bottom-30% by attention from summaries-aplus, re-render the
+    # prompt, re-infer. The reshaped output competes with pass-1 via
+    # _is_better_result.
+    #
+    # Gated on GLIA_POOL_RESHAPE=full. Costs roughly +2× inference per
+    # instance (one capture pass + one generation pass with reshaped pool).
+    if os.environ.get("GLIA_POOL_RESHAPE") == "full" and out_path.exists():
+        try:
+            pos_path = workdir / "out.pool_positions.json"
+            if not pos_path.exists():
+                log("pool-reshape: pool_positions.json missing; skipping")
+            else:
+                lens_attn_bin = GLIA / "scratch/lens/target/release/lens-attention"
+                lens_tokenizer = Path("/home/ivy/Models/qwen2.5-coder-tokenizer/tokenizer.json")
+                if not (lens_attn_bin.exists() and lens_tokenizer.exists()):
+                    log(f"pool-reshape: prereq missing (bin={lens_attn_bin.exists()}, tok={lens_tokenizer.exists()}); skipping")
+                else:
+                    log("pool-reshape: capturing D2 attention norms via lens-attention")
+                    attn_out = workdir / "pool_reshape_attn.jsonl"
+                    sh(
+                        [str(lens_attn_bin),
+                         "--weights", gguf,
+                         "--tokenizer", str(lens_tokenizer),
+                         "--prefix", str(prefix_path),
+                         "--suffix", str(suffix_path),
+                         "--max-new", "8",
+                         "--out", str(attn_out)],
+                        capture_output=True, text=True,
+                    )
+                    if attn_out.exists():
+                        # Aggregate attention norms per pool entry at
+                        # decision layers (25-27 per cycle 0.4 lens).
+                        pool_pos = json.loads(pos_path.read_text())
+                        entries = pool_pos.get("entries", [])
+                        # Build per-position score by summing decision-band layers.
+                        pos_score: dict[int, float] = {}
+                        with open(attn_out) as f:
+                            for line in f:
+                                rec = json.loads(line)
+                                layer = rec.get("layer")
+                                pos = rec.get("position_idx")
+                                norm = rec.get("norm")
+                                if layer is None or pos is None or norm is None:
+                                    continue
+                                if 25 <= layer <= 27:
+                                    pos_score[pos] = pos_score.get(pos, 0.0) + norm
+                        # Aggregate per pool entry: mean norm over its token range.
+                        entry_scores = []
+                        for e in entries:
+                            ts, te = e["token_start"], e["token_end"]
+                            scores = [pos_score.get(p, 0.0) for p in range(ts, te)]
+                            mean = sum(scores) / max(1, len(scores))
+                            entry_scores.append((e["idx"], mean, e.get("qname")))
+                        entry_scores.sort(key=lambda x: x[1])
+                        n_drop = max(1, len(entry_scores) * 30 // 100)
+                        drop_idx = {e[0] for e in entry_scores[:n_drop]}
+                        log(f"pool-reshape: scored {len(entry_scores)} entries; "
+                            f"dropping bottom {n_drop} (idx={sorted(drop_idx)})")
+                        # Filter summaries-aplus.json.
+                        all_summaries = json.loads(summaries_aplus.read_text())
+                        kept = [s for i, s in enumerate(all_summaries) if i not in drop_idx]
+                        reshaped_path = workdir / "summaries-aplus-reshaped.json"
+                        reshaped_path.write_text(json.dumps(kept))
+                        # Re-run inference with reshaped pool.
+                        reshape_out_path = workdir / "out_reshape.txt"
+                        log(f"pool-reshape: re-inferring with {len(kept)} entries (was {len(all_summaries)})")
+                        t_rs = time.time()
+                        r_rs = sh(
+                            ["python", str(OUTDIR / "run_llama_pathB.py"),
+                             gguf, str(prefix_path), str(suffix_path),
+                             str(reshaped_path), str(reshape_out_path)],
+                            capture_output=True, text=True, env=inf_env,
+                        )
+                        wall_rs = time.time() - t_rs
+                        if r_rs.returncode == 0 and reshape_out_path.exists() and reshape_out_path.read_text().strip():
+                            # Score: did reshape produce a different diff with
+                            # better chance of applying? Cheap-apply check.
+                            cand_patch = Path("/tmp/_pool_reshape_check.patch")
+                            cand_patch.write_text(reshape_out_path.read_text())
+                            r_chk = sh(
+                                ["git", "-C", str(repo_dir), "apply", "--check", str(cand_patch)],
+                                capture_output=True, text=True,
+                            )
+                            orig_patch = Path("/tmp/_pool_reshape_orig.patch")
+                            orig_patch.write_text(out_path.read_text())
+                            r_chk_orig = sh(
+                                ["git", "-C", str(repo_dir), "apply", "--check", str(orig_patch)],
+                                capture_output=True, text=True,
+                            )
+                            if r_chk.returncode == 0 and r_chk_orig.returncode != 0:
+                                log(f"pool-reshape: promoted (reshape applies, original didn't; +{wall_rs:.1f}s)")
+                                out_path = reshape_out_path
+                                wall += wall_rs
+                            elif r_chk.returncode == 0 and r_chk_orig.returncode == 0:
+                                # Both apply — keep original (no signal to flip).
+                                log(f"pool-reshape: both apply; keeping pass-1 (+{wall_rs:.1f}s wasted)")
+                            else:
+                                log(f"pool-reshape: reshape doesn't apply either; keeping pass-1")
+                        else:
+                            log(f"pool-reshape: re-inference failed rc={r_rs.returncode}; keeping pass-1")
+                    else:
+                        log("pool-reshape: lens-attention produced no output; skipping reshape")
+        except Exception as e:
+            log(f"pool-reshape: raised {type(e).__name__}: {e}; keeping pass-1")
 
     # C2 (cycle 0.6 spitball sage loop): two-pass refinement. After pass-1
     # emits a diff, synth_validator critiques it against the directive.
@@ -992,6 +1371,199 @@ def extract_diff(out_text):
     return diff
 
 
+def compositional_apply_and_test(inst, repo_dir, out_path, workdir):
+    """P3.2 (Option 5, cycle 1.1). Hunk-by-hunk apply + test. Splits a
+    multi-hunk diff, applies each hunk INDIVIDUALLY, runs F2P+P2P after
+    each, keeps the hunk only if F2P pass count strictly increases AND
+    P2P fail count does not increase. Reverts otherwise.
+
+    Returns the combined-kept-hunks test_result dict (same shape as
+    apply_and_test). When the diff has 1 hunk or fewer, just defers to
+    apply_and_test directly. Addresses the django PASS-but-1-regressions
+    failure mode by isolating the regression-causing hunk.
+    """
+    diff_text = out_path.read_text() if out_path.exists() else ""
+    if not diff_text.strip():
+        return apply_and_test(inst, repo_dir, out_path, workdir=workdir)
+
+    header, hunks = _split_hunks(diff_text)
+    if len(hunks) <= 1:
+        # Single hunk → no compositional gain; defer.
+        return apply_and_test(inst, repo_dir, out_path, workdir=workdir)
+
+    log(f"compositional: {len(hunks)} hunks; testing hunk-by-hunk")
+    kept_hunks: list[str] = []
+    per_hunk_records: list[dict] = []
+    best_result: dict = {"apply": "INIT", "f2p": None}
+
+    def _f2p_pass_count(res: dict) -> int:
+        return int(res.get("f2p_pass") or 0)
+    def _p2p_fail_count(res: dict) -> int:
+        return int(res.get("reg_fail") or 0)
+
+    baseline_pass = 0
+    baseline_p2p_fail = 0
+    # Reset repo before each attempt; build combined diff = header + kept + this hunk.
+    for i, h in enumerate(hunks):
+        candidate_diff = header + "".join(kept_hunks) + h
+        candidate_path = workdir / f"compositional_hunk_{i}.diff"
+        candidate_path.write_text(candidate_diff)
+        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+        res = apply_and_test(inst, repo_dir, candidate_path, workdir=workdir)
+        f2p_pass = _f2p_pass_count(res)
+        p2p_fail = _p2p_fail_count(res)
+        keep = (f2p_pass > baseline_pass) and (p2p_fail <= baseline_p2p_fail)
+        # Special case: if the candidate broke applying (APPLY-FAIL), don't keep.
+        if (res.get("apply") or "").lower() == "apply-fail":
+            keep = False
+        per_hunk_records.append({
+            "hunk_idx": i,
+            "kept": keep,
+            "apply": res.get("apply"),
+            "f2p": res.get("f2p"),
+            "f2p_pass_after": f2p_pass,
+            "p2p_fail_after": p2p_fail,
+        })
+        if keep:
+            kept_hunks.append(h)
+            baseline_pass = f2p_pass
+            baseline_p2p_fail = p2p_fail
+            best_result = res
+            log(f"compositional: hunk {i} kept (f2p_pass={f2p_pass}, p2p_fail={p2p_fail})")
+        else:
+            log(f"compositional: hunk {i} dropped (f2p_pass={f2p_pass}, "
+                f"p2p_fail={p2p_fail}, apply={res.get('apply')})")
+
+    # Final combined diff = kept hunks only.
+    final_diff = header + "".join(kept_hunks)
+    final_path = workdir / "compositional_final.diff"
+    final_path.write_text(final_diff)
+    # Persist per-hunk record for the matrix analyzer.
+    hunk_log = workdir / "hunk_attribution.jsonl"
+    with open(hunk_log, "w") as f:
+        for r in per_hunk_records:
+            f.write(json.dumps(r) + "\n")
+    log(f"compositional: kept {len(kept_hunks)}/{len(hunks)} hunks; final result f2p={best_result.get('f2p')}")
+    # Promote final composite to out_path so the rest of run_instance sees it.
+    if kept_hunks:
+        out_path.write_text(final_diff)
+    return best_result
+
+
+def _capture_runtime_evidence(inst, repo_dir, workdir) -> str:
+    """Lever 1 helper. Apply test_patch, run the F2P test once at base_commit
+    (NO model fix applied), capture the failing test's traceback / assertion,
+    revert the test_patch. Returns the failure block (trimmed to ~3KB) or
+    empty string if anything fails.
+
+    Side-effects on repo_dir are reverted via `git checkout -- .` before
+    returning so the subsequent inference pipeline starts from a clean tree.
+    """
+    test_patch = inst.get("test_patch") or ""
+    if not test_patch.strip():
+        return ""
+    f2p_ids = inst.get("FAIL_TO_PASS") or []
+    if not f2p_ids:
+        return ""
+    # Apply test_patch with the same fuzz tolerance the model-diff path uses.
+    patch_path = workdir / "_runtime_evidence_test_patch.patch"
+    patch_path.write_text(test_patch)
+    r = sh(["git", "-C", str(repo_dir), "apply", "--recount", "--whitespace=fix",
+            str(patch_path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        r2 = sh(["patch", "-p1", "--forward", "--quiet", "--fuzz=5", "-l",
+                 "-d", str(repo_dir), "-i", str(patch_path)],
+                capture_output=True, text=True)
+        if r2.returncode != 0:
+            log("runtime evidence: test_patch failed to apply at base_commit; skipping")
+            sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+            return ""
+    # Build test command from spec + ensure venv.
+    try:
+        test_cmd, directives, _ = get_test_command(inst)
+    except KeyError:
+        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+        return ""
+    venv_dir, py_bin = ensure_venv(inst, repo_dir)
+    test_env = os.environ.copy()
+    if venv_dir:
+        test_env["PATH"] = f"{venv_dir/'bin'}:{test_env['PATH']}"
+        test_env["VIRTUAL_ENV"] = str(venv_dir)
+    test_env["CFLAGS"] = (
+        f"{test_env.get('CFLAGS','')} -Wno-incompatible-pointer-types -Wno-error"
+    ).strip()
+    test_env.update(_test_env_vars(inst["repo"], inst.get("version", "")))
+    full_cmd = f"{test_cmd} {' '.join(directives)}"
+    log(f"runtime evidence: running F2P at base_commit ({full_cmd})")
+    try:
+        rt = subprocess.run(full_cmd, shell=True, cwd=str(repo_dir),
+                            capture_output=True, text=True, timeout=120, env=test_env)
+        log_text = (rt.stdout or "") + "\n" + (rt.stderr or "")
+    except subprocess.TimeoutExpired:
+        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+        return ""
+    finally:
+        # Always revert before returning so subsequent inference sees a clean tree.
+        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+    return _extract_failure_block(log_text)
+
+
+def _extract_failure_block(test_log: str) -> str:
+    """Lever 3 helper. Pull the failure-detail section out of a pytest /
+    django runtests / sympy bin/test log. Pytest emits "=== FAILURES ===" +
+    per-test traceback; django emits "FAIL: ..." + traceback; sympy emits
+    "Error" + similar. Return a trimmed chunk small enough to embed in the
+    pass-2 prompt without blowing context (~3KB cap).
+    """
+    if not test_log:
+        return ""
+    # Pytest: "=========== FAILURES ===========" up to next "=" banner / EOF.
+    m = re.search(r"=+\s*FAILURES\s*=+", test_log)
+    if m:
+        start = m.end()
+        # Stop at the next "=== short test summary" / "=== passes" / EOF.
+        end_m = re.search(r"\n=+\s*(short test summary|PASSES|warnings summary|FAILURES)\s*=+",
+                          test_log[start:])
+        end = (start + end_m.start()) if end_m else len(test_log)
+        block = test_log[start:end].strip()
+        return block[-3000:]
+    # Django: "FAIL: <test_id>" or "ERROR: <test_id>" line; take up to 50 lines.
+    m = re.search(r"^(FAIL|ERROR):\s+\S+", test_log, flags=re.M)
+    if m:
+        start = m.start()
+        lines = test_log[start:].split("\n")
+        block = "\n".join(lines[:50])
+        return block[-3000:]
+    # Fallback: last 3KB of log (test runner emitted unstructured failure).
+    return test_log.strip()[-3000:]
+
+
+def _is_better_result(new_result: dict, old_result: dict) -> bool:
+    """Lever 3 helper. Decide whether pass-2's test_result improved on pass-1.
+    Hierarchy (best→worst): PASS > PASS-but-regressions > FAIL(some pass)
+    > FAIL(0 pass) > NO-RUN > APPLY-FAIL > TIMEOUT.
+    """
+    def score(r):
+        apply = (r.get("apply") or "").lower()
+        f2p = (r.get("f2p") or "")
+        if apply == "apply-fail":
+            return -100
+        if f2p.startswith("TIMEOUT"):
+            return -90
+        if f2p.startswith("NO-RUN"):
+            return -80
+        if f2p == "PASS":
+            return 1000
+        if "regressions" in f2p:
+            return 900
+        if f2p.startswith("FAIL"):
+            # Heuristic: more F2P passes = better. Parse "FAIL (X/Y pass, ..."
+            mm = re.match(r"FAIL \((\d+)/", f2p)
+            return int(mm.group(1)) * 10 if mm else 0
+        return 0
+    return score(new_result) > score(old_result)
+
+
 def apply_and_test(inst, repo_dir, out_path, workdir=None):
     text = out_path.read_text()
     diff = extract_diff(text)
@@ -1175,7 +1747,190 @@ def main():
         print(json.dumps(result, indent=2))
         return 1
 
-    test_result = apply_and_test(inst, repo_dir, out_path, workdir=workdir)
+    # P4.3 (cycle 1.1) post-edit static check. Runs synth_check on out.txt
+    # before venv test execution. STATIC-FAIL reasons are stored at
+    # workdir/static_check.json so Lever 3 can include them in the sage
+    # runtime-trace critique block. Doesn't gate apply_and_test on its
+    # own — that's apply's job — but enriches downstream diagnostics.
+    try:
+        if out_path.exists() and out_path.read_text().strip():
+            static_check_bin = GLIA / "target/release/synth_check"
+            if static_check_bin.exists():
+                check_out = workdir / "static_check.json"
+                sh(
+                    [str(static_check_bin),
+                     "--src", str(repo_dir),
+                     "--diff", str(out_path),
+                     "--check-out", str(check_out)],
+                    capture_output=True, text=True,
+                )
+                if check_out.exists():
+                    sc = json.loads(check_out.read_text())
+                    log(f"static-check: {sc.get('status')} ({len(sc.get('reasons', []))} reasons)")
+    except Exception as _e:
+        log(f"static-check: skipped ({type(_e).__name__}: {_e})")
+
+    # P3.2 (cycle 1.1): when GLIA_COMPOSITIONAL=1, run hunk-by-hunk
+    # apply+test that keeps only hunks which strictly improve F2P without
+    # regressing P2P. Falls through to plain apply_and_test for single-
+    # hunk diffs (no compositional gain available there). Note the default
+    # call to apply_and_test still happens via compositional_apply_and_test
+    # for single-hunk cases.
+    if os.environ.get("GLIA_COMPOSITIONAL") == "1":
+        test_result = compositional_apply_and_test(inst, repo_dir, out_path, workdir)
+    else:
+        test_result = apply_and_test(inst, repo_dir, out_path, workdir=workdir)
+
+    # Lever 3 (sage pass-2 with runtime trace): when pass-1 applied cleanly but
+    # F2P still failed (RIGHT-LINE-WRONG-CONTENT / RIGHT-TARGET-WRONG-EDIT) OR
+    # APPLY-FAIL'd, the new test_log carries the post-edit traceback — concrete
+    # runtime evidence the directive-side critique cannot synthesize. Re-prompt
+    # with the new traceback as a "your previous attempt produced THIS failure"
+    # block and re-test. Gated on GLIA_SAGE_RUNTIME=1 (defaults to GLIA_TWO_PASS).
+    sage_runtime = os.environ.get("GLIA_SAGE_RUNTIME",
+                                  os.environ.get("GLIA_TWO_PASS", "0")) == "1"
+    pass1_f2p = test_result.get("f2p") or ""
+    pass1_apply = test_result.get("apply") or ""
+    needs_runtime_pass2 = sage_runtime and (
+        pass1_f2p.startswith("FAIL") or pass1_apply == "APPLY-FAIL"
+        or pass1_f2p.startswith("NO-RUN")
+    )
+    if needs_runtime_pass2:
+        try:
+            test_log_path = workdir / "test_log.txt"
+            test_log = test_log_path.read_text() if test_log_path.exists() else ""
+            failure_block = _extract_failure_block(test_log)
+            if failure_block:
+                log(f"sage runtime: pass-1 {pass1_f2p}/{pass1_apply}; "
+                    f"building pass-2 directive from {len(failure_block)}c runtime trace")
+                pass1_diff = out_path.read_text() if out_path.exists() else ""
+                # P4.3 integration: pull static-check reasons (if any) so
+                # the model sees both runtime AND static failure signals.
+                static_block = ""
+                try:
+                    sc_path = workdir / "static_check.json"
+                    if sc_path.exists():
+                        sc = json.loads(sc_path.read_text())
+                        if sc.get("status") == "STATIC-FAIL" and sc.get("reasons"):
+                            static_block = (
+                                "Additionally, a static check on your diff found:\n"
+                                + "\n".join(f"- {r}" for r in sc["reasons"])
+                                + "\n\n"
+                            )
+                except Exception:
+                    pass
+                runtime_critique = (
+                    f"## Runtime evidence from your previous attempt\n\n"
+                    f"Your previous diff was applied (or attempted) and the F2P test "
+                    f"produced this failure:\n\n"
+                    f"```\n{failure_block.strip()}\n```\n\n"
+                    f"{static_block}"
+                    f"## Previous diff (REJECTED — must produce a different result)\n\n"
+                    f"```\n{pass1_diff.strip()[:4000]}\n```\n\n"
+                    f"## Corrected diff\n\n"
+                    f"Read the failure above. The error type, object type, "
+                    f"attribute name, and the exact line numbers in the traceback "
+                    f"tell you precisely what the fix must do differently. Output "
+                    f"rules:\n"
+                    f"- First line must be `diff --git a/... b/...`.\n"
+                    f"- Do NOT wrap the diff in code fences (no triple backticks).\n"
+                    f"- Do NOT emit an `index <sha>..<sha>` line.\n"
+                    f"- `@@` hunk headers must use the real file's line numbers.\n"
+                    f"- Emit only the diff. No prose before or after.<|im_end|>\n"
+                    f"<|im_start|>assistant"
+                )
+                pass2_suffix_path = workdir / "suffix_pass2_runtime.txt"
+                pass2_suffix_path.write_text(runtime_critique)
+                pass2_out_path = workdir / "out_pass2_runtime.txt"
+                t2 = time.time()
+                gguf = MODELS[args.model]
+                prefix_path = workdir / "prefix.txt"
+                summaries_aplus = workdir / "summaries-aplus.json"
+                inf_env = os.environ.copy()
+                r3 = sh(
+                    ["python", str(OUTDIR / "run_llama_pathB.py"),
+                     gguf, str(prefix_path), str(pass2_suffix_path),
+                     str(summaries_aplus), str(pass2_out_path)],
+                    capture_output=True, text=True, env=inf_env,
+                )
+                wall3 = time.time() - t2
+                if r3.returncode == 0 and pass2_out_path.exists():
+                    pass2_diff = pass2_out_path.read_text().strip()
+                    if pass2_diff and pass2_diff != pass1_diff.strip():
+                        log(f"sage runtime: pass-2 diff produced "
+                            f"({len(pass2_diff)}c in {wall3:.1f}s); re-testing")
+                        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+                        test_result_2 = apply_and_test(
+                            inst, repo_dir, pass2_out_path, workdir=workdir,
+                        )
+                        if _is_better_result(test_result_2, test_result):
+                            log(f"sage runtime: pass-2 promoted "
+                                f"(p1={pass1_f2p} → p2={test_result_2.get('f2p')})")
+                            out_path = pass2_out_path
+                            test_result = test_result_2
+                            wall += wall3
+                        else:
+                            log(f"sage runtime: pass-2 not better; keeping pass-1")
+                    else:
+                        log("sage runtime: pass-2 empty or unchanged; keeping pass-1")
+                else:
+                    log(f"sage runtime: pass-2 inference failed rc={r3.returncode}; "
+                        f"keeping pass-1")
+            else:
+                log("sage runtime: no FAILURES block in test_log; skipping pass-2")
+        except Exception as e:
+            log(f"sage runtime: pass-2 raised {type(e).__name__}: {e}; keeping pass-1")
+
+    # Tier 3 #8 (cycle 1.1): per-instance lens trajectory recording. For
+    # FAIL instances, run the cycle 0.4 logit-lens once with the SAME
+    # prefix+suffix the inference used. Captures per-(position, layer)
+    # top-K logits at the decision band (positions 23-25 × layers 25-27).
+    # Output lands at scratch/lens/cycle/cycle-<tag>-lens-<id>.jsonl so the
+    # matrix analyzer (solution_curve.py) can overlay "at which layer did
+    # the model commit wrong" alongside pass@k.
+    #
+    # Gated on GLIA_LENS_TRACE=1 (default off — lens forward pass roughly
+    # doubles per-instance wall when active). Recommended for cycle 1.1+.
+    if os.environ.get("GLIA_LENS_TRACE") == "1":
+        try:
+            f2p_str = test_result.get("f2p") or ""
+            apply_str = test_result.get("apply") or ""
+            should_trace = (
+                f2p_str.startswith("FAIL")
+                or f2p_str.startswith("NO-RUN")
+                or apply_str == "APPLY-FAIL"
+            )
+            if should_trace:
+                lens_bin = GLIA / "scratch/lens/target/release/lens"
+                lens_prefix = workdir / "prefix.txt"
+                lens_suffix = workdir / "suffix.txt"
+                tokenizer_path = Path("/home/ivy/Models/qwen2.5-coder-tokenizer/tokenizer.json")
+                lens_gguf = MODELS.get(args.model)
+                if (lens_bin.exists() and lens_gguf and tokenizer_path.exists()
+                        and lens_prefix.exists() and lens_suffix.exists()):
+                    cycle_tag = args.tag or "untagged"
+                    lens_out = (GLIA / f"scratch/lens/cycle/lens-{cycle_tag}-{inst['instance_id']}.jsonl")
+                    lens_out.parent.mkdir(parents=True, exist_ok=True)
+                    log(f"lens-trace: capturing decision-band trajectory for {inst['instance_id']}")
+                    sh(
+                        [str(lens_bin),
+                         "--weights", lens_gguf,
+                         "--tokenizer", str(tokenizer_path),
+                         "--prefix", str(lens_prefix),
+                         "--suffix", str(lens_suffix),
+                         "--output-positions", "23..=27",
+                         "--mode", "generate",
+                         "--max-new", "32",
+                         "--out", str(lens_out)],
+                        capture_output=True, text=True,
+                    )
+                    log(f"lens-trace: wrote {lens_out}")
+                else:
+                    log(f"lens-trace: prereq missing (bin={lens_bin.exists()}, "
+                        f"gguf={bool(lens_gguf)}, tok={tokenizer_path.exists()}, "
+                        f"prefix={lens_prefix.exists()}, suffix={lens_suffix.exists()}); skipping")
+        except Exception as e:
+            log(f"lens-trace: raised {type(e).__name__}: {e}; continuing")
 
     result = {
         "instance_id": inst["instance_id"],

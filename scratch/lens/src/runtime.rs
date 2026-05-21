@@ -139,6 +139,16 @@ pub trait LensRuntime {
     /// forward pass. Returns (HashMap<layer, Vec<f32>>, tensor_names_seen).
     /// Empty when capture_attention was off OR no attention tensors fired.
     fn attention_norms(&self) -> AttentionCaptures;
+
+    /// C3 — attach an AttentionBiasSpec to subsequent forward passes. When
+    /// set, the cb_eval trampoline biases the `attn_out-N` / `kqv_out-N`
+    /// tensor at decision layers by adding `alpha * target_embed`. Pass None
+    /// to detach. Independent of `forward_generate_with_inject`'s
+    /// `InjectSpec` — both can be active in the same forward pass.
+    ///
+    /// Default no-op (FakeRuntime ignores). LlamaCppRuntime stores it in
+    /// CbState so the trampoline can read it without re-locking.
+    fn set_attn_bias(&mut self, _spec: Option<AttentionBiasSpec>) {}
 }
 
 /// D2 — attention output captured per layer per token-position. Same
@@ -170,6 +180,34 @@ pub struct InjectSpec {
     pub inject_positions: Vec<u32>,
     /// Mix strength. 0.0 = no-op; 1.0 = full target embed replaces a unit of
     /// existing residual. Start at 0.3 per the plan.
+    pub alpha: f32,
+}
+
+/// C3 — direct attention-output biasing parameters. When attached to a
+/// forward_generate_with_inject call alongside an InjectSpec (or alone), the
+/// cb_eval trampoline modifies the `attn_out-N` / `kqv_out-N` tensor at
+/// decision layers by adding `alpha * target_embed` to the row corresponding
+/// to the current generation position. Functionally this is "direct attention
+/// biasing": regardless of which keys the attention attended to, an extra
+/// fixed contribution in the target direction enters the residual stream.
+///
+/// Separate from InjectSpec because B3 hooks `l_out-N` (post-layer residual)
+/// while C3 hooks `attn_out-N` (intra-layer attention output, BEFORE the FFN
+/// in the same layer). Both can be active in the same forward pass.
+#[derive(Debug, Clone)]
+pub struct AttentionBiasSpec {
+    /// Target direction to add. Length = `runtime.n_embd()`. Same shape as
+    /// `InjectSpec::target_embed` — typically the token embedding for the
+    /// first token of the qname the directive named as PRIMARY target.
+    pub target_embed: Vec<f32>,
+    /// Layer indices at whose `attn_out-N` to bias (0-indexed). Cycle 0.4:
+    /// 25..=27 on Qwen 2.5 Coder 7B.
+    pub bias_layers: Vec<u32>,
+    /// Generated-token positions to bias at (0-indexed). Cycle 0.4: 23..=25
+    /// is the marshmallow decision window. Subset is fine.
+    pub bias_positions: Vec<u32>,
+    /// Mix strength. Smaller than InjectSpec.alpha because attn_out is added
+    /// straight into the residual; 0.1 is a reasonable starting point.
     pub alpha: f32,
 }
 
@@ -407,6 +445,11 @@ struct CbState {
     /// (diagnostic; first-pass tells the caller which tensor names are
     /// actually populated by the running Qwen2 graph). Cleared on reset.
     attn_tensor_names_seen: std::collections::BTreeSet<String>,
+    /// C3 direct attention bias state. When Some + inject_active_position is
+    /// Some, the trampoline modifies the `attn_out-N` / `kqv_out-N` tensor at
+    /// the matched layer/position by adding `alpha * target_embed`. Operates
+    /// independently of `inject_spec` (B3); both can be active simultaneously.
+    attn_bias_spec: Option<AttentionBiasSpec>,
 }
 
 impl CbState {
@@ -423,6 +466,7 @@ impl CbState {
             capture_attention: false,
             attn_norms_per_layer: HashMap::new(),
             attn_tensor_names_seen: std::collections::BTreeSet::new(),
+            attn_bias_spec: None,
         }
     }
     fn reset_for_forward(&mut self) {
@@ -573,6 +617,65 @@ unsafe extern "C" fn cb_eval_trampoline(
             }
         }
     } else if let Some(layer) = attn_layer {
+        // C3 — direct attention-output bias. When attn_bias_spec is set,
+        // intercept `attn_out-N` / `kqv_out-N` at the matched layer and add
+        // `alpha * target_embed` to the row corresponding to the current
+        // generation position. Independent of capture_attention.
+        let do_bias = state
+            .attn_bias_spec
+            .as_ref()
+            .map(|s| s.bias_layers.contains(&layer))
+            .unwrap_or(false)
+            && state.inject_active_position.is_some()
+            // Only bias on attn_out-style tensors (post-projection, in residual
+            // space). kq_soft_max_ext / soft_max are attention weights and
+            // their tensor shape isn't compatible with target_embed addition.
+            && (name.starts_with("attn_out-")
+                || name.starts_with("kqv_out-")
+                || name.starts_with("kqv_merged_cont-"));
+        if do_bias {
+            let dtype = unsafe { (*t).type_ };
+            if dtype == llama_cpp_sys_2::GGML_TYPE_F32 {
+                let spec = state.attn_bias_spec.clone().unwrap();
+                let active_pos = state.inject_active_position.unwrap();
+                if spec.bias_positions.contains(&active_pos)
+                    && !spec.target_embed.is_empty()
+                {
+                    let nbytes = unsafe { llama_cpp_sys_2::ggml_nbytes(t) };
+                    let n_elems = nbytes / std::mem::size_of::<f32>();
+                    state.scratch.resize(nbytes, 0);
+                    unsafe {
+                        llama_cpp_sys_2::ggml_backend_tensor_get(
+                            t,
+                            state.scratch.as_mut_ptr() as *mut std::os::raw::c_void,
+                            0,
+                            nbytes,
+                        );
+                    }
+                    let n_embd = spec.target_embed.len();
+                    if n_embd <= n_elems && n_elems % n_embd == 0 {
+                        let n_rows = n_elems / n_embd;
+                        let row_offset = (n_rows - 1) * n_embd;
+                        let scratch_ptr = state.scratch.as_mut_ptr() as *mut f32;
+                        unsafe {
+                            let row = std::slice::from_raw_parts_mut(
+                                scratch_ptr.add(row_offset),
+                                n_embd,
+                            );
+                            for (r, e) in row.iter_mut().zip(spec.target_embed.iter()) {
+                                *r += spec.alpha * *e;
+                            }
+                            llama_cpp_sys_2::ggml_backend_tensor_set(
+                                t,
+                                state.scratch.as_ptr() as *const std::os::raw::c_void,
+                                0,
+                                nbytes,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // D2 — attention-output capture. Only when capture_attention is on
         // (saves ~10-20ms per forward in the default path).
         if state.capture_attention {
@@ -846,6 +949,11 @@ impl LensRuntime for LlamaCppRuntime {
             norms_per_layer: s.attn_norms_per_layer.clone(),
             tensor_names_seen: s.attn_tensor_names_seen.clone(),
         }
+    }
+
+    fn set_attn_bias(&mut self, spec: Option<AttentionBiasSpec>) {
+        let mut s = self.cb_state.lock().unwrap();
+        s.attn_bias_spec = spec;
     }
 
     fn forward_capture(

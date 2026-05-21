@@ -29,7 +29,7 @@ use clap::Parser;
 use regex::Regex;
 use repo_graph_code_domain::node_kind;
 use repo_graph_core::NodeId;
-use repo_graph_projection_text::driver_utils::build_repo_graph;
+use repo_graph_projection_text::driver_utils::{build_repo_graph, extract_position_cell};
 
 #[derive(Parser, Debug)]
 #[command(about = "Derive a directive block from SWE-bench test_patch.patch (B1, cycle 0.6)")]
@@ -79,6 +79,15 @@ struct ResolvedSymbol {
     qname: String,
     /// Kind of the matched node (METHOD / FUNCTION / CLASS).
     kind_label: &'static str,
+    /// On-disk file path for the resolved node (from POSITION cell). None if
+    /// the node had no POSITION cell. Used to disambiguate package vs module
+    /// (sphinx-10325: `sphinx/ext/autodoc/__init__.py` vs `sphinx/ext/autodoc.py`).
+    file: Option<String>,
+    /// Lever 2 (gold-line skeleton): the definition signature line text +
+    /// its 1-indexed line number. For a method `def foo(self, x):` shows
+    /// the `def foo(...)` line — gives the model the function arg shape +
+    /// concrete edit location without spelling out the body.
+    signature_line: Option<(u32, String)>,
 }
 
 const STOP_IDENTS: &[&str] = &[
@@ -127,6 +136,21 @@ fn main() -> Result<()> {
     );
 
     let tail_idx = build_tail_index(&graph);
+    // file_by_id + start_line_by_id: lookup maps from POSITION cells so the
+    // directive can disambiguate package vs module (sphinx-10325) and surface
+    // each target's definition signature line (Lever 2 gold-line skeleton).
+    let mut file_by_id: std::collections::HashMap<NodeId, String> = std::collections::HashMap::new();
+    let mut start_line_by_id: std::collections::HashMap<NodeId, u32> = std::collections::HashMap::new();
+    for n in &graph.nodes {
+        let Some(pos_json) = extract_position_cell(n) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(pos_json) else { continue };
+        if let Some(file) = v.get("file").and_then(|x| x.as_str()) {
+            file_by_id.insert(n.id, file.to_string());
+        }
+        if let Some(sl) = v.get("start_line").and_then(|x| x.as_u64()) {
+            start_line_by_id.insert(n.id, sl as u32);
+        }
+    }
     let mut idents: BTreeSet<String> = BTreeSet::new();
     let mut all_test_fns: BTreeSet<String> = BTreeSet::new();
     for h in &hunks {
@@ -168,10 +192,23 @@ fn main() -> Result<()> {
             Some(k) if k == node_kind::CLASS => "class",
             _ => "symbol",
         };
+        let file_opt = file_by_id.get(&nid).cloned();
+        let signature_line = match (&file_opt, start_line_by_id.get(&nid).copied()) {
+            (Some(file), Some(sl)) => {
+                let file_abs = args.src.join(file);
+                std::fs::read_to_string(&file_abs).ok().and_then(|text| {
+                    text.lines().nth((sl as usize).saturating_sub(1))
+                        .map(|s| (sl, s.trim_end().to_string()))
+                })
+            }
+            _ => None,
+        };
         resolved.push(ResolvedSymbol {
             name: ident.clone(),
             qname: qn.to_string(),
             kind_label,
+            file: file_opt,
+            signature_line,
         });
     }
     eprintln!(
@@ -307,6 +344,27 @@ fn build_tail_index<'g>(
            qn_str.starts_with("test_") || qn_str.contains("::test_") {
             continue;
         }
+        // Exclude external test-infrastructure API. pytest's Pytester /
+        // makepyfile / runpytest are surfaced by tail-index when the
+        // test_patch body names them, but they are pytest's own test API
+        // (fixtures, harness) not the implementation under test. Cycle 0.8
+        // pytest-11143 regressed because the directive named these as PRIMARY
+        // while the actual gold target (AssertionRewriter) sat in SECONDARY.
+        if qn_str.starts_with("testing::") || qn_str.contains("::pytester::") ||
+           qn_str.contains("::conftest::") ||
+           qn_str.contains("::fixtures::") || qn_str.ends_with("::pytester") {
+            continue;
+        }
+        let tail_check = qn_str.rsplit("::").next().unwrap_or("");
+        // Pytest fixture names — these are always test scaffolding.
+        const FIXTURE_TAILS: &[&str] = &[
+            "pytester", "tmpdir", "tmp_path", "monkeypatch", "caplog",
+            "capsys", "capfd", "recwarn", "request", "makepyfile",
+            "runpytest", "runpytest_subprocess", "makefile",
+        ];
+        if FIXTURE_TAILS.contains(&tail_check) {
+            continue;
+        }
         let tail = qn_str.rsplit("::").next().unwrap_or(qn_str);
         out.entry(tail).or_default().push((n.id, qn_str));
     }
@@ -356,19 +414,46 @@ fn render_directive(
         s.push('\n');
     }
 
-    // Resolved targets — the implementation surface the tests reach.
+    // Resolved targets — the implementation surface the tests reach. Each
+    // target lists its on-disk file path explicitly so the model doesn't
+    // hallucinate a path (e.g. sphinx-10325 emitted `sphinx/ext/autodoc.py`
+    // but the gold target lives in `sphinx/ext/autodoc/__init__.py`).
     s.push_str("Implementation-side targets (graph-resolved from test body identifiers):\n");
     for r in resolved {
-        s.push_str(&format!(
-            "- `{}` ({}, referenced as `{}` in the new tests)\n",
-            r.qname, r.kind_label, r.name,
-        ));
+        match (&r.file, &r.signature_line) {
+            (Some(f), Some((ln, sig))) => s.push_str(&format!(
+                "- `{}` ({}, referenced as `{}` in the new tests) — file `{}` line {} ({})\n",
+                r.qname, r.kind_label, r.name, f, ln, sig.trim(),
+            )),
+            (Some(f), None) => s.push_str(&format!(
+                "- `{}` ({}, referenced as `{}` in the new tests) — file `{}`\n",
+                r.qname, r.kind_label, r.name, f,
+            )),
+            _ => s.push_str(&format!(
+                "- `{}` ({}, referenced as `{}` in the new tests)\n",
+                r.qname, r.kind_label, r.name,
+            )),
+        }
     }
     s.push('\n');
 
+    // Surface unique target files explicitly — many SWE-bench instances have
+    // package-vs-module ambiguity (`pkg/__init__.py` vs `pkg.py`); listing
+    // the resolved file paths once lets the model pick the right one.
+    let target_files: BTreeSet<&str> = resolved.iter()
+        .filter_map(|r| r.file.as_deref()).collect();
+    if !target_files.is_empty() {
+        s.push_str("Implementation files that contain the targets above:\n");
+        for f in &target_files {
+            s.push_str(&format!("- `{f}`\n"));
+        }
+        s.push('\n');
+    }
+
     s.push_str(
         "Pick the SINGLE target above whose behavior most directly determines the \
-         test's assertion outcome — that is where the fix lands. Do NOT modify the \
+         test's assertion outcome — that is where the fix lands. Edit the file \
+         listed alongside that target (NOT a guessed path). Do NOT modify the \
          test files themselves. Emit a minimal unified diff against the \
          implementation file(s).\n",
     );

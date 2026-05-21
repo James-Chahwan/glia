@@ -79,6 +79,22 @@ name = "synth_test_expectation"
 required-features = ["driver"]
 
 [[bin]]
+name = "synth_test_assertion"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_runtime_type"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_pr_hint"
+required-features = ["driver"]
+
+[[bin]]
+name = "synth_check"
+required-features = ["driver"]
+
+[[bin]]
 name = "synth_prose_mention"
 required-features = ["driver"]
 

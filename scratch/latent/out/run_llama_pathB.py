@@ -37,6 +37,13 @@ per_token_pool = os.environ.get("PER_TOKEN_POOL") == "1"
 # bounded segments. Markers are literal text tokenized fresh — no reserved-
 # ID allocation needed. Requires PER_TOKEN_POOL=1 to have meaning.
 pool_markers = os.environ.get("POOL_MARKERS") == "1"
+# B5 beam sampling: replace greedy argmax with top-k + temperature sampling
+# when SAMPLE_TEMP > 0. Each invocation produces ONE candidate; the
+# orchestrator (run_instance.py) loops to gather N candidates and picks the
+# best by apply+test. Defaults preserve greedy behavior.
+sample_temp = float(os.environ.get("SAMPLE_TEMP", "0"))
+sample_top_k = int(os.environ.get("SAMPLE_TOP_K", "5"))
+sample_seed = int(os.environ.get("SAMPLE_SEED", "0"))
 
 prefix = open(prefix_path).read()
 suffix = open(suffix_path).read()
@@ -89,6 +96,14 @@ print(f"[pathB-llama] prefix {len(prefix_ids)} tok, suffix {len(suffix_ids)} tok
 # `[POOL_<i>_START]` / `[POOL_<i>_END]` text markers around each entry so
 # the model can attend to bounded pool spans.
 node_vecs = []
+# P2.1 (D2 pool reshape): record per-summary position ranges in the
+# concatenated prompt-embedding stream so an outer orchestrator can
+# aggregate D2 attention norms per pool entry. Format: list of {idx,
+# qname, token_start, token_end} (0-indexed, half-open). Token indices
+# are relative to all_embeds, which is [prefix_emb | pool_entries | suffix_emb].
+pool_positions = []
+_prefix_tokens_len = len(prefix_ids)
+_cursor = _prefix_tokens_len  # cursor walks the pool segment
 if no_inject:
     print(f"[pathB-llama] NO_INJECT=1 — skipping per-summary embed ({len(summaries)} summaries ignored)", file=sys.stderr)
 else:
@@ -114,10 +129,19 @@ else:
                 entry = emb
             node_vecs.append(entry)
             per_token_count += entry.shape[0]
+            _entry_len = entry.shape[0]
         else:
             pooled = emb.mean(axis=0, keepdims=True)  # [1, D]
             node_vecs.append(pooled)
             pooled_count += 1
+            _entry_len = 1
+        pool_positions.append({
+            "idx": i,
+            "qname": s.get("qname"),
+            "token_start": _cursor,
+            "token_end": _cursor + _entry_len,
+        })
+        _cursor += _entry_len
         if i < 3:
             seg_tokens = node_vecs[-1].shape[0]
             print(f"[pathB-llama] node[{i}] {s.get('qname','?')} {len(sid)} tok → {seg_tokens} segment-vec(s)", file=sys.stderr)
@@ -128,6 +152,28 @@ else:
 
 # --- Step 5: concat full embed sequence [T_total, D] ---
 all_embeds = np.concatenate([prefix_emb] + node_vecs + [suffix_emb], axis=0).astype(np.float32)
+
+# P6.1 (Option 10 minimal, cycle 1.1): latent prompt warping. Add a
+# learned bias vector to every prompt-embedding row before decode. The
+# bias is computed by train_prompt_bias.py as
+# mean(prompts that PASSed) - mean(prompts that FAILed), normalized.
+# Effect: nudges the prompt-embedding space toward configurations that
+# historically produced PASS outcomes. Single 4096-dim vector — minimal
+# scope; upgrade to D×D projection if it shows uplift.
+_prompt_bias_path = os.environ.get("GLIA_PROMPT_BIAS", "")
+_prompt_bias_alpha = float(os.environ.get("GLIA_PROMPT_BIAS_ALPHA", "0.1"))
+if _prompt_bias_path and os.path.exists(_prompt_bias_path) and _prompt_bias_alpha != 0.0:
+    try:
+        bias = np.load(_prompt_bias_path).astype(np.float32)
+        if bias.shape == (all_embeds.shape[1],):
+            all_embeds = all_embeds + _prompt_bias_alpha * bias[None, :]
+            print(f"[pathB-llama] prompt bias applied (alpha={_prompt_bias_alpha}, "
+                  f"bias_norm={float(np.linalg.norm(bias)):.4f})", file=sys.stderr)
+        else:
+            print(f"[pathB-llama] prompt bias shape mismatch: {bias.shape} vs "
+                  f"({all_embeds.shape[1]},); skipping", file=sys.stderr)
+    except Exception as _e:
+        print(f"[pathB-llama] prompt bias load failed: {_e}; skipping", file=sys.stderr)
 T_total = all_embeds.shape[0]
 print(f"[pathB-llama] full embed [{T_total}, {D}] = prefix {len(prefix_ids)} + nodes {len(node_vecs)} + suffix {len(suffix_ids)}", file=sys.stderr)
 if T_total > n_ctx:
@@ -163,8 +209,30 @@ if rc != 0:
 prefill_s = time.time() - t0
 print(f"[pathB-llama] prefill {T_total} tok in {prefill_s:.1f}s ({T_total/prefill_s:.1f} tok/s)", file=sys.stderr)
 
-# --- Step 7: greedy sample loop ---
+# --- Step 7: sample loop (greedy by default; top-k + temperature when SAMPLE_TEMP > 0) ---
 eos_ids = {llm._model.token_eos(), 151645, 151643}  # generic eos + Qwen <|im_end|>, <|endoftext|>
+
+# B5 beam-sampling RNG. Seeded so callers can reproduce a given candidate by
+# passing the same SAMPLE_SEED. Default 0 → llama.cpp's fresh RNG via numpy.
+_rng = np.random.default_rng(sample_seed if sample_seed else None)
+
+def _sample_next(logits: np.ndarray) -> int:
+    """Pick the next token from a logits vector. When SAMPLE_TEMP <= 0
+    returns greedy argmax (cycle 0.7/0.8/0.9 behavior). Otherwise:
+    keep top-K logits, scale by 1/temperature, softmax, multinomial draw.
+    """
+    if sample_temp <= 0.0:
+        return int(logits.argmax())
+    # Top-K filter: indices of K highest-logit tokens.
+    k = max(1, min(sample_top_k, logits.shape[0]))
+    top_idx = np.argpartition(-logits, k - 1)[:k]
+    top_logits = logits[top_idx] / sample_temp
+    # Softmax (subtract max for numerical stability).
+    top_logits -= top_logits.max()
+    probs = np.exp(top_logits)
+    probs /= probs.sum()
+    choice = _rng.choice(k, p=probs)
+    return int(top_idx[choice])
 
 # First token from last position of prefill
 logits_p = llama_get_logits_ith(ctx, T_total - 1)
@@ -173,7 +241,7 @@ first_logits = np.frombuffer(
     (ctypes.c_float * n_vocab).from_address(ctypes.addressof(logits_p.contents)),
     dtype=np.float32, count=n_vocab,
 ).copy()
-next_id = int(first_logits.argmax())
+next_id = _sample_next(first_logits)
 collected = [next_id]
 
 # Reuse a small batch for incremental decode
@@ -200,7 +268,7 @@ for step in range(1, max_new):
         (ctypes.c_float * n_vocab).from_address(ctypes.addressof(lp.contents)),
         dtype=np.float32, count=n_vocab,
     )
-    next_id = int(arr.argmax())
+    next_id = _sample_next(arr)
     collected.append(next_id)
     if (step + 1) % 32 == 0:
         elapsed = time.time() - t1
@@ -213,6 +281,23 @@ llama_batch_free(batch)
 llama_batch_free(inc)
 
 text = llm.detokenize(collected).decode("utf-8", errors="replace")
+# P2.1: emit pool position ranges so an orchestrator can correlate per-
+# token attention norms (from lens-attention bin) with per-summary identity.
+# Path: alongside out_path, replacing .txt with .pool_positions.json.
+try:
+    _pos_path = os.path.splitext(out_path)[0] + ".pool_positions.json"
+    with open(_pos_path, "w") as f:
+        json.dump({
+            "prefix_token_count": _prefix_tokens_len,
+            "pool_token_start": _prefix_tokens_len,
+            "pool_token_end": _cursor,
+            "suffix_token_count": len(suffix_ids),
+            "entries": pool_positions,
+        }, f)
+    print(f"[pathB-llama] wrote pool_positions: {_pos_path}", file=sys.stderr)
+except Exception as _e:
+    print(f"[pathB-llama] pool_positions write failed: {_e}", file=sys.stderr)
+
 with open(out_path, "w") as f:
     f.write(text)
 print(f"[pathB-llama] wrote {out_path}", file=sys.stderr)

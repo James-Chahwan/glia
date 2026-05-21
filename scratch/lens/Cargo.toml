@@ -39,6 +39,10 @@ path = "src/bin/lens-inject.rs"
 name = "lens-attention"
 path = "src/bin/lens-attention.rs"
 
+[[bin]]
+name = "lens-attention-bias"
+path = "src/bin/lens-attention-bias.rs"
+
 [dependencies]
 # Raw llama.cpp FFI — exposes llama_context_params.cb_eval +
 # ggml_backend_tensor_get directly (the high-level llama-cpp-2 wrapper does

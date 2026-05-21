@@ -427,6 +427,20 @@ fn main() -> Result<()> {
         } else {
             None
         };
+        // B3: walk-to-condition — when redirected from a raise, find the
+        // nearest enclosing condition (if/elif/while/for) above the raise
+        // line. This is the upstream gate the test exercises; the actual fix
+        // often lives there (relaxing/tightening the condition) rather than
+        // at the raise statement itself.
+        let raise_frame_condition: Option<(u32, String)> = if redirected_from_raise {
+            graph_matched_frames.first().and_then(|(m, _, _)| {
+                let file_abs = args.src.join(&m.matched_node_file);
+                let text = std::fs::read_to_string(&file_abs).ok()?;
+                walk_up_to_condition(&text, m.traceback_line, m.matched_start_line)
+            })
+        } else {
+            None
+        };
         if redirected_from_raise {
             eprintln!(
                 "[synth_traceback_target] deepest frame is a `raise` line; primary target redirected to caller {}, deepest frame {} emitted as SECONDARY site (not anti-target)",
@@ -469,6 +483,15 @@ fn main() -> Result<()> {
                     "\n**Secondary site**: `{}` at line {} is where the raise lives. If the right fix is to relax/tighten the validation itself (not to change the caller's data flow), edit there instead. Pick whichever site produces the smaller, more targeted diff.\n",
                     raise_qn, raise_line,
                 ));
+                // B3: surface the upstream condition that guards the raise.
+                // This is the line the test exercises just before triggering
+                // the raise — relaxing/tightening it is often the smaller fix.
+                if let Some((cond_line, cond_src)) = &raise_frame_condition {
+                    s.push_str(&format!(
+                        "\n**Upstream condition** (line {} in `{}`, guarding the raise above):\n```\n{}\n```\nIf the bug is that this condition is too strict / too loose, edit this line — that fix is usually one branch addition or a comparison tweak, smaller than reworking caller data flow.\n",
+                        cond_line, raise_qn, cond_src,
+                    ));
+                }
             } else {
                 s.push_str(&format!(
                     "\nThe SWE-bench issue traceback names this function at line {} (the DEEPEST frame — where the exception throws).\n",
@@ -479,11 +502,46 @@ fn main() -> Result<()> {
             // the model knows EXACTLY which line to edit AND what access is
             // failing. Both extracted from the issue text (graph-derived
             // target + issue-derived buggy line + issue-derived exception).
+            //
+            // Lever 2 (gold-line skeleton): also surface ±3 lines of source
+            // context around the BUGGY LINE. Cycle 0.8 evidence: 2/6 FAILs
+            // were RIGHT-LINE-WRONG-CONTENT — model found the right line but
+            // emitted semantically wrong replacement text. Giving the model
+            // the surrounding statement structure (multi-line expressions,
+            // adjacent branches, function args) lets it understand what the
+            // line is doing semantically and produce a coherent edit.
             if let Some(src) = target_src_line {
                 s.push_str(&format!(
                     "\nThe BUGGY LINE (per traceback line {}) is:\n```\n{}\n```\n",
                     tm.traceback_line, src,
                 ));
+                // Read ±3 lines around the buggy line from disk for context.
+                let file_abs = args.src.join(&tm.matched_node_file);
+                if let Ok(file_text) = std::fs::read_to_string(&file_abs) {
+                    let lines: Vec<&str> = file_text.lines().collect();
+                    let n = lines.len() as u32;
+                    let buggy = tm.traceback_line;
+                    let lo = buggy.saturating_sub(3).max(tm.matched_start_line);
+                    let hi = (buggy + 3).min(tm.matched_end_line).min(n);
+                    if hi >= lo {
+                        s.push_str(&format!(
+                            "\nContext around the buggy line (lines {}-{} of `{}`):\n```\n",
+                            lo, hi, tm.matched_node_file,
+                        ));
+                        for ln in lo..=hi {
+                            if let Some(text) = lines.get((ln - 1) as usize) {
+                                let marker = if ln == buggy { " ← BUGGY" } else { "" };
+                                s.push_str(&format!("{ln:>5}: {text}{marker}\n"));
+                            }
+                        }
+                        s.push_str("```\n");
+                        s.push_str(
+                            "The fix replaces the BUGGY line above. Preserve the surrounding \
+                             statement structure (operator chains, branch shape, indentation) and \
+                             change only what the exception demands.\n",
+                        );
+                    }
+                }
             }
             match &exc_info {
                 Some(ExcInfo::Attribute { class, obj_type, attr }) => {
@@ -570,4 +628,54 @@ fn main() -> Result<()> {
 
 fn qname_of_node(graph: &repo_graph_graph::RepoGraph, node: &Node) -> Option<String> {
     graph.nav.qname_by_id.get(&node.id).cloned()
+}
+
+/// B3 helper. Walk UP from `raise_line` toward `fn_start_line` looking for the
+/// nearest enclosing condition statement (`if`, `elif`, `while`, `for`, or
+/// `assert`). Returns `(line_number, trimmed_source)` for the matched line.
+///
+/// This is the upstream gate guarding the raise; for python the bug often
+/// lives in the condition itself (off-by-one comparator, missing `or` clause,
+/// inverted predicate) rather than the raise statement. Surfacing the gate
+/// line gives the model a smaller, more targeted edit candidate alongside the
+/// caller-redirect site emitted by the existing raise-redirect heuristic.
+///
+/// Python-only for now. The match looks at indentation-stripped line content
+/// so it works whether the raise is inside `def`/`class`/`with`/etc.
+fn walk_up_to_condition(file_text: &str, raise_line: u32, fn_start_line: u32) -> Option<(u32, String)> {
+    let lines: Vec<&str> = file_text.lines().collect();
+    if (raise_line as usize) == 0 || (raise_line as usize) > lines.len() {
+        return None;
+    }
+    let lower_bound = fn_start_line.saturating_sub(1) as usize;
+    // 1-indexed line number → 0-indexed slice
+    let raise_idx = (raise_line as usize).saturating_sub(1);
+    if raise_idx < lower_bound {
+        return None;
+    }
+    // Walk back from the line just above the raise toward the fn start.
+    let mut i = raise_idx.saturating_sub(1);
+    while i >= lower_bound {
+        let line = lines.get(i).copied().unwrap_or("");
+        let trimmed = line.trim_start();
+        // Recognize condition keywords. `else:` alone doesn't carry a
+        // condition so skip it.
+        let is_condition = trimmed.starts_with("if ")
+            || trimmed.starts_with("if(")
+            || trimmed.starts_with("elif ")
+            || trimmed.starts_with("elif(")
+            || trimmed.starts_with("while ")
+            || trimmed.starts_with("while(")
+            || trimmed.starts_with("for ")
+            || trimmed.starts_with("assert ")
+            || trimmed.starts_with("assert(");
+        if is_condition {
+            return Some(((i + 1) as u32, trimmed.trim_end().to_string()));
+        }
+        if i == lower_bound {
+            break;
+        }
+        i -= 1;
+    }
+    None
 }
