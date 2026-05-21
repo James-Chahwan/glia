@@ -66,6 +66,16 @@ struct PerInstanceStats {
     final_layer_kl_max: Option<f32>,
     gold_first_layer: Option<u32>,
     gold_first_pos: Option<u32>,
+    /// D3 (cycle 0.6) — for each tracked position p, the smallest layer L
+    /// such that inj-run top-1 at every layer L..L_max equals the final-layer
+    /// top-1. Captures "when did the model commit to this token." Computed
+    /// only when the inj run is in generate mode (positions = generated
+    /// tokens); otherwise empty.
+    layer_of_decision_per_token: Vec<u32>,
+    /// Mean of `layer_of_decision_per_token`, or None when empty. Lower
+    /// means the model decides earlier in the stack. Cycle 0.4 lens results
+    /// expect ~25 for marshmallow PASS (decision band).
+    mean_decision_layer: Option<f32>,
 }
 
 fn main() -> Result<()> {
@@ -288,6 +298,41 @@ fn compute_per_instance(
             Some(p) => Some(p.max(k)),
         });
 
+    // D3 — layer-of-decision per position. For each position p, find the
+    // smallest layer L_d such that inj_top1[(L_d..L_max), p] is constant and
+    // equals the final-layer prediction. This is the layer at which the
+    // model commits to its output token. Lower = earlier commitment; the
+    // cycle 0.4 lens identified L25-27 as the marshmallow decision band.
+    let layers_vec: Vec<u32> = layers.iter().copied().collect();
+    let mut layer_of_decision_per_token: Vec<u32> = Vec::new();
+    if !layers_vec.is_empty() {
+        for &p in positions.iter() {
+            let last_l = *layers_vec.last().unwrap();
+            let Some(&final_top1) = inj_top1.get(&(last_l, p)) else {
+                continue;
+            };
+            let mut decision: Option<u32> = None;
+            for (idx, &l) in layers_vec.iter().enumerate() {
+                let constant_from_here = layers_vec[idx..].iter().all(|&ll| {
+                    inj_top1.get(&(ll, p)).is_some_and(|t| *t == final_top1)
+                });
+                if constant_from_here {
+                    decision = Some(l);
+                    break;
+                }
+            }
+            if let Some(d) = decision {
+                layer_of_decision_per_token.push(d);
+            }
+        }
+    }
+    let mean_decision_layer = if layer_of_decision_per_token.is_empty() {
+        None
+    } else {
+        let sum: u32 = layer_of_decision_per_token.iter().sum();
+        Some(sum as f32 / layer_of_decision_per_token.len() as f32)
+    };
+
     // Gold first-surface (rank ≤ 3) in inj.
     let mut sorted_inj: Vec<&&AggLensStep> = inj.iter().collect();
     sorted_inj.sort_by_key(|r| (r.layer, r.position));
@@ -317,6 +362,8 @@ fn compute_per_instance(
         final_layer_kl_max,
         gold_first_layer,
         gold_first_pos,
+        layer_of_decision_per_token,
+        mean_decision_layer,
     }
 }
 
@@ -364,6 +411,11 @@ fn build_markdown_report(per_instance: &[PerInstanceStats]) -> String {
     s.push_str(&histogram(per_instance, |p| p.final_layer_kl_max));
     s.push_str("```\n\n");
 
+    s.push_str("### mean_decision_layer (D3 — when the model commits to its token)\n");
+    s.push_str("```\n");
+    s.push_str(&histogram(per_instance, |p| p.mean_decision_layer));
+    s.push_str("```\n\n");
+
     s.push_str("## Per-project pass rate\n\n");
     let mut by_proj: BTreeMap<String, (u32, u32)> = BTreeMap::new();
     for p in per_instance {
@@ -382,8 +434,8 @@ fn build_markdown_report(per_instance: &[PerInstanceStats]) -> String {
     s.push('\n');
 
     s.push_str("## Per-instance ranked table\n\n");
-    s.push_str("| instance | project | pass | peak-lyr | peak-pos | peak-kl | persist | final-kl | gold-1st(lyr,pos) |\n");
-    s.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    s.push_str("| instance | project | pass | peak-lyr | peak-pos | peak-kl | persist | final-kl | mean-dec | gold-1st(lyr,pos) |\n");
+    s.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
     let mut ranked = per_instance.to_vec();
     ranked.sort_by(|a, b| {
         let ak = a.effect_peak_kl.unwrap_or(0.0);
@@ -392,7 +444,7 @@ fn build_markdown_report(per_instance: &[PerInstanceStats]) -> String {
     });
     for p in ranked {
         s.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             p.instance_id,
             p.project,
             if p.pass { "PASS" } else { "FAIL" },
@@ -401,6 +453,7 @@ fn build_markdown_report(per_instance: &[PerInstanceStats]) -> String {
             p.effect_peak_kl.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into()),
             p.effect_persistence_layers,
             p.final_layer_kl_max.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".into()),
+            p.mean_decision_layer.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
             match (p.gold_first_layer, p.gold_first_pos) {
                 (Some(l), Some(po)) => format!("({l},{po})"),
                 _ => "—".into(),

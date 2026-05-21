@@ -118,6 +118,15 @@ struct Args {
     #[arg(long)]
     injection: Option<PathBuf>,
 
+    /// Optional graph-derived DIRECTIVE markdown file. When set, the file's
+    /// raw text is prepended to the suffix (mirrors run_instance.py's
+    /// directive-prepend pattern at run_instance.py:750-761). Use this to
+    /// make lens runs real-pipeline-comparable. Compatible with --injection:
+    /// the JSON pool goes between prefix and suffix, the directive sits at
+    /// the front of the suffix (real-pipeline layout).
+    #[arg(long)]
+    directive: Option<PathBuf>,
+
     /// Positions in the output stream to track. Each position p means
     /// "predict the next token after the p-th-from-LAST prompt token"; so
     /// p=0 is the first generated token (predicted by the last prompt token),
@@ -215,8 +224,25 @@ fn main() -> Result<()> {
 
     let prefix = std::fs::read_to_string(&args.prefix)
         .with_context(|| format!("read prefix {:?}", args.prefix))?;
-    let suffix = std::fs::read_to_string(&args.suffix)
+    let suffix_raw = std::fs::read_to_string(&args.suffix)
         .with_context(|| format!("read suffix {:?}", args.suffix))?;
+
+    // Optional graph-derived directive prepended to suffix (A3, real-pipeline
+    // layout — matches run_instance.py:750-761). The directive contributes to
+    // BOTH baseline and with-injection passes since real-pipeline always
+    // includes it; the JSON pool is what varies between conditions.
+    let suffix = if let Some(dir_path) = &args.directive {
+        let dir_text = std::fs::read_to_string(dir_path)
+            .with_context(|| format!("read directive {:?}", dir_path))?;
+        tracing::info!(
+            "directive: {} ({} bytes prepended to suffix)",
+            dir_path.display(),
+            dir_text.len()
+        );
+        format!("{dir_text}{suffix_raw}")
+    } else {
+        suffix_raw
+    };
 
     let injection_text = if let Some(path) = &args.injection {
         let raw = std::fs::read_to_string(path)
