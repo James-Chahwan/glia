@@ -96,6 +96,57 @@ pub trait LensRuntime {
         eos_token_id: Option<u32>,
         run_label: &str,
     ) -> Result<AutoregressiveCaptures>;
+
+    /// Cycle 0.6 spitball B3 — autoregressive generation WITH residual-stream
+    /// injection at the decision band (L25-27 per cycle 0.4 lens evidence).
+    ///
+    /// At each generation step, for each layer L in `spec.inject_layers`, add
+    /// `spec.target_embed * spec.alpha` to the residual stream at every
+    /// position p in `spec.inject_positions`, then continue the forward pass.
+    /// The modified residual flows through subsequent layers + the unembed
+    /// head; the resulting logits → argmax produces the steered token.
+    ///
+    /// FakeRuntime: writes the injection into its synthetic residual tensors
+    /// (testable end-to-end without llama.cpp).
+    ///
+    /// LlamaCppRuntime: writes via ggml_backend_tensor_set in cb_eval. On
+    /// `l_out-N` for N in inject_layers, reads the tensor, modifies the rows
+    /// at inject_positions in scratch buffer, calls ggml_backend_tensor_set
+    /// to push the modified data back, returns true to continue evaluation.
+    /// Subsequent ops in the compute graph (L26 reading L25's output, etc.)
+    /// then see the injected residual. cb_eval return value semantics: true
+    /// = continue, false = abort the forward pass. Modification is via
+    /// tensor_set, NOT the return value.
+    ///
+    /// Returns the same AutoregressiveCaptures shape as forward_generate so
+    /// the lens-math + JSONL pipeline can ingest it identically.
+    fn forward_generate_with_inject(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+        spec: &InjectSpec,
+    ) -> Result<AutoregressiveCaptures>;
+}
+
+/// Injection parameters for `forward_generate_with_inject`. Lives in
+/// runtime so both FakeRuntime + LlamaCppRuntime can share the shape.
+#[derive(Debug, Clone)]
+pub struct InjectSpec {
+    /// Target embedding to add to the residual stream. Length must equal
+    /// `runtime.n_embd()`. Typically the model's own token-embedding row for
+    /// the steering token (e.g. the first token of the target qname).
+    pub target_embed: Vec<f32>,
+    /// Layer indices to inject at (0-indexed). Cycle 0.4 evidence: 25..=27
+    /// on Qwen 2.5 Coder 7B.
+    pub inject_layers: Vec<u32>,
+    /// Generated-token positions to inject at (0-indexed). Cycle 0.4
+    /// identified positions 23-25 as the marshmallow decision window.
+    pub inject_positions: Vec<u32>,
+    /// Mix strength. 0.0 = no-op; 1.0 = full target embed replaces a unit of
+    /// existing residual. Start at 0.3 per the plan.
+    pub alpha: f32,
 }
 
 // ============================================================================
@@ -244,6 +295,41 @@ impl LensRuntime for FakeRuntime {
             stopped_on_eos,
         })
     }
+
+    fn forward_generate_with_inject(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+        spec: &InjectSpec,
+    ) -> Result<AutoregressiveCaptures> {
+        // Synthetic analog of cb_eval write: run the standard fake pass, then
+        // add spec.target_embed * alpha to the residual stream at every
+        // (layer, position) in spec.inject_{layers,positions}.
+        if spec.target_embed.len() != self.n_embd {
+            anyhow::bail!(
+                "inject target_embed len {} != n_embd {}",
+                spec.target_embed.len(),
+                self.n_embd
+            );
+        }
+        let mut caps = self.forward_generate(prompt_tokens, max_new, eos_token_id, run_label)?;
+        for step in caps.steps.iter_mut() {
+            if !spec.inject_positions.contains(&step.position) {
+                continue;
+            }
+            for lc in step.layers.iter_mut() {
+                if !spec.inject_layers.contains(&lc.layer) {
+                    continue;
+                }
+                for (r, t) in lc.residual.iter_mut().zip(spec.target_embed.iter()) {
+                    *r += spec.alpha * *t;
+                }
+            }
+        }
+        Ok(caps)
+    }
 }
 
 // ============================================================================
@@ -266,6 +352,14 @@ struct CbState {
     n_vocab: usize,
     /// Scratch host buffer to avoid per-callback allocation.
     scratch: Vec<u8>,
+    /// B3 injection state. When Some + inject_active_position is Some, the
+    /// trampoline modifies the l_out-N tensor at the matched layer/position
+    /// before appending to per_layer + before subsequent ops read from it.
+    inject_spec: Option<InjectSpec>,
+    /// The generated-token index currently being processed. Set by
+    /// `forward_generate_with_inject` before each single-token decode call.
+    /// None during prompt prefill or non-inject forward passes.
+    inject_active_position: Option<u32>,
 }
 
 impl CbState {
@@ -277,10 +371,13 @@ impl CbState {
             n_embd: 0,
             n_vocab: 0,
             scratch: Vec::with_capacity(64 * 1024),
+            inject_spec: None,
+            inject_active_position: None,
         }
     }
     fn reset_for_forward(&mut self) {
         self.per_layer.clear();
+        self.inject_active_position = None;
     }
 }
 
@@ -353,6 +450,50 @@ unsafe extern "C" fn cb_eval_trampoline(
                 nbytes,
             );
         }
+
+        // B3: if inject_spec is active AND this layer + position match, modify
+        // the tensor data in scratch and push it back via ggml_backend_tensor_set
+        // BEFORE appending to per_layer (so per_layer reflects what subsequent
+        // layers actually see). Modification: add target_embed * alpha
+        // element-wise to the row(s) at inject_positions in this ubatch.
+        let do_inject = state
+            .inject_spec
+            .as_ref()
+            .map(|s| s.inject_layers.contains(&layer))
+            .unwrap_or(false)
+            && state.inject_active_position.is_some();
+        if do_inject {
+            // Borrow-checker dance: pull values out before mutating scratch.
+            let spec = state.inject_spec.clone().unwrap();
+            let active_pos = state.inject_active_position.unwrap();
+            if spec.inject_positions.contains(&active_pos)
+                && spec.target_embed.len() <= n_elems
+            {
+                let scratch_ptr = state.scratch.as_mut_ptr() as *mut f32;
+                let n_embd = spec.target_embed.len();
+                let n_rows = n_elems / n_embd;
+                if n_rows > 0 {
+                    // The ubatch's last row is the current decode token. Modify it.
+                    let row_offset = (n_rows - 1) * n_embd;
+                    unsafe {
+                        let row = std::slice::from_raw_parts_mut(scratch_ptr.add(row_offset), n_embd);
+                        for (r, e) in row.iter_mut().zip(spec.target_embed.iter()) {
+                            *r += spec.alpha * *e;
+                        }
+                    }
+                    // Push modified data back to the backend tensor.
+                    unsafe {
+                        llama_cpp_sys_2::ggml_backend_tensor_set(
+                            t,
+                            state.scratch.as_ptr() as *const std::os::raw::c_void,
+                            0,
+                            nbytes,
+                        );
+                    }
+                }
+            }
+        }
+
         let data: &[f32] = unsafe {
             std::slice::from_raw_parts(state.scratch.as_ptr() as *const f32, n_elems)
         };
@@ -871,6 +1012,178 @@ impl LensRuntime for LlamaCppRuntime {
                 if let Some(w) = &s.output_weight {
                     self.head.output_weight = w.clone();
                 }
+            }
+        }
+
+        Ok(AutoregressiveCaptures {
+            run: run_label.to_string(),
+            generated_tokens,
+            steps,
+            stopped_on_eos,
+        })
+    }
+
+    fn forward_generate_with_inject(
+        &mut self,
+        prompt_tokens: &[u32],
+        max_new: u32,
+        eos_token_id: Option<u32>,
+        run_label: &str,
+        spec: &InjectSpec,
+    ) -> Result<AutoregressiveCaptures> {
+        // B3 (cycle 0.6 spitball): autoregressive decode with residual-stream
+        // modification at the lens-identified decision band (L25-27 × gen
+        // positions 23-25). cb_eval reads l_out-N, modifies the row in scratch,
+        // writes back via ggml_backend_tensor_set, and subsequent ops see the
+        // injected residual. Inject hot-path is gated on
+        // cb_state.inject_active_position so prompt prefill and out-of-band
+        // generation steps stay untouched.
+        if prompt_tokens.is_empty() {
+            anyhow::bail!("forward_generate_with_inject: empty prompt_tokens");
+        }
+        if max_new == 0 {
+            anyhow::bail!("forward_generate_with_inject: max_new must be > 0");
+        }
+        if spec.target_embed.len() != self.head.n_embd {
+            anyhow::bail!(
+                "inject target_embed len {} != n_embd {}",
+                spec.target_embed.len(),
+                self.head.n_embd
+            );
+        }
+
+        {
+            let mut s = self.cb_state.lock().unwrap();
+            s.reset_for_forward();
+            s.inject_spec = Some(spec.clone());
+            s.inject_active_position = None; // prompt phase
+        }
+        unsafe {
+            let mem = llama_cpp_sys_2::llama_get_memory(self.ctx);
+            if !mem.is_null() {
+                llama_cpp_sys_2::llama_memory_clear(mem, true);
+            }
+        }
+
+        let n_prompt = prompt_tokens.len();
+        let n_embd = self.head.n_embd;
+        let n_vocab = self.head.n_vocab as i32;
+
+        // Prompt prefill — no inject during prompt.
+        unsafe {
+            let mut batch = llama_cpp_sys_2::llama_batch_init(n_prompt as i32, 0, 1);
+            for (i, &tok) in prompt_tokens.iter().enumerate() {
+                *batch.token.add(i) = tok as i32;
+                *batch.pos.add(i) = i as i32;
+                *batch.n_seq_id.add(i) = 1;
+                *(*batch.seq_id.add(i)).add(0) = 0;
+                *batch.logits.add(i) = (i == n_prompt - 1) as i8;
+            }
+            batch.n_tokens = n_prompt as i32;
+            let rc = llama_cpp_sys_2::llama_decode(self.ctx, batch);
+            llama_cpp_sys_2::llama_batch_free(batch);
+            if rc != 0 {
+                anyhow::bail!("llama_decode (prompt) returned {rc}");
+            }
+        }
+
+        let eos = eos_token_id.unwrap_or_else(|| unsafe {
+            let e = llama_cpp_sys_2::llama_vocab_eos(self.vocab);
+            if e < 0 { u32::MAX } else { e as u32 }
+        });
+
+        let mut generated_tokens: Vec<u32> = Vec::with_capacity(max_new as usize);
+        let mut stopped_on_eos = false;
+        let mut cur_pos = n_prompt as i32;
+        for step in 0..max_new {
+            // Sample from logits (no inject during sampling — inject is on the
+            // NEXT step's decode, modifying l_out-N as it computes the next
+            // token's residual).
+            let logits_ptr = unsafe { llama_cpp_sys_2::llama_get_logits_ith(self.ctx, -1) };
+            if logits_ptr.is_null() {
+                anyhow::bail!("llama_get_logits_ith returned NULL at gen pos {cur_pos}");
+            }
+            let logits = unsafe {
+                std::slice::from_raw_parts(logits_ptr, n_vocab as usize)
+            };
+            let next = logits
+                .iter()
+                .enumerate()
+                .fold((0u32, f32::NEG_INFINITY), |acc, (i, &l)| {
+                    if l > acc.1 { (i as u32, l) } else { acc }
+                })
+                .0;
+
+            let is_eog = unsafe {
+                llama_cpp_sys_2::llama_vocab_is_eog(self.vocab, next as i32)
+            };
+            if next == eos || is_eog {
+                stopped_on_eos = true;
+                break;
+            }
+            generated_tokens.push(next);
+
+            // Activate inject for THIS step's decode. cb_eval fires on the new
+            // token's l_out-N tensors; the trampoline checks inject_positions
+            // and inject_layers to decide whether to modify.
+            {
+                let mut s = self.cb_state.lock().unwrap();
+                s.inject_active_position = Some(step);
+            }
+
+            unsafe {
+                let mut batch = llama_cpp_sys_2::llama_batch_init(1, 0, 1);
+                *batch.token.add(0) = next as i32;
+                *batch.pos.add(0) = cur_pos;
+                *batch.n_seq_id.add(0) = 1;
+                *(*batch.seq_id.add(0)).add(0) = 0;
+                *batch.logits.add(0) = 1;
+                batch.n_tokens = 1;
+                let rc = llama_cpp_sys_2::llama_decode(self.ctx, batch);
+                llama_cpp_sys_2::llama_batch_free(batch);
+                if rc != 0 {
+                    anyhow::bail!("llama_decode (gen pos {cur_pos}) returned {rc}");
+                }
+            }
+            cur_pos += 1;
+        }
+
+        // Clear inject state so subsequent forward calls don't carry over.
+        {
+            let mut s = self.cb_state.lock().unwrap();
+            s.inject_spec = None;
+            s.inject_active_position = None;
+        }
+
+        // Slice per_layer buffers as in forward_generate. The captures reflect
+        // the MODIFIED residuals (the trampoline appends post-modification).
+        let n_gen = generated_tokens.len();
+        let mut steps: Vec<PositionCapture> = Vec::with_capacity(n_gen);
+        {
+            let s = self.cb_state.lock().unwrap();
+            for step_idx in 0..n_gen {
+                let mut layers = Vec::with_capacity(self.n_layers);
+                for l in 0..self.n_layers as u32 {
+                    let Some(buf) = s.per_layer.get(&l) else {
+                        return Err(anyhow!(
+                            "missing l_out-{l} in cb_eval captures during inject-generate",
+                        ));
+                    };
+                    let captured_rows = buf.len() / n_embd;
+                    if captured_rows < n_gen {
+                        anyhow::bail!(
+                            "layer {l}: {captured_rows} captured rows, expected ≥ {n_gen}",
+                        );
+                    }
+                    let row = captured_rows - n_gen + step_idx;
+                    let row_start = row * n_embd;
+                    let residual = buf[row_start..row_start + n_embd].to_vec();
+                    layers.push(LayerCapture { layer: l, residual });
+                }
+                steps.push(PositionCapture {
+                    position: step_idx as u32,
+                    layers,
+                });
             }
         }
 

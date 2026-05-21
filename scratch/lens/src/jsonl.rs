@@ -98,6 +98,15 @@ impl LensJsonlWriter {
         Ok(())
     }
 
+    /// Write an opaque JSON value as a JSONL line. Used by lens-inject /
+    /// lens-ablate to embed run-summary records alongside LensSteps.
+    pub fn record_raw(&mut self, value: &serde_json::Value) -> anyhow::Result<()> {
+        let line = serde_json::to_string(value)?;
+        self.out.write_all(line.as_bytes())?;
+        self.out.write_all(b"\n")?;
+        Ok(())
+    }
+
     pub fn finish(mut self) -> anyhow::Result<()> {
         self.out.flush()?;
         Ok(())

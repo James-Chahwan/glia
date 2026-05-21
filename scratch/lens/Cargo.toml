@@ -27,6 +27,14 @@ path = "src/bin/lens-batch.rs"
 name = "lens-analyze"
 path = "src/bin/lens-analyze.rs"
 
+[[bin]]
+name = "lens-ablate"
+path = "src/bin/lens-ablate.rs"
+
+[[bin]]
+name = "lens-inject"
+path = "src/bin/lens-inject.rs"
+
 [dependencies]
 # Raw llama.cpp FFI — exposes llama_context_params.cb_eval +
 # ggml_backend_tensor_get directly (the high-level llama-cpp-2 wrapper does
