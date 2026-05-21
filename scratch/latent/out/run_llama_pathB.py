@@ -61,15 +61,17 @@ print(f"[pathB-llama] embed table {emb_table.shape} f32 in {time.time()-t0:.1f}s
 
 # --- Step 2: load model ---
 t0 = time.time()
+n_gpu_layers = int(os.environ.get("N_GPU_LAYERS", "0"))
 llm = Llama(
     model_path=gguf_path,
     n_ctx=n_ctx,
     n_threads=n_threads,
-    n_gpu_layers=0,
+    n_gpu_layers=n_gpu_layers,
     n_batch=n_ctx,  # batch must hold full prefill
     verbose=False,
     logits_all=False,
 )
+print(f"[pathB-llama] n_gpu_layers={n_gpu_layers} (set N_GPU_LAYERS=99 for full GPU offload)", file=sys.stderr)
 print(f"[pathB-llama] model loaded in {time.time()-t0:.1f}s", file=sys.stderr)
 
 D = llama_n_embd(llm._model.model)
