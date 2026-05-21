@@ -211,7 +211,11 @@ def ensure_venv(inst, repo_dir):
     env["VIRTUAL_ENV"] = str(venv_dir)
     # Modern gcc rejects incompatible pointer-type warnings as errors; older
     # repos (astropy WCS, scipy) compile fine with these silenced.
+    # P1 fix: -Wno-incompatible-pointer-types is C-only; if it leaks into
+    # CXXFLAGS the C++ build fails with "valid for C/ObjC but not for C++"
+    # (sklearn + matplotlib have C++ files in their build_ext).
     env["CFLAGS"] = f"{env.get('CFLAGS','')} -Wno-incompatible-pointer-types -Wno-error".strip()
+    env["CXXFLAGS"] = f"{env.get('CXXFLAGS','')} -Wno-error".strip()
     # setuptools_scm version stamps get baked at install time. pytest-self
     # editable install with no git tag → version="unknown" → pytest.__version__
     # crashes its own _checkversion. Test-time env vars don't help post-install.
@@ -899,17 +903,29 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     if os.environ.get("GLIA_PER_TOKEN_POOL") == "1":
         inf_env["PER_TOKEN_POOL"] = "1"
         inf_env["POOL_MARKERS"] = "1"
-        # Bump ctx if not already set. Per-token-pool can expand
-        # ~5-7× over mean-pool on cycle_loop_set. Cycle 1.1 GPU run
-        # surfaced matplotlib-22711 with 1155 pool entries (~60K
-        # tokens) and matplotlib-22835 with 323 entries (~25K tokens).
-        # 32K wasn't enough — every matplotlib sample exited rc=3
-        # ("T_total > n_ctx"). Bumping to 65536 covers everything seen
-        # so far on cycle_loop_set; Qwen 2.5 Coder supports 128K
-        # natively. VRAM cost on A40 at 64K is ~7GB additional for KV
-        # cache; total ~12GB, fits 48GB comfortably.
+        # P2 fix (cycle 1.1-gpu follow-up): size N_CTX based on actual pool
+        # size. Per-token-pool token count tracks roughly linearly with the
+        # number of summary entries; matplotlib-22711 with 1155 entries
+        # hit ~60K tokens. Use entry count to pick a safe N_CTX bucket:
+        #   ≤300 entries  → 32K  (marshmallow, most django/sphinx)
+        #   ≤700 entries  → 65K  (matplotlib-22835 / 323 entries)
+        #   >700 entries  → 131K (matplotlib-22711 / 1155 entries)
+        # Qwen 2.5 Coder supports 131K natively; A40 48GB fits 131K KV
+        # cache (~15GB additional) comfortably.
         if "N_CTX" not in inf_env:
-            inf_env["N_CTX"] = "65536"
+            try:
+                n_entries = len(json.loads(summaries_aplus.read_text()))
+            except Exception:
+                n_entries = 0
+            if n_entries > 700:
+                inf_env["N_CTX"] = "131072"
+                log(f"N_CTX=131072 ({n_entries} pool entries — heavy)")
+            elif n_entries > 300:
+                inf_env["N_CTX"] = "65536"
+                log(f"N_CTX=65536 ({n_entries} pool entries)")
+            else:
+                inf_env["N_CTX"] = "32768"
+                log(f"N_CTX=32768 ({n_entries} pool entries)")
 
     # B5 beam-sampling. When GLIA_SAMPLES>1, run N inference passes with
     # SAMPLE_TEMP>0 + per-sample seed, write each candidate diff to
@@ -951,7 +967,12 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
             )
             ci = time.time() - ti
             if ri.returncode != 0:
-                log(f"  sample {i}: rc={ri.returncode} ({ci:.1f}s); skipped")
+                # P5 fix: surface pathB's stderr tail so future debugging
+                # doesn't require a re-run. Common causes of rc=3: T_total
+                # exceeds n_ctx (need N_CTX bump). Common rc=4: llama_decode
+                # prefill failure (out-of-memory or batch shape mismatch).
+                err_tail = (ri.stderr or "")[-300:].strip().replace("\n", " | ")
+                log(f"  sample {i}: rc={ri.returncode} ({ci:.1f}s); skipped — stderr: {err_tail}")
                 continue
             text = cand_path.read_text() if cand_path.exists() else ""
             candidates.append((i, cand_path, text, ci))
@@ -1013,6 +1034,12 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                 idx, _path, text, ci = cand
                 # apply_and_test mutates + resets the repo (git checkout
                 # -- . at end); safe to call multiple times in serial.
+                # P7 fix: but it can leave the test_patch.patch applied if
+                # mid-flow exception fires. Force-clean before each
+                # candidate's apply_and_test so TESTPATCH-FAIL doesn't
+                # silently propagate from a prior candidate's leftover state.
+                sh(["git", "-C", str(repo_dir), "checkout", "--", "."],
+                   capture_output=True, text=True)
                 cand_workdir = workdir / f"sample_{idx}_test"
                 cand_workdir.mkdir(exist_ok=True)
                 cand_out = cand_workdir / "out.txt"
@@ -1251,7 +1278,11 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         else:
             log("sage loop: synth_validator or directive missing; skipping pass-2")
 
-    return out_path, wall, len(aplus_cells)
+    # P4 fix: report BOTH the AccessPath cell count (aplus_cells, what this
+    # function has always returned) AND the total pool size, so downstream
+    # JSONL doesn't read "aplus_cells=0" and conclude the pool is empty.
+    total_pool = len(json.loads(summaries_aplus.read_text())) if summaries_aplus.exists() else 0
+    return out_path, wall, len(aplus_cells), total_pool
 
 
 _HUNK_HDR_RE = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', re.M)
@@ -1447,9 +1478,19 @@ def compositional_apply_and_test(inst, repo_dir, out_path, workdir):
         for r in per_hunk_records:
             f.write(json.dumps(r) + "\n")
     log(f"compositional: kept {len(kept_hunks)}/{len(hunks)} hunks; final result f2p={best_result.get('f2p')}")
+    # P3 fix (cycle 1.1-gpu follow-up): if NO hunks survived the keep-test,
+    # don't return INIT — fall back to plain apply_and_test on the FULL
+    # diff. The compositional path is supposed to *improve* over plain apply
+    # by isolating the regression-causing hunk; if every hunk individually
+    # was rejected, plain apply might still produce useful F2P signal
+    # (single-hunk apply could even apply different mechanics than per-hunk
+    # serial). Worst case it's redundant with the per-hunk test, same wall.
+    if not kept_hunks:
+        log("compositional: 0 hunks survived; falling back to plain apply_and_test on full diff")
+        sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+        return apply_and_test(inst, repo_dir, out_path, workdir=workdir)
     # Promote final composite to out_path so the rest of run_instance sees it.
-    if kept_hunks:
-        out_path.write_text(final_diff)
+    out_path.write_text(final_diff)
     return best_result
 
 
@@ -1495,6 +1536,7 @@ def _capture_runtime_evidence(inst, repo_dir, workdir) -> str:
     test_env["CFLAGS"] = (
         f"{test_env.get('CFLAGS','')} -Wno-incompatible-pointer-types -Wno-error"
     ).strip()
+    test_env["CXXFLAGS"] = f"{test_env.get('CXXFLAGS','')} -Wno-error".strip()
     test_env.update(_test_env_vars(inst["repo"], inst.get("version", "")))
     full_cmd = f"{test_cmd} {' '.join(directives)}"
     log(f"runtime evidence: running F2P at base_commit ({full_cmd})")
@@ -1640,6 +1682,7 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
         test_env["PATH"] = f"{venv_dir/'bin'}:{test_env['PATH']}"
         test_env["VIRTUAL_ENV"] = str(venv_dir)
     test_env["CFLAGS"] = f"{test_env.get('CFLAGS','')} -Wno-incompatible-pointer-types -Wno-error".strip()
+    test_env["CXXFLAGS"] = f"{test_env.get('CXXFLAGS','')} -Wno-error".strip()
     test_env.update(_test_env_vars(inst["repo"], inst.get("version", "")))
     # ensure_repo's `git clean -fdx` between instances wipes the in-tree
     # `.so` files built during venv install (mpl `_c_internal_utils`,
@@ -1742,7 +1785,7 @@ def main():
     workdir = OUTDIR / f"inst-{inst['instance_id']}-{args.model}{tag_suffix}"
 
     try:
-        out_path, wall, n_cells = run_pipeline(inst, repo_dir, args.model, workdir, no_siblings=args.no_siblings, no_keysym=args.no_keysym)
+        out_path, wall, n_cells, n_pool = run_pipeline(inst, repo_dir, args.model, workdir, no_siblings=args.no_siblings, no_keysym=args.no_keysym)
     except SystemExit as e:
         result = {"instance_id": inst["instance_id"], "model": args.model, "error": str(e), "wall_s": None}
         with open(args.results, "a") as f:
@@ -1939,7 +1982,8 @@ def main():
         "instance_id": inst["instance_id"],
         "model": args.model,
         "wall_s": round(wall, 1),
-        "aplus_cells": n_cells,
+        "aplus_cells": n_cells,         # AccessPath cells only
+        "pool_size": n_pool,             # total summary entries in pool
         **test_result,
     }
     with open(args.results, "a") as f:
