@@ -294,8 +294,19 @@ fn parse_directive(text: &str) -> DirectiveTargets {
     // qname (contains `::` OR is a single identifier). Both bullet-line
     // bullets AND paragraph-statement targets (e.g. synth_traceback_target's
     // "Edit ONE function: `artist::Artist::format_cursor_data`") flow through
-    // here. Filters out access-path patterns (start with `self.`) which are
-    // handled separately.
+    // here. Filters out access-path patterns (start with `self.`).
+    //
+    // **PRIMARY-block scoping** — cycle 0.8 evidence: the synth_directive
+    // composer appends supplementary "Additional graph-derived signals"
+    // blocks under any non-primary channel. Validator must only check
+    // alignment against the PRIMARY block; otherwise it treats touching
+    // ANY surfaced qname tail (from any supplementary channel) as
+    // alignment, producing false-negative critiques. Split on the
+    // "## Additional graph-derived signals" header.
+    let primary_block = match text.find("## Additional graph-derived signals") {
+        Some(i) => &text[..i],
+        None => text,
+    };
     let qname_quoted_re = Regex::new(r"`([A-Za-z_][A-Za-z0-9_:]*)`").unwrap();
     let file_re = Regex::new(r"in\s+`([^`]+\.\w+)`").unwrap();
     let line_range_re =
@@ -306,7 +317,7 @@ fn parse_directive(text: &str) -> DirectiveTargets {
     let mut files = BTreeSet::new();
     let mut line_ranges = Vec::new();
     let mut access_paths = BTreeSet::new();
-    for line in text.lines() {
+    for line in primary_block.lines() {
         for c in qname_quoted_re.captures_iter(line) {
             let qn = c.get(1).unwrap().as_str();
             // Skip access paths (self.X) — caught by access_path_re below.
