@@ -296,6 +296,17 @@ fn build_tail_index<'g>(
             continue;
         };
         let qn_str = qn.as_str();
+        // Exclude test-fixture qnames. The point of test_expectation is to
+        // find the IMPLEMENTATION being tested, not other test fixtures or
+        // testdata classes. Sphinx-10325 cycle 0.7 regressed because the
+        // tail-index matched `inheritedmeth` against test-root fixtures
+        // (`tests::roots::test-ext-autodoc::target::inheritance::Base::*`)
+        // instead of the real `sphinx::ext::autodoc::__init__::*` module.
+        if qn_str.starts_with("tests::") || qn_str.contains("::tests::") ||
+           qn_str.starts_with("test::") || qn_str.contains("::test::") ||
+           qn_str.starts_with("test_") || qn_str.contains("::test_") {
+            continue;
+        }
         let tail = qn_str.rsplit("::").next().unwrap_or(qn_str);
         out.entry(tail).or_default().push((n.id, qn_str));
     }
