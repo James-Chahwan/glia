@@ -83,7 +83,7 @@ rustc --version
 echo
 echo "=== Python deps ==="
 pip3 install --quiet --upgrade pip
-pip3 install --quiet \
+pip3 install --quiet uv \
   numpy pandas pyarrow \
   gguf \
   tokenizers \
