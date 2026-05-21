@@ -1,5 +1,13 @@
 # Overnight loop — cycle log
 
+## cycle 0.3 — 7b-q4 · 2026-05-21T09:10:55+10:00 → 2026-05-21T09:33:03+10:00
+
+- N=7 loop-set instances
+- pass=1 / fail=6 / error=0
+- total wall=1328s
+- per-cycle results: cycle/cycle-0.3-results.jsonl
+
+
 Newest cycle at top. Append-only. Never rewrite.
 
 Conventions:
@@ -60,3 +68,48 @@ Source of truth:
 - per-instance lens telemetry: `out/cycle-0/<instance>.{jsonl,png}`
 
 Baseline run output goes to `scratch/latent/out/instance_results.jsonl` (run_instance.py's default) AND is tagged with `cycle: 0` in the cycle results.
+
+## cycle 0.6 — Rust uplift session · 2026-05-21
+
+Plan: `/home/ivy/.claude/plans/abstract-rolling-hellman.md`. Six bundle tasks shipped this session (Phase 1-3 of the plan; Phase 4 C1/C2 deferred to cycle 0.95 — Python-adjacent, not big-rust-session scope).
+
+**Bundle A — measurement unblock (Rust portion):**
+
+- **A2 — soften matplotlib-22835 raise-redirect** (`projection-text/src/bin/synth_traceback_target.rs:369-434`). Cycle 0.3 NO-DIFF on matplotlib-22835 was caused by the directive simultaneously naming the deepest frame as the target AND putting it in "Do NOT modify." Soft fix: when redirected_from_raise, emit BOTH frames — PRIMARY (caller, fix likely lands here) and SECONDARY (raise site, edit if validation tweak makes the smaller diff). Anti-target list drops the raise frame.
+- **A3 — lens `--directive` flag** (`scratch/lens/src/main.rs:118-127`). Adds `--directive <path>` that prepends raw markdown to the suffix (real-pipeline layout, mirroring `run_instance.py:750-761`). Lens runs in generate-mode can now consume the same composed directive the real pipeline uses.
+
+**Bundle B — graph-side directive extensions (three new channels):**
+
+- **B1 — `synth_test_expectation.rs` NEW bin** (`projection-text/src/bin/synth_test_expectation.rs`, ~330 LOC). Parses `test_patch.patch`, extracts per-hunk added identifiers, matches against graph qnames via tail-index. Smoke results: marshmallow-1359 surfaces `fields::List` (gold class); django-10914 surfaces `core::files::storage::FileSystemStorage::file_permissions_mode` (gold fix site).
+- **B2 — `synth_prose_mention.rs` NEW bin** (`projection-text/src/bin/synth_prose_mention.rs`, ~210 LOC). Scans issue text for backtick-quoted + CamelCase identifiers, resolves via the same tail-index. Smoke: django-10914 surfaces `FileSystemStorage` from the prose (agrees with B1 — two channels point at the same fix site).
+- **B4 — `synth_directive.rs` NEW composer** (`projection-text/src/bin/synth_directive.rs`, ~250 LOC). Subprocess-orchestrates traceback + test_expectation + prose_mention; scores each emitted block (4 points per resolved-target bullet, +2 for "Edit ONE" lines, +1 traceback bonus, -1 per inert marker); highest score becomes PRIMARY block, others append as "Additional graph-derived signals." Marshmallow smoke shows all 3 channels firing, cross-channel agreement on `fields::List` / `_bind_to_schema`.
+
+**Bundle D — lens diagnostic instrumentation:**
+
+- **D1 — lens-batch `--mode` + `--max-new` + `--directive-dir`** (`scratch/lens/src/bin/lens-batch.rs:80-105`). Forwards generate-mode + per-instance directives to the lens subprocess. Lets cycle 0.7+ batch runs replicate real-pipeline behaviour across the 7-instance loop set.
+- **D3 — `mean_decision_layer` metric** (`scratch/lens/src/bin/lens-analyze.rs:54-95,257-291`). For each generated-token position, finds the smallest layer L where inj-run top-1 is constant from L through the final layer — i.e. when the model committed to that token. Cross-instance PASS-vs-FAIL histogram added to the markdown report + per-instance JSONL.
+
+**Run-pipeline wiring** (Python edit, but tied to Rust work):
+
+- `scratch/latent/out/run_instance.py:719-770` — replaces the single-channel synth_traceback_target call with a synth_directive composer call. `GLIA_DIRECTIVE_LEGACY=1` reverts to cycle-0.3 behaviour for A/B comparisons.
+
+**What this session does NOT close:**
+
+- A1 (sklearn-10508 NO-RUN) — Python eval_specs.py work, out of Rust-session scope.
+- C1 / C2 (per-token pool embed + marker tokens) — Python-side change in run_llama_pathB.py; deferred to cycle 0.95.
+- Cycle 0.7 measurement — needs to actually be run; ~3h inference for the 7-instance loop set.
+
+**Honest framing:** no PASS-count claim. The cycle 0.7 re-run + downstream measurement is the test of whether multi-channel composition + raise-redirect softening uplift the 1/7 baseline. All scoring decisions in B4 are heuristic — likely needs cycle 0.7 evidence to tune.
+
+**Files modified / added:**
+```
+projection-text/src/bin/synth_traceback_target.rs  edit  (A2 raise-redirect soften)
+projection-text/src/bin/synth_test_expectation.rs  new   (B1 ~330 LOC)
+projection-text/src/bin/synth_prose_mention.rs     new   (B2 ~210 LOC)
+projection-text/src/bin/synth_directive.rs         new   (B4 ~250 LOC composer)
+projection-text/Cargo.toml                         edit  (3 new [[bin]] entries)
+scratch/lens/src/main.rs                           edit  (A3 --directive flag)
+scratch/lens/src/bin/lens-batch.rs                 edit  (D1 generate-mode forwarding)
+scratch/lens/src/bin/lens-analyze.rs               edit  (D3 layer-of-decision)
+scratch/latent/out/run_instance.py                 edit  (wire B4 composer)
+```

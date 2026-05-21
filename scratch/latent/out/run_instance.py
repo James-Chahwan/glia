@@ -716,19 +716,38 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     prefix_path = workdir / "prefix.txt"
     prefix_path.write_text(prefix)
 
-    # Graph-derived traceback target directive (cycle 0.2/0.3 sage feature).
-    # Calls projection-text/src/bin/synth_traceback_target which reads the
-    # .gmap via build_repo_graph + parses issue.txt traceback regex + emits
-    # a prescriptive directive (target qname, anti-targets, buggy line,
-    # exception parse). When the issue has no parseable Python traceback or
-    # no graph-matched frame, this writes an empty/inert directive and we
-    # fall back to the generic suffix only.
+    # Graph-derived composed directive (cycle 0.6+, Bundle B4).
+    # Calls projection-text/src/bin/synth_directive which orchestrates three
+    # named-content channels:
+    #   1. synth_traceback_target — Python traceback frames (high precision
+    #      when present; ~1/7 of cycle_loop_set hits)
+    #   2. synth_test_expectation — test_patch identifiers (broad — 7/7)
+    #   3. synth_prose_mention    — backtick + CamelCase issue prose
+    # Channels score themselves; primary block + supporting blocks are
+    # composed into one directive at workdir/directive.txt.
     #
-    # See cycle/marshmallow_log.md iter5 for the win-condition data;
-    # cycle/full_rust_injection_plan.md for the JSON-removal roadmap.
+    # Cycle 0.6 reframe: cycle 0.5 A + 0.5 D established that the lever is
+    # structure × graph-derived NAMED content (multiplied; either alone
+    # FAILs). Widening the named-content funnel from 1 channel (traceback)
+    # to 3 channels is the cycle 0.7 test.
+    #
+    # GLIA_DIRECTIVE_LEGACY=1 reverts to the single-channel traceback bin
+    # (cycle 0.2/0.3 behaviour) for comparison runs.
     directive_path = workdir / "directive.txt"
+    legacy_only = os.environ.get("GLIA_DIRECTIVE_LEGACY") == "1"
+    synth_composer = GLIA / "target/release/synth_directive"
     synth_target_bin = GLIA / "target/release/synth_traceback_target"
-    if synth_target_bin.exists():
+    if synth_composer.exists() and not legacy_only:
+        cmd = [
+            str(synth_composer),
+            "--src", str(repo_dir),
+            "--issue", str(issue_path),
+            "--text-out", str(directive_path),
+        ]
+        if test_patch_path.exists() and test_patch_path.stat().st_size > 0:
+            cmd += ["--test-patch", str(test_patch_path)]
+        sh(cmd, capture_output=True, text=True)
+    elif synth_target_bin.exists():
         sh(
             [str(synth_target_bin),
              "--src", str(repo_dir),
@@ -739,13 +758,19 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     directive_text = ""
     if directive_path.exists():
         body = directive_path.read_text().strip()
-        # Inert directive when no graph-matched frame (the bin emits a
-        # one-line "(no graph node matched...)" placeholder).
-        if body and "no graph node matched" not in body and "no targeting available" not in body:
+        # Inert when no channel produced content. Composer writes a stub
+        # "(no channel produced..." message; legacy bin writes "no graph
+        # node matched..." / "no targeting available".
+        inert_markers = (
+            "no graph node matched",
+            "no targeting available",
+            "no channel produced",
+        )
+        if body and not any(m in body for m in inert_markers):
             directive_text = directive_path.read_text() + "\n\n"
-            log(f"traceback directive: {len(directive_text)} chars")
+            log(f"composed directive: {len(directive_text)} chars")
         else:
-            log("traceback directive: (inert; no graph-matched frame in issue traceback)")
+            log("composed directive: (inert; no channel surfaced graph-derived content)")
 
     suffix = (
         f"{directive_text}"
