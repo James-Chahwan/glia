@@ -275,7 +275,13 @@ fn main() -> Result<()> {
 }
 
 fn parse_directive(text: &str) -> DirectiveTargets {
-    let bullet_re = Regex::new(r"^[-*]\s*`([^`]+)`").unwrap();
+    // Extract qnames from ANY backtick-quoted string that looks like a Python
+    // qname (contains `::` OR is a single identifier). Both bullet-line
+    // bullets AND paragraph-statement targets (e.g. synth_traceback_target's
+    // "Edit ONE function: `artist::Artist::format_cursor_data`") flow through
+    // here. Filters out access-path patterns (start with `self.`) which are
+    // handled separately.
+    let qname_quoted_re = Regex::new(r"`([A-Za-z_][A-Za-z0-9_:]*)`").unwrap();
     let file_re = Regex::new(r"in\s+`([^`]+\.\w+)`").unwrap();
     let line_range_re =
         Regex::new(r"in\s+`([^`]+\.\w+)`\s*\(function body spans lines (\d+)-(\d+)\)").unwrap();
@@ -286,15 +292,19 @@ fn parse_directive(text: &str) -> DirectiveTargets {
     let mut line_ranges = Vec::new();
     let mut access_paths = BTreeSet::new();
     for line in text.lines() {
-        // Bullet qnames (per `- ` prefix in synth_* directive output).
-        if let Some(c) = bullet_re.captures(line.trim_start()) {
+        for c in qname_quoted_re.captures_iter(line) {
             let qn = c.get(1).unwrap().as_str();
-            // Only qname-shaped strings (contain `::` or have only ID-chars).
-            if qn.contains("::") || qn.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                let tail = qn.rsplit("::").next().unwrap_or(qn).to_string();
-                qname_tails.insert(tail);
-                qnames.insert(qn.to_string());
+            // Skip access paths (self.X) — caught by access_path_re below.
+            if qn.starts_with("self.") {
+                continue;
             }
+            // Require qname-shape: contains `::` OR is plain identifier ≥ 2 chars.
+            if !qn.contains("::") && qn.len() < 2 {
+                continue;
+            }
+            let tail = qn.rsplit("::").next().unwrap_or(qn).to_string();
+            qname_tails.insert(tail);
+            qnames.insert(qn.to_string());
         }
         for c in file_re.captures_iter(line) {
             let f = c.get(1).unwrap().as_str().to_string();

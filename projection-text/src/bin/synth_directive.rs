@@ -241,15 +241,37 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+// Cycle 0.7 empirical finding (channel-attribution on marshmallow's PASS):
+// the traceback channel surfaced `_bind_to_schema` (the gold method) but the
+// composer ranked it SECONDARY behind test_expectation (which surfaced CLASS
+// names only). Marshmallow PASSed because traceback content was still in the
+// directive, but for django + pytest the composer's CLASS-PRIMARY ranking
+// caused regressions to APPLY-FAIL. Fix: weight METHOD bullets and line-
+// anchored content above CLASS bullets, and give traceback a stronger base
+// bonus when it provides line ranges.
 fn score_directive(text: &str, _label: &str) -> (i32, usize) {
     let mut score = 0i32;
     let mut targets = 0usize;
     let mut had_traceback = false;
+    let mut had_line_anchor = false;
+    let mut method_bullets = 0i32;
+    let mut class_bullets = 0i32;
     for line in text.lines() {
         let t = line.trim_start();
         if t.starts_with("- `") {
             score += 4;
             targets += 1;
+            // Per-bullet kind boost. Bullets emitted by synth_test_expectation
+            // tag the kind in parens: "(method, ...)" / "(class, ...)" /
+            // "(function, ...)". synth_traceback_target's bullets are
+            // anti-target labels OR sections that include "method"/"function"
+            // signal via the directive's prose ("Edit ONE function: ...").
+            if t.contains("(method,") {
+                method_bullets += 1;
+                score += 4; // method bullets are more precise than class
+            } else if t.contains("(class,") {
+                class_bullets += 1;
+            }
         }
         if t.contains("Edit ONE") || t.contains("PRIMARY") {
             score += 2;
@@ -257,13 +279,35 @@ fn score_directive(text: &str, _label: &str) -> (i32, usize) {
         if t.contains("from issue traceback") {
             had_traceback = true;
         }
+        if t.contains("function body spans lines") {
+            // synth_traceback_target's line-anchor signal. Strongest single
+            // content signal — a line-anchored target is far more actionable
+            // than a class name. Worth +10.
+            had_line_anchor = true;
+        }
+        if t.contains("BUGGY LINE") {
+            // synth_traceback_target also names the buggy LINE explicitly —
+            // strongest possible content signal.
+            score += 5;
+        }
         if t.starts_with("(no ") {
             score -= 1;
         }
     }
     if had_traceback && targets > 0 {
-        score += 1;
+        score += 3;
     }
+    if had_line_anchor {
+        score += 10;
+    }
+    // Cap the noise from many class bullets: each class beyond the first 3
+    // adds +1 instead of +4 (test_expectation can surface 5-7 classes for
+    // tests that touch many CLASSES from the test_patch).
+    if class_bullets > 3 {
+        let excess = class_bullets - 3;
+        score -= 3 * excess;
+    }
+    let _ = method_bullets;
     (score, targets)
 }
 
