@@ -86,6 +86,10 @@ required-features = ["driver"]
 name = "synth_directive"
 required-features = ["driver"]
 
+[[bin]]
+name = "synth_validator"
+required-features = ["driver"]
+
 [dev-dependencies]
 repo-graph-parser-go = { path = "../parsers/code/go" }
 repo-graph-parser-python = { path = "../parsers/code/python" }

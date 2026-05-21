@@ -804,6 +804,71 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     if r.returncode != 0:
         raise SystemExit(f"run_llama_pathB failed rc={r.returncode}: {r.stderr[-1000:]}")
     log(f"pathB-llama done in {wall:.1f}s; out={out_path}")
+
+    # C2 (cycle 0.6 spitball sage loop): two-pass refinement. After pass-1
+    # emits a diff, synth_validator critiques it against the directive.
+    # When critique non-empty (not the inert sentinel), re-prompt with the
+    # critique prepended and the first-pass diff as "previous attempt" for
+    # the model to revise. Pass-2 output replaces pass-1 if non-empty.
+    #
+    # Gated on GLIA_TWO_PASS=1 (default off so cycle 0.7 baseline isn't
+    # disturbed). Doubles inference time per instance; only worth it after
+    # cycle 0.7 failure-mode classifier shows enough APPLY-FAIL /
+    # TARGET-MISMATCH cases that the orchestration cost is justified.
+    if os.environ.get("GLIA_TWO_PASS") == "1" and out_path.exists():
+        synth_validator_bin = GLIA / "target/release/synth_validator"
+        if synth_validator_bin.exists() and directive_path.exists():
+            critique_path = workdir / "critique.md"
+            sh(
+                [str(synth_validator_bin),
+                 "--diff", str(out_path),
+                 "--directive", str(directive_path),
+                 "--text-out", str(critique_path)],
+                capture_output=True, text=True,
+            )
+            crit = critique_path.read_text() if critique_path.exists() else ""
+            if crit.strip() and "no critique" not in crit:
+                log(f"sage loop: pass-1 critique non-empty ({len(crit)}c); running pass-2")
+                pass1_diff = out_path.read_text()
+                pass2_suffix = (
+                    f"{crit}\n\n"
+                    f"## Previous attempt (pass-1, REJECTED — do NOT repeat)\n\n"
+                    f"```\n{pass1_diff.strip()}\n```\n\n"
+                    f"## Corrected diff\n\n"
+                    "Produce a minimal unified git diff per the critique above. Output rules:\n"
+                    "- First line must be `diff --git a/... b/...`.\n"
+                    "- Do NOT wrap the diff in code fences (no triple backticks).\n"
+                    "- Do NOT emit an `index <sha>..<sha>` line.\n"
+                    "- `@@` hunk headers must use the real file's line numbers; do not fabricate them.\n"
+                    "- Emit only the diff. No prose before or after.<|im_end|>\n"
+                    "<|im_start|>assistant"
+                )
+                pass2_suffix_path = workdir / "suffix_pass2.txt"
+                pass2_suffix_path.write_text(pass2_suffix)
+                pass2_out_path = workdir / "out_pass2.txt"
+                t1 = time.time()
+                r2 = sh(
+                    ["python", str(OUTDIR / "run_llama_pathB.py"),
+                     gguf, str(prefix_path), str(pass2_suffix_path),
+                     str(summaries_aplus), str(pass2_out_path)],
+                    capture_output=True, text=True, env=inf_env,
+                )
+                wall2 = time.time() - t1
+                if r2.returncode == 0 and pass2_out_path.exists():
+                    pass2_diff = pass2_out_path.read_text().strip()
+                    if pass2_diff:
+                        log(f"sage loop: pass-2 promoted ({len(pass2_diff)}c in {wall2:.1f}s)")
+                        out_path = pass2_out_path
+                        wall += wall2
+                    else:
+                        log(f"sage loop: pass-2 produced empty diff in {wall2:.1f}s; keeping pass-1")
+                else:
+                    log(f"sage loop: pass-2 failed (rc={r2.returncode}); keeping pass-1")
+            else:
+                log("sage loop: pass-1 critique inert (diff aligns with directive); skipping pass-2")
+        else:
+            log("sage loop: synth_validator or directive missing; skipping pass-2")
+
     return out_path, wall, len(aplus_cells)
 
 
