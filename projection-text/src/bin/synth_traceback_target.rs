@@ -371,23 +371,83 @@ fn main() -> Result<()> {
         // that aren't in our --src graph. The actual repo-side bug is the
         // deepest frame WHERE THE GRAPH KNOWS THE FUNCTION. Walk tracebacks
         // in reverse order to find it.
-        let (target_match, target_src_line): (Option<&TracebackMatch>, Option<&String>) = {
-            let mut tm: Option<&TracebackMatch> = None;
-            let mut tsrc: Option<&String> = None;
-            for (tb_file, tb_line, _tb_fn, src) in tracebacks.iter().rev() {
-                if let Some(m) = narrowest_by_loc.get(&(tb_file.clone(), *tb_line)).copied() {
-                    tm = Some(m);
-                    tsrc = src.as_ref();
-                    break;
-                }
+        //
+        // ALSO: when the deepest-graph-matched frame's BUGGY LINE is a
+        // `raise X(...)` statement, the bug is NOT in the raise — the bug
+        // is upstream (caller wrongly invoked a path that reaches the raise).
+        // Redirect to the next-deepest-graph-matched frame in that case.
+        let raise_re = Regex::new(r#"^\s*raise\b"#)?;
+        let mut graph_matched_frames: Vec<(&TracebackMatch, Option<&String>, bool /*is_raise*/)> = Vec::new();
+        for (tb_file, tb_line, _tb_fn, src) in tracebacks.iter().rev() {
+            if let Some(m) = narrowest_by_loc.get(&(tb_file.clone(), *tb_line)).copied() {
+                let is_raise = src.as_ref().map(|s| raise_re.is_match(s)).unwrap_or(false);
+                graph_matched_frames.push((m, src.as_ref(), is_raise));
             }
-            (tm, tsrc)
+        }
+        // First non-raise frame wins. If all frames are raises (rare), fall
+        // back to the deepest.
+        let (target_match, target_src_line): (Option<&TracebackMatch>, Option<&String>) = {
+            let first_non_raise = graph_matched_frames.iter().find(|(_, _, is_raise)| !*is_raise);
+            match first_non_raise {
+                Some((m, src, _)) => (Some(*m), *src),
+                None => match graph_matched_frames.first() {
+                    Some((m, src, _)) => (Some(*m), *src),
+                    None => (None, None),
+                },
+            }
         };
+        let redirected_from_raise = graph_matched_frames
+            .first()
+            .map(|(_, _, is_raise)| *is_raise)
+            .unwrap_or(false)
+            && target_match
+                .map(|tm| {
+                    graph_matched_frames
+                        .first()
+                        .map(|(m, _, _)| m.matched_qname != tm.matched_qname)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+        // When we redirected from a raise, capture the raise frame separately so
+        // we can emit it as a SECONDARY site (validation point) instead of
+        // burying it in the anti-target list. matplotlib-22835 cycle 0.3
+        // NO-DIFF result: the directive that simultaneously redirected target
+        // away from the raise AND listed the raise frame under "Do NOT modify"
+        // caused the model to emit nothing. Soften: keep both frames
+        // selectable, let the model decide where the fix lands.
+        let raise_frame_qname: Option<String> = if redirected_from_raise {
+            graph_matched_frames
+                .first()
+                .map(|(m, _, _)| m.matched_qname.clone())
+        } else {
+            None
+        };
+        let raise_frame_line: Option<u32> = if redirected_from_raise {
+            graph_matched_frames.first().map(|(m, _, _)| m.traceback_line)
+        } else {
+            None
+        };
+        if redirected_from_raise {
+            eprintln!(
+                "[synth_traceback_target] deepest frame is a `raise` line; primary target redirected to caller {}, deepest frame {} emitted as SECONDARY site (not anti-target)",
+                target_match.map(|m| m.matched_qname.as_str()).unwrap_or("?"),
+                raise_frame_qname.as_deref().unwrap_or("?"),
+            );
+        }
 
         // Build anti-target list: all OTHER narrowest matches besides the target.
+        // EXCLUDE the raise-frame qname when redirected_from_raise — emitting
+        // it as anti-target alongside a "fix it in the caller" directive
+        // contradicts itself and produced NO-DIFF in matplotlib-22835.
         let antitarget_qnames: Vec<&String> = narrowest_by_loc
             .values()
             .filter(|m| target_match.map(|t| t.matched_qname != m.matched_qname).unwrap_or(true))
+            .filter(|m| {
+                raise_frame_qname
+                    .as_ref()
+                    .map(|rq| &m.matched_qname != rq)
+                    .unwrap_or(true)
+            })
             .map(|m| &m.matched_qname)
             .collect();
 
@@ -398,10 +458,23 @@ fn main() -> Result<()> {
                 "Edit ONE function: `{}` in `{}` (function body spans lines {}-{}).\n",
                 tm.matched_qname, tm.matched_node_file, tm.matched_start_line, tm.matched_end_line,
             ));
-            s.push_str(&format!(
-                "\nThe SWE-bench issue traceback names this function at line {} (the DEEPEST frame — where the exception throws).\n",
-                tm.traceback_line,
-            ));
+            if redirected_from_raise {
+                let raise_line = raise_frame_line.unwrap_or(0);
+                let raise_qn = raise_frame_qname.as_deref().unwrap_or("?");
+                s.push_str(&format!(
+                    "\nThis caller frame at line {} is the PRIMARY fix site — it reaches a `raise X(...)` statement at line {} in `{}` under conditions the test exercises. The fix most likely lands here so the raise stops firing for the failing test inputs.\n",
+                    tm.traceback_line, raise_line, raise_qn,
+                ));
+                s.push_str(&format!(
+                    "\n**Secondary site**: `{}` at line {} is where the raise lives. If the right fix is to relax/tighten the validation itself (not to change the caller's data flow), edit there instead. Pick whichever site produces the smaller, more targeted diff.\n",
+                    raise_qn, raise_line,
+                ));
+            } else {
+                s.push_str(&format!(
+                    "\nThe SWE-bench issue traceback names this function at line {} (the DEEPEST frame — where the exception throws).\n",
+                    tm.traceback_line,
+                ));
+            }
             // Surface the buggy source line + the exception class together so
             // the model knows EXACTLY which line to edit AND what access is
             // failing. Both extracted from the issue text (graph-derived
@@ -463,10 +536,14 @@ fn main() -> Result<()> {
                     s.push_str(&format!("- `{q}`\n"));
                 }
             }
-            s.push_str(&format!(
-                "\nEdit ONLY `{}` and ONLY the buggy line above. Emit a minimal unified diff.\n",
-                tm.matched_node_file,
-            ));
+            if redirected_from_raise {
+                s.push_str("\nEdit ONE of the two sites above (primary or secondary), not both. Emit a minimal unified diff.\n");
+            } else {
+                s.push_str(&format!(
+                    "\nEdit ONLY `{}` and ONLY the buggy line above. Emit a minimal unified diff.\n",
+                    tm.matched_node_file,
+                ));
+            }
         } else {
             s.push_str(
                 "(no graph node matched the deepest traceback frame — no targeting available)\n",
