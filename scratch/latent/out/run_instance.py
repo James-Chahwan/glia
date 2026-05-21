@@ -243,6 +243,15 @@ def ensure_venv(inst, repo_dir):
     # install skips compilation. Without this matplotlib/astropy import as
     # "partially initialized module" — _c_internal_utils / _erfa missing.
     if repo in _POST_INSTALL_BUILD_EXT:
+        # Runpod /workspace persistent volume strips executable bits → matplotlib's
+        # extract-and-./configure of bundled freetype fails with Errno 13. Write
+        # mplsetup.cfg to skip bundled freetype (use system libfreetype-dev which
+        # auto8h installs) AND skip bundled qhull (which downloads + compiles
+        # cleanly via Python, no ./configure exec needed).
+        if repo == "matplotlib/matplotlib":
+            (repo_dir / "mplsetup.cfg").write_text(
+                "[libs]\nsystem_freetype = True\nsystem_qhull = False\n"
+            )
         r = subprocess.run(f"{py_bin} setup.py build_ext --inplace", shell=True,
                            cwd=str(repo_dir), env=env, capture_output=True,
                            text=True, timeout=600)

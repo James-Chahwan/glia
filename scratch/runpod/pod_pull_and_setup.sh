@@ -48,7 +48,8 @@ apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   build-essential cmake git curl ca-certificates pkg-config \
   python3-dev python3-pip python3-venv \
-  libssl-dev libffi-dev patch
+  libssl-dev libffi-dev patch \
+  libfreetype6-dev libpng-dev libqhull-dev
 
 # 2. /home/ivy path layout (glia hardcodes absolute paths).
 echo
