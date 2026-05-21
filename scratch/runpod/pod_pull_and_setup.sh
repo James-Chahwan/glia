@@ -6,9 +6,9 @@
 # datacenter-grade bandwidth to pull each piece from its actual origin:
 #
 #   - glia code:    git clone github.com/James-Chahwan/glia (~50MB, ~30s)
-#   - Qwen model:   huggingface-cli download (~5GB, ~30-60s @ gigabit)
-#   - tokenizer:    huggingface-cli download (~10MB)
-#   - parquets:     huggingface-cli download princeton-nlp/SWE-bench_Lite (~3MB)
+#   - Qwen model:   hf download (~5GB, ~30-60s @ gigabit)
+#   - tokenizer:    hf download (~10MB)
+#   - parquets:     hf download princeton-nlp/SWE-bench_Lite (~3MB)
 #   - swe-work:     git clone each upstream repo + checkout base_commit
 #                   (~17 repos × ~50-200MB each, can parallelize)
 #
@@ -143,9 +143,8 @@ echo
 echo "=== huggingface download: ${MODEL_REPO}/${MODEL_FILE} ==="
 mkdir -p /home/ivy/Models/qwen2.5-coder-7b-gguf
 if [[ ! -f /home/ivy/Models/qwen2.5-coder-7b-gguf/${MODEL_FILE} ]]; then
-  huggingface-cli download "${MODEL_REPO}" "${MODEL_FILE}" \
+  hf download "${MODEL_REPO}" "${MODEL_FILE}" \
     --local-dir /home/ivy/Models/qwen2.5-coder-7b-gguf \
-    --local-dir-use-symlinks False
 else
   echo "  model already present"
 fi
@@ -155,9 +154,8 @@ ls -lh /home/ivy/Models/qwen2.5-coder-7b-gguf/
 echo
 echo "=== huggingface download: ${TOKENIZER_REPO}/tokenizer.json ==="
 if [[ ! -f /home/ivy/Models/qwen2.5-coder-tokenizer/tokenizer.json ]]; then
-  huggingface-cli download "${TOKENIZER_REPO}" tokenizer.json \
+  hf download "${TOKENIZER_REPO}" tokenizer.json \
     --local-dir /home/ivy/Models/qwen2.5-coder-tokenizer \
-    --local-dir-use-symlinks False
 fi
 ls -lh /home/ivy/Models/qwen2.5-coder-tokenizer/
 
@@ -165,11 +163,10 @@ ls -lh /home/ivy/Models/qwen2.5-coder-tokenizer/
 echo
 echo "=== huggingface download: ${SWEBENCH_DATASET} parquets ==="
 if [[ ! -f /home/ivy/Datasets/swe-bench-lite/data/test-00000-of-00001.parquet ]]; then
-  huggingface-cli download "${SWEBENCH_DATASET}" \
+  hf download "${SWEBENCH_DATASET}" \
     "data/dev-00000-of-00001.parquet" "data/test-00000-of-00001.parquet" \
     --repo-type dataset \
     --local-dir /home/ivy/Datasets/swe-bench-lite \
-    --local-dir-use-symlinks False
 fi
 ls -lh /home/ivy/Datasets/swe-bench-lite/data/
 
