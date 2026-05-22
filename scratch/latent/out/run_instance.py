@@ -2347,6 +2347,21 @@ def main():
     }
     with open(args.results, "a") as f:
         f.write(json.dumps(result) + "\n")
+    # Also write per-cycle-tag JSONL so standalone runs (cycle 2.2 alpha
+    # sweep, ad-hoc smoke runs) can be analyzed via the same path as
+    # cycle-harness runs. The cycle-{tag}-results.jsonl file is the
+    # canonical input for failure_mode_classifier, channel_attribution,
+    # solution_curve, etc.
+    if args.tag:
+        # Embed cycle tag in result so downstream tools group correctly.
+        result["cycle"] = args.tag
+        cycle_results_path = GLIA / "scratch" / "lens" / "cycle" / f"cycle-{args.tag}-results.jsonl"
+        try:
+            cycle_results_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cycle_results_path, "a") as f:
+                f.write(json.dumps(result) + "\n")
+        except Exception as _e:
+            log(f"warn: failed to write cycle-tag results: {type(_e).__name__}: {_e}")
     print(json.dumps(result, indent=2))
     return 0
 
