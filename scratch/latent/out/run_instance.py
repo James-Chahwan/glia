@@ -182,18 +182,20 @@ def ensure_venv(inst, repo_dir):
     if repo == "astropy/astropy":
         # astropy 5.x setup.py imports extension_helpers at metadata-prep time
         extra_build_deps.append("extension_helpers")
-    # setuptools 71+ dropped pkg_resources — sklearn 0.20 (and other older
-    # repos on Python 3.9) import pkg_resources at setup.py top-level and
-    # ModuleNotFoundError out. Pin <71 globally; newer repos still work.
-    # Cython 3.x (default in uv 2024+) rejects older .pyx syntax that
-    # sklearn 0.20's _gradient_boosting.pyx uses → CompileError aborts
-    # build_ext before _check_build.so is built. Pin <3 for compat.
-    # numpy 2.0+ removes APIs sklearn 0.20-era depends on; pin <2 in build
-    # deps so the cython compile of sklearn's .pyx files succeeds. (Specs
-    # often request numpy==1.19.2 but that wheel won't build on py3.9+; we
-    # need a numpy that's both <2 AND has wheels for the venv's Python.)
+    # Substrate pins for older SWE-bench instances (sklearn 0.20-era):
+    # - setuptools<71: setuptools 71+ dropped pkg_resources; sklearn 0.20
+    #   setup.py imports it at top level → ModuleNotFoundError otherwise.
+    # - cython<3: sklearn 0.20's .pyx syntax (_gradient_boosting.pyx,
+    #   quad_tree.pyx) is rejected by Cython 3.x → CompileError.
+    # - numpy<1.25: cycle 2.0 sklearn diagnosis revealed sklearn 0.20's
+    #   feature_extraction/image.py uses `dtype=np.int` which was DEPRECATED
+    #   in numpy 1.20 + REMOVED in numpy 1.25. numpy<2 installed 1.26.4
+    #   → AttributeError. numpy<1.25 installs 1.24.x which still has np.int
+    #   as alias + has wheels for Python 3.9. Modern matplotlib/scipy in
+    #   the SWE-bench corpus are fine with 1.24.x too (most need ≥1.20 only).
     sh(["uv", "pip", "install", "--python", str(py_bin),
-        "pip", "setuptools<71", "wheel", "cython<3", "numpy<2", *extra_build_deps],
+        "pip", "setuptools<71", "wheel", "cython<3", "numpy<1.25",
+        *extra_build_deps],
        capture_output=True, text=True)
 
     # Install pinned pip_packages (numpy/scipy/etc). Try as-spec'd first;
