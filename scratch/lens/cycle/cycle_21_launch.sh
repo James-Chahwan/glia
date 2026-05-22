@@ -151,5 +151,33 @@ print(f"  2.0: {c20c}")
 print(f"  2.1: {c21c}")
 PY
 
+#
+# Phase 4 — queue follow-up cycles to keep GPU busy
+#
+phase "Cycle 2.2 — alpha sweep on marshmallow + 2 hard instances (lens-bias only)"
+# Test the attention-bias lever in isolation across alpha {0.1, 0.3, 0.5,
+# 1.0}. Run on marshmallow (stable PASS for reference) + pytest + sphinx
+# (the two FAIL-but-applied instances where attention bias might unstick
+# edit-content). 3 instances × 4 alphas = 12 inference runs.
+for ALPHA in 0.1 0.3 0.5 1.0; do
+  for INST in marshmallow-code__marshmallow-1359 pytest-dev__pytest-11143 sphinx-doc__sphinx-10325; do
+    SPLIT="dev"
+    [[ "$INST" == "marshmallow-code__marshmallow-1359" ]] && SPLIT="dev" || SPLIT="test"
+    TAG="2.2-alpha-${ALPHA}"
+    rm -rf /home/ivy/Code/glia/scratch/latent/out/inst-${INST}-14b-q4-${TAG} 2>/dev/null
+    echo "=== alpha=${ALPHA} inst=${INST} ==="
+    GLIA_TWO_PASS=1 GLIA_SAGE_RUNTIME=1 GLIA_RUNTIME_EVIDENCE=1 \
+    GLIA_PER_TOKEN_POOL=1 GLIA_SAMPLES=3 GLIA_COMPOSITIONAL=1 \
+    GLIA_NORMALIZE_DIFF=1 GLIA_EXEMPLAR_FULL_HUNK=1 \
+    GLIA_ATTN_INJECTION=1 GLIA_ATTN_ALPHA="$ALPHA" \
+    N_GPU_LAYERS=99 \
+    python3 /home/ivy/Code/glia/scratch/latent/out/run_instance.py \
+      --instance-id "$INST" --split "$SPLIT" --model 14b-q4 --tag "$TAG" 2>&1 | tail -3 >> "$LOG"
+  done
+done
+
+phase "Cycle 2.3 — lens-bias smoke (alpha sweep on prefix/suffix only, no full pipeline)"
+bash /home/ivy/Code/glia/scratch/lens/cycle/lens_bias_smoke.sh 2>&1 | tail -20 >> "$LOG"
+
 phase "DONE"
 echo "Total wall: $(( ($(date +%s) - START) / 60 )) min" | tee -a "$LOG"

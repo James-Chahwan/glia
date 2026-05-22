@@ -181,28 +181,71 @@ print(f"[pathB-llama] full embed [{T_total}, {D}] = prefix {len(prefix_ids)} + n
 if T_total > n_ctx:
     # Top-K pool cap (cycle 1.2-gpu-14b mid-flight finding): matplotlib-22711
     # has 1156 entries → 141K tokens, exceeds Qwen's 131K native ctx by ~10K.
-    # Drop pool entries from the TAIL (lowest-score by aplus rank) until the
-    # total fits. Prefix + suffix are load-bearing — never truncate those.
+    # Drop pool entries until the total fits. Prefix + suffix are load-
+    # bearing — never truncate those.
+    #
+    # A2 protected-set (cycle 2.0 finding): cycle 1.2 + cycle 2.0 evidence
+    # both show matplotlib-22711 emerging from pool-cap with NO-DIFF — the
+    # gold qname is presumably in the dropped tail. Build a protected set
+    # from GLIA_PROTECTED_QNAMES (comma-separated qnames) — entries whose
+    # qname matches NEVER get dropped. run_instance.py sets this from the
+    # directive's PRIMARY target block.
+    protected = set()
+    _protected_env = os.environ.get("GLIA_PROTECTED_QNAMES", "")
+    if _protected_env:
+        for q in _protected_env.split(","):
+            q = q.strip()
+            if q:
+                protected.add(q)
     overflow = T_total - n_ctx
-    pool_token_lens = [v.shape[0] for v in node_vecs]
-    dropped_idx = []
+    # Build (drop-order-priority, idx, token_len) tuples for each pool slot.
+    # Lower priority = drop first. Protected entries get priority +1M
+    # (effectively never dropped unless absolutely required).
+    pool_meta = []
+    for i, v in enumerate(node_vecs):
+        qn = pool_positions[i].get("qname", "") if i < len(pool_positions) else ""
+        is_protected = qn in protected or any(qn.endswith("::" + p.split("::")[-1])
+                                              for p in protected if "::" in p)
+        # Priority: tail entries drop first (low priority = high idx); protected
+        # gets a +1M priority bump.
+        priority = i + (1_000_000 if is_protected else 0)
+        pool_meta.append((priority, i, v.shape[0], is_protected))
+    # Sort ascending by priority: lowest-priority (tail, non-protected) at front.
+    pool_meta.sort(key=lambda m: m[0])
+
+    # Drop from front (lowest priority) until overflow cleared.
+    dropped_set = set()
     dropped_tokens = 0
-    # Drop from tail; pool entries are pre-sorted by aplus score, so tail is
-    # lowest-relevance. Leave a 256-token margin for safety.
-    while pool_token_lens and (dropped_tokens < overflow + 256):
-        last_len = pool_token_lens.pop()
-        dropped_tokens += last_len
-        dropped_idx.append(len(pool_token_lens))  # index now points to the dropped slot
-    if pool_token_lens:
+    n_protected_kept = sum(1 for m in pool_meta if m[3])
+    for prio, idx, tok_len, prot in pool_meta:
+        if prot:
+            # Don't touch protected entries even if we run over.
+            continue
+        if dropped_tokens >= overflow + 256:
+            break
+        dropped_set.add(idx)
+        dropped_tokens += tok_len
+
+    if dropped_set:
+        kept_indices = [i for i in range(len(node_vecs)) if i not in dropped_set]
         # Rebuild concat with the kept pool subset.
-        node_vecs = node_vecs[:len(pool_token_lens)]
-        # Also trim pool_positions to match if it was populated.
+        node_vecs = [node_vecs[i] for i in kept_indices]
         if pool_positions:
-            pool_positions = pool_positions[:len(pool_token_lens)]
+            pool_positions = [pool_positions[i] for i in kept_indices]
         all_embeds = np.concatenate([prefix_emb] + node_vecs + [suffix_emb], axis=0).astype(np.float32)
         T_total = all_embeds.shape[0]
-        print(f"[pathB-llama] pool capped: dropped {len(dropped_idx)} tail entries "
-              f"({dropped_tokens} tokens) — new T_total={T_total}", file=sys.stderr)
+        print(f"[pathB-llama] pool capped: dropped {len(dropped_set)} entries "
+              f"({dropped_tokens} tokens); protected={n_protected_kept} kept; "
+              f"new T_total={T_total}",
+              file=sys.stderr)
+        # Log first 3 dropped qnames so we can see if gold is being culled
+        # (it shouldn't, with the protected-set filter active).
+        sample_dropped = [pool_positions_orig := None]  # placeholder
+        # Note: pool_positions has already been trimmed above. Read from
+        # node_vecs context: log indices instead.
+        sample = sorted(dropped_set)[:3]
+        print(f"[pathB-llama] pool capped: sample dropped idx={sample}",
+              file=sys.stderr)
     if T_total > n_ctx:
         print(f"[pathB-llama] ERROR T_total {T_total} still > n_ctx {n_ctx} after pool cap; "
               f"prefix+suffix alone ({len(prefix_ids)+len(suffix_ids)} tok) exceeds ctx",

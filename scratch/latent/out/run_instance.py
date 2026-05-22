@@ -1056,6 +1056,23 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         except Exception as e:
             log(f"plan-then-edit: exception ({type(e).__name__}: {e}); fallback to direct")
 
+    # A2 — pass directive's PRIMARY target qnames through to pathB as
+    # GLIA_PROTECTED_QNAMES so the pool-cap path NEVER drops gold-relevant
+    # entries even when T_total > n_ctx. Builds a comma-separated list of
+    # `pkg::cls::method` style qnames found in backticks in the directive
+    # (capped at top-10 to keep env value bounded).
+    if directive_path.exists():
+        try:
+            dt = directive_path.read_text()
+            qnames = list(dict.fromkeys(
+                re.findall(r"`([a-zA-Z_][\w]*(?:::[\w:]+)+)`", dt)
+            ))[:10]
+            if qnames:
+                inf_env["GLIA_PROTECTED_QNAMES"] = ",".join(qnames)
+                log(f"protected qnames: {len(qnames)} from directive (pool-cap will keep)")
+        except Exception:
+            pass
+
     # B5 beam-sampling. When GLIA_SAMPLES>1, run N inference passes with
     # SAMPLE_TEMP>0 + per-sample seed, write each candidate diff to
     # out_sample_<i>.txt, dedup by exact-text equality, score each by a
