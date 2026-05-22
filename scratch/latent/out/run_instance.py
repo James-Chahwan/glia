@@ -808,9 +808,18 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                     "Match this STYLE when emitting your diff. The CONTENT of these is NOT relevant — "
                     "they are unrelated past fixes in the same repo.\n\n"
                 )
+                # Lever #7 — retrieval-augmented exemplars. When
+                # GLIA_EXEMPLAR_FULL_HUNK=1, use the full multi-hunk diff
+                # instead of just the first hunk; gives the model
+                # concrete edit dialect (multiple +/- lines) for the repo.
+                use_full = os.environ.get("GLIA_EXEMPLAR_FULL_HUNK", "0") == "1"
+                ex_key = "all_hunks" if use_full else "first_hunk"
                 for r in ex_recs:
-                    exemplar_block += f"```\n{r.get('first_hunk', '').strip()}\n```\n\n"
-                log(f"diff exemplars: prepended {len(ex_recs)} from {ex_path.name}")
+                    body = r.get(ex_key) or r.get("first_hunk", "")
+                    exemplar_block += f"```\n{body.strip()}\n```\n\n"
+                log(f"diff exemplars: prepended {len(ex_recs)} "
+                    f"({'full-hunk' if use_full else 'first-hunk'}) "
+                    f"from {ex_path.name}")
     except Exception as _e:
         log(f"diff exemplars: skipped ({type(_e).__name__}: {_e})")
 
@@ -920,6 +929,22 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                     "exercises:\n\n"
                     f"```\n{runtime_evidence.strip()}\n```\n\n"
                 )
+                # Lever #2 — behavioral-target directive (GLIA_BEHAVIORAL_TARGET=1).
+                # Parse the raw F2P trace into assertion-level structured bullets
+                # so the model sees "what value does the test expect vs see"
+                # rather than just the raw traceback. Concrete behavioral target
+                # directly informs RIGHT-LINE-WRONG-CONTENT class failures.
+                if os.environ.get("GLIA_BEHAVIORAL_TARGET", "0") == "1":
+                    behavioral_bullets = _extract_behavioral_target(runtime_evidence)
+                    if behavioral_bullets:
+                        evidence_block += (
+                            "## Behavioral target (extracted from trace)\n\n"
+                            "The test's assertion(s) failed with the following "
+                            "expected-vs-actual contract. Your fix must make each "
+                            "assertion's actual value equal the expected:\n\n"
+                            f"{behavioral_bullets}\n\n"
+                        )
+                        log(f"behavioral target: extracted {behavioral_bullets.count(chr(10))} assertion bullets")
                 directive_text = evidence_block + directive_text
                 log(f"runtime evidence: prepended {len(runtime_evidence)}c F2P traceback")
         except Exception as e:
@@ -978,6 +1003,58 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
             else:
                 inf_env["N_CTX"] = "32768"
                 log(f"N_CTX=32768 ({n_entries} pool entries)")
+
+    # Lever #1 — plan-then-edit (GLIA_PLAN_THEN_EDIT=1).
+    # 14B+ models target correctly but write wrong edit content
+    # (RIGHT-TARGET-WRONG-EDIT). Force an explicit prose plan before the
+    # diff to surface the model's reasoning, then prepend the plan into the
+    # edit suffix so the model's diff is informed by its own analysis.
+    # Doubles inference wall for the planning pass (~50% of beam=3 wall);
+    # should improve edit-content correctness on the 5 non-PASS instances.
+    plan_then_edit = os.environ.get("GLIA_PLAN_THEN_EDIT", "0") == "1"
+    if plan_then_edit:
+        planning_suffix = (
+            f"{directive_text}"
+            "Before emitting the diff, write a SHORT plan (4-8 sentences):\n"
+            "1. What is the bug? (one sentence)\n"
+            "2. Which symbol (function/method/class) carries the bug? Name it.\n"
+            "3. What does the failing test assert? What value does it expect vs see?\n"
+            "4. What is the MINIMAL change to make the test pass? Describe in words.\n\n"
+            "Plan first, no code, no diff syntax. Emit ONLY the plan now.<|im_end|>\n"
+            "<|im_start|>assistant"
+        )
+        planning_suffix_path = workdir / "suffix_plan.txt"
+        planning_suffix_path.write_text(planning_suffix)
+        plan_path = workdir / "plan.md"
+        plan_env = inf_env.copy()
+        plan_env["MAX_NEW"] = "300"
+        log(f"plan-then-edit: planning pass")
+        try:
+            ri_plan = sh(["python", str(OUTDIR / "run_llama_pathB.py"),
+                          gguf, str(prefix_path), str(planning_suffix_path),
+                          str(summaries_aplus), str(plan_path)],
+                         capture_output=True, text=True, env=plan_env)
+            if ri_plan.returncode == 0 and plan_path.exists():
+                plan_text = plan_path.read_text().strip()
+                if plan_text:
+                    log(f"plan-then-edit: plan {len(plan_text)}c — prepending to edit suffix")
+                    plan_aware_suffix = (
+                        f"{directive_text}"
+                        "## Plan (your own analysis)\n\n"
+                        f"{plan_text}\n\n"
+                        "## Diff\n\n"
+                        "Now emit a minimal unified git diff implementing the plan above.\n"
+                        "- First line must be `diff --git a/... b/...`.\n"
+                        "- Do NOT wrap in code fences.\n"
+                        "- `@@` hunks must use real file line numbers.\n"
+                        "- Emit only the diff.<|im_end|>\n"
+                        "<|im_start|>assistant"
+                    )
+                    suffix_path.write_text(plan_aware_suffix)
+            else:
+                log(f"plan-then-edit: planning rc={ri_plan.returncode}; skipping plan integration")
+        except Exception as e:
+            log(f"plan-then-edit: exception ({type(e).__name__}: {e}); fallback to direct")
 
     # B5 beam-sampling. When GLIA_SAMPLES>1, run N inference passes with
     # SAMPLE_TEMP>0 + per-sample seed, write each candidate diff to
@@ -1266,6 +1343,14 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         except Exception as e:
             log(f"pool-reshape: raised {type(e).__name__}: {e}; keeping pass-1")
 
+    # Lever #3 — when GLIA_SKIP_VALIDATOR_PASS=1, skip the validator-driven
+    # pass-2 entirely and rely on sage-runtime (Lever 3) for recovery.
+    # Cycle 1.2 django evidence: validator pass-2 promoted a 1042c diff that
+    # made things WORSE (compositional dropped all hunks); only sage-runtime
+    # pass-2 (informed by actual test trace) fixed it. Validator's text-only
+    # critique can mislead; runtime trace is gold signal.
+    skip_validator = os.environ.get("GLIA_SKIP_VALIDATOR_PASS", "0") == "1"
+
     # C2 (cycle 0.6 spitball sage loop): two-pass refinement. After pass-1
     # emits a diff, synth_validator critiques it against the directive.
     # When critique non-empty (not the inert sentinel), re-prompt with the
@@ -1276,7 +1361,8 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     # disturbed). Doubles inference time per instance; only worth it after
     # cycle 0.7 failure-mode classifier shows enough APPLY-FAIL /
     # TARGET-MISMATCH cases that the orchestration cost is justified.
-    if os.environ.get("GLIA_TWO_PASS") == "1" and out_path.exists():
+    if (os.environ.get("GLIA_TWO_PASS") == "1" and out_path.exists()
+            and not skip_validator):
         synth_validator_bin = GLIA / "target/release/synth_validator"
         if synth_validator_bin.exists() and directive_path.exists():
             critique_path = workdir / "critique.md"
@@ -1603,6 +1689,60 @@ def _capture_runtime_evidence(inst, repo_dir, workdir) -> str:
         # Always revert before returning so subsequent inference sees a clean tree.
         sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
     return _extract_failure_block(log_text)
+
+
+def _extract_behavioral_target(trace: str) -> str:
+    """Lever #2 — distill a failing-test traceback into structured
+    "expected vs actual" bullets for the directive prefix.
+
+    Patterns matched (best-effort, single-pass over the trace):
+      - pytest AssertionError: ``assert 0 == 1`` → "Expression evaluates 0; must equal 1"
+      - pytest assert with operator: ``assert obj.attr == "foo"`` → likewise
+      - django AssertionError: ``AssertionError: 'foo' != 'bar' : ...`` → "got 'foo'; expected 'bar'"
+      - generic raised exception: ``ValueError: explanation`` → "Test triggers ValueError: ..."
+    Returns up to 4 bullets joined by newlines. Empty string if nothing matched.
+    """
+    if not trace:
+        return ""
+    bullets = []
+    # Pattern 1: pytest 'assert LEFT == RIGHT' (most common form)
+    for m in re.finditer(r"^\s*(?:E\s+)?assert\s+(.+?)\s*==\s*(.+?)$",
+                          trace, flags=re.M):
+        actual = m.group(1).strip().rstrip(",")
+        expected = m.group(2).strip().rstrip(",")
+        if len(actual) < 200 and len(expected) < 200:
+            bullets.append(f"- Expression `{actual}` must equal `{expected}` "
+                            f"(currently fails the equality).")
+        if len(bullets) >= 4:
+            break
+    # Pattern 2: django/unittest 'X != Y' AssertionError with optional msg
+    for m in re.finditer(r"AssertionError:\s*(.+?)\s*!=\s*(.+?)(?:\s+:\s+.+)?$",
+                          trace, flags=re.M):
+        actual = m.group(1).strip()
+        expected = m.group(2).strip()
+        if len(actual) < 200 and len(expected) < 200:
+            bullets.append(f"- Got `{actual}`; expected `{expected}`.")
+        if len(bullets) >= 4:
+            break
+    # Pattern 3: top-level exception with class + message
+    for m in re.finditer(r"^\s*(?:E\s+)?([A-Z][A-Za-z_]+(?:Error|Exception)):\s*(.+?)$",
+                          trace, flags=re.M):
+        exc = m.group(1).strip()
+        msg = m.group(2).strip()
+        if exc in ("AssertionError",):
+            continue  # already covered above
+        if len(msg) < 300:
+            bullets.append(f"- Bug raises `{exc}`: {msg}")
+        if len(bullets) >= 4:
+            break
+    # Dedupe + cap
+    seen = set()
+    deduped = []
+    for b in bullets:
+        if b not in seen:
+            seen.add(b)
+            deduped.append(b)
+    return "\n".join(deduped[:4])
 
 
 def _extract_failure_block(test_log: str) -> str:
