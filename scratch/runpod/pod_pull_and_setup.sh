@@ -50,7 +50,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   python3-dev python3-pip python3-venv \
   libssl-dev libffi-dev patch \
   libfreetype6-dev libpng-dev libqhull-dev \
-  libfontconfig1-dev
+  libfontconfig1-dev libclang-dev clang
 
 # 2. /home/ivy path layout (glia hardcodes absolute paths).
 echo
