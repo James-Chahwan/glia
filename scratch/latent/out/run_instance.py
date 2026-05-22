@@ -316,8 +316,15 @@ def ensure_venv(inst, repo_dir):
         else:
             log(f"  build_ext --inplace ok")
 
-    # Always install pytest — many specs assume it's already there from conda
-    sh(["uv", "pip", "install", "--python", str(py_bin), "pytest"],
+    # Always install pytest — many specs assume it's already there from conda.
+    # Cycle 2.1 sklearn-10508 diagnosis: pytest 4.0+ removed yield-based
+    # tests. sklearn 0.20's test_label.py uses `def test_x(): ... yield ...`
+    # → collection error: "'yield' keyword is allowed in fixtures, but not
+    # in tests". Pin pytest<4 for older repos that still have yield-tests.
+    # Modern repos work with pytest<4 too (it's just an upper bound on
+    # major version, not min).
+    pytest_pin = "pytest<4" if repo == "scikit-learn/scikit-learn" else "pytest"
+    sh(["uv", "pip", "install", "--python", str(py_bin), pytest_pin],
        capture_output=True, text=True)
 
     marker.write_text(f"{repo}@{inst['base_commit']}\n{install_cmd}\n")
@@ -1026,11 +1033,45 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
     # should improve edit-content correctness on the 5 non-PASS instances.
     plan_then_edit = os.environ.get("GLIA_PLAN_THEN_EDIT", "0") == "1"
     if plan_then_edit:
+        # Cycle 2.1 sphinx finding: plan-then-edit's planning pass picked
+        # `sphinx::parsers::Parser::app` (wrong file) even though file_priors
+        # top-1 for sphinx is `sphinx/ext/autodoc/__init__.py` (the gold
+        # file). The plan IGNORED file_priors because they were in the
+        # prefix's file_priors_block but not called out by the planning
+        # prompt itself. Fix: explicitly re-quote the top-3 file priors in
+        # the planning prompt and force the plan to address whether its
+        # target file matches the prior.
+        priors_hint = ""
+        try:
+            slug_fp = inst['repo'].replace("/", "__")
+            fp_path = OUTDIR / "file_priors" / f"{slug_fp}.json"
+            if fp_path.exists():
+                fp = json.loads(fp_path.read_text())
+                by_inst = fp.get("by_file_to_instances", {})
+                file_counts_ex = []
+                n_total_ex = max(1, fp.get("n_total_instances", 1) - 1)
+                for fpath, insts in by_inst.items():
+                    cnt = sum(1 for i in insts if i != inst["instance_id"])
+                    if cnt > 0:
+                        file_counts_ex.append((fpath, cnt))
+                file_counts_ex.sort(key=lambda x: (-x[1], x[0]))
+                top3 = file_counts_ex[:3]
+                if top3:
+                    priors_hint = (
+                        "File-priors hint: across past fixes in this repo, "
+                        + ", ".join(f"`{f}`" for f, _c in top3)
+                        + " are the most-edited files. Prefer one of these when "
+                        + "naming the target symbol's file in step 2, unless "
+                        + "the traceback or test_patch clearly points elsewhere.\n\n"
+                    )
+        except Exception:
+            pass
         planning_suffix = (
             f"{directive_text}"
+            f"{priors_hint}"
             "Before emitting the diff, write a SHORT plan (4-8 sentences):\n"
             "1. What is the bug? (one sentence)\n"
-            "2. Which symbol (function/method/class) carries the bug? Name it.\n"
+            "2. Which symbol (function/method/class) carries the bug? Name it AND its file path.\n"
             "3. What does the failing test assert? What value does it expect vs see?\n"
             "4. What is the MINIMAL change to make the test pass? Describe in words.\n\n"
             "Plan first, no code, no diff syntax. Emit ONLY the plan now.<|im_end|>\n"
@@ -1077,17 +1118,28 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
         except Exception as e:
             log(f"plan-then-edit: exception ({type(e).__name__}: {e}); fallback to direct")
 
-    # A2 — pass directive's PRIMARY target qnames through to pathB as
+    # A2 — pass directive's target qnames through to pathB as
     # GLIA_PROTECTED_QNAMES so the pool-cap path NEVER drops gold-relevant
-    # entries even when T_total > n_ctx. Builds a comma-separated list of
-    # `pkg::cls::method` style qnames found in backticks in the directive
-    # (capped at top-10 to keep env value bounded).
+    # entries even when T_total > n_ctx.
+    #
+    # Cycle 2.1 matplotlib-22711 finding: original regex required `pkg::cls::method`
+    # shape (≥2 `::` separators) and only extracted 1 qname from a directive
+    # that had 5+ qnames in causal_chain + test_expectation + prose_mention
+    # blocks. Tightened regex was missing single-segment `cls::method`
+    # patterns AND `cls.method` patterns AND multi-line ` qnames in lists.
+    # Expanded to extract from ALL backticked tokens that look like Python/
+    # Rust qnames (≥1 `::` OR ≥1 `.` between identifier segments).
     if directive_path.exists():
         try:
             dt = directive_path.read_text()
-            qnames = list(dict.fromkeys(
-                re.findall(r"`([a-zA-Z_][\w]*(?:::[\w:]+)+)`", dt)
-            ))[:10]
+            # Match `pkg::cls::method`, `cls::method`, `pkg.cls.method` patterns
+            # inside backticks. Up to 20 qnames now (was 10) since the union
+            # of causal_chain + test_expectation + prose_mention can legitimately
+            # surface that many on big-bug instances.
+            qname_pat = re.compile(
+                r"`([a-zA-Z_][\w]*(?:(?:::|\.)[\w]+)+)`"
+            )
+            qnames = list(dict.fromkeys(qname_pat.findall(dt)))[:20]
             if qnames:
                 inf_env["GLIA_PROTECTED_QNAMES"] = ",".join(qnames)
                 log(f"protected qnames: {len(qnames)} from directive (pool-cap will keep)")
@@ -2019,6 +2071,32 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
             sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
             return {"apply": "APPLY-FAIL", "f2p": None, "reg": None, "reg_fail": None,
                     "apply_err": (r.stderr + r2.stderr)[-400:]}
+
+    # Cycle 2.1 matplotlib-22835 finding: model emitted a diff that applied
+    # cleanly but resulted in Python source with broken indentation INSIDE
+    # an existing block. The tests then NO-RUN with `E IndentationError:
+    # unexpected indent`. ast.parse the touched Python files BEFORE the
+    # test runs — if any of them fails to parse, fall back to APPLY-FAIL
+    # so sage runtime pass-2 gets a chance to re-prompt with a clean diff.
+    try:
+        touched_files = re.findall(r"^\+\+\+ b/(\S+)", diff, flags=re.M)
+        for tf in touched_files:
+            if not tf.endswith(".py"):
+                continue
+            tf_path = repo_dir / tf
+            if not tf_path.exists():
+                continue
+            try:
+                import ast as _ast
+                _ast.parse(tf_path.read_text(errors="replace"))
+            except SyntaxError as se:
+                sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
+                log(f"post-apply ast.parse: SyntaxError in {tf}: {se}")
+                return {"apply": "APPLY-FAIL", "f2p": None, "reg": None, "reg_fail": None,
+                        "apply_err": f"post-apply SyntaxError: {se}"[:400]}
+    except Exception as _e:
+        # Don't let our own checker raise into apply_and_test
+        log(f"post-apply ast.parse: skipped ({type(_e).__name__}: {_e})")
 
     # Per-repo test command from swebench spec — django runtests.py / sympy bin/test
     # / pytest -rA depending on repo. Directives = test files extracted from
