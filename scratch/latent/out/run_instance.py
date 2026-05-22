@@ -187,14 +187,15 @@ def ensure_venv(inst, repo_dir):
     #   setup.py imports it at top level → ModuleNotFoundError otherwise.
     # - cython<3: sklearn 0.20's .pyx syntax (_gradient_boosting.pyx,
     #   quad_tree.pyx) is rejected by Cython 3.x → CompileError.
-    # - numpy<1.25: cycle 2.0 sklearn diagnosis revealed sklearn 0.20's
+    # - numpy<1.24: cycle 2.0 sklearn diagnosis revealed sklearn 0.20's
     #   feature_extraction/image.py uses `dtype=np.int` which was DEPRECATED
-    #   in numpy 1.20 + REMOVED in numpy 1.25. numpy<2 installed 1.26.4
-    #   → AttributeError. numpy<1.25 installs 1.24.x which still has np.int
-    #   as alias + has wheels for Python 3.9. Modern matplotlib/scipy in
-    #   the SWE-bench corpus are fine with 1.24.x too (most need ≥1.20 only).
+    #   in numpy 1.20 + REMOVED in numpy 1.24 (not 1.25 as initially
+    #   suspected). Initial fix numpy<1.25 still installed 1.24.x → still
+    #   AttributeError. numpy<1.24 installs 1.23.5 which has np.int as a
+    #   deprecated-but-accessible alias + wheels for Python 3.9-3.11.
+    #   Modern matplotlib (3.6+) in the SWE-bench corpus accepts ≥1.20.
     sh(["uv", "pip", "install", "--python", str(py_bin),
-        "pip", "setuptools<71", "wheel", "cython<3", "numpy<1.25",
+        "pip", "setuptools<71", "wheel", "cython<3", "numpy<1.24",
         *extra_build_deps],
        capture_output=True, text=True)
 
