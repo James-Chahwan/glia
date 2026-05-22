@@ -582,17 +582,47 @@ pub fn write_sharded(
 ) -> Result<Manifest, StoreError> {
     std::fs::create_dir_all(dir)?;
 
+    // Phase 1 incremental rebuild: load prior manifest (if present) and
+    // compare per-shard content hashes. Shards whose serialized bytes hash
+    // matches the stored content_hash skip the write_atomic call. Cuts
+    // write/fsync work for the common case of "this repo's parse output
+    // didn't change for these shards" — useful for any consumer that
+    // watches mtime or hot-loads on change events.
+    //
+    // Worst case unchanged: 0 writes saved (every shard hash changed).
+    // Best case: parse output identical → only manifest gets a rewrite
+    // (and it might also skip via the same check). Typical: 1-3 of N
+    // shards change per cycle when a single language tree is edited.
+    let prior_manifest: Option<Manifest> = std::fs::read(dir.join(MANIFEST_NAME))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
+
     let mut entries = Vec::with_capacity(shards.len());
+    let mut shards_skipped = 0usize;
     for (name, g) in shards {
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
         let container = Container::from_repo_graph(g);
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
-        write_atomic(&shard_path, &bytes)?;
+        let content_hash = hex_xxhash64(&bytes);
+
+        // Skip-when-unchanged: write only if the prior manifest didn't
+        // already report this hash for this shard name AND the file exists.
+        let unchanged = prior_manifest.as_ref().map(|m| {
+            m.shards.iter().any(|e| e.name == *name
+                && e.content_hash == content_hash
+                && dir.join(&e.path).exists())
+        }).unwrap_or(false);
+        if !unchanged {
+            write_atomic(&shard_path, &bytes)?;
+        } else {
+            shards_skipped += 1;
+        }
+
         entries.push(ShardEntry {
             name: (*name).to_string(),
             path: file_name,
-            content_hash: hex_xxhash64(&bytes),
+            content_hash,
         });
     }
 
@@ -602,11 +632,20 @@ pub fn write_sharded(
         let shard_path = dir.join(CROSS_STACK_NAME);
         let container = Container::for_cross_edges(cross_edges.to_vec());
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
-        write_atomic(&shard_path, &bytes)?;
+        let content_hash = hex_xxhash64(&bytes);
+        let unchanged = prior_manifest.as_ref()
+            .and_then(|m| m.cross.as_ref())
+            .map(|c| c.content_hash == content_hash && dir.join(&c.path).exists())
+            .unwrap_or(false);
+        if !unchanged {
+            write_atomic(&shard_path, &bytes)?;
+        } else {
+            shards_skipped += 1;
+        }
         Some(ShardEntry {
             name: "cross_stack".to_string(),
             path: CROSS_STACK_NAME.to_string(),
-            content_hash: hex_xxhash64(&bytes),
+            content_hash,
         })
     };
 
@@ -616,7 +655,26 @@ pub fn write_sharded(
         cross,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
-    write_atomic(&dir.join(MANIFEST_NAME), &manifest_bytes)?;
+    // Skip the manifest write only if it's byte-identical to the prior one
+    // (so consumers watching the manifest mtime don't get false wakeups).
+    let manifest_path = dir.join(MANIFEST_NAME);
+    let manifest_unchanged = std::fs::read(&manifest_path)
+        .ok()
+        .map(|prior| prior == manifest_bytes)
+        .unwrap_or(false);
+    if !manifest_unchanged {
+        write_atomic(&manifest_path, &manifest_bytes)?;
+    }
+    // Diagnostic: emit how many shards were skipped (env-gated to keep
+    // hot-path output clean by default; opt in via GLIA_STORE_VERBOSE=1).
+    if std::env::var("GLIA_STORE_VERBOSE").as_deref() == Ok("1") {
+        eprintln!(
+            "[store] write_sharded: {} shards skipped (unchanged), {} written, manifest {}",
+            shards_skipped,
+            shards.len() + cross_edges.len().min(1) - shards_skipped,
+            if manifest_unchanged { "unchanged" } else { "rewritten" },
+        );
+    }
     Ok(manifest)
 }
 
@@ -931,5 +989,64 @@ mod tests {
         let archived = shard_b.1.archived().unwrap();
         let node = &archived.nodes[0];
         assert_eq!(node.cells.len(), 1);
+    }
+
+    #[test]
+    fn write_sharded_skips_unchanged_shards_on_rewrite() {
+        // Phase 1 incremental rebuild test: write a sharded layout twice
+        // with identical inputs; verify that the second pass does NOT
+        // change the mtime of either shard file (skip-when-unchanged).
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let shard_dir = dir.path();
+        let repo = RepoId::from_canonical("test://incremental");
+        let g_a = RepoGraph {
+            repo,
+            nodes: vec![Node {
+                id: NodeId(100),
+                repo,
+                confidence: repo_graph_core::Confidence::Strong,
+                cells: vec![],
+            }],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let g_b = RepoGraph {
+            repo,
+            nodes: vec![Node {
+                id: NodeId(200),
+                repo,
+                confidence: repo_graph_core::Confidence::Strong,
+                cells: vec![],
+            }],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        write_sharded(&[("a", &g_a), ("b", &g_b)], &[], shard_dir).unwrap();
+        let shard_a_path = shard_dir.join("a.gmap");
+        let shard_b_path = shard_dir.join("b.gmap");
+        let manifest_path = shard_dir.join(MANIFEST_NAME);
+        let mtime_a_before = std::fs::metadata(&shard_a_path).unwrap().modified().unwrap();
+        let mtime_b_before = std::fs::metadata(&shard_b_path).unwrap().modified().unwrap();
+        let mtime_m_before = std::fs::metadata(&manifest_path).unwrap().modified().unwrap();
+        // Sleep a bit so mtime resolution differences are visible if a
+        // write_atomic does fire.
+        std::thread::sleep(Duration::from_millis(50));
+        // Rewrite with identical inputs.
+        write_sharded(&[("a", &g_a), ("b", &g_b)], &[], shard_dir).unwrap();
+        let mtime_a_after = std::fs::metadata(&shard_a_path).unwrap().modified().unwrap();
+        let mtime_b_after = std::fs::metadata(&shard_b_path).unwrap().modified().unwrap();
+        let mtime_m_after = std::fs::metadata(&manifest_path).unwrap().modified().unwrap();
+        assert_eq!(mtime_a_before, mtime_a_after, "shard a was rewritten despite unchanged input");
+        assert_eq!(mtime_b_before, mtime_b_after, "shard b was rewritten despite unchanged input");
+        assert_eq!(mtime_m_before, mtime_m_after, "manifest was rewritten despite unchanged input");
     }
 }
