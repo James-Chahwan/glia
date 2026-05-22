@@ -6,3 +6,8 @@ publish = false
 
 [dependencies]
 repo-graph-core = { path = "../core" }
+
+[[bench]]
+name = "ppr"
+path = "benches/ppr.rs"
+harness = false
