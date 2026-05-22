@@ -188,8 +188,12 @@ def ensure_venv(inst, repo_dir):
     # Cython 3.x (default in uv 2024+) rejects older .pyx syntax that
     # sklearn 0.20's _gradient_boosting.pyx uses → CompileError aborts
     # build_ext before _check_build.so is built. Pin <3 for compat.
+    # numpy 2.0+ removes APIs sklearn 0.20-era depends on; pin <2 in build
+    # deps so the cython compile of sklearn's .pyx files succeeds. (Specs
+    # often request numpy==1.19.2 but that wheel won't build on py3.9+; we
+    # need a numpy that's both <2 AND has wheels for the venv's Python.)
     sh(["uv", "pip", "install", "--python", str(py_bin),
-        "pip", "setuptools<71", "wheel", "cython<3", *extra_build_deps],
+        "pip", "setuptools<71", "wheel", "cython<3", "numpy<2", *extra_build_deps],
        capture_output=True, text=True)
 
     # Install pinned pip_packages (numpy/scipy/etc). Try as-spec'd first;
