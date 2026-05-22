@@ -1106,6 +1106,62 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
             text = cand_path.read_text() if cand_path.exists() else ""
             candidates.append((i, cand_path, text, ci))
             log(f"  sample {i}: {len(text)}c in {ci:.1f}s")
+
+            # Lever #8 — lens-attention-bias as a parallel beam channel.
+            # GLIA_ATTN_INJECTION=1 runs lens-attention-bias bin with the
+            # same prefix/suffix, injecting target embed at L25-27 via
+            # cb_eval write path (Rust runtime, not Python). Adds a 2nd
+            # candidate per sample = doubles beam diversity, lets matrix
+            # Option C compare baseline vs latent-steered side-by-side.
+            # Target qname resolved from directive PRIMARY block heuristic
+            # (first `::`-containing backticked symbol).
+            if os.environ.get("GLIA_ATTN_INJECTION", "0") == "1":
+                try:
+                    target_qname = os.environ.get("GLIA_ATTN_TARGET_QNAME") or \
+                        _extract_primary_target_qname(directive_path)
+                    if target_qname:
+                        lens_bin = (GLIA / "scratch/lens/target/release"
+                                    / "lens-attention-bias")
+                        attn_alpha = os.environ.get("GLIA_ATTN_ALPHA", "0.3")
+                        attn_json = workdir / f"attn_sample_{i}.json"
+                        attn_text_path = workdir / f"out_sample_{i}_attnbias.txt"
+                        if lens_bin.exists():
+                            t_attn = time.time()
+                            ri_attn = sh([
+                                str(lens_bin),
+                                "--weights", gguf,
+                                "--tokenizer", "/home/ivy/Models/qwen2.5-coder-tokenizer/tokenizer.json",
+                                "--prefix", str(prefix_path),
+                                "--suffix", str(suffix_path),
+                                "--target-qname", target_qname,
+                                "--inject-layers", "25:28",
+                                "--inject-positions", "23:26",
+                                "--alpha", attn_alpha,
+                                "--max-new", "400",
+                                "--out", str(attn_json),
+                            ], capture_output=True, text=True, env=cand_env)
+                            ai = time.time() - t_attn
+                            if ri_attn.returncode == 0 and attn_json.exists():
+                                try:
+                                    attn_data = json.loads(attn_json.read_text())
+                                    injected = attn_data.get("injected_output", "")
+                                    if injected.strip():
+                                        attn_text_path.write_text(injected)
+                                        # Use a high-bit index to avoid colliding
+                                        # with regular sample indices.
+                                        attn_idx = i + 1000
+                                        candidates.append(
+                                            (attn_idx, attn_text_path, injected, ai))
+                                        log(f"  sample {attn_idx} (attn-bias α={attn_alpha} "
+                                            f"target={target_qname.split('::')[-1]}): "
+                                            f"{len(injected)}c in {ai:.1f}s")
+                                except Exception as ex:
+                                    log(f"  attn-bias sample {i}: parse failed ({ex})")
+                            else:
+                                err_tail = (ri_attn.stderr or "")[-200:].strip()
+                                log(f"  attn-bias sample {i}: rc={ri_attn.returncode} — {err_tail}")
+                except Exception as ex:
+                    log(f"  attn-bias sample {i}: skipped ({type(ex).__name__}: {ex})")
         wall = time.time() - t0
         # Dedup by text (greedy + low-temp can collide).
         seen = set()
@@ -1689,6 +1745,30 @@ def _capture_runtime_evidence(inst, repo_dir, workdir) -> str:
         # Always revert before returning so subsequent inference sees a clean tree.
         sh(["git", "-C", str(repo_dir), "checkout", "--", "."])
     return _extract_failure_block(log_text)
+
+
+def _extract_primary_target_qname(directive_path) -> str:
+    """Lever #8 helper. Scan the composed directive for the first
+    `pkg::cls::method` style qname inside a backtick — that's the
+    PRIMARY target the directive surfaced. Returns empty string if
+    nothing matched.
+
+    Used to feed lens-attention-bias's --target-qname arg without
+    requiring the caller to know the synth_directive internals.
+    """
+    if not directive_path or not directive_path.exists():
+        return ""
+    try:
+        text = directive_path.read_text()
+    except Exception:
+        return ""
+    # Prefer the first qname inside the PRIMARY block — synth_directive
+    # always puts it under "Implementation-side targets:" or
+    # "Required fix target". Fall back to any `::`-containing backtick.
+    m = re.search(r"`([a-zA-Z_][\w]*::[\w:]+)`", text)
+    if m:
+        return m.group(1)
+    return ""
 
 
 def _extract_behavioral_target(trace: str) -> str:
