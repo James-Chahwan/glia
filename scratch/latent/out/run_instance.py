@@ -1172,8 +1172,9 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                                 "--prefix", str(prefix_path),
                                 "--suffix", str(suffix_path),
                                 "--target-qname", target_qname,
-                                "--inject-layers", "25:28",
-                                "--inject-positions", "23:26",
+                                # Bin expects CSV indices, NOT colon ranges
+                                "--bias-layers", "25,26,27",
+                                "--bias-positions", "23,24,25",
                                 "--alpha", attn_alpha,
                                 "--max-new", "400",
                                 "--out", str(attn_json),
