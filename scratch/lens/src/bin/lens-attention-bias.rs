@@ -199,6 +199,15 @@ fn run<R: LensRuntime>(args: &Args) -> Result<()> {
         writer.record(step)?;
     }
 
+    // Detokenize generated sequences so callers (e.g. run_instance.py's
+    // attn-injection beam channel) get the actual diff text, not token ids.
+    let baseline_output: String = baseline.generated_tokens.iter()
+        .map(|&t| rt.detokenize(t))
+        .collect();
+    let injected_output: String = biased.generated_tokens.iter()
+        .map(|&t| rt.detokenize(t))
+        .collect();
+
     let summary = serde_json::json!({
         "kind": "AttentionBiasSummary",
         "data": {
@@ -210,6 +219,8 @@ fn run<R: LensRuntime>(args: &Args) -> Result<()> {
             "alpha": attn_spec.alpha,
             "baseline_tokens": baseline.generated_tokens,
             "biased_tokens": biased.generated_tokens,
+            "baseline_output": baseline_output,
+            "injected_output": injected_output,
             "hamming": hamming,
             "first_divergence_step": first_div,
         }

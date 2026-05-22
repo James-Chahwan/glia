@@ -1170,8 +1170,25 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                             ai = time.time() - t_attn
                             if ri_attn.returncode == 0 and attn_json.exists():
                                 try:
-                                    attn_data = json.loads(attn_json.read_text())
-                                    injected = attn_data.get("injected_output", "")
+                                    # lens-attention-bias emits a JSONL stream
+                                    # with one "AttentionBiasSummary" record;
+                                    # the actual injected text is at
+                                    # data.injected_output (cycle 2.0 fix:
+                                    # was reading injected_output at the top
+                                    # level, which doesn't exist).
+                                    injected = ""
+                                    for line in attn_json.read_text().splitlines():
+                                        if not line.strip():
+                                            continue
+                                        try:
+                                            rec = json.loads(line)
+                                        except json.JSONDecodeError:
+                                            continue
+                                        if rec.get("kind") == "AttentionBiasSummary":
+                                            injected = rec.get("data", {}).get(
+                                                "injected_output", "")
+                                            break
+                                    attn_data = {"injected_output": injected}
                                     if injected.strip():
                                         attn_text_path.write_text(injected)
                                         # Use a high-bit index to avoid colliding
