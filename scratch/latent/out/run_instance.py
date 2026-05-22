@@ -1914,15 +1914,23 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
     # Compresses bloated diffs (sphinx 1607c) and re-anchors line numbers
     # to current source, removing APPLY-FAIL caused by line drift. Opt-in
     # for now to A/B against the baseline; default off until validated.
+    #
+    # B1+B3 polish (cycle 2.0 observation): on diffs that already apply
+    # cleanly at correct line numbers, the round-trip produces output
+    # ≥ original because git's --unified=3 may emit more context than the
+    # model. Log message now says "no compression available" instead of
+    # the misleading "produced N≥M". Behavioral semantics unchanged:
+    # original is kept when normalize doesn't shrink it.
     if os.environ.get("GLIA_NORMALIZE_DIFF") == "1":
         from diff_healer import normalize_diff_via_apply
         normalized = normalize_diff_via_apply(diff, repo_dir)
         if normalized and normalized.strip() and len(normalized) <= len(diff):
-            log(f"normalize_diff: {len(diff)}c → {len(normalized)}c")
+            log(f"normalize_diff: {len(diff)}c → {len(normalized)}c (compressed)")
             diff = normalized
         elif normalized:
-            # normalize succeeded but grew the diff (unusual) — keep original
-            log(f"normalize_diff: produced {len(normalized)}c (≥ original {len(diff)}c); keeping original")
+            log(f"normalize_diff: no compression available ({len(normalized)}c ≥ {len(diff)}c); keeping original")
+        else:
+            log(f"normalize_diff: round-trip failed (apply or git-diff returned empty); keeping original")
 
     # Apply test_patch first (adds the FAIL_TO_PASS tests which don't exist at base_commit).
     testpatch_path = Path("/tmp/run_instance.testpatch")
