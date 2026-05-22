@@ -1933,14 +1933,22 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
     # original is kept when normalize doesn't shrink it.
     if os.environ.get("GLIA_NORMALIZE_DIFF") == "1":
         from diff_healer import normalize_diff_via_apply
-        normalized = normalize_diff_via_apply(diff, repo_dir)
-        if normalized and normalized.strip() and len(normalized) <= len(diff):
-            log(f"normalize_diff: {len(diff)}c → {len(normalized)}c (compressed)")
-            diff = normalized
-        elif normalized:
-            log(f"normalize_diff: no compression available ({len(normalized)}c ≥ {len(diff)}c); keeping original")
-        else:
-            log(f"normalize_diff: round-trip failed (apply or git-diff returned empty); keeping original")
+        try:
+            normalized = normalize_diff_via_apply(diff, repo_dir)
+            if normalized and normalized.strip() and len(normalized) <= len(diff):
+                log(f"normalize_diff: {len(diff)}c → {len(normalized)}c (compressed)")
+                diff = normalized
+            elif normalized:
+                log(f"normalize_diff: no compression available ({len(normalized)}c ≥ {len(diff)}c); keeping original")
+            else:
+                log(f"normalize_diff: round-trip failed (apply or git-diff returned empty); keeping original")
+        except subprocess.TimeoutExpired as ex:
+            # Cycle 2.0 django finding: huge repos (django 50K files +
+            # __pycache__) can exceed our git/patch timeouts. Don't crash
+            # apply_and_test — just skip normalize for this candidate.
+            log(f"normalize_diff: timed out ({ex.cmd[0] if ex.cmd else 'unknown'}); keeping original")
+        except Exception as ex:
+            log(f"normalize_diff: exception ({type(ex).__name__}: {ex}); keeping original")
 
     # Apply test_patch first (adds the FAIL_TO_PASS tests which don't exist at base_commit).
     testpatch_path = Path("/tmp/run_instance.testpatch")

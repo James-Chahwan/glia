@@ -406,27 +406,28 @@ def normalize_diff_via_apply(diff_text: str, repo_dir: Path) -> Optional[str]:
         f.write(diff_text)
         diff_path = f.name
     try:
-        # Save current state
+        # Cycle 2.0 django finding: `git stash --include-untracked` timed
+        # out at 30s on django's huge repo (lots of test artifacts +
+        # __pycache__ to stash). We DON'T actually need the stash — the
+        # caller (apply_and_test) guarantees the repo is clean before
+        # this is reached (P7 fix: `git checkout -- .` before each beam
+        # candidate). Skip the stash entirely. Belt-and-braces: if there
+        # ARE pending edits and the round-trip leaks them, the caller's
+        # `git checkout -- .` cleanup at the end restores state.
         had_stash = False
-        r_stash = subprocess.run(
-            ["git", "-C", str(repo_dir), "stash", "--include-untracked"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if r_stash.returncode == 0 and "No local changes" not in r_stash.stdout:
-            had_stash = True
-        # Apply with high fuzz
+        # Apply with high fuzz; 120s timeout (django/scipy can be slow)
         r_apply = subprocess.run(
             ["patch", "-p1", "--fuzz=5", "--forward", "-l",
              "-d", str(repo_dir), "-i", diff_path],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=120,
         )
         # patch rc=0 = clean; rc=1 = some hunks rejected (partial); rc>=2 = failure
         if r_apply.returncode >= 2:
             return None
-        # Capture clean diff
+        # Capture clean diff; 60s timeout (big repos can be slow)
         r_diff = subprocess.run(
             ["git", "-C", str(repo_dir), "diff", "--unified=3"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=60,
         )
         normalized = r_diff.stdout if r_diff.returncode == 0 else ""
         # Restore
