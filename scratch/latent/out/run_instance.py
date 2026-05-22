@@ -51,6 +51,9 @@ MODELS = {
     "7b-q8":  "/home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q8_0.gguf",
     "14b-q4": "/home/ivy/Models/qwen2.5-coder-14b-gguf/qwen2.5-coder-14b-instruct-q4_k_m.gguf",
     "32b-q4": "/home/ivy/Models/qwen2.5-coder-32b-gguf/qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+    # Qwen3-30B-A3B MoE (3B active params). Downloaded during auto8h; alias
+    # was missing so MoE smoke was skipped. Adding for next cycle.
+    "qwen3-moe-q4": "/home/ivy/Models/qwen3-30b-a3b-gguf/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
     # DeepSeek bases — capability test 2026-04-29 vs Qwen 2.5 Coder family.
     "deepseek-v2-lite-q4": "/home/ivy/Models/deepseek-coder-v2-lite-gguf/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
     "r1-distill-7b-q4":    "/home/ivy/Models/deepseek-r1-distill-qwen-7b-gguf/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
@@ -246,18 +249,48 @@ def ensure_venv(inst, repo_dir):
     # install skips compilation. Without this matplotlib/astropy import as
     # "partially initialized module" — _c_internal_utils / _erfa missing.
     if repo in _POST_INSTALL_BUILD_EXT:
-        # Runpod /workspace persistent volume strips executable bits → matplotlib's
-        # extract-and-./configure of bundled freetype fails with Errno 13. Write
-        # mplsetup.cfg to skip bundled freetype (use system libfreetype-dev which
-        # auto8h installs) AND skip bundled qhull (which downloads + compiles
-        # cleanly via Python, no ./configure exec needed).
+        # matplotlib substrate fix (cycle 1.5 + auto8h finding):
+        # - /workspace persistent volume strips exec bits → bundled freetype
+        #   ./configure fails with Errno 13.
+        # - system_freetype=True (initial fix) makes build_ext succeed, BUT
+        #   matplotlib's TESTS reject system freetype because they check
+        #   the exact bundled version for image comparisons. Error:
+        #   "Matplotlib is not built with the correct FreeType version."
+        # Real fix: pre-stage bundled freetype OUTSIDE /workspace
+        # (where chmod +x works), build there, then symlink into the
+        # expected location. This gives matplotlib the bundled freetype
+        # version its tests expect AND avoids the perm issue.
         if repo == "matplotlib/matplotlib":
-            (repo_dir / "mplsetup.cfg").write_text(
-                "[libs]\nsystem_freetype = True\nsystem_qhull = False\n"
-            )
+            import shutil
+            ft_url_marker = repo_dir / "build" / "freetype-2.6.1"
+            staged = Path("/root/.cache/glia-mpl/freetype-2.6.1")
+            if not (ft_url_marker / "objs" / ".libs" / "libfreetype.a").exists():
+                # Force matplotlib's setup.py to extract the tarball in build/
+                # then chmod its configure script + run our own pre-build outside.
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                # Let matplotlib's setupext download/extract the tarball if needed.
+                # First pass: run build_ext which will fail on configure, but it
+                # will have extracted the tarball into build/freetype-2.6.1/.
+                subprocess.run(f"{py_bin} setup.py build_ext --inplace",
+                               shell=True, cwd=str(repo_dir), env=env,
+                               capture_output=True, text=True, timeout=300)
+                # Now chmod the bundled configure + autogen scripts so re-run works.
+                if ft_url_marker.exists():
+                    for script in ft_url_marker.rglob("configure"):
+                        try: os.chmod(script, 0o755)
+                        except Exception: pass
+                    for script in ft_url_marker.rglob("config.*"):
+                        try: os.chmod(script, 0o755)
+                        except Exception: pass
+                    for script in ft_url_marker.rglob("*.sh"):
+                        try: os.chmod(script, 0o755)
+                        except Exception: pass
+                    log(f"  matplotlib: chmod +x ran on bundled freetype scripts")
+            # Don't write mplsetup.cfg — let matplotlib use bundled freetype.
+            # The chmod above unsticks the ./configure step.
         r = subprocess.run(f"{py_bin} setup.py build_ext --inplace", shell=True,
                            cwd=str(repo_dir), env=env, capture_output=True,
-                           text=True, timeout=600)
+                           text=True, timeout=900)
         if r.returncode != 0:
             log(f"  build_ext --inplace failed rc={r.returncode}: {r.stderr.strip()[-200:]}")
         else:
@@ -1631,6 +1664,21 @@ def apply_and_test(inst, repo_dir, out_path, workdir=None):
     if healed != diff:
         log("heal_diff: applied corrections")
         diff = healed
+
+    # Post-auto8h edit-content lever: when GLIA_NORMALIZE_DIFF=1, run the
+    # diff through normalize_diff_via_apply (patch with fuzz → git diff).
+    # Compresses bloated diffs (sphinx 1607c) and re-anchors line numbers
+    # to current source, removing APPLY-FAIL caused by line drift. Opt-in
+    # for now to A/B against the baseline; default off until validated.
+    if os.environ.get("GLIA_NORMALIZE_DIFF") == "1":
+        from diff_healer import normalize_diff_via_apply
+        normalized = normalize_diff_via_apply(diff, repo_dir)
+        if normalized and normalized.strip() and len(normalized) <= len(diff):
+            log(f"normalize_diff: {len(diff)}c → {len(normalized)}c")
+            diff = normalized
+        elif normalized:
+            # normalize succeeded but grew the diff (unusual) — keep original
+            log(f"normalize_diff: produced {len(normalized)}c (≥ original {len(diff)}c); keeping original")
 
     # Apply test_patch first (adds the FAIL_TO_PASS tests which don't exist at base_commit).
     testpatch_path = Path("/tmp/run_instance.testpatch")

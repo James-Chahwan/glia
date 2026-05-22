@@ -375,3 +375,76 @@ def _find_run(source_lines: List[str], needles: List[str], exact: bool, near: in
     if len(candidates) == 1:
         return candidates[0]
     return min(candidates, key=lambda i: abs(i - near))
+
+
+def normalize_diff_via_apply(diff_text: str, repo_dir: Path) -> Optional[str]:
+    """Apply model's diff (with high fuzz) via `patch`, then re-emit via
+    `git diff` against HEAD. This produces a machine-perfect diff anchored
+    to current source line numbers — no line drift, no extraneous context,
+    correct hunk geometry.
+
+    Use AFTER heal_diff has done its best, as a last-resort normalizer
+    for diffs that still APPLY-FAIL. Cheap when the diff is small,
+    expensive (~1-2s) on large diffs because it forks `patch` + `git`.
+
+    Returns the normalized diff, or None if normalization failed (no apply
+    landed at all, or git-diff is empty after apply).
+
+    Round-trip semantics:
+      1. git stash --include-untracked  (preserve any pending edits)
+      2. patch -p1 --fuzz=5 -l --forward -d repo_dir -i diff
+      3. git diff -- (captures clean diff against HEAD)
+      4. git checkout -- . (revert apply)
+      5. git stash pop (restore prior edits, if any)
+    """
+    import subprocess
+    if not diff_text or not diff_text.strip():
+        return None
+    # Write diff to tempfile for `patch` to consume
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as f:
+        f.write(diff_text)
+        diff_path = f.name
+    try:
+        # Save current state
+        had_stash = False
+        r_stash = subprocess.run(
+            ["git", "-C", str(repo_dir), "stash", "--include-untracked"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r_stash.returncode == 0 and "No local changes" not in r_stash.stdout:
+            had_stash = True
+        # Apply with high fuzz
+        r_apply = subprocess.run(
+            ["patch", "-p1", "--fuzz=5", "--forward", "-l",
+             "-d", str(repo_dir), "-i", diff_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        # patch rc=0 = clean; rc=1 = some hunks rejected (partial); rc>=2 = failure
+        if r_apply.returncode >= 2:
+            return None
+        # Capture clean diff
+        r_diff = subprocess.run(
+            ["git", "-C", str(repo_dir), "diff", "--unified=3"],
+            capture_output=True, text=True, timeout=30,
+        )
+        normalized = r_diff.stdout if r_diff.returncode == 0 else ""
+        # Restore
+        subprocess.run(["git", "-C", str(repo_dir), "checkout", "--", "."],
+                       capture_output=True, text=True, timeout=30)
+        # Also clean up any .rej / .orig files patch may have left
+        for ext in (".rej", ".orig"):
+            for path in repo_dir.rglob(f"*{ext}"):
+                try: path.unlink()
+                except Exception: pass
+        if had_stash:
+            subprocess.run(["git", "-C", str(repo_dir), "stash", "pop"],
+                           capture_output=True, text=True, timeout=30)
+        if not normalized.strip():
+            return None
+        return normalized
+    finally:
+        try:
+            os.unlink(diff_path)
+        except Exception:
+            pass

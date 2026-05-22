@@ -57,6 +57,33 @@ def first_hunk(patch: str, max_chars: int) -> str:
     return body[:max_chars]
 
 
+def all_hunks(patch: str, max_chars: int) -> str:
+    """Extract the FULL multi-hunk diff for a single-file change.
+    Truncate at max_chars but try to land on a clean line boundary.
+    Used by the edit-content lever (post-auto8h): the model needs to see
+    HOW a real fix looks for the target repo, not just the file path
+    + first hunk preamble. Showing multiple +/- lines from prior commits
+    gives the model concrete edit dialect to imitate.
+    """
+    m = re.search(r"^diff --git", patch, flags=re.M)
+    if not m:
+        return patch[:max_chars]
+    start = m.start()
+    body = patch[start:]
+    # Take the WHOLE first-file diff (all hunks). Stop at second
+    # `diff --git` marker (next file in the patch).
+    next_diff = re.search(r"^diff --git", body[1:], flags=re.M)
+    if next_diff:
+        body = body[: next_diff.start() + 1]
+    if len(body) > max_chars:
+        # Cut at a clean line boundary if possible.
+        body = body[:max_chars]
+        last_nl = body.rfind("\n")
+        if last_nl > max_chars - 200:  # only re-trim if we'd lose ≤200 chars
+            body = body[:last_nl]
+    return body
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--exemplars-per-repo", type=int, default=2)
@@ -98,6 +125,11 @@ def main():
                     "instance_id": r["instance_id"],
                     "patch_chars": r["patch_chars"],
                     "first_hunk": first_hunk(r["patch"], args.max_chars),
+                    # Post-auto8h edit-content lever: also expose the FULL
+                    # multi-hunk diff (up to max_chars * 3 = 4500c default).
+                    # run_instance.py's exemplar_block can opt into this
+                    # via env GLIA_EXEMPLAR_FULL_HUNK=1.
+                    "all_hunks": all_hunks(r["patch"], args.max_chars * 3),
                 }) + "\n")
         n_written += 1
         print(f"  {repo}: cached {len(kept)} exemplars → {path}", file=sys.stderr)

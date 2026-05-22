@@ -158,16 +158,27 @@ def classify_instance(record: dict) -> Classification:
 
     diff_emitted = not is_no_diff(out_text)
 
+    # Cycle 1.4-no-channels exposed a bug: when f2p was a NO-RUN string
+    # (build_ext fail, IndentationError, missing module), the classifier
+    # treated the diff's gold-file/line overlap as if the test had run +
+    # failed, bucketing it as RIGHT-TARGET-WRONG-EDIT or
+    # RIGHT-LINE-WRONG-CONTENT. That inflates "we're close" stats —
+    # NO-RUN means the test pipeline never executed at all.
+    f2p_str = str(f2p_field or "")
+    is_no_run = f2p_str.startswith("NO-RUN") or "NO-RUN" in f2p_str
+
     if not diff_emitted:
         mode = "NO-DIFF"
     elif apply_status == "NO-DIFF":
         mode = "NO-DIFF"
     elif "fail" in apply_status.lower() or apply_status == "NO-APPLY":
         mode = "APPLY-FAIL"
+    elif is_no_run:
+        mode = "NO-RUN"
     elif f2p_field == "PASS":
         mode = "PASS"
     else:
-        # Diff applied; tests failed. Diagnose against gold.
+        # Diff applied; tests RAN; tests failed. Diagnose against gold.
         gold_file_set = set(gold_files)
         model_file_set = set(model_files)
         if not gold_file_set or not (gold_file_set & model_file_set):

@@ -223,6 +223,17 @@ for _, row in df.iterrows():
 print("  swe-work clone phase done")
 PY
 
+# 10b. Build file_priors + diff_exemplars (load-bearing per cycle 1.5
+# finding: without these, multi-channel composer misroutes django and
+# pytest into APPLY-FAIL / WRONG-TARGET).
+echo
+echo "=== build file_priors + diff_exemplars ==="
+cd /home/ivy/Code/glia/scratch/latent/out
+python3 build_file_priors.py --top-n 5 2>&1 | tail -3
+python3 build_diff_exemplars.py --exemplars-per-repo 2 --max-chars 1500 2>&1 | tail -3
+echo "  file_priors: $(ls file_priors 2>/dev/null | wc -l) repos"
+echo "  exemplars:   $(ls exemplars 2>/dev/null | wc -l) repos"
+
 # 11. Cargo builds.
 echo
 echo "=== cargo build (release, --features driver) ==="
