@@ -51,6 +51,9 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
   libssl-dev libffi-dev patch \
   libfreetype6-dev libpng-dev libqhull-dev \
   libfontconfig1-dev libclang-dev clang
+# libnccl is held by CUDA package on Runpod images; explicit --allow-change-held-packages
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+  --allow-change-held-packages libnccl-dev libnccl2 2>&1 | tail -3
 
 # 2. /home/ivy path layout (glia hardcodes absolute paths).
 echo
