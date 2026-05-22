@@ -269,6 +269,16 @@ def ensure_venv(inst, repo_dir):
         # version its tests expect AND avoids the perm issue.
         if repo == "matplotlib/matplotlib":
             import shutil
+            # CRITICAL: delete any stale mplsetup.cfg from earlier cycles
+            # (commit 541a771 wrote system_freetype=True, which makes tests
+            # refuse: "Matplotlib is not built with the correct FreeType
+            # version. Rebuild without setting system_freetype=1"). Cycle 2.0
+            # matplotlib-22835 was hitting this with chmod+build_ext both OK
+            # but tests still rejecting.
+            mpl_cfg = repo_dir / "mplsetup.cfg"
+            if mpl_cfg.exists():
+                try: mpl_cfg.unlink()
+                except Exception: pass
             ft_url_marker = repo_dir / "build" / "freetype-2.6.1"
             staged = Path("/root/.cache/glia-mpl/freetype-2.6.1")
             if not (ft_url_marker / "objs" / ".libs" / "libfreetype.a").exists():
