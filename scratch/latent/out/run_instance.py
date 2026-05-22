@@ -1051,16 +1051,24 @@ def run_pipeline(inst, repo_dir, model_key, workdir, no_siblings=False, no_keysy
                 plan_text = plan_path.read_text().strip()
                 if plan_text:
                     log(f"plan-then-edit: plan {len(plan_text)}c — prepending to edit suffix")
+                    # CRITICAL: avoid `## Plan` / `## Diff` markdown headers.
+                    # Cycle 2.1 marshmallow regression: with markdown sections
+                    # the model wrapped its diff in ```diff fences, breaking
+                    # apply. Use plain prose-style framing: the plan is "the
+                    # analysis you just did above"; the new task is "emit the
+                    # corresponding diff". Output rules duplicated from the
+                    # baseline suffix so the format constraints are crystal.
                     plan_aware_suffix = (
                         f"{directive_text}"
-                        "## Plan (your own analysis)\n\n"
+                        "Your analysis (don't repeat it):\n"
                         f"{plan_text}\n\n"
-                        "## Diff\n\n"
-                        "Now emit a minimal unified git diff implementing the plan above.\n"
+                        "Now produce the minimal unified git diff that "
+                        "implements the analysis above. Output rules:\n"
                         "- First line must be `diff --git a/... b/...`.\n"
-                        "- Do NOT wrap in code fences.\n"
-                        "- `@@` hunks must use real file line numbers.\n"
-                        "- Emit only the diff.<|im_end|>\n"
+                        "- Do NOT wrap the diff in code fences (no triple backticks).\n"
+                        "- Do NOT emit an `index <sha>..<sha>` line.\n"
+                        "- `@@` hunk headers must use the real file's line numbers; do not fabricate them.\n"
+                        "- Emit only the diff. No prose before or after.<|im_end|>\n"
                         "<|im_start|>assistant"
                     )
                     suffix_path.write_text(plan_aware_suffix)
