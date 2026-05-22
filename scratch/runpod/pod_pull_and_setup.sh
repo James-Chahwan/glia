@@ -247,6 +247,12 @@ cargo build --release -p repo-graph-projection-text --features driver 2>&1 | tai
 echo
 echo "=== cargo build glia-lens (release, --features cuda) ==="
 cd /home/ivy/Code/glia/scratch/lens
+# llama-cpp-sys-2 with cuda compiles ggml-cuda.cu with NCCL symbols
+# (ncclAllReduce/CommInitAll/etc). The build script doesn't auto-link
+# libnccl, so the final rust-lld step fails with undefined symbols.
+# RUSTFLAGS pulls libnccl into the link line. libnccl2 + libnccl-dev
+# are installed in step 1 above.
+export RUSTFLAGS="${RUSTFLAGS:-} -L native=/lib/x86_64-linux-gnu -l dylib=nccl"
 cargo build --release --features cuda 2>&1 | tail -5
 
 # 12. Verification.
