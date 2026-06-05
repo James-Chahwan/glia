@@ -6,7 +6,13 @@ resolver = "3"
 # built tool (shells out to `cargo run --bin synth_*` in projection-text), never
 # as a library, so it's fully decoupled from the engine build. Excluded here so
 # the engine workspace never descends into it.
-exclude = ["bench"]
+#
+# `engram-export` is likewise excluded: it's a publish=false side artifact whose
+# only external dep is `engram-core` in the SIBLING `Engram` repo (path
+# `../../Engram/...`), which doesn't exist in CI — leaving it in `members` breaks
+# `cargo metadata` for the whole workspace and fails every wheel build. Nothing
+# in the engine build depends on it; build it manually when Engram is checked out.
+exclude = ["bench", "engram-export"]
 
 members = [
     "core",
@@ -37,7 +43,6 @@ members = [
     "parsers/code/vue",
     "parsers/code/extractors",
     "engine",
-    "engram-export",
     "py",
     "cli",
 ]
