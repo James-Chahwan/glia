@@ -62,8 +62,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Build the Intel (x86_64) wheel by CROSS-COMPILING on the Apple Silicon
+          # runner. Dedicated macos-13 (Intel) runners queue for hours / are being
+          # retired; abi3 + maturin cross-compiles x86_64-apple-darwin fine on arm64
+          # (no target-Python needed), so both mac wheels build on macos-14.
           - target: x86_64
-            runner: macos-13
+            runner: macos-14
           - target: aarch64
             runner: macos-14
     steps:
