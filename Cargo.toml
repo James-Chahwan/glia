@@ -7,11 +7,15 @@ resolver = "3"
 # as a library, so it's fully decoupled from the engine build. Excluded here so
 # the engine workspace never descends into it.
 #
-# `engram-export` is likewise excluded: it's a publish=false side artifact whose
-# only external dep is `engram-core` in the SIBLING `Engram` repo (path
-# `../../Engram/...`), which doesn't exist in CI — leaving it in `members` breaks
-# `cargo metadata` for the whole workspace and fails every wheel build. Nothing
-# in the engine build depends on it; build it manually when Engram is checked out.
+# `engram-export` is excluded: the engram bridge depends on `engram-core` in the
+# SIBLING `Engram` repo (path `../../Engram/...`), which only exists on a machine
+# with Engram checked out next to glia — never in CI or a fresh clone. It's a
+# publish=false side artifact and NOTHING in the engine workspace depends on it:
+# the `export-engram` subcommand moved out of `cli` into engram-export's own
+# `glia-export-engram` bin, so `cli` rejoins the workspace (CI-clean). Leaving
+# engram-export in the workspace would break `cargo metadata` for everything and
+# fail every wheel build. Run the exporter from `engram-export/` when Engram is
+# present: `cargo run -p repo-graph-engram-export --bin glia-export-engram`.
 exclude = ["bench", "engram-export"]
 
 members = [
@@ -43,6 +47,6 @@ members = [
     "parsers/code/vue",
     "parsers/code/extractors",
     "engine",
-    "py",
     "cli",
+    "py",
 ]

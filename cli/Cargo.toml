@@ -13,7 +13,6 @@ path = "src/main.rs"
 repo-graph-engine = { path = "../engine" }
 repo-graph-graph = { path = "../graph" }
 repo-graph-store = { path = "../store" }
-repo-graph-engram-export = { path = "../engram-export" }
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 clap = { version = "4", features = ["derive"] }

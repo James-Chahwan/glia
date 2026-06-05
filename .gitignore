@@ -3,6 +3,9 @@
 # separate from the engine's /target and let 3d-viewer balloon to 16GB
 # untracked. Ignore them all. (2026-05-31)
 bench/**/target/
+# engram-export is excluded from the workspace (cross-repo engram-core dep), so
+# it builds into its own target/ when run standalone.
+engram-export/target/
 nodes.json
 nodes.gmap
 

@@ -9,8 +9,12 @@ description = "Export a resolved glia MergedGraph as an engram_core::Gmap bincod
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
+# For the `glia-export-engram` bin (the `export-engram` subcommand moved out of
+# `cli` so the engine workspace stays free of the cross-repo engram-core dep).
+repo-graph-engine = { path = "../engine" }
 # The ONLY thing glia and engram share. Path dep (sibling repos) keeps the
 # contract structs + serde byte-identical on both sides — see module docs.
 engram-core = { path = "../../Engram/crates/engram-core" }
 bincode = "1.3"
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }
