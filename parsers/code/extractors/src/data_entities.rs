@@ -55,6 +55,12 @@ pub fn extract_data_entity_nodes(
         std::collections::HashSet::new();
 
     let mut emit = |flavor: DataEntityFlavor, name: &str| {
+        // Flavor-agnostic noise gate: numerics and English/JS keywords are never
+        // real table/collection/label names, regardless of how they were
+        // captured (raw SQL, `.collection('callback')`, etc.). (glia-v2 G7)
+        if is_noise_entity_name(name) {
+            return;
+        }
         let key = (flavor, name.to_string());
         if !seen.insert(key.clone()) {
             return;
@@ -76,8 +82,15 @@ pub fn extract_data_entity_nodes(
         });
     };
 
-    for name in scan_sql_tables(source) {
-        emit(DataEntityFlavor::Sql, &name);
+    // Only scan for raw-SQL table refs when the source actually contains a SQL
+    // statement. Without this gate the `FROM`/`JOIN`/`INTO`/`UPDATE` scan fires
+    // on ordinary English/JS ("copied from this", `Array.from(callback)`,
+    // `Intl.DateTimeFormat`), minting bogus `data_entity:sql:*` nodes on repos
+    // with zero SQL. (glia-v2 G7)
+    if has_sql_context(source) {
+        for name in scan_sql_tables(source) {
+            emit(DataEntityFlavor::Sql, &name);
+        }
     }
     for name in scan_orm_table_decls(source) {
         emit(DataEntityFlavor::Sql, &name);
@@ -106,6 +119,27 @@ pub fn extract_data_entity_nodes(
 // `UPDATE <name>` clauses inside string literals. Case-insensitive on the
 // keyword, identifier-shaped on the name.
 // ----------------------------------------------------------------------------
+
+/// True when `source` contains an unambiguous SQL statement signature. Gates
+/// the raw-SQL table scan so plain prose/JS that happens to use the words
+/// `from`/`join`/`into`/`update` doesn't get mistaken for SQL. (glia-v2 G7)
+fn has_sql_context(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    const SIG: &[&str] = &[
+        "select ",
+        "insert into",
+        "delete from",
+        "create table",
+        "alter table",
+        "truncate table",
+        "merge into",
+    ];
+    if SIG.iter().any(|s| lower.contains(s)) {
+        return true;
+    }
+    // `UPDATE <table> SET ...` — the verb alone is too common, pair it with SET.
+    lower.contains("update ") && lower.contains(" set ")
+}
 
 fn scan_sql_tables(source: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -199,6 +233,48 @@ fn find_keyword_ci(hay: &str, kw_upper: &str, kw_lower: &str) -> Option<usize> {
 
 fn is_sql_ident_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
+}
+
+/// True for captured "names" that are never real data entities, whatever the
+/// flavor: pure numerics (`FROM 2`) and English/JS keywords that follow
+/// `from`/`into` in prose or get passed to `.collection(...)`. Applied at the
+/// single `emit` funnel so SQL, NoSQL and graph flavors are all protected.
+/// (glia-v2 G7)
+fn is_noise_entity_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return true;
+    }
+    if name.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "this"
+            | "that"
+            | "these"
+            | "those"
+            | "it"
+            | "them"
+            | "self"
+            | "here"
+            | "there"
+            | "where"
+            | "within"
+            | "callback"
+            | "provided"
+            | "above"
+            | "below"
+            | "which"
+            | "what"
+            | "async"
+            | "await"
+            | "return"
+            | "import"
+            | "export"
+            | "undefined"
+            | "null"
+    )
 }
 
 /// Strip schema prefix and noise; reject SQL keywords / placeholders that
@@ -544,6 +620,44 @@ const q4 = "SELECT u.* FROM users u JOIN orders o ON u.id = o.user_id";
         assert!(qnames.contains(&"data_entity:sql:posts".to_string()));
         assert!(qnames.contains(&"data_entity:sql:comments".to_string()));
         assert!(qnames.contains(&"data_entity:sql:orders".to_string()));
+    }
+
+    #[test]
+    fn no_sql_context_means_no_sql_entities() {
+        // Plain TS/JS with prose + JS idioms that use the words from/into/update
+        // but contain ZERO SQL. Pre-fix this minted data_entity:sql:this,
+        // :callback, :DateTimeFormat etc. (glia-v2 G7)
+        let repo = RepoId(1);
+        let src = r#"
+// adapted from this gist; update within the callback provided above
+const fmt = new Intl.DateTimeFormat('en');
+const items = Array.from(callback(this));
+this.update(2);
+"#;
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let qnames = entity_qnames(&out);
+        assert!(
+            qnames.iter().all(|q| !q.starts_with("data_entity:sql:")),
+            "expected zero sql entities in SQL-free source, got {qnames:?}"
+        );
+    }
+
+    #[test]
+    fn nosql_collection_rejects_keyword_and_numeric_names() {
+        // The flavor-agnostic noise gate also protects NoSQL captures: a quoted
+        // `.collection('callback')` must not mint data_entity:nosql:callback,
+        // and a numeric collection name is never real. (glia-v2 G7)
+        let repo = RepoId(1);
+        let src = r#"
+db.collection('callback');
+db.collection('2');
+db.collection('users');
+"#;
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let qnames = entity_qnames(&out);
+        assert!(qnames.contains(&"data_entity:nosql:users".to_string()));
+        assert!(!qnames.contains(&"data_entity:nosql:callback".to_string()));
+        assert!(!qnames.contains(&"data_entity:nosql:2".to_string()));
     }
 
     #[test]

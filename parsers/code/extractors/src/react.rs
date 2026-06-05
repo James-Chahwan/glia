@@ -58,6 +58,11 @@ pub fn extract_react_nodes(
         if !looks_like_url_path(&path) {
             continue;
         }
+        // Drop template-source expressions (`/${...}`) captured from framework
+        // internals — not literal routes. (glia-v2 G8)
+        if path.contains("${") {
+            continue;
+        }
         let canonical = format!("GET {path}");
         if !seen.insert(canonical.clone()) {
             continue;

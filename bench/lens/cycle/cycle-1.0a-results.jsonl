@@ -1,0 +1,1 @@
+{"instance_id": "marshmallow-code__marshmallow-1359", "model": "7b-q4", "wall_s": 217.1, "aplus_cells": 84, "apply": "applied", "f2p": "FAIL (0/1 pass, 1 fail, 0 missing)", "reg": 76, "reg_fail": 0, "f2p_pass": 0, "f2p_fail": 1, "f2p_missing_n": 0, "cycle": "1.0a", "wall_s_outer": 398}

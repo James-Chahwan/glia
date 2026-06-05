@@ -91,10 +91,10 @@ Scoring is **heuristic, not load-bearing** — see `project_b4_composer_scoring_
 
 | File | Convention |
 |---|---|
-| `scratch/lens/cycle/cycle_log.md` | INSERT-AFTER-H1 markdown summary per cycle |
-| `scratch/lens/cycle/results_history.jsonl` | One JSON line per instance per cycle |
-| `scratch/lens/cycle/marshmallow_log.md` | Iteration trace per marshmallow cycle |
-| `scratch/lens/cycle/cycle-<N>-results.jsonl` | Per-cycle aggregated results |
+| `bench/lens/cycle/cycle_log.md` | INSERT-AFTER-H1 markdown summary per cycle |
+| `bench/lens/cycle/results_history.jsonl` | One JSON line per instance per cycle |
+| `bench/lens/cycle/marshmallow_log.md` | Iteration trace per marshmallow cycle |
+| `bench/lens/cycle/cycle-<N>-results.jsonl` | Per-cycle aggregated results |
 
 **Rule**: corrections land as new entries with explicit `CORRECTED:` markers, never as edits to existing lines. The append-only convention prevents accidental reinterpretation of results during analysis. Git history is the recovery mechanism.
 
@@ -111,7 +111,7 @@ Negative results are first-class evidence. The cycle 0.5 A/D FAILs are explicitl
 
 ## 9. Sacred holdout
 
-`scratch/lens/manifests/holdout.json` contains 10 instances NEVER touched until cycle 1.0 validation. Every cycle driver asserts loop-set ∩ holdout = ∅ at start (`run_cycle_loop.sh:32-46`). Violation = abort.
+`bench/lens/manifests/holdout.json` contains 10 instances NEVER touched until cycle 1.0 validation. Every cycle driver asserts loop-set ∩ holdout = ∅ at start (`run_cycle_loop.sh:32-46`). Violation = abort.
 
 Memory references (`reference_swebench_lite_gold_patches`, `reference_overnight_loop_conventions`) state this in stronger terms. The holdout is the only defense against overfitting to the 21-instance working set.
 
@@ -122,7 +122,7 @@ Memory references (`reference_swebench_lite_gold_patches`, `reference_overnight_
 
 ## 11. Lens runtime conventions
 
-`scratch/lens/src/runtime.rs` exposes the `LensRuntime` trait. Two impls:
+`bench/lens/src/runtime.rs` exposes the `LensRuntime` trait. Two impls:
 
 - **FakeRuntime** — synthetic embeddings for testing the pipeline end-to-end without llama.cpp.
 - **LlamaCppRuntime** — uses `ggml_backend_sched_eval_callback` (cb_eval) to capture residual streams.
@@ -138,7 +138,7 @@ Memory references (`reference_swebench_lite_gold_patches`, `reference_overnight_
 
 ## 12. JSONL schema (lens)
 
-`scratch/lens/src/jsonl.rs::LensStep`:
+`bench/lens/src/jsonl.rs::LensStep`:
 
 ```rust
 struct LensStep {
@@ -159,14 +159,14 @@ Line-delimited, `#[serde(tag = "kind", content = "data")]` envelope (`{"kind":"L
 
 ## 13. CycleHarness contract
 
-`scratch/lens/cycle/run_cycle_loop.sh <cycle_tag> [model]` — drives the 7-instance loop set.
+`bench/lens/cycle/run_cycle_loop.sh <cycle_tag> [model]` — drives the 7-instance loop set.
 
 - Calls `run_instance.py --instance-id … --split … --model … --tag cycle-<N>` per instance
-- Parses last line of `scratch/latent/out/instance_results.jsonl` for F2P field
+- Parses last line of `bench/latent/out/instance_results.jsonl` for F2P field
 - Appends to `cycle/cycle-<N>-results.jsonl` AND `cycle/results_history.jsonl` (both append-only)
 - Updates `cycle_log.md` via INSERT-AFTER-H1 summary block
 
-**Tag convention**: `cycle-<N>` where N is the cycle number (e.g. `cycle-0.7`). Per-instance workdirs land at `scratch/latent/out/inst-<id>-<model>-cycle-<N>/`.
+**Tag convention**: `cycle-<N>` where N is the cycle number (e.g. `cycle-0.7`). Per-instance workdirs land at `bench/latent/out/inst-<id>-<model>-cycle-<N>/`.
 
 ## 14. Memory system rules
 
@@ -189,4 +189,4 @@ Output paths: `/tmp/<descriptive>.md` for one-off smoke tests; `<workdir>/<chann
 
 ---
 
-*Last updated: 2026-05-21, cycle 0.6 Rust session. Owners: glia engine + scratch/{lens,latent,3d-viewer}.*
+*Last updated: 2026-05-21, cycle 0.6 Rust session. Owners: glia engine + bench/{lens,latent,3d-viewer}.*

@@ -280,8 +280,10 @@ fn main() -> Result<()> {
             if graph_basename != tb_basename {
                 continue;
             }
-            // Line containment.
-            if *tb_line < pos.start_line || *tb_line > pos.end_line {
+            // Line containment. POSITION rows are 0-indexed (tree-sitter);
+            // traceback line numbers are 1-indexed — convert before comparing.
+            let tb_line_0 = tb_line.saturating_sub(1);
+            if tb_line_0 < pos.start_line || tb_line_0 > pos.end_line {
                 continue;
             }
             let qname = qname_of_node(&graph, node)

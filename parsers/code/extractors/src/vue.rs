@@ -66,6 +66,11 @@ pub fn extract_vue_nodes(
     // --- Vue Router routes: `{ path: '/x', component: X }`.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path_str in scan_router_paths(source) {
+        // Drop template-source expressions (`/${...}`) captured from framework
+        // internals — not literal routes. (glia-v2 G8)
+        if path_str.contains("${") {
+            continue;
+        }
         let normalized = if path_str.starts_with('/') {
             path_str
         } else {

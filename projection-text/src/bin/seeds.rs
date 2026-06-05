@@ -1,7 +1,7 @@
 //! seeds — extract candidate identifiers from a SWE-bench issue + match
 //! against graph nodes + run PPR + sibling-expand.
 //!
-//! Replaces scratch/latent/out/seed_from_issue.py. Rust-native: direct graph
+//! Replaces bench/latent/out/seed_from_issue.py. Rust-native: direct graph
 //! access, no pyo3, no Python layer between the issue text and the .gmap.
 //!
 //! Output JSON shape (consumed by node_summaries + synth_composition +

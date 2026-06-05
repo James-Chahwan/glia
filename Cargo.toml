@@ -1,18 +1,17 @@
 [workspace]
 resolver = "3"
 
-# `scratch/latent` is the v0.4.13 latent-injection SWE-bench arm (forked
-# qwen2 model + candle `forward_input_embed` hook). Marshmallow-1359 SOLVE
-# proven there, then bench inference moved to llama.cpp (~7× faster CPU).
-# Excluded from default workspace so default builds skip the candle
-# download/compile. Build explicitly when needed:
-#   cargo build -p repo-graph-latent
-exclude = ["scratch/latent"]
+# The SWE-bench / lens / latent harness lives in `bench/` (renamed from
+# `scratch/` 2026-05-31) as its OWN cargo workspace — it consumes glia only as a
+# built tool (shells out to `cargo run --bin synth_*` in projection-text), never
+# as a library, so it's fully decoupled from the engine build. Excluded here so
+# the engine workspace never descends into it.
+exclude = ["bench"]
 
 members = [
-    "scratch",
     "core",
     "code-domain",
+    "parsers/code/docs",
     "parsers/code/python",
     "parsers/code/go",
     "parsers/code/typescript",
@@ -38,6 +37,7 @@ members = [
     "parsers/code/vue",
     "parsers/code/extractors",
     "engine",
+    "engram-export",
     "py",
     "cli",
 ]

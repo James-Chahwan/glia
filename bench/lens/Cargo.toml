@@ -1,0 +1,92 @@
+[package]
+name = "glia-lens"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Logit lens MVP — per-layer top-K JSONL + 2D PNG + terminal ASCII for one Qwen forward pass with/without latent injection."
+
+# Standalone crate, NOT part of the glia workspace. The llama-cpp-sys-2 build
+# pulls in CMake + ~200 .cpp files (~10 min first compile) which we don't want
+# dragging into default `cargo build` at workspace root. Build explicitly:
+#     cd bench/lens && cargo build --release
+[workspace]
+
+[lib]
+name = "glia_lens"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lens"
+path = "src/main.rs"
+
+[[bin]]
+name = "lens-batch"
+path = "src/bin/lens-batch.rs"
+
+[[bin]]
+name = "lens-analyze"
+path = "src/bin/lens-analyze.rs"
+
+[[bin]]
+name = "lens-ablate"
+path = "src/bin/lens-ablate.rs"
+
+[[bin]]
+name = "lens-inject"
+path = "src/bin/lens-inject.rs"
+
+[[bin]]
+name = "lens-attention"
+path = "src/bin/lens-attention.rs"
+
+[[bin]]
+name = "lens-attention-bias"
+path = "src/bin/lens-attention-bias.rs"
+
+[dependencies]
+# Raw llama.cpp FFI — exposes llama_context_params.cb_eval +
+# ggml_backend_tensor_get directly (the high-level llama-cpp-2 wrapper does
+# NOT expose cb_eval as of 0.1.146, which is the whole reason we drop down).
+# Opt-in via `--features real` so default builds skip the ~10-min CMake.
+llama-cpp-sys-2 = { version = "0.1", optional = true }
+
+# Tokenizer (HF tokenizer.json compatible). Also gated since we only need it
+# alongside the real runtime.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"], optional = true }
+
+# 2D plotting → PNG.
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "all_series", "ttf"] }
+
+# CLI.
+clap = { version = "4", features = ["derive"] }
+
+# JSON / JSONL.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors.
+anyhow = "1"
+thiserror = "2"
+
+# Logging (use to gate cb_eval tensor name spam).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Slice 1.6/1.7 — batch + analyzer.
+walkdir = "2"
+
+[features]
+default = []
+# Enable the real llama.cpp-backed runtime. Off by default — pulls in
+# llama-cpp-sys-2 (~10-min CMake compile on first build) + tokenizers. With
+# this feature off, only the synthetic FakeRuntime is available, useful for
+# iterating on lens math / renderers / JSONL schema.
+real = ["dep:llama-cpp-sys-2", "dep:tokenizers"]
+# CUDA backend for the 1660 Super. Implies `real`. Q4 7B fits in 6GB so it's
+# worth trying, but CPU AVX2 on the 3700X / 3800X is the proven path.
+cuda = ["real", "llama-cpp-sys-2/cuda"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

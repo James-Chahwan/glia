@@ -205,9 +205,9 @@ The substrate is the precondition for trying any of those shapes cleanly. v0.4.x
 
 **Engineering wins from this arm that did ship to v0.4.x core:**
 1. Graph substrate hardened to feed cross-language reachability into ranked composition cells.
-2. Bench inference moved from candle to llama.cpp (`scratch/latent/out/run_llama_pathB.py`). ~7x faster CPU decode plus GBNF-grammar-constrained decoding kills the format-prior failure class plaguing the candle path.
+2. Bench inference moved from candle to llama.cpp (`bench/latent/out/run_llama_pathB.py`). ~7x faster CPU decode plus GBNF-grammar-constrained decoding kills the format-prior failure class plaguing the candle path.
 
-The latent arm itself lives in `scratch/latent/`, excluded from the default workspace build so default cargo invocations skip the candle download:
+The latent arm itself lives in `bench/latent/`, excluded from the default workspace build so default cargo invocations skip the candle download:
 
 ```
 cargo build                       # core glia, no candle
@@ -295,7 +295,7 @@ Practical effects: GitHub marks the repo as "Other / non-standard". PyPI won't s
 - [PolyForm Project](https://polyformproject.org). The noncommercial license that glia's worker-protective overlay sits on top of.
 
 **Parked experiment:**
-- [candle](https://github.com/huggingface/candle). The v0.4.13 latent-injection arm forked the qwen2 model from here (Apache-2.0 / MIT). Bench inference subsequently moved to llama.cpp for ~7x CPU speedup. The candle fork lives in `scratch/latent/` for replay.
+- [candle](https://github.com/huggingface/candle). The v0.4.13 latent-injection arm forked the qwen2 model from here (Apache-2.0 / MIT). Bench inference subsequently moved to llama.cpp for ~7x CPU speedup. The candle fork lives in `bench/latent/` for replay.
 
 **Thinking partners:**
 - [Anthropic's Claude](https://claude.com). Sustained design partner through the project. The graph-substrate framing, the resolver decomposition, the worker-protective licensing direction, and most of glia's actual implementation were distilled in long collaborative sessions. Thanks for being a tool that lets a single person turn a core thinking advantage into shippable substrate.

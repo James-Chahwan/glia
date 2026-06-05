@@ -1,0 +1,26 @@
+[workspace]
+# Standalone — kept out of glia's main workspace via Cargo.toml exclude.
+
+[package]
+name = "glia-tui"
+version = "0.4.13"
+edition = "2024"
+publish = false
+description = "Standalone TUI tester for glia — animates PPR, flow traces, and graph builds. Auto-reloads on .gmap changes. Excluded from default workspace; build with `cargo build -p glia-tui`."
+
+[[bin]]
+name = "glia-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+notify = "7"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+
+repo-graph-core = { path = "../../core" }
+repo-graph-code-domain = { path = "../../code-domain" }
+repo-graph-graph = { path = "../../graph" }
+repo-graph-engine = { path = "../../engine" }
+repo-graph-activation = { path = "../../activation" }

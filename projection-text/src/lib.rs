@@ -14,6 +14,11 @@ pub mod driver_utils;
 #[cfg(feature = "driver")]
 pub mod passes;
 
+/// Refactored synth pass entry points (called both by the bins and
+/// in-process by glia-3d's Inject scene).
+#[cfg(feature = "driver")]
+pub mod synth_callsite_argflow;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 

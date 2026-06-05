@@ -159,6 +159,31 @@ fn visit_type_decl(
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
+    // G12.5: base_list. C# does not syntactically distinguish base class from
+    // interfaces, so heuristic: a name starting with `I` + uppercase letter is
+    // an interface → IMPLEMENTS; otherwise → INHERITS_FROM. A single ambiguous
+    // item defaults to INHERITS_FROM.
+    let mut base_cursor = node.walk();
+    if let Some(base_list) = node
+        .children(&mut base_cursor)
+        .find(|c| c.kind() == "base_list")
+    {
+        let mut bl_cursor = base_list.walk();
+        for base in base_list.named_children(&mut bl_cursor) {
+            // Skip primary-constructor argument lists; only type/base names.
+            if base.kind() == "argument_list" {
+                continue;
+            }
+            let raw = text_of(base, src);
+            let category = if is_interface_name(raw) {
+                edge_category::IMPLEMENTS
+            } else {
+                edge_category::INHERITS_FROM
+            };
+            emit_heritage_ref(raw, category, id, repo, acc);
+        }
+    }
+
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -167,6 +192,9 @@ fn visit_type_decl(
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
                 visit_method(child, src, file_rel, &qname, id, repo, acc);
+            }
+            "field_declaration" => {
+                visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
             }
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
@@ -215,6 +243,119 @@ fn visit_method(
     }
 
     check_route_attrs(node, src, id, repo, acc);
+}
+
+/// G12.5: heuristic — does this base-list name look like an interface?
+/// C# convention: interfaces are `I` followed by an uppercase letter (IFoo).
+fn is_interface_name(raw: &str) -> bool {
+    // Take the trailing simple name, stripping generics + namespace qualifiers.
+    let base = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = base.rsplit('.').next().unwrap_or(base).trim();
+    let mut chars = simple.chars();
+    matches!(chars.next(), Some('I'))
+        && matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
+}
+
+/// G12.5: record an unresolved heritage reference from a class to a supertype.
+fn emit_heritage_ref(
+    raw: &str,
+    category: repo_graph_core::EdgeCategoryId,
+    from_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let base = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = base.rsplit('.').next().unwrap_or(base).trim();
+    if simple.is_empty() {
+        return;
+    }
+    let target = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, simple);
+    acc.edges.push(Edge {
+        from: from_id,
+        to: target,
+        category,
+        confidence: Confidence::Weak,
+    });
+}
+
+/// G19: class-level constants / static fields. `const TYPE NAME = ...;` or
+/// `static readonly TYPE NAME = ...;`. Emits a STATE_VAR node + DEFINES edge
+/// per declarator. Noise gate: skip undocumented + literal-primitive fields.
+fn visit_field_decl(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let text = text_of(node, src);
+    let is_const = text.contains("const");
+    let is_static_readonly = text.contains("static") && text.contains("readonly");
+    if !(is_const || is_static_readonly) {
+        return;
+    }
+    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+
+    // field_declaration → variable_declaration → variable_declarator(s).
+    let mut fcursor = node.walk();
+    for var_decl in node
+        .named_children(&mut fcursor)
+        .filter(|c| c.kind() == "variable_declaration")
+    {
+        let mut vcursor = var_decl.walk();
+        for declarator in var_decl
+            .named_children(&mut vcursor)
+            .filter(|c| c.kind() == "variable_declarator")
+        {
+            let Some(name_node) = declarator.child_by_field_name("name") else {
+                continue;
+            };
+            // Noise gate: undocumented + primitive-literal initializer → skip.
+            if !has_doc {
+                let mut dcursor = declarator.walk();
+                let lit = declarator
+                    .named_children(&mut dcursor)
+                    .any(|c| is_primitive_literal(c.kind()));
+                if lit {
+                    continue;
+                }
+            }
+            let name = text_of(name_node, src);
+            let qname = format!("{parent_qname}::{name}");
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+            acc.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: entity_cells(&node, src, file_rel),
+            });
+            acc.edges.push(Edge {
+                from: parent_id,
+                to: id,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            });
+            acc.nav
+                .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
+        }
+    }
+}
+
+/// True for C# primitive/atom literal initializer node kinds.
+fn is_primitive_literal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "integer_literal"
+            | "real_literal"
+            | "boolean_literal"
+            | "character_literal"
+            | "string_literal"
+            | "verbatim_string_literal"
+            | "raw_string_literal"
+            | "null_literal"
+    )
 }
 
 fn check_route_attrs(node: TsNode, src: &[u8], handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
@@ -421,32 +562,29 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                root.start_position().row + 1,
-                root.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(*node, src).to_string()),
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 #[cfg(test)]
@@ -490,6 +628,45 @@ public interface IDrawable { void Draw(); }
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::STRUCT).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
+    }
+
+    #[test]
+    fn implements_and_state_var() {
+        // G12.5: `class X : Base, IFoo` → INHERITS_FROM(Base) + IMPLEMENTS(IFoo).
+        // G19: a documented `const int FEE = 250;` emits a STATE_VAR.
+        let source = r#"
+namespace MyApp;
+
+public class X : Base, IFoo {
+    /// <summary>The processing fee in cents.</summary>
+    public const int FEE = 250;
+
+    public const int RAW = 7;
+}
+"#;
+        let fp = parse_file(source, "X.cs", "MyApp", repo()).unwrap();
+
+        let state_vars: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::STATE_VAR)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(state_vars, vec!["FEE"]);
+
+        let implements = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .count();
+        assert_eq!(implements, 1);
+        let inherits = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::INHERITS_FROM)
+            .count();
+        assert_eq!(inherits, 1);
     }
 
     #[test]

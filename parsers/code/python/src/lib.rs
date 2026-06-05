@@ -76,6 +76,11 @@ pub fn parse_file(
                 collect_calls_in(child, src, module_id, None, &mut acc);
                 // Django-style path('/x', view) registrations in urls.py scan.
                 scan_django_routes(child, src, repo, &mut acc);
+                // glia v5 G19 — module-level constant assignments
+                // (`MAX_RETRIES = …`). Only UPPERCASE names.
+                collect_state_vars(
+                    child, src, file_rel_path, module_qname, module_id, repo, &mut acc,
+                );
             }
             "assignment" => {
                 // urlpatterns = [ path(...), re_path(...) ] lives here too.
@@ -571,6 +576,105 @@ fn visit_function(
             }
         }
     }
+}
+
+// ============================================================================
+// State variables (glia v5 G19)
+// ============================================================================
+//
+// Module-level constants — `MAX_RETRIES = 3`, `DEFAULTS = {...}`. tree-sitter
+// represents these as a top-level `expression_statement` wrapping an
+// `assignment` whose `left` is a bare `identifier`. We emit one STATE_VAR per
+// UPPERCASE name (screaming-snake convention); lowercase names are skipped to
+// avoid noise from ordinary module-scope locals.
+//
+// Noise gate: an UPPERCASE name with no leading doc whose RHS is a single
+// literal primitive (number / string / bool / None) is skipped. Documented
+// constants and non-trivial initialisers (calls, lists, dicts, tuples) are
+// kept. Module-level vars rarely carry docstrings, so leading_doc/None is the
+// common case — the literal-primitive test does the real filtering.
+
+#[allow(clippy::too_many_arguments)]
+fn collect_state_vars(
+    stmt: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut cursor = stmt.walk();
+    for child in stmt.named_children(&mut cursor) {
+        if child.kind() != "assignment" {
+            continue;
+        }
+        let Some(lhs) = child.child_by_field_name("left") else {
+            continue;
+        };
+        if lhs.kind() != "identifier" {
+            continue;
+        }
+        let name = text(lhs, src);
+        // UPPERCASE-only (screaming snake): at least one letter, no lowercase.
+        // The naming convention is itself the intent signal — a SCREAMING_SNAKE
+        // name is a declared constant regardless of whether its RHS is a bare
+        // literal, so it bypasses the literal-primitive noise gate that applies
+        // to languages without a constant-naming convention (e.g. Go). Python
+        // module-level assignments have no docstring path, so there is no doc
+        // signal to consult; `state_var_is_noise` only filters the degenerate
+        // bare-annotation (`X: int`) case here.
+        if !is_screaming_snake(name) {
+            continue;
+        }
+        if state_var_is_noise(child) {
+            continue;
+        }
+
+        let qname = format!("{module_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: build_cells(&stmt, src, file_rel),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::STATE_VAR, Some(module_id));
+        acc.edges.push(Edge {
+            from: module_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+    }
+}
+
+/// True if `s` is screaming-snake-case: contains at least one ASCII letter and
+/// no lowercase letters (digits / underscores allowed). `MAX_RETRIES`, `PI`,
+/// `_X2` all qualify; `config`, `MixedCase` do not.
+fn is_screaming_snake(s: &str) -> bool {
+    let mut saw_alpha = false;
+    for c in s.chars() {
+        if c.is_ascii_lowercase() {
+            return false;
+        }
+        if c.is_ascii_uppercase() {
+            saw_alpha = true;
+        }
+    }
+    saw_alpha
+}
+
+/// Noise gate for a module-level UPPERCASE assignment. The SCREAMING_SNAKE
+/// naming convention is the declared-constant signal, so a constant with a
+/// literal-primitive RHS is still meaningful and is kept. The only thing
+/// filtered here is the degenerate bare annotation (`X: int` with no value),
+/// which declares nothing concrete. Python module-level assignments have no
+/// docstring path, so there is no doc signal to consult.
+fn state_var_is_noise(assignment: TsNode) -> bool {
+    // No `right` field → bare annotation without a value; trivial.
+    assignment.child_by_field_name("right").is_none()
 }
 
 // ============================================================================
@@ -1496,6 +1600,34 @@ mod tests {
                 .filter(|e| e.category == edge_category::CALLS)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn uppercase_module_constant_emits_state_var_lowercase_does_not() {
+        let src = "MAX_RETRIES = 3\nconfig = {}\n";
+        let parse = parse_file(src, "myapp/settings.py", "myapp::settings", repo()).unwrap();
+
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "myapp::settings");
+
+        // UPPERCASE constant → STATE_VAR with DEFINES edge from module.
+        let max_retries = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "myapp::settings::MAX_RETRIES",
+        );
+        assert!(parse.nodes.iter().any(|n| n.id == max_retries));
+        assert!(has_edge(&parse, module_id, max_retries, edge_category::DEFINES));
+
+        // lowercase name → skipped entirely.
+        let config = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::STATE_VAR,
+            "myapp::settings::config",
+        );
+        assert!(!parse.nodes.iter().any(|n| n.id == config));
     }
 
     #[test]

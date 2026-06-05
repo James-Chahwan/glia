@@ -130,6 +130,11 @@ pub fn extract_ts_backend_routes(
 }
 
 fn add_method(by_path: &mut BTreeMap<String, Vec<String>>, route: &str, method: &str) {
+    // Drop template-source expressions captured from framework internals
+    // (`/${this.routeConfig.path}`) — not literal routes. (glia-v2 G8)
+    if route.contains("${") {
+        return;
+    }
     let entry = by_path.entry(route.to_string()).or_default();
     let m = method.to_ascii_lowercase();
     if !entry.iter().any(|existing| existing == &m) {

@@ -114,7 +114,7 @@ Two ways to encode hierarchy in `NodeId`:
 
 **Location & layout (confirmed 2026-04-17):**
 - Workspace at `repo-graph/rust/Cargo.toml` (inside the existing repo, no separate repo)
-- First crate: `repo-graph/rust/scratch/` (throwaway; deleted or kept as regression test once step 1 begins)
+- First crate: `repo-graph/rust/bench/` (throwaway; deleted or kept as regression test once step 1 begins)
 - Future crates added as workspace members: `core-types`, `parser-py`, `graph`, `merge`, `serde-json`, `rkyv-store`, `latent`, `py-bindings`
 
 **Toolchain:**

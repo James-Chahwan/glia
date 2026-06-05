@@ -1,0 +1,186 @@
+[2026-05-22T00:03:26+10:00] smoke phase1 START · model=7b-q4 stretch=auto
+[2026-05-22T00:03:26+10:00] [1/2+stretch] smoke=phase1 marshmallow-code__marshmallow-1359
+[00:03:28] instance: marshmallow-code__marshmallow-1359 | repo: marshmallow-code/marshmallow @ b40a0f4e
+[00:03:28] F2P: 1 tests; P2P: 76 tests
+[00:03:28] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 fetch --all --quiet
+[00:03:28] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 checkout -f b40a0f4e33823e6d0f341f7e8684e359a99060d1
+[00:03:28] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 clean -fdx --quiet
+[00:03:28] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --repo-canonical marshmallow-code__marshmallow-1359 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/test_patch.patch
+[00:03:28]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[00:03:28]   [seeds] [seeder] issue-anchor: files=2(0 nodes), dotted=9(25 nodes), backtick=11(18 nodes), tb-frames=0(0 nodes)
+[00:03:28]   [seeds] [seeder] issue-anchor: dropped 9 test-file nodes
+[00:03:28]   [seeds] [seeder] issue-anchor inject: 34 resolved, 15 new (delta=+0.0500 on top=0.0326)
+[00:03:28]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json
+[00:03:28] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json
+[00:03:28] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-atomic.json --repo-canonical marshmallow-code__marshmallow-1359
+[00:03:29]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-atomic.json --repo-canonical marshmallow-code__marshmallow-1359`
+[00:03:29]   [node_summaries] [parse] 34 Python files
+[00:03:29]   [node_summaries] [graph] 1590 nodes, 2016 edges
+[00:03:29]   [node_summaries] [summaries] wrote 135 entries (103 with CODE source, 32 without, 0 skipped)
+[00:03:29]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-atomic.json
+[00:03:29] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --repo-canonical marshmallow-code__marshmallow-1359
+[00:03:29]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: ["src::marshmallow::schema::BaseSchema::opts"]
+[00:03:29]   [synth_composition] [synth] 84 AccessPaths
+[00:03:29]   [synth_composition] [render] 84 CompositionCells
+[00:03:29]   [synth_composition] [append] 135 existing + 84 new = 219
+[00:03:29]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json
+[00:03:29] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --repo-canonical marshmallow-code__marshmallow-1359
+[00:03:29]   [synth_callsite_argflow] [graph] 1590 nodes, 2016 edges
+[00:03:29]   [synth_callsite_argflow] [seeds] 135 activated qnames
+[00:03:29]   [synth_callsite_argflow] [resolve] 135 activated qnames matched
+[00:03:29]   [synth_callsite_argflow] [synth] 5 callsite-argflow cells emitted
+[00:03:29]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json
+[00:03:29] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json
+[00:03:29]   [synth_constant_decl]      Running `/home/ivy/Code/glia/target/release/synth_constant_decl --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json`
+[00:03:29]   [synth_constant_decl] [constdecl] 1 UPPERCASE issue tokens: SCHEMA_OPTS_VAR_NAME×1
+[00:03:29]   [synth_constant_decl] [constdecl] scanned 34 files, 6 have UPPERCASE constants
+[00:03:29]   [synth_constant_decl] [constdecl] 0 ConstantDecl cells emitted
+[00:03:29]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json (224 total cells)
+[00:03:29] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/chain.json --repo-canonical marshmallow-code__marshmallow-1359
+[00:03:29]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_bind_to_schema (chain 1 methods)
+[00:03:29]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_deserialize (chain 0 methods)
+[00:03:29]   [synth_call_chain] [tp-anchor] Tuple → src::marshmallow::fields::Tuple::_serialize (chain 0 methods)
+[00:03:29]   [synth_call_chain] [chain] 20 anchors, 7 method records (depth ≤ 4)
+[00:03:29]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/chain.json
+[00:03:29] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_cells.json --repo-canonical marshmallow-code__marshmallow-1359 --chain /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/chain.json
+[00:03:29]   [synth_key_symbols]   #6 [chain-grounding] src::marshmallow::fields::Field::context (src/marshmallow/fields.py)
+[00:03:29]   [synth_key_symbols]   #7 [attr-presence] src::marshmallow::schema::BaseSchema::fields (src/marshmallow/schema.py)
+[00:03:29]   [synth_key_symbols]   #8 [attr-presence] src::marshmallow::schema::BaseSchema::opts (src/marshmallow/schema.py)
+[00:03:29]   [synth_key_symbols]   #9 [chain-grounding] src::marshmallow::fields::Field::root (src/marshmallow/fields.py)
+[00:03:29]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_cells.json
+[00:03:29] source cells: 9
+[00:03:29] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_map.txt --repo-canonical marshmallow-code__marshmallow-1359 --excerpt-context 3
+[00:03:30]   [synth_source_map] [parse] 34 Python files
+[00:03:30]   [synth_source_map] [graph] 1590 nodes, 2016 edges
+[00:03:30]   [synth_source_map] [srcmap] source_cells.json: 9 qnames
+[00:03:30]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): src/marshmallow/fields.py(1.17), src/marshmallow/schema.py(0.10), src/marshmallow/validate.py(0.04), tests/base.py(0.01), tests/test_registry.py(0.01), tests/test_schema.py(0.10)
+[00:03:30]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_map.txt (2042 bytes)
+[00:03:30] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/derived_notes.txt
+[00:03:30]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[00:03:30]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/derived_notes.txt`
+[00:03:30] $ /home/ivy/Code/glia/target/release/synth_directive --src /home/ivy/swe-work/marshmallow-code__marshmallow-1359 --issue /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/directive.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/test_patch.patch
+[00:03:30] composed directive: 6129 chars
+[00:03:30] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 apply --recount --whitespace=fix /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/_runtime_evidence_test_patch.patch
+[00:03:30] runtime evidence: running F2P at base_commit (pytest -rA tests/test_fields.py)
+[00:03:30] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 checkout -- .
+[00:03:30] runtime evidence: prepended 694c F2P traceback
+[00:03:30] running pathB-llama: model=7b-q4
+[00:03:30] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/out.txt
+[00:07:39] pathB-llama done in 248.2s; out=/home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/out.txt
+[00:07:39] $ /home/ivy/Code/glia/target/release/synth_validator --diff /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/out.txt --directive /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/directive.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-marshmallow-code__marshmallow-1359-7b-q4-smoke-phase1/critique.md
+[00:07:39] sage loop: pass-1 critique inert (diff aligns with directive); skipping pass-2
+[00:07:39] heal_diff: applied corrections
+[00:07:39] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[00:07:39] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 apply --recount --whitespace=fix /tmp/run_instance.patch
+[00:07:39] test cmd: pytest -rA tests/test_fields.py
+[00:07:39] $ git -C /home/ivy/swe-work/marshmallow-code__marshmallow-1359 checkout -- .
+{
+  "instance_id": "marshmallow-code__marshmallow-1359",
+  "model": "7b-q4",
+  "wall_s": 248.2,
+  "aplus_cells": 84,
+  "apply": "applied",
+  "f2p": "PASS",
+  "reg": 76,
+  "reg_fail": 0,
+  "f2p_pass": 1,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0
+}
+[2026-05-22T00:07:39+10:00] [1/2+stretch] marshmallow-code__marshmallow-1359 PASS wall=253s
+[2026-05-22T00:07:39+10:00] [2/2+stretch] smoke=phase1 django__django-10914
+[00:07:41] instance: django__django-10914 | repo: django/django @ e7fd69d0
+[00:07:41] F2P: 1 tests; P2P: 98 tests
+[00:07:41] $ git -C /home/ivy/swe-work/django__django-10914 fetch --all --quiet
+[00:07:41] $ git -C /home/ivy/swe-work/django__django-10914 checkout -f e7fd69d051eaa67cb17f172a39b57253e9cb831a
+[00:07:41] $ git -C /home/ivy/swe-work/django__django-10914 clean -fdx --quiet
+[00:07:41] $ cargo run --release --features driver --bin seeds -- --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --repo-canonical django__django-10914 --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/test_patch.patch
+[00:07:44]   [seeds] [seeder] sibling-expanded: 60 → 120 nodes
+[00:07:44]   [seeds] [seeder] issue-anchor: files=0(0 nodes), dotted=2(0 nodes), backtick=12(16 nodes), tb-frames=0(0 nodes)
+[00:07:44]   [seeds] [seeder] issue-anchor: dropped 1 test-file nodes
+[00:07:44]   [seeds] [seeder] issue-anchor inject: 15 resolved, 13 new (delta=+0.0500 on top=0.0191)
+[00:07:44]   [seeds] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json
+[00:07:44] seeds: /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json
+[00:07:44] $ cargo run --release --features driver --bin node_summaries -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-atomic.json --repo-canonical django__django-10914
+[00:07:47]   [node_summaries]      Running `/home/ivy/Code/glia/target/release/node_summaries --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-atomic.json --repo-canonical django__django-10914`
+[00:07:47]   [node_summaries] [parse] 2534 Python files
+[00:07:47]   [node_summaries] [graph] 51090 nodes, 74028 edges
+[00:07:47]   [node_summaries] [summaries] wrote 133 entries (113 with CODE source, 20 without, 0 skipped)
+[00:07:47]   [node_summaries] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-atomic.json
+[00:07:47] $ cargo run --release --features driver --bin synth_composition -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-atomic.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --repo-canonical django__django-10914
+[00:07:50]   [synth_composition] [diag] ATTRIBUTE qnames ending in ::opts: ["django::contrib::admin::options::BaseModelAdmin::opts", "django::contrib::admin::helpers::InlineAdminFormSet::opts", "django::db::models::fields::related::ManyToManyField::opts", "django::contrib::admin::options::ModelAdmin::opts", "django::contrib::admin::options::InlineModelAdmin::opts", "django::db::models::fields::related::RelatedField::opts", "django::db::models::fields::related::ForeignObject::opts", "django::contrib::admin::views::main::ChangeList::opts"]
+[00:07:50]   [synth_composition] [synth] 0 AccessPaths
+[00:07:50]   [synth_composition] [render] 0 CompositionCells
+[00:07:50]   [synth_composition] [append] 133 existing + 0 new = 133
+[00:07:50]   [synth_composition] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json
+[00:07:50] $ cargo run --release --features driver --bin synth_callsite_argflow -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --repo-canonical django__django-10914
+[00:07:53]   [synth_callsite_argflow] [graph] 51090 nodes, 74028 edges
+[00:07:53]   [synth_callsite_argflow] [seeds] 133 activated qnames
+[00:07:53]   [synth_callsite_argflow] [resolve] 133 activated qnames matched
+[00:07:53]   [synth_callsite_argflow] [synth] 10 callsite-argflow cells emitted
+[00:07:53]   [synth_callsite_argflow] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json
+[00:07:53] $ cargo run --release --features driver --bin synth_constant_decl -- --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json
+[00:07:53]   [synth_constant_decl] [constdecl] scanned 2534 files, 234 have UPPERCASE constants
+[00:07:53]   [synth_constant_decl] [constdecl] 2 ConstantDecl cells emitted
+[00:07:53]   [synth_constant_decl]   [constdecl] synth::ConstantDecl::django::conf::global_settings::FILE_UPLOAD_HANDLERS
+[00:07:53]   [synth_constant_decl]   [constdecl] synth::ConstantDecl::django::conf::global_settings::FILE_UPLOAD_PERMISSIONS
+[00:07:53]   [synth_constant_decl] [constdecl] wrote /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json (145 total cells)
+[00:07:53] $ cargo run --release --features driver --bin synth_call_chain -- --src /home/ivy/swe-work/django__django-10914 --f2p /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/f2p.json --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/test_patch.patch --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/chain.json --repo-canonical django__django-10914
+[00:07:56]   [synth_call_chain] [test_patch] 2 tokens accepted (0 dropped over cap=5)
+[00:07:56]   [synth_call_chain] [tp-anchor] default_storage → django::contrib::messages::storage::__init__::default_storage (chain 1 methods)
+[00:07:56]   [synth_call_chain] [tp-anchor] file_permissions_mode → django::core::files::storage::FileSystemStorage::file_permissions_mode (chain 1 methods)
+[00:07:56]   [synth_call_chain] [chain] 3 anchors, 2 method records (depth ≤ 4)
+[00:07:56]   [synth_call_chain] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/chain.json
+[00:07:56] $ cargo run --release --features driver --bin synth_key_symbols -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/test_patch.patch --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_cells.json --repo-canonical django__django-10914 --chain /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/chain.json
+[00:07:58]   [synth_key_symbols]   #2 [activated] django::core::files::uploadedfile::TemporaryUploadedFile (django/core/files/uploadedfile.py)
+[00:07:58]   [synth_key_symbols]   #3 [activated] django::contrib::gis::gdal::geomtype::OGRGeomType::django (django/contrib/gis/gdal/geomtype.py)
+[00:07:58]   [synth_key_symbols]   #4 [activated] django::core::management::commands::shell::Command::python (django/core/management/commands/shell.py)
+[00:07:58]   [synth_key_symbols]   #5 [activated] django::core::cache::backends::db::DatabaseCache::set (django/core/cache/backends/db.py)
+[00:07:58]   [synth_key_symbols] [write] /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_cells.json
+[00:07:58] source cells: 5
+[00:07:58] $ cargo run --release --features driver --bin synth_source_map -- --src /home/ivy/swe-work/django__django-10914 --seeds /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/seeds.json --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_cells.json --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_map.txt --repo-canonical django__django-10914 --excerpt-context 3
+[00:08:01]   [synth_source_map] [parse] 2534 Python files
+[00:08:01]   [synth_source_map] [graph] 51090 nodes, 74028 edges
+[00:08:01]   [synth_source_map] [srcmap] source_cells.json: 5 qnames
+[00:08:01]   [synth_source_map] [srcmap] selected 6 activated files (presented alphabetically): django/contrib/gis/gdal/geomtype.py(0.05), django/core/cache/backends/base.py(0.05), django/core/cache/backends/db.py(0.05), django/core/cache/backends/memcached.py(0.06), django/core/files/storage.py(0.22), django/core/files/uploadedfile.py(0.07)
+[00:08:01]   [synth_source_map] [srcmap] wrote /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_map.txt (944 bytes)
+[00:08:01] $ cargo run --release --features driver --bin synth_derived_notes -- --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/derived_notes.txt
+[00:08:01]   [synth_derived_notes] Finished `release` profile [optimized] target(s) in 0.05s
+[00:08:01]   [synth_derived_notes]      Running `/home/ivy/Code/glia/target/release/synth_derived_notes --source-cells /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/source_cells.json --summaries /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/derived_notes.txt`
+[00:08:01] $ /home/ivy/Code/glia/target/release/synth_directive --src /home/ivy/swe-work/django__django-10914 --issue /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/issue.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/directive.txt --test-patch /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/test_patch.patch
+[00:08:10] composed directive: 2106 chars
+[00:08:10] $ git -C /home/ivy/swe-work/django__django-10914 apply --recount --whitespace=fix /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/_runtime_evidence_test_patch.patch
+[00:08:10] runtime evidence: running F2P at base_commit (./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 test_utils.tests)
+[00:08:10] $ git -C /home/ivy/swe-work/django__django-10914 checkout -- .
+[00:08:10] runtime evidence: prepended 1747c F2P traceback
+[00:08:10] running pathB-llama: model=7b-q4
+[00:08:10] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/suffix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/out.txt
+[00:11:03] pathB-llama done in 172.7s; out=/home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/out.txt
+[00:11:03] $ /home/ivy/Code/glia/target/release/synth_validator --diff /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/out.txt --directive /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/directive.txt --text-out /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/critique.md
+[00:11:03] sage loop: pass-1 critique non-empty (797c); running pass-2
+[00:11:03] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/suffix_pass2.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/out_pass2.txt
+[00:13:50] sage loop: pass-2 promoted (574c in 167.2s)
+[00:13:50] heal_diff: applied corrections
+[00:13:50] $ git -C /home/ivy/swe-work/django__django-10914 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[00:13:50] $ git -C /home/ivy/swe-work/django__django-10914 apply --recount --whitespace=fix /tmp/run_instance.patch
+[00:13:50] test cmd: ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 test_utils.tests
+[00:13:51] $ git -C /home/ivy/swe-work/django__django-10914 checkout -- .
+[00:13:51] sage runtime: pass-1 FAIL (0/1 pass, 1 fail, 0 missing)/applied; building pass-2 directive from 1747c runtime trace
+[00:13:51] $ python /home/ivy/Code/glia/scratch/latent/out/run_llama_pathB.py /home/ivy/Models/qwen2.5-coder-7b-gguf/qwen2.5-coder-7b-instruct-q4_k_m.gguf /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/prefix.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/suffix_pass2_runtime.txt /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/summaries-aplus.json /home/ivy/Code/glia/scratch/latent/out/inst-django__django-10914-7b-q4-smoke-phase1/out_pass2_runtime.txt
+[00:16:31] sage runtime: pass-2 empty or unchanged; keeping pass-1
+{
+  "instance_id": "django__django-10914",
+  "model": "7b-q4",
+  "wall_s": 339.9,
+  "aplus_cells": 0,
+  "apply": "applied",
+  "f2p": "FAIL (0/1 pass, 1 fail, 0 missing)",
+  "reg": 95,
+  "reg_fail": 1,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0
+}
+[2026-05-22T00:16:31+10:00] [2/2+stretch] django__django-10914 FAIL (f2p=FAIL (0/1 pass, 1 fail, 0 missing)) wall=532s
+[2026-05-22T00:16:31+10:00] smoke phase1 stretch skipped (clean_pass=1 < 2)
+[2026-05-22T00:16:31+10:00] smoke phase1 DONE · clean_pass=1 pass_with_regr=0 fail=1 error=0 no_result=0 total=785s

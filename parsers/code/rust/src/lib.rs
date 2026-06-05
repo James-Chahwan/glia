@@ -85,6 +85,11 @@ pub fn parse_file(
                     child, src, file_rel_path, module_qname, module_id, repo, &type_ids, &mut acc,
                 );
             }
+            "const_item" | "static_item" => {
+                visit_const_static(
+                    child, src, file_rel_path, module_qname, module_id, repo, &mut acc,
+                );
+            }
             "use_declaration" => {
                 collect_use(child, src, module_qname, &mut acc);
             }
@@ -177,6 +182,22 @@ fn visit_impl(
     let base_name = type_name.split('<').next().unwrap_or(type_name);
     let parent_id = type_ids.get(base_name).copied().unwrap_or(module_id);
 
+    // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
+    // the `trait` field. Emit IMPLEMENTS (Type → trait) only when the trait is
+    // in-file; skip external traits rather than fabricate a target.
+    if let Some(trait_node) = node.child_by_field_name("trait") {
+        let trait_name = text_of(trait_node, src);
+        let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
+        if let Some(&trait_id) = type_ids.get(trait_base) {
+            acc.edges.push(Edge {
+                from: parent_id,
+                to: trait_id,
+                category: edge_category::IMPLEMENTS,
+                confidence: Confidence::Strong,
+            });
+        }
+    }
+
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -210,6 +231,54 @@ fn visit_impl(
             }
         }
     }
+}
+
+/// G19 — module-level `const`/`static` surfaced as STATE_VAR.
+///
+/// Noise gate: skip undocumented literal-primitive constants (e.g.
+/// `const X: u32 = 1;`); keep documented ones or non-literal initialisers.
+fn visit_const_static(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+
+    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+    let value_is_literal = node.child_by_field_name("value").is_some_and(|v| {
+        matches!(
+            v.kind(),
+            "integer_literal" | "string_literal" | "boolean_literal" | "float_literal"
+        )
+    });
+    if !has_doc && value_is_literal {
+        return;
+    }
+
+    let name = text_of(name_node, src);
+    let qname = format!("{module_qname}::{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: entity_cells(&node, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: module_id,
+        to: id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+    acc.nav
+        .record(id, name, &qname, node_kind::STATE_VAR, Some(module_id));
 }
 
 fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
@@ -503,6 +572,15 @@ fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Ac
             continue;
         };
         let after = arg_start + close + 1;
+        // The path quote and the call's closing paren can be found
+        // independently (the quote scan ignores paren depth; the paren scan
+        // treats `"..."` as opaque). If `)` closes *before* the path quote we
+        // matched, the candidate is a stray `.at(` inside a comment or string
+        // and the `"` belongs to unrelated source further on — skip it.
+        if after <= j {
+            search_from = j + 1;
+            continue;
+        }
         // Verbs may live inside the call (Poem / Axum-style:
         // `.at("/p", get(h).post(h2))`) or chained after (Tide / Salvo:
         // `.at("/p").get(h).post(h2)`). One combined window catches both.
@@ -629,32 +707,29 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                root.start_position().row + 1,
-                root.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(*node, src).to_string()),
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 #[cfg(test)]
@@ -724,6 +799,53 @@ pub trait Drawable {
         let fp = parse_file(source, "src/lib.rs", "myapp", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
+    }
+
+    #[test]
+    fn const_static_noise_gate_and_implements() {
+        let source = r#"
+/// Fee.
+pub const FEE_BPS: u32 = 250;
+
+const X: u32 = 1;
+
+pub struct Foo;
+
+pub trait Display {
+    fn fmt(&self);
+}
+
+impl Display for Foo {
+    fn fmt(&self) {}
+}
+"#;
+        let fp = parse_file(source, "src/lib.rs", "myapp", repo()).unwrap();
+
+        // G19: documented const → STATE_VAR; undocumented literal const skipped.
+        let state_vars: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::STATE_VAR)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(state_vars.contains(&"FEE_BPS"));
+        assert!(!state_vars.contains(&"X"));
+        assert_eq!(state_vars.len(), 1);
+
+        // FEE_BPS carries its doc cell.
+        let fee_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "myapp::FEE_BPS");
+        let fee_node = fp.nodes.iter().find(|n| n.id == fee_id).unwrap();
+        assert!(fee_node.cells.iter().any(|c| c.kind == cell_type::DOC));
+
+        // G12.5: Foo implements in-file trait Display → IMPLEMENTS edge.
+        let foo_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "myapp::Foo");
+        let display_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "myapp::Display");
+        assert!(fp.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS
+            && e.from == foo_id
+            && e.to == display_id));
     }
 
     #[test]

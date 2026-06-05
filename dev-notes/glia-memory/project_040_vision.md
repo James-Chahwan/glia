@@ -66,7 +66,7 @@ Positioning: gmap is the **JSON-parallel for graph-as-LLM-context.** Not "a file
 Why this naming is load-bearing for the bigger product: positions latent-vector projection as first-class ("gmap vectors" reads naturally; ".rgraph vectors" doesn't); survives IDE rendering ("a view of the gmap"); survives mempalace bridge ("send the gmap into the palace"); works for the future write-path ("the LLM writes to the gmap"). File-format naming would have shut all of that down.
 
 **Step 0 (rkyv hello world, exploratory probe — not yet a commitment to 0.4.0 Rust path):**
-- Location: `repo-graph/rust/scratch/` (workspace root at `repo-graph/rust/Cargo.toml`)
+- Location: `repo-graph/rust/bench/` (workspace root at `repo-graph/rust/Cargo.toml`)
 - Edition: 2024
 - rkyv version: **0.8** (not 0.7 — flipped after user pointed out "if you're writing it, more blog posts doesn't matter; pick the newer stabler API")
 - Claude writes the code, user reads it (verbatim user: *"once i see it working my understanding will switch like i can read the code it's more the rustisms and see it's possible quickly"*)

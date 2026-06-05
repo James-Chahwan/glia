@@ -107,6 +107,25 @@ fn visit_type_decl(
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
+    // G12.5: class heritage. `superclass` (extends) → INHERITS_FROM;
+    // `interfaces` (super_interfaces → type_list) → IMPLEMENTS per interface.
+    if let Some(superclass) = node.child_by_field_name("superclass") {
+        let mut sc_cursor = superclass.walk();
+        for sc in superclass.named_children(&mut sc_cursor) {
+            emit_heritage_ref(text_of(sc, src), edge_category::INHERITS_FROM, id, repo, acc);
+        }
+    }
+    if let Some(interfaces) = node.child_by_field_name("interfaces") {
+        // `interfaces` is a `super_interfaces` wrapping a `type_list`.
+        let mut if_cursor = interfaces.walk();
+        for type_list in interfaces.named_children(&mut if_cursor) {
+            let mut tl_cursor = type_list.walk();
+            for iface in type_list.named_children(&mut tl_cursor) {
+                emit_heritage_ref(text_of(iface, src), edge_category::IMPLEMENTS, id, repo, acc);
+            }
+        }
+    }
+
     // Walk body for methods + nested types.
     let Some(body) = node.child_by_field_name("body") else {
         return;
@@ -116,6 +135,9 @@ fn visit_type_decl(
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
                 visit_method(child, src, file_rel, &qname, id, repo, acc);
+            }
+            "field_declaration" => {
+                visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
             }
             "class_declaration" | "interface_declaration" | "enum_declaration"
             | "record_declaration" => {
@@ -166,6 +188,102 @@ fn visit_method(
 
     // Check for route annotations on the method.
     check_route_annotations(node, src, file_rel, id, repo, acc);
+}
+
+/// G12.5: record an unresolved heritage reference (extends/implements) from a
+/// class to a supertype name. The graph resolver turns the name into an edge;
+/// here we record the directional edge intent with the given category.
+fn emit_heritage_ref(
+    raw: &str,
+    category: repo_graph_core::EdgeCategoryId,
+    from_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // Strip generic args (e.g. `Comparable<Foo>` → `Comparable`) and take the
+    // trailing simple name (e.g. `pkg.Base` → `Base`).
+    let base = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+    if simple.is_empty() {
+        return;
+    }
+    let target = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, simple);
+    acc.edges.push(Edge {
+        from: from_id,
+        to: target,
+        category,
+        confidence: Confidence::Weak,
+    });
+}
+
+/// G19: class-level constants / static fields. Emits a STATE_VAR node for each
+/// declarator in a `static final` field, plus a DEFINES edge class→field.
+/// Noise gate: skip when undocumented AND the initializer is a primitive literal.
+fn visit_field_decl(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let text = text_of(node, src);
+    // Only class-level constants: must be both `static` and `final`.
+    if !(text.contains("static") && text.contains("final")) {
+        return;
+    }
+    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+
+    let mut cursor = node.walk();
+    for declarator in node.children_by_field_name("declarator", &mut cursor) {
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        // Noise gate: undocumented + literal-primitive initializer → skip.
+        if !has_doc {
+            if let Some(value) = declarator.child_by_field_name("value") {
+                if is_primitive_literal(value.kind()) {
+                    continue;
+                }
+            }
+        }
+        let name = text_of(name_node, src);
+        let qname = format!("{parent_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&node, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
+    }
+}
+
+/// True for Java primitive/atom literal initializer node kinds.
+fn is_primitive_literal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "decimal_integer_literal"
+            | "hex_integer_literal"
+            | "octal_integer_literal"
+            | "binary_integer_literal"
+            | "decimal_floating_point_literal"
+            | "hex_floating_point_literal"
+            | "character_literal"
+            | "string_literal"
+            | "true"
+            | "false"
+            | "null_literal"
+    )
 }
 
 fn check_route_annotations(
@@ -537,32 +655,29 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                root.start_position().row + 1,
-                root.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(*node, src).to_string()),
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 #[cfg(test)]
@@ -611,6 +726,48 @@ public enum Color {
         let fp = parse_file(source, "src/main/java/Types.java", "com::example", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+    }
+
+    #[test]
+    fn implements_and_state_var() {
+        // G12.5: `implements IFoo` emits an IMPLEMENTS edge (class → interface).
+        // G19: a documented `static final int FEE = 250;` emits a STATE_VAR.
+        let source = r#"
+package com.example;
+
+public class X extends Base implements IFoo, IBar {
+    /** The processing fee in cents. */
+    public static final int FEE = 250;
+
+    public static final int RAW = 7;
+}
+"#;
+        let fp = parse_file(source, "src/main/java/X.java", "com::example", repo()).unwrap();
+
+        // STATE_VAR: only the documented FEE survives the noise gate.
+        let state_vars: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::STATE_VAR)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(state_vars, vec!["FEE"]);
+
+        // IMPLEMENTS edges: one per interface (IFoo, IBar).
+        let implements = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .count();
+        assert_eq!(implements, 2);
+        // extends Base → INHERITS_FROM.
+        let inherits = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::INHERITS_FROM)
+            .count();
+        assert_eq!(inherits, 1);
     }
 
     #[test]

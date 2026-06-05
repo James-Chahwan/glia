@@ -1,0 +1,319 @@
+# Cycle 3.7 — Sprint 14+15+16 stack on 50-bench
+Started: Sat May 23 09:32:45 UTC 2026
+
+## Sprint 14: exemplar-drop fix + auto-harvest
+## Sprint 15: substrate_matrix.json (timeouts, pins)
+## Sprint 16: package-name fallback locator
+
+## Stack envs
+- GLIA_FIM_EDIT=1, GLIA_FIM_ITERATE=1, GLIA_FIM_MAX_ITERS=3
+- GLIA_FIM_RETRIEVAL=1 (NOW WORKING after Sprint 14 fix)
+- GLIA_FIM_HARVEST=1 (auto-harvest cycle PASSes — Sprint 14)
+- Per-repo timeouts via substrate_matrix.json (Sprint 15)
+- Sprint 16 package-name fallback in locate_qname
+
+Seeded 0 exemplars into /home/ivy/Code/glia/scratch/latent/exemplars/index.jsonl
+Index has 3 exemplars:
+  marshmallow-1359-datetime-bind: marshmallow-code/marshmallow :: DateTime::_bind_to_schema
+  pytest-11143-rewrite-isinstance: pytest-dev/pytest :: AssertionRewriter::is_rewrite_disabled
+  pytest-7373-skipif-guard: pytest-dev/pytest :: evaluate_xfail_marks
+
+
+=== [1/50] astropy__astropy-14182 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 944s
+
+=== [2/50] astropy__astropy-14995 (split=test) ===
+  "reg_fail": 25,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 571s
+
+=== [3/50] astropy__astropy-7746 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 1,
+  "cycle": "3.7-50bench"
+}
+wall: 438s
+
+=== [4/50] django__django-11283 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 4s
+
+=== [5/50] django__django-11742 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 3s
+
+=== [6/50] django__django-11964 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 3s
+
+=== [7/50] django__django-12284 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 3s
+
+=== [8/50] django__django-12470 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 3s
+
+=== [9/50] django__django-13321 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 4s
+
+=== [10/50] django__django-14667 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 4s
+
+=== [11/50] django__django-16139 (split=test) ===
+  "reg_fail": 8,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 992s
+
+=== [12/50] marshmallow-code__marshmallow-1343 (split=dev) ===
+  "reg_fail": 0,
+  "f2p_pass": 1,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 106s
+
+=== [13/50] marshmallow-code__marshmallow-1359 (split=dev) ===
+  "reg_fail": 0,
+  "f2p_pass": 1,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 126s
+
+=== [14/50] matplotlib__matplotlib-18869 (split=test) ===
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+
+wall: 4s
+
+=== [15/50] matplotlib__matplotlib-23299 (split=test) ===
+  "f2p": null,
+  "reg": null,
+  "reg_fail": null,
+  "apply_err": "post-apply SyntaxError: unexpected indent (<unknown>, line 78)",
+  "cycle": "3.7-50bench"
+}
+wall: 874s
+
+=== [16/50] matplotlib__matplotlib-23476 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 1,
+  "cycle": "3.7-50bench"
+}
+wall: 998s
+
+=== [17/50] matplotlib__matplotlib-25498 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 1,
+  "cycle": "3.7-50bench"
+}
+wall: 750s
+
+=== [18/50] mwaskom__seaborn-3010 (split=test) ===
+  "reg_fail": 2,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 209s
+
+=== [19/50] mwaskom__seaborn-3407 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 1,
+  "cycle": "3.7-50bench"
+}
+wall: 446s
+
+=== [20/50] pallets__flask-4045 (split=test) ===
+  "reg_fail": 9,
+  "f2p_pass": 1,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 254s
+
+=== [21/50] pallets__flask-4992 (split=test) ===
+  "f2p": null,
+  "reg": null,
+  "reg_fail": null,
+  "apply_err": "error: tests/static/config.toml: already exists in working directory\n",
+  "cycle": "3.7-50bench"
+}
+wall: 178s
+
+=== [22/50] pallets__flask-5063 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 2,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 294s
+
+=== [23/50] psf__requests-2317 (split=test) ===
+[11:58:53] $ git -C /home/ivy/swe-work/psf__requests-2317 checkout -- .
+[11:58:54] heal_diff: applied corrections
+[11:58:55] normalize_diff: no compression available (1069c ≥ 979c); keeping original
+[11:58:55] $ git -C /home/ivy/swe-work/psf__requests-2317 apply --recount --whitespace=nowarn /tmp/run_instance.testpatch
+[11:58:55] $ git -C /home/ivy/swe-work/psf__requests-2317 apply --recount --whitespace=fix /tmp/run_instance.patch
+[11:58:55] test cmd: pytest -rA test_requests.py
+wall: 1800s
+
+=== [24/50] psf__requests-3362 (split=test) ===
+  "reg_fail": 2,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 242s
+
+=== [25/50] psf__requests-863 (split=test) ===
+  "reg_fail": 11,
+  "f2p_pass": 2,
+  "f2p_fail": 2,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 1054s
+
+=== [26/50] pydata__xarray-4094 (split=test) ===
+  "reg_fail": 1,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 836s
+
+=== [27/50] pydata__xarray-4248 (split=test) ===
+  "f2p": null,
+  "reg": null,
+  "reg_fail": null,
+  "apply_err": "post-apply SyntaxError: expected 'except' or 'finally' block (<unknown>, line 104)",
+  "cycle": "3.7-50bench"
+}
+wall: 718s
+
+=== [28/50] pydata__xarray-5131 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 10,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 534s
+
+=== [29/50] pylint-dev__astroid-1196 (split=dev) ===
+  "reg_fail": 1,
+  "f2p_pass": 0,
+  "f2p_fail": 2,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 298s
+
+=== [30/50] pylint-dev__pylint-7080 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 0,
+  "f2p_fail": 0,
+  "f2p_missing_n": 1,
+  "cycle": "3.7-50bench"
+}
+wall: 578s
+
+=== [31/50] pylint-dev__pylint-7228 (split=test) ===
+  "reg_fail": 10,
+  "f2p_pass": 0,
+  "f2p_fail": 2,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 614s
+
+=== [32/50] pylint-dev__pylint-7993 (split=test) ===
+  "reg_fail": 7,
+  "f2p_pass": 0,
+  "f2p_fail": 1,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 449s
+
+=== [33/50] pytest-dev__pytest-11143 (split=test) ===
+  "reg_fail": 0,
+  "f2p_pass": 1,
+  "f2p_fail": 0,
+  "f2p_missing_n": 0,
+  "cycle": "3.7-50bench"
+}
+wall: 196s
+
+=== [34/50] pytest-dev__pytest-7168 (split=test) ===

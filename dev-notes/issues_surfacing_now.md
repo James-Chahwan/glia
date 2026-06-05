@@ -64,7 +64,7 @@ Wall will be heavy (plan pass + attn-bias pass per sample = ~3× baseline). But 
 
 **Plan**: after cycle 2.0 closes, run smoke on marshmallow:
 ```bash
-ssh pod 'bash /home/ivy/Code/glia/scratch/lens/cycle/lens_bias_smoke.sh'
+ssh pod 'bash /home/ivy/Code/glia/bench/lens/cycle/lens_bias_smoke.sh'
 ```
 Read the alpha sweep table, find the knee where injection moves output without degenerating.
 

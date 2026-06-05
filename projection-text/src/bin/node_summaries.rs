@@ -1,7 +1,7 @@
 //! node_summaries — per-activated-node summary strings for Path B pooled
 //! vectors.
 //!
-//! Replaces scratch/latent/out/node_summaries.py. Rust-native: reads CODE
+//! Replaces bench/latent/out/node_summaries.py. Rust-native: reads CODE
 //! cells directly off nodes (every Python METHOD/FUNCTION/CLASS/MODULE carries
 //! one as of the current parser), so pooled vectors embed real source instead
 //! of reconstructed stubs.

@@ -80,6 +80,12 @@ fn visit_top(
             "function_signature" | "function_definition" | "top_level_definition" => {
                 visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
+            // G19 — library-level `const`/`final NAME = expr;`. The hidden
+            // `_top_level_definition` rule inlines the keyword + this list as
+            // direct children of the program root.
+            "static_final_declaration_list" => {
+                visit_top_level_consts(child, src, file_rel, parent_qname, parent_id, repo, acc);
+            }
             _ => {}
         }
     }
@@ -114,6 +120,10 @@ fn visit_class(
     });
     acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
 
+    // G12.5 — heritage: `extends Y` → INHERITS_FROM (superclass);
+    // `implements I` and `with M` → IMPLEMENTS (interface/mixin).
+    visit_class_heritage(node, src, id, repo, acc);
+
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
         if child.kind() == "class_body" {
@@ -125,6 +135,75 @@ fn visit_class(
             }
         }
     }
+}
+
+/// G12.5: class heritage. The `superclass` field holds `extends <type>` plus an
+/// optional `with` mixin clause (or, in the mixin-only form, just `with`). The
+/// `interfaces` field holds the `implements` clause.
+///   - `extends Y`  → INHERITS_FROM (class → superclass)
+///   - `with M`     → IMPLEMENTS    (class → mixin)
+///   - `implements I` → IMPLEMENTS  (class → interface)
+fn visit_class_heritage(node: TsNode, src: &[u8], id: NodeId, repo: RepoId, acc: &mut Acc) {
+    if let Some(superclass) = node.child_by_field_name("superclass") {
+        // `extends <type>` arrives via the `type` field; mixins (`with`) nest as
+        // a `mixins` child holding one or more `_type_not_void` types.
+        if let Some(sc_type) = superclass.child_by_field_name("type") {
+            emit_heritage_ref(text_of(sc_type, src), edge_category::INHERITS_FROM, id, repo, acc);
+        }
+        let mut sc_cursor = superclass.walk();
+        for child in superclass.named_children(&mut sc_cursor) {
+            if child.kind() == "mixins" {
+                emit_mixin_or_interface_refs(child, src, id, repo, acc);
+            }
+        }
+    }
+    if let Some(interfaces) = node.child_by_field_name("interfaces") {
+        emit_mixin_or_interface_refs(interfaces, src, id, repo, acc);
+    }
+}
+
+/// Emit an IMPLEMENTS edge per type in a `mixins` (`with`) or `interfaces`
+/// (`implements`) clause. The `with`/`implements` keywords are anonymous, so the
+/// named children are the type nodes themselves.
+fn emit_mixin_or_interface_refs(
+    clause: TsNode,
+    src: &[u8],
+    id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut cursor = clause.walk();
+    for ty in clause.named_children(&mut cursor) {
+        // Each type head is a `type_identifier` (or function/record type). Skip
+        // trailing `type_arguments` so generics don't spawn spurious edges.
+        if ty.kind() == "type_arguments" {
+            continue;
+        }
+        emit_heritage_ref(text_of(ty, src), edge_category::IMPLEMENTS, id, repo, acc);
+    }
+}
+
+fn emit_heritage_ref(
+    raw: &str,
+    category: repo_graph_core::EdgeCategoryId,
+    from_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // Strip generic args (`Comparable<Foo>` → `Comparable`) and take the trailing
+    // simple name (`pkg.Base` → `Base`). Graph crate resolves the target node.
+    let base = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+    if simple.is_empty() {
+        return;
+    }
+    let target = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, simple);
+    acc.edges.push(Edge {
+        from: from_id,
+        to: target,
+        category,
+        confidence: Confidence::Weak,
+    });
 }
 
 fn visit_class_member(
@@ -230,6 +309,110 @@ fn visit_function(
     });
     acc.nav
         .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
+}
+
+/// G19: library-level `const`/`final` constants. The list holds one
+/// `static_final_declaration` per declarator (`name = value`). Emits a STATE_VAR
+/// node + DEFINES edge module→const for each.
+///
+/// Noise gate: skip when undocumented AND the initializer is a primitive literal
+/// (number / string / bool). Documented or non-trivial initializers are kept.
+fn visit_top_level_consts(
+    list: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // The leading `///` doc precedes the `const`/`final` keyword, which is a
+    // prev-sibling of this list (the `_top_level_definition` rule is hidden).
+    // Anchor doc detection at that keyword so `leading_doc` reaches the comment.
+    let doc_anchor = const_keyword_sibling(list).unwrap_or(list);
+    let doc = repo_graph_doc::leading_doc(&doc_anchor, src);
+    let has_doc = doc.is_some();
+
+    let mut cursor = list.walk();
+    for decl in list.named_children(&mut cursor) {
+        if decl.kind() != "static_final_declaration" {
+            continue;
+        }
+        let Some(name_node) = decl.child_by_field_name("name") else {
+            continue;
+        };
+        // Noise gate: undocumented + literal-primitive initializer → skip.
+        if !has_doc
+            && let Some(value) = decl.child_by_field_name("value")
+            && is_primitive_literal(value.kind())
+        {
+            continue;
+        }
+        let name = text_of(name_node, src);
+        let qname = format!("{parent_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+
+        // entity_cells gives CODE + POSITION (+ DOC when leading_doc sees it from
+        // the node itself). Top-level consts carry the doc above the keyword, so
+        // splice in the doc we resolved from the keyword anchor when present.
+        let mut cells = entity_cells(&decl, src, file_rel);
+        if let Some(ref d) = doc
+            && !cells.iter().any(|c| c.kind == cell_type::DOC)
+        {
+            cells.push(Cell {
+                kind: cell_type::DOC,
+                payload: CellPayload::Text(d.clone()),
+            });
+        }
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
+    }
+}
+
+/// Walk prev-siblings of a top-level declaration list to the `const`/`final`/
+/// `late` keyword token, used as the doc-comment anchor.
+fn const_keyword_sibling(list: TsNode) -> Option<TsNode> {
+    let mut prev = list.prev_sibling();
+    let mut hops = 0u32;
+    while let Some(n) = prev {
+        hops += 1;
+        if hops > 8 {
+            break;
+        }
+        match n.kind() {
+            "const" | "final" | "late" => return Some(n),
+            // Skip an optional type annotation / `augment` marker between the
+            // keyword and the list.
+            _ => prev = n.prev_sibling(),
+        }
+    }
+    None
+}
+
+/// True for Dart primitive/atom literal initializer node kinds.
+fn is_primitive_literal(kind: &str) -> bool {
+    matches!(
+        kind,
+        "decimal_integer_literal"
+            | "hex_integer_literal"
+            | "decimal_floating_point_literal"
+            | "string_literal"
+            | "true"
+            | "false"
+            | "null_literal"
+    )
 }
 
 fn find_identifier<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<String> {
@@ -443,32 +626,29 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                root.start_position().row + 1,
-                root.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(*node, src).to_string()),
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 #[cfg(test)]
@@ -515,6 +695,74 @@ void main() {
 "#;
         let fp = parse_file(source, "lib/main.dart", "lib::main", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 1);
+    }
+
+    #[test]
+    fn heritage_implements_and_extends() {
+        let source = r#"
+class IFoo {}
+class Base {}
+class Mix {}
+class X extends Base with Mix implements IFoo {
+  void run() {}
+}
+"#;
+        let fp = parse_file(source, "lib/x.dart", "lib::x", repo()).unwrap();
+        let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::x::X");
+        let base = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "Base");
+        let mix = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "Mix");
+        let ifoo = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "IFoo");
+        // extends → INHERITS_FROM
+        assert!(fp.edges.iter().any(|e| e.from == x_id
+            && e.to == base
+            && e.category == edge_category::INHERITS_FROM));
+        // with → IMPLEMENTS
+        assert!(fp.edges.iter().any(|e| e.from == x_id
+            && e.to == mix
+            && e.category == edge_category::IMPLEMENTS));
+        // implements → IMPLEMENTS
+        assert!(fp.edges.iter().any(|e| e.from == x_id
+            && e.to == ifoo
+            && e.category == edge_category::IMPLEMENTS));
+    }
+
+    #[test]
+    fn implements_edge_only() {
+        let source = "class IFoo {}\nclass X implements IFoo {}\n";
+        let fp = parse_file(source, "lib/x.dart", "lib::x", repo()).unwrap();
+        let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::x::X");
+        let ifoo = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "IFoo");
+        assert!(fp.edges.iter().any(|e| e.from == x_id
+            && e.to == ifoo
+            && e.category == edge_category::IMPLEMENTS));
+    }
+
+    #[test]
+    fn library_const_with_doc_emits_state_var() {
+        let source = "/// Fee.\nconst feeBps = 250;\n";
+        let fp = parse_file(source, "lib/cfg.dart", "lib::cfg", repo()).unwrap();
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "lib::cfg::feeBps");
+        // STATE_VAR node emitted (documented primitive survives the noise gate).
+        let node = fp.nodes.iter().find(|n| n.id == id).expect("feeBps STATE_VAR node");
+        assert_eq!(
+            *fp.nav.kind_by_id.get(&id).unwrap(),
+            node_kind::STATE_VAR
+        );
+        // Doc cell carried through.
+        assert!(node.cells.iter().any(|c| c.kind == cell_type::DOC));
+        // DEFINES edge module→const.
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::cfg");
+        assert!(fp.edges.iter().any(|e| e.from == module_id
+            && e.to == id
+            && e.category == edge_category::DEFINES));
+    }
+
+    #[test]
+    fn undocumented_primitive_const_is_gated() {
+        let source = "const k = 1;\n";
+        let fp = parse_file(source, "lib/cfg.dart", "lib::cfg", repo()).unwrap();
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "lib::cfg::k");
+        assert!(!fp.nodes.iter().any(|n| n.id == id));
     }
 
     fn route_id(method: &str, path: &str) -> NodeId {

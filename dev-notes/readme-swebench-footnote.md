@@ -19,12 +19,12 @@ Two engineering wins came out of it that ship in v0.4.x core:
    reachability into ranked composition cells (glia's `synth_*` bins still
    live in `projection-text/`, feature-gated behind `--features driver`).
 2. The bench inference path moved from candle to **llama.cpp**
-   (`scratch/latent/out/run_llama_pathB.py`) — ~7× faster on CPU and
+   (`bench/latent/out/run_llama_pathB.py`) — ~7× faster on CPU and
    GBNF-grammar-constrained decoding kills the format-prior failure class
    that plagued the candle path.
 
 The latent-injection arm itself is parked. The `forward_input_embed` hook
-(forked qwen2 model + candle dependency) lives in `scratch/latent/` and is
+(forked qwen2 model + candle dependency) lives in `bench/latent/` and is
 **excluded from the default workspace build** to keep the candle download
 out of routine cargo invocations:
 

@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "repo-graph-py"
-version = "0.4.12"
+version = "0.4.14"
 description = "Native Rust engine for mcp-repo-graph — parses, builds, and stores code graphs."
 readme = "README.md"
-license = { file = "../LICENSE" }
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 authors = [
     {name = "James Chahwan"},

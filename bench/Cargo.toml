@@ -1,0 +1,18 @@
+# Standalone bench workspace — decoupled from the glia engine workspace
+# (2026-05-31). The SWE-bench/lens/latent harness consumes glia only as a built
+# tool (shells out to `cargo run --bin synth_*` in ../projection-text), never as
+# a library, so it builds independently. lens/ and latent/ are their own nested
+# workspaces.
+[workspace]
+
+[package]
+name = "bench-rkyv-poc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rkyv = { version = "0.8", features = ["bytecheck"] }
+memmap2 = "0.9"

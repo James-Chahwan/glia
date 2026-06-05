@@ -1,0 +1,10 @@
+[package]
+name = "repo-graph-doc"
+version = "0.4.13"
+edition = "2024"
+
+[dependencies]
+tree-sitter = "0.26"
+
+[dev-dependencies]
+tree-sitter-rust = "0.24"

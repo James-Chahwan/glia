@@ -43,6 +43,18 @@ pub const MAGIC: [u8; 4] = *b"GMAP";
 /// Format version. Bump on any layout change. Loader rejects mismatches.
 pub const FORMAT_VERSION: u32 = 1;
 
+/// Convention: `<repo>/.ai/repo-graph/` holds the sharded layout (manifest.json
+/// + per-language `.gmap` + `cross_stack.gmap`). Matches the `mcp-repo-graph`
+/// wrapper's config location (`.ai/repo-graph/config.yaml`) so all on-disk
+/// state for a repo lives under one directory.
+pub const DEFAULT_GMAP_SUBDIR: &str = ".ai/repo-graph";
+
+/// Resolve the conventional gmap directory for a repo. Does NOT create the
+/// directory — callers decide whether to write.
+pub fn default_gmap_dir(repo_path: &Path) -> PathBuf {
+    repo_path.join(DEFAULT_GMAP_SUBDIR)
+}
+
 /// Top-level on-disk shape. Owned form = what the writer builds; Archived form
 /// = `&ArchivedContainer`, what mmap returns.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +165,31 @@ impl CodeNavStore {
     }
 }
 
+impl CodeNavStore {
+    /// Inverse of `from_owned` — rehydrate a `CodeNav` from this on-disk shape.
+    /// Used by the cache-load path so a `RepoGraph` produced from disk has the
+    /// same nav structure a freshly-parsed one does.
+    pub fn to_owned(&self) -> CodeNav {
+        let mut nav = CodeNav::default();
+        for (k, v) in &self.name_by_id {
+            nav.name_by_id.insert(*k, v.clone());
+        }
+        for (k, v) in &self.qname_by_id {
+            nav.qname_by_id.insert(*k, v.clone());
+        }
+        for (k, v) in &self.kind_by_id {
+            nav.kind_by_id.insert(*k, *v);
+        }
+        for (k, v) in &self.parent_of {
+            nav.parent_of.insert(*k, *v);
+        }
+        for (k, v) in &self.children_of {
+            nav.children_of.insert(*k, v.clone());
+        }
+        nav
+    }
+}
+
 impl SymbolTableStore {
     pub fn from_owned(sym: &SymbolTable) -> Self {
         let mut module_by_qname: Vec<_> = sym
@@ -185,6 +222,36 @@ impl SymbolTableStore {
     }
 }
 
+impl SymbolTableStore {
+    /// Inverse of `from_owned`. Note: `properties` lives on `RepoGraph`, not on
+    /// `SymbolTable`, so cache-loaded graphs have `properties = HashSet::new()`
+    /// (it's only populated at parse time and isn't currently persisted).
+    pub fn to_owned_table(&self) -> SymbolTable {
+        use std::collections::HashMap;
+        let module_by_qname: HashMap<_, _> = self
+            .module_by_qname
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let to_map = |pairs: &Vec<(NodeId, Vec<(String, NodeId)>)>| -> HashMap<NodeId, HashMap<String, NodeId>> {
+            pairs
+                .iter()
+                .map(|(k, inner)| {
+                    let m: HashMap<_, _> =
+                        inner.iter().map(|(s, n)| (s.clone(), *n)).collect();
+                    (*k, m)
+                })
+                .collect()
+        };
+        SymbolTable {
+            module_by_qname,
+            module_symbols: to_map(&self.module_symbols),
+            class_methods: to_map(&self.class_methods),
+            module_import_bindings: to_map(&self.module_import_bindings),
+        }
+    }
+}
+
 impl Container {
     /// Build a `Container` from an owned `RepoGraph`. Cheap conversion: clones
     /// nodes/edges and flattens the maps. Caller drops the source graph after
@@ -199,6 +266,25 @@ impl Container {
             symbols: SymbolTableStore::from_owned(&g.symbols),
             unresolved_calls: g.unresolved_calls.clone(),
             unresolved_refs: g.unresolved_refs.clone(),
+        }
+    }
+
+    /// Inverse of `from_repo_graph` — rebuild a `RepoGraph` from this container.
+    /// `properties` is set to empty: it's parse-time state on `RepoGraph` and
+    /// isn't currently part of the on-disk schema. Cache-load consumers don't
+    /// need it (only parse-time composition does), so this is a deliberate
+    /// information loss bounded by the format version.
+    pub fn to_repo_graph(&self) -> RepoGraph {
+        use std::collections::HashSet;
+        RepoGraph {
+            repo: self.repo,
+            nodes: self.nodes.clone(),
+            edges: self.edges.clone(),
+            nav: self.code_nav.to_owned(),
+            symbols: self.symbols.to_owned_table(),
+            unresolved_calls: self.unresolved_calls.clone(),
+            unresolved_refs: self.unresolved_refs.clone(),
+            properties: HashSet::new(),
         }
     }
 
@@ -764,6 +850,121 @@ fn verify_hash(entry: &ShardEntry, path: &Path) -> Result<(), StoreError> {
         });
     }
     Ok(())
+}
+
+// ============================================================================
+// MergedGraph round-trip — write/read for the multi-language sharded layout
+// ============================================================================
+
+/// Write a merged graph to a sharded directory. Each `RepoGraph` becomes one
+/// shard; cross-repo edges go in `cross_stack.gmap`. Shard names use
+/// `repo-<u64>-<idx>` so the same repo's multiple language sub-graphs don't
+/// collide. Returns the manifest that was written.
+pub fn write_merged_sharded(
+    merged: &repo_graph_graph::MergedGraph,
+    dir: &Path,
+) -> Result<Manifest, StoreError> {
+    let names: Vec<String> = merged
+        .graphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            if merged.graphs.len() == 1 {
+                format!("repo-{}", g.repo.0)
+            } else {
+                format!("repo-{}-{:02}", g.repo.0, i)
+            }
+        })
+        .collect();
+    let shards: Vec<(&str, &RepoGraph)> = names
+        .iter()
+        .zip(merged.graphs.iter())
+        .map(|(n, g)| (n.as_str(), g))
+        .collect();
+    write_sharded(&shards, &merged.cross_edges, dir)
+}
+
+/// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
+/// every per-language `RepoGraph` from its archived shard, then attaches the
+/// cross-stack edges. Loaded `RepoGraph.properties` is empty (parse-time-only
+/// field, not persisted at FORMAT_VERSION=1).
+pub fn read_merged_sharded(
+    dir: &Path,
+) -> Result<repo_graph_graph::MergedGraph, StoreError> {
+    let sharded = ShardedMmap::open(dir)?;
+    let mut graphs = Vec::with_capacity(sharded.shards.len());
+    for (_name, mmap) in &sharded.shards {
+        let archived = mmap.archived()?;
+        let owned: Container =
+            rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
+        graphs.push(owned.to_repo_graph());
+    }
+    let cross_edges = if let Some(cross_mmap) = &sharded.cross {
+        let archived = cross_mmap.archived()?;
+        let owned: Container =
+            rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
+        owned.edges
+    } else {
+        Vec::new()
+    };
+    Ok(repo_graph_graph::MergedGraph {
+        graphs,
+        cross_edges,
+    })
+}
+
+/// Cheap freshness check: is any file under `repo_path` newer than the
+/// manifest in `gmap_dir`? Skips `.git`, `target`, `node_modules`, `.venv`,
+/// `__pycache__`, and the gmap dir itself.
+///
+/// Returns:
+/// - `true` if the gmap is missing/unreadable, OR any source file's mtime is
+///   newer than the manifest's mtime.
+/// - `false` if everything in the repo predates the manifest.
+///
+/// Walks lazily and stops at the first newer file. Worst case O(N) over the
+/// source tree.
+pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
+    let manifest_path = gmap_dir.join(MANIFEST_NAME);
+    let Ok(manifest_meta) = std::fs::metadata(&manifest_path) else {
+        return true;
+    };
+    let Ok(manifest_mtime) = manifest_meta.modified() else {
+        return true;
+    };
+
+    let skip_dirs = [".git", "target", "node_modules", ".venv", "__pycache__", DEFAULT_GMAP_SUBDIR.split('/').next().unwrap()];
+    let mut stack = vec![repo_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if ftype.is_dir() {
+                let basename = entry.file_name();
+                let bn = basename.to_string_lossy();
+                if skip_dirs.iter().any(|d| bn == *d) {
+                    continue;
+                }
+                stack.push(path);
+            } else if ftype.is_file() {
+                if let Ok(meta) = entry.metadata() {
+                    if let Ok(mtime) = meta.modified() {
+                        if mtime > manifest_mtime {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 // ============================================================================

@@ -475,32 +475,29 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                root.start_position().row + 1,
-                root.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(*node, src).to_string()),
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Text(format!(
-                "{}:{}-{}",
-                file_rel,
-                node.start_position().row + 1,
-                node.end_position().row + 1,
-            )),
+            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 #[cfg(test)]

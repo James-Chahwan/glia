@@ -63,7 +63,7 @@ rust/
   store/                    .gmap container (rkyv + mmap)
   projection-text/          dense text renderer
   parsers/code/{python,go,typescript}/
-  scratch/                  ignore — leftover from rkyv hello-world
+  bench/                  ignore — leftover from rkyv hello-world
 ```
 
 ## Sample dense-text output (backend fixture)

@@ -128,6 +128,12 @@ fn visit_top(
         "import_statement" => collect_import(n, src, module_qname, acc),
         "export_statement" => {
             if let Some(decl) = n.child_by_field_name("declaration") {
+                // G19: surface module-level exported data constants
+                // (`export const NAME = ...`) as STATE_VAR nodes. Arrow/function
+                // consts are still hoisted to Function nodes by visit_lexical.
+                if decl.kind() == "lexical_declaration" {
+                    visit_exported_const(decl, src, file_rel, module_qname, module_id, repo, acc);
+                }
                 visit_top(decl, src, file_rel, module_qname, module_id, repo, acc);
             }
         }
@@ -185,6 +191,12 @@ fn visit_class(
     acc.nav
         .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
 
+    // Class heritage: `class X extends Y implements I, J`.
+    // `extends_clause` → INHERITS_FROM, each type in `implements_clause` →
+    // IMPLEMENTS (class → interface). The superclass / interfaces are cross-file
+    // references resolved later, so we record them as Inherits/Implements refs.
+    collect_class_heritage(n, src, module_qname, class_id, repo, acc);
+
     let Some(body) = n.child_by_field_name("body") else {
         return;
     };
@@ -193,6 +205,96 @@ fn visit_class(
         if member.kind() == "method_definition" {
             visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
         }
+    }
+}
+
+/// Parse `class X extends Y implements I, J` heritage.
+///
+/// `extends_clause` → INHERITS_FROM (class → superclass), each type in
+/// `implements_clause` → IMPLEMENTS (class → interface). The referenced types
+/// are typically cross-file; we emit best-effort same-module target NodeIds
+/// (qname = `<module_qname>::<TypeName>`) for the graph crate's cross-file
+/// resolver to reconcile.
+fn collect_class_heritage(
+    class_node: TsNode,
+    src: &[u8],
+    module_qname: &str,
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut cursor = class_node.walk();
+    let Some(heritage) = class_node
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "class_heritage")
+    else {
+        return;
+    };
+
+    let mut hc = heritage.walk();
+    for clause in heritage.named_children(&mut hc) {
+        match clause.kind() {
+            "extends_clause" => {
+                // The superclass expression(s) live under field `value`; sibling
+                // `type_arguments` nodes are skipped by selecting the field.
+                let mut ec = clause.walk();
+                for ty in clause.children_by_field_name("value", &mut ec) {
+                    if let Some(base) = heritage_type_name(ty, src) {
+                        let to_qname = format!("{module_qname}::{base}");
+                        let to_id =
+                            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &to_qname);
+                        acc.edges.push(Edge {
+                            from: class_id,
+                            to: to_id,
+                            category: edge_category::INHERITS_FROM,
+                            confidence: Confidence::Weak,
+                        });
+                    }
+                }
+            }
+            "implements_clause" => {
+                let mut ic = clause.walk();
+                for ty in clause.named_children(&mut ic) {
+                    if let Some(iface) = heritage_type_name(ty, src) {
+                        let to_qname = format!("{module_qname}::{iface}");
+                        let to_id =
+                            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &to_qname);
+                        acc.edges.push(Edge {
+                            from: class_id,
+                            to: to_id,
+                            category: edge_category::IMPLEMENTS,
+                            confidence: Confidence::Weak,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract the leading identifier of a heritage type node, stripping generic
+/// arguments and module qualifiers (`ns.IFoo<T>` → `IFoo`).
+fn heritage_type_name<'a>(ty: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    if ty.kind() == "comment" {
+        return None;
+    }
+    let base = match ty.kind() {
+        // `generic_type` wraps the name node under field `name`.
+        "generic_type" => ty.child_by_field_name("name").unwrap_or(ty),
+        _ => ty,
+    };
+    let raw = text(base, src).trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // `ns.IFoo` / `IFoo<T>` → take the trailing simple name.
+    let after_dot = raw.rsplit('.').next().unwrap_or(raw);
+    let simple = after_dot.split('<').next().unwrap_or(after_dot).trim();
+    if simple.is_empty() {
+        None
+    } else {
+        Some(simple)
     }
 }
 
@@ -323,6 +425,118 @@ fn visit_lexical(
         emit_function_value(
             value, name, src, file_rel, module_qname, module_id, repo, acc,
         );
+    }
+}
+
+/// G19: surface module-level exported data constants
+/// (`export const NAME = ...`, `export const NAME: T = ...`) as STATE_VAR nodes.
+///
+/// Only `const` lexical declarations qualify. Arrow/function-valued consts are
+/// left to `visit_lexical` (they become Function nodes). A noise gate drops
+/// undocumented literal-primitive consts (number / short string / bool) so that
+/// only documented or structurally-interesting (object / call / array)
+/// constants reach the graph.
+#[allow(clippy::too_many_arguments)]
+fn visit_exported_const(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // Only `const` declarations (skip `let` / `var`).
+    let is_const = {
+        let mut c = n.walk();
+        n.children(&mut c).any(|ch| ch.kind() == "const")
+    };
+    if !is_const {
+        return;
+    }
+
+    // Resolve the doc once from the lexical_declaration (leading_doc hops up to
+    // the export_statement wrapper to find the JSDoc above it).
+    let doc = repo_graph_doc::leading_doc(&n, src);
+
+    let mut cursor = n.walk();
+    for declarator in n.named_children(&mut cursor) {
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(name_n) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if name_n.kind() != "identifier" {
+            continue;
+        }
+        let value = declarator.child_by_field_name("value");
+        // Arrow/function consts are hoisted to Function nodes by visit_lexical.
+        if let Some(v) = value {
+            if matches!(v.kind(), "arrow_function" | "function_expression") {
+                continue;
+            }
+        }
+        // Noise gate: drop undocumented literal-primitive consts.
+        if doc.is_none() && value.map(|v| is_literal_primitive(v, src)).unwrap_or(true) {
+            continue;
+        }
+
+        let name = text(name_n, src);
+        let const_qname = format!("{module_qname}::{name}");
+        let const_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &const_qname);
+
+        // Cells: CODE/POSITION from the declarator, plus the resolved doc.
+        let mut cells = vec![
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Text(slice(&declarator, src).to_string()),
+            },
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(position_json(&declarator, file_rel)),
+            },
+        ];
+        if let Some(ref d) = doc {
+            cells.push(Cell {
+                kind: cell_type::DOC,
+                payload: CellPayload::Text(d.clone()),
+            });
+        }
+
+        acc.nodes.push(Node {
+            id: const_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: module_id,
+            to: const_id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav.record(
+            const_id,
+            name,
+            &const_qname,
+            node_kind::STATE_VAR,
+            Some(module_id),
+        );
+    }
+}
+
+/// Whether an initializer is a literal primitive that should be gated out when
+/// undocumented: a number, a boolean, or a short string (< 32 chars). Objects,
+/// arrays, calls, template strings, and longer strings are kept.
+fn is_literal_primitive(value: TsNode, src: &[u8]) -> bool {
+    match value.kind() {
+        "number" | "true" | "false" => true,
+        "string" => {
+            // Measure the literal contents, excluding surrounding quotes.
+            strip_string_quotes(text(value, src)).chars().count() < 32
+        }
+        _ => false,
     }
 }
 
@@ -963,7 +1177,14 @@ fn build_cells(n: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         kind: cell_type::POSITION,
         payload: CellPayload::Json(position_json(n, file_rel)),
     };
-    vec![code, pos]
+    let mut cells = vec![code, pos];
+    if let Some(doc) = repo_graph_doc::leading_doc(n, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 fn position_json(n: &TsNode, file_rel: &str) -> String {
@@ -1416,5 +1637,66 @@ export class HealthService {
         assert_eq!(occurrences, 2, "expected 2 Node emissions for same endpoint");
         let payloads = endpoint_payloads(&parse, ep);
         assert_eq!(payloads.len(), 2, "expected 2 ENDPOINT_HIT cells");
+    }
+
+    #[test]
+    fn g195_exported_const_state_var_and_implements_edge() {
+        // G19: documented exported const → STATE_VAR node with a DOC cell.
+        // G12.5: `implements I` → IMPLEMENTS edge; `extends Y` → INHERITS_FROM.
+        let src = "\
+/** Fee. */
+export const FEE_BPS = 250;
+
+export const TAG = 7;
+
+interface IFoo {}
+
+class X extends Base implements IFoo {}
+";
+        let parse = parse_file(src, "src/fees.ts", "src::fees", repo()).unwrap();
+
+        let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::fees");
+
+        // FEE_BPS is documented → emitted as STATE_VAR with a DOC cell.
+        let fee_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::fees::FEE_BPS");
+        let fee = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == fee_id)
+            .expect("FEE_BPS should be a STATE_VAR node");
+        assert!(
+            has_edge(&parse, mod_id, fee_id, edge_category::DEFINES),
+            "module should DEFINE the const"
+        );
+        assert!(
+            fee.cells.iter().any(|c| c.kind == cell_type::DOC
+                && matches!(&c.payload, CellPayload::Text(t) if t.contains("Fee"))),
+            "FEE_BPS should carry its JSDoc, cells: {:?}",
+            fee.cells
+        );
+
+        // TAG is an undocumented literal-primitive number → gated out.
+        let tag_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::fees::TAG");
+        assert!(
+            !parse.nodes.iter().any(|n| n.id == tag_id),
+            "undocumented numeric const should be suppressed by the noise gate"
+        );
+
+        // G12.5: class X implements IFoo → IMPLEMENTS; extends Base → INHERITS_FROM.
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::fees::X");
+        let iface_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "src::fees::IFoo");
+        let base_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::fees::Base");
+        assert!(
+            has_edge(&parse, class_id, iface_id, edge_category::IMPLEMENTS),
+            "expected X --IMPLEMENTS--> IFoo, edges: {:?}",
+            parse.edges
+        );
+        assert!(
+            has_edge(&parse, class_id, base_id, edge_category::INHERITS_FROM),
+            "expected X --INHERITS_FROM--> Base"
+        );
     }
 }

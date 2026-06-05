@@ -21,7 +21,7 @@ rust/
       typescript/            repo-graph-parser-typescript (pending v0.4.3b.3)
     (future: chemistry/, video/, policy/, ...)
   graph/                     per-repo graph construction + resolver
-  scratch/                   throwaway experiments
+  bench/                   throwaway experiments
 ```
 
 **Crate name convention:** `repo-graph-parser-<language>` (kebab-case, language at end). The on-disk path differs from the crate name — that's fine, Cargo doesn't enforce a match.

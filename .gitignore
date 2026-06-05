@@ -1,4 +1,8 @@
 /target/
+# Standalone bench sub-workspaces each emit their own target/ — these are
+# separate from the engine's /target and let 3d-viewer balloon to 16GB
+# untracked. Ignore them all. (2026-05-31)
+bench/**/target/
 nodes.json
 nodes.gmap
 
@@ -10,5 +14,14 @@ entities.json
 # SWE-bench experiment artifacts (gold patches, prompts, runlogs, model
 # outputs) — regenerable research data; opt-in via `cargo build -p
 # repo-graph-latent` then re-run the pipeline.
-scratch/latent/out/
+bench/latent/out/
 
+runpod.sh
+
+# Cached graph data produced by repo-graph-py 0.4.14+ auto-persist. Regenerable
+# from source — `repo_graph_py.generate()` writes here unless GLIA_NO_PERSIST=1.
+.ai/repo-graph/
+
+# Claude Code runtime lock (scheduled tasks); settings.local.json is ignored
+# globally. Track .claude/commands/ but never the lock.
+.claude/scheduled_tasks.lock

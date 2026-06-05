@@ -198,7 +198,13 @@ fn scan_angular_router_paths(source: &str) -> Vec<String> {
         let start = search_from + rel + "path:".len();
         let rest = source[start..].trim_start();
         if let Some(path) = first_string_literal(rest) {
-            out.push(path);
+            // Skip template-source expressions captured from framework internals
+            // (`path: \`/${this.routeConfig.path}\``). A `${...}` path is not a
+            // literal route — emitting it mints noise like `GET /${...}` that
+            // clears trigram thresholds against many queries. (glia-v2 G8)
+            if !path.contains("${") {
+                out.push(path);
+            }
         }
         search_from = start + 1;
     }

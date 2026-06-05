@@ -1,6 +1,6 @@
 [package]
 name = "glia-cli"
-version = "0.4.12"
+version = "0.4.13"
 edition = "2024"
 publish = false
 description = "glia CLI — analyze a repo, query impact reachability, merge multiple .gmap-style scans into a cross-service graph."
@@ -13,6 +13,7 @@ path = "src/main.rs"
 repo-graph-engine = { path = "../engine" }
 repo-graph-graph = { path = "../graph" }
 repo-graph-store = { path = "../store" }
+repo-graph-engram-export = { path = "../engram-export" }
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 clap = { version = "4", features = ["derive"] }

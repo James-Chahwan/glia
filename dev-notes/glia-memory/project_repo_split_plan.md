@@ -29,7 +29,7 @@ User verbatim on splitting: *"well im still gonna split the repos just cause i m
 
 1. **Split glia repo** (this plan, local).
 2. **v0.4.12 publish from slimmed repo-graph** — Linux x86_64 wheel only, server.json 0.2.0 → 0.4.12 bump, CLAUDE.md rewrite ("engine lives at glia"), tag v0.4.12, push both repos to both remotes.
-3. **v0.4.13 scratch probe in `glia/rust/scratch/latent_probe/`** — candle + Qwen 2.5 Coder 7B + `forward_input_embed` hello world. First goal: verify the injection hook works end-to-end before designing anything.
+3. **v0.4.13 scratch probe in `glia/rust/bench/latent_probe/`** — candle + Qwen 2.5 Coder 7B + `forward_input_embed` hello world. First goal: verify the injection hook works end-to-end before designing anything.
 
 Ordering rationale: splitting first makes the v0.4.12 CLAUDE.md rewrite trivial (one sentence pointing at glia), and the narrative for the first public release matches the code.
 

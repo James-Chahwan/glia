@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use repo_graph_core::{CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
+use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
 /// Graph-type tag for any code-language graph. First arg to `NodeId::from_parts`.
 pub const GRAPH_TYPE: &str = "code";
@@ -104,6 +104,25 @@ pub mod node_kind {
     // `package:npm:react`, `package:cargo:tokio`, `package:gomod:github.com/gin-gonic/gin`).
     // PackageResolver pairs across repos by full qname.
     pub const PACKAGE_DEP: NodeKindId = NodeKindId(40);
+
+    // v0.4.13 — collapsed-region anchor. One node stands in for a whole
+    // build-output / vendored / gitignored directory (e.g. `www/`,
+    // `node_modules/`) instead of emitting a node per file inside it. qname
+    // `region:<repo-relative-path>`; provenance + file count live in the ORIGIN
+    // cell. Preserves the spatial map without the per-file flood. (glia-v2 G1/G10)
+    pub const REGION: NodeKindId = NodeKindId(41);
+
+    // v0.4.14 — a prose section from an external `.md` doc (README, ARCHITECTURE,
+    // docs/). qname `docs::<file_stem>::<section_slug>`; the CODE cell holds the
+    // chunk text. The engram exporter maps this kind to `Content::Proposition`
+    // (not Symbol) with provenance `documentation`. (glia-v5 G18)
+    pub const DOC_SECTION: NodeKindId = NodeKindId(42);
+
+    // v0.4.14 — a top-level state variable / constant (Solidity public state, Go
+    // package var, Rust static/const, TS exported const, etc.). Emitted as a
+    // `Content::Symbol` like a function; the distinct kind lets consumers rank
+    // it differently if useful. (glia-v5 G19)
+    pub const STATE_VAR: NodeKindId = NodeKindId(43);
 }
 
 // ============================================================================
@@ -195,6 +214,10 @@ pub mod edge_category {
     /// `Field.root → Schema` via RETURNS_TYPE, then `Schema → opts` via
     /// HAS_ATTRIBUTE.
     pub const RETURNS_TYPE: EdgeCategoryId = EdgeCategoryId(21);
+    /// Class/contract → interface it implements. Distinct from `INHERITS_FROM`
+    /// (class extends class): TS/Java/C#/Dart `implements`, Rust `impl Trait for`,
+    /// Solidity `is <Interface>`. Maps to `EdgeKind::Implements`. (glia-v5 G12.5)
+    pub const IMPLEMENTS: EdgeCategoryId = EdgeCategoryId(32);
 }
 
 // ============================================================================
@@ -217,6 +240,17 @@ pub mod cell_type {
     pub const ENV: CellTypeId = CellTypeId(12);
     pub const CONV: CellTypeId = CellTypeId(13);
     pub const VECTOR: CellTypeId = CellTypeId(14);
+    /// Provenance/locality of a node: a JSON cell
+    /// `{"provenance":"build_output|vendored|generated|authored","region":"www","files":N}`.
+    /// Lets consumers (engram, neuropil) filter by *coordinate* rather than by
+    /// string-matching keys, and preserves the spatial map of a repo without
+    /// emitting a node per file inside a collapsed region. (glia-v2 G10/G14)
+    pub const ORIGIN: CellTypeId = CellTypeId(15);
+    /// External library names imported in a node's source file — a JSON array
+    /// `["ethers","web3"]` (deduped, sorted, capped). Denormalized per-node so
+    /// the engram exporter can fill `Content::Symbol.imports` without a parent
+    /// lookup; gives the encoder library context. (glia-v5 G15)
+    pub const IMPORTS: CellTypeId = CellTypeId(16);
 }
 
 // ============================================================================
@@ -333,6 +367,115 @@ pub enum CallQualifier {
 // ============================================================================
 // FileParse + CodeNav
 // ============================================================================
+
+/// Normalize one import path to an external library name, per language, or
+/// `None` for relative / intra-workspace / stdlib-ish imports. (glia-v5 G15)
+pub fn library_name(path: &str, lang: &str) -> Option<String> {
+    let p = path.trim().trim_matches(|c| c == '"' || c == '\'');
+    if p.is_empty() {
+        return None;
+    }
+    let scoped = |p: &str| -> Option<String> {
+        // `@scope/pkg/...` → `@scope/pkg`
+        let rest = p.strip_prefix('@')?;
+        let mut it = rest.splitn(3, '/');
+        Some(format!("@{}/{}", it.next()?, it.next()?))
+    };
+    match lang {
+        "typescript" | "javascript" | "react" | "angular" | "vue" => {
+            if p.starts_with('.') {
+                return None; // relative
+            }
+            scoped(p).or_else(|| p.split('/').next().map(str::to_string))
+        }
+        "solidity" => {
+            if p.starts_with('.') {
+                return None;
+            }
+            scoped(p).or_else(|| p.split('/').next().map(str::to_string))
+        }
+        // Go: the parser stores import paths `::`-joined (mapped to repo qnames)
+        // or `/`-joined; take the last non-empty segment either way.
+        "go" => p
+            .rsplit(|c| c == '/' || c == ':')
+            .find(|s| !s.is_empty())
+            .map(str::to_string),
+        "python" => p.split('.').next().map(str::to_string),
+        "rust" => {
+            let top = p.split("::").next()?;
+            if matches!(top, "crate" | "self" | "super" | "std" | "core" | "alloc") {
+                return None;
+            }
+            Some(top.to_string())
+        }
+        "dart" => p
+            .strip_prefix("package:")
+            .and_then(|r| r.split('/').next())
+            .map(str::to_string),
+        "java" | "csharp" | "scala" | "kotlin" => {
+            // dotted package — keep the first two segments as the library prefix.
+            let segs: Vec<&str> = p.split('.').collect();
+            (!segs.is_empty()).then(|| segs.iter().take(2).copied().collect::<Vec<_>>().join("."))
+        }
+        "c_cpp" => {
+            let p = p.trim_matches(|c| c == '<' || c == '>');
+            if p.is_empty() {
+                return None;
+            }
+            p.split('/').next().map(str::to_string)
+        }
+        _ => {
+            if p.starts_with('.') {
+                return None;
+            }
+            p.split(|c| c == '/' || c == ':')
+                .find(|s| !s.is_empty())
+                .map(str::to_string)
+        }
+    }
+}
+
+/// External library names imported in a file (deduped, sorted, capped at 10).
+/// (glia-v5 G15)
+pub fn library_names(imports: &[ImportStmt], lang: &str) -> Vec<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for imp in imports {
+        let path = match &imp.target {
+            ImportTarget::Module { path, .. } => path.as_str(),
+            ImportTarget::Symbol { module, level, .. } => {
+                if *level > 0 {
+                    continue; // Python relative import — intra-package
+                }
+                module.as_str()
+            }
+        };
+        if let Some(lib) = library_name(path, lang) {
+            set.insert(lib);
+        }
+    }
+    set.into_iter().take(10).collect()
+}
+
+/// Attach an `IMPORTS` cell (JSON array of library names) to every node of `fp`,
+/// computed once from `fp.imports`. Always attaches (empty `[]` distinguishes
+/// "no imports" from "not extracted"). The engram exporter reads it into
+/// `Content::Symbol.imports`. (glia-v5 G15)
+pub fn attach_imports_cell(fp: &mut FileParse, lang: &str) {
+    let libs = library_names(&fp.imports, lang);
+    let json = format!(
+        "[{}]",
+        libs.iter()
+            .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    for n in &mut fp.nodes {
+        n.cells.push(Cell {
+            kind: cell_type::IMPORTS,
+            payload: CellPayload::Json(json.clone()),
+        });
+    }
+}
 
 /// The per-file output every code-language parser produces. `repo-graph-graph`
 /// consumes a `Vec<FileParse>` to build a `RepoGraph`.

@@ -4,6 +4,8 @@
 //! the `glia` CLI. This file is intentionally thin — only the Python-facing
 //! surface lives here.
 
+use std::path::Path;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -11,6 +13,10 @@ use repo_graph_code_domain::node_kind;
 use repo_graph_core::{Confidence, NodeId, RepoId};
 use repo_graph_engine::{generate_many as engine_generate_many, generate_one, parse_one};
 use repo_graph_graph::MergedGraph;
+use repo_graph_store::{
+    default_gmap_dir as store_default_gmap_dir, is_gmap_stale, read_merged_sharded,
+    write_merged_sharded,
+};
 
 #[pyclass]
 struct PyGraph {
@@ -151,6 +157,24 @@ impl PyGraph {
         }
         result
     }
+
+    /// Persist this graph to a sharded `.gmap` layout at `dir`. Creates `dir`
+    /// if missing. Idempotent: re-writing the same graph is content-hash
+    /// skipped (see `write_sharded`'s skip-when-unchanged logic).
+    fn save_to(&self, dir: &str) -> PyResult<()> {
+        write_merged_sharded(&self.merged, Path::new(dir))
+            .map(|_| ())
+            .map_err(|e| PyValueError::new_err(format!("save_to({dir}): {e}")))
+    }
+
+    /// Convenience: save under the conventional `<repo>/.ai/repo-graph/`. The
+    /// wrapper's cache-load path will find it there.
+    fn save_to_default(&self, repo_path: &str) -> PyResult<()> {
+        let dir = store_default_gmap_dir(Path::new(repo_path));
+        write_merged_sharded(&self.merged, &dir)
+            .map(|_| ())
+            .map_err(|e| PyValueError::new_err(format!("save_to_default({}): {e}", dir.display())))
+    }
 }
 
 fn escape_json(s: &str) -> String {
@@ -176,6 +200,20 @@ fn generate(repo_path: &str) -> PyResult<PyGraph> {
             result.parse_errors.len(),
             result.parse_errors.first().unwrap_or(&String::new())
         )));
+    }
+    // Auto-persist to the conventional gmap dir so the next session can
+    // `load_from_gmap` instead of regenerating. Failure to write is logged but
+    // not fatal — a fresh in-memory graph is still usable, the cache layer is
+    // an optimization. Opt out with `GLIA_NO_PERSIST=1` (tests / experiments
+    // that don't want side effects on the target repo).
+    if std::env::var("GLIA_NO_PERSIST").as_deref() != Ok("1") {
+        let dir = store_default_gmap_dir(Path::new(repo_path));
+        if let Err(e) = write_merged_sharded(&result.merged, &dir) {
+            eprintln!(
+                "[repo-graph-py] warning: failed to persist gmap to {}: {e}",
+                dir.display()
+            );
+        }
     }
     Ok(PyGraph {
         merged: result.merged,
@@ -228,9 +266,40 @@ fn parse_file_to_json(source: &str, path: &str, lang: &str) -> PyResult<String> 
     Ok(out)
 }
 
+/// Load a previously-generated graph from a sharded `.gmap` directory.
+/// `dir` must contain `manifest.json` + the per-shard `.gmap` files written by
+/// `PyGraph.save_to` / `save_to_default`. Returns a `PyGraph` whose downstream
+/// methods (node_count, dense_text, activate, …) behave identically to a fresh
+/// `generate()` result, except `RepoGraph.properties` is empty (parse-time-only
+/// state, not persisted at FORMAT_VERSION=1).
+#[pyfunction]
+fn load_from_gmap(dir: &str) -> PyResult<PyGraph> {
+    let merged = read_merged_sharded(Path::new(dir))
+        .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))?;
+    Ok(PyGraph { merged })
+}
+
+/// Conventional gmap directory path for a repo: `<repo>/.ai/repo-graph`.
+/// The Python wrapper uses this to know where to look for a cached graph.
+#[pyfunction]
+fn default_gmap_dir(repo_path: &str) -> String {
+    store_default_gmap_dir(Path::new(repo_path))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Is the cached gmap at `gmap_dir` older than any source file under
+/// `repo_path`? Used by the wrapper to decide between load and regenerate.
+/// Returns `true` if the gmap is missing entirely. Skips `.git`, `target`,
+/// `node_modules`, `.venv`, `__pycache__`, and `.ai/`.
+#[pyfunction]
+fn is_stale(gmap_dir: &str, repo_path: &str) -> bool {
+    is_gmap_stale(Path::new(gmap_dir), Path::new(repo_path))
+}
+
 #[pyfunction]
 fn version() -> &'static str {
-    "0.4.10"
+    env!("CARGO_PKG_VERSION")
 }
 
 // ============================================================================
@@ -242,6 +311,9 @@ fn repo_graph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(generate, m)?)?;
     m.add_function(wrap_pyfunction!(generate_many, m)?)?;
     m.add_function(wrap_pyfunction!(parse_file_to_json, m)?)?;
+    m.add_function(wrap_pyfunction!(load_from_gmap, m)?)?;
+    m.add_function(wrap_pyfunction!(default_gmap_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(is_stale, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyGraph>()?;
     Ok(())

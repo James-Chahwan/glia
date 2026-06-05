@@ -9,7 +9,9 @@
 //!     cross-graph resolvers (HTTP, gRPC, DbResolver, etc.) fire across the
 //!     boundary. The pyo3 wrapper and the `glia` CLI both call into here.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, edge_category, node_kind};
@@ -38,8 +40,14 @@ pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
         return Err(format!("not a directory: {repo_path}"));
     }
     let repo = RepoId::from_canonical(&format!("file://{repo_path}"));
-    let files = walk_source_files(&root);
-    let (graphs, mut parse_errors) = build_graphs_for_repo(&files, repo);
+    let (files, regions, md) = walk_source_files(&root);
+    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo);
+    if !regions.is_empty() {
+        graphs.push(build_region_graph(&regions, repo));
+    }
+    if let Some(docs) = build_docs_graph(&md, repo) {
+        graphs.push(docs);
+    }
     let mut merged = MergedGraph::new(graphs);
     run_all_resolvers(&mut merged);
     post_passes(&mut merged);
@@ -68,9 +76,15 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
             continue;
         }
         let repo = RepoId::from_canonical(&format!("file://{path}"));
-        let files = walk_source_files(&root);
+        let (files, regions, md) = walk_source_files(&root);
         let (graphs, parse_errors) = build_graphs_for_repo(&files, repo);
         all_graphs.extend(graphs);
+        if !regions.is_empty() {
+            all_graphs.push(build_region_graph(&regions, repo));
+        }
+        if let Some(docs) = build_docs_graph(&md, repo) {
+            all_graphs.push(docs);
+        }
         all_errors.extend(parse_errors);
     }
     if all_graphs.is_empty() {
@@ -105,6 +119,13 @@ fn build_graphs_for_repo(
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut proto_parses = Vec::new();
     let mut parse_errors = Vec::new();
+
+    // Suppress the default panic-print-to-stderr while we run per-file parsers
+    // — we catch panics below and report them as parse_errors. The default
+    // hook would otherwise spam stderr (with a backtrace) for every bad file
+    // even though we recover. Restored on scope exit via Drop guard so a
+    // panic in non-loop code still gets the user-visible report.
+    let _hook_guard = SuppressPanicHook::install();
 
     for (path, source) in files {
         let yaml_ext = matches!(
@@ -245,19 +266,36 @@ fn build_graphs_for_repo(
             continue;
         }
 
-        match parse_one(source, path, lang, repo) {
-            Ok(mut fp) => {
-                let module_id = NodeId::from_parts(
-                    GRAPH_TYPE,
-                    repo,
-                    node_kind::MODULE,
-                    &path_to_qname(path),
-                );
-                apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo);
+        // Per-file panic isolation. Parsers occasionally hit slice/regex bugs
+        // on adversarial inputs (e.g. parsers/code/rust/src/lib.rs:511 slice
+        // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
+        // kill an N-file repo build — log it, skip it, keep going.
+        let parse_result = catch_unwind(AssertUnwindSafe(|| {
+            let mut fp = parse_one(source, path, lang, repo)?;
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo);
+            // G15: denormalize the file's external library names onto every node
+            // as an IMPORTS cell (one place, all languages).
+            repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
+            Ok::<_, String>(fp)
+        }));
+        match parse_result {
+            Ok(Ok(fp)) => {
                 parses_by_lang.entry(lang).or_default().push(fp);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 parse_errors.push(format!("{path}: {e}"));
+            }
+            Err(payload) => {
+                parse_errors.push(format!(
+                    "{path}: PANIC ({lang} parser/extractors): {}",
+                    panic_payload_str(&payload)
+                ));
             }
         }
     }
@@ -288,6 +326,45 @@ fn build_graphs_for_repo(
     (graphs, parse_errors)
 }
 
+/// RAII guard: replaces the global panic hook with a no-op for the lifetime
+/// of the guard, then restores. Used by `build_graphs_for_repo` so caught
+/// per-file panics don't flood stderr with backtraces. Process-global state,
+/// so this assumes single-threaded parsing (true today). If parsing ever
+/// goes parallel, switch to `panic::update_hook` filtering by thread.
+struct SuppressPanicHook {
+    prev: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
+}
+
+impl SuppressPanicHook {
+    fn install() -> Self {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        Self { prev: Some(prev) }
+    }
+}
+
+impl Drop for SuppressPanicHook {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            std::panic::set_hook(prev);
+        }
+    }
+}
+
+/// Best-effort string extraction from a panic payload returned by
+/// `catch_unwind`. The payload is `Box<dyn Any + Send>` and the message is
+/// commonly a `&'static str` (from `panic!("literal")`) or `String` (from
+/// `panic!("{}", x)` / `unwrap`).
+fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    }
+}
+
 fn run_all_resolvers(merged: &mut MergedGraph) {
     merged.run(&HttpStackResolver);
     merged.run(&GrpcStackResolver);
@@ -308,6 +385,115 @@ fn post_passes(merged: &mut MergedGraph) {
     downgrade_test_paths(merged);
     demote_unmatched_http_nodes(merged);
     emit_tests_edges(merged);
+    tag_synthetic_provenance(merged);
+}
+
+/// Tag the substrate-only synthetic node kinds with an `ORIGIN` cell so
+/// consumers (the engram exporter, neuropil) can filter them by coordinate
+/// rather than string-matching keys. These nodes are real and load-bearing for
+/// the cross-repo resolvers (`PackageResolver` pairs `package:npm:*`,
+/// `EventBusResolver` pairs `event_*`), so they are NOT dropped here — only
+/// categorised. (glia-v2 G6/G9/G11)
+fn tag_synthetic_provenance(merged: &mut MergedGraph) {
+    use repo_graph_code_domain::{cell_type, node_kind};
+    use repo_graph_core::{Cell, CellPayload};
+
+    for g in &mut merged.graphs {
+        let nodes = &mut g.nodes;
+        let nav = &g.nav;
+        for n in nodes.iter_mut() {
+            // Don't double-tag (region anchors are tagged at creation).
+            if n.cells.iter().any(|c| c.kind == cell_type::ORIGIN) {
+                continue;
+            }
+            let kind = nav.kind_by_id.get(&n.id).copied();
+            let qname = nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+            let file = position_file(&n.cells).unwrap_or_default();
+            let provenance = if matches!(kind, Some(node_kind::PACKAGE_DEP)) {
+                // npm/cargo/etc. dependency pseudo-nodes (G9 hub).
+                "dependency"
+            } else if matches!(
+                kind,
+                Some(node_kind::EVENT_EMITTER) | Some(node_kind::EVENT_HANDLER)
+            ) {
+                // event emitter/handler name pseudo-nodes (G6).
+                "synthetic"
+            } else if qname.contains("ExampleInstrumentedTest")
+                || qname.starts_with("androidTest::")
+            {
+                // Framework-generated test stubs — Capacitor's
+                // ExampleInstrumentedTest, anything under androidTest (G11).
+                "generated"
+            } else if is_generated_proto(&file) {
+                // protobuf-generated reflection code — `chatpb::*::Reset` etc.
+                // swamp recall on matching trigrams. Distinct from `generated`
+                // so engram can opt it back in independently. (glia-v3 #5)
+                "generated_proto"
+            } else if is_test_fixture(&file, qname) {
+                // test files + seeders/load-testers — droppable by default at
+                // recall, opt-in via engram's --include-tests. (glia-v3 #6)
+                "test_fixture"
+            } else {
+                continue;
+            };
+            n.cells.push(Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(r#"{{"provenance":"{provenance}"}}"#)),
+            });
+        }
+    }
+}
+
+/// Pull the `file` path out of a node's POSITION cell. Lightweight string
+/// scan of the `{"file":"...","start_line":..}` payload — avoids a serde_json
+/// dependency in the engine crate.
+fn position_file(cells: &[repo_graph_core::Cell]) -> Option<String> {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::CellPayload;
+    for c in cells {
+        if c.kind != cell_type::POSITION {
+            continue;
+        }
+        if let CellPayload::Json(j) = &c.payload
+            && let Some(rest) = j.split("\"file\":\"").nth(1)
+            && let Some(end) = rest.find('"')
+        {
+            return Some(rest[..end].to_string());
+        }
+    }
+    None
+}
+
+/// Generated-protobuf source: codegen file extensions across the languages
+/// quokka-stack mixes (Go / Dart / TS / Python). The reflection-method noise
+/// (`Reset`/`String`/`ProtoReflect`/`Marshal`…) lives in these files. (glia-v3 #5)
+fn is_generated_proto(file: &str) -> bool {
+    file.ends_with(".pb.go")
+        || file.ends_with(".pb-grpc.go")
+        || file.ends_with(".pb.dart")
+        || file.ends_with(".pbjson.dart")
+        || file.ends_with(".pbenum.dart")
+        || file.ends_with(".pbserver.dart")
+        || file.ends_with(".pb.ts")
+        || file.ends_with("_pb2.py")
+        || file.ends_with("_pb2_grpc.py")
+        || file.contains(".pb.")
+}
+
+/// Test / fixture / seeder code, by file path or qname shape. (glia-v3 #6)
+fn is_test_fixture(file: &str, qname: &str) -> bool {
+    file.ends_with("_test.go")
+        || file.ends_with("_test.dart")
+        || file.ends_with(".spec.ts")
+        || file.ends_with(".test.ts")
+        || file.ends_with(".spec.js")
+        || file.ends_with(".test.js")
+        || file.ends_with("_test.py")
+        || file.ends_with("_spec.rb")
+        || file.contains("/tests/")
+        || file.contains("/__tests__/")
+        || file.contains("/test/")
+        || is_test_qname(qname)
 }
 
 // ----------------------------------------------------------------------------
@@ -415,7 +601,7 @@ fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc, queues,
-        react, ts_routes, vue, websocket,
+        react, services, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -493,35 +679,185 @@ fn apply_cross_cutting_extractors(
             source, path, &module_qname, module_id, repo
         ));
     }
+
+    // G14: cross-language SERVICE classification. Runs LAST so the per-file
+    // nav already has every CLASS / STRUCT and its METHOD children populated
+    // by the language parser + framework extractors above. Emits SERVICE
+    // nodes + CONTAINS edges to owned methods.
+    {
+        let svc = services::extract_service_nodes(source, lang, &fp.nav, module_id, repo);
+        fp.nodes.extend(svc.nodes);
+        fp.edges.extend(svc.edges);
+        merge_nav(&mut fp.nav, svc.nav);
+    }
 }
 
 // ----------------------------------------------------------------------------
 // Helpers — file walk, path mapping, nav merge
 // ----------------------------------------------------------------------------
 
-fn walk_source_files(root: &Path) -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    walk_dir(root, root, &mut files);
-    files
+/// A build-output / vendored / gitignored directory collapsed to a single
+/// anchor node instead of being parsed file-by-file. Preserves the repo's
+/// spatial map without the per-file flood. (glia-v2 G1/G2/G10)
+struct RegionAnchor {
+    /// Repo-relative path of the collapsed directory (`www`, `packages/x/dist`).
+    rel_path: String,
+    /// `vendored` | `build_output` — recorded in the anchor's ORIGIN cell.
+    provenance: &'static str,
+    /// The directory's own name (`www`, `node_modules`).
+    region: String,
 }
 
-fn walk_dir(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) {
+/// Walk the repo, classifying each directory as source-to-parse or a collapsed
+/// region. Returns `(files_to_parse, region_anchors)`.
+type WalkResult = (
+    Vec<(String, String)>, // source files to parse
+    Vec<RegionAnchor>,     // collapsed build/vendor regions
+    Vec<(String, String)>, // markdown docs (rel_path, text) — G18
+);
+
+fn walk_source_files(root: &Path) -> WalkResult {
+    let mut files = Vec::new();
+    let mut regions = Vec::new();
+    let mut md = Vec::new();
+    let gitignore_dirs = load_gitignore_dirs(root);
+    walk_dir(root, root, &gitignore_dirs, &mut files, &mut regions, &mut md);
+    (files, regions, md)
+}
+
+/// VCS internals and editor metadata: no graph-meaningful content, skipped
+/// outright (not even recorded as a region).
+fn is_hard_skip(name: &str) -> bool {
+    matches!(name, ".git" | ".hg" | ".svn" | ".idea" | ".vscode")
+}
+
+/// Provenance for directories always collapsed to a region anchor regardless of
+/// `.gitignore` — dependency trees and conventional build output. `None` for an
+/// ordinary source directory.
+fn always_region(name: &str) -> Option<&'static str> {
+    match name {
+        "node_modules" | "vendor" | "bower_components" | ".venv" | "site-packages" => {
+            Some("vendored")
+        }
+        "target" | "dist" | "build" | "out" | "__pycache__" | ".cache" | ".next" | ".nuxt"
+        | ".angular" | "coverage" => Some("build_output"),
+        _ => None,
+    }
+}
+
+/// Directory names the repo's top-level `.gitignore` marks ignored. Build
+/// mirrors a project gitignores (Capacitor's `www/`, `android/`) collapse to a
+/// region anchor rather than being parsed as source. Only plain, non-glob,
+/// non-negated entries are honored, matched by final path component against
+/// directory names during the walk. (glia-v2 G10)
+fn load_gitignore_dirs(root: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) else {
+        return out;
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('!')
+            || line.contains('*')
+            || line.contains('?')
+            || line.contains('[')
+        {
+            continue;
+        }
+        let trimmed = line.trim_matches('/');
+        let comp = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        if !comp.is_empty() {
+            out.insert(comp.to_string());
+        }
+    }
+    out
+}
+
+/// True for a filename that looks like a bundler-emitted, content-hashed chunk
+/// (`main.e188fddd19255ba1.js`, `1624.4e9cc6119b4878fe.js`, `styles.<hash>.css`)
+/// — i.e. build output, not authored source. The signal is a dot-delimited
+/// segment of ≥8 hex digits before a JS/CSS extension.
+fn is_hashed_chunk(name: &str) -> bool {
+    let ext_ok = name.ends_with(".js")
+        || name.ends_with(".mjs")
+        || name.ends_with(".css")
+        || name.ends_with(".map");
+    if !ext_ok {
+        return false;
+    }
+    name.split('.').any(|seg| {
+        seg.len() >= 8 && seg.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
+/// True when a directory is a built web-bundle mirror — it directly contains
+/// several content-hashed chunk files. Catches Capacitor's copied bundle
+/// (`android/app/src/main/assets/public`, `ios/App/App/public`) and any other
+/// build mirror that `.gitignore` doesn't flag, regardless of path. (glia-v2 G10)
+fn dir_is_build_bundle(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut hashed = 0usize;
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+            && is_hashed_chunk(&entry.file_name().to_string_lossy())
+        {
+            hashed += 1;
+            if hashed >= 3 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    gitignore_dirs: &std::collections::HashSet<String>,
+    files: &mut Vec<(String, String)>,
+    regions: &mut Vec<RegionAnchor>,
+    md: &mut Vec<(String, String)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if matches!(
-            name.as_str(),
-            ".git" | ".hg" | ".svn" | ".cache" | ".venv" | ".idea" | ".vscode"
-                | "node_modules" | "vendor" | "__pycache__" | "target" | "dist" | "build"
-        ) {
+        if is_hard_skip(&name) {
             continue;
         }
         if path.is_dir() {
-            walk_dir(root, &path, files);
+            // Collapse vendored/build/gitignored directories to one anchor and
+            // do NOT descend — categorise the region instead of dropping it or
+            // emitting a node per file inside. (glia-v2 G1/G2/G10)
+            let provenance = always_region(&name)
+                .or_else(|| gitignore_dirs.contains(&name).then_some("build_output"))
+                .or_else(|| dir_is_build_bundle(&path).then_some("build_output"));
+            if let Some(provenance) = provenance {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                regions.push(RegionAnchor {
+                    rel_path: rel.to_string_lossy().to_string(),
+                    provenance,
+                    region: name,
+                });
+                continue;
+            }
+            walk_dir(root, &path, gitignore_dirs, files, regions, md);
         } else if path.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().to_string();
+            // Markdown docs (G18) — collected separately; the include/skip rules
+            // are applied in `build_docs_graph`.
+            if rel_str.to_ascii_lowercase().ends_with(".md")
+                && std::fs::metadata(&path).map(|m| m.len() <= 500_000).unwrap_or(false)
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                md.push((rel_str.clone(), text));
+                continue;
+            }
             let matches_lang = detect_language(&rel_str).is_some();
             let matches_bypass = is_bypass_path(&rel_str);
             if (matches_lang || matches_bypass)
@@ -530,6 +866,45 @@ fn walk_dir(root: &Path, dir: &Path, files: &mut Vec<(String, String)>) {
                 files.push((rel_str, source));
             }
         }
+    }
+}
+
+/// Build a one-node-per-region graph from the collapsed [`RegionAnchor`]s. Each
+/// node carries an `ORIGIN` cell `{provenance, region}` so consumers filter by
+/// coordinate instead of string-matching keys. (glia-v2 G1/G10)
+fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> repo_graph_graph::RepoGraph {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::{Cell, CellPayload};
+
+    let mut nodes = Vec::new();
+    let mut nav = CodeNav::default();
+    for r in regions {
+        let qname = format!("region:{}", r.rel_path);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::REGION, &qname);
+        let origin = format!(
+            r#"{{"provenance":"{}","region":"{}"}}"#,
+            r.provenance, r.region
+        );
+        nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(origin),
+            }],
+        });
+        nav.record(id, &r.region, &qname, node_kind::REGION, None);
+    }
+    repo_graph_graph::RepoGraph {
+        repo,
+        nodes,
+        edges: Vec::new(),
+        nav,
+        symbols: Default::default(),
+        unresolved_calls: Vec::new(),
+        unresolved_refs: Vec::new(),
+        properties: Default::default(),
     }
 }
 
@@ -544,6 +919,203 @@ fn is_bypass_path(path: &str) -> bool {
     is_dockerfile_path(path)
         || is_dotenv_path(path)
         || repo_graph_code_extractors::packages::is_manifest_path(path)
+}
+
+// ----------------------------------------------------------------------------
+// G18 — external `.md` doc ingest (README/ARCHITECTURE/docs/) → prose nodes
+// the exporter maps to `Content::Proposition` with provenance `documentation`.
+// ----------------------------------------------------------------------------
+
+/// Repo-root markdown files worth ingesting as documentation.
+fn is_wellknown_doc(rel: &str) -> bool {
+    matches!(
+        rel,
+        "README.md"
+            | "ARCHITECTURE.md"
+            | "CHANGELOG.md"
+            | "CONTRIBUTING.md"
+            | "CODE_OF_CONDUCT.md"
+            | "CLAUDE.md"
+            | "AGENTS.md"
+            | "CODE_RULES.md"
+    )
+}
+
+/// Should this markdown path be ingested? Root well-known files, anything under
+/// a top-level `docs/`, or under `.ai/` (≤2 levels). License boilerplate skipped.
+fn include_doc(rel: &str) -> bool {
+    let lower = rel.to_ascii_lowercase();
+    if lower.ends_with("license.md") || lower.contains("license") {
+        return false;
+    }
+    if is_wellknown_doc(rel) {
+        return true;
+    }
+    rel.starts_with("docs/") || rel.starts_with(".ai/")
+}
+
+/// A slug for a heading line: lowercased, alnum runs joined by `-` (GitHub anchor).
+fn heading_slug(heading: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in heading.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Cap to 500 chars, truncating at a sentence boundary when possible.
+fn cap_prose(s: &str) -> String {
+    const MAX: usize = 500;
+    let s = s.trim();
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let mut end = MAX;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let slice = &s[..end];
+    // prefer the last sentence end within the cap
+    if let Some(dot) = slice.rfind(". ") {
+        return slice[..=dot].trim().to_string();
+    }
+    slice.trim_end().to_string()
+}
+
+struct DocChunk {
+    slug: String,
+    text: String,
+    start_line: u32,
+    end_line: u32,
+}
+
+/// Split markdown at `#`/`##` headings into chunks. Falls back to one chunk
+/// (first 500 chars) when the file has no headings.
+fn chunk_markdown(text: &str) -> Vec<DocChunk> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut chunks: Vec<DocChunk> = Vec::new();
+    let mut cur_slug: Option<String> = None;
+    let mut cur_start = 0u32;
+    let mut buf: Vec<&str> = Vec::new();
+    let mut seq = 0u32;
+
+    let flush = |chunks: &mut Vec<DocChunk>,
+                 slug: &Option<String>,
+                 buf: &[&str],
+                 start: u32,
+                 end: u32,
+                 seq: &mut u32| {
+        let body = cap_prose(&buf.join("\n"));
+        if body.is_empty() {
+            return;
+        }
+        let slug = slug.clone().unwrap_or_else(|| {
+            let s = if *seq == 0 {
+                "overview".to_string()
+            } else {
+                format!("section-{seq}")
+            };
+            *seq += 1;
+            s
+        });
+        chunks.push(DocChunk { slug, text: body, start_line: start, end_line: end });
+    };
+
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("# ") || t.starts_with("## ") {
+            flush(&mut chunks, &cur_slug, &buf, cur_start, i as u32, &mut seq);
+            buf.clear();
+            cur_slug = Some(heading_slug(t.trim_start_matches('#').trim()));
+            cur_start = i as u32;
+            buf.push(line);
+        } else {
+            buf.push(line);
+        }
+    }
+    flush(
+        &mut chunks,
+        &cur_slug,
+        &buf,
+        cur_start,
+        lines.len() as u32,
+        &mut seq,
+    );
+
+    // Fallback: no headings → one chunk of the whole file.
+    if chunks.is_empty() {
+        let body = cap_prose(text);
+        if !body.is_empty() {
+            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line: lines.len() as u32 });
+        }
+    }
+    chunks
+}
+
+/// Build a graph of `DOC_SECTION` nodes from the repo's markdown docs. Each node
+/// carries the prose in a CODE cell, a POSITION cell (md path + line range), and
+/// an ORIGIN cell `provenance=documentation`. The exporter maps the kind to
+/// `Content::Proposition`. (glia-v5 G18)
+fn build_docs_graph(md: &[(String, String)], repo: RepoId) -> Option<repo_graph_graph::RepoGraph> {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::{Cell, CellPayload};
+
+    let mut nodes = Vec::new();
+    let mut nav = CodeNav::default();
+    for (path, text) in md {
+        if !include_doc(path) {
+            continue;
+        }
+        let stem = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("doc")
+            .to_string();
+        for chunk in chunk_markdown(text) {
+            let qname = format!("docs::{stem}::{}", chunk.slug);
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, &qname);
+            let pos = format!(
+                r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
+                path.replace('\\', "\\\\").replace('"', "\\\""),
+                chunk.start_line,
+                chunk.end_line
+            );
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![
+                    Cell { kind: cell_type::CODE, payload: CellPayload::Text(chunk.text) },
+                    Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
+                    Cell {
+                        kind: cell_type::ORIGIN,
+                        payload: CellPayload::Json(r#"{"provenance":"documentation"}"#.into()),
+                    },
+                ],
+            });
+            nav.record(id, &chunk.slug, &qname, node_kind::DOC_SECTION, None);
+        }
+    }
+    if nodes.is_empty() {
+        return None;
+    }
+    Some(repo_graph_graph::RepoGraph {
+        repo,
+        nodes,
+        edges: Vec::new(),
+        nav,
+        symbols: Default::default(),
+        unresolved_calls: Vec::new(),
+        unresolved_refs: Vec::new(),
+        properties: Default::default(),
+    })
 }
 
 fn is_dockerfile_path(path: &str) -> bool {
@@ -781,4 +1353,137 @@ fn strip_test_affixes(name: &str) -> &str {
         }
     }
     name
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    #[test]
+    fn hashed_chunk_detection() {
+        assert!(is_hashed_chunk("main.e188fddd19255ba1.js"));
+        assert!(is_hashed_chunk("1624.4e9cc6119b4878fe.js"));
+        assert!(is_hashed_chunk("styles.0a1b2c3d4e5f6a7b.css"));
+        // Authored source is not a hashed chunk.
+        assert!(!is_hashed_chunk("app.component.ts"));
+        assert!(!is_hashed_chunk("index.js"));
+        assert!(!is_hashed_chunk("user_service.py"));
+        // 8-hex-ish word but wrong extension.
+        assert!(!is_hashed_chunk("deadbeef.txt"));
+    }
+
+    #[test]
+    fn markdown_chunking_and_include_rules() {
+        // Heading-split chunking (G18).
+        let md = "# Overview\nIntro text.\n## Setup\nRun the thing.\n";
+        let chunks = chunk_markdown(md);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].slug, "overview");
+        assert_eq!(chunks[1].slug, "setup");
+        // Fallback: no headings → one "overview" chunk.
+        let plain = chunk_markdown("just a paragraph with no heading at all.");
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].slug, "overview");
+        // Include rules.
+        assert!(include_doc("README.md"));
+        assert!(include_doc("docs/architecture.md"));
+        assert!(!include_doc("LICENSE.md"));
+        assert!(!include_doc("src/notes.md")); // not root-wellknown / docs/ / .ai/
+    }
+
+    #[test]
+    fn proto_and_test_fixture_detection() {
+        // generated_proto: codegen extensions across languages (glia-v3 #5).
+        assert!(is_generated_proto("chatpb/chat.pb.go"));
+        assert!(is_generated_proto("gen/chat.pb-grpc.go"));
+        assert!(is_generated_proto("lib/proto/chat.pbjson.dart"));
+        assert!(is_generated_proto("proto/chat_pb2.py"));
+        assert!(!is_generated_proto("src/chat.go"));
+        assert!(!is_generated_proto("src/app/chat.component.ts"));
+        // test_fixture: paths + qname shapes (glia-v3 #6).
+        assert!(is_test_fixture("services/auth_test.go", "turps::auth"));
+        assert!(is_test_fixture("app/login.spec.ts", "quokka_web::login"));
+        assert!(is_test_fixture("pkg/foo.go", "pkg::tests::seed_users"));
+        assert!(!is_test_fixture("services/auth.go", "turps::auth::HashPassword"));
+    }
+
+    #[test]
+    fn position_file_extraction() {
+        use repo_graph_code_domain::cell_type;
+        use repo_graph_core::{Cell, CellPayload};
+        let cells = vec![Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(
+                r#"{"file":"src/app/a.ts","start_line":3,"end_line":9}"#.into(),
+            ),
+        }];
+        assert_eq!(position_file(&cells).as_deref(), Some("src/app/a.ts"));
+        assert_eq!(position_file(&[]), None);
+    }
+
+    #[test]
+    fn gitignore_dir_parsing() {
+        let root = std::env::temp_dir().join(format!("glia_gi_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(".gitignore"),
+            "# comment\n/www\nandroid/\n*.log\n!keep\n/dist\nsrc/generated\n",
+        )
+        .unwrap();
+        let dirs = load_gitignore_dirs(&root);
+        assert!(dirs.contains("www"));
+        assert!(dirs.contains("android"));
+        assert!(dirs.contains("dist"));
+        assert!(dirs.contains("generated")); // final component of src/generated
+        assert!(!dirs.contains("keep")); // negation skipped
+        assert!(dirs.iter().all(|d| !d.contains('*'))); // globs skipped
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_collapses_build_and_vendor_regions() {
+        let root = std::env::temp_dir().join(format!("glia_walk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/app")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/left-pad")).unwrap();
+        std::fs::create_dir_all(root.join("www")).unwrap();
+        std::fs::create_dir_all(root.join("android/app/src/main/assets/public")).unwrap();
+        std::fs::write(root.join(".gitignore"), "/www\n").unwrap();
+        // authored source
+        std::fs::write(root.join("src/app/a.ts"), "export class A {}").unwrap();
+        // vendored dep (must NOT be parsed)
+        std::fs::write(root.join("node_modules/left-pad/index.js"), "module.exports=1").unwrap();
+        // gitignored build mirror
+        std::fs::write(root.join("www/main.abc12345def0.js"), "var a=1").unwrap();
+        // capacitor bundle mirror NOT in .gitignore — caught by hash-chunk probe
+        let pub_dir = root.join("android/app/src/main/assets/public");
+        for h in ["1624.4e9cc6119b4878fe", "1102.7837812dd7ed4d51", "2075.f756d5b13b56050a"] {
+            std::fs::write(pub_dir.join(format!("{h}.js")), "var b=2").unwrap();
+        }
+
+        let (files, regions, _md) = walk_source_files(&root);
+
+        // Only the authored source file is queued for parsing.
+        assert_eq!(files.len(), 1, "files: {files:?}");
+        assert!(files[0].0.ends_with("a.ts"));
+
+        let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
+        assert!(region_paths.contains(&"node_modules"), "{region_paths:?}");
+        assert!(region_paths.contains(&"www"), "{region_paths:?}");
+        assert!(
+            region_paths.contains(&"android/app/src/main/assets/public"),
+            "hash-chunk bundle mirror should collapse: {region_paths:?}"
+        );
+        // node_modules is vendored; the bundle mirrors are build_output.
+        let nm = regions.iter().find(|r| r.rel_path == "node_modules").unwrap();
+        assert_eq!(nm.provenance, "vendored");
+        let pub_region = regions
+            .iter()
+            .find(|r| r.rel_path.ends_with("assets/public"))
+            .unwrap();
+        assert_eq!(pub_region.provenance, "build_output");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

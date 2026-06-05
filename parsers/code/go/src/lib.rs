@@ -124,6 +124,20 @@ pub fn parse_file(
                 );
             }
             "type_declaration" => { /* already collected in first pass */ }
+            // glia v5 G19 — package-level state variables: `var X = …`,
+            // `var X T = …`, `const X = …`, including grouped blocks. Only
+            // top-level declarations (parent == source_file) reach here.
+            "var_declaration" | "const_declaration" => {
+                collect_state_vars(
+                    child,
+                    src,
+                    file_rel_path,
+                    package_qname,
+                    module_id,
+                    repo,
+                    &mut acc,
+                );
+            }
             _ => {}
         }
     }
@@ -211,6 +225,142 @@ fn collect_types(
         });
         type_ids.insert(name, id);
     }
+}
+
+// ============================================================================
+// State variables (glia v5 G19)
+// ============================================================================
+//
+// Package-level `var`/`const` declarations. tree-sitter-go wraps each in a
+// `var_declaration` / `const_declaration` containing one or more `var_spec` /
+// `const_spec` children (grouped `var ( … )` blocks yield several specs). Each
+// spec may declare multiple names (`var a, b = 1, 2`); we emit one STATE_VAR
+// per name. Qname is `<module>::<Name>`. The module DEFINES each var.
+//
+// Noise gate: a spec with no leading doc whose initialiser is a single literal
+// primitive (number / string / bool / nil / iota) is skipped — those add bulk
+// without conveying structure. Documented vars and non-trivial initialisers
+// (calls, composites, multiple names) are kept.
+
+#[allow(clippy::too_many_arguments)]
+fn collect_state_vars(
+    decl: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    package_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut cursor = decl.walk();
+    for child in decl.named_children(&mut cursor) {
+        match child.kind() {
+            "var_spec" | "const_spec" => {
+                emit_state_var_spec(child, src, file_rel, package_qname, module_id, repo, acc);
+            }
+            // Grouped `var ( … )` blocks wrap their specs in a var_spec_list.
+            // (Grouped `const ( … )` puts const_spec directly under the decl.)
+            "var_spec_list" => {
+                let mut sc = child.walk();
+                for spec in child.named_children(&mut sc) {
+                    if spec.kind() == "var_spec" {
+                        emit_state_var_spec(
+                            spec, src, file_rel, package_qname, module_id, repo, acc,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_state_var_spec(
+    spec: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    package_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    // Names: the `name` field is multiple (`var a, b = …`). They precede the
+    // optional type and the value, so collect leading identifier children and
+    // stop at the first non-identifier (the type or `=` value).
+    let mut names: Vec<String> = Vec::new();
+    let mut nc = spec.walk();
+    for child in spec.named_children(&mut nc) {
+        if child.kind() == "identifier" {
+            names.push(text_of(child, src).to_string());
+        } else {
+            break;
+        }
+    }
+    if names.is_empty() {
+        return;
+    }
+
+    if state_var_is_noise(spec, src) {
+        return;
+    }
+
+    for name in names {
+        let qname = format!("{package_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(spec, src, file_rel),
+        });
+        acc.nav
+            .record(id, &name, &qname, node_kind::STATE_VAR, Some(module_id));
+        acc.edges.push(Edge {
+            from: module_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+    }
+}
+
+/// Noise gate: keep documented specs and non-trivial initialisers; skip a spec
+/// whose only value is a single literal primitive and which carries no doc.
+fn state_var_is_noise(spec: TsNode, src: &[u8]) -> bool {
+    if repo_graph_doc::leading_doc(&spec, src).is_some() {
+        return false;
+    }
+    // Values live under the `value` field — an `expression_list`. A trivial
+    // spec has exactly one literal-primitive value (or none, e.g. iota const).
+    let Some(values) = spec.child_by_field_name("value") else {
+        // No initialiser (`var x int`, or a const carrying only iota) — trivial.
+        return true;
+    };
+    let mut vc = values.walk();
+    let value_nodes: Vec<TsNode> = values.named_children(&mut vc).collect();
+    if value_nodes.len() != 1 {
+        // Multiple initialisers or composite — non-trivial, keep.
+        return false;
+    }
+    is_literal_primitive(value_nodes[0])
+}
+
+/// True for a single literal primitive: number, string, bool, nil, iota.
+fn is_literal_primitive(node: TsNode) -> bool {
+    matches!(
+        node.kind(),
+        "int_literal"
+            | "float_literal"
+            | "imaginary_literal"
+            | "rune_literal"
+            | "interpreted_string_literal"
+            | "raw_string_literal"
+            | "true"
+            | "false"
+            | "nil"
+            | "iota"
+    )
 }
 
 // ============================================================================
@@ -958,27 +1108,26 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
 }
 
 fn entity_cells(node: TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
-    vec![
+    let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
             payload: CellPayload::Text(text_of(node, src).to_string()),
         },
         position_cell(node, file_rel),
-    ]
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(&node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 fn position_cell(node: TsNode, file_rel: &str) -> Cell {
-    let start = node.start_position();
-    let end = node.end_position();
-    let json = format!(
-        r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
-        file_rel.replace('\\', "\\\\").replace('"', "\\\""),
-        start.row + 1,
-        end.row + 1
-    );
     Cell {
         kind: cell_type::POSITION,
-        payload: CellPayload::Json(json),
+        payload: CellPayload::Json(repo_graph_doc::position_json(&node, file_rel)),
     }
 }
 
@@ -1157,6 +1306,44 @@ func Login(ctx context.Context) error {
                 && matches!(&c.qualifier, CallQualifier::Attribute { base, name }
                     if base == "helpers" && name == "HashPassword")
         }));
+    }
+
+    // ========================================================================
+    // State variables (glia v5 G19)
+    // ========================================================================
+
+    const STATE_VARS: &str = r#"package config
+
+// MaxRetries is the cap on connection attempts before giving up.
+const MaxRetries = 3
+
+const internalSeed = 42
+
+var Registry = newRegistry()
+"#;
+
+    #[test]
+    fn documented_const_emits_state_var_but_bare_literal_does_not() {
+        let parse =
+            parse_file(STATE_VARS, "config/config.go", "config", "", repo()).unwrap();
+
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "config");
+
+        // Documented literal const → kept.
+        let max_retries =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "config::MaxRetries");
+        assert!(parse.nodes.iter().any(|n| n.id == max_retries));
+        assert!(has_edge(&parse, module_id, max_retries, edge_category::DEFINES));
+
+        // Undocumented bare-literal const → noise-gated out.
+        let internal_seed =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "config::internalSeed");
+        assert!(!parse.nodes.iter().any(|n| n.id == internal_seed));
+
+        // Undocumented var with a call initialiser → non-trivial, kept.
+        let registry =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "config::Registry");
+        assert!(parse.nodes.iter().any(|n| n.id == registry));
     }
 
     #[test]

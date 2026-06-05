@@ -1,0 +1,2 @@
+{"instance_id": "marshmallow-code__marshmallow-1359", "model": "7b-q4", "wall_s": 248.2, "aplus_cells": 84, "apply": "applied", "f2p": "PASS", "reg": 76, "reg_fail": 0, "f2p_pass": 1, "f2p_fail": 0, "f2p_missing_n": 0, "phase": "phase1", "wall_s_outer": 253}
+{"instance_id": "django__django-10914", "model": "7b-q4", "wall_s": 339.9, "aplus_cells": 0, "apply": "applied", "f2p": "FAIL (0/1 pass, 1 fail, 0 missing)", "reg": 95, "reg_fail": 1, "f2p_pass": 0, "f2p_fail": 1, "f2p_missing_n": 0, "phase": "phase1", "wall_s_outer": 532}
