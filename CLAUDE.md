@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code when working in the Rust workspace. After v0.4.12 this directory will be split into its own `glia` repo via `git filter-repo`; these docs travel with it.
 
+**Companion docs:** `WORKFLOW.md` is the session rhythm (orient→work→record, knowledge routing across the four memory systems, ≥100-instance pre-flight, house style) — **run `/orient` at the start of every session**. `CODE_RULES.md` is the operational code conventions. This file is architecture.
+
 ## What This Is
 
 **glia** is the Rust engine behind repo-graph. It parses source, builds a unified cross-language graph, stores it in a zero-copy `.gmap` file (rkyv + mmap), runs Personalised PageRank activation over it, and projects it to dense text or structured forms.
