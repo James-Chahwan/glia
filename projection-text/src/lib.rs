@@ -560,7 +560,10 @@ fn kind_name(k: NodeKindId) -> &'static str {
         7 => "Interface",
         8 => "Struct",
         9 => "Endpoint",
-        _ => "Node",
+        // Was a flat "Node" for every id >9 — stale for components, services,
+        // data entities, regions, doc sections, state vars, etc. Fall back to
+        // the canonical code-domain name (WP-I) so new kinds never read "Node".
+        _ => node_kind::name(k),
     }
 }
 

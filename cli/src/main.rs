@@ -490,49 +490,9 @@ fn write_json_to(merged: &MergedGraph, out: &mut Vec<u8>) {
 // ----------------------------------------------------------------------------
 
 fn node_kind_name(k: NodeKindId) -> &'static str {
-    match k {
-        x if x == node_kind::MODULE => "MODULE",
-        x if x == node_kind::CLASS => "CLASS",
-        x if x == node_kind::FUNCTION => "FUNCTION",
-        x if x == node_kind::METHOD => "METHOD",
-        x if x == node_kind::ROUTE => "ROUTE",
-        x if x == node_kind::PACKAGE => "PACKAGE",
-        x if x == node_kind::INTERFACE => "INTERFACE",
-        x if x == node_kind::STRUCT => "STRUCT",
-        x if x == node_kind::ENDPOINT => "ENDPOINT",
-        x if x == node_kind::ENUM => "ENUM",
-        x if x == node_kind::GRPC_SERVICE => "GRPC_SERVICE",
-        x if x == node_kind::GRPC_CLIENT => "GRPC_CLIENT",
-        x if x == node_kind::QUEUE_CONSUMER => "QUEUE_CONSUMER",
-        x if x == node_kind::QUEUE_PRODUCER => "QUEUE_PRODUCER",
-        x if x == node_kind::GRAPHQL_RESOLVER => "GRAPHQL_RESOLVER",
-        x if x == node_kind::GRAPHQL_OPERATION => "GRAPHQL_OPERATION",
-        x if x == node_kind::WS_HANDLER => "WS_HANDLER",
-        x if x == node_kind::WS_CLIENT => "WS_CLIENT",
-        x if x == node_kind::EVENT_HANDLER => "EVENT_HANDLER",
-        x if x == node_kind::EVENT_EMITTER => "EVENT_EMITTER",
-        x if x == node_kind::CLI_COMMAND => "CLI_COMMAND",
-        x if x == node_kind::CLI_INVOCATION => "CLI_INVOCATION",
-        x if x == node_kind::DATABASE => "DATABASE",
-        x if x == node_kind::CACHE => "CACHE",
-        x if x == node_kind::BLOB_STORE => "BLOB_STORE",
-        x if x == node_kind::SEARCH_INDEX => "SEARCH_INDEX",
-        x if x == node_kind::EMAIL_SERVICE => "EMAIL_SERVICE",
-        x if x == node_kind::COMPONENT => "COMPONENT",
-        x if x == node_kind::HOOK => "HOOK",
-        x if x == node_kind::SERVICE => "SERVICE",
-        x if x == node_kind::DIRECTIVE => "DIRECTIVE",
-        x if x == node_kind::PIPE => "PIPE",
-        x if x == node_kind::GUARD => "GUARD",
-        x if x == node_kind::COMPOSABLE => "COMPOSABLE",
-        x if x == node_kind::ATTRIBUTE => "ATTRIBUTE",
-        x if x == node_kind::DATA_ENTITY => "DATA_ENTITY",
-        x if x == node_kind::CRON_JOB => "CRON_JOB",
-        x if x == node_kind::CONFIG_KEY => "CONFIG_KEY",
-        x if x == node_kind::INFRA_RESOURCE => "INFRA_RESOURCE",
-        x if x == node_kind::PACKAGE_DEP => "PACKAGE_DEP",
-        _ => "UNKNOWN",
-    }
+    // Delegate to the canonical code-domain table (WP-I) — no local copy to go
+    // stale when a kind is added.
+    node_kind::name(k)
 }
 
 // ----------------------------------------------------------------------------
@@ -731,38 +691,6 @@ fn resolve_gitdir_file(git_file: &Path) -> Option<std::path::PathBuf> {
 // ----------------------------------------------------------------------------
 
 fn edge_category_name(c: repo_graph_core::EdgeCategoryId) -> &'static str {
-    match c {
-        x if x == edge_category::DEFINES => "DEFINES",
-        x if x == edge_category::CONTAINS => "CONTAINS",
-        x if x == edge_category::IMPORTS => "IMPORTS",
-        x if x == edge_category::CALLS => "CALLS",
-        x if x == edge_category::USES => "USES",
-        x if x == edge_category::DOCUMENTS => "DOCUMENTS",
-        x if x == edge_category::TESTS => "TESTS",
-        x if x == edge_category::INJECTS => "INJECTS",
-        x if x == edge_category::HANDLED_BY => "HANDLED_BY",
-        x if x == edge_category::HTTP_CALLS => "HTTP_CALLS",
-        x if x == edge_category::GRPC_CALLS => "GRPC_CALLS",
-        x if x == edge_category::QUEUE_FLOWS => "QUEUE_FLOWS",
-        x if x == edge_category::GRAPHQL_CALLS => "GRAPHQL_CALLS",
-        x if x == edge_category::WS_CONNECTS => "WS_CONNECTS",
-        x if x == edge_category::EVENT_FLOWS => "EVENT_FLOWS",
-        x if x == edge_category::SHARES_SCHEMA => "SHARES_SCHEMA",
-        x if x == edge_category::CLI_INVOKES => "CLI_INVOKES",
-        x if x == edge_category::ACCESSES_DATA => "ACCESSES_DATA",
-        x if x == edge_category::HAS_ATTRIBUTE => "HAS_ATTRIBUTE",
-        x if x == edge_category::INHERITS_FROM => "INHERITS_FROM",
-        x if x == edge_category::RETURNS_TYPE => "RETURNS_TYPE",
-        x if x == edge_category::SHARES_DATA_ENTITY => "SHARES_DATA_ENTITY",
-        x if x == edge_category::SCHEDULES => "SCHEDULES",
-        x if x == edge_category::SHARES_CRON_SCHEDULE => "SHARES_CRON_SCHEDULE",
-        x if x == edge_category::READS_CONFIG => "READS_CONFIG",
-        x if x == edge_category::DEFINES_CONFIG => "DEFINES_CONFIG",
-        x if x == edge_category::SHARES_CONFIG => "SHARES_CONFIG",
-        x if x == edge_category::INFRA_REFERENCES => "INFRA_REFERENCES",
-        x if x == edge_category::SHARES_INFRA_REF => "SHARES_INFRA_REF",
-        x if x == edge_category::DEPENDS_ON => "DEPENDS_ON",
-        x if x == edge_category::SHARES_DEPENDENCY => "SHARES_DEPENDENCY",
-        _ => "UNKNOWN",
-    }
+    // Delegate to the canonical code-domain table (WP-I).
+    edge_category::name(c)
 }

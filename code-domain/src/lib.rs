@@ -123,6 +123,61 @@ pub mod node_kind {
     // `Content::Symbol` like a function; the distinct kind lets consumers rank
     // it differently if useful. (glia-v5 G19)
     pub const STATE_VAR: NodeKindId = NodeKindId(43);
+
+    /// Canonical id→name for every node kind. Single source of truth for decode
+    /// tables (pyo3 `kind_names`), the CLI, and projection-text's display
+    /// fallback — so no consumer reimplements a table that goes stale when a
+    /// kind is added. Keep in lockstep with the constants above.
+    pub const ALL: &[(NodeKindId, &str)] = &[
+        (MODULE, "MODULE"),
+        (CLASS, "CLASS"),
+        (FUNCTION, "FUNCTION"),
+        (METHOD, "METHOD"),
+        (ROUTE, "ROUTE"),
+        (PACKAGE, "PACKAGE"),
+        (INTERFACE, "INTERFACE"),
+        (STRUCT, "STRUCT"),
+        (ENDPOINT, "ENDPOINT"),
+        (ENUM, "ENUM"),
+        (GRPC_SERVICE, "GRPC_SERVICE"),
+        (GRPC_CLIENT, "GRPC_CLIENT"),
+        (QUEUE_CONSUMER, "QUEUE_CONSUMER"),
+        (QUEUE_PRODUCER, "QUEUE_PRODUCER"),
+        (GRAPHQL_RESOLVER, "GRAPHQL_RESOLVER"),
+        (GRAPHQL_OPERATION, "GRAPHQL_OPERATION"),
+        (WS_HANDLER, "WS_HANDLER"),
+        (WS_CLIENT, "WS_CLIENT"),
+        (EVENT_HANDLER, "EVENT_HANDLER"),
+        (EVENT_EMITTER, "EVENT_EMITTER"),
+        (CLI_COMMAND, "CLI_COMMAND"),
+        (CLI_INVOCATION, "CLI_INVOCATION"),
+        (DATABASE, "DATABASE"),
+        (CACHE, "CACHE"),
+        (BLOB_STORE, "BLOB_STORE"),
+        (SEARCH_INDEX, "SEARCH_INDEX"),
+        (EMAIL_SERVICE, "EMAIL_SERVICE"),
+        (COMPONENT, "COMPONENT"),
+        (HOOK, "HOOK"),
+        (SERVICE, "SERVICE"),
+        (DIRECTIVE, "DIRECTIVE"),
+        (PIPE, "PIPE"),
+        (GUARD, "GUARD"),
+        (COMPOSABLE, "COMPOSABLE"),
+        (ATTRIBUTE, "ATTRIBUTE"),
+        (DATA_ENTITY, "DATA_ENTITY"),
+        (CRON_JOB, "CRON_JOB"),
+        (CONFIG_KEY, "CONFIG_KEY"),
+        (INFRA_RESOURCE, "INFRA_RESOURCE"),
+        (PACKAGE_DEP, "PACKAGE_DEP"),
+        (REGION, "REGION"),
+        (DOC_SECTION, "DOC_SECTION"),
+        (STATE_VAR, "STATE_VAR"),
+    ];
+
+    /// Name for a node-kind id, or `"UNKNOWN"` if unregistered.
+    pub fn name(k: NodeKindId) -> &'static str {
+        ALL.iter().find(|(id, _)| *id == k).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+    }
 }
 
 // ============================================================================
@@ -218,6 +273,49 @@ pub mod edge_category {
     /// (class extends class): TS/Java/C#/Dart `implements`, Rust `impl Trait for`,
     /// Solidity `is <Interface>`. Maps to `EdgeKind::Implements`. (glia-v5 G12.5)
     pub const IMPLEMENTS: EdgeCategoryId = EdgeCategoryId(32);
+
+    /// Canonical id→name for every edge category. Single source of truth for
+    /// decode tables (pyo3 `category_names`) and the CLI. Keep in lockstep with
+    /// the constants above.
+    pub const ALL: &[(EdgeCategoryId, &str)] = &[
+        (DEFINES, "DEFINES"),
+        (CONTAINS, "CONTAINS"),
+        (IMPORTS, "IMPORTS"),
+        (CALLS, "CALLS"),
+        (USES, "USES"),
+        (DOCUMENTS, "DOCUMENTS"),
+        (TESTS, "TESTS"),
+        (INJECTS, "INJECTS"),
+        (HANDLED_BY, "HANDLED_BY"),
+        (HTTP_CALLS, "HTTP_CALLS"),
+        (GRPC_CALLS, "GRPC_CALLS"),
+        (QUEUE_FLOWS, "QUEUE_FLOWS"),
+        (GRAPHQL_CALLS, "GRAPHQL_CALLS"),
+        (WS_CONNECTS, "WS_CONNECTS"),
+        (EVENT_FLOWS, "EVENT_FLOWS"),
+        (SHARES_SCHEMA, "SHARES_SCHEMA"),
+        (CLI_INVOKES, "CLI_INVOKES"),
+        (ACCESSES_DATA, "ACCESSES_DATA"),
+        (HAS_ATTRIBUTE, "HAS_ATTRIBUTE"),
+        (INHERITS_FROM, "INHERITS_FROM"),
+        (RETURNS_TYPE, "RETURNS_TYPE"),
+        (SHARES_DATA_ENTITY, "SHARES_DATA_ENTITY"),
+        (SCHEDULES, "SCHEDULES"),
+        (SHARES_CRON_SCHEDULE, "SHARES_CRON_SCHEDULE"),
+        (READS_CONFIG, "READS_CONFIG"),
+        (DEFINES_CONFIG, "DEFINES_CONFIG"),
+        (SHARES_CONFIG, "SHARES_CONFIG"),
+        (INFRA_REFERENCES, "INFRA_REFERENCES"),
+        (SHARES_INFRA_REF, "SHARES_INFRA_REF"),
+        (DEPENDS_ON, "DEPENDS_ON"),
+        (SHARES_DEPENDENCY, "SHARES_DEPENDENCY"),
+        (IMPLEMENTS, "IMPLEMENTS"),
+    ];
+
+    /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
+    pub fn name(c: EdgeCategoryId) -> &'static str {
+        ALL.iter().find(|(id, _)| *id == c).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+    }
 }
 
 // ============================================================================
@@ -251,6 +349,33 @@ pub mod cell_type {
     /// the engram exporter can fill `Content::Symbol.imports` without a parent
     /// lookup; gives the encoder library context. (glia-v5 G15)
     pub const IMPORTS: CellTypeId = CellTypeId(16);
+
+    /// Canonical id→name for every cell type. Backs the pyo3 `cell_type_names`
+    /// decode table so consumers that read structured cells (WP-J) can label
+    /// them without a local table. Keep in lockstep with the constants above.
+    pub const ALL: &[(CellTypeId, &str)] = &[
+        (CODE, "CODE"),
+        (DOC, "DOC"),
+        (POSITION, "POSITION"),
+        (INTENT, "INTENT"),
+        (ROUTE_METHOD, "ROUTE_METHOD"),
+        (ENDPOINT_HIT, "ENDPOINT_HIT"),
+        (TEST, "TEST"),
+        (ATTN, "ATTN"),
+        (FAIL, "FAIL"),
+        (CONSTRAINT, "CONSTRAINT"),
+        (DECISION, "DECISION"),
+        (ENV, "ENV"),
+        (CONV, "CONV"),
+        (VECTOR, "VECTOR"),
+        (ORIGIN, "ORIGIN"),
+        (IMPORTS, "IMPORTS"),
+    ];
+
+    /// Name for a cell-type id, or `"UNKNOWN"` if unregistered.
+    pub fn name(c: CellTypeId) -> &'static str {
+        ALL.iter().find(|(id, _)| *id == c).map(|(_, n)| *n).unwrap_or("UNKNOWN")
+    }
 }
 
 // ============================================================================
@@ -532,5 +657,36 @@ impl CodeNav {
             self.parent_of.insert(id, p);
             self.children_of.entry(p).or_default().push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_kind_names_resolve_and_cover() {
+        // Every ALL entry resolves to its own name via name().
+        for (id, n) in node_kind::ALL {
+            assert_eq!(node_kind::name(*id), *n);
+        }
+        // Spot-check the ids that the old hardcoded tables missed (41/42/43).
+        assert_eq!(node_kind::name(node_kind::REGION), "REGION");
+        assert_eq!(node_kind::name(node_kind::DOC_SECTION), "DOC_SECTION");
+        assert_eq!(node_kind::name(node_kind::STATE_VAR), "STATE_VAR");
+        // Unregistered id falls back, never panics.
+        assert_eq!(node_kind::name(NodeKindId(9999)), "UNKNOWN");
+    }
+
+    #[test]
+    fn edge_and_cell_names_resolve() {
+        for (id, n) in edge_category::ALL {
+            assert_eq!(edge_category::name(*id), *n);
+        }
+        assert_eq!(edge_category::name(edge_category::IMPLEMENTS), "IMPLEMENTS");
+        for (id, n) in cell_type::ALL {
+            assert_eq!(cell_type::name(*id), *n);
+        }
+        assert_eq!(cell_type::name(cell_type::POSITION), "POSITION");
     }
 }

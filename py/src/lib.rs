@@ -9,7 +9,7 @@ use std::path::Path;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_code_domain::node_kind;
+use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{Confidence, NodeId, RepoId};
 use repo_graph_engine::{generate_many as engine_generate_many, generate_one, parse_one};
 use repo_graph_graph::MergedGraph;
@@ -306,6 +306,28 @@ fn is_stale(gmap_dir: &str, repo_path: &str) -> bool {
     is_gmap_stale(Path::new(gmap_dir), Path::new(repo_path))
 }
 
+/// Canonical node-kind `id → name` table (WP-I / #3). Lets the wrapper decode
+/// `nodes_json` kinds without a hardcoded Python table that goes stale when a
+/// kind is added. Returns `[(id, name)]`.
+#[pyfunction]
+fn kind_names() -> Vec<(u32, String)> {
+    node_kind::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+}
+
+/// Canonical edge-category `id → name` table (WP-I / #3). Pairs with
+/// `edges_json` category ids.
+#[pyfunction]
+fn category_names() -> Vec<(u32, String)> {
+    edge_category::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+}
+
+/// Canonical cell-type `id → name` table — labels the structured cells exposed
+/// by `node_cells` (WP-J).
+#[pyfunction]
+fn cell_type_names() -> Vec<(u32, String)> {
+    cell_type::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
+}
+
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -323,6 +345,9 @@ fn repo_graph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_from_gmap, m)?)?;
     m.add_function(wrap_pyfunction!(default_gmap_dir, m)?)?;
     m.add_function(wrap_pyfunction!(is_stale, m)?)?;
+    m.add_function(wrap_pyfunction!(kind_names, m)?)?;
+    m.add_function(wrap_pyfunction!(category_names, m)?)?;
+    m.add_function(wrap_pyfunction!(cell_type_names, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<PyGraph>()?;
     Ok(())
