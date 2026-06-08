@@ -124,6 +124,48 @@ node. Cross-benefit (Engram emission + neuropil + any client). Bundle with WP-I.
    `category→weight` table for the active profile rather than per-edge. Recommend: keep internal.
 3. **`read` truncation:** wrapper caps the span; no engine change. dense_text already truncates. ✓
 
+## Build status — v0.4.15 cut (2026-06-09)
+
+Branch `feat/v0.4.15-cut`, **not pushed/tagged** (release gate = James). 10 of 11
+WPs shipped, each its own commit + tests; full workspace suite green except the
+**pre-existing** `py_smoke_fixture::every_code_entity_has_code_and_position_cells`
+(fails identically on base `eedcd65` — confirmed, not caused by this cut).
+
+Done: WP-0 resolver fix · WP-A spans · WP-I decode tables · WP-J cells ·
+WP-G Go import leak (note: needed both prefix threading AND a domain-aware
+`library_name` — prefix alone wasn't enough) · WP-F activate profiles ·
+WP-C subset/prose · WP-B resolve_signal+sniffer · WP-H DOCUMENTS edges ·
+WP-WHEEL 0.4.15 bump.
+
+### WP-D incremental indexing — PARKED, needs a direction call
+
+Not a code-stuck park — it's a multi-hour, format-touching feature whose shape is
+a release-gate decision. What I found in the store:
+- Manifest already has `schema_version` + per-**shard** `content_hash` (**xxhash64**,
+  not blake3) and a write-side skip-unchanged-shards step. But shards are by
+  **kind, not file** — there is no per-file artifact to reuse, so the read/build
+  path re-parses everything.
+- GR-4's acceptance ("touch 1 file → re-parse ~1 file, byte-identical to clean
+  rebuild") needs (a) a new persisted **per-file** parse cache, and (b) resolver
+  re-run regardless (cross-graph resolvers are global) — the
+  resolver-invalidation registry the incremental plan calls "the bulk of the work."
+
+**Decisions needed before I build it:**
+1. **Hash:** use the existing `xxhash64` (no new dep, consistent with shards) or
+   add `blake3` per GR-4's literal text? (Recommend xxhash64.)
+2. **Architecture:** persist a per-file `FileParse` cache under
+   `.ai/repo-graph/parses/` keyed by content hash (reuse unchanged files, re-merge
+   + re-run resolvers) — vs an in-memory-only `generate_incremental(prev, changed)`
+   (what neuropil wants, but reconstructing per-file contributions from a merged
+   graph is lossy). (Recommend the persisted per-file cache; it also backs Engram's
+   `export-engram --since`.)
+3. **Scope now:** parse-only speedup (skip re-parsing unchanged files; resolvers
+   still global) is the safe, high-value first slice. Full resolver-invalidation
+   (skip resolvers when no cross-cutting node changed) is a follow-up. OK to ship
+   the parse-only slice first and keep "byte-identical" as the test?
+4. **Manifest bump:** adding per-file hashes bumps `MANIFEST_VERSION`; old caches
+   rebuild once (graceful). OK?
+
 ## Cross-cutting caveat (unchanged)
 None of this reaches the live MCP until repo-graph deletes its stale vendored `rust/` fork
 (`git rm -r rust/`, zero glia LOC, repo-graph session's job). The wheel is necessary but not
