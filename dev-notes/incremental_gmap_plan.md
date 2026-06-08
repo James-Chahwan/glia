@@ -105,6 +105,13 @@ they cache at the same boundary.)
 
 ## 4. Change detection (the "indexing")
 
+> **v1 (shipped 0.4.16) simplification:** the walk already reads every file into
+> memory, so v1 **hashes the in-memory source (xxhash64)** and keys the cache on
+> that — no `stat`/mtime step, no `FileEntry.mtime_ns`/`size`. The mtime
+> fast-path below (skipping the *read* of unchanged files) only saves cheap file
+> I/O, not the expensive parse, so it's deferred to v2. GR-4's "re-parse ~1 file"
+> bar is met by content-hash alone. The rest of this section is the v2 target.
+
 Per candidate file, cheapest-first:
 
 1. **`stat` → (mtime_ns, size).** If both match the `FileEntry` → **unchanged**: reuse
