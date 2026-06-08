@@ -137,7 +137,17 @@ WP-G Go import leak (note: needed both prefix threading AND a domain-aware
 WP-C subset/prose · WP-B resolve_signal+sniffer · WP-H DOCUMENTS edges ·
 WP-WHEEL 0.4.15 bump.
 
-### WP-D incremental indexing — PARKED, needs a direction call
+### WP-D incremental indexing — DESIGN FINALIZED (see `incremental_gmap_plan.md`)
+
+2026-06-09: full design written. Architecture: **cache `FileParse` per file (keyed by
+xxhash64), rebuild the graph from cached+fresh parses** — byte-identical by construction,
+zero resolver changes (supersedes the old in-place-patch Phase 2). Decisions resolved:
+xxhash64 (not blake3), bincode sidecar `parse_cache.bin` (single file, inode-safe),
+`CARGO_PKG_VERSION` invalidation stamp (folds in #10), parse-only-speedup v1 with a
+byte-identical test as the gate. ~230–340 LOC across 2a (core) + 2b (disk/pyo3/CLI);
+Engram `--since` is follow-on 2c; Phase 3 LiveGraph stays cut. Ready to implement on go.
+
+#### (historical) original open questions
 
 Not a code-stuck park — it's a multi-hour, format-touching feature whose shape is
 a release-gate decision. What I found in the store:
