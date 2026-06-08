@@ -269,9 +269,19 @@ fn escape_json(s: &str) -> String {
 // Module functions
 // ============================================================================
 
+/// Build the graph for a repo. `incremental` (default True, WP-D) reuses a
+/// per-file parse cache at `<repo>/.ai/repo-graph/parse_cache.bin` so unchanged
+/// files skip tree-sitter; the result is identical to a clean build. Pass
+/// `incremental=False` to force a full reparse.
 #[pyfunction]
-fn generate(repo_path: &str) -> PyResult<PyGraph> {
-    let result = generate_one(repo_path).map_err(PyValueError::new_err)?;
+#[pyo3(signature = (repo_path, incremental=true))]
+fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
+    let result = if incremental {
+        repo_graph_engine::generate_one_incremental(repo_path)
+    } else {
+        generate_one(repo_path)
+    }
+    .map_err(PyValueError::new_err)?;
     if !result.parse_errors.is_empty()
         && result.merged.graphs.iter().all(|g| g.nodes.is_empty())
     {

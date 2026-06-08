@@ -24,6 +24,9 @@ use repo_graph_graph::{
 
 pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
 
+pub mod cache;
+pub use cache::{CacheStats, ParseCache};
+
 pub struct GenerateResult {
     pub merged: MergedGraph,
     pub total_nodes: usize,
@@ -35,6 +38,36 @@ pub struct GenerateResult {
 /// derived from `file://<path>`; cross-graph resolvers run but only emit
 /// edges within this single repo (rare in practice).
 pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
+    generate_one_inner(repo_path, None)
+}
+
+/// Incremental build using an in-memory [`ParseCache`] (WP-D): unchanged files
+/// skip tree-sitter. Hold one `cache` across edits (e.g. neuropil's hot-reload).
+/// The result is byte-identical to [`generate_one`] — only the parse step is
+/// elided; the graph is rebuilt and resolvers re-run in full.
+pub fn generate_one_with_cache(
+    repo_path: &str,
+    cache: &mut ParseCache,
+) -> Result<GenerateResult, String> {
+    generate_one_inner(repo_path, Some(cache))
+}
+
+/// Disk-backed incremental build: load the parse cache from
+/// `<repo>/.ai/repo-graph/parse_cache.bin`, build, then persist it. Cache save
+/// failures are logged, not fatal. Backs pyo3 `generate(incremental=True)`.
+pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, String> {
+    let mut cache = ParseCache::load(repo_path);
+    let result = generate_one_inner(repo_path, Some(&mut cache))?;
+    if let Err(e) = cache.save(repo_path) {
+        eprintln!("[incremental] warning: failed to save parse cache: {e}");
+    }
+    Ok(result)
+}
+
+fn generate_one_inner(
+    repo_path: &str,
+    cache: Option<&mut ParseCache>,
+) -> Result<GenerateResult, String> {
     let root = PathBuf::from(repo_path);
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
@@ -42,7 +75,7 @@ pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
     let repo = RepoId::from_canonical(&format!("file://{repo_path}"));
     let (files, regions, md) = walk_source_files(&root);
     let go_prefix = read_go_module_prefix(&root);
-    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix);
+    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, cache);
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
     }
@@ -79,7 +112,7 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
         let repo = RepoId::from_canonical(&format!("file://{path}"));
         let (files, regions, md) = walk_source_files(&root);
         let go_prefix = read_go_module_prefix(&root);
-        let (graphs, parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix);
+        let (graphs, parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, None);
         all_graphs.extend(graphs);
         if !regions.is_empty() {
             all_graphs.push(build_region_graph(&regions, repo));
@@ -132,10 +165,16 @@ fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
     go_module_prefix: &str,
+    mut cache: Option<&mut ParseCache>,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut proto_parses = Vec::new();
     let mut parse_errors = Vec::new();
+    // WP-D incremental: track which main-parser files we saw so deleted files
+    // get evicted; count reuse vs reparse for the marker.
+    let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reused = 0usize;
+    let mut reparsed = 0usize;
 
     // Suppress the default panic-print-to-stderr while we run per-file parsers
     // — we catch panics below and report them as parse_errors. The default
@@ -283,6 +322,20 @@ fn build_graphs_for_repo(
             continue;
         }
 
+        // WP-D incremental: reuse the cached parse if the source is unchanged;
+        // only changed / new files pay tree-sitter.
+        let hash = cache.is_some().then(|| cache::content_hash(source));
+        let cached_fp = match hash {
+            Some(h) => cache.as_deref().and_then(|c| c.get(path, h, lang)),
+            None => None,
+        };
+        if let Some(fp) = cached_fp {
+            reused += 1;
+            live_paths.insert(path.clone());
+            parses_by_lang.entry(lang).or_default().push(fp);
+            continue;
+        }
+
         // Per-file panic isolation. Parsers occasionally hit slice/regex bugs
         // on adversarial inputs (e.g. parsers/code/rust/src/lib.rs:511 slice
         // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
@@ -303,6 +356,11 @@ fn build_graphs_for_repo(
         }));
         match parse_result {
             Ok(Ok(fp)) => {
+                reparsed += 1;
+                if let (Some(c), Some(h)) = (cache.as_deref_mut(), hash) {
+                    c.put(path.clone(), h, lang, fp.clone());
+                }
+                live_paths.insert(path.clone());
                 parses_by_lang.entry(lang).or_default().push(fp);
             }
             Ok(Err(e)) => {
@@ -315,6 +373,18 @@ fn build_graphs_for_repo(
                 ));
             }
         }
+    }
+
+    // WP-D: evict cached parses for files gone this build, and emit the
+    // greppable marker so a cycle can confirm the cache engaged.
+    if let Some(c) = cache.as_deref_mut() {
+        c.retain_paths(&live_paths);
+        c.stats.reused = reused;
+        c.stats.reparsed = reparsed;
+        eprintln!(
+            "[incremental] reused {reused}, reparsed {reparsed}, evicted {} (parse cache)",
+            c.stats.evicted
+        );
     }
 
     let mut graphs = Vec::new();
@@ -1507,6 +1577,93 @@ fn strip_test_affixes(name: &str) -> &str {
 #[cfg(test)]
 mod walk_tests {
     use super::*;
+
+    fn unique_tmp(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("glia_wpd_{}_{}_{}", std::process::id(), tag, n))
+    }
+
+    /// Sorted (node-ids, edges) — a deterministic fingerprint of a graph's
+    /// content, independent of build order.
+    fn fingerprint(g: &MergedGraph) -> (Vec<u64>, Vec<(u64, u64, u32)>) {
+        let mut nodes: Vec<u64> =
+            g.graphs.iter().flat_map(|r| r.nodes.iter().map(|n| n.id.0)).collect();
+        nodes.sort_unstable();
+        let mut edges: Vec<(u64, u64, u32)> =
+            g.all_edges().map(|e| (e.from.0, e.to.0, e.category.0)).collect();
+        edges.sort_unstable();
+        (nodes, edges)
+    }
+
+    #[test]
+    fn incremental_reuses_unchanged_and_matches_clean_build() {
+        let dir = unique_tmp("incr");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.py");
+        std::fs::write(&a, "def foo():\n    return 1\n").unwrap();
+        std::fs::write(dir.join("b.py"), "def bar():\n    return 2\n").unwrap();
+        let repo = dir.to_str().unwrap();
+
+        // Cold cache: both files parsed; graph identical to a clean build.
+        let clean = generate_one(repo).unwrap();
+        let mut cache = ParseCache::new();
+        let cold = generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(cache.stats.reparsed, 2);
+        assert_eq!(cache.stats.reused, 0);
+        assert_eq!(fingerprint(&clean.merged), fingerprint(&cold.merged));
+
+        // Edit one file → only that file reparses, the other is reused…
+        std::fs::write(&a, "def foo():\n    return 1 + 1\n").unwrap();
+        let warm = generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(cache.stats.reparsed, 1, "only the edited file reparsed");
+        assert_eq!(cache.stats.reused, 1, "the unchanged file reused");
+
+        // …and the incremental result equals a fresh clean build (byte-identical
+        // graph — the WP-D acceptance gate).
+        let clean2 = generate_one(repo).unwrap();
+        assert_eq!(fingerprint(&warm.merged), fingerprint(&clean2.merged));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn incremental_evicts_deleted_files() {
+        let dir = unique_tmp("evict");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "def foo():\n    return 1\n").unwrap();
+        let b = dir.join("b.py");
+        std::fs::write(&b, "def bar():\n    return 2\n").unwrap();
+        let repo = dir.to_str().unwrap();
+
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(cache.len(), 2);
+
+        std::fs::remove_file(&b).unwrap();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(cache.stats.evicted, 1, "deleted file evicted from cache");
+        assert_eq!(cache.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_cache_disk_roundtrip() {
+        let dir = unique_tmp("disk");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "def foo():\n    return 1\n").unwrap();
+        let repo = dir.to_str().unwrap();
+
+        // Missing cache loads empty.
+        assert!(ParseCache::load(repo).is_empty());
+        // Incremental build persists it; a fresh load sees the entry.
+        generate_one_incremental(repo).unwrap();
+        assert_eq!(ParseCache::load(repo).len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn backtick_identifiers_extract_inline_code(){

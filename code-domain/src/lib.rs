@@ -614,7 +614,11 @@ pub fn attach_imports_cell(fp: &mut FileParse, lang: &str) {
 
 /// The per-file output every code-language parser produces. `repo-graph-graph`
 /// consumes a `Vec<FileParse>` to build a `RepoGraph`.
-#[derive(Debug, Default)]
+///
+/// `Clone` + serde: the incremental build (WP-D) caches the per-file parse so an
+/// unchanged file skips tree-sitter on the next build. serde uses bincode (the
+/// cache is transient/regenerable — not the rkyv `.gmap` path).
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileParse {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -634,7 +638,10 @@ pub struct FileParse {
 
 /// Code-domain navigation indices — what the strict `Node` shape pushed out of
 /// per-node fields. Merged across files by v0.4.3 into one per-repo index.
-#[derive(Debug, Default, Clone)]
+///
+/// serde (bincode only — `NodeId` map keys aren't strings, so serde_json can't
+/// take it) so a `FileParse` round-trips through the WP-D parse cache.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CodeNav {
     /// Simple name (`"login"`), not the full qualified name.
     pub name_by_id: HashMap<NodeId, String>,

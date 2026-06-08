@@ -15,7 +15,7 @@ use std::path::Path;
 use clap::{Parser, Subcommand, ValueEnum};
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_many, generate_one};
+use repo_graph_engine::{GenerateResult, generate_many, generate_one, generate_one_incremental};
 use repo_graph_graph::MergedGraph;
 
 #[derive(Parser, Debug)]
@@ -69,6 +69,9 @@ enum Cmd {
         /// Output directory. Defaults to `<repo>/.glia`.
         #[arg(long)]
         out: Option<String>,
+        /// Force a full reparse, ignoring the incremental parse cache (WP-D).
+        #[arg(long)]
+        no_incremental: bool,
     },
     /// Install git hooks (`post-commit`, `post-merge`, `post-checkout`) into
     /// the target repo so its `.gmap` rebuilds automatically on each change.
@@ -119,7 +122,9 @@ fn main() {
             depth,
         } => cmd_impact(&repo, &qname, direction, depth),
         Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
-        Cmd::Build { repo, out } => cmd_build(&repo, out.as_deref()),
+        Cmd::Build { repo, out, no_incremental } => {
+            cmd_build(&repo, out.as_deref(), !no_incremental)
+        }
         Cmd::InstallHooks {
             repo,
             uninstall,
@@ -499,8 +504,13 @@ fn node_kind_name(k: NodeKindId) -> &'static str {
 // `build` — walk repo, write per-language `.gmap` files
 // ----------------------------------------------------------------------------
 
-fn cmd_build(repo: &str, out: Option<&str>) -> i32 {
-    let result = match generate_one(repo) {
+fn cmd_build(repo: &str, out: Option<&str>, incremental: bool) -> i32 {
+    let built = if incremental {
+        generate_one_incremental(repo)
+    } else {
+        generate_one(repo)
+    };
+    let result = match built {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");

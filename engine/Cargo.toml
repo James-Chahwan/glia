@@ -29,3 +29,8 @@ repo-graph-parser-terraform = { path = "../parsers/code/terraform" }
 repo-graph-parser-react = { path = "../parsers/code/react" }
 repo-graph-parser-angular = { path = "../parsers/code/angular" }
 repo-graph-parser-vue = { path = "../parsers/code/vue" }
+# WP-D incremental parse cache: hash sources (xxhash64, same primitive as the
+# store) + (de)serialize cached FileParses (bincode — transient sidecar).
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
