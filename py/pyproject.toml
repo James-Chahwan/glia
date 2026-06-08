@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "repo-graph-py"
-version = "0.4.14"
+version = "0.4.15"
 description = "Native Rust engine for mcp-repo-graph — parses, builds, and stores code graphs."
 readme = "README.md"
 license = { file = "LICENSE" }
