@@ -58,6 +58,53 @@ pub fn render_merged_full(m: &MergedGraph) -> String {
     render(&graphs, &m.cross_edges, true)
 }
 
+/// Human-readable prose projection (WP-C / GR-3): one short block per node —
+/// `KIND qname [file:start-end]` followed by up to 3 lines of its doc (or code
+/// preview). Pair with [`repo_graph_graph::MergedGraph::subset`] to render a
+/// ranked slice from `activate` as a primed prose anchor instead of the whole
+/// graph.
+pub fn render_prose(m: &MergedGraph) -> String {
+    let mut out = String::new();
+    for g in &m.graphs {
+        for n in &g.nodes {
+            let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+            let kind = g
+                .nav
+                .kind_by_id
+                .get(&n.id)
+                .map(|k| node_kind::name(*k))
+                .unwrap_or("NODE");
+            let loc = node_position(n)
+                .map(|p| format!(" [{}:{}-{}]", p.file, p.start_line + 1, p.end_line + 1))
+                .unwrap_or_default();
+            let _ = writeln!(out, "{kind} {qname}{loc}");
+            if let Some(text) = node_doc_or_code(n) {
+                for line in text.lines().take(3) {
+                    let _ = writeln!(out, "    {}", line.trim_end());
+                }
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Doc text for a node if it has one, else a preview of its code cell.
+fn node_doc_or_code(node: &repo_graph_core::Node) -> Option<&str> {
+    let mut code = None;
+    for c in &node.cells {
+        if let repo_graph_core::CellPayload::Text(s) = &c.payload {
+            if c.kind == cell_type::DOC {
+                return Some(s.as_str());
+            }
+            if c.kind == cell_type::CODE && code.is_none() {
+                code = Some(s.as_str());
+            }
+        }
+    }
+    code
+}
+
 fn render(graphs: &[&RepoGraph], cross_edges: &[Edge], full_bodies: bool) -> String {
     let scopes = build_scopes(graphs);
     let defaults = compute_defaults(graphs);

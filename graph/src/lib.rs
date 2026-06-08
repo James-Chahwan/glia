@@ -880,6 +880,76 @@ impl MergedGraph {
         out
     }
 
+    /// A new `MergedGraph` containing only `keep` nodes, the edges whose both
+    /// endpoints are kept, and matching nav entries — structural glue for scoped
+    /// projection (WP-C / GR-3: render the top-K from `activate`, not the whole
+    /// graph). `symbols` / unresolved / `properties` are dropped (rendering and
+    /// read paths don't need them). Cross-benefit: any consumer can scope a view.
+    pub fn subset(&self, keep: &[NodeId]) -> MergedGraph {
+        let keep: HashSet<NodeId> = keep.iter().copied().collect();
+        let graphs = self
+            .graphs
+            .iter()
+            .map(|g| {
+                let nodes: Vec<Node> =
+                    g.nodes.iter().filter(|n| keep.contains(&n.id)).cloned().collect();
+                let edges: Vec<Edge> = g
+                    .edges
+                    .iter()
+                    .filter(|e| keep.contains(&e.from) && keep.contains(&e.to))
+                    .cloned()
+                    .collect();
+                let mut nav = CodeNav::default();
+                for (id, v) in &g.nav.name_by_id {
+                    if keep.contains(id) {
+                        nav.name_by_id.insert(*id, v.clone());
+                    }
+                }
+                for (id, v) in &g.nav.qname_by_id {
+                    if keep.contains(id) {
+                        nav.qname_by_id.insert(*id, v.clone());
+                    }
+                }
+                for (id, v) in &g.nav.kind_by_id {
+                    if keep.contains(id) {
+                        nav.kind_by_id.insert(*id, *v);
+                    }
+                }
+                for (id, p) in &g.nav.parent_of {
+                    if keep.contains(id) && keep.contains(p) {
+                        nav.parent_of.insert(*id, *p);
+                    }
+                }
+                for (id, kids) in &g.nav.children_of {
+                    if keep.contains(id) {
+                        let kept: Vec<NodeId> =
+                            kids.iter().copied().filter(|k| keep.contains(k)).collect();
+                        if !kept.is_empty() {
+                            nav.children_of.insert(*id, kept);
+                        }
+                    }
+                }
+                RepoGraph {
+                    repo: g.repo,
+                    nodes,
+                    edges,
+                    nav,
+                    symbols: SymbolTable::default(),
+                    unresolved_calls: Vec::new(),
+                    unresolved_refs: Vec::new(),
+                    properties: HashSet::new(),
+                }
+            })
+            .collect();
+        let cross_edges = self
+            .cross_edges
+            .iter()
+            .filter(|e| keep.contains(&e.from) && keep.contains(&e.to))
+            .cloned()
+            .collect();
+        MergedGraph { graphs, cross_edges }
+    }
+
     /// G19 — resolve an OTLP-style dotted span name (`myservice.handlers.users.list_users`)
     /// to a `NodeId`. First tries an exact match against the qname (after
     /// converting `.` to `::`); then a suffix match so spans rooted at a
@@ -2275,6 +2345,26 @@ mod tests {
             unresolved_refs: vec![],
             properties: HashSet::new(),
         }
+    }
+
+    #[test]
+    fn subset_keeps_only_requested_nodes_and_internal_edges() {
+        // flow_graph: a->b->c, d->c (CALLS).
+        let m = MergedGraph::new(vec![flow_graph()]);
+        let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
+        let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::b");
+        let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
+
+        let sub = m.subset(&[a, b]);
+        let g = &sub.graphs[0];
+        let ids: HashSet<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids, HashSet::from([a, b]));
+        // a->b kept (both in subset); b->c dropped (c excluded).
+        assert_eq!(g.edges.len(), 1);
+        assert!(g.edges.iter().any(|e| e.from == a && e.to == b));
+        // nav filtered to the kept nodes.
+        assert!(g.nav.qname_by_id.contains_key(&a));
+        assert!(!g.nav.qname_by_id.contains_key(&c));
     }
 
     #[test]

@@ -49,6 +49,28 @@ impl PyGraph {
         repo_graph_projection_text::render_merged_full(&self.merged)
     }
 
+    /// Scoped dense sigil text for just `node_ids` (+ structural glue), not the
+    /// whole graph (WP-C / GR-3). `full` keeps untruncated cell bodies. Pass the
+    /// top-K from `activate` for a scoped view / `mode=prose` precursor.
+    #[pyo3(signature = (node_ids, full=false))]
+    fn dense_text_subset(&self, node_ids: Vec<u64>, full: bool) -> String {
+        let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
+        let sub = self.merged.subset(&ids);
+        if full {
+            repo_graph_projection_text::render_merged_full(&sub)
+        } else {
+            repo_graph_projection_text::render_merged(&sub)
+        }
+    }
+
+    /// Prose projection (WP-C / GR-3) of just `node_ids`: one readable block per
+    /// node (kind, qname, location, doc/code preview). Backs `mode=prose`.
+    fn prose(&self, node_ids: Vec<u64>) -> String {
+        let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
+        let sub = self.merged.subset(&ids);
+        repo_graph_projection_text::render_prose(&sub)
+    }
+
     fn nodes_json(&self) -> PyResult<String> {
         let mut out = String::from("[");
         let mut first = true;
