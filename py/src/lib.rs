@@ -66,13 +66,26 @@ impl PyGraph {
                     out.push(',');
                 }
                 first = false;
+                // GR-1: surface the node's source span from its POSITION cell.
+                // Stored rows are 0-based (tree-sitter); emit 1-based inclusive.
+                // Nodes without a span (synthetic / cross-stack) carry null.
+                let span = match repo_graph_projection_text::node_position(n) {
+                    Some(p) => format!(
+                        r#","path":"{}","start_line":{},"end_line":{}"#,
+                        escape_json(&p.file),
+                        p.start_line + 1,
+                        p.end_line + 1,
+                    ),
+                    None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
+                };
                 out.push_str(&format!(
-                    r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"}}"#,
+                    r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"{}}}"#,
                     n.id.0,
                     kind,
                     escape_json(name),
                     escape_json(qname),
                     conf,
+                    span,
                 ));
             }
         }

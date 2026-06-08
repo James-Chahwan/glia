@@ -485,6 +485,32 @@ fn compact_position(json: &str) -> String {
     }
 }
 
+/// A node's source location, parsed from its POSITION cell. `start_line` /
+/// `end_line` are 0-based tree-sitter rows exactly as stored — callers that
+/// want 1-based (e.g. the pyo3 `nodes_json` surface, GR-1) add 1.
+pub struct NodePosition {
+    pub file: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+/// Parse the POSITION cell off a node into a typed [`NodePosition`], or `None`
+/// for nodes with no source span (synthetic / cross-stack endpoints). Shared so
+/// every consumer reads spans the same way instead of re-scraping JSON.
+pub fn node_position(node: &repo_graph_core::Node) -> Option<NodePosition> {
+    let json = node.cells.iter().find_map(|c| match &c.payload {
+        repo_graph_core::CellPayload::Json(j) if c.kind == cell_type::POSITION => {
+            Some(j.as_str())
+        }
+        _ => None,
+    })?;
+    Some(NodePosition {
+        file: extract_json_str(json, "file")?.to_string(),
+        start_line: extract_json_num(json, "start_line")?,
+        end_line: extract_json_num(json, "end_line")?,
+    })
+}
+
 fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let marker = format!("\"{key}\":\"");
     let start = json.find(&marker)? + marker.len();
@@ -608,6 +634,31 @@ mod tests {
         g.nav
             .record(fn_id, "f", "m::a::f", node_kind::FUNCTION, Some(mod_id));
         g
+    }
+
+    #[test]
+    fn node_position_parses_position_cell() {
+        let repo = RepoId::from_canonical("test://pos");
+        let id = NodeId::from_parts("code", repo, node_kind::FUNCTION, "m::f");
+        let with_pos = Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(
+                    r#"{"file":"src/a.ts","start_line":41,"end_line":87}"#.into(),
+                ),
+            }],
+        };
+        let p = node_position(&with_pos).expect("position parsed");
+        assert_eq!(p.file, "src/a.ts");
+        assert_eq!(p.start_line, 41); // 0-based as stored; pyo3 emits +1 = 42
+        assert_eq!(p.end_line, 87);
+
+        // No POSITION cell → None (synthetic / cross-stack endpoints).
+        let no_pos = Node { id, repo, confidence: Confidence::Strong, cells: vec![] };
+        assert!(node_position(&no_pos).is_none());
     }
 
     #[test]
