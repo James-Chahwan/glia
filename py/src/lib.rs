@@ -161,9 +161,22 @@ impl PyGraph {
         Vec::new()
     }
 
-    fn activate(&self, seed_ids: Vec<u64>, top_k: Option<usize>) -> Vec<(u64, f64)> {
+    /// Spreading activation (PPR) from `seed_ids`. `profile` (WP-F / GR-5)
+    /// selects an edge-weight preset — "default", "repair", "review", or
+    /// "onboard" — so the same engine serves different agent tasks. Returns
+    /// `(id, score)` pairs, score-sorted, capped at `top_k`.
+    #[pyo3(signature = (seed_ids, top_k=None, profile=None))]
+    fn activate(
+        &self,
+        seed_ids: Vec<u64>,
+        top_k: Option<usize>,
+        profile: Option<String>,
+    ) -> Vec<(u64, f64)> {
         let seeds: Vec<NodeId> = seed_ids.into_iter().map(NodeId).collect();
-        let mut config = repo_graph_graph::code_activation_defaults();
+        let mut config = match profile.as_deref() {
+            Some(p) => repo_graph_graph::code_activation_profile(p),
+            None => repo_graph_graph::code_activation_defaults(),
+        };
         if let Some(k) = top_k {
             config.top_k = k;
         }

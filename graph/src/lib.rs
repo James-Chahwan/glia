@@ -2004,6 +2004,46 @@ pub fn code_activation_defaults() -> repo_graph_activation::ActivationConfig {
     }
 }
 
+/// Task-tuned edge-weight presets over [`code_activation_defaults`] (WP-F /
+/// GR-5). Same PPR engine, different lens on which relationships matter:
+/// - `"repair"` upweights what buggy code actually touches (calls + data/config
+///   access + tests).
+/// - `"review"` upweights structural relationships a reviewer reasons over
+///   (calls, tests, implements/inherits, return types).
+/// - `"onboard"` upweights the high-level shape (entry points + module /
+///   containment / docs).
+/// - `"default"` (or any unknown profile) returns the defaults unchanged.
+pub fn code_activation_profile(profile: &str) -> repo_graph_activation::ActivationConfig {
+    let mut config = code_activation_defaults();
+    let w = &mut config.edge_weights;
+    match profile {
+        "repair" => {
+            w.insert(edge_category::CALLS, 8.0);
+            w.insert(edge_category::USES, 6.0);
+            w.insert(edge_category::ACCESSES_DATA, 6.0);
+            w.insert(edge_category::READS_CONFIG, 5.0);
+            w.insert(edge_category::IMPORTS, 5.0);
+            w.insert(edge_category::TESTS, 4.0);
+        }
+        "review" => {
+            w.insert(edge_category::CALLS, 6.0);
+            w.insert(edge_category::TESTS, 6.0);
+            w.insert(edge_category::IMPLEMENTS, 5.0);
+            w.insert(edge_category::INHERITS_FROM, 5.0);
+            w.insert(edge_category::RETURNS_TYPE, 4.0);
+        }
+        "onboard" => {
+            w.insert(edge_category::CONTAINS, 5.0);
+            w.insert(edge_category::IMPORTS, 5.0);
+            w.insert(edge_category::HANDLED_BY, 6.0);
+            w.insert(edge_category::DEFINES, 3.0);
+            w.insert(edge_category::DOCUMENTS, 3.0);
+        }
+        _ => {}
+    }
+    config
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2015,6 +2055,32 @@ mod tests {
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://unit")
+    }
+
+    #[test]
+    fn activation_profiles_shift_weights() {
+        let def = code_activation_defaults();
+        let repair = code_activation_profile("repair");
+        let onboard = code_activation_profile("onboard");
+        // repair upweights CALLS above the default.
+        assert!(
+            repair.edge_weights[&edge_category::CALLS]
+                > def.edge_weights[&edge_category::CALLS]
+        );
+        // onboard upweights CONTAINS above the default.
+        assert!(
+            onboard.edge_weights[&edge_category::CONTAINS]
+                > def.edge_weights[&edge_category::CONTAINS]
+        );
+        // Unknown / default profile == defaults.
+        assert_eq!(
+            code_activation_profile("default").edge_weights[&edge_category::CALLS],
+            def.edge_weights[&edge_category::CALLS]
+        );
+        assert_eq!(
+            code_activation_profile("nonsense").edge_weights[&edge_category::CALLS],
+            def.edge_weights[&edge_category::CALLS]
+        );
     }
 
     #[test]
