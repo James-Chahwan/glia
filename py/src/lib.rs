@@ -221,6 +221,15 @@ impl PyGraph {
 
     /// Substring search over qnames, returned sorted by node id so repeated
     /// calls (and any caller that takes `[0]`) are reproducible across processes.
+    /// Resolve a failure/change signal to seed node ids (WP-B / GR-2 `locate`).
+    /// `kind` ∈ {"stacktrace", "test", "diff", "auto"}; "auto" sniffs the shape.
+    /// Frame/symbol/path → node-id resolution (and the sniffer) run in Rust;
+    /// unresolvable tokens are simply absent. Feed the result to `activate`.
+    #[pyo3(signature = (text, kind="auto"))]
+    fn resolve_signal(&self, text: &str, kind: &str) -> Vec<u64> {
+        self.merged.resolve_signal(text, kind).into_iter().map(|id| id.0).collect()
+    }
+
     fn find_nodes_by_qname(&self, pattern: &str) -> Vec<u64> {
         self.merged
             .qnames_containing(pattern)
