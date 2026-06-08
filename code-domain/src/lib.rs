@@ -519,12 +519,22 @@ pub fn library_name(path: &str, lang: &str) -> Option<String> {
             }
             scoped(p).or_else(|| p.split('/').next().map(str::to_string))
         }
-        // Go: the parser stores import paths `::`-joined (mapped to repo qnames)
-        // or `/`-joined; take the last non-empty segment either way.
-        "go" => p
-            .rsplit(|c| c == '/' || c == ':')
-            .find(|s| !s.is_empty())
-            .map(str::to_string),
+        // Go: only external third-party modules count as library deps — their
+        // import path's first segment is a domain (contains a '.'), e.g.
+        // github.com, golang.org, gopkg.in. Internal imports (repo-relative
+        // after go.mod prefix stripping, WP-G) and stdlib (fmt, net/http) have
+        // no domain segment and must NOT leak into Symbol.imports. Return the
+        // module path (host/org/repo). Parser stores paths `::`- or `/`-joined.
+        "go" => {
+            let segs: Vec<&str> =
+                p.split(|c| c == '/' || c == ':').filter(|s| !s.is_empty()).collect();
+            match segs.first() {
+                Some(first) if first.contains('.') => {
+                    Some(segs.iter().take(3).copied().collect::<Vec<_>>().join("/"))
+                }
+                _ => None,
+            }
+        }
         "python" => p.split('.').next().map(str::to_string),
         "rust" => {
             let top = p.split("::").next()?;
@@ -676,6 +686,25 @@ mod tests {
         assert_eq!(node_kind::name(node_kind::STATE_VAR), "STATE_VAR");
         // Unregistered id falls back, never panics.
         assert_eq!(node_kind::name(NodeKindId(9999)), "UNKNOWN");
+    }
+
+    #[test]
+    fn go_library_name_excludes_internal_and_stdlib() {
+        // External third-party (domain first segment) → module path.
+        assert_eq!(
+            library_name("github.com::external::lib", "go"),
+            Some("github.com/external/lib".to_string())
+        );
+        assert_eq!(
+            library_name("github.com/external/lib", "go"),
+            Some("github.com/external/lib".to_string())
+        );
+        // Internal import (go.mod prefix stripped to a repo-relative path) — WP-G:
+        // must NOT leak into Symbol.imports.
+        assert_eq!(library_name("internal::util", "go"), None);
+        // Stdlib — no domain, excluded.
+        assert_eq!(library_name("fmt", "go"), None);
+        assert_eq!(library_name("net::http", "go"), None);
     }
 
     #[test]

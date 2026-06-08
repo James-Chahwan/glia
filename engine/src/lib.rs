@@ -41,7 +41,8 @@ pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
     }
     let repo = RepoId::from_canonical(&format!("file://{repo_path}"));
     let (files, regions, md) = walk_source_files(&root);
-    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo);
+    let go_prefix = read_go_module_prefix(&root);
+    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix);
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
     }
@@ -77,7 +78,8 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
         }
         let repo = RepoId::from_canonical(&format!("file://{path}"));
         let (files, regions, md) = walk_source_files(&root);
-        let (graphs, parse_errors) = build_graphs_for_repo(&files, repo);
+        let go_prefix = read_go_module_prefix(&root);
+        let (graphs, parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix);
         all_graphs.extend(graphs);
         if !regions.is_empty() {
             all_graphs.push(build_region_graph(&regions, repo));
@@ -112,9 +114,24 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
 // Per-repo graph building
 // ----------------------------------------------------------------------------
 
+/// Read the `module` path from a repo's `go.mod` (e.g. `github.com/foo/bar`),
+/// or `""` if there's no go.mod. The Go parser uses it to tell internal package
+/// imports from external libraries (WP-G / #6).
+fn read_go_module_prefix(root: &Path) -> String {
+    std::fs::read_to_string(root.join("go.mod"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .map(str::trim)
+                .find_map(|l| l.strip_prefix("module ").map(|m| m.trim().to_string()))
+        })
+        .unwrap_or_default()
+}
+
 fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
+    go_module_prefix: &str,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut proto_parses = Vec::new();
@@ -271,7 +288,7 @@ fn build_graphs_for_repo(
         // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
         // kill an N-file repo build — log it, skip it, keep going.
         let parse_result = catch_unwind(AssertUnwindSafe(|| {
-            let mut fp = parse_one(source, path, lang, repo)?;
+            let mut fp = parse_one_with(source, path, lang, repo, go_module_prefix)?;
             let module_id = NodeId::from_parts(
                 GRAPH_TYPE,
                 repo,
@@ -541,11 +558,24 @@ pub fn parse_one(
     lang: &str,
     repo: RepoId,
 ) -> Result<FileParse, String> {
+    parse_one_with(source, path, lang, repo, "")
+}
+
+/// Like [`parse_one`] but with the Go `module` prefix (from `go.mod`) so the Go
+/// parser recognises internal package imports as internal instead of leaking
+/// their names into `Symbol.imports` (WP-G / #6). Non-Go languages ignore it.
+pub fn parse_one_with(
+    source: &str,
+    path: &str,
+    lang: &str,
+    repo: RepoId,
+    go_module_prefix: &str,
+) -> Result<FileParse, String> {
     let module_qname = path_to_qname(path);
     match lang {
         "python" => repo_graph_parser_python::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "go" => repo_graph_parser_go::parse_file(source, path, &module_qname, "", repo)
+        "go" => repo_graph_parser_go::parse_file(source, path, &module_qname, go_module_prefix, repo)
             .map_err(|e| e.to_string()),
         "typescript" | "js" => repo_graph_parser_typescript::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
