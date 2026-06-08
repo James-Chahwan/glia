@@ -10,7 +10,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Confidence, NodeId, RepoId};
+use repo_graph_core::{CellPayload, Confidence, NodeId, RepoId};
 use repo_graph_engine::{generate_many as engine_generate_many, generate_one, parse_one};
 use repo_graph_graph::MergedGraph;
 use repo_graph_store::{
@@ -132,6 +132,33 @@ impl PyGraph {
             }
         }
         result
+    }
+
+    /// All cells on a node as `(cell_type_id, payload)` pairs (WP-J / #8).
+    /// Pair the id with `cell_type_names()` to label. Text/Json payloads return
+    /// their string (imports/state-var/doc cells included); Bytes payloads
+    /// (cached embeddings) return "". Structured access instead of scraping
+    /// `dense_text`. Empty if the node id is unknown.
+    fn node_cells(&self, node_id: u64) -> Vec<(u32, String)> {
+        let id = NodeId(node_id);
+        for g in &self.merged.graphs {
+            for n in &g.nodes {
+                if n.id == id {
+                    return n
+                        .cells
+                        .iter()
+                        .map(|c| {
+                            let payload = match &c.payload {
+                                CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+                                CellPayload::Bytes(_) => String::new(),
+                            };
+                            (c.kind.0, payload)
+                        })
+                        .collect();
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn activate(&self, seed_ids: Vec<u64>, top_k: Option<usize>) -> Vec<(u64, f64)> {
