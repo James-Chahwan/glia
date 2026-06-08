@@ -402,7 +402,126 @@ fn post_passes(merged: &mut MergedGraph) {
     downgrade_test_paths(merged);
     demote_unmatched_http_nodes(merged);
     emit_tests_edges(merged);
+    link_doc_sections(merged);
     tag_synthetic_provenance(merged);
+}
+
+/// WP-H / #7: link `.md` DOC_SECTION nodes to the code symbols they document so
+/// doc nodes aren't islands. High-precision signal — backtick-quoted
+/// identifiers in the markdown (`` `MyClass` ``, `` `parse_file()` ``) — matched
+/// against code-symbol names. Emits DOCUMENTS cross-edges (doc → symbol), capped
+/// per doc node to bound noise.
+fn link_doc_sections(merged: &mut MergedGraph) {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::CellPayload;
+
+    // Index code symbols by simple name; lowest NodeId wins (deterministic).
+    let mut symbol_by_name: HashMap<String, NodeId> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
+                continue;
+            };
+            if !is_doc_linkable_symbol(kind) {
+                continue;
+            }
+            let Some(name) = g.nav.name_by_id.get(&n.id) else {
+                continue;
+            };
+            symbol_by_name
+                .entry(name.clone())
+                .and_modify(|cur| {
+                    if n.id.0 < cur.0 {
+                        *cur = n.id;
+                    }
+                })
+                .or_insert(n.id);
+        }
+    }
+    if symbol_by_name.is_empty() {
+        return;
+    }
+
+    const MAX_LINKS_PER_DOC: usize = 25;
+    let mut new_edges: Vec<Edge> = Vec::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
+                continue;
+            }
+            let Some(text) = n.cells.iter().find_map(|c| match &c.payload {
+                CellPayload::Text(s) if c.kind == cell_type::CODE => Some(s.as_str()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+            for ident in backtick_identifiers(text) {
+                if let Some(&sym) = symbol_by_name.get(&ident) {
+                    if sym != n.id && seen.insert(sym) {
+                        new_edges.push(Edge {
+                            from: n.id,
+                            to: sym,
+                            category: edge_category::DOCUMENTS,
+                            confidence: Confidence::Medium,
+                        });
+                        if seen.len() >= MAX_LINKS_PER_DOC {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    merged.cross_edges.extend(new_edges);
+}
+
+/// Node kinds a doc section can meaningfully document.
+fn is_doc_linkable_symbol(kind: repo_graph_core::NodeKindId) -> bool {
+    use repo_graph_code_domain::node_kind as nk;
+    kind == nk::FUNCTION
+        || kind == nk::METHOD
+        || kind == nk::CLASS
+        || kind == nk::STRUCT
+        || kind == nk::INTERFACE
+        || kind == nk::ENUM
+        || kind == nk::COMPONENT
+        || kind == nk::SERVICE
+        || kind == nk::STATE_VAR
+        || kind == nk::DATA_ENTITY
+}
+
+/// Identifiers inside single-backtick inline-code spans in markdown. Triple-
+/// backtick fenced blocks fall on even split segments and are skipped.
+fn backtick_identifiers(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, seg) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            if let Some(id) = identifier_from_span(seg) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
+/// Reduce an inline-code span to a bare identifier: drop trailing `()`, take the
+/// last `.`/`::` segment, require an identifier ≥3 chars. `None` if not one.
+fn identifier_from_span(span: &str) -> Option<String> {
+    let s = span.trim().trim_end_matches("()");
+    let s = s.rsplit(|c| c == '.' || c == ':').next().unwrap_or(s);
+    if s.len() < 3 {
+        return None;
+    }
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 /// Tag the substrate-only synthetic node kinds with an `ORIGIN` cell so
@@ -1388,6 +1507,29 @@ fn strip_test_affixes(name: &str) -> &str {
 #[cfg(test)]
 mod walk_tests {
     use super::*;
+
+    #[test]
+    fn backtick_identifiers_extract_inline_code(){
+        let md = "Use `parse_config` and `WidgetFactory.build()`.\n\
+                  Run `npm install` (ignored). `x` too short.\n\
+                  ```\nfenced `not_this`\n```";
+        let ids = backtick_identifiers(md);
+        assert!(ids.contains(&"parse_config".to_string()));
+        // method span reduces to the trailing identifier.
+        assert!(ids.contains(&"build".to_string()));
+        // "npm install" has a space → not an identifier; "x" too short.
+        assert!(!ids.iter().any(|s| s.contains(' ')));
+        assert!(!ids.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn identifier_from_span_normalises() {
+        assert_eq!(identifier_from_span("parse_config()"), Some("parse_config".into()));
+        assert_eq!(identifier_from_span("mod::Thing"), Some("Thing".into()));
+        assert_eq!(identifier_from_span("a.b.method"), Some("method".into()));
+        assert_eq!(identifier_from_span("--flag"), None);
+        assert_eq!(identifier_from_span("ab"), None); // too short
+    }
 
     #[test]
     fn hashed_chunk_detection() {
