@@ -6,6 +6,8 @@ bench/**/target/
 # engram-export is excluded from the workspace (cross-repo engram-core dep), so
 # it builds into its own target/ when run standalone.
 engram-export/target/
+# py builds a standalone target/ when compiled on its own (maturin / cargo -p).
+py/target/
 nodes.json
 nodes.gmap
 
