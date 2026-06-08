@@ -299,15 +299,9 @@ fn cmd_impact(repo: &str, qname: &str, direction: ImpactDirection, depth: usize)
     let merged = &result.merged;
 
     // Resolve qname → NodeId across all repo graphs (one match expected; if
-    // multiple, walk all).
-    let mut targets: Vec<NodeId> = Vec::new();
-    for g in &merged.graphs {
-        for (id, qn) in &g.nav.qname_by_id {
-            if qn == qname {
-                targets.push(*id);
-            }
-        }
-    }
+    // multiple, walk all). Sorted by node id so the section order is stable
+    // across processes (the resolver no longer leaks HashMap iteration order).
+    let targets: Vec<NodeId> = merged.qnames_exact(qname);
     if targets.is_empty() {
         eprintln!("error: no node with qname `{qname}` in {repo}");
         eprintln!();

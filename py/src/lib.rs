@@ -135,27 +135,23 @@ impl PyGraph {
             .collect()
     }
 
+    /// Resolve a simple name to a node id. Deterministic across processes: when
+    /// several nodes share the name (e.g. an Angular component's `CLASS` and its
+    /// framework `COMPONENT` marker), the highest-degree node wins rather than
+    /// whichever the per-process `HashMap` seed happened to order first — the
+    /// root cause of `impact`/`trace` intermittently returning empty.
     fn find_node(&self, name: &str) -> Option<u64> {
-        for g in &self.merged.graphs {
-            for (id, n) in &g.nav.name_by_id {
-                if n == name {
-                    return Some(id.0);
-                }
-            }
-        }
-        None
+        self.merged.resolve_name(name).map(|id| id.0)
     }
 
+    /// Substring search over qnames, returned sorted by node id so repeated
+    /// calls (and any caller that takes `[0]`) are reproducible across processes.
     fn find_nodes_by_qname(&self, pattern: &str) -> Vec<u64> {
-        let mut result = Vec::new();
-        for g in &self.merged.graphs {
-            for (id, q) in &g.nav.qname_by_id {
-                if q.contains(pattern) {
-                    result.push(id.0);
-                }
-            }
-        }
-        result
+        self.merged
+            .qnames_containing(pattern)
+            .into_iter()
+            .map(|id| id.0)
+            .collect()
     }
 
     /// Persist this graph to a sharded `.gmap` layout at `dir`. Creates `dir`

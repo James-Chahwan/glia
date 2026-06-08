@@ -788,41 +788,120 @@ impl MergedGraph {
         out
     }
 
-    /// G22 — resolve a full qualified name to a `NodeId` across every repo.
-    /// Returns `None` if no node carries this exact qname. NodeIds aren't
-    /// stable across rebuilds; qnames are, so this is the canonical re-keying
-    /// path for view-state persistence (e.g. `.neuropil/view_state.json`).
-    pub fn node_id_by_qname(&self, qname: &str) -> Option<NodeId> {
+    /// Total degree (incoming + outgoing) of `id` across both intra- and
+    /// cross-repo edges. Used purely as the determinism tiebreak in
+    /// [`Self::pick_primary`].
+    fn degree(&self, id: NodeId) -> usize {
+        self.all_edges()
+            .filter(|e| e.from == id || e.to == id)
+            .count()
+    }
+
+    /// Deterministically choose the "primary" node among identically-keyed
+    /// candidates (nodes sharing a simple name or a qname). Two real cases hit
+    /// this: framework parsers stack a `COMPONENT`/route marker on top of the
+    /// underlying `CLASS`, sharing name *and* qname; and suffix matches collide
+    /// across repos.
+    ///
+    /// Rule: highest total degree wins — the node that actually participates in
+    /// the graph is what traversal, `impact`, and span resolution want, not an
+    /// edgeless marker. Ties break on the lowest `NodeId`. Both keys are stable
+    /// across processes, so the choice no longer rides on `HashMap` iteration
+    /// order — that randomness was the root of the intermittent-empty
+    /// `impact`/`trace` results (an Angular `GroupsComponent` resolving to the
+    /// edgeless `COMPONENT` marker instead of the 80-downstream `CLASS`).
+    pub fn pick_primary(&self, candidates: &[NodeId]) -> Option<NodeId> {
+        match candidates {
+            [] => None,
+            [only] => Some(*only),
+            many => many
+                .iter()
+                .copied()
+                .max_by_key(|&id| (self.degree(id), std::cmp::Reverse(id.0))),
+        }
+    }
+
+    /// Resolve a simple name (`"GroupsComponent"`) to a single `NodeId`,
+    /// deterministically. When several nodes share the name, the highest-degree
+    /// one wins (see [`Self::pick_primary`]). `None` if no node carries it.
+    pub fn resolve_name(&self, name: &str) -> Option<NodeId> {
+        let mut matches = Vec::new();
         for g in &self.graphs {
-            for (id, qn) in &g.nav.qname_by_id {
-                if qn == qname {
-                    return Some(*id);
+            for (id, n) in &g.nav.name_by_id {
+                if n == name {
+                    matches.push(*id);
                 }
             }
         }
-        None
+        self.pick_primary(&matches)
+    }
+
+    /// G22 — resolve a full qualified name to a single `NodeId` across every
+    /// repo. Returns `None` if no node carries this exact qname. NodeIds aren't
+    /// stable across rebuilds; qnames are, so this is the canonical re-keying
+    /// path for view-state persistence (e.g. `.neuropil/view_state.json`).
+    ///
+    /// When more than one node shares the qname (a framework marker stacked on
+    /// its class), the pick is deterministic — see [`Self::pick_primary`].
+    pub fn node_id_by_qname(&self, qname: &str) -> Option<NodeId> {
+        self.pick_primary(&self.qnames_exact(qname))
+    }
+
+    /// Every node whose qname matches `qname` exactly, sorted by `NodeId` for a
+    /// stable, reproducible iteration order. Use when each match matters (e.g.
+    /// `impact` walks them all); use [`Self::node_id_by_qname`] for the single
+    /// primary node.
+    pub fn qnames_exact(&self, qname: &str) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for g in &self.graphs {
+            for (id, qn) in &g.nav.qname_by_id {
+                if qn == qname {
+                    out.push(*id);
+                }
+            }
+        }
+        out.sort_by_key(|id| id.0);
+        out
+    }
+
+    /// Every node whose qname *contains* `pattern`, sorted by `NodeId`. Backs
+    /// the pyo3 `find_nodes_by_qname` substring search; sorting keeps the result
+    /// reproducible across processes.
+    pub fn qnames_containing(&self, pattern: &str) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for g in &self.graphs {
+            for (id, qn) in &g.nav.qname_by_id {
+                if qn.contains(pattern) {
+                    out.push(*id);
+                }
+            }
+        }
+        out.sort_by_key(|id| id.0);
+        out
     }
 
     /// G19 — resolve an OTLP-style dotted span name (`myservice.handlers.users.list_users`)
     /// to a `NodeId`. First tries an exact match against the qname (after
     /// converting `.` to `::`); then a suffix match so spans rooted at a
     /// package the parser doesn't see still bind to the method node.
-    /// Returns the first match in iteration order — when multiple repos
-    /// expose the same qname suffix, consumers should disambiguate by repo.
+    /// When several nodes share the qname suffix, the pick is deterministic
+    /// (highest-degree, see [`Self::pick_primary`]) — consumers that need a
+    /// specific repo should still disambiguate by repo.
     pub fn resolve_span(&self, span_name: &str) -> Option<NodeId> {
         let normalised = span_name.replace('.', "::");
         if let Some(id) = self.node_id_by_qname(&normalised) {
             return Some(id);
         }
         let suffix = format!("::{normalised}");
+        let mut matches = Vec::new();
         for g in &self.graphs {
             for (id, qn) in &g.nav.qname_by_id {
                 if qn.ends_with(&suffix) {
-                    return Some(*id);
+                    matches.push(*id);
                 }
             }
         }
-        None
+        self.pick_primary(&matches)
     }
 }
 
@@ -2156,6 +2235,81 @@ mod tests {
         // Wrong category yields nothing — proves filter is enforced.
         let none = g.predecessors(c, &[edge_category::IMPORTS], 5);
         assert!(none.is_empty());
+    }
+
+    /// Reproduces the `impact`/`trace` non-determinism: a framework component
+    /// where the `CLASS` carries the edges and a `COMPONENT` marker shares its
+    /// name *and* qname but has none. Resolution must always land on the
+    /// connected `CLASS`, regardless of `HashMap` iteration order.
+    fn dupe_name_graph() -> MergedGraph {
+        let r = repo();
+        let class = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "pkg::Dup");
+        let comp = NodeId::from_parts(GRAPH_TYPE, r, node_kind::COMPONENT, "pkg::Dup");
+        let run = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "pkg::Dup::run");
+        let mut nav = CodeNav::default();
+        nav.record(class, "Dup", "pkg::Dup", node_kind::CLASS, None);
+        nav.record(comp, "Dup", "pkg::Dup", node_kind::COMPONENT, None);
+        nav.record(run, "run", "pkg::Dup::run", node_kind::METHOD, Some(class));
+        let g = RepoGraph {
+            repo: r,
+            nodes: vec![
+                Node { id: class, repo: r, confidence: Confidence::Strong, cells: vec![] },
+                Node { id: comp, repo: r, confidence: Confidence::Strong, cells: vec![] },
+                Node { id: run, repo: r, confidence: Confidence::Strong, cells: vec![] },
+            ],
+            // Only the CLASS participates in an edge; the COMPONENT is edgeless.
+            edges: vec![Edge {
+                from: class,
+                to: run,
+                category: edge_category::CONTAINS,
+                confidence: Confidence::Strong,
+            }],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        };
+        MergedGraph::new(vec![g])
+    }
+
+    #[test]
+    fn resolve_name_prefers_connected_node_over_edgeless_marker() {
+        let m = dupe_name_graph();
+        let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "pkg::Dup");
+        // Both `resolve_name` (by simple name) and `node_id_by_qname` (exact
+        // qname) hit the duplicate; both must choose the connected CLASS.
+        assert_eq!(m.resolve_name("Dup"), Some(class));
+        assert_eq!(m.node_id_by_qname("pkg::Dup"), Some(class));
+    }
+
+    #[test]
+    fn pick_primary_is_order_independent() {
+        let m = dupe_name_graph();
+        let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "pkg::Dup");
+        let comp = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::COMPONENT, "pkg::Dup");
+        // Same candidate set in either order → same winner. This is the
+        // property HashMap iteration order used to violate across processes.
+        assert_eq!(m.pick_primary(&[class, comp]), Some(class));
+        assert_eq!(m.pick_primary(&[comp, class]), Some(class));
+        assert_eq!(m.pick_primary(&[]), None);
+    }
+
+    #[test]
+    fn qname_matches_are_sorted_by_node_id() {
+        let m = dupe_name_graph();
+        let got = m.qnames_exact("pkg::Dup");
+        assert_eq!(got.len(), 2, "both same-qname nodes returned");
+        let mut want = got.clone();
+        want.sort_by_key(|id| id.0);
+        assert_eq!(got, want, "qnames_exact must return a stable id-sorted order");
+
+        // Substring search reaches all three (Dup, Dup marker, Dup::run).
+        let sub = m.qnames_containing("pkg::Dup");
+        assert_eq!(sub.len(), 3);
+        let mut want_sub = sub.clone();
+        want_sub.sort_by_key(|id| id.0);
+        assert_eq!(sub, want_sub);
     }
 
     /// Build a single-node RepoGraph holding one DATA_ENTITY for `qname` in
