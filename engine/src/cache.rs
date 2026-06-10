@@ -155,6 +155,17 @@ impl ParseCache {
         }
     }
 
+    /// Delete the on-disk sidecar. Called when the user explicitly asks for a
+    /// non-incremental build (`--no-incremental` / `incremental=False`): a
+    /// forced clean build must be a real escape hatch — without this, the NEXT
+    /// default-on build would reuse whatever cache the user was escaping.
+    pub fn purge(repo_path: &str) -> std::io::Result<()> {
+        match std::fs::remove_file(gmap_dir(repo_path).join(CACHE_FILE)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     /// Persist atomically next to the `.gmap`. Best-effort: the cache is an
     /// optimization, never load-bearing.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {

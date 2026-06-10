@@ -1700,6 +1700,12 @@ mod walk_tests {
         generate_one_incremental(repo).unwrap();
         assert_eq!(ParseCache::load(repo).len(), 1);
 
+        // Explicit purge (the --no-incremental escape hatch) removes the
+        // sidecar; the next load starts cold. Purging a missing file is Ok.
+        ParseCache::purge(repo).unwrap();
+        assert!(ParseCache::load(repo).is_empty());
+        ParseCache::purge(repo).unwrap();
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

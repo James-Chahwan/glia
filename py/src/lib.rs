@@ -272,13 +272,19 @@ fn escape_json(s: &str) -> String {
 /// Build the graph for a repo. `incremental` (default True, WP-D) reuses a
 /// per-file parse cache at `<repo>/.ai/repo-graph/parse_cache.bin` so unchanged
 /// files skip tree-sitter; the result is identical to a clean build. Pass
-/// `incremental=False` to force a full reparse.
+/// `incremental=False` to force a full reparse (this also deletes the sidecar,
+/// so the next incremental build starts cold).
 #[pyfunction]
 #[pyo3(signature = (repo_path, incremental=true))]
 fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
     let result = if incremental {
         repo_graph_engine::generate_one_incremental(repo_path)
     } else {
+        // An explicit clean build also discards the sidecar — otherwise the
+        // next default-on build would reuse the cache the user was escaping.
+        if let Err(e) = repo_graph_engine::ParseCache::purge(repo_path) {
+            eprintln!("warning: could not remove parse cache: {e}");
+        }
         generate_one(repo_path)
     }
     .map_err(PyValueError::new_err)?;

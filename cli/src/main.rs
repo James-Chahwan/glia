@@ -508,6 +508,11 @@ fn cmd_build(repo: &str, out: Option<&str>, incremental: bool) -> i32 {
     let built = if incremental {
         generate_one_incremental(repo)
     } else {
+        // An explicit clean build also discards the sidecar — otherwise the
+        // next default-on build would reuse the cache the user was escaping.
+        if let Err(e) = repo_graph_engine::ParseCache::purge(repo) {
+            eprintln!("warning: could not remove parse cache: {e}");
+        }
         generate_one(repo)
     };
     let result = match built {
