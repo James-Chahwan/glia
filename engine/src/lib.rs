@@ -1646,8 +1646,10 @@ mod walk_tests {
         assert_eq!(cache.stats.reparsed, 1, "only the edited file reparsed");
         assert_eq!(cache.stats.reused, 1, "the unchanged file reused");
 
-        // …and the incremental result equals a fresh clean build (byte-identical
-        // graph — the WP-D acceptance gate).
+        // …and the incremental result equals a fresh clean build as a SET
+        // (sorted fingerprint — fast unit check). The real WP-D acceptance
+        // gate is tests/byte_identical.rs, which compares the actual bytes
+        // the store writes and fails on any ordering nondeterminism.
         let clean2 = generate_one(repo).unwrap();
         assert_eq!(fingerprint(&warm.merged), fingerprint(&clean2.merged));
 

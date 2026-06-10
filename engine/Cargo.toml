@@ -34,3 +34,9 @@ repo-graph-parser-vue = { path = "../parsers/code/vue" }
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
 twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
+
+[dev-dependencies]
+# Gate test only: the bytes-on-disk byte-identical check writes real sharded
+# layouts via the store (engine itself stays store-independent).
+repo-graph-store = { path = "../store" }
+tempfile = "3"

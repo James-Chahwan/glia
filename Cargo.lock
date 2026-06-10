@@ -641,7 +641,9 @@ dependencies = [
  "repo-graph-parser-terraform",
  "repo-graph-parser-typescript",
  "repo-graph-parser-vue",
+ "repo-graph-store",
  "serde",
+ "tempfile",
  "twox-hash",
 ]
 
