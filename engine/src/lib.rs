@@ -487,6 +487,14 @@ fn post_passes(merged: &mut MergedGraph) {
     emit_tests_edges(merged);
     link_doc_sections(merged);
     tag_synthetic_provenance(merged);
+    // Deterministic cross-edge order: several resolvers emit pairs by
+    // iterating HashMap indexes (per-process seed), so the edge SET was stable
+    // but its Vec order — and therefore cross_stack.gmap's bytes — flapped
+    // across processes and even clean-vs-incremental in one process (audit
+    // 2026-06-10 #6). One sort here covers all resolvers and post-passes.
+    merged
+        .cross_edges
+        .sort_unstable_by_key(|e| (e.from.0, e.to.0, e.category.0, e.confidence as u8));
 }
 
 /// WP-H / #7: link `.md` DOC_SECTION nodes to the code symbols they document so
