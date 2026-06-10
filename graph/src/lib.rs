@@ -2235,20 +2235,27 @@ impl MergedGraph {
                 .collect();
             let Some(last) = name_segs.last() else { continue };
             let suffix = format!("::{}", name_segs.join("::"));
-            // Prefer a qname ending with the full ::-suffix; else the bare name.
-            let mut matched: Option<NodeId> = None;
+            // Prefer a qname ending with the full ::-suffix; else the bare
+            // name. Collect ALL matches and pick_primary — first-match over
+            // qname_by_id (a HashMap, per-process seed) flapped the resolved
+            // seed across processes, the same bug class pick_primary fixed
+            // for resolve_name/resolve_span (audit 2026-06-10 #7).
+            let mut suffix_matches: Vec<NodeId> = Vec::new();
+            let mut name_matches: Vec<NodeId> = Vec::new();
             for g in &self.graphs {
-                for (id, qn) in &g.nav.qname_by_id {
-                    if qn.ends_with(&suffix) || qn.as_str() == *last {
-                        matched = Some(*id);
-                        break;
+                for n in &g.nodes {
+                    let Some(qn) = g.nav.qname_by_id.get(&n.id) else { continue };
+                    if qn.ends_with(&suffix) {
+                        suffix_matches.push(n.id);
+                    } else if qn.as_str() == *last {
+                        name_matches.push(n.id);
                     }
                 }
-                if matched.is_some() {
-                    break;
-                }
             }
-            let id = matched.or_else(|| self.resolve_name(last));
+            let id = self
+                .pick_primary(&suffix_matches)
+                .or_else(|| self.pick_primary(&name_matches))
+                .or_else(|| self.resolve_name(last));
             if let Some(id) = id {
                 if seen.insert(id) {
                     out.push(id);
