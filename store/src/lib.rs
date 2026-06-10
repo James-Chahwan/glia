@@ -640,6 +640,15 @@ pub const CROSS_STACK_NAME: &str = "cross_stack.gmap";
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Manifest {
     pub schema_version: u32,
+    /// Workspace release version that wrote this layout (`[workspace.package]`
+    /// in the root Cargo.toml). `is_gmap_stale` treats a mismatch as stale so
+    /// a graph written by an older (or buggier) engine is regenerated on
+    /// upgrade instead of being served until a source file happens to change
+    /// (audit 2026-06-10 #9 — a pre-gating engine's 23k-node junk graph
+    /// survived the 0.4.16 upgrade because only source mtimes were checked).
+    /// `default` so pre-0.4.17 manifests deserialize (as "", always stale).
+    #[serde(default)]
+    pub engine_version: String,
     pub shards: Vec<ShardEntry>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cross: Option<ShardEntry>,
@@ -737,6 +746,7 @@ pub fn write_sharded(
 
     let manifest = Manifest {
         schema_version: MANIFEST_VERSION,
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
         shards: entries,
         cross,
     };
@@ -932,6 +942,17 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     let Ok(manifest_mtime) = manifest_meta.modified() else {
         return true;
     };
+    // A layout written by a different release is stale regardless of source
+    // mtimes — otherwise an old engine's output is served until a source file
+    // happens to change. Unreadable/unparseable manifest → stale.
+    let version_matches = std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
+        .map(|m| m.engine_version == env!("CARGO_PKG_VERSION"))
+        .unwrap_or(false);
+    if !version_matches {
+        return true;
+    }
 
     let skip_dirs = [".git", "target", "node_modules", ".venv", "__pycache__", DEFAULT_GMAP_SUBDIR.split('/').next().unwrap()];
     let mut stack = vec![repo_path.to_path_buf()];
@@ -1249,5 +1270,44 @@ mod tests {
         assert_eq!(mtime_a_before, mtime_a_after, "shard a was rewritten despite unchanged input");
         assert_eq!(mtime_b_before, mtime_b_after, "shard b was rewritten despite unchanged input");
         assert_eq!(mtime_m_before, mtime_m_after, "manifest was rewritten despite unchanged input");
+    }
+
+    #[test]
+    fn stale_when_manifest_written_by_other_engine_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let gmap_dir = dir.path().join("gmap");
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let repo = RepoId::from_canonical("test://stale");
+        let g = RepoGraph {
+            repo,
+            nodes: vec![],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        write_sharded(&[("a", &g)], &[], &gmap_dir).unwrap();
+        // Fresh manifest from THIS engine version + no newer sources → fresh.
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+
+        // Same layout but stamped by another release → stale regardless of
+        // source mtimes (the upgrade / poisoned-cache path).
+        let manifest_path = gmap_dir.join(MANIFEST_NAME);
+        let mut m: Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        m.engine_version = "0.0.0".to_string();
+        std::fs::write(&manifest_path, serde_json::to_vec(&m).unwrap()).unwrap();
+        // Ensure the rewrite itself can't be what makes it stale: mtime check
+        // compares repo files (none) to the manifest, so only the version
+        // mismatch can trigger here.
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir));
+
+        // Pre-0.4.17 manifest (no engine_version field at all) → stale.
+        m.engine_version = String::new();
+        std::fs::write(&manifest_path, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir));
     }
 }
