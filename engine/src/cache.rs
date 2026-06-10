@@ -12,10 +12,13 @@ use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::FileParse;
 
-/// Tied to the engine crate version: a different glia build may parse
-/// differently, so a cache written by another version is discarded (one-time
-/// full rebuild after upgrade — also the fix for "stale cache after upgrade",
-/// backlog #10).
+/// Tied to the WORKSPACE release version (`[workspace.package]` in the root
+/// Cargo.toml — the same single line that versions the wheel): a different glia
+/// release may parse differently, so a cache written by another version is
+/// discarded (one-time full rebuild after upgrade — also the fix for "stale
+/// cache after upgrade", backlog #10). The engine crate inherits the workspace
+/// version precisely so this stamp can never lag a release (audit 2026-06-10
+/// #4: a py-only bump left this frozen at 0.4.13).
 const CACHE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CACHE_FILE: &str = "parse_cache.bin";
 
@@ -56,6 +59,17 @@ pub struct CacheStats {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseCache {
     version: String,
+    /// Repo identity the cached parses were built under (`file://<repo_path>`,
+    /// the exact string fed to `RepoId::from_canonical`). Every cached
+    /// `FileParse` has that RepoId baked into its NodeIds, but the per-file
+    /// content hash can't see it — so a path-spelling change (`.` vs absolute)
+    /// or a moved repo must discard the cache, or reused nodes silently carry
+    /// the old identity (audit 2026-06-10 #2).
+    repo_canonical: String,
+    /// `go.mod` module path the cached parses were built under. It changes how
+    /// every `.go` file parses (internal-vs-library imports, WP-G) without
+    /// changing any `.go` content hash (audit 2026-06-10 #3).
+    go_prefix: String,
     entries: HashMap<String, CacheEntry>,
     #[serde(skip)]
     pub stats: CacheStats,
@@ -65,6 +79,8 @@ impl Default for ParseCache {
     fn default() -> Self {
         Self {
             version: CACHE_VERSION.to_string(),
+            repo_canonical: String::new(),
+            go_prefix: String::new(),
             entries: HashMap::new(),
             stats: CacheStats::default(),
         }
@@ -74,6 +90,25 @@ impl Default for ParseCache {
 impl ParseCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Discard every entry if the build context differs from the one the cache
+    /// was written under, then adopt the new context. Per-file content hashes
+    /// can't see either value, so a mismatch means every entry is suspect.
+    /// Called at the top of each build — covers the disk sidecar AND a
+    /// long-lived in-memory cache (neuropil) being pointed at a different repo.
+    pub fn validate_context(&mut self, repo_canonical: &str, go_prefix: &str) {
+        if self.repo_canonical != repo_canonical || self.go_prefix != go_prefix {
+            if !self.entries.is_empty() {
+                eprintln!(
+                    "[incremental] build context changed (repo path or go.mod module), discarding {} cached parses",
+                    self.entries.len()
+                );
+            }
+            self.entries.clear();
+            repo_canonical.clone_into(&mut self.repo_canonical);
+            go_prefix.clone_into(&mut self.go_prefix);
+        }
     }
 
     /// Reuse an unchanged parse for `path` (content hash + language must match),

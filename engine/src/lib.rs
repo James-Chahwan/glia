@@ -66,15 +66,21 @@ pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, Strin
 
 fn generate_one_inner(
     repo_path: &str,
-    cache: Option<&mut ParseCache>,
+    mut cache: Option<&mut ParseCache>,
 ) -> Result<GenerateResult, String> {
     let root = PathBuf::from(repo_path);
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
     }
-    let repo = RepoId::from_canonical(&format!("file://{repo_path}"));
+    let canonical = format!("file://{repo_path}");
+    let repo = RepoId::from_canonical(&canonical);
     let (files, regions, md) = walk_source_files(&root);
     let go_prefix = read_go_module_prefix(&root);
+    // Cached parses are only valid under the exact repo identity + go.mod
+    // module they were built with — neither is visible to per-file hashes.
+    if let Some(c) = cache.as_deref_mut() {
+        c.validate_context(&canonical, &go_prefix);
+    }
     let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, cache);
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
@@ -1645,6 +1651,38 @@ mod walk_tests {
         generate_one_with_cache(repo, &mut cache).unwrap();
         assert_eq!(cache.stats.evicted, 1, "deleted file evicted from cache");
         assert_eq!(cache.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cache_discarded_when_build_context_changes() {
+        let dir = unique_tmp("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.py"), "def foo():\n    return 1\n").unwrap();
+        let repo = dir.to_str().unwrap();
+
+        // Same dir, different path spelling → different RepoId baked into
+        // cached NodeIds → every entry must be discarded, not reused.
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(cache.stats.reparsed, 1);
+        let alt = format!("{repo}/.");
+        generate_one_with_cache(&alt, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 0, "path-spelling change must not reuse");
+        assert_eq!(cache.stats.reparsed, 1);
+
+        // Same spelling again → reuse works.
+        generate_one_with_cache(&alt, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 1);
+
+        // go.mod module change → .go parses are context-dependent → discard.
+        std::fs::write(dir.join("m.go"), "package m\nfunc F() {}\n").unwrap();
+        std::fs::write(dir.join("go.mod"), "module example.com/one\n").unwrap();
+        generate_one_with_cache(&alt, &mut cache).unwrap();
+        std::fs::write(dir.join("go.mod"), "module example.com/two\n").unwrap();
+        generate_one_with_cache(&alt, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 0, "go.mod module change must not reuse");
 
         std::fs::remove_dir_all(&dir).ok();
     }

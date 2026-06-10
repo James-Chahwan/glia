@@ -1,6 +1,6 @@
 [package]
 name = "repo-graph-engine"
-version = "0.4.13"
+version.workspace = true
 edition = "2024"
 publish = false
 description = "Pure-Rust orchestration: walk a repo, run language parsers + cross-cutting extractors, build per-lang graphs, merge, run cross-graph resolvers. Consumed by the pyo3 wrapper (`repo-graph-py`) and the `glia` CLI."

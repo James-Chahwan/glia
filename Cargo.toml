@@ -50,3 +50,10 @@ members = [
     "cli",
     "py",
 ]
+
+# Single release version for the crates that must move in lockstep: the wheel
+# (`py`) and the engine's parse-cache stamp (`engine/src/cache.rs`). Bumping the
+# release happens HERE and nowhere else — a py-only bump used to leave the cache
+# stamp frozen (audit 2026-06-10 #4), so old parses survived upgrades.
+[workspace.package]
+version = "0.4.17"
