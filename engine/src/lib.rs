@@ -394,6 +394,13 @@ fn build_graphs_for_repo(
     }
 
     let mut graphs = Vec::new();
+    // Deterministic per-language build order: HashMap iteration is seeded per
+    // process, and the resulting `graphs` order decides shard indices in
+    // `write_sharded` (repo-<hash>-NN.gmap). Random order made every shard's
+    // content hash flap across processes, so the write-side skip-unchanged-
+    // shards optimization never fired (audit 2026-06-10 #5).
+    let mut parses_by_lang: Vec<(&str, Vec<FileParse>)> = parses_by_lang.into_iter().collect();
+    parses_by_lang.sort_unstable_by_key(|(lang, _)| *lang);
     for (lang, parses) in parses_by_lang {
         let graph = match lang {
             "python" => repo_graph_graph::build_python(repo, parses),
