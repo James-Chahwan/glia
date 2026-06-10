@@ -1063,7 +1063,12 @@ fn walk_dir(
     md: &mut Vec<(String, String)>,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
+    // Sort by name: read_dir yields filesystem/inode order, which leaked into
+    // node/edge Vec order (and so shard bytes) — stable-ish on one machine,
+    // not reproducible across machines or after file churn (audit 2026-06-10).
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_unstable_by_key(|e| e.file_name());
+    for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if is_hard_skip(&name) {

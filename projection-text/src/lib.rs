@@ -166,12 +166,16 @@ fn build_scopes(graphs: &[&RepoGraph]) -> Vec<(String, String)> {
         .filter(|(_, c)| *c >= MIN_SCOPE_USES)
         .collect();
 
+    // Tiebreak on the prefix string: candidates arrive in HashMap order
+    // (per-process seed), and a stable sort on savings alone let score ties
+    // flap which prefixes make the MAX_SCOPES cut — and the alias-collision
+    // numbering — across processes (audit 2026-06-10).
     candidates.sort_by_key(|&(p, c)| {
         let seg_count = p.matches("::").count() + 1;
         let alias_len = if seg_count == 1 { 2 } else { seg_count };
         let legend_cost = p.len() + alias_len + 3;
         let gross = c * (p.len() - alias_len);
-        std::cmp::Reverse(gross.saturating_sub(legend_cost))
+        (std::cmp::Reverse(gross.saturating_sub(legend_cost)), p)
     });
 
     let mut used: HashSet<String> = HashSet::new();
@@ -183,8 +187,9 @@ fn build_scopes(graphs: &[&RepoGraph]) -> Vec<(String, String)> {
         scopes.push((alias, prefix.to_string()));
     }
 
-    // Longer prefixes first so abbreviate() matches greedily.
-    scopes.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
+    // Longer prefixes first so abbreviate() matches greedily; tiebreak on the
+    // prefix itself so equal lengths are ordered deterministically.
+    scopes.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.1.cmp(&b.1)));
     scopes
 }
 

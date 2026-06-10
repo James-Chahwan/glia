@@ -258,7 +258,13 @@ pub fn activate(
         .filter(|(_, s)| **s > 0.0)
         .map(|(&id, &s)| (id, s))
         .collect();
-    result.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Tiebreak on node id so exact-score ties at the top_k boundary don't
+    // resolve by caller-supplied input order (audit 2026-06-10).
+    result.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.0.cmp(&b.0.0))
+    });
     result.truncate(config.top_k);
 
     ActivationResult {
