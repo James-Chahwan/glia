@@ -239,6 +239,17 @@ impl PyGraph {
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// **resolve** (P3, handoff v6): a failure/change signal (stacktrace, diff,
+    /// test id, or `auto`-sniffed) → the ranked, LOCATED nodes it points at, in
+    /// one call — the answer that `resolve_signal`→`activate`→`read×N` collapses
+    /// to. Resolution order preserved; each record
+    /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
+    #[pyo3(signature = (text, kind="auto", top_k=None))]
+    fn resolve(&self, text: &str, kind: &str, top_k: Option<usize>) -> PyResult<String> {
+        let answer = repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k);
+        serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Resolve a simple name to a node id. Deterministic across processes: when
     /// several nodes share the name (e.g. an Angular component's `CLASS` and its
     /// framework `COMPONENT` marker), the highest-degree node wins rather than

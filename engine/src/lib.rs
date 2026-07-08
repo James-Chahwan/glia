@@ -1589,6 +1589,60 @@ pub fn blast_radius_by_qname(
         .collect())
 }
 
+/// One located node in a `resolve` answer: identity + kind + PPR relevance +
+/// `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it doesn't walk.)
+#[derive(serde::Serialize)]
+pub struct LocatedNode {
+    pub id: u64,
+    pub qname: String,
+    pub name: String,
+    pub kind: &'static str,
+    pub score: f64,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+}
+
+/// **resolve** (P3): a failure/change signal (stacktrace, diff, test id, or
+/// `auto`) → the ranked, LOCATED nodes it points at, in one call. Resolution
+/// order is preserved (stacktrace frames stay in order); `score` is PPR
+/// relevance seeded by the whole resolved set, so shared-context nodes rank up.
+/// `kind` ∈ {`stacktrace`, `test`, `diff`, `auto`}.
+pub fn resolve_signal_located(
+    merged: &MergedGraph,
+    text: &str,
+    kind: &str,
+    top_k: Option<usize>,
+) -> Vec<LocatedNode> {
+    let seeds = merged.resolve_signal(text, kind);
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+    let mut config = repo_graph_graph::code_activation_defaults();
+    config.direction = repo_graph_activation::Direction::Undirected;
+    config.top_k = usize::MAX;
+    let scores: HashMap<NodeId, f64> =
+        merged.activate(&seeds, &config).scores.into_iter().collect();
+    let mut out: Vec<LocatedNode> = seeds
+        .iter()
+        .map(|id| {
+            let (name, qname, kind, file, line) = locate_node(merged, *id);
+            LocatedNode {
+                id: id.0,
+                qname,
+                name,
+                kind,
+                score: scores.get(id).copied().unwrap_or(0.0),
+                file,
+                line,
+            }
+        })
+        .collect();
+    if let Some(k) = top_k {
+        out.truncate(k);
+    }
+    out
+}
+
 /// `(name, qname, kind_name, file, line)` for a node across the merged graphs.
 /// `file`/`line` come from the POSITION cell; `None` for synthetic nodes
 /// (ENDPOINT/DOC_SPACE) that carry no span. Shared "locate" for the primitives.

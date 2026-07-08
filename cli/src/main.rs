@@ -74,6 +74,23 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Resolve (P3): a failure/change signal (stacktrace, diff, test id) → the
+    /// ranked, located nodes it points at, in one call.
+    Resolve {
+        /// Path to the repo root.
+        repo: String,
+        /// The signal text (stacktrace, diff hunk, test id, or free text).
+        signal: String,
+        /// Signal kind: `auto` (sniff), `stacktrace`, `test`, or `diff`.
+        #[arg(long, default_value = "auto")]
+        kind: String,
+        /// Keep only the top-K by relevance.
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Merge N repos into one MergedGraph; cross-resolvers fire across repo
     /// boundaries. Emit summary + cross-edge counts + (optionally) JSON.
     Merge {
@@ -196,6 +213,9 @@ fn main() {
         } => cmd_impact(&repo, &qname, direction, depth),
         Cmd::BlastRadius { repo, qname, direction, depth, top_k, json } => {
             cmd_blast_radius(&repo, &qname, direction, depth, top_k, json)
+        }
+        Cmd::Resolve { repo, signal, kind, top_k, json } => {
+            cmd_resolve(&repo, &signal, &kind, top_k, json)
         }
         Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
         Cmd::Build { repo, out, no_incremental } => {
@@ -551,6 +571,42 @@ fn cmd_blast_radius(
             "| {:.4} | {} | {} | {} | `{}` | {} |",
             a.score, a.depth, a.reason, a.kind, a.qname, loc
         );
+    }
+    0
+}
+
+// ----------------------------------------------------------------------------
+// `resolve` (P3)
+// ----------------------------------------------------------------------------
+
+fn cmd_resolve(repo: &str, signal: &str, kind: &str, top_k: Option<usize>, json: bool) -> i32 {
+    let result = match generate_one(repo) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let answer = repo_graph_engine::resolve_signal_located(&result.merged, signal, kind, top_k);
+    if json {
+        println!("{}", serde_json::to_string(&answer).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia resolve ({kind})");
+    println!();
+    if answer.is_empty() {
+        println!("_(nothing resolved)_");
+        return 0;
+    }
+    println!("| score | kind | qname | location |");
+    println!("|--:|---|---|---|");
+    for a in &answer {
+        let loc = match (&a.file, a.line) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
+            (Some(f), None) => f.clone(),
+            _ => "—".to_string(),
+        };
+        println!("| {:.4} | {} | `{}` | {} |", a.score, a.kind, a.qname, loc);
     }
     0
 }

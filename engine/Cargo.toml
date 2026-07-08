@@ -9,6 +9,8 @@ description = "Pure-Rust orchestration: walk a repo, run language parsers + cros
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
+# Direction enum for the P3 resolve/blast answer-shaping (activation config).
+repo-graph-activation = { path = "../activation" }
 repo-graph-code-extractors = { path = "../parsers/code/extractors" }
 repo-graph-parser-python = { path = "../parsers/code/python" }
 repo-graph-parser-go = { path = "../parsers/code/go" }

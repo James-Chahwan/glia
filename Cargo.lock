@@ -835,6 +835,7 @@ name = "repo-graph-engine"
 version = "0.4.17"
 dependencies = [
  "bincode",
+ "repo-graph-activation",
  "repo-graph-code-domain",
  "repo-graph-code-extractors",
  "repo-graph-core",
