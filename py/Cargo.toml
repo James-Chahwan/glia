@@ -21,3 +21,6 @@ repo-graph-engine = { path = "../engine" }
 repo-graph-projection-text = { path = "../projection-text" }
 repo-graph-activation = { path = "../activation" }
 repo-graph-store = { path = "../store" }
+# Parse POSITION cell JSON + build answer records for the P3 primitives
+# (blast_radius/resolve). Already in the tree via the engine.
+serde_json = "1"

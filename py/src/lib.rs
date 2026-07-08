@@ -210,6 +210,35 @@ impl PyGraph {
             .collect()
     }
 
+    /// **blast_radius** (P3, handoff v6): the complete, deduped,
+    /// edge-category-aware, PPR-ranked, LOCATED closure around `qname` — the
+    /// answer that `find`→`impact`→`activate`→`read×N` composed to, in ONE call.
+    /// Structural `imports`/`contains` edges are excluded so the radius doesn't
+    /// fan out through shared containers (handoff P1 bullet 4). Each record:
+    /// `{id, qname, name, kind, reason, depth, score, file, line}` where `reason`
+    /// is the edge category that first put the node in scope. `direction` ∈
+    /// {`forward` (what it affects), `backward` (what affects it), `both`}.
+    /// Returns a JSON array, ranked by PPR score (desc). Errors if `qname`
+    /// resolves to no node.
+    #[pyo3(signature = (qname, direction="both", depth=4, top_k=None))]
+    fn blast_radius(
+        &self,
+        qname: &str,
+        direction: &str,
+        depth: usize,
+        top_k: Option<usize>,
+    ) -> PyResult<String> {
+        let answer = repo_graph_engine::blast_radius_by_qname(
+            &self.merged,
+            qname,
+            direction,
+            depth,
+            top_k,
+        )
+        .map_err(PyValueError::new_err)?;
+        serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// Resolve a simple name to a node id. Deterministic across processes: when
     /// several nodes share the name (e.g. an Angular component's `CLASS` and its
     /// framework `COMPONENT` marker), the highest-degree node wins rather than

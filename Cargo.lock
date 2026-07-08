@@ -1174,6 +1174,7 @@ dependencies = [
  "repo-graph-graph",
  "repo-graph-projection-text",
  "repo-graph-store",
+ "serde_json",
 ]
 
 [[package]]

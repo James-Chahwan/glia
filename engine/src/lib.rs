@@ -17,11 +17,11 @@ use std::path::{Path, PathBuf};
 use repo_graph_code_domain::{
     CodeNav, DocProvenance, DocRecord, FileParse, GRAPH_TYPE, edge_category, node_kind,
 };
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use repo_graph_core::{CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, DbResolver, EventBusResolver,
     GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver, MergedGraph,
-    PackageResolver, QueueStackResolver, SharedSchemaResolver, WebSocketStackResolver,
+    PackageResolver, QueueStackResolver, Reach, SharedSchemaResolver, WebSocketStackResolver,
 };
 
 pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
@@ -1523,6 +1523,108 @@ fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<repo_graph_gr
         unresolved_refs: Vec::new(),
         properties: Default::default(),
     })
+}
+
+// ============================================================================
+// P3 answer-shaped primitives (handoff v6) — rank + locate + why, in the ENGINE
+// so the CLI, pyo3/MCP, and future TUI/3d-viewer all share one implementation.
+// ============================================================================
+
+/// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
+/// + PPR `score` + `file`:`line`. Serialized straight to the pyo3/CLI surface.
+#[derive(serde::Serialize)]
+pub struct BlastAnswer {
+    pub id: u64,
+    pub qname: String,
+    pub name: String,
+    pub kind: &'static str,
+    /// Edge category that first put this node in scope ("why it's in the radius").
+    pub reason: &'static str,
+    pub depth: usize,
+    pub score: f64,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+}
+
+/// `blast_radius`, resolved from a qname/name and fully located — the P3 answer
+/// that `find`→`impact`→`activate`→`read×N` collapses to. `direction` ∈
+/// {`forward`, `backward`, `both`}. Err on an unknown qname or bad direction.
+pub fn blast_radius_by_qname(
+    merged: &MergedGraph,
+    qname: &str,
+    direction: &str,
+    max_depth: usize,
+    top_k: Option<usize>,
+) -> Result<Vec<BlastAnswer>, String> {
+    let seed = merged
+        .node_id_by_qname(qname)
+        .or_else(|| merged.resolve_name(qname))
+        .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
+    let reach = match direction {
+        "forward" => Reach::Forward,
+        "backward" => Reach::Backward,
+        "both" => Reach::Both,
+        o => return Err(format!("direction must be forward|backward|both, got `{o}`")),
+    };
+    let mut hits = merged.blast_radius(seed, reach, max_depth, None);
+    if let Some(k) = top_k {
+        hits.truncate(k);
+    }
+    Ok(hits
+        .iter()
+        .map(|h| {
+            let (name, qname, kind, file, line) = locate_node(merged, h.id);
+            BlastAnswer {
+                id: h.id.0,
+                qname,
+                name,
+                kind,
+                reason: edge_category::name(h.reason),
+                depth: h.depth,
+                score: h.score,
+                file,
+                line,
+            }
+        })
+        .collect())
+}
+
+/// `(name, qname, kind_name, file, line)` for a node across the merged graphs.
+/// `file`/`line` come from the POSITION cell; `None` for synthetic nodes
+/// (ENDPOINT/DOC_SPACE) that carry no span. Shared "locate" for the primitives.
+pub fn locate_node(
+    merged: &MergedGraph,
+    id: NodeId,
+) -> (String, String, &'static str, Option<String>, Option<i64>) {
+    for g in &merged.graphs {
+        if !g.nav.qname_by_id.contains_key(&id) {
+            continue;
+        }
+        let name = g.nav.name_by_id.get(&id).cloned().unwrap_or_default();
+        let qname = g.nav.qname_by_id.get(&id).cloned().unwrap_or_default();
+        let kind = g
+            .nav
+            .kind_by_id
+            .get(&id)
+            .map(|k| node_kind::name(*k))
+            .unwrap_or("UNKNOWN");
+        let (mut file, mut line) = (None, None);
+        if let Some(n) = g.nodes.iter().find(|n| n.id == id) {
+            for c in &n.cells {
+                if c.kind != repo_graph_code_domain::cell_type::POSITION {
+                    continue;
+                }
+                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                        file = v.get("file").and_then(|f| f.as_str()).map(String::from);
+                        line = v.get("start_line").and_then(serde_json::Value::as_i64);
+                    }
+                }
+            }
+        }
+        return (name, qname, kind, file, line);
+    }
+    (String::new(), format!("(unknown:{})", id.0), "UNKNOWN", None, None)
 }
 
 fn is_dockerfile_path(path: &str) -> bool {

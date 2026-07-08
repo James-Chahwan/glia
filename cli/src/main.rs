@@ -52,6 +52,28 @@ enum Cmd {
         #[arg(long, default_value_t = 4)]
         depth: usize,
     },
+    /// Blast radius (P3): the complete, edge-category-aware, PPR-ranked, located
+    /// closure around <qname> — what it affects / what affects it, across service
+    /// boundaries, in one call. Excludes structural import/contain edges so the
+    /// radius doesn't fan out through shared containers.
+    BlastRadius {
+        /// Path to the repo root (or `--merge` a set — use `merge` for multi-repo).
+        repo: String,
+        /// Qname or simple name of the seed entity.
+        qname: String,
+        /// Which way the radius spreads.
+        #[arg(long, value_enum, default_value_t = ImpactDirection::Both)]
+        direction: ImpactDirection,
+        /// Maximum hops along carry edges.
+        #[arg(long, default_value_t = 4)]
+        depth: usize,
+        /// Keep only the top-K by PPR score.
+        #[arg(long)]
+        top_k: Option<usize>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Merge N repos into one MergedGraph; cross-resolvers fire across repo
     /// boundaries. Emit summary + cross-edge counts + (optionally) JSON.
     Merge {
@@ -172,6 +194,9 @@ fn main() {
             direction,
             depth,
         } => cmd_impact(&repo, &qname, direction, depth),
+        Cmd::BlastRadius { repo, qname, direction, depth, top_k, json } => {
+            cmd_blast_radius(&repo, &qname, direction, depth, top_k, json)
+        }
         Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
         Cmd::Build { repo, out, no_incremental } => {
             cmd_build(&repo, out.as_deref(), !no_incremental)
@@ -470,6 +495,65 @@ fn lookup_node_info(merged: &MergedGraph, id: NodeId) -> NodeInfo {
 // ----------------------------------------------------------------------------
 // `merge`
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// `blast-radius` (P3)
+// ----------------------------------------------------------------------------
+
+fn cmd_blast_radius(
+    repo: &str,
+    qname: &str,
+    direction: ImpactDirection,
+    depth: usize,
+    top_k: Option<usize>,
+    json: bool,
+) -> i32 {
+    let result = match generate_one(repo) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let dir = match direction {
+        ImpactDirection::Forward => "forward",
+        ImpactDirection::Backward => "backward",
+        ImpactDirection::Both => "both",
+    };
+    let answer =
+        match repo_graph_engine::blast_radius_by_qname(&result.merged, qname, dir, depth, top_k) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("error: {e}");
+                eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
+                return 3;
+            }
+        };
+    if json {
+        println!("{}", serde_json::to_string(&answer).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia blast-radius `{qname}` ({dir}, depth ≤ {depth})");
+    println!();
+    if answer.is_empty() {
+        println!("_(nothing in radius)_");
+        return 0;
+    }
+    println!("| score | depth | via | kind | qname | location |");
+    println!("|--:|--:|---|---|---|---|");
+    for a in &answer {
+        let loc = match (&a.file, a.line) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
+            (Some(f), None) => f.clone(),
+            _ => "—".to_string(),
+        };
+        println!(
+            "| {:.4} | {} | {} | {} | `{}` | {} |",
+            a.score, a.depth, a.reason, a.kind, a.qname, loc
+        );
+    }
+    0
+}
 
 fn cmd_merge(repos: &[String], out: Option<&str>) -> i32 {
     if repos.is_empty() {
