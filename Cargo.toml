@@ -57,4 +57,4 @@ members = [
 # release happens HERE and nowhere else — a py-only bump used to leave the cache
 # stamp frozen (audit 2026-06-10 #4), so old parses survived upgrades.
 [workspace.package]
-version = "0.4.17"
+version = "0.4.18"
