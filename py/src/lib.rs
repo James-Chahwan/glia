@@ -239,6 +239,17 @@ impl PyGraph {
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// **coverage** (P2, handoff v6): for the languages present in the repo, the
+    /// known extraction caveats + how many edges of each flagged category exist
+    /// — so a consumer falls back to grep DELIBERATELY where glia is
+    /// known-partial (dynamic dispatch, string-built URLs, non-standard HTTP
+    /// clients) instead of trusting a silent blind spot. Each note
+    /// `{language, edge_category, note, verify, edges_found}`. Returns a JSON array.
+    fn coverage(&self) -> PyResult<String> {
+        let report = repo_graph_engine::coverage_report(&self.merged);
+        serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// **cross_stack_trace** (P3, handoff v6): follow `feature` forward across
     /// service boundaries and return the ORDERED path — each hop labeled with its
     /// `mechanism` (http/queue/grpc/call/…) and `cross_service` — in one call.

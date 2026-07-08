@@ -74,6 +74,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Coverage (P2): for the languages present in the repo, the known
+    /// extraction caveats + edges-found per flagged category, so you fall back
+    /// to grep deliberately where glia is known-partial.
+    Coverage {
+        /// Path to the repo root.
+        repo: String,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Cross-stack trace (P3): follow <feature> forward across service
     /// boundaries and print the ordered path, each hop labeled with its
     /// mechanism (http/queue/grpc/call) and whether it crossed a service.
@@ -229,6 +239,7 @@ fn main() {
         Cmd::BlastRadius { repo, qname, direction, depth, top_k, json } => {
             cmd_blast_radius(&repo, &qname, direction, depth, top_k, json)
         }
+        Cmd::Coverage { repo, json } => cmd_coverage(&repo, json),
         Cmd::Trace { repo, feature, depth, json } => cmd_trace(&repo, &feature, depth, json),
         Cmd::Resolve { repo, signal, kind, top_k, json } => {
             cmd_resolve(&repo, &signal, &kind, top_k, json)
@@ -586,6 +597,38 @@ fn cmd_blast_radius(
         println!(
             "| {:.4} | {} | {} | {} | `{}` | {} |",
             a.score, a.depth, a.reason, a.kind, a.qname, loc
+        );
+    }
+    0
+}
+
+// ----------------------------------------------------------------------------
+// `coverage` (P2)
+// ----------------------------------------------------------------------------
+
+fn cmd_coverage(repo: &str, json: bool) -> i32 {
+    let result = match generate_one(repo) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let report = repo_graph_engine::coverage_report(&result.merged);
+    if json {
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia coverage `{repo}`");
+    println!();
+    println!("_Where glia is known-partial — verify these dimensions with grep._");
+    println!();
+    println!("| language | edge | found | caveat → verify |");
+    println!("|---|---|--:|---|");
+    for n in &report {
+        println!(
+            "| {} | {} | {} | {} — _{}_ |",
+            n.language, n.edge_category, n.edges_found, n.note, n.verify
         );
     }
     0
