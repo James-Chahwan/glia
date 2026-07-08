@@ -154,14 +154,20 @@ fn auth_py_emits_function_and_records_imports() {
 fn every_code_entity_has_code_and_position_cells() {
     let p = parse("myapp/users.py", "myapp::users");
     for n in &p.nodes {
-        assert!(
-            n.cells.iter().any(|c| c.kind == cell_type::CODE),
-            "node {:?} missing code cell",
-            n.id
-        );
+        let kind = p.nav.kind_by_id.get(&n.id).copied();
+        // ATTRIBUTE nodes are intentionally cell-light: an attribute's body IS
+        // the enclosing class body, so it carries a POSITION cell but no CODE
+        // cell (see `emit_attribute_node`). Every other code entity carries both.
+        if kind != Some(node_kind::ATTRIBUTE) {
+            assert!(
+                n.cells.iter().any(|c| c.kind == cell_type::CODE),
+                "node {:?} ({kind:?}) missing code cell",
+                n.id
+            );
+        }
         assert!(
             n.cells.iter().any(|c| c.kind == cell_type::POSITION),
-            "node {:?} missing position cell",
+            "node {:?} ({kind:?}) missing position cell",
             n.id
         );
     }
