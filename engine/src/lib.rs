@@ -1681,7 +1681,7 @@ fn edge_category_counts(merged: &MergedGraph) -> std::collections::HashMap<&'sta
 // ============================================================================
 
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
-/// + PPR `score` + `file`:`line`. Serialized straight to the pyo3/CLI surface.
+/// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
 #[derive(serde::Serialize)]
 pub struct BlastAnswer {
     pub id: u64,
@@ -1692,8 +1692,64 @@ pub struct BlastAnswer {
     pub reason: &'static str,
     pub depth: usize,
     pub score: f64,
+    /// Reachable from an entrypoint (route/handler/main/test/component) — `false`
+    /// = likely dead. Best-effort; annotated, not filtered, unless `live_only`.
+    pub live: bool,
     pub file: Option<String>,
     pub line: Option<i64>,
+}
+
+/// Is this node an entrypoint — an externally-triggered root from which live
+/// code is reachable? Routes, gRPC/WS/event handlers, CLI commands, framework
+/// components, and `main`/`test*` functions.
+fn is_entrypoint(kind: Option<repo_graph_core::NodeKindId>, name: &str) -> bool {
+    match kind {
+        Some(k)
+            if k == node_kind::ROUTE
+                || k == node_kind::GRPC_SERVICE
+                || k == node_kind::WS_HANDLER
+                || k == node_kind::EVENT_HANDLER
+                || k == node_kind::CLI_COMMAND
+                || k == node_kind::COMPONENT =>
+        {
+            true
+        }
+        Some(k) if k == node_kind::FUNCTION || k == node_kind::METHOD => {
+            name == "main" || name.starts_with("test") || name.starts_with("Test")
+        }
+        _ => false,
+    }
+}
+
+/// The entrypoint-reachable ("live") node set: every entrypoint plus everything
+/// forward-reachable from one along semantic carry edges. A node absent from
+/// this set is likely dead code. Conservative (generous entrypoint set) to avoid
+/// false-dead flags — the failure mode the handoff warns about.
+pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
+    use std::collections::{HashSet, VecDeque};
+    let carry: HashSet<repo_graph_core::EdgeCategoryId> =
+        repo_graph_graph::blast_carry_edges().into_iter().collect();
+    let edges: Vec<&Edge> = merged.all_edges().collect();
+
+    let mut live: HashSet<NodeId> = HashSet::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let kind = g.nav.kind_by_id.get(&n.id).copied();
+            let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+            if is_entrypoint(kind, name) && live.insert(n.id) {
+                queue.push_back(n.id);
+            }
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        for e in &edges {
+            if e.from == node && carry.contains(&e.category) && live.insert(e.to) {
+                queue.push_back(e.to);
+            }
+        }
+    }
+    live
 }
 
 /// `blast_radius`, resolved from a qname/name and fully located — the P3 answer
@@ -1705,6 +1761,7 @@ pub fn blast_radius_by_qname(
     direction: &str,
     max_depth: usize,
     top_k: Option<usize>,
+    live_only: bool,
 ) -> Result<Vec<BlastAnswer>, String> {
     let seed = merged
         .node_id_by_qname(qname)
@@ -1716,12 +1773,11 @@ pub fn blast_radius_by_qname(
         "both" => Reach::Both,
         o => return Err(format!("direction must be forward|backward|both, got `{o}`")),
     };
-    let mut hits = merged.blast_radius(seed, reach, max_depth, None);
-    if let Some(k) = top_k {
-        hits.truncate(k);
-    }
-    Ok(hits
+    let live = entrypoint_reachable(merged);
+    let hits = merged.blast_radius(seed, reach, max_depth, None);
+    let mut out: Vec<BlastAnswer> = hits
         .iter()
+        .filter(|h| !live_only || live.contains(&h.id))
         .map(|h| {
             let (name, qname, kind, file, line) = locate_node(merged, h.id);
             BlastAnswer {
@@ -1732,11 +1788,16 @@ pub fn blast_radius_by_qname(
                 reason: edge_category::name(h.reason),
                 depth: h.depth,
                 score: h.score,
+                live: live.contains(&h.id),
                 file,
                 line,
             }
         })
-        .collect())
+        .collect();
+    if let Some(k) = top_k {
+        out.truncate(k);
+    }
+    Ok(out)
 }
 
 /// One hop in a cross-stack trace: a typed edge from one entity to the next,

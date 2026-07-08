@@ -57,10 +57,13 @@ enum Cmd {
     /// boundaries, in one call. Excludes structural import/contain edges so the
     /// radius doesn't fan out through shared containers.
     BlastRadius {
-        /// Path to the repo root (or `--merge` a set — use `merge` for multi-repo).
+        /// Path to the repo root.
         repo: String,
         /// Qname or simple name of the seed entity.
         qname: String,
+        /// Additional repos to merge in (cross-service). Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
         /// Which way the radius spreads.
         #[arg(long, value_enum, default_value_t = ImpactDirection::Both)]
         direction: ImpactDirection,
@@ -70,6 +73,9 @@ enum Cmd {
         /// Keep only the top-K by PPR score.
         #[arg(long)]
         top_k: Option<usize>,
+        /// Drop nodes not reachable from an entrypoint (likely-dead code).
+        #[arg(long)]
+        live_only: bool,
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -80,6 +86,9 @@ enum Cmd {
     Coverage {
         /// Path to the repo root.
         repo: String,
+        /// Additional repos to merge in. Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -88,10 +97,13 @@ enum Cmd {
     /// boundaries and print the ordered path, each hop labeled with its
     /// mechanism (http/queue/grpc/call) and whether it crossed a service.
     Trace {
-        /// Path to the repo root (use `merge`-style multi-repo for cross-service).
+        /// Path to the repo root.
         repo: String,
         /// Qname or simple name of the feature/entry entity.
         feature: String,
+        /// Additional repos to merge in (cross-service). Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
         /// Maximum hops.
         #[arg(long, default_value_t = 6)]
         depth: usize,
@@ -106,6 +118,9 @@ enum Cmd {
         repo: String,
         /// The signal text (stacktrace, diff hunk, test id, or free text).
         signal: String,
+        /// Additional repos to merge in. Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
         /// Signal kind: `auto` (sniff), `stacktrace`, `test`, or `diff`.
         #[arg(long, default_value = "auto")]
         kind: String,
@@ -236,13 +251,15 @@ fn main() {
             direction,
             depth,
         } => cmd_impact(&repo, &qname, direction, depth),
-        Cmd::BlastRadius { repo, qname, direction, depth, top_k, json } => {
-            cmd_blast_radius(&repo, &qname, direction, depth, top_k, json)
+        Cmd::BlastRadius { repo, qname, with, direction, depth, top_k, live_only, json } => {
+            cmd_blast_radius(&repo, &qname, &with, direction, depth, top_k, live_only, json)
         }
-        Cmd::Coverage { repo, json } => cmd_coverage(&repo, json),
-        Cmd::Trace { repo, feature, depth, json } => cmd_trace(&repo, &feature, depth, json),
-        Cmd::Resolve { repo, signal, kind, top_k, json } => {
-            cmd_resolve(&repo, &signal, &kind, top_k, json)
+        Cmd::Coverage { repo, with, json } => cmd_coverage(&repo, &with, json),
+        Cmd::Trace { repo, feature, with, depth, json } => {
+            cmd_trace(&repo, &feature, &with, depth, json)
+        }
+        Cmd::Resolve { repo, signal, with, kind, top_k, json } => {
+            cmd_resolve(&repo, &signal, &with, &kind, top_k, json)
         }
         Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
         Cmd::Build { repo, out, no_incremental } => {
@@ -547,15 +564,30 @@ fn lookup_node_info(merged: &MergedGraph, id: NodeId) -> NodeInfo {
 // `blast-radius` (P3)
 // ----------------------------------------------------------------------------
 
+/// Build a graph from one repo, or merge several (`--with`) so cross-service
+/// resolvers fire across the boundary — shared by the P2/P3 commands.
+fn generate_for(repo: &str, with: &[String]) -> Result<GenerateResult, String> {
+    if with.is_empty() {
+        generate_one(repo)
+    } else {
+        let mut repos = vec![repo.to_string()];
+        repos.extend(with.iter().cloned());
+        generate_many(&repos)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn cmd_blast_radius(
     repo: &str,
     qname: &str,
+    with: &[String],
     direction: ImpactDirection,
     depth: usize,
     top_k: Option<usize>,
+    live_only: bool,
     json: bool,
 ) -> i32 {
-    let result = match generate_one(repo) {
+    let result = match generate_for(repo, with) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -567,15 +599,21 @@ fn cmd_blast_radius(
         ImpactDirection::Backward => "backward",
         ImpactDirection::Both => "both",
     };
-    let answer =
-        match repo_graph_engine::blast_radius_by_qname(&result.merged, qname, dir, depth, top_k) {
-            Ok(a) => a,
-            Err(e) => {
-                eprintln!("error: {e}");
-                eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
-                return 3;
-            }
-        };
+    let answer = match repo_graph_engine::blast_radius_by_qname(
+        &result.merged,
+        qname,
+        dir,
+        depth,
+        top_k,
+        live_only,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
+            return 3;
+        }
+    };
     if json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
         return 0;
@@ -586,17 +624,18 @@ fn cmd_blast_radius(
         println!("_(nothing in radius)_");
         return 0;
     }
-    println!("| score | depth | via | kind | qname | location |");
-    println!("|--:|--:|---|---|---|---|");
+    println!("| score | depth | live | via | kind | qname | location |");
+    println!("|--:|--:|:-:|---|---|---|---|");
     for a in &answer {
         let loc = match (&a.file, a.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
+        let live = if a.live { "●" } else { "⊘" };
         println!(
-            "| {:.4} | {} | {} | {} | `{}` | {} |",
-            a.score, a.depth, a.reason, a.kind, a.qname, loc
+            "| {:.4} | {} | {} | {} | {} | `{}` | {} |",
+            a.score, a.depth, live, a.reason, a.kind, a.qname, loc
         );
     }
     0
@@ -606,8 +645,8 @@ fn cmd_blast_radius(
 // `coverage` (P2)
 // ----------------------------------------------------------------------------
 
-fn cmd_coverage(repo: &str, json: bool) -> i32 {
-    let result = match generate_one(repo) {
+fn cmd_coverage(repo: &str, with: &[String], json: bool) -> i32 {
+    let result = match generate_for(repo, with) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -638,8 +677,8 @@ fn cmd_coverage(repo: &str, json: bool) -> i32 {
 // `trace` (P3 cross_stack_trace)
 // ----------------------------------------------------------------------------
 
-fn cmd_trace(repo: &str, feature: &str, depth: usize, json: bool) -> i32 {
-    let result = match generate_one(repo) {
+fn cmd_trace(repo: &str, feature: &str, with: &[String], depth: usize, json: bool) -> i32 {
+    let result = match generate_for(repo, with) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -685,8 +724,15 @@ fn cmd_trace(repo: &str, feature: &str, depth: usize, json: bool) -> i32 {
 // `resolve` (P3)
 // ----------------------------------------------------------------------------
 
-fn cmd_resolve(repo: &str, signal: &str, kind: &str, top_k: Option<usize>, json: bool) -> i32 {
-    let result = match generate_one(repo) {
+fn cmd_resolve(
+    repo: &str,
+    signal: &str,
+    with: &[String],
+    kind: &str,
+    top_k: Option<usize>,
+    json: bool,
+) -> i32 {
+    let result = match generate_for(repo, with) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");

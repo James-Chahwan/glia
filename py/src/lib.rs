@@ -220,13 +220,14 @@ impl PyGraph {
     /// {`forward` (what it affects), `backward` (what affects it), `both`}.
     /// Returns a JSON array, ranked by PPR score (desc). Errors if `qname`
     /// resolves to no node.
-    #[pyo3(signature = (qname, direction="both", depth=4, top_k=None))]
+    #[pyo3(signature = (qname, direction="both", depth=4, top_k=None, live_only=false))]
     fn blast_radius(
         &self,
         qname: &str,
         direction: &str,
         depth: usize,
         top_k: Option<usize>,
+        live_only: bool,
     ) -> PyResult<String> {
         let answer = repo_graph_engine::blast_radius_by_qname(
             &self.merged,
@@ -234,6 +235,7 @@ impl PyGraph {
             direction,
             depth,
             top_k,
+            live_only,
         )
         .map_err(PyValueError::new_err)?;
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
