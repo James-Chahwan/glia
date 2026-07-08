@@ -241,6 +241,15 @@ impl PyGraph {
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// **governing_docs** (tier-4 P3 payoff): the doc sections that DOCUMENTS
+    /// `qname` — "what are the rules for X?" — located, in one call. Each record
+    /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
+    fn governing_docs(&self, qname: &str) -> PyResult<String> {
+        let docs = repo_graph_engine::governing_docs(&self.merged, qname)
+            .map_err(PyValueError::new_err)?;
+        serde_json::to_string(&docs).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// **coverage** (P2, handoff v6): for the languages present in the repo, the
     /// known extraction caveats + how many edges of each flagged category exist
     /// — so a consumer falls back to grep DELIBERATELY where glia is

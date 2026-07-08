@@ -1304,7 +1304,10 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
         if t.starts_with("# ") || t.starts_with("## ") {
             flush(&mut chunks, &cur_slug, &buf, cur_start, i as u32, &mut seq);
             buf.clear();
-            cur_slug = Some(heading_slug(t.trim_start_matches('#').trim()));
+            // An emoji/punctuation-only heading slugs to "" — fall through to the
+            // ordinal fallback (overview/section-N) so sections don't collide.
+            let s = heading_slug(t.trim_start_matches('#').trim());
+            cur_slug = if s.is_empty() { None } else { Some(s) };
             cur_start = i as u32;
             buf.push(line);
         } else {
@@ -1927,6 +1930,37 @@ pub fn resolve_signal_located(
         out.truncate(k);
     }
     out
+}
+
+/// **governing_docs** (P3 payoff, tier-4): the doc sections that DOCUMENTS a
+/// symbol — "what are the rules for X?" — located, in one call. Direct
+/// `doc --DOCUMENTS--> symbol` predecessors (the conservative, precise linker
+/// signal). Reuses `LocatedNode` (score = 0; docs aren't PPR-ranked here).
+pub fn governing_docs(merged: &MergedGraph, qname: &str) -> Result<Vec<LocatedNode>, String> {
+    let target = merged
+        .node_id_by_qname(qname)
+        .or_else(|| merged.resolve_name(qname))
+        .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in merged.all_edges() {
+        if e.to == target
+            && e.category == edge_category::DOCUMENTS
+            && seen.insert(e.from)
+        {
+            let (name, qn, kind, file, line) = locate_node(merged, e.from);
+            out.push(LocatedNode {
+                id: e.from.0,
+                qname: qn,
+                name,
+                kind,
+                score: 0.0,
+                file,
+                line,
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// `(name, qname, kind_name, file, line)` for a node across the merged graphs.

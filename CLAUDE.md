@@ -95,9 +95,36 @@ Implement `CrossGraphResolver`; register it so `MergedGraph` calls it during cro
 - **Publish gate.** Only `rust/py/` publishes to PyPI (as `repo-graph-py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
+## Query & Answer Surface (v6 P2/P3)
+
+Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
+TUI), not composed by the consumer. Each is one call: complete, ranked, located.
+
+CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
+- `glia blast-radius <repo> <qname>` — edge-category-aware, PPR-ranked, located
+  closure with per-node edge-reason + `live` flag (`--live-only`, `--direction`,
+  `--depth`, `--top-k`). Excludes structural import/contain edges (no fan-out noise).
+- `glia trace <repo> <feature>` — ordered cross-service path with mechanism labels
+  (http/queue/grpc/call) + `cross_service` flags.
+- `glia resolve <repo> <signal> [--kind stacktrace|test|diff|auto]` — signal →
+  ranked located nodes.
+- `glia coverage <repo>` — P2 blind-spot signaling: per-language known extraction
+  caveats + edges-found, so graph+grep fallback is deliberate.
+- `glia docs-for <repo> <qname>` — the DOC_SECTIONs that DOCUMENTS a symbol
+  (governing_docs). Tier-4 doc ingestion: `glia docs sync --space <KEY>` /
+  `glia docs push` (network; feeds the deterministic build via a local snapshot).
+
+pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `resolve`, `coverage`,
+`governing_docs` (+ `activate`, `find_node`, `node_cells`, `dense_text*`). Engine
+entry points: `blast_radius_by_qname`, `cross_stack_trace`, `resolve_signal_located`,
+`coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`.
+
 ## Roadmap
 
-- **0.4.13** — maturin GitHub Actions wheel matrix; candle `forward_input_embed` latent hook; SWE-bench Lite N=20–30 run (Qwen 2.5 Coder 7B, Runpod 4090, ~$20–30)
+- **v6 (done, glia-side):** P1 substrate completeness (blind 48→0, eval-gated by
+  `bench/substrate-gap`), P2 coverage signaling, P3 answer-shaped primitives
+  (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
+  are its enabler.
 - **0.5.0** — rename to **glia**; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain
 
 ## Memory

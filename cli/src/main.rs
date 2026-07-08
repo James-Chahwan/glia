@@ -80,6 +80,20 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Docs-for (tier-4 P3): the doc sections that DOCUMENTS <qname> — "what are
+    /// the rules for X?" — located.
+    DocsFor {
+        /// Path to the repo root.
+        repo: String,
+        /// Qname or simple name of the code entity.
+        qname: String,
+        /// Additional repos to merge in. Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Coverage (P2): for the languages present in the repo, the known
     /// extraction caveats + edges-found per flagged category, so you fall back
     /// to grep deliberately where glia is known-partial.
@@ -254,6 +268,7 @@ fn main() {
         Cmd::BlastRadius { repo, qname, with, direction, depth, top_k, live_only, json } => {
             cmd_blast_radius(&repo, &qname, &with, direction, depth, top_k, live_only, json)
         }
+        Cmd::DocsFor { repo, qname, with, json } => cmd_docs_for(&repo, &qname, &with, json),
         Cmd::Coverage { repo, with, json } => cmd_coverage(&repo, &with, json),
         Cmd::Trace { repo, feature, with, depth, json } => {
             cmd_trace(&repo, &feature, &with, depth, json)
@@ -637,6 +652,49 @@ fn cmd_blast_radius(
             "| {:.4} | {} | {} | {} | {} | `{}` | {} |",
             a.score, a.depth, live, a.reason, a.kind, a.qname, loc
         );
+    }
+    0
+}
+
+// ----------------------------------------------------------------------------
+// `docs-for` (tier-4 P3 payoff)
+// ----------------------------------------------------------------------------
+
+fn cmd_docs_for(repo: &str, qname: &str, with: &[String], json: bool) -> i32 {
+    let result = match generate_for(repo, with) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let docs = match repo_graph_engine::governing_docs(&result.merged, qname) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
+            return 3;
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&docs).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia docs-for `{qname}`");
+    println!();
+    if docs.is_empty() {
+        println!("_(no governing docs)_");
+        return 0;
+    }
+    println!("| kind | doc section | location |");
+    println!("|---|---|---|");
+    for d in &docs {
+        let loc = match (&d.file, d.line) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
+            (Some(f), None) => f.clone(),
+            _ => "—".to_string(),
+        };
+        println!("| {} | `{}` | {} |", d.kind, d.qname, loc);
     }
     0
 }
