@@ -1589,6 +1589,81 @@ pub fn blast_radius_by_qname(
         .collect())
 }
 
+/// One hop in a cross-stack trace: a typed edge from one entity to the next,
+/// with the `mechanism` (edge category) and whether it crossed a service
+/// boundary. The destination is located.
+#[derive(serde::Serialize)]
+pub struct TraceHop {
+    pub depth: usize,
+    /// Edge category name — the mechanism (`CALLS`, `HTTP_CALLS`, `QUEUE_FLOWS`…).
+    pub mechanism: &'static str,
+    /// True when `from` and `to` live in different repos/services.
+    pub cross_service: bool,
+    pub from_qname: String,
+    pub to_qname: String,
+    pub to_kind: &'static str,
+    pub to_file: Option<String>,
+    pub to_line: Option<i64>,
+}
+
+/// **cross_stack_trace** (P3): follow a feature forward across service
+/// boundaries and return the ORDERED path — each hop labeled with its mechanism
+/// (http/queue/grpc/call/…) and whether it crossed a service boundary — in one
+/// call. Where `blast_radius` returns a ranked *set*, this returns the *sequence*
+/// of typed edges, so an agent sees how a request flows end to end.
+pub fn cross_stack_trace(
+    merged: &MergedGraph,
+    feature: &str,
+    max_depth: usize,
+) -> Result<Vec<TraceHop>, String> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+    let seed = merged
+        .node_id_by_qname(feature)
+        .or_else(|| merged.resolve_name(feature))
+        .ok_or_else(|| format!("no node with qname/name `{feature}`"))?;
+
+    let mut repo_of: HashMap<NodeId, u64> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            repo_of.insert(n.id, g.repo.0);
+        }
+    }
+    let carry: HashSet<repo_graph_core::EdgeCategoryId> =
+        repo_graph_graph::blast_carry_edges().into_iter().collect();
+    let edges: Vec<&Edge> = merged.all_edges().collect();
+
+    let mut hops = Vec::new();
+    let mut visited: HashSet<NodeId> = HashSet::from([seed]);
+    let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(seed, 0)]);
+    while let Some((node, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+        for e in &edges {
+            if e.from != node || !carry.contains(&e.category) {
+                continue;
+            }
+            if visited.insert(e.to) {
+                let (_, from_qname, _, _, _) = locate_node(merged, e.from);
+                let (_, to_qname, to_kind, to_file, to_line) = locate_node(merged, e.to);
+                let cross_service = repo_of.get(&e.from) != repo_of.get(&e.to);
+                hops.push(TraceHop {
+                    depth: depth + 1,
+                    mechanism: edge_category::name(e.category),
+                    cross_service,
+                    from_qname,
+                    to_qname,
+                    to_kind,
+                    to_file,
+                    to_line,
+                });
+                queue.push_back((e.to, depth + 1));
+            }
+        }
+    }
+    Ok(hops)
+}
+
 /// One located node in a `resolve` answer: identity + kind + PPR relevance +
 /// `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it doesn't walk.)
 #[derive(serde::Serialize)]

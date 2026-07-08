@@ -74,6 +74,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Cross-stack trace (P3): follow <feature> forward across service
+    /// boundaries and print the ordered path, each hop labeled with its
+    /// mechanism (http/queue/grpc/call) and whether it crossed a service.
+    Trace {
+        /// Path to the repo root (use `merge`-style multi-repo for cross-service).
+        repo: String,
+        /// Qname or simple name of the feature/entry entity.
+        feature: String,
+        /// Maximum hops.
+        #[arg(long, default_value_t = 6)]
+        depth: usize,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Resolve (P3): a failure/change signal (stacktrace, diff, test id) → the
     /// ranked, located nodes it points at, in one call.
     Resolve {
@@ -214,6 +229,7 @@ fn main() {
         Cmd::BlastRadius { repo, qname, direction, depth, top_k, json } => {
             cmd_blast_radius(&repo, &qname, direction, depth, top_k, json)
         }
+        Cmd::Trace { repo, feature, depth, json } => cmd_trace(&repo, &feature, depth, json),
         Cmd::Resolve { repo, signal, kind, top_k, json } => {
             cmd_resolve(&repo, &signal, &kind, top_k, json)
         }
@@ -570,6 +586,53 @@ fn cmd_blast_radius(
         println!(
             "| {:.4} | {} | {} | {} | `{}` | {} |",
             a.score, a.depth, a.reason, a.kind, a.qname, loc
+        );
+    }
+    0
+}
+
+// ----------------------------------------------------------------------------
+// `trace` (P3 cross_stack_trace)
+// ----------------------------------------------------------------------------
+
+fn cmd_trace(repo: &str, feature: &str, depth: usize, json: bool) -> i32 {
+    let result = match generate_one(repo) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let hops = match repo_graph_engine::cross_stack_trace(&result.merged, feature, depth) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: {e}");
+            eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
+            return 3;
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string(&hops).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia trace `{feature}` (depth ≤ {depth})");
+    println!();
+    if hops.is_empty() {
+        println!("_(no outward flow)_");
+        return 0;
+    }
+    println!("| depth | mechanism | xsvc | from | → to | location |");
+    println!("|--:|---|:-:|---|---|---|");
+    for h in &hops {
+        let loc = match (&h.to_file, h.to_line) {
+            (Some(f), Some(l)) => format!("{f}:{l}"),
+            (Some(f), None) => f.clone(),
+            _ => "—".to_string(),
+        };
+        let xsvc = if h.cross_service { "✔" } else { "" };
+        println!(
+            "| {} | {} | {} | `{}` | `{}` ({}) | {} |",
+            h.depth, h.mechanism, xsvc, h.from_qname, h.to_qname, h.to_kind, loc
         );
     }
     0
