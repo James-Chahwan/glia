@@ -1,0 +1,12 @@
+{
+  "framework": "rust-axum",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "/users", "note": "axum route"},
+    {"kind": "FUNCTION", "name": "list_users", "note": "handler"}
+  ],
+  "expect_edges": [
+    {"from": "/users", "to": "list_users", "category": "HANDLED_BY", "note": "route handled by handler"}
+  ]
+}

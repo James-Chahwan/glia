@@ -1,0 +1,12 @@
+{
+  "framework": "py-accesses-data",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "users", "note": "table"},
+    {"kind": "FUNCTION", "name": "find_users", "note": "accessor"}
+  ],
+  "expect_edges": [
+    {"from": "find_users", "to": "users", "category": "ACCESSES_DATA", "note": "session.query(User)"}
+  ]
+}

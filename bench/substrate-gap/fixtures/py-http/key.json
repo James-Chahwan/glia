@@ -1,0 +1,13 @@
+{
+  "framework": "py-http",
+  "language": "python",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "requests.get(f'http://api/users/{uid}') -> client ENDPOINT (Pattern A); f-string seg -> ${…}"},
+    {"kind": "ENDPOINT", "name": "POST /users", "note": "requests.post('http://api/users') -> client ENDPOINT"},
+    {"kind": "ROUTE", "name": "/users", "note": "flask route (server, control)"}
+  ],
+  "expect_edges": [
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: requests.post paired to flask POST /users (GET client hits /users/<int:uid>, a flask converter the resolver doesn't wildcard, so only POST pairs)"}
+  ]
+}

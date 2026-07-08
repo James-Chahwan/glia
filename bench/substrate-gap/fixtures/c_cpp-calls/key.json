@@ -1,0 +1,12 @@
+{
+  "framework": "c_cpp-calls",
+  "language": "c++",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "helper", "note": "callee"},
+    {"kind": "FUNCTION", "name": "compute", "note": "caller"}
+  ],
+  "expect_edges": [
+    {"from": "compute", "to": "helper", "category": "CALLS", "note": "compute() calls helper()"}
+  ]
+}

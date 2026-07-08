@@ -1,0 +1,14 @@
+{
+  "framework": "dart-http-dio",
+  "language": "dart",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "dio.get('/users/$id') -> client ENDPOINT (Pattern A fix)"},
+    {"kind": "ENDPOINT", "name": "POST /users", "note": "dio.post('/users') -> client ENDPOINT"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi route (server, control)"}
+  ],
+  "expect_edges": [
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: dio.get paired to chi GET /users/{id}"},
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: dio.post paired to chi POST /users"}
+  ]
+}

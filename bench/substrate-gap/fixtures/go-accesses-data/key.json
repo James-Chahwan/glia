@@ -1,0 +1,12 @@
+{
+  "framework": "go-accesses-data",
+  "language": "go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "users", "note": "table in SELECT ... FROM users"},
+    {"kind": "FUNCTION", "name": "getUsers", "note": "fn issuing the query"}
+  ],
+  "expect_edges": [
+    {"from": "getUsers", "to": "users", "category": "ACCESSES_DATA", "note": "db.Query on users table"}
+  ]
+}

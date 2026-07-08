@@ -73,6 +73,14 @@ enum Cmd {
         #[arg(long)]
         no_incremental: bool,
     },
+    /// Sync external docs (Confluence) to/from a repo's doc snapshot. This is
+    /// the **network** step, deliberately separate from `build` so the
+    /// byte-identical build stays deterministic: `sync` fetches into
+    /// `<repo>/.glia/docs-snapshot/`, then `build` ingests that snapshot.
+    Docs {
+        #[command(subcommand)]
+        action: DocsCmd,
+    },
     /// Install git hooks (`post-commit`, `post-merge`, `post-checkout`) into
     /// the target repo so its `.gmap` rebuilds automatically on each change.
     /// Opt-in only — rebuild latency on big repos can be noticeable.
@@ -88,6 +96,49 @@ enum Cmd {
         /// flags like `--out path/to/out`.
         #[arg(long)]
         command: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DocsCmd {
+    /// Pull every page in a Confluence space into `<repo>/.glia/docs-snapshot`.
+    /// Then `glia build <repo>` ingests it (DOC_SPACE + DOC_SECTION + doc→code
+    /// DOCUMENTS links). Credentials resolve flag → env → `./.env`
+    /// (CONFLUENCE_SITE / CONFLUENCE_EMAIL / CONFLUENCE_TOKEN).
+    Sync {
+        /// Repo whose snapshot to write.
+        repo: String,
+        /// Confluence space key (e.g. `MFS`).
+        #[arg(long)]
+        space: String,
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Push a storage-format (XHTML) page body to Confluence — create a new
+    /// page, or update an existing one with `--page-id`.
+    Push {
+        /// Confluence space key.
+        #[arg(long)]
+        space: String,
+        /// Page title.
+        #[arg(long)]
+        title: String,
+        /// File containing the Confluence storage-format (XHTML) body.
+        #[arg(long)]
+        file: String,
+        /// Update this page id instead of creating a new page.
+        #[arg(long)]
+        page_id: Option<String>,
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
     },
 }
 
@@ -125,6 +176,7 @@ fn main() {
         Cmd::Build { repo, out, no_incremental } => {
             cmd_build(&repo, out.as_deref(), !no_incremental)
         }
+        Cmd::Docs { action } => cmd_docs(action),
         Cmd::InstallHooks {
             repo,
             uninstall,
@@ -568,6 +620,75 @@ fn cmd_build(repo: &str, out: Option<&str>, incremental: bool) -> i32 {
 
 const HOOK_NAMES: &[&str] = &["post-commit", "post-merge", "post-checkout"];
 const HOOK_MARKER: &str = "# glia-install-hooks: managed";
+
+// ----------------------------------------------------------------------------
+// `docs` — Confluence sync (network step; snapshot feeds the offline build)
+// ----------------------------------------------------------------------------
+
+fn cmd_docs(action: DocsCmd) -> i32 {
+    use repo_graph_doc_sources::confluence_rest::{self, Config};
+    match action {
+        DocsCmd::Sync { repo, space, site, email, token } => {
+            let cfg = match Config::resolve(site, email, token) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            };
+            let pages = match confluence_rest::pull_space(&cfg, &space) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: pulling space {space}: {e}");
+                    return 1;
+                }
+            };
+            let records: Vec<_> = pages.iter().map(repo_graph_doc_sources::record_from_page).collect();
+            match repo_graph_doc_sources::write_snapshot(Path::new(&repo), &records) {
+                Ok(manifest) => {
+                    println!("synced {} page(s) from space {space} → {}", records.len(), manifest.display());
+                    println!("run `glia build {repo}` to ingest.");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: writing snapshot: {e}");
+                    1
+                }
+            }
+        }
+        DocsCmd::Push { space, title, file, page_id, site, email, token } => {
+            let cfg = match Config::resolve(site, email, token) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return 2;
+                }
+            };
+            let storage = match std::fs::read_to_string(&file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: reading {file}: {e}");
+                    return 1;
+                }
+            };
+            let result = match &page_id {
+                Some(id) => confluence_rest::update_page(&cfg, id, &space, &title, &storage),
+                None => confluence_rest::create_page(&cfg, &space, &title, &storage),
+            };
+            match result {
+                Ok(p) => {
+                    let verb = if page_id.is_some() { "updated" } else { "created" };
+                    println!("{verb} page {} (v{}) — {}", p.id, p.version, p.url);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("error: pushing page: {e}");
+                    1
+                }
+            }
+        }
+    }
+}
 
 fn cmd_install_hooks(repo: &str, uninstall: bool, command: Option<&str>) -> i32 {
     let repo_path = Path::new(repo);

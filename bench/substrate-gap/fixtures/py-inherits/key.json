@@ -1,0 +1,12 @@
+{
+  "framework": "py-inherits",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Animal", "note": "base"},
+    {"kind": "CLASS", "name": "Dog", "note": "subclass"}
+  ],
+  "expect_edges": [
+    {"from": "Dog", "to": "Animal", "category": "INHERITS_FROM", "note": "class Dog(Animal)"}
+  ]
+}

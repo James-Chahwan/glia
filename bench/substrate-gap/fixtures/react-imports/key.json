@@ -1,0 +1,12 @@
+{
+  "framework": "react-imports",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "App", "note": "importing module"},
+    {"kind": "FUNCTION", "name": "apiBase", "note": "imported symbol"}
+  ],
+  "expect_edges": [
+    {"from": "App", "to": "api", "category": "IMPORTS", "note": "KNOWN GAP: TS IMPORTS stubbed (None resolver)"}
+  ]
+}

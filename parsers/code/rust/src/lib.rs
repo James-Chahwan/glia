@@ -100,7 +100,7 @@ pub fn parse_file(
         }
     }
 
-    scan_axum_routes(source, repo, &mut acc);
+    scan_axum_routes(source, module_id, repo, &mut acc);
     scan_at_path_chains(source, repo, &mut acc);
     scan_salvo_routes(source, repo, &mut acc);
 
@@ -410,7 +410,7 @@ fn visit_route_attr(
     }
 }
 
-fn scan_axum_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc) {
     // Axum: Router::new().route("/path", get(handler).post(handler2))
     //                    .route("/users/:id", get(get_user))
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -448,6 +448,23 @@ fn scan_axum_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 let route_name = format!("{mu} {path}");
                 if seen.insert(route_name.clone()) {
                     emit_axum_route(&mu, path, repo, acc);
+                    // `get(handler)` names the handler fn — link ROUTE→handler
+                    // via a HANDLED_BY ref (graph's resolve_refs binds Bare by
+                    // name, incl. same-module fns).
+                    if let Some(handler) = extract_handler_name(args_text, &pat) {
+                        let route_id = NodeId::from_parts(
+                            GRAPH_TYPE,
+                            repo,
+                            node_kind::ROUTE,
+                            &route_name,
+                        );
+                        acc.refs.push(UnresolvedRef {
+                            from: route_id,
+                            from_module: module_id,
+                            qualifier: CallQualifier::Bare(handler),
+                            category: edge_category::HANDLED_BY,
+                        });
+                    }
                 }
             }
         }
@@ -479,6 +496,48 @@ fn find_matching_paren(s: &str) -> Option<usize> {
                 }
             }
             _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the handler name from an axum verb-wrapper call inside `hay`,
+/// e.g. `get(list_users)` → `list_users`, `post(api::create)` → `create`.
+/// `pat` is the boundary-checked verb pattern like `"get("`. Returns the
+/// last `::` path segment (the fn's bare name — what resolve_refs binds).
+/// Closures (`get(|| ...)`) and empty/non-identifier args yield `None`.
+fn extract_handler_name(hay: &str, pat: &str) -> Option<String> {
+    let bytes = hay.as_bytes();
+    let pat_bytes = pat.as_bytes();
+    let mut i = 0;
+    while i + pat_bytes.len() <= bytes.len() {
+        if &bytes[i..i + pat_bytes.len()] == pat_bytes {
+            let prev_ok = i == 0 || {
+                let p = bytes[i - 1];
+                !(p.is_ascii_alphanumeric() || p == b'_')
+            };
+            if prev_ok {
+                let arg_start = i + pat_bytes.len();
+                let mut j = arg_start;
+                // Read a Rust path: identifier chars plus `::` separators.
+                while j < bytes.len() {
+                    let c = bytes[j];
+                    if c.is_ascii_alphanumeric() || c == b'_' || c == b':' {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let token = &hay[arg_start..j];
+                let name = token.rsplit("::").next().unwrap_or("");
+                if !name.is_empty()
+                    && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                {
+                    return Some(name.to_string());
+                }
+                return None;
+            }
         }
         i += 1;
     }
@@ -908,6 +967,51 @@ fn app() -> Router {
         assert!(route_names.contains(&"GET /users"));
         assert!(route_names.contains(&"POST /users"));
         assert!(route_names.contains(&"GET /users/:id"));
+    }
+
+    #[test]
+    fn axum_routes_emit_handled_by_refs() {
+        let source = r#"
+async fn list_users() {}
+async fn create_user() {}
+async fn get_user() {}
+
+fn app() -> Router {
+    Router::new()
+        .route("/users", get(list_users).post(create_user))
+        .route("/users/:id", get(get_user))
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        // Each verb-wrapper (`get(fn)`, `post(fn)`) yields a HANDLED_BY ref
+        // from its ROUTE node to the handler fn, as a Bare qualifier.
+        let handlers: Vec<&str> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(handlers.contains(&"list_users"), "handlers: {handlers:?}");
+        assert!(handlers.contains(&"create_user"), "handlers: {handlers:?}");
+        assert!(handlers.contains(&"get_user"), "handlers: {handlers:?}");
+
+        // The ROUTE `GET /users` must be the `from` of the list_users ref.
+        let route_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users");
+        assert!(fp.refs.iter().any(|r| r.category == edge_category::HANDLED_BY
+            && r.from == route_id
+            && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "list_users")));
+
+        // Path-qualified handlers reduce to the fn's bare name.
+        assert_eq!(
+            extract_handler_name("get(api::handlers::show)", "get("),
+            Some("show".to_string())
+        );
+        // Closures don't name a handler fn — skipped.
+        assert_eq!(extract_handler_name("get(|| async {})", "get("), None);
     }
 
     fn route_names(fp: &FileParse) -> Vec<&str> {

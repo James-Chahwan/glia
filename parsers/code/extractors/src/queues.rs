@@ -57,10 +57,17 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str])] = &[
     ("use Oban.Pro.Worker", QueueFramework::Oban, &[]),
     // `nc.subscribe` collides with Backbone events / Redis pubsub vars; gate.
     ("nc.subscribe", QueueFramework::Nats, &["nats", "NATS"]),
+    // Go's nats.go exports Capitalized APIs (`nc.Subscribe`, `nc.QueueSubscribe`);
+    // the lowercase JS needles never match Go source, so Go queues went blind.
+    ("nc.Subscribe", QueueFramework::Nats, &["nats", "NATS"]),
+    ("nc.QueueSubscribe", QueueFramework::Nats, &["nats", "NATS"]),
     ("channel.consume", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"]),
     ("KafkaConsumer", QueueFramework::Kafka, &[]),
     // `consumer.subscribe` is generic; require kafka library presence.
     ("consumer.subscribe", QueueFramework::Kafka, &["kafka", "kafkajs", "confluent"]),
+    // Go Kafka consumers: segmentio `reader.ReadMessage`, confluent `consumer.ReadMessage`.
+    ("reader.ReadMessage", QueueFramework::Kafka, &["kafka", "segmentio"]),
+    ("consumer.ReadMessage", QueueFramework::Kafka, &["kafka", "confluent"]),
     // Redis-as-queue consumer side. BLPOP/BRPOP block until message; LPOP/RPOP
     // are non-blocking pops. .NET driver uses ListLeftPop/ListRightPop.
     (".blpop(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"]),
@@ -89,10 +96,16 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str])] = &[
     ("perform_in", QueueFramework::Sidekiq, &[]),
     ("Oban.insert", QueueFramework::Oban, &[]),
     ("nc.publish", QueueFramework::Nats, &["nats", "NATS"]),
+    // Go's nats.go exports Capitalized `nc.Publish`; the lowercase JS needle
+    // never matches Go source, so Go NATS producers went blind.
+    ("nc.Publish", QueueFramework::Nats, &["nats", "NATS"]),
     ("channel.publish", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"]),
     ("channel.basic_publish", QueueFramework::RabbitMQ, &[]),
     ("producer.send", QueueFramework::Kafka, &["kafka", "kafkajs", "confluent"]),
     ("producer.produce", QueueFramework::Kafka, &["kafka", "confluent"]),
+    // Go Kafka producers: confluent `producer.Produce`, segmentio `writer.WriteMessages`.
+    ("producer.Produce", QueueFramework::Kafka, &["kafka", "confluent"]),
+    ("writer.WriteMessages", QueueFramework::Kafka, &["kafka", "segmentio"]),
     // Redis-as-queue producer side. .lpush / .rpush both push items onto a
     // list; consumers BLPOP/BRPOP off the other end.
     (".lpush(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"]),
@@ -187,7 +200,12 @@ fn extract_topic_near(source: &str, pattern: &str) -> Option<String> {
 }
 
 fn extract_first_string_literal(s: &str) -> Option<String> {
+    // Go APIs take the topic as the first call argument (`nc.Publish("orders", ..)`),
+    // so when the needle stops before the `(`, skip a single opening paren (and any
+    // surrounding whitespace) to reach the string literal instead of falling back to
+    // the framework tag.
     let trimmed = s.trim_start();
+    let trimmed = trimmed.strip_prefix('(').map_or(trimmed, str::trim_start);
     let (quote, rest) = if let Some(rest) = trimmed.strip_prefix('\'') {
         ('\'', rest)
     } else if let Some(rest) = trimmed.strip_prefix('"') {
@@ -321,6 +339,39 @@ var entry = db.ListLeftPop("votes");"#;
             result.nodes.is_empty(),
             "jQuery .delay() must not emit a Celery producer (no celery import)"
         );
+    }
+
+    #[test]
+    fn go_nats_capitalized_producer_and_consumer_with_topic() {
+        // Go's nats.go exports Capitalized `nc.Publish` / `nc.Subscribe`, and the
+        // topic is the first call argument after `(` — earlier lowercase-only
+        // needles + a literal scanner that stopped at `(` left Go queues blind.
+        let producer = r#"
+import "github.com/nats-io/nats.go"
+
+func PublishOrder(nc *nats.Conn, payload []byte) error {
+	return nc.Publish("orders", payload)
+}
+"#;
+        let pr = extract_queue_producer_nodes(producer, module_id(), repo());
+        assert_eq!(pr.nodes.len(), 1);
+        assert_eq!(pr.nav.kind_by_id[&pr.nodes[0].id], node_kind::QUEUE_PRODUCER);
+        let pq = pr.nav.qname_by_id.values().next().unwrap();
+        assert_eq!(pq, "queue_producer:orders");
+
+        let consumer = r#"
+import "github.com/nats-io/nats.go"
+
+func SubscribeOrders(nc *nats.Conn) (*nats.Subscription, error) {
+	return nc.Subscribe("orders", handle)
+}
+"#;
+        let cr = extract_queue_consumer_nodes(consumer, module_id(), repo());
+        assert_eq!(cr.nodes.len(), 1);
+        assert_eq!(cr.nav.kind_by_id[&cr.nodes[0].id], node_kind::QUEUE_CONSUMER);
+        let cq = cr.nav.qname_by_id.values().next().unwrap();
+        // Topic must be the subject "orders", not the framework tag "nats".
+        assert_eq!(cq, "queue_consumer:orders");
     }
 
     #[test]

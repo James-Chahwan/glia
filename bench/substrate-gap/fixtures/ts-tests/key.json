@@ -1,0 +1,11 @@
+{
+  "framework": "ts-tests",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "add", "note": "unit under test"}
+  ],
+  "expect_edges": [
+    {"from": "math.test", "to": "math", "category": "TESTS", "note": "test module -> source module (emitted at MODULE granularity, not to fn add)"}
+  ]
+}

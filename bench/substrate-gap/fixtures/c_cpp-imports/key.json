@@ -1,0 +1,12 @@
+{
+  "framework": "c_cpp-imports",
+  "language": "c++",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "square", "note": "declared in mathutil.h, defined in main.cpp"},
+    {"kind": "FUNCTION", "name": "run", "note": "importer TU function"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "mathutil", "category": "IMPORTS", "note": "#include \"mathutil.h\" (stubbed for C++ => expect blind)"}
+  ]
+}

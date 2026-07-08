@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, edge_category, node_kind};
+use repo_graph_code_domain::{
+    CodeNav, DocProvenance, DocRecord, FileParse, GRAPH_TYPE, edge_category, node_kind,
+};
 use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, DbResolver, EventBusResolver,
@@ -85,7 +87,9 @@ fn generate_one_inner(
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
     }
-    if let Some(docs) = build_docs_graph(&md, repo) {
+    let mut doc_records = FileDocSource(md).collect();
+    doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
+    if let Some(docs) = build_docs_graph(&doc_records, repo) {
         graphs.push(docs);
     }
     let mut merged = MergedGraph::new(graphs);
@@ -123,7 +127,9 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
         if !regions.is_empty() {
             all_graphs.push(build_region_graph(&regions, repo));
         }
-        if let Some(docs) = build_docs_graph(&md, repo) {
+        let mut doc_records = FileDocSource(md).collect();
+        doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
+        if let Some(docs) = build_docs_graph(&doc_records, repo) {
             all_graphs.push(docs);
         }
         all_errors.extend(parse_errors);
@@ -401,7 +407,21 @@ fn build_graphs_for_repo(
     // shards optimization never fired (audit 2026-06-10 #5).
     let mut parses_by_lang: Vec<(&str, Vec<FileParse>)> = parses_by_lang.into_iter().collect();
     parses_by_lang.sort_unstable_by_key(|(lang, _)| *lang);
+    // TS-family lang tags (typescript/angular/react/vue) share ONE module + symbol
+    // space in a repo: an Angular component (`.component.ts` → "angular") injects a
+    // service (`.service.ts` → "typescript"), and imports cross those tags. Build
+    // them as a single graph so intra-repo ref/import resolution works across the
+    // tag boundary (Pattern E DI, Pattern B imports). Other `_`-arm langs
+    // (dart/swift/c_cpp/solidity/terraform) keep separate graphs — distinct symbol
+    // spaces that must not cross-resolve. ts_family accumulates in the sorted lang
+    // order and is built last, so graph/shard order stays deterministic.
+    const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
+    let mut ts_family: Vec<FileParse> = Vec::new();
     for (lang, parses) in parses_by_lang {
+        if TS_FAMILY.contains(&lang) {
+            ts_family.extend(parses);
+            continue;
+        }
         let graph = match lang {
             "python" => repo_graph_graph::build_python(repo, parses),
             "go" => repo_graph_graph::build_go(repo, parses),
@@ -409,11 +429,17 @@ fn build_graphs_for_repo(
                 repo_graph_graph::build_dotted(repo, parses)
             }
             "ruby" => repo_graph_graph::build_ruby(repo, parses),
-            _ => repo_graph_graph::build_typescript(repo, parses, |_, _| None),
+            _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
         };
         match graph {
             Ok(g) => graphs.push(g),
             Err(e) => parse_errors.push(format!("{lang} graph: {e}")),
+        }
+    }
+    if !ts_family.is_empty() {
+        match repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source) {
+            Ok(g) => graphs.push(g),
+            Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
     }
 
@@ -1304,34 +1330,165 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     chunks
 }
 
+// ============================================================================
+// Doc ingestion seam (Tier-4)
+// ============================================================================
+//
+// `build_docs_graph` consumes `DocRecord`s from any `DocSource` instead of the
+// raw file-walk pairs, so external adapters (Confluence/Notion/wiki, in the
+// future `doc-sources` crate) feed the SAME DOC_SECTION builder + downstream
+// `link_doc_sections`. `FileDocSource` reproduces the repo `.md` walk exactly.
+
+/// Produces the documents to ingest. The repo file walk is `FileDocSource`;
+/// external adapters implement this against a fetched snapshot.
+trait DocSource {
+    fn collect(self) -> Vec<DocRecord>;
+}
+
+/// Today's source: the `(rel_path, text)` markdown pairs the file walk collected.
+/// Byte-identical to the pre-seam path — provenance is `File` and no new cell is
+/// emitted.
+struct FileDocSource(Vec<(String, String)>);
+
+impl DocSource for FileDocSource {
+    fn collect(self) -> Vec<DocRecord> {
+        self.0
+            .into_iter()
+            .map(|(rel_path, text)| DocRecord {
+                rel_path,
+                text,
+                provenance: DocProvenance::file(),
+            })
+            .collect()
+    }
+}
+
+/// External docs previously fetched by `glia docs sync` into the repo's
+/// gitignored `.glia/docs-snapshot/manifest.jsonl` (one `DocRecord` JSON per
+/// line). Reading a LOCAL snapshot is deterministic — the non-deterministic
+/// network fetch that produced it is a separate step — so the byte-identical
+/// build gate stays valid. No snapshot → no external docs (repos without one
+/// are byte-identical to before).
+struct SnapshotDocSource {
+    manifest: PathBuf,
+}
+
+impl SnapshotDocSource {
+    fn for_repo(root: &Path) -> Self {
+        Self {
+            manifest: root
+                .join(".glia")
+                .join("docs-snapshot")
+                .join("manifest.jsonl"),
+        }
+    }
+}
+
+impl DocSource for SnapshotDocSource {
+    fn collect(self) -> Vec<DocRecord> {
+        let Ok(content) = std::fs::read_to_string(&self.manifest) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<DocRecord>(l).ok())
+            .collect()
+    }
+}
+
 /// Build a graph of `DOC_SECTION` nodes from the repo's markdown docs. Each node
 /// carries the prose in a CODE cell, a POSITION cell (md path + line range), and
 /// an ORIGIN cell `provenance=documentation`. The exporter maps the kind to
 /// `Content::Proposition`. (glia-v5 G18)
-fn build_docs_graph(md: &[(String, String)], repo: RepoId) -> Option<repo_graph_graph::RepoGraph> {
-    use repo_graph_code_domain::cell_type;
+fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<repo_graph_graph::RepoGraph> {
+    use repo_graph_code_domain::{DocSourceKind, cell_type};
     use repo_graph_core::{Cell, CellPayload};
 
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    fn source_tag(k: DocSourceKind) -> &'static str {
+        match k {
+            DocSourceKind::File => "file",
+            DocSourceKind::Confluence => "confluence",
+            DocSourceKind::Notion => "notion",
+            DocSourceKind::Wiki => "wiki",
+        }
+    }
+
     let mut nodes = Vec::new();
+    let mut edges = Vec::new();
     let mut nav = CodeNav::default();
-    for (path, text) in md {
-        if !include_doc(path) {
+    // Dedup DOC_SPACE nodes by qname (a space maps to many pages/records).
+    let mut spaces: HashMap<String, NodeId> = HashMap::new();
+
+    for rec in records {
+        let (path, text) = (&rec.rel_path, &rec.text);
+        let is_file = rec.provenance.kind == DocSourceKind::File;
+        // `include_doc` gates repo files; external docs are pre-curated by sync.
+        if is_file && !include_doc(path) {
             continue;
         }
+
+        // A DOC_SPACE for an external container (Confluence space / Notion db /
+        // wiki), emitted once. File docs have no container → stay flat, so their
+        // output is byte-identical to before the seam.
+        let space_id: Option<NodeId> = rec.provenance.container.as_deref().map(|container| {
+            let tag = source_tag(rec.provenance.kind);
+            let sqname = format!("docspace::{tag}::{container}");
+            if let Some(&sid) = spaces.get(&sqname) {
+                return sid;
+            }
+            let sid = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SPACE, &sqname);
+            let origin = format!(
+                r#"{{"provenance":"documentation","source":"{tag}","container":"{}"}}"#,
+                esc(container)
+            );
+            nodes.push(Node {
+                id: sid,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![Cell {
+                    kind: cell_type::ORIGIN,
+                    payload: CellPayload::Json(origin),
+                }],
+            });
+            nav.record(sid, container, &sqname, node_kind::DOC_SPACE, None);
+            spaces.insert(sqname, sid);
+            sid
+        });
+
         let stem = std::path::Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("doc")
             .to_string();
+
         for chunk in chunk_markdown(text) {
-            let qname = format!("docs::{stem}::{}", chunk.slug);
+            // File qname unchanged; external qnames are namespaced by container.
+            let qname = match rec.provenance.container.as_deref() {
+                Some(container) => format!("docs::{container}::{stem}::{}", chunk.slug),
+                None => format!("docs::{stem}::{}", chunk.slug),
+            };
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, &qname);
             let pos = format!(
                 r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
-                path.replace('\\', "\\\\").replace('"', "\\\""),
+                esc(path),
                 chunk.start_line,
                 chunk.end_line
             );
+            // File docs keep today's exact ORIGIN cell (byte-identical); external
+            // docs carry source + call-back url so a route traces to its page.
+            let origin = if is_file {
+                r#"{"provenance":"documentation"}"#.to_string()
+            } else {
+                let tag = source_tag(rec.provenance.kind);
+                format!(
+                    r#"{{"provenance":"documentation","source":"{tag}","url":"{}"}}"#,
+                    esc(rec.provenance.url.as_deref().unwrap_or(""))
+                )
+            };
             nodes.push(Node {
                 id,
                 repo,
@@ -1339,13 +1496,18 @@ fn build_docs_graph(md: &[(String, String)], repo: RepoId) -> Option<repo_graph_
                 cells: vec![
                     Cell { kind: cell_type::CODE, payload: CellPayload::Text(chunk.text) },
                     Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
-                    Cell {
-                        kind: cell_type::ORIGIN,
-                        payload: CellPayload::Json(r#"{"provenance":"documentation"}"#.into()),
-                    },
+                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) },
                 ],
             });
-            nav.record(id, &chunk.slug, &qname, node_kind::DOC_SECTION, None);
+            nav.record(id, &chunk.slug, &qname, node_kind::DOC_SECTION, space_id);
+            if let Some(sid) = space_id {
+                edges.push(Edge {
+                    from: sid,
+                    to: id,
+                    category: edge_category::CONTAINS,
+                    confidence: Confidence::Strong,
+                });
+            }
         }
     }
     if nodes.is_empty() {
@@ -1354,7 +1516,7 @@ fn build_docs_graph(md: &[(String, String)], repo: RepoId) -> Option<repo_graph_
     Some(repo_graph_graph::RepoGraph {
         repo,
         nodes,
-        edges: Vec::new(),
+        edges,
         nav,
         symbols: Default::default(),
         unresolved_calls: Vec::new(),
@@ -1433,6 +1595,85 @@ fn path_to_qname(path: &str) -> String {
         .with_extension("")
         .to_string_lossy()
         .replace(['/', '\\'], "::")
+}
+
+/// Resolve a TS/JS relative import specifier to the in-repo module qname it
+/// targets — the inverse of `path_to_qname` (drop extension, `/`→`::`). Bare or
+/// scoped specifiers (`@angular/core`, `lodash`) are external → None (no edge).
+/// This is the resolver the engine previously stubbed with `|_,_| None`, which
+/// is why NO TS/JS/Angular/React/Vue import ever became a category-3 IMPORTS
+/// edge — imports lived only as `Symbol.imports` cells (handoff Pattern B).
+fn resolve_ts_source(from_module: &str, specifier: &str) -> Option<String> {
+    let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+    if !spec.starts_with('.') {
+        return None; // external package — no intra-repo edge
+    }
+    // Directory of the importing module = its qname minus the final (file) segment.
+    let mut segs: Vec<String> = from_module.split("::").map(String::from).collect();
+    segs.pop();
+    for part in spec.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            p => {
+                let p = p
+                    .strip_suffix(".ts")
+                    .or_else(|| p.strip_suffix(".tsx"))
+                    .or_else(|| p.strip_suffix(".js"))
+                    .or_else(|| p.strip_suffix(".jsx"))
+                    .unwrap_or(p);
+                segs.push(p.to_string());
+            }
+        }
+    }
+    if segs.is_empty() {
+        return None;
+    }
+    Some(segs.join("::"))
+}
+
+/// Relative-import resolver for the non-TS `_`-arm languages (dart / c_cpp /
+/// solidity). Handles dotted specifiers (`./x`, `../a/b`) AND bare filenames
+/// that carry a source extension (`import 'models.dart'`, `#include
+/// "mathutil.h"`) — both resolve against the importing file's directory to the
+/// `path_to_qname` form. A bare specifier with no source extension (a package /
+/// system import like `package:collection`, `import Foundation`, `<stdio.h>`)
+/// is external → None. Superset of `resolve_ts_source`; kept separate so the
+/// verified TS-family path is untouched.
+fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String> {
+    const SRC_EXT: &[&str] = &[
+        ".dart", ".h", ".hpp", ".hh", ".hxx", ".sol", ".swift", ".ts", ".tsx", ".js", ".jsx",
+    ];
+    let spec = specifier
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
+    let has_src_ext = SRC_EXT.iter().any(|e| spec.ends_with(e));
+    if !spec.starts_with('.') && !has_src_ext {
+        return None; // external package / system header
+    }
+    let mut segs: Vec<String> = from_module.split("::").map(String::from).collect();
+    segs.pop(); // directory of the importing file
+    for part in spec.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segs.pop();
+            }
+            p => {
+                let stem = SRC_EXT
+                    .iter()
+                    .find_map(|e| p.strip_suffix(e))
+                    .unwrap_or(p);
+                segs.push(stem.to_string());
+            }
+        }
+    }
+    if segs.is_empty() {
+        return None;
+    }
+    Some(segs.join("::"))
 }
 
 // ----------------------------------------------------------------------------

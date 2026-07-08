@@ -1,0 +1,12 @@
+{
+  "framework": "solidity-calls",
+  "language": "solidity",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "deposit", "note": "caller"},
+    {"kind": "METHOD", "name": "_credit", "note": "callee"}
+  ],
+  "expect_edges": [
+    {"from": "deposit", "to": "_credit", "category": "CALLS", "note": "deposit() calls _credit()"}
+  ]
+}

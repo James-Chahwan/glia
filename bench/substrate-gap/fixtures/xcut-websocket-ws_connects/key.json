@@ -1,0 +1,12 @@
+{
+  "framework": "xcut-websocket",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "WS_CLIENT", "name": "/ws", "note": "TS new WebSocket(ws://.../ws)"},
+    {"kind": "WS_HANDLER", "name": "ws", "note": "Go gorilla websocket.Upgrader handler"}
+  ],
+  "expect_edges": [
+    {"from": "/ws", "to": "ws:ws", "category": "WS_CONNECTS", "note": "WS_CLIENT -> WS_HANDLER cross-graph pairing"}
+  ]
+}

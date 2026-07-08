@@ -48,6 +48,7 @@ members = [
     "parsers/code/extractors",
     "engine",
     "cli",
+    "doc-sources",
     "py",
 ]
 

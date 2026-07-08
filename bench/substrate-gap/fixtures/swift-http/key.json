@@ -1,0 +1,14 @@
+{
+  "framework": "swift-http",
+  "language": "swift",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "URL(string:) + URLSession.dataTask, GET default -> client ENDPOINT (Pattern A fix); path /users/${…}"},
+    {"kind": "ENDPOINT", "name": "POST /users", "note": "URLRequest httpMethod=\"POST\" -> client ENDPOINT POST /users"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi route (server, control)"}
+  ],
+  "expect_edges": [
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: URLSession GET paired to chi GET /users/{id}"},
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: URLSession POST paired to chi POST /users"}
+  ]
+}

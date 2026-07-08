@@ -34,7 +34,7 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_top(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
     scan_scala_routes(source, repo, &mut acc);
 
     Ok(FileParse {
@@ -64,6 +64,7 @@ fn visit_top(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -73,13 +74,13 @@ fn visit_top(
             "import_declaration" => collect_import(child, src, parent_qname, acc),
             "package_clause" => collect_package(child, src, parent_qname, acc),
             "object_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, repo, node_kind::CLASS, acc);
+                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
             }
             "class_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, repo, node_kind::CLASS, acc);
+                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
             }
             "trait_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, repo, node_kind::INTERFACE, acc);
+                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::INTERFACE, acc);
             }
             "function_definition" | "val_definition" | "var_definition" => {
                 visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
@@ -96,6 +97,7 @@ fn visit_type_def(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     acc: &mut Acc,
@@ -121,8 +123,46 @@ fn visit_type_def(
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
+    emit_heritage_refs(&node, src, id, module_id, acc);
+
     if let Some(body) = node.child_by_field_name("body") {
-        visit_body_members(body, src, file_rel, &qname, id, repo, acc);
+        visit_body_members(body, src, file_rel, &qname, id, module_id, repo, acc);
+    }
+}
+
+/// Scala class/trait/object heritage. The `extend`/`extends_clause` node holds
+/// one or more `type` fields: `class Dog extends Animal with Runnable` →
+/// `Animal` (first, the primary supertype) becomes INHERITS_FROM, each mixin
+/// trait after `with` becomes IMPLEMENTS. We emit an `UnresolvedRef` with a
+/// `Bare(TypeName)` qualifier; `resolve_refs` binds it to the uniquely-named
+/// class/interface node across the repo and forms the heritage edge.
+fn emit_heritage_refs(node: &TsNode, src: &[u8], from_id: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let Some(ext) = node.child_by_field_name("extend") else {
+        return;
+    };
+    let mut cursor = ext.walk();
+    let mut first = true;
+    for ty in ext.children_by_field_name("type", &mut cursor) {
+        // Strip generic args (`Ordered[Dog]` → `Ordered`) and take the trailing
+        // simple name (`pkg.Animal` → `Animal`).
+        let raw = text_of(ty, src);
+        let base = raw.split('[').next().unwrap_or(raw).trim();
+        let simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+        if simple.is_empty() {
+            continue;
+        }
+        let category = if first {
+            edge_category::INHERITS_FROM
+        } else {
+            edge_category::IMPLEMENTS
+        };
+        first = false;
+        acc.refs.push(UnresolvedRef {
+            from: from_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(simple.to_string()),
+            category,
+        });
     }
 }
 
@@ -132,6 +172,7 @@ fn visit_body_members(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -142,10 +183,10 @@ fn visit_body_members(
                 visit_method(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             "object_definition" | "class_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, repo, node_kind::CLASS, acc);
+                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
             }
             "trait_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, repo, node_kind::INTERFACE, acc);
+                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::INTERFACE, acc);
             }
             _ => {}
         }
@@ -184,7 +225,9 @@ fn visit_function(
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
 
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc);
+        // Top-level `def` (parent is a MODULE): a bare `foo()` binds against the
+        // module's top-level symbols, so keep it `Bare`.
+        collect_calls_in(body, src, id, false, acc);
     }
 }
 
@@ -220,7 +263,12 @@ fn visit_method(
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc);
+        // Method inside a type body (parent is CLASS/INTERFACE): an unqualified
+        // `foo()` is an implicit `this.foo()` — a sibling method of the enclosing
+        // type. Classify as `SelfMethod` so `resolve_calls` binds it against
+        // `class_methods[<enclosing type>]` (a bare `module_symbols` lookup would
+        // miss, since sibling methods live under the type, not the module).
+        collect_calls_in(body, src, id, true, acc);
     }
 }
 
@@ -248,13 +296,13 @@ fn collect_package(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     });
 }
 
-fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, in_type: bool, acc: &mut Acc) {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         if n.kind() == "call_expression"
             && let Some(func) = n.child_by_field_name("function")
         {
-            let qualifier = classify_call(func, src);
+            let qualifier = classify_call(func, src, in_type);
             acc.calls.push(CallSite { from, qualifier });
         }
         let mut cursor = n.walk();
@@ -269,9 +317,19 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     }
 }
 
-fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
+fn classify_call(func_node: TsNode, src: &[u8], in_type: bool) -> CallQualifier {
     match func_node.kind() {
-        "identifier" => CallQualifier::Bare(text_of(func_node, src).to_string()),
+        "identifier" => {
+            let name = text_of(func_node, src).to_string();
+            // Inside a type body an unqualified call is an implicit self-call;
+            // emit `SelfMethod` so it binds against the enclosing type's methods.
+            // At module scope it stays `Bare` (binds against module symbols).
+            if in_type {
+                CallQualifier::SelfMethod(name)
+            } else {
+                CallQualifier::Bare(name)
+            }
+        }
         "field_expression" => {
             let obj = func_node
                 .child_by_field_name("value")
@@ -541,6 +599,117 @@ class Config {
 "#;
         let fp = parse_file(source, "src/Config.scala", "src::Config", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+    }
+
+    #[test]
+    fn intra_object_call_is_self_method() {
+        // `compute` calls sibling `helper` bare inside `object Calc`. The parser
+        // must emit `SelfMethod("helper")` (not `Bare`) so `resolve_calls` binds
+        // it against the enclosing type's methods (`class_methods[Calc]`).
+        let source = r#"
+object Calc {
+  def helper(x: Int): Int = x + 1
+
+  def compute(n: Int): Int = {
+    helper(n) * 2
+  }
+}
+"#;
+        let fp = parse_file(source, "app.scala", "app::Calc", repo()).unwrap();
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::SelfMethod("helper".to_string())),
+            "expected SelfMethod(\"helper\") CallSite from compute(): {:?}",
+            fp.calls
+        );
+        assert!(
+            !fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::Bare("helper".to_string())),
+            "intra-object bare call must be SelfMethod, not Bare: {:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn top_level_call_is_bare() {
+        // A bare call from a top-level `def` (module scope) stays `Bare` so it
+        // binds against module-level symbols.
+        let source = r#"
+def helper(x: Int): Int = x + 1
+
+def compute(n: Int): Int = {
+  helper(n) * 2
+}
+"#;
+        let fp = parse_file(source, "app.scala", "app", repo()).unwrap();
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::Bare("helper".to_string())),
+            "expected Bare(\"helper\") CallSite from top-level compute(): {:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn class_extends_emits_inherits_from_ref() {
+        // `class Dog extends Animal` must emit an UnresolvedRef with a
+        // Bare("Animal") qualifier under INHERITS_FROM, from the CLASS node.
+        // A `with` mixin trait becomes an IMPLEMENTS ref. resolve_refs binds
+        // the bare type name to the trait/class node across the repo.
+        let source = r#"
+trait Animal {
+  def speak(): String
+}
+
+trait Runnable {
+  def run(): Unit
+}
+
+class Dog extends Animal with Runnable {
+  def speak(): String = "woof"
+  def run(): Unit = {}
+}
+"#;
+        let fp = parse_file(source, "src/Animals.scala", "src::Animals", repo()).unwrap();
+
+        let dog_id = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(_, n)| **n == "Dog")
+            .map(|(id, _)| *id)
+            .expect("Dog CLASS node recorded");
+
+        // INHERITS_FROM ref: Dog → Animal (primary supertype).
+        assert!(
+            fp.refs.iter().any(|r| r.from == dog_id
+                && r.category == edge_category::INHERITS_FROM
+                && r.qualifier == CallQualifier::Bare("Animal".to_string())),
+            "expected INHERITS_FROM Bare(\"Animal\") ref from Dog: {:?}",
+            fp.refs
+        );
+
+        // IMPLEMENTS ref: Dog → Runnable (mixin trait after `with`).
+        assert!(
+            fp.refs.iter().any(|r| r.from == dog_id
+                && r.category == edge_category::IMPLEMENTS
+                && r.qualifier == CallQualifier::Bare("Runnable".to_string())),
+            "expected IMPLEMENTS Bare(\"Runnable\") ref from Dog: {:?}",
+            fp.refs
+        );
+
+        // from_module must be the module node (whose binding table resolves).
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Animals");
+        assert!(
+            fp.refs
+                .iter()
+                .all(|r| r.category != edge_category::INHERITS_FROM || r.from_module == module_id),
+            "heritage refs must carry the module node as from_module: {:?}",
+            fp.refs
+        );
     }
 
     #[test]

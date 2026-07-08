@@ -15,5 +15,8 @@ repo-graph-graph = { path = "../graph" }
 repo-graph-store = { path = "../store" }
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
+# Tier-4 doc adapters (Confluence REST + snapshot). Network I/O lives here, not
+# in the engine — the CLI drives `docs sync`/`docs push`; `build` stays offline.
+repo-graph-doc-sources = { path = "../doc-sources" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"

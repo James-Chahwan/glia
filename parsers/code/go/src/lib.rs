@@ -24,6 +24,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 
 // ============================================================================
 // Public entry point
@@ -169,6 +170,12 @@ struct Acc {
     /// file. Prevents stacking duplicate ROUTE_METHOD cells when a body walks
     /// past the same registration twice (shouldn't happen, defensive).
     route_methods_seen: HashMap<NodeId, HashMap<String, ()>>,
+    /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
+    /// (method, path) even if the same endpoint is called twice in a file.
+    endpoint_seen: std::collections::HashSet<NodeId>,
+    /// Dedup for ACCESSES_DATA edges — one edge per (enclosing fn, DATA_ENTITY)
+    /// even if the same table is queried repeatedly inside the same function.
+    data_access_seen: std::collections::HashSet<(NodeId, NodeId)>,
 }
 
 // ============================================================================
@@ -399,7 +406,7 @@ fn visit_function(
     });
 
     if let Some(body) = decl.child_by_field_name("body") {
-        collect_calls_in(body, src, id, None, acc);
+        collect_calls_in(body, src, id, None, repo, file_rel, acc);
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
     }
 }
@@ -455,7 +462,7 @@ fn visit_method(
     });
 
     if let Some(body) = decl.child_by_field_name("body") {
-        collect_calls_in(body, src, id, receiver_var.as_deref(), acc);
+        collect_calls_in(body, src, id, receiver_var.as_deref(), repo, file_rel, acc);
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
     }
 }
@@ -587,25 +594,37 @@ fn record_import(
 // Call collection
 // ============================================================================
 
+#[allow(clippy::too_many_arguments)]
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
     from: NodeId,
     receiver_var: Option<&str>,
+    repo: RepoId,
+    file_rel: &str,
     acc: &mut Acc,
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.kind() == "call_expression"
-            && let Some(q) = classify_call(child, src, receiver_var)
-        {
-            acc.calls.push(CallSite {
-                from,
-                qualifier: q,
-            });
+        if child.kind() == "call_expression" {
+            if let Some(q) = classify_call(child, src, receiver_var) {
+                acc.calls.push(CallSite {
+                    from,
+                    qualifier: q,
+                });
+            }
+            // Pattern A: outbound client HTTP call (`http.Get('http://…/x')`) →
+            // ENDPOINT node so HttpStackResolver can pair it with a server ROUTE.
+            try_detect_go_endpoint(child, src, from, repo, file_rel, acc);
+            // Data access: `db.Query("SELECT … FROM users")` → DATA_ENTITY node +
+            // ACCESSES_DATA edge anchored to the *enclosing* fn (`from`), not the
+            // module. The module-anchored edge is still emitted by the
+            // cross-cutting data-entities extractor; this adds the fine-grained
+            // fn→table attribution the DbResolver / call-site queries want.
+            try_detect_go_data_access(child, src, from, repo, acc);
         }
         if child.kind() != "func_literal" {
-            collect_calls_in(child, src, from, receiver_var, acc);
+            collect_calls_in(child, src, from, receiver_var, repo, file_rel, acc);
         }
     }
 }
@@ -635,6 +654,322 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
         }
         _ => None,
     }
+}
+
+// ============================================================================
+// Client HTTP calls (Pattern A) — outbound net/http calls become ENDPOINT
+// nodes so the HttpStackResolver can pair them with a server ROUTE, giving a
+// cross-stack HTTP_CALLS edge. Mirrors the Dart parser's `try_detect_dart_endpoint`.
+// ============================================================================
+//
+// Recognised shapes:
+//   `http.Get(url)` / `http.Post(url, …)` / `http.Head(url)` — stdlib package
+//        funcs; verb from the method name, receiver is the `http` package.
+//   `client.Get(url)` / `c.Post(…)` / `httpClient.Get(url)` — *http.Client
+//        methods; receiver is an http-client variable (never a server router).
+//   `http.NewRequest("GET", url, body)` /
+//   `http.NewRequestWithContext(ctx, "POST", url, body)` — verb is the string
+//        method arg, url is the following string arg.
+//
+// The URL literal is usually absolute (`http://host/users`); `url_to_path`
+// strips the host to `/users`. A non-literal / non-path URL is skipped.
+
+/// Map a Go client method name (verb form) to its canonical upper-case verb.
+fn client_http_verb(name: &str) -> Option<&'static str> {
+    match name {
+        "Get" | "GET" => Some("GET"),
+        "Post" | "POST" => Some("POST"),
+        "Put" | "PUT" => Some("PUT"),
+        "Patch" | "PATCH" => Some("PATCH"),
+        "Delete" | "DELETE" => Some("DELETE"),
+        "Head" | "HEAD" => Some("HEAD"),
+        "Options" | "OPTIONS" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+/// True for an http-client receiver variable in the verb form (`client.Get`,
+/// `httpClient.Post`, `c.Get`). The stdlib `http` package is handled separately;
+/// server routers (`r`, `app`, group vars) are deliberately excluded so route
+/// registration (`r.Get("/x", h)`) is never mistaken for a client call.
+fn is_http_client_receiver(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "client" || n == "httpclient" || n == "c" || n.ends_with("client")
+}
+
+/// Detect an outbound client HTTP call and emit a shared ENDPOINT node + CALLS
+/// edge from the enclosing `from` node. No-op for anything that isn't a client
+/// HTTP idiom.
+fn try_detect_go_endpoint(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "selector_expression" {
+        return;
+    }
+    let Some(operand) = func.child_by_field_name("operand") else {
+        return;
+    };
+    let Some(field) = func.child_by_field_name("field") else {
+        return;
+    };
+    if operand.kind() != "identifier" {
+        return;
+    }
+    let recv = text_of(operand, src);
+    let method = text_of(field, src);
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+
+    // Form 3: http.NewRequest("GET", url, …) / NewRequestWithContext(ctx, "POST", url, …)
+    if recv == "http" && (method == "NewRequest" || method == "NewRequestWithContext") {
+        detect_new_request(call, args, src, from, repo, file_rel, acc);
+        return;
+    }
+
+    // Forms 1 & 2: verb methods. Receiver must be the `http` package or a
+    // recognised http-client variable — never a server router.
+    let Some(verb) = client_http_verb(method) else {
+        return;
+    };
+    if recv != "http" && !is_http_client_receiver(recv) {
+        return;
+    }
+    let Some(first) = args.named_child(0) else {
+        return;
+    };
+    let Some(raw) = string_literal_text(first, src) else {
+        return; // non-literal URL (variable / fmt.Sprintf) — can't resolve a path
+    };
+    emit_go_endpoint(verb, &raw, call, from, repo, file_rel, acc);
+}
+
+/// `http.NewRequest`/`NewRequestWithContext`: the verb and url are string-literal
+/// args in order (a leading `ctx` in the WithContext form is not a string, so
+/// filtering to string literals lands verb first, url second).
+fn detect_new_request(
+    call: TsNode,
+    args: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let mut strings: Vec<String> = Vec::new();
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if let Some(s) = string_literal_text(arg, src) {
+            strings.push(s);
+        }
+    }
+    if strings.len() < 2 {
+        return;
+    }
+    let verb = strings[0].to_ascii_uppercase();
+    let Some(canonical) = client_http_verb(&verb) else {
+        return;
+    };
+    emit_go_endpoint(canonical, &strings[1], call, from, repo, file_rel, acc);
+}
+
+/// Build a `ClientEndpoint` from a URL literal and push it via the shared helper.
+/// Skips the call when `url_to_path` yields no request path (bare host / non-path).
+fn emit_go_endpoint(
+    verb: &str,
+    raw_url: &str,
+    call: TsNode,
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let Some(path) = url_to_path(raw_url) else {
+        return;
+    };
+    let pos = call.start_position();
+    let ep = ClientEndpoint {
+        method: verb.to_string(),
+        path,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence: Confidence::Strong,
+    };
+    push_client_endpoint(
+        repo,
+        &ep,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
+}
+
+// ============================================================================
+// Data access (ACCESSES_DATA) — raw-SQL queries issued from a function body.
+// ============================================================================
+//
+// The cross-cutting `data_entities` extractor already scans the whole file and
+// mints one `DATA_ENTITY` node per table, anchoring an ACCESSES_DATA edge to the
+// *module*. That loses which function issued the query. Here we walk each fn/
+// method body (where the enclosing node id is known) and, for every string-
+// literal call argument that carries a SQL statement, emit an ACCESSES_DATA edge
+// from the enclosing fn to the table's DATA_ENTITY node.
+//
+// The DATA_ENTITY NodeId is built with the exact same qname shape the extractor
+// uses (`data_entity:sql:<table>`) so the two collapse onto one node at graph
+// build; only the edge anchor differs (fn vs module).
+//
+// Recognised shape: any call whose arguments contain a string literal with a
+// SQL statement signature — `db.Query("SELECT … FROM users")`,
+// `tx.ExecContext(ctx, "INSERT INTO orders …")`, `sqlx.Get(&u, `SELECT … `)`.
+// Table names come from `FROM` / `JOIN` / `INTO` / `UPDATE` clauses.
+
+/// Detect raw-SQL query calls and emit fn→table ACCESSES_DATA edges. No-op for
+/// calls whose arguments hold no SQL-shaped string literal.
+fn try_detect_go_data_access(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        let Some(sql) = string_literal_text(arg, src) else {
+            continue;
+        };
+        if !sql_has_context(&sql) {
+            continue;
+        }
+        for table in scan_sql_tables(&sql) {
+            emit_data_access(&table, from, repo, acc);
+        }
+    }
+}
+
+/// Emit (once per enclosing-fn × table) a DATA_ENTITY node + ACCESSES_DATA edge.
+/// The node mirrors the data-entities extractor so ids collapse at graph build.
+fn emit_data_access(table: &str, from: NodeId, repo: RepoId, acc: &mut Acc) {
+    let qname = format!("data_entity:sql:{table}");
+    let entity_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    if !acc.data_access_seen.insert((from, entity_id)) {
+        return;
+    }
+    acc.nodes.push(Node {
+        id: entity_id,
+        repo,
+        confidence: Confidence::Medium,
+        cells: vec![],
+    });
+    acc.nav
+        .record(entity_id, table, &qname, node_kind::DATA_ENTITY, None);
+    acc.edges.push(Edge {
+        from,
+        to: entity_id,
+        category: edge_category::ACCESSES_DATA,
+        confidence: Confidence::Medium,
+    });
+}
+
+/// True when `s` contains an unambiguous SQL statement signature. Mirrors the
+/// data-entities extractor's gate so a plain string that merely uses the word
+/// `from`/`update` isn't mistaken for SQL.
+fn sql_has_context(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    const SIG: &[&str] = &[
+        "select ",
+        "insert into",
+        "delete from",
+        "create table",
+        "alter table",
+        "truncate table",
+        "merge into",
+    ];
+    if SIG.iter().any(|sig| lower.contains(sig)) {
+        return true;
+    }
+    lower.contains("update ") && lower.contains(" set ")
+}
+
+/// Pull table names from `FROM`/`JOIN`/`INTO`/`UPDATE` clauses in a SQL string.
+/// Case-insensitive on the keyword, identifier-shaped on the name; strips a
+/// schema prefix (`public.users` → `users`) and rejects SQL keywords.
+fn scan_sql_tables(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::new();
+    for keyword in ["FROM", "JOIN", "INTO", "UPDATE"] {
+        let kw = keyword.as_bytes();
+        let mut i = 0;
+        while i + kw.len() <= bytes.len() {
+            let matches_kw = (0..kw.len()).all(|j| bytes[i + j].eq_ignore_ascii_case(&kw[j]));
+            if !matches_kw {
+                i += 1;
+                continue;
+            }
+            let prev_ok = i == 0 || !is_sql_word_byte(bytes[i - 1]);
+            let after = i + kw.len();
+            let next_ok = after < bytes.len()
+                && matches!(bytes[after], b' ' | b'\t' | b'\n' | b'\r');
+            if !(prev_ok && next_ok) {
+                i += 1;
+                continue;
+            }
+            // Skip whitespace to the identifier.
+            let mut k = after;
+            while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
+                k += 1;
+            }
+            let start = k;
+            while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_' || bytes[k] == b'.') {
+                k += 1;
+            }
+            if k > start {
+                if let Some(name) = canonical_sql_table(&sql[start..k]) {
+                    out.push(name);
+                }
+            }
+            i = after;
+        }
+    }
+    out
+}
+
+fn is_sql_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Normalise a captured SQL identifier: drop the schema prefix, require an
+/// identifier shape, and reject SQL keywords that can follow FROM/JOIN/etc.
+fn canonical_sql_table(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 128 {
+        return None;
+    }
+    let last = raw.rsplit('.').next().unwrap_or(raw);
+    if last.is_empty() || !last.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    if matches!(
+        last.to_ascii_uppercase().as_str(),
+        "SELECT" | "WHERE" | "AND" | "OR" | "IF" | "EXISTS" | "NULL" | "TRUE" | "FALSE"
+    ) {
+        return None;
+    }
+    Some(last.to_string())
 }
 
 // ============================================================================
@@ -825,6 +1160,15 @@ fn try_emit_route(
     let Some(canonical) = normalize_http_method(method_name) else {
         return;
     };
+    // A client HTTP call (`client.Get("/x")`) has the same verb shape but is an
+    // outbound ENDPOINT (handled by try_detect_go_endpoint); skip its receiver
+    // here so it isn't mis-emitted as a phantom server ROUTE.
+    if let Some(operand) = func.child_by_field_name("operand")
+        && operand.kind() == "identifier"
+        && is_http_client_receiver(text_of(operand, src))
+    {
+        return;
+    }
     let is_title_case = method_name
         .chars()
         .next()
@@ -1346,6 +1690,96 @@ var Registry = newRegistry()
         assert!(parse.nodes.iter().any(|n| n.id == registry));
     }
 
+    // ========================================================================
+    // Data access (ACCESSES_DATA) — fn → DATA_ENTITY attribution
+    // ========================================================================
+
+    const DB_QUERY: &str = r#"package main
+
+import "database/sql"
+
+func getUsers(db *sql.DB) error {
+    rows, err := db.Query("SELECT id, name FROM users WHERE active = true")
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+    return nil
+}
+"#;
+
+    #[test]
+    fn accesses_data_edge_anchored_to_enclosing_function() {
+        let parse = parse_file(DB_QUERY, "main.go", "main", "", repo()).unwrap();
+
+        let get_users =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "main::getUsers");
+        let users = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:users",
+        );
+
+        // DATA_ENTITY node minted with the extractor-compatible qname.
+        assert!(parse.nodes.iter().any(|n| n.id == users));
+
+        // ACCESSES_DATA edge is anchored to getUsers, NOT the module.
+        assert!(has_edge(&parse, get_users, users, edge_category::ACCESSES_DATA));
+
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "main");
+        assert!(
+            !has_edge(&parse, module_id, users, edge_category::ACCESSES_DATA),
+            "parser must not anchor ACCESSES_DATA to the module"
+        );
+    }
+
+    #[test]
+    fn accesses_data_dedupes_repeated_table_in_same_fn() {
+        const SRC: &str = r#"package main
+
+func touch(db *DB) {
+    db.Query("SELECT * FROM users")
+    db.Exec("INSERT INTO users (name) VALUES (?)")
+}
+"#;
+        let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
+        let touch = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "main::touch");
+        let users = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:users",
+        );
+        let edges = parse
+            .edges
+            .iter()
+            .filter(|e| {
+                e.from == touch && e.to == users && e.category == edge_category::ACCESSES_DATA
+            })
+            .count();
+        assert_eq!(edges, 1, "one edge per (fn, table) despite two queries");
+    }
+
+    #[test]
+    fn non_sql_string_arg_does_not_emit_data_access() {
+        // A string that merely contains the word `from` is not SQL.
+        const SRC: &str = r#"package main
+
+func log(l *Logger) {
+    l.Info("received request from client")
+}
+"#;
+        let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
+        assert!(
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA),
+            "non-SQL string must not mint ACCESSES_DATA"
+        );
+    }
+
     #[test]
     fn syntax_error_produces_partial_graph() {
         // Missing closing brace; tree-sitter still recovers.
@@ -1822,6 +2256,111 @@ func handle(r *http.Request) string {
             .iter()
             .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD));
         assert!(!any_route, "getters with non-`/` strings must not be routes");
+    }
+
+    // ========================================================================
+    // Client HTTP calls (Pattern A) — net/http outbound calls → ENDPOINT nodes.
+    // ========================================================================
+
+    fn endpoint_id(repo: RepoId, method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        )
+    }
+
+    const HTTP_CLIENT_CALLS: &str = r#"package client
+
+import (
+    "context"
+    "net/http"
+)
+
+func FetchUsers() ([]byte, error) {
+    resp, _ := http.Get("http://api.example.com/users")
+    return nil, nil
+}
+
+func CreateUser(httpClient *http.Client) {
+    httpClient.Post("http://api.example.com/users", "application/json", nil)
+}
+
+func GetOne(ctx context.Context) {
+    http.NewRequestWithContext(ctx, "DELETE", "http://api.example.com/things", nil)
+}
+"#;
+
+    #[test]
+    fn client_http_calls_emit_endpoints_with_calls_edges() {
+        let parse = parse_file(
+            HTTP_CLIENT_CALLS,
+            "client/client.go",
+            "client",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+
+        let get_users = endpoint_id(repo(), "GET", "/users");
+        let post_users = endpoint_id(repo(), "POST", "/users");
+        let del_things = endpoint_id(repo(), "DELETE", "/things");
+
+        // http.Get(absolute URL) → ENDPOINT GET /users (host stripped).
+        assert!(
+            parse.nodes.iter().any(|n| n.id == get_users),
+            "expected GET /users ENDPOINT from http.Get"
+        );
+        // client-method form `hc.Post(...)` → ENDPOINT POST /users.
+        assert!(
+            parse.nodes.iter().any(|n| n.id == post_users),
+            "expected POST /users ENDPOINT from hc.Post"
+        );
+        // NewRequestWithContext(ctx, "DELETE", url, …) → ENDPOINT DELETE /things.
+        assert!(
+            parse.nodes.iter().any(|n| n.id == del_things),
+            "expected DELETE /things ENDPOINT from NewRequestWithContext"
+        );
+
+        // CALLS edge from the enclosing function into each endpoint.
+        let fetch_users =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "client::FetchUsers");
+        assert!(
+            has_edge(&parse, fetch_users, get_users, edge_category::CALLS),
+            "expected CALLS edge FetchUsers -> GET /users endpoint"
+        );
+
+        // Client calls must NOT be mis-emitted as server ROUTE nodes.
+        assert!(
+            !parse
+                .nodes
+                .iter()
+                .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD)),
+            "client HTTP calls must not become server ROUTE nodes"
+        );
+    }
+
+    #[test]
+    fn relative_path_client_call_is_endpoint_not_route() {
+        // A client with a relative path shares the `verb("/path")` shape with a
+        // chi route registration; the client-receiver guard keeps it an ENDPOINT.
+        let source = r#"package client
+
+func hit(client *http.Client) {
+    client.Get("/users")
+}
+"#;
+        let parse = parse_file(source, "client/c.go", "client", "", repo()).unwrap();
+        let ep = endpoint_id(repo(), "GET", "/users");
+        assert!(parse.nodes.iter().any(|n| n.id == ep), "expected ENDPOINT");
+        assert!(
+            !parse
+                .nodes
+                .iter()
+                .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD)),
+            "client.Get('/users') must not emit a phantom ROUTE"
+        );
     }
 
     #[test]

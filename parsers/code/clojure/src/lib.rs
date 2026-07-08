@@ -115,6 +115,16 @@ fn first_symbol<'a>(list: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
     None
 }
 
+fn first_kwd<'a>(list: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = list.walk();
+    for child in list.named_children(&mut cursor) {
+        if child.kind() == "kwd_lit" {
+            return Some(text_of(child, src));
+        }
+    }
+    None
+}
+
 fn second_symbol<'a>(list: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
     let mut cursor = list.walk();
     let mut seen_first = false;
@@ -249,30 +259,23 @@ fn visit_defrecord(
 }
 
 fn collect_ns(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+    // `(ns app.core (:require [app.util :as util] ...))`
+    //
+    // The `:require` (and `:use`) clauses are nested `list_lit`s whose HEAD is a
+    // keyword (`kwd_lit` = `:require`), not a symbol — so `first_symbol` never
+    // matches them, and the `:require` keyword is never a direct child of the ns
+    // form. Detect the clause by its leading keyword, then reuse
+    // `collect_require` to walk the `[dep :as alias]` vectors inside.
+    //
+    // `from_module` is the MODULE node's qname (the file stem the engine passes,
+    // e.g. `core`) — NOT the dotted ns name — so the emitted `ImportStmt`
+    // resolves against `module_by_qname` in the graph builder.
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "list_lit"
-            && first_symbol(child, src) == Some(":require")
+            && matches!(first_kwd(child, src), Some(":require") | Some(":use"))
         {
             collect_require(child, src, from_module, acc);
-        }
-        if child.kind() == "kwd_lit" && text_of(child, src) == ":require" {
-            let mut c2 = node.walk();
-            let children: Vec<_> = node.named_children(&mut c2).collect();
-            for ch in &children {
-                if ch.kind() == "vec_lit" {
-                    let req_text = extract_require_from_vec(*ch, src);
-                    if !req_text.is_empty() {
-                        acc.imports.push(ImportStmt {
-                            from_module: from_module.to_string(),
-                            target: ImportTarget::Module {
-                                path: req_text,
-                                alias: None,
-                            },
-                        });
-                    }
-                }
-            }
         }
     }
 }
@@ -544,6 +547,35 @@ mod tests {
         let fp = parse_file(source, "src/proc.clj", "src::proc", repo()).unwrap();
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate")));
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Attribute { base, name } if base == "db" && name == "save")));
+    }
+
+    #[test]
+    fn ns_require_emits_import() {
+        // `app.core` requires `app.util`. The engine passes the file-stem qname
+        // (`core`) as module_qname, so from_module must equal `core` to resolve
+        // against module_by_qname, and the require target path (`app.util`) must
+        // be emitted so the graph's tail fallback binds it to the `util` module.
+        let source = r#"
+(ns app.core
+  (:require [app.util :as util]
+            [clojure.string :as str]))
+
+(defn run [x]
+  (util/process x))
+"#;
+        let fp = parse_file(source, "core.clj", "core", repo()).unwrap();
+        assert!(
+            fp.imports.iter().any(|i| i.from_module == "core"
+                && matches!(&i.target, ImportTarget::Module { path, .. } if path == "app.util")),
+            "expected import core -> app.util, got {:?}",
+            fp.imports
+                .iter()
+                .map(|i| (&i.from_module, &i.target))
+                .collect::<Vec<_>>()
+        );
+        // Every ns-require import carries the file-stem from_module, not the
+        // dotted ns name — otherwise resolve_imports_python early-continues.
+        assert!(fp.imports.iter().all(|i| i.from_module == "core"));
     }
 
     fn route_id(method: &str, path: &str) -> NodeId {

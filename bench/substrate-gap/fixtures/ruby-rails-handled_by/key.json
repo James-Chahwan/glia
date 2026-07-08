@@ -1,0 +1,13 @@
+{
+  "framework": "ruby-rails",
+  "language": "ruby",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "users", "note": "routes.rb GET users"},
+    {"kind": "CLASS", "name": "UsersController", "note": "controller"},
+    {"kind": "METHOD", "name": "index", "note": "action"}
+  ],
+  "expect_edges": [
+    {"from": "users", "to": "index", "category": "HANDLED_BY", "note": "route mapped to users#index"}
+  ]
+}

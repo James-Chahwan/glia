@@ -1,0 +1,12 @@
+{
+  "framework": "elixir-phoenix",
+  "language": "elixir",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "compute", "note": "caller"},
+    {"kind": "FUNCTION", "name": "helper", "note": "callee"}
+  ],
+  "expect_edges": [
+    {"from": "compute", "to": "helper", "category": "CALLS", "note": "compute calls helper"}
+  ]
+}

@@ -204,6 +204,48 @@ fn visit_function(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
+        collect_emits_in(body, src, parent_qname, id, repo, acc);
+    }
+}
+
+/// Walk a function body for `emit Foo(...)` statements and wire an EVENT_FLOWS
+/// edge from the emitting function (`from`) to the event node. The event is
+/// declared in the same contract, so its NodeId is name-derived against the
+/// contract qname (`parent_qname`) using the EVENT_EMITTER kind — matching the
+/// node `visit_event` produces. Nested functions are not descended into (their
+/// own emits are wired when they are visited).
+fn collect_emits_in(
+    node: TsNode,
+    src: &[u8],
+    contract_qname: &str,
+    from: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "emit_statement"
+            && let Some(name_node) = n.child_by_field_name("name")
+        {
+            let event = text_of(unwrap_expression(name_node), src);
+            if !event.is_empty() {
+                let to_qname = format!("{contract_qname}::{event}");
+                let to =
+                    NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &to_qname);
+                acc.edges.push(Edge {
+                    from,
+                    to,
+                    category: edge_category::EVENT_FLOWS,
+                    confidence: Confidence::Strong,
+                });
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if !matches!(child.kind(), "function_definition") {
+                stack.push(child);
+            }
+        }
     }
 }
 
@@ -221,7 +263,7 @@ fn visit_event(
     };
     let name = text_of(name_node, src);
     let qname = format!("{parent_qname}::{name}");
-    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::EVENT_EMITTER, &qname);
 
     acc.nodes.push(Node {
         id,
@@ -236,7 +278,7 @@ fn visit_event(
         confidence: Confidence::Strong,
     });
     acc.nav
-        .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
+        .record(id, name, &qname, node_kind::EVENT_EMITTER, Some(parent_id));
 }
 
 fn visit_enum(
@@ -494,26 +536,55 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 }
 
 fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
+    // tree-sitter-solidity wraps the `function:` field of a `call_expression`
+    // in an `expression` node, e.g. `function: (expression (identifier))` or
+    // `function: (expression (member_expression ...))`. Unwrap a single-child
+    // `expression` so we classify against the real callee node.
+    let func_node = unwrap_expression(func_node);
     match func_node.kind() {
-        "identifier" => CallQualifier::Bare(text_of(func_node, src).to_string()),
+        // A bare identifier call inside a contract method is an internal call
+        // to a sibling function of the SAME contract (Solidity functions are
+        // METHOD-kind, contract-scoped). Emit SelfMethod so the graph's
+        // resolve_calls binds it against the enclosing contract's methods
+        // (module_symbols would never contain a contract method, so `Bare`
+        // could not resolve). Free/global builtins (`require`, `keccak256`,
+        // type conversions) simply fall through to unresolved — harmless.
+        "identifier" => CallQualifier::SelfMethod(text_of(func_node, src).to_string()),
         "member_expression" => {
-            let obj = func_node
+            let obj_node = func_node
                 .child_by_field_name("object")
-                .map(|n| text_of(n, src))
-                .unwrap_or("");
+                .map(unwrap_expression);
+            let obj = obj_node.map(|n| text_of(n, src)).unwrap_or("");
             let prop = func_node
                 .child_by_field_name("property")
                 .map(|n| text_of(n, src))
                 .unwrap_or("");
-            CallQualifier::Attribute {
-                base: obj.to_string(),
-                name: prop.to_string(),
+            // `this.m()` / `super.m()` target a method of the enclosing
+            // contract → SelfMethod, same as a bare internal call.
+            if obj == "this" || obj == "super" {
+                CallQualifier::SelfMethod(prop.to_string())
+            } else {
+                CallQualifier::Attribute {
+                    base: obj.to_string(),
+                    name: prop.to_string(),
+                }
             }
         }
         _ => CallQualifier::ComplexReceiver {
             receiver: text_of(func_node, src).to_string(),
             name: String::new(),
         },
+    }
+}
+
+/// Unwrap a single-child `expression` wrapper node (the solidity grammar boxes
+/// most sub-expressions in an `expression` rule). Returns the inner node when
+/// `node` is an `expression` with exactly one named child; otherwise `node`.
+fn unwrap_expression(node: TsNode) -> TsNode {
+    if node.kind() == "expression" && node.named_child_count() == 1 {
+        node.named_child(0).unwrap_or(node)
+    } else {
+        node
     }
 }
 
@@ -677,6 +748,129 @@ contract Y is Base {
         assert_eq!(
             fp.edges.iter().filter(|e| e.category == edge_category::IMPLEMENTS).count(),
             0,
+        );
+    }
+
+    #[test]
+    fn internal_call_emits_self_method() {
+        // `deposit()` calls sibling `_credit()` — a bare internal call inside a
+        // contract. The parser must emit a SelfMethod CallSite so the graph
+        // resolves it against the enclosing contract's methods.
+        let source = r#"
+contract Bank {
+    mapping(address => uint256) balances;
+
+    function deposit(uint256 amount) public {
+        _credit(msg.sender, amount);
+        this.deposit(amount);
+    }
+
+    function _credit(address to, uint256 amount) internal {
+        balances[to] += amount;
+    }
+}
+"#;
+        let fp = parse_file(source, "contracts/Bank.sol", "contracts::Bank", repo()).unwrap();
+
+        // Bare internal call `_credit(...)` → SelfMethod("_credit").
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit")),
+            "expected a SelfMethod call to _credit, got {:?}",
+            fp.calls
+        );
+
+        // `this.deposit(...)` also maps to SelfMethod (same-contract dispatch).
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "deposit")),
+            "expected a SelfMethod call to deposit via `this.`, got {:?}",
+            fp.calls
+        );
+
+        // The call originates from `deposit`'s NodeId, not `_credit`'s.
+        let deposit_id = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(_, n)| n.as_str() == "deposit")
+            .map(|(id, _)| *id)
+            .expect("deposit method node");
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.from == deposit_id
+                    && matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit")),
+            "the _credit call should originate from deposit"
+        );
+
+        // No ComplexReceiver leaked through the expression-unwrap.
+        assert!(
+            !fp.calls
+                .iter()
+                .any(|c| matches!(c.qualifier, CallQualifier::ComplexReceiver { .. })),
+            "no call should classify as ComplexReceiver: {:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn event_emitter_node_and_event_flows_edge() {
+        // `event BidPlaced(...)` is an EVENT_EMITTER (not a FUNCTION), and the
+        // `bid()` function that does `emit BidPlaced(...)` wires an EVENT_FLOWS
+        // edge bid -> BidPlaced.
+        let source = r#"
+contract Auction {
+    uint256 public highestBid;
+
+    event BidPlaced(address indexed bidder, uint256 amount);
+
+    function bid(uint256 amount) public {
+        highestBid = amount;
+        emit BidPlaced(msg.sender, amount);
+    }
+}
+"#;
+        let fp = parse_file(source, "Auction.sol", "Auction", repo()).unwrap();
+
+        // The event surfaces as EVENT_EMITTER named `BidPlaced` (never FUNCTION).
+        let event_id = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .find(|(_, k)| **k == node_kind::EVENT_EMITTER)
+            .map(|(id, _)| *id)
+            .expect("expected an EVENT_EMITTER node");
+        assert_eq!(
+            fp.nav.name_by_id.get(&event_id).map(String::as_str),
+            Some("BidPlaced")
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::FUNCTION)
+                .count(),
+            0,
+            "the event must not be emitted as FUNCTION"
+        );
+
+        // `bid` is a METHOD; `emit BidPlaced(...)` wires bid -> BidPlaced.
+        let bid_id = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(_, n)| n.as_str() == "bid")
+            .map(|(id, _)| *id)
+            .expect("bid method node");
+        assert!(
+            fp.edges.iter().any(|e| e.from == bid_id
+                && e.to == event_id
+                && e.category == edge_category::EVENT_FLOWS),
+            "expected an EVENT_FLOWS edge bid -> BidPlaced, got {:?}",
+            fp.edges
         );
     }
 

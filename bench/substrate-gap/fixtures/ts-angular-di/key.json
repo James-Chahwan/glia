@@ -1,0 +1,12 @@
+{
+  "framework": "ts-angular-di",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "SERVICE", "name": "ApiService", "note": "@Injectable service"},
+    {"kind": "COMPONENT", "name": "AppComponent", "note": "@Component"}
+  ],
+  "expect_edges": [
+    {"from": "AppComponent", "to": "ApiService", "category": "INJECTS", "note": "GAP: constructor DI -> INJECTS (cat 8 defined, never emitted)"}
+  ]
+}

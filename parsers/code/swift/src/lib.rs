@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -5,6 +7,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 
 pub fn parse_file(
     source: &str,
@@ -57,6 +60,9 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
+    /// (method, path) even if the same endpoint is called twice in a file.
+    endpoint_seen: HashSet<NodeId>,
 }
 
 fn visit_top(
@@ -190,6 +196,7 @@ fn visit_function(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
+        collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
     }
 }
 
@@ -226,6 +233,7 @@ fn visit_method(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
+        collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
     }
 }
 
@@ -294,6 +302,142 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
+}
+
+const HTTP_VERBS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// Pattern A: detect Swift `URLSession` client HTTP calls in a function/method
+/// body and emit shared ENDPOINT nodes so the HttpStackResolver can pair them
+/// with a server ROUTE.
+///
+/// The request PATH lives in the `URL(string: "…")` literal (a plain
+/// `dataTask(with: url)` only sees a variable). The HTTP verb defaults to GET;
+/// if the same body sets `request.httpMethod = "POST"` we adopt that verb
+/// (`URLRequest.httpMethod` is the only way to change it). One httpMethod per
+/// body is the norm; when present it applies to that body's URL(s).
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    // `request.httpMethod = "VERB"` in this body overrides the GET default.
+    let explicit_method = body_http_method(body, src);
+    let method = explicit_method.clone().unwrap_or_else(|| "GET".to_string());
+
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if let Some((raw_path, interpolated)) = url_string_literal_path(n, src)
+            && let Some(path) = url_to_path(&raw_path)
+        {
+            let pos = n.start_position();
+            // Plain literal + default verb → Strong; interpolated path or a verb
+            // inferred indirectly from httpMethod → Medium.
+            let confidence = if interpolated || explicit_method.is_some() {
+                Confidence::Medium
+            } else {
+                Confidence::Strong
+            };
+            let ep = ClientEndpoint {
+                method: method.clone(),
+                path,
+                file: file_rel.to_string(),
+                line: pos.row + 1,
+                col: pos.column + 1,
+                confidence,
+            };
+            push_client_endpoint(
+                repo,
+                &ep,
+                from,
+                &mut acc.nodes,
+                &mut acc.edges,
+                &mut acc.nav,
+                &mut acc.endpoint_seen,
+            );
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            // Don't cross into a nested declaration — its own visit handles it.
+            if !matches!(child.kind(), "function_declaration" | "class_declaration") {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// If `n` is a `URL(string: "…")` call, return the reconstructed URL string and
+/// whether it contained interpolation. `URL(string: someVar)` (no literal) → None.
+fn url_string_literal_path(n: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    if n.kind() != "call_expression" {
+        return None;
+    }
+    let callee = n.named_child(0)?;
+    if callee.kind() != "simple_identifier" || text_of(callee, src) != "URL" {
+        return None;
+    }
+    let sl = first_descendant_of_kind(n, "line_string_literal")?;
+    Some(swift_string_path(sl, src))
+}
+
+/// Reconstruct a Swift `line_string_literal`, replacing every `\(expr)`
+/// interpolation with `${…}` so it normalises like a TS template path
+/// (`normalise_http_path` collapses any segment containing `${` to `{}`).
+/// Returns `(text, had_interpolation)`.
+fn swift_string_path(string_literal: TsNode, src: &[u8]) -> (String, bool) {
+    let mut out = String::new();
+    let mut interpolated = false;
+    let mut c = string_literal.walk();
+    for child in string_literal.named_children(&mut c) {
+        match child.kind() {
+            "line_str_text" => out.push_str(text_of(child, src)),
+            "interpolated_expression" => {
+                out.push_str("${…}");
+                interpolated = true;
+            }
+            _ => {}
+        }
+    }
+    (out, interpolated)
+}
+
+/// Scan a body for `<x>.httpMethod = "VERB"` and return the upper-cased verb.
+fn body_http_method(body: TsNode, src: &[u8]) -> Option<String> {
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "assignment"
+            && let Some(target) = n.child_by_field_name("target")
+            && text_of(target, src).trim_end().ends_with(".httpMethod")
+            && let Some(result) = n.child_by_field_name("result")
+            && result.kind() == "line_string_literal"
+        {
+            let (verb, _) = swift_string_path(result, src);
+            let verb = verb.trim().to_ascii_uppercase();
+            if HTTP_VERBS.contains(&verb.as_str()) {
+                return Some(verb);
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn first_descendant_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut c = node.walk();
+    for child in node.named_children(&mut c) {
+        if let Some(found) = first_descendant_of_kind(child, kind) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn scan_vapor_routes(source: &str, repo: RepoId, acc: &mut Acc) {
@@ -515,5 +659,67 @@ import Vapor
 "#;
         let fp = parse_file(source, "Sources/App.swift", "Sources::App", repo()).unwrap();
         assert_eq!(fp.imports.len(), 2);
+    }
+
+    #[test]
+    fn urlsession_client_call_emits_endpoint_not_route() {
+        // Pattern A: URLSession `URL(string:)` client calls in a function →
+        // ENDPOINT nodes (not phantom ROUTEs), with a CALLS edge from the
+        // enclosing function. GET default; `httpMethod = "POST"` adopts POST.
+        // Absolute URL host is stripped; `\(id)` interpolation → `${…}`.
+        let source = r#"
+import Foundation
+
+func fetchUser(id: String) {
+    let url = URL(string: "https://api.example.com/users/\(id)")!
+    let task = URLSession.shared.dataTask(with: url) { data, response, error in
+    }
+    task.resume()
+}
+
+func createUser(body: Data) {
+    let url = URL(string: "https://api.example.com/users")!
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    let task = URLSession.shared.dataTask(with: request) { data, response, error in
+    }
+    task.resume()
+}
+"#;
+        let fp = parse_file(source, "Sources/Api.swift", "Sources::Api", repo()).unwrap();
+
+        let ep_get =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
+        let ep_post =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/users");
+
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_get),
+            "expected GET /users/${{…}} ENDPOINT node"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_post),
+            "expected POST /users ENDPOINT node"
+        );
+        // Must NOT emit phantom ROUTE nodes for the client calls.
+        assert!(
+            !fp.nodes
+                .iter()
+                .any(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ROUTE)),
+            "client URLSession calls must not become server ROUTEs"
+        );
+        // CALLS edge from the enclosing function into each endpoint.
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_get && e.category == edge_category::CALLS),
+            "expected CALLS edge into the GET endpoint"
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_post && e.category == edge_category::CALLS),
+            "expected CALLS edge into the POST endpoint"
+        );
     }
 }

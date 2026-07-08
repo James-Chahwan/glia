@@ -1,0 +1,12 @@
+{
+  "framework": "py-imports",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "util", "note": "imported module"},
+    {"kind": "MODULE", "name": "app", "note": "importer"}
+  ],
+  "expect_edges": [
+    {"from": "app", "to": "util", "category": "IMPORTS", "note": "from util import shared_helper"}
+  ]
+}

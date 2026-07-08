@@ -1,0 +1,12 @@
+{
+  "framework": "php-laravel",
+  "language": "php",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "/users", "note": "Route::get('/users', ...)"},
+    {"kind": "METHOD", "name": "index", "note": "UserController::index handler"}
+  ],
+  "expect_edges": [
+    {"from": "/users", "to": "index", "category": "HANDLED_BY", "note": "route handled by controller method"}
+  ]
+}

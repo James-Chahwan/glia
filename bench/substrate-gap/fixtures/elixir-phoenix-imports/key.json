@@ -1,0 +1,13 @@
+{
+  "framework": "elixir-phoenix",
+  "language": "elixir",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "controller", "note": "file module — the IMPORTS source; defmodule itself is a PACKAGE node"},
+    {"kind": "PACKAGE", "name": "UserController", "note": "defmodule MyAppWeb.UserController"},
+    {"kind": "PACKAGE", "name": "Repo", "note": "defmodule MyApp.Repo (in-repo alias target, short name Repo)"}
+  ],
+  "expect_edges": [
+    {"from": "controller", "to": "Repo", "category": "IMPORTS", "note": "alias MyApp.Repo -> in-repo module bound by short-name tail fallback"}
+  ]
+}

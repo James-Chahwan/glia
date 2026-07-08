@@ -25,8 +25,21 @@ runpod.sh
 
 # Cached graph data produced by repo-graph-py 0.4.14+ auto-persist. Regenerable
 # from source — `repo_graph_py.generate()` writes here unless GLIA_NO_PERSIST=1.
+# Match at any depth (crates auto-persist into their own `<crate>/.ai/`).
 .ai/repo-graph/
+**/.ai/repo-graph/
+
+# Python bytecode (eval harnesses under bench/).
+__pycache__/
+
+# Regenerable substrate-gap eval output — BLINDSPOTS.md is the committed summary.
+bench/substrate-gap/results.jsonl
 
 # Claude Code runtime lock (scheduled tasks); settings.local.json is ignored
 # globally. Track .claude/commands/ but never the lock.
 .claude/scheduled_tasks.lock
+# Tier-4 external-doc snapshot (glia docs sync) — gitignored by default
+.glia/docs-snapshot/
+
+# Atlassian/Confluence API token for `glia docs sync` (Tier-4) — never commit
+.env

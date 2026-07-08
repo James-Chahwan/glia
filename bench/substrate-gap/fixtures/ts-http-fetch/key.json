@@ -1,0 +1,12 @@
+{
+  "framework": "ts-http-fetch",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "/users", "note": "TS fetch endpoint (client)"},
+    {"kind": "ROUTE", "name": "/users", "note": "Express route (server)"}
+  ],
+  "expect_edges": [
+    {"from": "/users", "to": "/users", "category": "HTTP_CALLS", "note": "TS fetch -> Express route pairing"}
+  ]
+}

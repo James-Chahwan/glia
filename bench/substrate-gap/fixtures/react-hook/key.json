@@ -1,0 +1,12 @@
+{
+  "framework": "react-hook",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "HOOK", "name": "useCounter", "note": "custom React hook"},
+    {"kind": "COMPONENT", "name": "Counter", "note": "component consuming the hook"}
+  ],
+  "expect_edges": [
+    {"from": "Counter", "to": "useCounter", "category": "CALLS", "note": "component calls custom hook"}
+  ]
+}

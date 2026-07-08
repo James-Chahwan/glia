@@ -229,7 +229,13 @@ fn build_symbol_table(g: &mut RepoGraph) {
     // Walk children_of; if parent kind == MODULE, child goes in module_symbols.
     for (parent, children) in &g.nav.children_of {
         let parent_kind = g.nav.kind_by_id.get(parent).copied();
-        if parent_kind == Some(node_kind::MODULE) {
+        // MODULE (file) and PACKAGE (namespace, e.g. C# `namespace Shop.Services`)
+        // both scope top-level type/fn defs. Registering PACKAGE children lets a
+        // namespace-scoped type resolve by name (Pattern E INJECTS: C# services
+        // live under a PACKAGE node, not a MODULE). A type indexed under both its
+        // file MODULE and its namespace PACKAGE is deduped by id in the global
+        // lookups, so this doesn't create false ambiguity.
+        if parent_kind == Some(node_kind::MODULE) || parent_kind == Some(node_kind::PACKAGE) {
             let entry = g.symbols.module_symbols.entry(*parent).or_default();
             for child in children {
                 if let Some(name) = g.nav.name_by_id.get(child) {
@@ -278,6 +284,27 @@ fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) {
                         .entry(from_mod_id)
                         .or_default()
                         .insert(bound_name, target_id);
+                } else {
+                    // Tail fallback (Pattern B): `import com.example.util.Helper`
+                    // (class) or `require app.util` (module) where the file layout
+                    // doesn't mirror the package path, so the full qname misses.
+                    // Bind the final segment — as a unique global class/interface
+                    // (module_symbols, incl. PACKAGE members) or a unique module by
+                    // short name. Miss-only + ambiguity-safe (returns None on tie).
+                    let tail = path
+                        .rsplit(|c| c == '.' || c == ':' || c == '/')
+                        .next()
+                        .unwrap_or(path);
+                    if let Some(target_id) =
+                        unique_global_function(g, tail).or_else(|| unique_global_module(g, tail))
+                    {
+                        push_edge(g, from_mod_id, target_id, edge_category::IMPORTS);
+                        g.symbols
+                            .module_import_bindings
+                            .entry(from_mod_id)
+                            .or_default()
+                            .insert(alias.clone().unwrap_or_else(|| tail.to_string()), target_id);
+                    }
                 }
             }
             ImportTarget::Symbol { module, name, alias, level } => {
@@ -323,6 +350,16 @@ fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) {
                             .or_default()
                             .insert(bound, symbol_id);
                     }
+                } else if let Some(symbol_id) = unique_global_function(g, name) {
+                    // Tail fallback (Pattern B): `from a.b import Name` where `a.b`
+                    // isn't a resolvable module (flat layout) — bind the imported
+                    // symbol by its unique global name. Miss-only + ambiguity-safe.
+                    push_edge(g, from_mod_id, symbol_id, edge_category::IMPORTS);
+                    g.symbols
+                        .module_import_bindings
+                        .entry(from_mod_id)
+                        .or_default()
+                        .insert(bound, symbol_id);
                 }
             }
         }
@@ -346,7 +383,12 @@ fn resolve_imports_go(g: &mut RepoGraph, imports: &[ImportStmt]) {
         let ImportTarget::Module { path, alias } = &stmt.target else {
             continue;
         };
-        let Some(target_id) = g.symbols.module_by_qname.get(path).copied() else {
+        let Some(target_id) = g.symbols.module_by_qname.get(path).copied().or_else(|| {
+            // Tail fallback (Pattern B): the go.mod-stripped path doesn't match a
+            // module qname exactly — bind the imported package by its unique short
+            // name (last `::` segment). Miss-only + ambiguity-safe.
+            unique_global_module(g, path.rsplit("::").next().unwrap_or(path))
+        }) else {
             continue;
         };
         push_edge(g, from_mod_id, target_id, edge_category::IMPORTS);
@@ -510,7 +552,9 @@ where
 
         let resolved: Option<NodeId> = match &site.qualifier {
             CallQualifier::Bare(name) => {
-                // Priority: local import binding → same-module top-level def.
+                // Priority: local import binding → same-module top-level def →
+                // enclosing PACKAGE's def (Elixir: `def`s live under a defmodule
+                // PACKAGE, not the file MODULE).
                 bindings
                     .and_then(|b| b.get(name).copied())
                     .or_else(|| {
@@ -518,6 +562,11 @@ where
                             .module_symbols
                             .get(&from_module)
                             .and_then(|s| s.get(name).copied())
+                    })
+                    .or_else(|| {
+                        enclosing_package(&g.nav, site.from).and_then(|pkg| {
+                            g.symbols.module_symbols.get(&pkg).and_then(|s| s.get(name).copied())
+                        })
                     })
             }
             CallQualifier::Attribute { base, name } => bindings
@@ -594,7 +643,22 @@ fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                 // match. Same-name collisions across the repo skip
                 // (better unresolved than wrong).
                 .or_else(|| {
-                    if r.category == edge_category::HANDLED_BY {
+                    // Global-by-name fallback. HANDLED_BY: route handler is a
+                    // same-package fn (import binding can't see it). INJECTS
+                    // (Pattern E): the injected service TYPE is resolved by its
+                    // unique class name across the repo — DI param types are
+                    // often unresolvable via imports (TS/dotted imports are a
+                    // separate gap), and `module_symbols` registers top-level
+                    // classes by name, so a uniquely-named service binds here.
+                    if r.category == edge_category::HANDLED_BY
+                        || r.category == edge_category::INJECTS
+                        || r.category == edge_category::INHERITS_FROM
+                        || r.category == edge_category::IMPLEMENTS
+                    {
+                        // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
+                        // type by its bare name; resolve to the uniquely-named class/
+                        // interface across the repo (module_symbols indexes them,
+                        // incl. namespace/PACKAGE members). Ambiguity → None.
                         unique_global_function(g, name)
                     } else {
                         None
@@ -661,15 +725,36 @@ fn unique_global_method(g: &RepoGraph, name: &str) -> Option<NodeId> {
     hit
 }
 
+/// A module/package whose qname's final segment equals `tail`, iff unique.
+/// For imports that target a module/namespace (`import app.util`, Go/Clojure/
+/// Elixir) where the file layout doesn't produce the full dotted qname, so the
+/// import binds by the module's short name. Deduped by id; None on ambiguity.
+fn unique_global_module(g: &RepoGraph, tail: &str) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for (qname, &id) in &g.symbols.module_by_qname {
+        if qname.rsplit("::").next() == Some(tail) {
+            match hit {
+                Some(existing) if existing == id => {}
+                Some(_) => return None,
+                None => hit = Some(id),
+            }
+        }
+    }
+    hit
+}
+
 /// Same idea for top-level functions across the repo.
 fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId> {
     let mut hit: Option<NodeId> = None;
     for syms in g.symbols.module_symbols.values() {
         if let Some(&id) = syms.get(name) {
-            if hit.is_some() {
-                return None; // ambiguous
+            match hit {
+                // Same node registered under both its MODULE and its PACKAGE
+                // (namespace) — not ambiguous, it's one node.
+                Some(existing) if existing == id => {}
+                Some(_) => return None, // two distinct nodes share the name
+                None => hit = Some(id),
             }
-            hit = Some(id);
         }
     }
     hit
@@ -683,6 +768,19 @@ fn enclosing_module(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
             return Some(id);
         }
         id = *nav.parent_of.get(&id)?;
+    }
+}
+
+/// Nearest enclosing PACKAGE (namespace / defmodule). Elixir `def`s live under a
+/// `defmodule` PACKAGE, not the file MODULE, so a bare sibling call resolves via
+/// the package's symbols. Additive fallback — `module_symbols` indexes PACKAGE
+/// members (build_symbol_table).
+fn enclosing_package(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
+    loop {
+        id = *nav.parent_of.get(&id)?;
+        if nav.kind_by_id.get(&id) == Some(&node_kind::PACKAGE) {
+            return Some(id);
+        }
     }
 }
 

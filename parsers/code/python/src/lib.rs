@@ -19,6 +19,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
 
 /// Parse one Python source file.
 ///
@@ -52,6 +53,11 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
+    // substrate-gap py-accesses-data — pre-pass: harvest `__tablename__` from
+    // every model class so `session.query(User)` sites (which may appear before
+    // *or* after the class in file order) can resolve `User` → its table.
+    scan_model_tables(root, src, repo, &mut acc);
+
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         match child.kind() {
@@ -73,7 +79,7 @@ pub fn parse_file(
             "import_from_statement" => collect_import_from(child, src, module_qname, &mut acc),
             "expression_statement" => {
                 // Top-level calls — record them with module as source.
-                collect_calls_in(child, src, module_id, None, &mut acc);
+                collect_calls_in(child, src, module_id, None, repo, file_rel_path, &mut acc);
                 // Django-style path('/x', view) registrations in urls.py scan.
                 scan_django_routes(child, src, repo, &mut acc);
                 // glia v5 G19 — module-level constant assignments
@@ -167,6 +173,19 @@ struct Acc {
     /// (valid attribute access) rather than `self.x()`. Lets composition-path
     /// synth filter method→class hops to only syntactically valid reads.
     properties: std::collections::HashSet<NodeId>,
+    /// Pattern A — dedup for client-HTTP ENDPOINT nodes: one node per
+    /// (method, path) even if the same endpoint is called from several sites.
+    endpoint_seen: std::collections::HashSet<NodeId>,
+    /// substrate-gap py-accesses-data — SQLAlchemy model class name → the
+    /// `data_entity:sql:<table>` node id, harvested from `__tablename__ = "..."`.
+    /// Lets a `session.query(User)` call inside a function anchor an
+    /// `ACCESSES_DATA` edge to that data-entity node (function-anchored, not
+    /// module-anchored — the data_entities extractor already emits the coarse
+    /// module→entity edge, but not the accessor→entity one the graph needs).
+    model_tables: HashMap<String, NodeId>,
+    /// Dedup for function-anchored `ACCESSES_DATA` edges: one edge per
+    /// (accessor fn, data-entity) even when a fn issues the query repeatedly.
+    accesses_data_seen: std::collections::HashSet<(NodeId, NodeId)>,
     nav: CodeNav,
 }
 
@@ -488,7 +507,7 @@ fn visit_method(
     collect_return_type_ref(n, src, method_id, module_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
-        collect_calls_in(body, src, method_id, Some(class_id), acc);
+        collect_calls_in(body, src, method_id, Some(class_id), repo, file_rel, acc);
         // v0.4.13 — scan for `self.<attr> = …` assignments that define class
         // attributes via instance-side `__init__`-style initialisation.
         collect_self_attr_assignments(
@@ -553,7 +572,16 @@ fn visit_function(
     collect_return_type_ref(n, src, func_id, module_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
-        collect_calls_in(body, src, func_id, None, acc);
+        collect_calls_in(body, src, func_id, None, repo, file_rel, acc);
+        // substrate-gap py-tests — a pytest `def test_x` that calls a bare
+        // function emits a fn-level TESTS ref (test_add → add). The engine's
+        // module→module TESTS post-pass stays; this adds the finer edge the
+        // graph contract wants. Resolves via the same import-binding path as a
+        // normal cross-file call, so only calls that bind to a real project fn
+        // become edges (builtins/asserts fall through harmlessly).
+        if is_pytest_test(name) {
+            collect_test_targets(body, src, func_id, module_id, acc);
+        }
         // Nested defs inside the body — visited recursively.
         let mut cursor = body.walk();
         for member in body.named_children(&mut cursor) {
@@ -786,6 +814,8 @@ fn collect_calls_in(
     src: &[u8],
     from: NodeId,
     enclosing_class: Option<NodeId>,
+    repo: RepoId,
+    file_rel: &str,
     acc: &mut Acc,
 ) {
     let mut stack = vec![n];
@@ -796,14 +826,23 @@ fn collect_calls_in(
         if matches!(kind, "function_definition" | "class_definition") {
             continue;
         }
-        if kind == "call"
-            && let Some(q) = extract_call_qualifier(node, src)
-        {
-            acc.unresolved.push(UnresolvedCall {
-                from,
-                enclosing_class,
-                qualifier: q,
-            });
+        if kind == "call" {
+            // Pattern A: client HTTP call (`requests.get('/x')`) → shared
+            // ENDPOINT node so the HttpStackResolver can pair it with a server
+            // ROUTE. This is *additional* to the normal call-qualifier record
+            // below (which stays as a cross-file CallSite, harmless).
+            try_detect_py_endpoint(node, src, from, repo, file_rel, acc);
+            // substrate-gap py-accesses-data — `session.query(User)` inside a
+            // function/method → ACCESSES_DATA edge anchored on `from` (the
+            // enclosing accessor), not the module.
+            try_detect_data_access(node, src, from, acc);
+            if let Some(q) = extract_call_qualifier(node, src) {
+                acc.unresolved.push(UnresolvedCall {
+                    from,
+                    enclosing_class,
+                    qualifier: q,
+                });
+            }
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -852,6 +891,327 @@ fn is_super_call(call_node: TsNode, src: &[u8]) -> bool {
         .child_by_field_name("function")
         .map(|f| f.kind() == "identifier" && text(f, src) == "super")
         .unwrap_or(false)
+}
+
+// ============================================================================
+// Data access (substrate-gap py-accesses-data)
+// ============================================================================
+//
+// A SQLAlchemy model declares its table with `__tablename__ = "users"`; a query
+// site names the model class (`session.query(User)`). The `data_entities`
+// extractor already mints the `data_entity:sql:users` node + a coarse
+// module→entity ACCESSES_DATA edge, but the graph contract wants the edge
+// anchored on the *accessor function* (`find_users`), so PPR/impact can reach
+// the data from the code path that touches it. We resolve `User` → its table
+// (built in `scan_model_tables`) and emit that function-anchored edge here.
+
+/// Pre-pass: walk top-level class definitions (bare or decorated), read each
+/// one's `__tablename__ = "<table>"`, and record `class_name → data_entity node
+/// id`. The node id matches the one the `data_entities` extractor mints, so the
+/// edge we emit points at the shared entity node.
+fn scan_model_tables(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        let class_node = match child.kind() {
+            "class_definition" => Some(child),
+            "decorated_definition" => {
+                split_decorated(child).1.filter(|i| i.kind() == "class_definition")
+            }
+            _ => None,
+        };
+        let Some(class_node) = class_node else { continue };
+        let Some(class_name) = child_text(class_node, "name", src) else {
+            continue;
+        };
+        let Some(table) = find_tablename(class_node, src) else {
+            continue;
+        };
+        if table.is_empty() {
+            continue;
+        }
+        let qname = format!("data_entity:sql:{table}");
+        let entity_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+        acc.model_tables.insert(class_name.to_string(), entity_id);
+    }
+}
+
+/// Read `__tablename__ = "<table>"` from a class body, if present. tree-sitter
+/// shape: `expression_statement > assignment` with `left` = the `__tablename__`
+/// identifier and `right` = a string literal.
+fn find_tablename(class_node: TsNode, src: &[u8]) -> Option<String> {
+    let body = class_node.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        if member.kind() != "expression_statement" {
+            continue;
+        }
+        let mut inner = member.walk();
+        for stmt in member.named_children(&mut inner) {
+            if stmt.kind() == "assignment"
+                && let Some(lhs) = stmt.child_by_field_name("left")
+                && lhs.kind() == "identifier"
+                && text(lhs, src) == "__tablename__"
+                && let Some(rhs) = stmt.child_by_field_name("right")
+                && rhs.kind() == "string"
+            {
+                return Some(strip_string_quotes(text(rhs, src)));
+            }
+        }
+    }
+    None
+}
+
+/// Detect a `<recv>.query(Model)` call and, when `Model` resolves to a known
+/// SQLAlchemy model, emit an ACCESSES_DATA edge from `from` (the enclosing
+/// accessor function/method) to the model's `data_entity:sql:<table>` node.
+/// Deduped per (accessor, entity).
+fn try_detect_data_access(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "attribute" {
+        return;
+    }
+    let Some(attr) = func.child_by_field_name("attribute") else {
+        return;
+    };
+    if text(attr, src) != "query" {
+        return;
+    }
+    let Some(arglist) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let args = positional_args(arglist);
+    let Some(first) = args.first() else {
+        return;
+    };
+    if first.kind() != "identifier" {
+        return;
+    }
+    let model = text(*first, src);
+    let Some(&entity_id) = acc.model_tables.get(model) else {
+        return;
+    };
+    if !acc.accesses_data_seen.insert((from, entity_id)) {
+        return;
+    }
+    acc.edges.push(Edge {
+        from,
+        to: entity_id,
+        category: edge_category::ACCESSES_DATA,
+        confidence: Confidence::Medium,
+    });
+}
+
+// ============================================================================
+// Test targets (substrate-gap py-tests)
+// ============================================================================
+
+/// pytest discovery convention: a test function is named `test_*`.
+fn is_pytest_test(name: &str) -> bool {
+    name.starts_with("test_")
+}
+
+/// Walk a pytest test function's body and emit a TESTS `UnresolvedRef` for each
+/// bare-name call (`add(2, 3)`). The graph crate binds these by the module's
+/// import bindings / symbols, so only calls that reach a real project function
+/// (e.g. `from calc import add`) produce a resolved fn-level TESTS edge; bare
+/// builtins simply stay unresolved. Deduped by callee name within the test.
+fn collect_test_targets(body: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    let mut stack = vec![body];
+    while let Some(node) = stack.pop() {
+        // Don't descend into nested defs — their calls aren't this test's.
+        if matches!(node.kind(), "function_definition" | "class_definition") {
+            continue;
+        }
+        if node.kind() == "call"
+            && let Some(func) = node.child_by_field_name("function")
+            && func.kind() == "identifier"
+        {
+            let name = text(func, src);
+            if seen.insert(name.to_string()) {
+                acc.refs.push(UnresolvedRef {
+                    from,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Bare(name.to_string()),
+                    category: edge_category::TESTS,
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+// ============================================================================
+// Client HTTP-call extraction (Pattern A) — requests / httpx
+// ============================================================================
+//
+// A client call like `requests.get('/users')` / `httpx.post(url)` /
+// `self.session.get(f'/users/{uid}')` is emitted as a shared ENDPOINT node (via
+// `push_client_endpoint`) so the cross-graph HttpStackResolver can pair it with
+// a server ROUTE (HTTP_CALLS). Server-side route decorators are handled
+// separately by `check_route_decorator`; those receivers (`app`, `router`,
+// `blueprint`) are not HTTP clients, so there is no phantom-ROUTE overlap.
+
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// True if a call receiver names an HTTP client — `requests` / `httpx` /
+/// `http` / `session` / `client` / `api`, or any `*_client` / `*session`
+/// (e.g. `self.http_client`, `api_session`). Leading underscores are ignored.
+/// The `/`-path guard downstream (a non-path first arg → `url_to_path` = None)
+/// keeps loose matches from producing spurious endpoints.
+fn is_http_client_receiver(name: &str) -> bool {
+    let n = name.trim_start_matches('_').to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "requests" | "httpx" | "http" | "session" | "client" | "api"
+    ) || n.ends_with("client")
+        || n.ends_with("session")
+}
+
+/// The simple (trailing) name of a call receiver: `requests` → `requests`;
+/// `self.session` (an `attribute`) → `session`. Chained/other shapes → None.
+fn http_receiver_simple<'a>(object: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    match object.kind() {
+        "identifier" => Some(text(object, src)),
+        "attribute" => object.child_by_field_name("attribute").map(|a| text(a, src)),
+        _ => None,
+    }
+}
+
+/// Positional argument nodes of a call's `argument_list`, in order, skipping
+/// `keyword_argument`s (`json=body`, `timeout=5`, …).
+fn positional_args<'a>(arglist: TsNode<'a>) -> Vec<TsNode<'a>> {
+    let mut out = Vec::new();
+    let mut cursor = arglist.walk();
+    for child in arglist.named_children(&mut cursor) {
+        if child.kind() != "keyword_argument" {
+            out.push(child);
+        }
+    }
+    out
+}
+
+/// Reconstruct a Python string-literal path. Plain text comes from
+/// `string_content`; every `interpolation` (`{uid}` in an f-string) becomes
+/// `${…}` so it normalises to a wildcard downstream (matching Dart/TS).
+/// Returns `(path, had_interpolation)`; a non-`string` node yields an empty path.
+fn py_string_path(node: TsNode, src: &[u8]) -> (String, bool) {
+    if node.kind() != "string" {
+        return (String::new(), false);
+    }
+    let mut out = String::new();
+    let mut interpolated = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" => out.push_str(text(child, src)),
+            "interpolation" => {
+                out.push_str("${…}");
+                interpolated = true;
+            }
+            _ => {}
+        }
+    }
+    (out, interpolated)
+}
+
+/// Pattern A: detect a client HTTP call and emit a shared ENDPOINT node + CALLS
+/// edge from `from`. Covers `requests.get(url)` / `httpx.post(url)` /
+/// `self.session.get(url)` (verb from the attribute) and
+/// `requests.request("GET", url)` (verb from the first string arg).
+fn try_detect_py_endpoint(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "attribute" {
+        return;
+    }
+    let Some(object) = func.child_by_field_name("object") else {
+        return;
+    };
+    let Some(attr) = func.child_by_field_name("attribute") else {
+        return;
+    };
+    let Some(recv) = http_receiver_simple(object, src) else {
+        return;
+    };
+    if !is_http_client_receiver(recv) {
+        return;
+    }
+    let Some(arglist) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let method_name = text(attr, src).to_ascii_lowercase();
+    let args = positional_args(arglist);
+
+    // Resolve (verb, url-arg-node).
+    let (verb, url_node) = if HTTP_VERBS.contains(&method_name.as_str()) {
+        let Some(url) = args.first().copied() else {
+            return;
+        };
+        (method_name.to_ascii_uppercase(), url)
+    } else if method_name == "request" {
+        // requests.request("GET", url) — verb is the first string arg.
+        let Some(verb_node) = args.first().copied() else {
+            return;
+        };
+        let (verb_raw, _) = py_string_path(verb_node, src);
+        let verb = verb_raw.trim().to_ascii_uppercase();
+        if !HTTP_VERBS.contains(&verb.to_ascii_lowercase().as_str()) {
+            return;
+        }
+        let Some(url) = args.get(1).copied() else {
+            return;
+        };
+        (verb, url)
+    } else {
+        return;
+    };
+
+    // Path must be a string literal; reconstruct interpolations, then reduce a
+    // full URL to its path. Bail on a bare variable / non-path first arg.
+    let (raw_path, interpolated) = py_string_path(url_node, src);
+    if raw_path.is_empty() {
+        return;
+    }
+    let Some(path) = endpoint::url_to_path(&raw_path) else {
+        return;
+    };
+    let confidence = if interpolated {
+        Confidence::Medium
+    } else {
+        Confidence::Strong
+    };
+    let pos = call.start_position();
+    let ep = ClientEndpoint {
+        method: verb,
+        path,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence,
+    };
+    push_client_endpoint(
+        repo,
+        &ep,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
 }
 
 /// v0.4.13a — walk a function/method definition's parameters and return-type
@@ -2135,5 +2495,171 @@ class Field:
             "expected USES ref Field::module_attr→Target, got refs: {:?}",
             parse.refs
         );
+    }
+
+    // ----- Pattern A: client HTTP-call ENDPOINT extraction -----
+
+    fn endpoint_id(method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        )
+    }
+
+    #[test]
+    fn requests_client_call_emits_endpoint_not_route() {
+        // `requests.get(f"http://api/users/{uid}")` / `requests.post(...)` in a
+        // function body → ENDPOINT nodes (not phantom ROUTEs), each with a CALLS
+        // edge from the enclosing function. Absolute URL → path; f-string
+        // interpolation → `${…}`.
+        let src = "import requests\n\n\ndef fetch_user(uid):\n    r = requests.get(f\"http://api/users/{uid}\")\n    return r.json()\n\n\ndef make_user(body):\n    requests.post(\"http://api/users\", json=body)\n";
+        let parse = parse_file(src, "client.py", "client", repo()).unwrap();
+
+        let fetch_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "client::fetch_user");
+        let ep_get = endpoint_id("GET", "/users/${…}");
+        let ep_post = endpoint_id("POST", "/users");
+
+        assert!(
+            parse.nodes.iter().any(|n| n.id == ep_get),
+            "expected GET /users/${{…}} ENDPOINT node, nodes: {:?}",
+            parse
+                .nodes
+                .iter()
+                .filter(|n| parse.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::ENDPOINT))
+                .map(|n| parse.nav.qname_by_id.get(&n.id))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            parse.nodes.iter().any(|n| n.id == ep_post),
+            "expected POST /users ENDPOINT node"
+        );
+        // CALLS edge from the enclosing function into the endpoint.
+        assert!(
+            has_edge(&parse, fetch_id, ep_get, edge_category::CALLS),
+            "expected CALLS edge fetch_user → GET endpoint"
+        );
+        // No phantom ROUTE for the client calls.
+        let has_route = parse
+            .nodes
+            .iter()
+            .any(|n| parse.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::ROUTE));
+        assert!(!has_route, "client requests.* must not emit server ROUTEs");
+    }
+
+    #[test]
+    fn requests_request_verb_from_first_arg_and_session_receiver() {
+        // `requests.request("GET", "/things")` → verb from first string arg.
+        // `self.session.post("/things")` → receiver's trailing name is a client.
+        let src = "import requests\n\n\nclass Api:\n    def run(self):\n        requests.request(\"GET\", \"/things\")\n        self.session.post(\"/things\")\n";
+        let parse = parse_file(src, "api.py", "api", repo()).unwrap();
+        let run_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "api::Api::run");
+        let ep_get = endpoint_id("GET", "/things");
+        let ep_post = endpoint_id("POST", "/things");
+        assert!(parse.nodes.iter().any(|n| n.id == ep_get), "missing GET /things");
+        assert!(parse.nodes.iter().any(|n| n.id == ep_post), "missing POST /things");
+        assert!(has_edge(&parse, run_id, ep_get, edge_category::CALLS));
+        assert!(has_edge(&parse, run_id, ep_post, edge_category::CALLS));
+    }
+
+    #[test]
+    fn non_http_receiver_does_not_emit_endpoint() {
+        // A `.get('/x')` on a non-client receiver (dict-like) must NOT become an
+        // endpoint. `cfg` is not an HTTP client name.
+        let src = "def f(cfg):\n    return cfg.get(\"/x\")\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        let has_endpoint = parse
+            .nodes
+            .iter()
+            .any(|n| parse.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::ENDPOINT));
+        assert!(!has_endpoint, "cfg.get should not emit an ENDPOINT");
+    }
+
+    #[test]
+    fn session_query_emits_accesses_data_from_enclosing_function() {
+        // substrate-gap py-accesses-data — `session.query(User)` inside
+        // `find_users` must anchor ACCESSES_DATA on the *function*, not the
+        // module. `User.__tablename__ = "users"` gives the data-entity node.
+        let src = "from sqlalchemy.orm import Session\n\n\nclass User(Base):\n    __tablename__ = \"users\"\n    id = Column(Integer)\n\n\ndef find_users(session):\n    return session.query(User).filter(User.name == \"x\").all()\n";
+        let parse = parse_file(src, "store.py", "store", repo()).unwrap();
+
+        let find_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::find_users");
+        let entity_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:users",
+        );
+
+        assert!(
+            has_edge(&parse, find_id, entity_id, edge_category::ACCESSES_DATA),
+            "expected find_users → data_entity:sql:users ACCESSES_DATA edge, edges: {:?}",
+            parse
+                .edges
+                .iter()
+                .filter(|e| e.category == edge_category::ACCESSES_DATA)
+                .map(|e| (e.from, e.to))
+                .collect::<Vec<_>>()
+        );
+
+        // The edge must NOT be anchored on the module.
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "store");
+        assert!(
+            !has_edge(&parse, module_id, entity_id, edge_category::ACCESSES_DATA),
+            "parser must not emit the module-anchored ACCESSES_DATA edge"
+        );
+    }
+
+    #[test]
+    fn unknown_model_does_not_emit_accesses_data() {
+        // No `__tablename__` for `Thing` → no data-entity resolution → no edge.
+        let src = "def find(session):\n    return session.query(Thing).all()\n";
+        let parse = parse_file(src, "store.py", "store", repo()).unwrap();
+        let has_ad = parse
+            .edges
+            .iter()
+            .any(|e| e.category == edge_category::ACCESSES_DATA);
+        assert!(!has_ad, "query on an unknown model must not emit ACCESSES_DATA");
+    }
+
+    #[test]
+    fn pytest_test_emits_fn_level_tests_ref() {
+        // substrate-gap py-tests — `def test_add` calling bare `add` emits a
+        // fn-level TESTS ref (resolved cross-file by the graph crate).
+        let src = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n";
+        let parse = parse_file(src, "test_calc.py", "test_calc", repo()).unwrap();
+
+        let test_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test_calc::test_add");
+
+        let has_tests_ref = parse.refs.iter().any(|r| {
+            r.from == test_id
+                && r.category == edge_category::TESTS
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "add")
+        });
+        assert!(
+            has_tests_ref,
+            "expected TESTS ref test_add → add, refs: {:?}",
+            parse
+                .refs
+                .iter()
+                .map(|r| (r.category, &r.qualifier))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn non_test_function_emits_no_tests_ref() {
+        // A plain (non-`test_`) function calling `add` must NOT emit a TESTS ref.
+        let src = "from calc import add\n\n\ndef run():\n    return add(1, 2)\n";
+        let parse = parse_file(src, "app.py", "app", repo()).unwrap();
+        let has_tests_ref = parse
+            .refs
+            .iter()
+            .any(|r| r.category == edge_category::TESTS);
+        assert!(!has_tests_ref, "non-test fn must not emit a TESTS ref");
     }
 }

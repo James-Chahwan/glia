@@ -1,0 +1,12 @@
+{
+  "framework": "xcut-eventbus",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "EVENT_EMITTER", "name": "userCreated", "note": "bus.emit('userCreated')"},
+    {"kind": "EVENT_HANDLER", "name": "userCreated", "note": "bus.on('userCreated')"}
+  ],
+  "expect_edges": [
+    {"from": "userCreated", "to": "userCreated", "category": "EVENT_FLOWS", "note": "EventBusResolver pairs emitter->handler by event name"}
+  ]
+}

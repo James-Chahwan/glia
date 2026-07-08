@@ -444,7 +444,17 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
         while let Some(rel) = source[search_from..].find(needle) {
             let start = search_from + rel + needle.len();
             if let Some((path, consumed)) = extract_first_string(&source[start..]) {
-                emit_route_medium(method, &path, module_id, repo, acc);
+                let route_id = emit_route_medium(method, &path, module_id, repo, acc);
+                // Bind the route to its controller action via a HANDLED_BY ref;
+                // the graph resolves the Attribute base+name against the class.
+                if let Some(qualifier) = extract_laravel_handler(&source[start + consumed..]) {
+                    acc.refs.push(UnresolvedRef {
+                        from: route_id,
+                        from_module: module_id,
+                        qualifier,
+                        category: edge_category::HANDLED_BY,
+                    });
+                }
                 search_from = start + consumed.max(1);
             } else {
                 search_from = start;
@@ -607,7 +617,7 @@ fn emit_route_strong(method: &str, path: &str, handler_id: NodeId, repo: RepoId,
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
-fn emit_route_medium(method: &str, path: &str, _module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+fn emit_route_medium(method: &str, path: &str, _module_id: NodeId, repo: RepoId, acc: &mut Acc) -> NodeId {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
@@ -621,6 +631,58 @@ fn emit_route_medium(method: &str, path: &str, _module_id: NodeId, repo: RepoId,
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+    route_id
+}
+
+/// Parse a Laravel route handler that follows the path argument and return a
+/// HANDLED_BY qualifier for it. Supports the two idiomatic controller-action
+/// shapes:
+///   `[UserController::class, 'index']`  → Attribute{ base: UserController, name: index }
+///   `'UserController@index'`            → Attribute{ base: UserController, name: index }
+/// Closures / invokable single-class handlers (`SomeController::class`) yield
+/// `None` (no specific method to bind to).
+fn extract_laravel_handler(after_path: &str) -> Option<CallQualifier> {
+    let bytes = after_path.as_bytes();
+    let mut i = 0;
+    // Skip whitespace and the comma separating path from handler.
+    while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let rest = &after_path[i..];
+    if bytes[i] == b'[' {
+        // Array callable: [Controller::class, 'method']
+        let (inner, _) = extract_bracket_list(rest)?;
+        let mut parts = inner.splitn(2, ',');
+        let first = parts.next()?.trim();
+        let second = parts.next()?.trim();
+        let base = first
+            .trim_end_matches("::class")
+            .trim()
+            .rsplit('\\')
+            .next()
+            .unwrap_or(first)
+            .to_string();
+        let name = second.trim_matches(|c| c == '\'' || c == '"').to_string();
+        if base.is_empty() || name.is_empty() {
+            return None;
+        }
+        return Some(CallQualifier::Attribute { base, name });
+    }
+    if bytes[i] == b'\'' || bytes[i] == b'"' {
+        // String callable: 'Controller@method' (classic Laravel style).
+        let (s, _) = extract_first_string(rest)?;
+        if let Some((base, name)) = s.split_once('@') {
+            let base = base.rsplit('\\').next().unwrap_or(base).trim().to_string();
+            let name = name.trim().to_string();
+            if !base.is_empty() && !name.is_empty() {
+                return Some(CallQualifier::Attribute { base, name });
+            }
+        }
+    }
+    None
 }
 
 fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
@@ -899,6 +961,65 @@ Route::resource('/photos', PhotoController::class);
         assert!(route_names.iter().any(|n| n.starts_with("POST /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("PUT /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("DELETE /photos")));
+    }
+
+    #[test]
+    fn laravel_route_handled_by_array_callable() {
+        let source = r#"<?php
+use App\Http\Controllers\UserController;
+
+Route::get('/users', [UserController::class, 'index']);
+Route::post('/users', [UserController::class, 'store']);
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        let handled: Vec<&UnresolvedRef> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .collect();
+        assert_eq!(handled.len(), 2, "one HANDLED_BY ref per verb route");
+        assert!(handled.iter().any(|r| matches!(
+            &r.qualifier,
+            CallQualifier::Attribute { base, name } if base == "UserController" && name == "index"
+        )));
+        assert!(handled.iter().any(|r| matches!(
+            &r.qualifier,
+            CallQualifier::Attribute { base, name } if base == "UserController" && name == "store"
+        )));
+    }
+
+    #[test]
+    fn laravel_route_handled_by_string_callable() {
+        // Classic `'Controller@action'` string form.
+        let source = r#"<?php
+Route::get('/legacy', 'LegacyController@show');
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        let handled: Vec<&UnresolvedRef> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .collect();
+        assert_eq!(handled.len(), 1);
+        assert!(matches!(
+            &handled[0].qualifier,
+            CallQualifier::Attribute { base, name } if base == "LegacyController" && name == "show"
+        ));
+    }
+
+    #[test]
+    fn laravel_route_closure_handler_emits_no_ref() {
+        // A closure handler has no controller action to bind to.
+        let source = r#"<?php
+Route::get('/ping', function () { return 'pong'; });
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        assert!(
+            fp.refs
+                .iter()
+                .all(|r| r.category != edge_category::HANDLED_BY),
+            "closure handler must not emit a HANDLED_BY ref"
+        );
     }
 
     // ========================================================================

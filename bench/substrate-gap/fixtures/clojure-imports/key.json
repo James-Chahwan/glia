@@ -1,0 +1,12 @@
+{
+  "framework": "clojure-imports",
+  "language": "clojure",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "core", "note": "importing ns"},
+    {"kind": "MODULE", "name": "util", "note": "required ns"}
+  ],
+  "expect_edges": [
+    {"from": "core", "to": "util", "category": "IMPORTS", "note": "(:require [app.util :as util])"}
+  ]
+}

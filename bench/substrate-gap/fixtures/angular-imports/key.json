@@ -1,0 +1,11 @@
+{
+  "framework": "angular",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "SERVICE", "name": "UserService", "note": "@Injectable service"}
+  ],
+  "expect_edges": [
+    {"from": "app.module", "to": "user.service", "category": "IMPORTS", "note": "app.module imports ./user.service (TS IMPORTS stubbed -> blind)"}
+  ]
+}

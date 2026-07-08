@@ -1,0 +1,11 @@
+{
+  "framework": "solidity-event_flows",
+  "language": "solidity",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "EVENT_EMITTER", "name": "BidPlaced", "note": "event declaration / emit site"}
+  ],
+  "expect_edges": [
+    {"from": "bid", "to": "BidPlaced", "category": "EVENT_FLOWS", "note": "bid() emits BidPlaced"}
+  ]
+}

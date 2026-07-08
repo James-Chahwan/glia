@@ -34,7 +34,7 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
-    visit_children(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_children(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -63,6 +63,7 @@ fn visit_children(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -71,11 +72,11 @@ fn visit_children(
         match child.kind() {
             "using_directive" => collect_using(child, src, parent_qname, acc),
             "namespace_declaration" | "file_scoped_namespace_declaration" => {
-                visit_namespace(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_namespace(child, src, file_rel, parent_qname, parent_id, module_id, repo, acc);
             }
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
-                visit_type_decl(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_type_decl(child, src, file_rel, parent_qname, parent_id, module_id, repo, acc);
             }
             _ => {}
         }
@@ -88,6 +89,7 @@ fn visit_namespace(
     file_rel: &str,
     _parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -116,9 +118,9 @@ fn visit_namespace(
 
     // File-scoped namespace has no body block — declarations are direct children.
     if node.kind() == "file_scoped_namespace_declaration" {
-        visit_children(node, src, file_rel, &qname, ns_id, repo, acc);
+        visit_children(node, src, file_rel, &qname, ns_id, module_id, repo, acc);
     } else if let Some(body) = node.child_by_field_name("body") {
-        visit_children(body, src, file_rel, &qname, ns_id, repo, acc);
+        visit_children(body, src, file_rel, &qname, ns_id, module_id, repo, acc);
     }
 }
 
@@ -128,6 +130,7 @@ fn visit_type_decl(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -180,9 +183,14 @@ fn visit_type_decl(
             } else {
                 edge_category::INHERITS_FROM
             };
-            emit_heritage_ref(raw, category, id, repo, acc);
+            emit_heritage_ref(raw, category, id, module_id, acc);
         }
     }
+
+    // Pattern E (DI): is this a class that receives injected dependencies?
+    // Gate on a DI signal (controller/service-shaped name or DI attribute) so a
+    // plain data class with a constructor doesn't emit spurious INJECTS edges.
+    let is_di = is_di_class(name, text_of(node, src));
 
     let Some(body) = node.child_by_field_name("body") else {
         return;
@@ -192,19 +200,117 @@ fn visit_type_decl(
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
                 visit_method(child, src, file_rel, &qname, id, repo, acc);
+                if is_di && child.kind() == "constructor_declaration" {
+                    emit_ctor_injects(child, src, id, module_id, repo, acc);
+                }
             }
             "field_declaration" => {
                 visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
             }
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
-                visit_type_decl(child, src, file_rel, &qname, id, repo, acc);
+                visit_type_decl(child, src, file_rel, &qname, id, module_id, repo, acc);
             }
             _ => {}
         }
     }
 
     check_route_attrs(node, src, id, repo, acc);
+}
+
+/// Pattern E gate: does this type look like a DI consumer? ASP.NET controllers
+/// and services receive dependencies via constructor injection. We recognise
+/// them by a conventional name suffix or a DI-registration attribute, which
+/// avoids flagging plain data/DTO classes that merely happen to have a ctor.
+fn is_di_class(name: &str, node_text: &str) -> bool {
+    const DI_SUFFIXES: [&str; 9] = [
+        "Controller",
+        "Service",
+        "Repository",
+        "Handler",
+        "Manager",
+        "Provider",
+        "Factory",
+        "Middleware",
+        "Worker",
+    ];
+    if DI_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    // Attribute-based signals (search only the leading attribute region — the
+    // class body is irrelevant and could contain unrelated text).
+    let head = &node_text[..node_text.find('{').unwrap_or(node_text.len())];
+    head.contains("[ApiController]")
+        || head.contains("[Controller]")
+        || head.contains("[Service")
+        || head.contains("[Injectable")
+}
+
+/// Pattern E: for each constructor parameter whose type is a class/interface
+/// (not a primitive), push an INJECTS `UnresolvedRef` from the consumer class
+/// to that dependency type. The graph resolver binds the bare type name to the
+/// uniquely-named class/interface node and forms the edge.
+fn emit_ctor_injects(
+    ctor: TsNode,
+    src: &[u8],
+    class_id: NodeId,
+    module_id: NodeId,
+    _repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(params) = ctor.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut cursor = params.walk();
+    for param in params.named_children(&mut cursor) {
+        if param.kind() != "parameter" {
+            continue;
+        }
+        let Some(type_node) = param.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(type_name) = injectable_type_name(type_node, src) else {
+            continue;
+        };
+        acc.refs.push(UnresolvedRef {
+            from: class_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(type_name),
+            category: edge_category::INJECTS,
+        });
+    }
+}
+
+/// Extract the bare dependency type name from a parameter `type` node, or
+/// `None` if it's a primitive/built-in that isn't a DI target. Strips generic
+/// arguments and namespace qualifiers (`Shop.Services.IUserService<T>` →
+/// `IUserService`).
+fn injectable_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
+    // `predefined_type` covers int/string/bool/... — never a DI dependency.
+    if type_node.kind() == "predefined_type" {
+        return None;
+    }
+    let raw = text_of(type_node, src);
+    let base = raw.split('<').next().unwrap_or(raw).trim();
+    let simple = base.rsplit('.').next().unwrap_or(base).trim();
+    let simple = simple.trim_end_matches('?'); // nullable reference type
+    if simple.is_empty() || is_primitive_type(simple) {
+        return None;
+    }
+    Some(simple.to_string())
+}
+
+/// C# built-in / value types that are never resolved as injected services.
+fn is_primitive_type(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "uint" | "long" | "ulong" | "short" | "ushort"
+            | "byte" | "sbyte" | "float" | "double" | "decimal"
+            | "bool" | "char" | "string" | "object" | "void"
+            | "Int32" | "Int64" | "UInt32" | "UInt64" | "Boolean"
+            | "String" | "Char" | "Byte" | "Double" | "Single"
+            | "Decimal" | "Object" | "DateTime" | "TimeSpan" | "Guid"
+    )
 }
 
 fn visit_method(
@@ -257,11 +363,15 @@ fn is_interface_name(raw: &str) -> bool {
 }
 
 /// G12.5: record an unresolved heritage reference from a class to a supertype.
+/// Emits an `UnresolvedRef` (not a name-derived `Edge`) so `resolve_refs` binds
+/// the bare base-type name to the uniquely-named class/interface node across the
+/// repo (INHERITS_FROM for a base class, IMPLEMENTS for an interface). External
+/// bases (e.g. `ControllerBase`) simply stay unresolved, which is fine.
 fn emit_heritage_ref(
     raw: &str,
     category: repo_graph_core::EdgeCategoryId,
     from_id: NodeId,
-    repo: RepoId,
+    module_id: NodeId,
     acc: &mut Acc,
 ) {
     let base = raw.split('<').next().unwrap_or(raw).trim();
@@ -269,12 +379,11 @@ fn emit_heritage_ref(
     if simple.is_empty() {
         return;
     }
-    let target = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, simple);
-    acc.edges.push(Edge {
+    acc.refs.push(UnresolvedRef {
         from: from_id,
-        to: target,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(simple.to_string()),
         category,
-        confidence: Confidence::Weak,
     });
 }
 
@@ -513,7 +622,16 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 fn classify_invocation(node: TsNode, src: &[u8]) -> CallQualifier {
     if let Some(func) = node.child_by_field_name("function") {
         match func.kind() {
-            "identifier" => CallQualifier::Bare(text_of(func, src).to_string()),
+            // No receiver: an unqualified call `Load()` inside a method is an
+            // implicit `this.Load()` — a method of the enclosing type (or an
+            // inherited one). C# has no module-level free functions, so a bare
+            // invocation never resolves against module top-level symbols;
+            // classify it as `SelfMethod` so `resolve_calls` binds it against
+            // the enclosing class's methods (`class_methods[<enclosing class>]`).
+            // Mirrors the Java parser, which faces the same no-free-functions
+            // shape. (A genuinely bare static-imported call — `using static` —
+            // simply falls through to unresolved, same as before.)
+            "identifier" => CallQualifier::SelfMethod(text_of(func, src).to_string()),
             "member_access_expression" => {
                 let obj = func
                     .child_by_field_name("expression")
@@ -632,7 +750,10 @@ public interface IDrawable { void Draw(); }
 
     #[test]
     fn implements_and_state_var() {
-        // G12.5: `class X : Base, IFoo` → INHERITS_FROM(Base) + IMPLEMENTS(IFoo).
+        // G12.5: `class X : Base, IFoo` → INHERITS_FROM(Base) + IMPLEMENTS(IFoo),
+        // both emitted as `UnresolvedRef`s (Bare base-type name) so resolve_refs
+        // binds them to the uniquely-named class/interface — not name-derived
+        // phantom edges.
         // G19: a documented `const int FEE = 250;` emits a STATE_VAR.
         let source = r#"
 namespace MyApp;
@@ -655,18 +776,37 @@ public class X : Base, IFoo {
             .collect();
         assert_eq!(state_vars, vec!["FEE"]);
 
-        let implements = fp
-            .edges
+        // Heritage is now REFs, not name-derived edges.
+        let implements: Vec<&UnresolvedRef> = fp
+            .refs
             .iter()
-            .filter(|e| e.category == edge_category::IMPLEMENTS)
-            .count();
-        assert_eq!(implements, 1);
-        let inherits = fp
-            .edges
+            .filter(|r| r.category == edge_category::IMPLEMENTS)
+            .collect();
+        assert_eq!(implements.len(), 1);
+        assert_eq!(
+            implements[0].qualifier,
+            CallQualifier::Bare("IFoo".to_string())
+        );
+        let inherits: Vec<&UnresolvedRef> = fp
+            .refs
             .iter()
-            .filter(|e| e.category == edge_category::INHERITS_FROM)
-            .count();
-        assert_eq!(inherits, 1);
+            .filter(|r| r.category == edge_category::INHERITS_FROM)
+            .collect();
+        assert_eq!(inherits.len(), 1);
+        assert_eq!(
+            inherits[0].qualifier,
+            CallQualifier::Bare("Base".to_string())
+        );
+
+        // No phantom name-derived heritage edges remain.
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::IMPLEMENTS
+                    || e.category == edge_category::INHERITS_FROM)
+                .count(),
+            0
+        );
     }
 
     #[test]
@@ -736,6 +876,137 @@ public class ThingsController {
         assert!(routes.contains(&"HEAD /things"));
         assert!(routes.contains(&"OPTIONS /things"));
         assert!(routes.contains(&"ANY /api/v1"));
+    }
+
+    #[test]
+    fn di_constructor_injects() {
+        // Pattern E: an ASP.NET controller whose constructor takes an
+        // interface-typed dependency emits an INJECTS UnresolvedRef with the
+        // bare service type name; the primitive `int` param is skipped.
+        let source = r#"
+using Shop.Services;
+
+namespace Shop.Controllers
+{
+    [ApiController]
+    public class UsersController : ControllerBase
+    {
+        private readonly IUserService _userService;
+
+        public UsersController(IUserService userService, int page)
+        {
+            _userService = userService;
+        }
+    }
+}
+"#;
+        let fp = parse_file(source, "Controllers/UsersController.cs", "Shop::Controllers", repo()).unwrap();
+        let injects: Vec<&UnresolvedRef> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .collect();
+        assert_eq!(injects.len(), 1, "exactly one INJECTS ref (primitive skipped)");
+        assert_eq!(
+            injects[0].qualifier,
+            CallQualifier::Bare("IUserService".to_string())
+        );
+    }
+
+    #[test]
+    fn di_gate_skips_plain_data_class() {
+        // A plain data class with a class-typed ctor param must NOT emit INJECTS.
+        let source = r#"
+namespace Shop.Models
+{
+    public class Order
+    {
+        public Order(Customer customer) {}
+    }
+}
+"#;
+        let fp = parse_file(source, "Models/Order.cs", "Shop::Models", repo()).unwrap();
+        assert_eq!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INJECTS)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn calls_selfmethod_and_attribute() {
+        // Pattern C (CALLS): mirrors the csharp-aspnet fixture.
+        //  - a bare same-class call `Load(id)` must be `SelfMethod("Load")` so
+        //    resolve_calls binds it against the enclosing class's methods
+        //    (a plain `Bare` would never resolve — C# has no free functions);
+        //  - a field-qualified call `_userService.GetById(id)` is
+        //    `Attribute { base: "_userService", name: "GetById" }` (instance
+        //    dispatch — the graph resolves it only when the field's declared
+        //    type is a locally-bound class);
+        //  - an explicit `this.Helper()` is `SelfMethod("Helper")`.
+        let source = r#"
+namespace Shop.Services
+{
+    public class UserService
+    {
+        public User GetById(int id)
+        {
+            return Load(id);
+        }
+
+        private User Load(int id)
+        {
+            this.Helper();
+            return new User();
+        }
+    }
+
+    public class UsersController
+    {
+        private readonly IUserService _userService;
+        public User GetUser(int id)
+        {
+            return _userService.GetById(id);
+        }
+    }
+}
+"#;
+        let fp = parse_file(source, "Services.cs", "Shop::Services", repo()).unwrap();
+
+        // bare `Load(id)` -> SelfMethod("Load")
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::SelfMethod("Load".to_string())),
+            "bare same-class call must be SelfMethod(\"Load\"), got: {:?}",
+            fp.calls
+        );
+        // and must NOT be emitted as Bare (would not resolve against class methods)
+        assert!(
+            !fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::Bare("Load".to_string())),
+            "bare intra-class call must be SelfMethod, not Bare"
+        );
+        // `this.Helper()` -> SelfMethod("Helper")
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.qualifier == CallQualifier::SelfMethod("Helper".to_string())),
+            "this.Helper() must be SelfMethod(\"Helper\")"
+        );
+        // `_userService.GetById(id)` -> Attribute { base: "_userService", name: "GetById" }
+        assert!(
+            fp.calls.iter().any(|c| c.qualifier
+                == CallQualifier::Attribute {
+                    base: "_userService".to_string(),
+                    name: "GetById".to_string(),
+                }),
+            "field-qualified call must be Attribute{{_userService, GetById}}, got: {:?}",
+            fp.calls
+        );
     }
 
     #[test]

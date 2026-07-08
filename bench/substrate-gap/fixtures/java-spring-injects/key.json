@@ -1,0 +1,12 @@
+{
+  "framework": "java-spring",
+  "language": "java",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "SERVICE", "name": "UserService", "note": "@Service bean"},
+    {"kind": "CLASS", "name": "UserController", "note": "consumer"}
+  ],
+  "expect_edges": [
+    {"from": "UserController", "to": "UserService", "category": "INJECTS", "note": "constructor DI of @Service"}
+  ]
+}

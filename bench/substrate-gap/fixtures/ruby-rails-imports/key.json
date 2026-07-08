@@ -1,0 +1,12 @@
+{
+  "framework": "ruby-rails",
+  "language": "ruby",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "main", "note": "requiring file"},
+    {"kind": "MODULE", "name": "util", "note": "required file"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "util", "category": "IMPORTS", "note": "require_relative util"}
+  ]
+}

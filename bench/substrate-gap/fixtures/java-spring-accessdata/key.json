@@ -1,0 +1,12 @@
+{
+  "framework": "java-spring",
+  "language": "java",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "@Entity"},
+    {"kind": "INTERFACE", "name": "UserRepository", "note": "@Repository"}
+  ],
+  "expect_edges": [
+    {"from": "UserRepository", "to": "User", "category": "ACCESSES_DATA", "note": "repository accesses User entity"}
+  ]
+}

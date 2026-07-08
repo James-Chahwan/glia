@@ -1,0 +1,29 @@
+[package]
+name = "repo-graph-doc-sources"
+version = "0.4.17"
+edition = "2024"
+publish = false
+
+# External doc-source adapters (Tier-4): fetch + normalize Confluence / Notion /
+# wiki pages into `DocRecord`s the engine ingests. NOT a dependency of `py/` —
+# the network I/O stays out of the deterministic engine + the published wheel.
+# The CLI (`glia docs sync`) drives it; the engine ingests the produced snapshot.
+
+[dependencies]
+repo-graph-code-domain = { path = "../code-domain" }
+# Storage-format XHTML → markdown conversion (pure, no network).
+quick-xml = "0.36"
+# `docsync` bin: (de)serialize the page manifest + emit DocRecord snapshot lines.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Blocking HTTP for the Confluence REST adapter (`confluence_rest`). Light,
+# no async runtime; rustls TLS via ureq's default `tls` feature.
+ureq = { version = "2", features = ["json"] }
+
+# The deterministic half of `glia docs sync`: convert already-fetched Confluence
+# storage-format pages into a `.glia/docs-snapshot/manifest.jsonl` the engine
+# ingests. The network fetch (REST) lands on top of this once the Confluence
+# account has product access; the conversion + snapshot format is proven here.
+[[bin]]
+name = "docsync"
+path = "src/bin/docsync.rs"

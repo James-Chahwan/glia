@@ -1,0 +1,12 @@
+{
+  "framework": "xstack-go-http",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "http.Get('http://api.example.com/users') -> client ENDPOINT (Pattern A fix)"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi server route (r.Get)"}
+  ],
+  "expect_edges": [
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: http.Get paired to chi GET /users"}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "framework": "xcut-queue",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "orders", "note": "NATS nc.Publish producer (server)"},
+    {"kind": "QUEUE_CONSUMER", "name": "orders", "note": "NATS nc.Subscribe consumer (client)"}
+  ],
+  "expect_edges": [
+    {"from": "orders", "to": "orders", "category": "QUEUE_FLOWS", "note": "producer -> consumer paired by topic 'orders'"}
+  ]
+}

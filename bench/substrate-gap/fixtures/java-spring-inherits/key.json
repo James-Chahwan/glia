@@ -1,0 +1,14 @@
+{
+  "framework": "java-spring",
+  "language": "java",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Circle", "note": "subclass"},
+    {"kind": "CLASS", "name": "Shape", "note": "superclass"},
+    {"kind": "INTERFACE", "name": "Drawable", "note": "interface"}
+  ],
+  "expect_edges": [
+    {"from": "Circle", "to": "Shape", "category": "INHERITS_FROM", "note": "extends Shape"},
+    {"from": "Circle", "to": "Drawable", "category": "IMPLEMENTS", "note": "implements Drawable"}
+  ]
+}

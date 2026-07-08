@@ -1,0 +1,12 @@
+{
+  "framework": "dart-imports",
+  "language": "dart",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "service", "note": "importer file"},
+    {"kind": "MODULE", "name": "models", "note": "imported relative file"}
+  ],
+  "expect_edges": [
+    {"from": "service", "to": "models", "category": "IMPORTS", "note": "relative `import 'models.dart'` -> in-repo IMPORTS edge (fixed via engine _-arm resolver)"}
+  ]
+}

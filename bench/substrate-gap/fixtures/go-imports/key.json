@@ -1,0 +1,12 @@
+{
+  "framework": "go-imports",
+  "language": "go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "main", "note": "main package file"},
+    {"kind": "FUNCTION", "name": "Double", "note": "imported symbol's def"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "util", "category": "IMPORTS", "note": "main.go imports internal/util (in-repo)"}
+  ]
+}

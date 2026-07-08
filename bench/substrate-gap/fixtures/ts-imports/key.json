@@ -1,0 +1,11 @@
+{
+  "framework": "ts-imports",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "greet", "note": "exported from util.ts"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "util", "category": "IMPORTS", "note": "main.ts imports ./util"}
+  ]
+}

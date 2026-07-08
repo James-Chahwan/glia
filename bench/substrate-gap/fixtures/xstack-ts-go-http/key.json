@@ -1,0 +1,12 @@
+{
+  "framework": "xstack-ts-go-http",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "/users", "note": "TS fetch endpoint"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi route"}
+  ],
+  "expect_edges": [
+    {"from": "/users", "to": "/users", "category": "HTTP_CALLS", "note": "control: supported stack should pair"}
+  ]
+}

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -5,6 +7,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::endpoint::{push_client_endpoint, ClientEndpoint};
 
 pub fn parse_file(
     source: &str,
@@ -56,6 +59,9 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
+    /// (method, path) even if the same endpoint is called twice in a file.
+    endpoint_seen: HashSet<NodeId>,
 }
 
 fn visit_top(
@@ -240,7 +246,7 @@ fn visit_class_member(
         if child.kind() == "function_body"
             && let Some(method_id) = acc.nodes.last().map(|n| n.id)
         {
-            collect_calls_in(child, src, method_id, acc);
+            collect_calls_in(child, src, method_id, repo, file_rel, acc);
         }
     }
 }
@@ -458,9 +464,19 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     });
 }
 
-fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+fn collect_calls_in(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
+        // Pattern A: client HTTP call (`dio.get('/x')`) → ENDPOINT node so the
+        // HttpStackResolver can pair it with a server ROUTE.
+        try_detect_dart_endpoint(n, src, from, repo, file_rel, acc);
         match n.kind() {
             "selector_expression" => {
                 if let Some(field) = n.child_by_field_name("field") {
@@ -511,6 +527,133 @@ fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
+const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// Pattern A: detect a client HTTP call `<recv>.<verb>('<path>', ...)` and emit a
+/// shared ENDPOINT node. tree-sitter-dart shapes `dio.get('/x')` as a node whose
+/// first named children are `identifier(receiver)`, `selector(.verb)`,
+/// `selector((args))`. `<recv>` must name an HTTP client (dio / http / *client /
+/// api) — server routes (`router.get`, shelf cascades) are handled by
+/// `scan_dart_routes`, which skips these client receivers so no phantom ROUTE.
+fn try_detect_dart_endpoint(
+    n: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let mut c = n.walk();
+    let kids: Vec<TsNode> = n.named_children(&mut c).collect();
+    if kids.len() < 3 || kids[0].kind() != "identifier" {
+        return;
+    }
+    if !is_http_client_receiver(text_of(kids[0], src)) {
+        return;
+    }
+    if kids[1].kind() != "selector" || kids[2].kind() != "selector" {
+        return;
+    }
+    // Verb is the first identifier under the `.verb` selector.
+    let Some(method) = first_identifier_text(kids[1], src) else {
+        return;
+    };
+    let method_l = method.to_ascii_lowercase();
+    if !HTTP_VERBS.contains(&method_l.as_str()) {
+        return;
+    }
+    // Path is the first string literal in the argument selector.
+    let Some(sl) = first_descendant_of_kind(kids[2], "string_literal") else {
+        return;
+    };
+    let path = dart_string_path(sl, src);
+    if !path.starts_with('/') {
+        return; // not a request path (full-URL var, non-path first arg, etc.)
+    }
+    let pos = n.start_position();
+    let ep = ClientEndpoint {
+        method: method_l.to_ascii_uppercase(),
+        path,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence: Confidence::Strong,
+    };
+    push_client_endpoint(
+        repo,
+        &ep,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
+}
+
+fn is_http_client_receiver(name: &str) -> bool {
+    let n = name.trim_start_matches('_').to_ascii_lowercase();
+    n == "dio"
+        || n.contains("dio")
+        || n == "http"
+        || n.ends_with("client")
+        || n == "api"
+        || n.ends_with("api")
+}
+
+/// First descendant `identifier` text, depth-first.
+fn first_identifier_text(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(text_of(node, src).to_string());
+    }
+    let mut c = node.walk();
+    for child in node.named_children(&mut c) {
+        if let Some(t) = first_identifier_text(child, src) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+fn first_descendant_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    if node.kind() == kind {
+        return Some(node);
+    }
+    let mut c = node.walk();
+    for child in node.named_children(&mut c) {
+        if let Some(found) = first_descendant_of_kind(child, kind) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Reconstruct a Dart string-literal path, replacing every `$id` / `${expr}`
+/// interpolation with `${…}` so it normalises like a TS template path
+/// (`normalise_http_path` collapses any segment containing `${` to `{}`).
+fn dart_string_path(string_literal: TsNode, src: &[u8]) -> String {
+    fn rec(n: TsNode, src: &[u8], out: &mut String) {
+        let mut c = n.walk();
+        for child in n.named_children(&mut c) {
+            let k = child.kind();
+            if k == "template_substitution" {
+                out.push_str("${…}");
+            } else if k.starts_with("template_chars") {
+                out.push_str(text_of(child, src));
+            } else {
+                rec(child, src, out);
+            }
+        }
+    }
+    let mut out = String::new();
+    rec(string_literal, src, &mut out);
+    if out.is_empty() {
+        out = text_of(string_literal, src)
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string();
+    }
+    out
+}
+
 // ============================================================================
 // Dart route extraction (v0.4.11a R-dart)
 // ============================================================================
@@ -540,21 +683,47 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
         idx = start;
     }
 
-    // shelf-style `.get('/...' / .post('/...' / etc.
+    // shelf-style `.get('/...' / .post('/...' / etc. — SERVER routes only.
+    // A client HTTP call (`dio.get('/x')`) has the same textual shape but is an
+    // outbound ENDPOINT, handled by `try_detect_dart_endpoint`; skip it here (by
+    // receiver name) so it is not mis-emitted as a phantom server ROUTE.
     for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
         let needle = format!(".{method}(");
         let mut idx = 0;
         while let Some(pos) = source[idx..].find(&needle) {
-            let after = &source[idx + pos + needle.len()..];
+            let dot_at = idx + pos;
+            let after = &source[dot_at + needle.len()..];
             if let Some(path) = first_string_literal_dart(after)
                 && path.starts_with('/')
+                && !is_http_client_receiver(ident_before(source, dot_at))
             {
                 let verb = method.to_ascii_uppercase();
                 emit_dart_route(&verb, &path, repo, acc, &mut seen);
             }
-            idx += pos + needle.len();
+            idx = dot_at + needle.len();
         }
     }
+}
+
+/// The identifier immediately preceding byte index `at` (the receiver of a
+/// `.method(` call). Empty for cascades (`..get`) or non-identifier prefixes,
+/// which then fall through to ROUTE emission.
+fn ident_before(source: &str, at: usize) -> &str {
+    let bytes = source.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 {
+        let ch = bytes[start - 1];
+        if ch.is_ascii_alphanumeric() || ch == b'_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    &source[start..end]
 }
 
 fn extract_kwarg_string(s: &str, key: &str) -> Option<String> {
@@ -799,5 +968,56 @@ final app = Router()
         let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+    }
+
+    #[test]
+    fn dio_client_call_emits_endpoint_not_route() {
+        // Pattern A: `dio.get('/users/$id')` / `dio.post('/users')` in a class
+        // method → ENDPOINT nodes (not phantom ROUTEs), with a CALLS edge from
+        // the enclosing method. Path interpolation → `${…}`.
+        let source = r#"class ApiClient {
+  final Dio dio;
+  Future<void> fetchUser(String id) async {
+    final res = await dio.get('/users/$id');
+    await dio.post('/users', data: body);
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/api.dart", "lib::api", repo()).unwrap();
+        let ep_get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
+        let ep_post = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:POST:/users");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_get),
+            "expected GET /users/${{…}} ENDPOINT node"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == ep_post),
+            "expected POST /users ENDPOINT node"
+        );
+        // Must NOT emit phantom ROUTE nodes for the client calls.
+        assert!(
+            !fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/$id")),
+            "client dio.get must not become a server ROUTE"
+        );
+        // CALLS edge from the enclosing method to each endpoint.
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_get && e.category == edge_category::CALLS),
+            "expected CALLS edge into the GET endpoint"
+        );
+    }
+
+    #[test]
+    fn shelf_router_still_emits_route_not_endpoint() {
+        // Server routes must be unaffected by the client-endpoint change.
+        let source = r#"
+final app = Router()
+  ..get('/things', handleList)
+  ..post('/things', handleCreate);
+"#;
+        let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/things")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/things")));
     }
 }

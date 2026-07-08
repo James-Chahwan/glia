@@ -1,0 +1,21 @@
+{
+  "framework": "csharp-aspnet",
+  "language": "csharp",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "IUserService", "note": "DI service interface"},
+    {"kind": "CLASS", "name": "UserService", "note": "impl"},
+    {"kind": "CLASS", "name": "UsersController", "note": "aspnet controller"},
+    {"kind": "METHOD", "name": "GetUser", "note": "action method"},
+    {"kind": "METHOD", "name": "GetById", "note": "service method (same-class caller)"},
+    {"kind": "METHOD", "name": "Load", "note": "same-class callee"},
+    {"kind": "ROUTE", "name": "users", "note": "[HttpGet] action route"}
+  ],
+  "expect_edges": [
+    {"from": "GetById", "to": "Load", "category": "CALLS", "note": "same-class call GetById()->Load() (bare => SelfMethod); field-typed instance dispatch _userService.GetById is Pattern-C 'instance dispatch blind' (no field-type resolution in resolve_calls)"},
+    {"from": "UsersController", "to": "Shop/Services", "category": "IMPORTS", "note": "using Shop.Services in-repo namespace"},
+    {"from": "{id}", "to": "GetUser", "category": "HANDLED_BY", "note": "[HttpGet] route handled by action method"},
+    {"from": "UsersController", "to": "IUserService", "category": "INJECTS", "note": "constructor DI of interface"},
+    {"from": "UserService", "to": "IUserService", "category": "IMPLEMENTS", "note": "in-repo interface impl; heritage emitted as UnresolvedRef(Bare) and bound by resolve_refs (external ControllerBase stays unresolved)"}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "framework": "java-spring",
+  "language": "java",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Helper", "note": "imported class"},
+    {"kind": "CLASS", "name": "Main", "note": "importer"}
+  ],
+  "expect_edges": [
+    {"from": "Main", "to": "Helper", "category": "IMPORTS", "note": "import com.example.util.Helper"}
+  ]
+}

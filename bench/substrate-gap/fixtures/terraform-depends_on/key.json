@@ -1,0 +1,14 @@
+{
+  "framework": "terraform",
+  "language": "terraform",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "aws_iam_role", "note": "role resource"},
+    {"kind": "INFRA_RESOURCE", "name": "aws_s3_bucket", "note": "bucket resource"},
+    {"kind": "INFRA_RESOURCE", "name": "aws_instance", "note": "worker resource"}
+  ],
+  "expect_edges": [
+    {"from": "aws_instance", "to": "aws_iam_role", "category": "DEPENDS_ON", "note": "depends_on = [aws_iam_role.app]"},
+    {"from": "aws_instance", "to": "aws_s3_bucket", "category": "DEPENDS_ON", "note": "depends_on = [aws_s3_bucket.data]"}
+  ]
+}

@@ -21,7 +21,7 @@ use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
-    cell_type, edge_category, node_kind,
+    UnresolvedRef, cell_type, edge_category, node_kind,
 };
 
 /// Parse one TypeScript source file.
@@ -77,6 +77,9 @@ struct Acc {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     imports: Vec<ImportStmt>,
+    /// Non-call cross-file references resolved into edges by the graph crate.
+    /// Angular constructor-DI emits `INJECTS` refs here (class → service type).
+    refs: Vec<UnresolvedRef>,
     unresolved: Vec<UnresolvedCall>,
     endpoints: Vec<EndpointCandidate>,
     module_functions: HashMap<String, NodeId>,
@@ -206,6 +209,113 @@ fn visit_class(
             visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
         }
     }
+
+    // Angular constructor dependency injection (Pattern E). A class decorated
+    // @Component/@Injectable/@Directive/@Pipe declares its dependencies as
+    // typed constructor parameters. Each class/interface-typed param becomes an
+    // INJECTS ref (class → dependency type); the graph crate binds the bare
+    // type name to the target node and forms the edge.
+    collect_constructor_injects(n, body, src, module_id, class_id, acc);
+}
+
+/// DI decorators that mark an Angular class as an injection consumer.
+const DI_DECORATORS: &[&str] = &["Component", "Injectable", "Directive", "Pipe"];
+
+/// Emit `INJECTS` refs for each class/interface-typed constructor parameter of
+/// an Angular-decorated class. Gated on a DI decorator so plain data classes
+/// don't mint injection edges. Primitive-typed params (`predefined_type`:
+/// string/number/boolean/…) are skipped.
+fn collect_constructor_injects(
+    class_node: TsNode,
+    body: TsNode,
+    src: &[u8],
+    module_id: NodeId,
+    class_id: NodeId,
+    acc: &mut Acc,
+) {
+    if !has_di_decorator(class_node, src) {
+        return;
+    }
+    // Find the `constructor` method.
+    let mut cursor = body.walk();
+    let Some(ctor) = body.named_children(&mut cursor).find(|m| {
+        m.kind() == "method_definition"
+            && child_text(*m, "name", src) == Some("constructor")
+    }) else {
+        return;
+    };
+    let Some(params) = ctor.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        // Constructor params carrying an accessibility/readonly modifier are
+        // `required_parameter`; plain ones may be `required_parameter` or
+        // `optional_parameter`. Both expose a `type` field.
+        if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        let Some(ty_ann) = param.child_by_field_name("type") else {
+            continue;
+        };
+        // type_annotation wraps the actual type node; skip primitives.
+        let mut tc = ty_ann.walk();
+        let Some(ty) = ty_ann.named_children(&mut tc).next() else {
+            continue;
+        };
+        if ty.kind() == "predefined_type" {
+            continue;
+        }
+        let Some(type_name) = heritage_type_name(ty, src) else {
+            continue;
+        };
+        acc.refs.push(UnresolvedRef {
+            from: class_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(type_name.to_string()),
+            category: edge_category::INJECTS,
+        });
+    }
+}
+
+/// True if the class (or its enclosing `export`/decorated wrapper) carries one
+/// of the Angular DI decorators. Decorators attach either directly to the
+/// `class_declaration` (`@Injectable() class Foo {}`) or to the parent
+/// `export_statement` (`@Component({...}) export class Foo {}`).
+fn has_di_decorator(class_node: TsNode, src: &[u8]) -> bool {
+    let matches_decorator = |node: TsNode| -> bool {
+        let mut c = node.walk();
+        node.named_children(&mut c)
+            .filter(|ch| ch.kind() == "decorator")
+            .any(|dec| {
+                decorator_name(dec, src)
+                    .map(|n| DI_DECORATORS.contains(&n))
+                    .unwrap_or(false)
+            })
+    };
+    if matches_decorator(class_node) {
+        return true;
+    }
+    class_node
+        .parent()
+        .map(matches_decorator)
+        .unwrap_or(false)
+}
+
+/// The leading identifier of a decorator: `@Component({...})` → "Component",
+/// `@Injectable` → "Injectable".
+fn decorator_name<'a>(dec: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let mut c = dec.walk();
+    let inner = dec.named_children(&mut c).next()?;
+    let ident = match inner.kind() {
+        // `@Component({...})` — call_expression, name under `function`.
+        "call_expression" => inner.child_by_field_name("function")?,
+        // `@Injectable` — bare identifier.
+        _ => inner,
+    };
+    // `@ns.Component(...)` — take the trailing simple name.
+    let raw = text(ident, src).trim();
+    Some(raw.rsplit('.').next().unwrap_or(raw))
 }
 
 /// Parse `class X extends Y implements I, J` heritage.
@@ -719,12 +829,21 @@ fn collect_calls_in(
     let mut stack = vec![n];
     while let Some(node) = stack.pop() {
         let kind = node.kind();
-        // Nested fn/class bodies own their own from-node — walked separately.
+        // Named-declaration/class bodies own their own from-node (emitted as
+        // separate Function/Method/Class nodes) — walked separately, so skip.
+        //
+        // Anonymous callback bodies — `arrow_function` and `function_expression`
+        // — are NOT hoisted to their own nodes when nested (e.g. the
+        // `useEffect(() => { fetch(...) })` / `useCallback` / `.then(() => …)`
+        // callback, or `arr.map(function(){…})`). Their calls belong to the
+        // enclosing `from` node, so we descend into them here rather than skip.
+        // (Top-level arrow/function-expression consts are handled at the
+        // declaration seam via `emit_function_value`, which walks the callback
+        // body directly and never routes the callback node through here — so
+        // descending here does not double-emit.)
         if matches!(
             kind,
             "function_declaration"
-                | "function_expression"
-                | "arrow_function"
                 | "method_definition"
                 | "class_declaration"
                 | "class_expression"
@@ -1063,7 +1182,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         edges: std::mem::take(&mut acc.edges),
         imports: std::mem::take(&mut acc.imports),
         calls: Vec::new(),
-        refs: Vec::new(),
+        refs: std::mem::take(&mut acc.refs),
         nav: std::mem::take(&mut acc.nav),
         properties: Default::default(),
     };
@@ -1238,6 +1357,78 @@ mod tests {
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://ts_smoke")
+    }
+
+    #[test]
+    fn angular_constructor_di_emits_injects_refs() {
+        // @Component class with constructor DI: AppComponent INJECTS ApiService
+        // and HttpClient; the primitive `number` param is skipped.
+        let src = "\
+import { Component } from \"@angular/core\";
+import { ApiService } from \"./api.service\";
+
+@Component({ selector: \"app-root\", template: \"<div></div>\" })
+export class AppComponent {
+  constructor(private api: ApiService, public http: HttpClient, private tries: number) {}
+}
+";
+        let parse = parse_file(src, "src/app.component.ts", "src::app_component", repo()).unwrap();
+
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::app_component");
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "src::app_component::AppComponent",
+        );
+
+        let inject_targets: Vec<&str> = parse
+            .refs
+            .iter()
+            .filter(|r| {
+                r.category == edge_category::INJECTS
+                    && r.from == class_id
+                    && r.from_module == module_id
+            })
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            inject_targets.contains(&"ApiService"),
+            "expected INJECTS ref Bare(\"ApiService\") from AppComponent, got refs: {:?}",
+            parse.refs
+        );
+        assert!(
+            inject_targets.contains(&"HttpClient"),
+            "expected INJECTS ref Bare(\"HttpClient\"), got: {inject_targets:?}"
+        );
+        assert!(
+            !inject_targets.contains(&"number"),
+            "primitive-typed ctor param must not emit INJECTS, got: {inject_targets:?}"
+        );
+    }
+
+    #[test]
+    fn plain_class_ctor_does_not_emit_injects() {
+        // No DI decorator → no INJECTS refs, even with typed ctor params.
+        let src = "\
+export class PlainData {
+  constructor(private svc: SomeService) {}
+}
+";
+        let parse = parse_file(src, "src/plain.ts", "src::plain", repo()).unwrap();
+        assert!(
+            !parse
+                .refs
+                .iter()
+                .any(|r| r.category == edge_category::INJECTS),
+            "undecorated class must not mint INJECTS refs, got: {:?}",
+            parse.refs
+        );
     }
 
     fn has_edge(parse: &FileParse, from: NodeId, to: NodeId, cat: EdgeCategoryId) -> bool {
@@ -1637,6 +1828,77 @@ export class HealthService {
         assert_eq!(occurrences, 2, "expected 2 Node emissions for same endpoint");
         let payloads = endpoint_payloads(&parse, ep);
         assert_eq!(payloads.len(), 2, "expected 2 ENDPOINT_HIT cells");
+    }
+
+    #[test]
+    fn fetch_nested_in_react_callbacks_emits_endpoints() {
+        // React puts fetch() inside a useEffect(() => {…}) callback and inside
+        // an async arrow. Both are anonymous callbacks nested in the component
+        // function body — the call walk must descend into them so the fetch is
+        // detected and attributed to the enclosing component function.
+        let src = "\
+import { useEffect, useState } from \"react\";
+
+export function UserList() {
+    const [users, setUsers] = useState([]);
+
+    useEffect(() => {
+        fetch(\"/users\")
+            .then((r) => r.json())
+            .then(setUsers);
+    }, []);
+
+    const addUser = async (body) => {
+        await fetch(\"/users\", { method: \"POST\", body: JSON.stringify(body) });
+    };
+
+    return null;
+}
+";
+        let parse = parse_file(src, "client/UserList.tsx", "client::UserList", repo()).unwrap();
+
+        let get_ep = endpoint_id(repo(), "GET", "/users");
+        let post_ep = endpoint_id(repo(), "POST", "/users");
+        let comp_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "client::UserList::UserList",
+        );
+
+        // GET from the useEffect callback.
+        assert!(
+            parse.nodes.iter().any(|n| n.id == get_ep),
+            "fetch inside useEffect callback should emit a GET endpoint, nodes: {:?}",
+            parse.nodes.iter().map(|n| n.id).collect::<Vec<_>>()
+        );
+        // POST from the addUser async arrow.
+        assert!(
+            parse.nodes.iter().any(|n| n.id == post_ep),
+            "fetch inside the async arrow should emit a POST endpoint"
+        );
+
+        // Both CALLS edges are attributed to the enclosing component function.
+        assert!(
+            has_edge(&parse, comp_id, get_ep, edge_category::CALLS),
+            "expected CALLS edge UserList -> GET /users"
+        );
+        assert!(
+            has_edge(&parse, comp_id, post_ep, edge_category::CALLS),
+            "expected CALLS edge UserList -> POST /users"
+        );
+
+        // No double-emit: exactly one Node emission per (method,path).
+        assert_eq!(
+            parse.nodes.iter().filter(|n| n.id == get_ep).count(),
+            1,
+            "GET /users must be emitted exactly once (no double-emit)"
+        );
+        assert_eq!(
+            parse.nodes.iter().filter(|n| n.id == post_ep).count(),
+            1,
+            "POST /users must be emitted exactly once (no double-emit)"
+        );
     }
 
     #[test]

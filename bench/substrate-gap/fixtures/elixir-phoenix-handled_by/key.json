@@ -1,0 +1,12 @@
+{
+  "framework": "elixir-phoenix",
+  "language": "elixir",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "/api/users", "note": "get /users under scope /api"},
+    {"kind": "FUNCTION", "name": "index", "note": "UserController.index action (Elixir def)"}
+  ],
+  "expect_edges": [
+    {"from": "/api/users", "to": "index", "category": "HANDLED_BY", "note": "route mapped to UserController :index"}
+  ]
+}

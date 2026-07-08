@@ -1,0 +1,15 @@
+{
+  "framework": "php-laravel",
+  "language": "php",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Greeter", "note": "service class"},
+    {"kind": "METHOD", "name": "greet", "note": "callee method"},
+    {"kind": "METHOD", "name": "index", "note": "caller method"}
+  ],
+  "expect_edges": [
+    {"from": "show", "to": "index", "category": "CALLS", "note": "show() calls $this->index() (self-call)"},
+    {"from": "index", "to": "greet", "category": "CALLS", "note": "index() calls $greeter->greet() (instance-var call)"},
+    {"from": "HomeController", "to": "Greeter", "category": "IMPORTS", "note": "use App\\Services\\Greeter"}
+  ]
+}

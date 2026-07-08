@@ -1,0 +1,12 @@
+{
+  "framework": "go-handled-by",
+  "language": "go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "/users", "note": "chi route"},
+    {"kind": "FUNCTION", "name": "listUsers", "note": "handler fn"}
+  ],
+  "expect_edges": [
+    {"from": "/users", "to": "listUsers", "category": "HANDLED_BY", "note": "r.Get(\"/users\", listUsers)"}
+  ]
+}

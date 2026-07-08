@@ -1,0 +1,11 @@
+{
+  "framework": "scala-imports",
+  "language": "scala",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "greet", "note": "defined in Greeter"}
+  ],
+  "expect_edges": [
+    {"from": "Main", "to": "Greeter", "category": "IMPORTS", "note": "main imports myapp.util.Greeter"}
+  ]
+}

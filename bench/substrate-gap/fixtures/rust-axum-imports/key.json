@@ -1,0 +1,12 @@
+{
+  "framework": "rust-axum",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "greet", "note": "imported fn"},
+    {"kind": "MODULE", "name": "util", "note": "imported module"}
+  ],
+  "expect_edges": [
+    {"from": "main", "to": "util", "category": "IMPORTS", "note": "use crate::util::greet resolves at MODULE granularity (main module -> util module) — the correct/present edge for Rust"}
+  ]
+}

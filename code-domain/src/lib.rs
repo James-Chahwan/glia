@@ -124,6 +124,11 @@ pub mod node_kind {
     // it differently if useful. (glia-v5 G19)
     pub const STATE_VAR: NodeKindId = NodeKindId(43);
 
+    // Tier-4 — a documentation container (a Confluence space, a Notion database,
+    // a wiki). `DOC_SECTION`s from an external source CONTAINS-nest under it;
+    // repo `.md` docs stay flat (no space). Carries source/url/version provenance.
+    pub const DOC_SPACE: NodeKindId = NodeKindId(44);
+
     /// Canonical id→name for every node kind. Single source of truth for decode
     /// tables (pyo3 `kind_names`), the CLI, and projection-text's display
     /// fallback — so no consumer reimplements a table that goes stale when a
@@ -172,6 +177,7 @@ pub mod node_kind {
         (REGION, "REGION"),
         (DOC_SECTION, "DOC_SECTION"),
         (STATE_VAR, "STATE_VAR"),
+        (DOC_SPACE, "DOC_SPACE"),
     ];
 
     /// Name for a node-kind id, or `"UNKNOWN"` if unregistered.
@@ -675,6 +681,199 @@ impl CodeNav {
             self.children_of.entry(p).or_default().push(id);
         }
     }
+}
+
+// ============================================================================
+// Shared client-HTTP endpoint emission (Pattern A — handoff v6 P1)
+// ============================================================================
+//
+// A client-side HTTP call — `dio.get('/x')` (Dart), `requests.get(url)`
+// (Python), `http.Get(url)` (Go), `restTemplate.getForObject(url)` (Java),
+// `URLSession…dataTask(url)` (Swift) — should become an ENDPOINT node that
+// `HttpStackResolver` pairs to a server ROUTE → HTTP_CALLS. The TypeScript
+// parser already emits this shape (fetch/axios); today no other language does,
+// so cross-stack HTTP is TS-only. This helper emits the IDENTICAL shape so the
+// one resolver works uniformly across languages (cross-benefit lives in the
+// shared crate, not duplicated per parser).
+
+pub mod endpoint {
+    use super::{cell_type, edge_category, node_kind, GRAPH_TYPE};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use std::collections::HashSet;
+
+    use super::CodeNav;
+
+    /// One extracted client HTTP call. `path` MUST use `${…}` for any
+    /// interpolated segment so it normalises the same way TS template paths do:
+    /// `normalise_http_path` in repo-graph-graph collapses any segment containing
+    /// `${` (or `:id` / `{id}`) to `{}`, so `/users/${…}` matches route
+    /// `/users/{id}` uniformly.
+    pub struct ClientEndpoint {
+        /// Upper-case HTTP verb, e.g. `"GET"`.
+        pub method: String,
+        /// Request path, e.g. `"/users/${…}"`.
+        pub path: String,
+        /// Call-site file (relative), carried on the ENDPOINT_HIT cell so a route
+        /// can be traced back to the specific frontend call-site.
+        pub file: String,
+        pub line: usize,
+        pub col: usize,
+        pub confidence: Confidence,
+    }
+
+    fn esc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    fn endpoint_hit_json(ep: &ClientEndpoint) -> String {
+        let conf = match ep.confidence {
+            Confidence::Strong => "strong",
+            Confidence::Medium => "medium",
+            Confidence::Weak => "weak",
+        };
+        format!(
+            r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"}}"#,
+            esc(&ep.method),
+            esc(&ep.path),
+            esc(&ep.file),
+            ep.line,
+            ep.col,
+            conf,
+        )
+    }
+
+    /// Extract the request PATH from a URL literal. Absolute URLs
+    /// (`http://host/x`, `https://…/x`) → the path (`/x`); already-relative
+    /// paths (`/x`) pass through; a bare host, a non-path string, or a variable
+    /// → None. Query/fragment are dropped. Lets a client call to
+    /// `http://api/users` pair with route `/users` (addresses the host-prefix
+    /// normalisation gap, handoff Pattern I). Interpolation reconstruction
+    /// (`$id`/`${expr}`/f-string) stays per-parser — call this AFTER it.
+    pub fn url_to_path(raw: &str) -> Option<String> {
+        let s = raw.trim();
+        let after_host = if let Some(i) = s.find("://") {
+            let rest = &s[i + 3..];
+            match rest.find('/') {
+                Some(j) => &rest[j..],
+                None => "/",
+            }
+        } else {
+            s
+        };
+        if !after_host.starts_with('/') {
+            return None;
+        }
+        let end = after_host.find(['?', '#']).unwrap_or(after_host.len());
+        Some(after_host[..end].to_string())
+    }
+
+    /// Stable ENDPOINT node id for a `(method, path)` — `endpoint:<METHOD>:<path>`,
+    /// the qname convention `HttpStackResolver::parse_endpoint_qname` reads.
+    pub fn endpoint_id(repo: RepoId, method: &str, path: &str) -> NodeId {
+        let qname = format!("endpoint:{method}:{path}");
+        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname)
+    }
+
+    /// Emit the ENDPOINT node (+ ENDPOINT_HIT cell) once per `(method, path)`,
+    /// record it in nav, and push a CALLS edge from the enclosing node `from`.
+    /// `seen` dedups the node across a file; the CALLS edge is pushed per call
+    /// site. Returns the endpoint NodeId.
+    pub fn push_client_endpoint(
+        repo: RepoId,
+        ep: &ClientEndpoint,
+        from: NodeId,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        nav: &mut CodeNav,
+        seen: &mut HashSet<NodeId>,
+    ) -> NodeId {
+        let qname = format!("endpoint:{}:{}", ep.method, ep.path);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
+        if seen.insert(id) {
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: ep.confidence,
+                cells: vec![Cell {
+                    kind: cell_type::ENDPOINT_HIT,
+                    payload: CellPayload::Json(endpoint_hit_json(ep)),
+                }],
+            });
+            let display = format!("{} {}", ep.method, ep.path);
+            nav.record(id, &display, &qname, node_kind::ENDPOINT, None);
+        }
+        edges.push(Edge {
+            from,
+            to: id,
+            category: edge_category::CALLS,
+            confidence: ep.confidence,
+        });
+        id
+    }
+}
+
+// ============================================================================
+// Doc ingestion (Tier-4 seam)
+// ============================================================================
+//
+// Source-agnostic doc record fed to the DOC_SECTION builder. Today the only
+// producer is the repo `.md` file walk (FileDocSource in the engine); the
+// Confluence / Notion / wiki adapters produce the SAME shape, so the builder +
+// `link_doc_sections` are source-agnostic. `provenance` is carried but not yet
+// emitted as a cell (that lands with the first external adapter) — so routing
+// file docs through this type is byte-identical to the pre-seam path.
+
+/// Where a doc came from. `File` = repo markdown (today's path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DocSourceKind {
+    File,
+    Confluence,
+    Notion,
+    Wiki,
+}
+
+/// Provenance for a doc — the seam carries it; adapters populate url/container/
+/// version and (later) emit it as a DOC_SECTION cell.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocProvenance {
+    pub kind: DocSourceKind,
+    /// Canonical URL of the source page (external sources).
+    pub url: Option<String>,
+    /// Space key / database id / wiki name.
+    pub container: Option<String>,
+    /// Version number / etag for incremental sync.
+    pub version: Option<String>,
+}
+
+impl DocProvenance {
+    /// Provenance for a repo markdown file (today's default).
+    pub fn file() -> Self {
+        Self {
+            kind: DocSourceKind::File,
+            url: None,
+            container: None,
+            version: None,
+        }
+    }
+}
+
+/// One document to ingest: a logical path/id + its markdown text + provenance.
+/// The DOC_SECTION builder chunks `text` by heading and keys nodes off
+/// `rel_path`'s stem, exactly as the file walk did.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DocRecord {
+    pub rel_path: String,
+    pub text: String,
+    pub provenance: DocProvenance,
 }
 
 #[cfg(test)]

@@ -1,0 +1,10 @@
+{
+  "framework": "solidity-state_var",
+  "language": "solidity",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "STATE_VAR", "name": "feeBasisPoints", "note": "public state variable"},
+    {"kind": "STATE_VAR", "name": "treasury", "note": "public state variable"}
+  ],
+  "expect_edges": []
+}

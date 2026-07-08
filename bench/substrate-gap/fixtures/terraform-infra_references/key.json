@@ -1,0 +1,14 @@
+{
+  "framework": "terraform",
+  "language": "terraform",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "aws_vpc", "note": "vpc resource"},
+    {"kind": "INFRA_RESOURCE", "name": "aws_subnet", "note": "subnet resource"},
+    {"kind": "INFRA_RESOURCE", "name": "aws_instance", "note": "instance resource"}
+  ],
+  "expect_edges": [
+    {"from": "aws_subnet", "to": "aws_vpc", "category": "INFRA_REFERENCES", "note": "subnet.vpc_id = aws_vpc.main.id"},
+    {"from": "aws_instance", "to": "aws_subnet", "category": "INFRA_REFERENCES", "note": "instance.subnet_id = aws_subnet.web.id"}
+  ]
+}

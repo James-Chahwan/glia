@@ -22,6 +22,13 @@ pub fn parse_file(
     let root = tree.root_node();
 
     let mut acc = Acc::default();
+    // The file-stem MODULE qname (e.g. `controller`). Elixir `import`/`alias`/`use`
+    // forms live *inside* a `defmodule`, so the walk's `parent_qname` at that point
+    // is the enclosing PACKAGE qname (`controller::MyAppWeb.UserController`), which
+    // `resolve_imports_python` never finds in `module_by_qname` (MODULE nodes only)
+    // → every import early-continues. Stash the file MODULE qname so `collect_import`
+    // emits `from_module` = the file stem, matching what the graph registers.
+    acc.module_qname = module_qname.to_string();
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -36,7 +43,7 @@ pub fn parse_file(
 
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
 
-    scan_phoenix_routes(source, repo, &mut acc);
+    scan_phoenix_routes(source, repo, module_id, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -57,6 +64,8 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// File-stem MODULE qname; the `from_module` every import resolves against.
+    module_qname: String,
 }
 
 fn visit_top(
@@ -94,7 +103,7 @@ fn visit_node(
         "def" | "defp" => visit_def(node, src, file_rel, parent_qname, parent_id, repo, acc),
         "defprotocol" => visit_defprotocol(node, src, file_rel, parent_qname, parent_id, repo, acc),
         "defstruct" => visit_defstruct(node, src, file_rel, parent_qname, parent_id, repo, acc),
-        "import" | "alias" | "use" => collect_import(node, src, parent_qname, acc),
+        "import" | "alias" | "use" => collect_import(node, src, acc),
         _ => {}
     }
 }
@@ -120,6 +129,11 @@ fn visit_defmodule(
     if name.is_empty() {
         return;
     }
+    // Elixir modules are dotted (`MyApp.Repo`). Keep the full dotted path in the
+    // qname (for uniqueness), but record the node's *name* as the last segment
+    // (`Repo`) — that is how Elixir refers to the module after `alias MyApp.Repo`,
+    // and it is the short name the graph's import tail fallback matches against.
+    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
 
@@ -136,7 +150,7 @@ fn visit_defmodule(
         confidence: Confidence::Strong,
     });
     acc.nav
-        .record(id, &name, &qname, node_kind::PACKAGE, Some(parent_id));
+        .record(id, &short, &qname, node_kind::PACKAGE, Some(parent_id));
 
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -254,14 +268,20 @@ fn visit_defstruct(
         .record(id, "__struct__", &qname, node_kind::STRUCT, Some(parent_id));
 }
 
-fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+fn collect_import(node: TsNode, src: &[u8], acc: &mut Acc) {
     let Some(args) = find_args(node) else {
         return;
     };
+    // `import Plug.Conn` / `alias MyApp.Repo` / `use Phoenix.Controller`. The first
+    // argument is the dotted module path; the graph's tail fallback splits it on
+    // `.` and binds the final segment (`Conn`/`Repo`) to a unique in-repo module by
+    // short name. External modules (e.g. `Plug.Conn`) have no in-repo target, so
+    // they resolve to no edge — only in-repo aliases (e.g. an app's own `MyApp.Repo`)
+    // produce an IMPORTS edge.
     let path = first_arg_text(args, src);
     if !path.is_empty() {
         acc.imports.push(ImportStmt {
-            from_module: from_module.to_string(),
+            from_module: acc.module_qname.clone(),
             target: ImportTarget::Module {
                 path,
                 alias: None,
@@ -348,7 +368,7 @@ fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
-fn scan_phoenix_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) {
     let bytes = source.as_bytes();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut scope_stack: Vec<String> = Vec::new();
@@ -386,9 +406,12 @@ fn scan_phoenix_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 let rest = &source[word_end..];
                 if let Some(path) = first_quoted(rest) {
                     let full = join_scope(&scope_stack, &path);
+                    // Handler action is the last atom on the route line, e.g.
+                    // `get "/users", UserController, :index` -> `index`.
+                    let action = route_action(rest);
                     let route_name = format!("{method} {full}");
                     if seen.insert(route_name.clone()) {
-                        emit_phoenix_route(&method, &full, repo, acc);
+                        emit_phoenix_route(&method, &full, action.as_deref(), repo, module_id, acc);
                     }
                 }
                 i = word_end;
@@ -400,7 +423,9 @@ fn scan_phoenix_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                     for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
                         let route_name = format!("{m} {full}");
                         if seen.insert(route_name.clone()) {
-                            emit_phoenix_route(m, &full, repo, acc);
+                            // `resources` derives standard RESTful actions from the
+                            // controller implicitly; no explicit action to link.
+                            emit_phoenix_route(m, &full, None, repo, module_id, acc);
                         }
                     }
                 }
@@ -482,7 +507,14 @@ fn join_scope(stack: &[String], path: &str) -> String {
     }
 }
 
-fn emit_phoenix_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
+fn emit_phoenix_route(
+    method: &str,
+    path: &str,
+    action: Option<&str>,
+    repo: RepoId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
@@ -496,6 +528,66 @@ fn emit_phoenix_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+
+    // HANDLED_BY: link the ROUTE to its controller action function. The action
+    // is a bare `def` in the controller module; resolve_refs binds it via the
+    // global-by-name fallback (Elixir modules are MODULE/PACKAGE nodes, not
+    // CLASS, so the Attribute/class-method path can't resolve them).
+    if let Some(action) = action {
+        if !action.is_empty() {
+            acc.refs.push(UnresolvedRef {
+                from: route_id,
+                from_module: module_id,
+                qualifier: CallQualifier::Bare(action.to_string()),
+                category: edge_category::HANDLED_BY,
+            });
+        }
+    }
+}
+
+/// Extract the controller action from a Phoenix route line. Given the text
+/// following the verb (e.g. `"/users", UserController, :index`), returns the
+/// trailing atom's name (`index`). Returns `None` when no `:atom` action is
+/// present on the same line (only scans up to the first newline).
+fn route_action(rest: &str) -> Option<String> {
+    let line = rest.split('\n').next().unwrap_or(rest);
+    let bytes = line.as_bytes();
+    // Skip past the quoted path so a `:param` inside it (e.g. "/users/:id")
+    // isn't mistaken for the action atom.
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] != b'"' {
+        i += 1;
+    }
+    if i < bytes.len() {
+        i += 1; // opening quote
+        while i < bytes.len() && bytes[i] != b'"' {
+            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if i < bytes.len() {
+            i += 1; // closing quote
+        }
+    }
+    let mut last: Option<String> = None;
+    while i < bytes.len() {
+        if bytes[i] == b':' && i + 1 < bytes.len() {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > start {
+                last = Some(line[start..j].to_string());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    last
 }
 
 fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -568,6 +660,56 @@ end
 "#;
         let fp = parse_file(source, "lib/web.ex", "lib::web", repo()).unwrap();
         assert_eq!(fp.imports.len(), 3);
+
+        // Regression: `import`/`alias`/`use` live *inside* the `defmodule`, but the
+        // emitted `from_module` must be the file-stem MODULE qname (`lib::web`) — the
+        // key the graph registers in `module_by_qname` — NOT the enclosing PACKAGE
+        // qname (`lib::web::MyApp.Web`). Otherwise `resolve_imports_python`
+        // early-continues and no elixir import ever resolves.
+        assert!(
+            fp.imports.iter().all(|i| i.from_module == "lib::web"),
+            "from_module must be the file MODULE qname, got: {:?}",
+            fp.imports.iter().map(|i| &i.from_module).collect::<Vec<_>>()
+        );
+
+        // The dotted alias path is preserved so the graph's tail fallback can split
+        // it to the short module name it binds against.
+        let paths: Vec<&str> = fp
+            .imports
+            .iter()
+            .filter_map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(paths.contains(&"Plug.Conn"), "paths: {paths:?}");
+        assert!(paths.contains(&"MyApp.Repo"), "paths: {paths:?}");
+    }
+
+    #[test]
+    fn defmodule_recorded_by_short_name() {
+        // `defmodule MyApp.Repo` records short name `Repo` (how Elixir refers to it
+        // after `alias MyApp.Repo`) so the graph's import tail fallback binds an
+        // in-repo alias by its unique short name — while the full dotted path stays
+        // in the qname for uniqueness.
+        let source = r#"
+defmodule MyApp.Repo do
+  def all(q), do: q
+end
+"#;
+        let fp = parse_file(source, "lib/repo.ex", "lib::repo", repo()).unwrap();
+        let pkg = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::PACKAGE))
+            .expect("defmodule package node");
+        assert_eq!(pkg.1, "Repo", "short name should be the last dotted segment");
+        assert_eq!(
+            fp.nav.qname_by_id.get(pkg.0).map(String::as_str),
+            Some("lib::repo::MyApp.Repo"),
+            "qname keeps the full dotted path"
+        );
     }
 
     #[test]
@@ -614,5 +756,55 @@ end
         let fp = parse_file(source, "lib/service.ex", "lib::service", repo()).unwrap();
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "validate")));
         assert!(fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Attribute { base, name } if base == "Repo" && name == "insert")));
+    }
+
+    #[test]
+    fn handled_by_refs_link_route_to_action() {
+        let source = r#"
+defmodule MyAppWeb.Router do
+  use MyAppWeb, :router
+
+  scope "/api", MyAppWeb do
+    get "/users", UserController, :index
+    post "/users", UserController, :create
+    put "/users/:id", UserController, :update
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/router.ex", "lib::router", repo()).unwrap();
+
+        // One HANDLED_BY ref per explicit-verb route, qualifier = Bare(action).
+        let actions: Vec<&str> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(actions.contains(&"index"), "actions: {actions:?}");
+        assert!(actions.contains(&"create"), "actions: {actions:?}");
+        // `:id` inside the path must not be captured as the action.
+        assert!(actions.contains(&"update"), "actions: {actions:?}");
+        assert!(!actions.contains(&"id"), "path param leaked: {actions:?}");
+
+        // The ref's `from` must be the ROUTE node id (GET /api/users).
+        let route_id = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(id, n)| {
+                n.as_str() == "GET /api/users"
+                    && fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE)
+            })
+            .map(|(id, _)| *id)
+            .expect("route node exists");
+        assert!(
+            fp.refs.iter().any(|r| r.from == route_id
+                && r.category == edge_category::HANDLED_BY
+                && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "index")),
+            "expected HANDLED_BY from GET /api/users -> index"
+        );
     }
 }

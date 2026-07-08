@@ -1,0 +1,12 @@
+{
+  "framework": "py-tests",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "add", "note": "unit under test"},
+    {"kind": "FUNCTION", "name": "test_add", "note": "pytest test"}
+  ],
+  "expect_edges": [
+    {"from": "test_add", "to": "add", "category": "TESTS", "note": "test_add exercises add"}
+  ]
+}

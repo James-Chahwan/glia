@@ -1,0 +1,12 @@
+{
+  "framework": "angular",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "SERVICE", "name": "UserService", "note": "@Injectable service"},
+    {"kind": "COMPONENT", "name": "UsersComponent", "note": "@Component"}
+  ],
+  "expect_edges": [
+    {"from": "UsersComponent", "to": "UserService", "category": "INJECTS", "note": "constructor DI -> INJECTS (cat 8)"}
+  ]
+}

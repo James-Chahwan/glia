@@ -1,0 +1,14 @@
+<h1>Overview</h1>
+<p>The <code>OrderService</code> is the entry point for placing an order. It
+validates the cart and then delegates capture to the <code>PaymentGateway</code>.</p>
+<h2>Charging</h2>
+<p>Payment capture happens in <code>PaymentGateway.charge</code>, which returns the
+captured amount. Never call the gateway directly from a controller — always go
+through <code>OrderService.place_order</code>.</p>
+<ac:structured-macro ac:name="code">
+  <ac:parameter ac:name="language">python</ac:parameter>
+  <ac:plain-text-body><![CDATA[svc = OrderService()
+svc.place_order(cart)]]></ac:plain-text-body>
+</ac:structured-macro>
+<p>See the <a href="https://github.com/acme/shop/blob/main/ordering.py">ordering.py</a>
+source for the authoritative behaviour.</p>

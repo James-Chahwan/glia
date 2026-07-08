@@ -32,6 +32,10 @@ Source: `rust/code-domain/src/lib.rs`
 | 32 | PIPE (v0.4.11a) |
 | 33 | GUARD (v0.4.11a) |
 | 34 | COMPOSABLE (v0.4.11a) |
+| 35-43 | ATTRIBUTE, DATA_ENTITY, CRON_JOB, CONFIG_KEY, INFRA_RESOURCE, PACKAGE_DEP, REGION, DOC_SECTION, STATE_VAR |
+| 44 | DOC_SPACE (Tier-4: external doc container — Confluence space / Notion db / wiki; DOC_SECTIONs CONTAINS-nest under it) |
+
+_(Canonical source is `code-domain::node_kind::ALL` — this table trails it; verify there.)_
 
 ### EdgeCategoryId values
 | ID | Name |
