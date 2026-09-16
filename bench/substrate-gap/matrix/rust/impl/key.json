@@ -1,0 +1,18 @@
+{
+  "framework": "rust-impl",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "impl",
+  "cells": ["rust/impl"],
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "Repo", "note": "`pub trait Repo` — a Rust trait is registered as INTERFACE. This is the mechanism LITERAL."},
+    {"kind": "STRUCT", "name": "SqlRepo", "note": "`pub struct SqlRepo`"}
+  ],
+  "expect_edges": [
+    {"from": "SqlRepo", "to": "Repo", "category": "IMPLEMENTS",
+     "note": "INTENDED: `impl Repo for SqlRepo` routes struct -> trait. MEASURED 2026-09-16: NO edge of any heritage category is emitted — the dump has 4 edges, all DEFINES/IMPORTS. Rust is a STRICTLY WORSE failure than TypeScript/Dart, which at least mint an IMPLEMENTS edge (with a dangling target): here the trait-impl block produces nothing at all. Recall 0/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 5 nodes / 4 edges. Both type nodes and the method are extracted (INTERFACE Repo, STRUCT SqlRepo, METHOD sql_repo::SqlRepo::get — so the parser DOES attribute the impl block's fn to SqlRepo), which makes the missing trait edge a resolution gap rather than a parse gap."
+}

@@ -1,0 +1,18 @@
+{
+  "framework": "dart-calls",
+  "language": "dart",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["dart/calls"],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "Calc::add", "note": "the callee. Qname-qualified because the mechanism LITERAL is the callee's resolved qname (`Module::Class::method`), not a textual name."},
+    {"kind": "METHOD", "name": "Calc::total", "note": "the caller"}
+  ],
+  "expect_edges": [
+    {"from": "Calc::total", "to": "Calc::add", "category": "CALLS",
+     "note": "INTENDED: the unqualified self-call `add(acc, x)` inside `total` walks to the enclosing CLASS — the SelfMethod resolution CLAUDE.md's parser/graph split describes. MEASURED ABSENT 2026-09-16: the fixture emits ZERO CALLS edges. parsers/code/dart/src/lib.rs collect_calls_in only pushes a CallQualifier::SelfMethod for a `selector_expression` whose receiver text is literally `this`, so a bare self-call is dropped. PROBED: rewriting the call as `this.add(acc, x)` ALSO emits nothing, so the blind spot is not an artefact of choosing the idiomatic unqualified form (Dart's own `unnecessary_this` lint forbids the qualified one). Recall 0/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 6 nodes / 5 edges, zero CALLS. Also measured absent: the cross-object call `Calc().total([1, 2, 3])` in main.dart produces no CALLS edge either (the receiver is a constructor invocation, not an `identifier`), so Dart CALLS is blind for both the self and the instance shape. dart is one of only two languages still `unknown` on the calls column."
+}

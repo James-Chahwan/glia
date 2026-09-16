@@ -1,0 +1,18 @@
+{
+  "framework": "typescript-impl",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "impl",
+  "cells": ["typescript/impl"],
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "Repo", "note": "`interface Repo` — the base type, and the mechanism LITERAL (the interface name must survive into the target node's name/qname)"},
+    {"kind": "CLASS", "name": "SqlRepo", "note": "`class SqlRepo implements Repo`"}
+  ],
+  "expect_edges": [
+    {"from": "SqlRepo", "to": "Repo", "category": "IMPLEMENTS",
+     "note": "INTENDED: the `implements` clause routes to the INTERFACE node. MEASURED 2026-09-16 (installed 0.4.18 wheel): an IMPLEMENTS edge IS emitted but its TARGET is a fabricated NodeId — `--dump` prints `[IMPLEMENTS] 'SqlRepo' -> '?'`, i.e. the `to` id resolves to no node in the graph. This is the review §3 'TS/Solidity/Rust heritage edges target fabricated NodeIds' claim, CONFIRMED for TypeScript. grade.py skips an edge whose endpoint is unresolvable (it requires `by_id.get(e['to'])`), so recall is 0/1 — the cell is capped at partial until the heritage target is bound to the real INTERFACE node."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 5 nodes / 5 edges. Extraction is clean (MODULE repo, MODULE sqlRepo, CLASS SqlRepo, METHOD get, INTERFACE Repo); the only miss is the dangling IMPLEMENTS target. Cross-file: the interface lives in repo.ts and the class in sqlRepo.ts, so a fix must resolve the heritage name across modules, not just within one file (the IMPORTS edge sqlRepo -> repo IS present, so the binding information exists)."
+}

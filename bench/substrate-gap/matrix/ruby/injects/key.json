@@ -1,0 +1,18 @@
+{
+  "framework": "ruby-injects",
+  "language": "ruby",
+  "dirs": ["."],
+  "mechanism": "injects",
+  "cells": ["ruby/injects"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserService", "note": "the injected dependency, and the mechanism LITERAL"},
+    {"kind": "CLASS", "name": "OrderController", "note": "the consumer, `def initialize(user_service)` — dry-container style explicit constructor injection, the canonical Ruby DI form (Ruby has no type hints, so the container registration is the only type signal)"}
+  ],
+  "expect_edges": [
+    {"from": "OrderController", "to": "UserService", "category": "INJECTS",
+     "note": "INTENDED: consumer -> dependency. MEASURED ABSENT 2026-09-16: parsers/code/ruby has no INJECTS site. Ruby is also the HARDEST of the three cells in this packet to fix, because an untyped `initialize(user_service)` parameter carries no type at all — a fix must read the dry-container `register(:user_service) { UserService.new }` binding (or the `@user_service = user_service` assignment plus a name convention), not a parameter type. Recall 0/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 6 nodes / 5 edges, zero INJECTS. `require 'dry/container'` mints no PACKAGE_DEP, so there is no DI-framework marker in the graph either."
+}

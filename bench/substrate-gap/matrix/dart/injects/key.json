@@ -1,0 +1,18 @@
+{
+  "framework": "dart-injects",
+  "language": "dart",
+  "dirs": ["."],
+  "mechanism": "injects",
+  "cells": ["dart/injects"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "ApiService", "note": "the injected dependency, and the mechanism LITERAL (the injected type's name must survive into the target node's identity). Declared CLASS, not SERVICE: unlike Angular's @Injectable (fixtures/ts-angular-di, which DOES mint a SERVICE node), nothing maps Dart's `@injectable` onto node_kind SERVICE, so SERVICE is not the intended shape for Dart today."},
+    {"kind": "CLASS", "name": "HomeController", "note": "the consumer, `HomeController(this.api)` constructor DI"}
+  ],
+  "expect_edges": [
+    {"from": "HomeController", "to": "ApiService", "category": "INJECTS",
+     "note": "INTENDED: get_it/injectable constructor DI routes consumer -> dependency. MEASURED ABSENT 2026-09-16: edge_category INJECTS (8) is emitted by exactly three parsers — typescript, csharp and java — and parsers/code/dart has no INJECTS site at all. Dart DI is therefore invisible, so liveness false-flags an injected-only service as dead. Recall 0/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 5 nodes / 4 edges, zero INJECTS. Both classes and the IMPORTS edge home_controller -> api_service are present, so the binding information a fix needs is already in the graph — only the constructor-parameter type walk is missing. Also measured: `package:injectable/injectable.dart` mints no PACKAGE_DEP node, so there is no framework marker either."
+}

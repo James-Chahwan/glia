@@ -1,0 +1,17 @@
+{
+  "framework": "solidity-imports",
+  "language": "solidity",
+  "dirs": ["."],
+  "mechanism": "imports",
+  "cells": ["solidity/imports"],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "IERC20", "note": "the imported file as a MODULE — the mechanism LITERAL is the imported module path. Only MODULE is scoped: there is no manifest in this fixture, so PACKAGE / PACKAGE_DEP (the DEPENDS_ON half of the mechanism) have nothing to extract and declaring them would force a false `none` on extraction."}
+  ],
+  "expect_edges": [
+    {"from": "Token", "to": "IERC20", "category": "IMPORTS",
+     "note": "`import \"./IERC20.sol\";` — source-level module import. MEASURED PRESENT 2026-09-16 (installed 0.4.18 wheel): recall 1/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill, and an UNEXPECTED PASS — this cell reads FULL on unmodified main. The review recorded Solidity as a heritage/identity problem language, but its relative-path import resolution is correct. Baseline 2026-09-16: 7 nodes / 6 edges (MODULE IERC20, MODULE Token, CLASS Token, INTERFACE IERC20, METHOD totalSupply, METHOD backing, STATE_VAR reserve). The contract deliberately does NOT write `contract Token is IERC20`: that would add an INHERITS_FROM edge and make this cell duplicate fixtures/solidity-inherits_from (solidity/impl), so the dependency is held as a state variable instead, which keeps the cell about imports alone."
+}

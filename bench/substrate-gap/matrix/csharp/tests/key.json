@@ -1,0 +1,20 @@
+{
+  "framework": "csharp-tests",
+  "language": "csharp",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["csharp/tests"],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "Calc::Add", "note": "unit under test. Qname-qualified: bare `Add` is a substring of `Add_ReturnsSum`."},
+    {"kind": "METHOD", "name": "CalcTests::Add_ReturnsSum", "note": "xUnit `[Fact] public void Add_ReturnsSum()` — the canonical MethodUnderTest_Expectation naming. LOAD-BEARING: must not be renamed to `test_add`."}
+  ],
+  "expect_edges": [
+    {"from": "CalcTests::Add_ReturnsSum", "to": "Calc::Add", "category": "TESTS",
+     "note": "INTENDED function-level TESTS edge. MEASURED absent — fn-level TESTS refs exist only in parsers/code/python."},
+    {"from": "CalcTests", "to": "Calc", "category": "TESTS",
+     "note": "INTENDED module-level TESTS edge. MEASURED ABSENT — review section 3 confirmed for C#: the module tail `CalcTests` is neither `test_*` nor `*_test`/`*_spec`, so engine/src/passes.rs is_test_qname rejects it. Note the file is `CalcTests.cs` (plural), the dominant .NET convention, which the matcher would still reject even if it were made case-insensitive, because it strips only the singular `_test` affix."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 8 nodes / 6 edges, ZERO TESTS edges, TESTS recall 0/2. C# emits no FUNCTION nodes (only METHOD), so only METHOD is scoped."
+}

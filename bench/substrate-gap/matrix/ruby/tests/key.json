@@ -1,0 +1,20 @@
+{
+  "framework": "ruby-tests",
+  "language": "ruby",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["ruby/tests"],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "Calc::add", "note": "unit under test"},
+    {"kind": "METHOD", "name": "CalcTest::test_adds", "note": "Minitest `def test_adds` inside `class CalcTest < Minitest::Test` — snake_case METHOD in a CamelCase CLASS, which is Ruby's actual convention. Ruby is deliberately NOT in the review's CamelCase list."}
+  ],
+  "expect_edges": [
+    {"from": "CalcTest::test_adds", "to": "Calc::add", "category": "TESTS",
+     "note": "INTENDED function-level TESTS edge. MEASURED absent — fn-level TESTS refs exist only in parsers/code/python."},
+    {"from": "calc_test", "to": "calc", "category": "TESTS",
+     "note": "The module-level TESTS edge. MEASURED PRESENT: the FILE is `calc_test.rb`, so the module tail carries the `_test` suffix engine/src/passes.rs strips, even though the test CLASS is CamelCase `CalcTest`. This isolates the gap precisely — the matcher keys on the MODULE (file) name, not the class name."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 6 nodes / 6 edges, TESTS recall 1/2. Ruby emits no FUNCTION nodes in this fixture (the test body is a METHOD on CalcTest), so only METHOD is scoped."
+}

@@ -1,0 +1,20 @@
+{
+  "framework": "go-tests",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["go/tests"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "calc::Add", "note": "unit under test. Asserted qname-qualified because the bare literal `Add` is a substring of `TestAdd` and would match either node."},
+    {"kind": "FUNCTION", "name": "calc_test::TestAdd", "note": "`func TestAdd(t *testing.T)` — Go's mandatory CamelCase test-name convention (`go test` only runs `Test[A-Z]...`). Load-bearing: it must NOT be renamed to snake_case."}
+  ],
+  "expect_edges": [
+    {"from": "calc_test::TestAdd", "to": "calc::Add", "category": "TESTS",
+     "note": "INTENDED: the finer function-level TESTS edge, the shape fixtures/py-tests measures as full for Python. MEASURED absent: engine/src/passes.rs emit_tests_edges is MODULE->MODULE only, and the fn-level TESTS ref exists in exactly one parser (parsers/code/python/src/lib.rs). Every non-Python language is blind here."},
+    {"from": "calc_test", "to": "calc", "category": "TESTS",
+     "note": "The module-level TESTS edge emit_tests_edges actually produces. MEASURED PRESENT: `calc_test.go` -> module tail `calc_test` -> strip_test_affixes finds the `_test` suffix -> pairs with module `calc`. Go passes this matcher because its test-file convention is snake_case; contrast java/tests, csharp/tests and php/tests, which read 0/2 on the identical assertion."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 4 nodes / 3 edges, TESTS recall 1/2 (module-level hits, function-level misses). Go has no METHOD nodes in this fixture, so only FUNCTION is scoped — declaring METHOD too would drop extraction to 1/2 and mask the routing result behind a `none`."
+}

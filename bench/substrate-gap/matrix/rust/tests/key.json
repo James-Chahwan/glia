@@ -1,0 +1,20 @@
+{
+  "framework": "rust-tests",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["rust/tests"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "calc::add", "note": "unit under test"},
+    {"kind": "FUNCTION", "name": "calc_test::adds", "note": "`#[test] fn adds()` in tests/calc_test.rs — Cargo's integration-test layout. snake_case, as Rust requires."}
+  ],
+  "expect_edges": [
+    {"from": "calc_test::adds", "to": "calc::add", "category": "TESTS",
+     "note": "INTENDED function-level TESTS edge. MEASURED absent — fn-level TESTS refs exist only in parsers/code/python."},
+    {"from": "calc_test", "to": "calc", "category": "TESTS",
+     "note": "The module-level TESTS edge. MEASURED PRESENT: module qname `tests::calc_test`, tail `calc_test`, `_test` suffix stripped -> pairs with module `calc`."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 4 nodes / 4 edges, TESTS recall 1/2. Only FUNCTION is scoped (no METHOD nodes)."
+}

@@ -1,0 +1,18 @@
+{
+  "framework": "php-injects",
+  "language": "php",
+  "dirs": ["."],
+  "mechanism": "injects",
+  "cells": ["php/injects"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserService", "note": "the injected dependency, and the mechanism LITERAL. Declared CLASS, not SERVICE: nothing maps a Laravel service onto node_kind SERVICE — a Laravel service is an ordinary class resolved by the container."},
+    {"kind": "CLASS", "name": "OrderController", "note": "the consumer, `__construct(private UserService $users)` — PHP 8 constructor property promotion, the canonical Laravel DI form"}
+  ],
+  "expect_edges": [
+    {"from": "OrderController", "to": "UserService", "category": "INJECTS",
+     "note": "INTENDED: the type-hinted constructor parameter is exactly the signal Laravel's container resolves on, and is the same shape parsers/code/java and parsers/code/csharp already turn into INJECTS refs. MEASURED ABSENT 2026-09-16: parsers/code/php has no INJECTS site. Recall 0/1."}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 8 nodes / 7 edges, zero INJECTS. The promoted constructor parameter IS parsed (METHOD OrderController::OrderController::__construct exists) and the `use App\\Services\\UserService` import resolves to an IMPORTS edge, so the type name is available at the constructor — only the INJECTS ref is not emitted."
+}
