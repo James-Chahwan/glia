@@ -162,17 +162,22 @@ fn visit_type_decl(
     // dependencies. Field injection (@Autowired on a field) is gated per-field
     // below and does not require the class itself to be a stereotype.
     let is_bean = is_spring_bean(&node, src);
+    // A4.4: Spring `@RequestMapping` / Micronaut `@Controller` / JAX-RS `@Path`
+    // on the class is a PREFIX for every action method below, not a route the
+    // methods own. Read it once here and compose it per method.
+    let class_prefix = class_route_prefix(node, src);
+    let mut composed = 0usize;
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
         match child.kind() {
             "constructor_declaration" => {
-                visit_method(child, src, file_rel, &qname, id, repo, acc);
+                composed += visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
                 if is_bean {
                     emit_constructor_injects(child, src, id, module_id, acc);
                 }
             }
             "method_declaration" => {
-                visit_method(child, src, file_rel, &qname, id, repo, acc);
+                composed += visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
             }
             "field_declaration" => {
                 visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
@@ -186,8 +191,14 @@ fn visit_type_decl(
         }
     }
 
-    // Check for Spring/JAX-RS route annotations on the class.
-    check_route_annotations(node, src, file_rel, id, repo, acc);
+    // The class's OWN annotations (its base route), with no prefix to compose
+    // against — the prefix IS this annotation.
+    check_route_annotations(node, src, file_rel, id, repo, "", acc);
+    if composed > 0 && !class_prefix.is_empty() {
+        eprintln!(
+            "[java-routes] composed {composed} action routes under '{class_prefix}' in {file_rel}"
+        );
+    }
 }
 
 fn visit_method(
@@ -197,10 +208,11 @@ fn visit_method(
     parent_qname: &str,
     parent_id: NodeId,
     repo: RepoId,
+    class_prefix: &str,
     acc: &mut Acc,
-) {
+) -> usize {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return 0;
     };
     let name = text_of(name_node, src);
     let qname = format!("{parent_qname}::{name}");
@@ -225,8 +237,8 @@ fn visit_method(
         collect_calls_in(body, src, id, repo, file_rel, acc);
     }
 
-    // Check for route annotations on the method.
-    check_route_annotations(node, src, file_rel, id, repo, acc);
+    // Route annotations on the method, composed onto the enclosing class prefix.
+    check_route_annotations(node, src, file_rel, id, repo, class_prefix, acc)
 }
 
 /// G12.5: record an unresolved heritage reference (extends/implements) from a
@@ -617,70 +629,190 @@ fn emit_field_inject(
     }
 }
 
+/// The annotations attached to THIS declaration — its direct
+/// `annotation` / `marker_annotation` children plus those inside its direct
+/// `modifiers` child (tree-sitter-java puts them in either place). It
+/// deliberately does not descend into the body, so a class no longer sees —
+/// and re-emits — its own methods' route annotations.
+///
+/// Returns `(simple name, first string argument)`; a `scoped_identifier` name
+/// (`@jakarta.ws.rs.Path`) is reduced to its last segment, and the marker form
+/// (`@PostMapping`, no arguments) yields `None` for the argument.
+fn own_annotations<'a>(node: TsNode<'a>, src: &'a [u8]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "annotation" | "marker_annotation" => push_annotation(child, src, &mut out),
+            "modifiers" => {
+                let mut inner = child.walk();
+                for ann in child.named_children(&mut inner) {
+                    if matches!(ann.kind(), "annotation" | "marker_annotation") {
+                        push_annotation(ann, src, &mut out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn push_annotation<'a>(ann: TsNode<'a>, src: &'a [u8], out: &mut Vec<(String, Option<String>)>) {
+    let Some(name_node) = ann.child_by_field_name("name") else {
+        return;
+    };
+    let name = text_of(name_node, src)
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let arg = ann
+        .child_by_field_name("arguments")
+        .and_then(|args| annotation_string_arg(args, src));
+    out.push((name, arg));
+}
+
+/// The path literal of an `annotation_argument_list`. Prefers an
+/// `element_value_pair` keyed `value` / `path` / `uri` / `uris` (so
+/// `@GetMapping(produces = "application/json", path = "/x")` yields `/x`, not
+/// the media type), then the first bare `string_literal`, and finally falls
+/// back to the existing text scanner for shapes the AST does not spell out
+/// (e.g. `uris = {"/a", "/b"}`).
+fn annotation_string_arg(args: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    let mut bare = None;
+    for child in args.named_children(&mut cursor) {
+        match child.kind() {
+            "element_value_pair" => {
+                let key = child
+                    .child_by_field_name("key")
+                    .map(|k| text_of(k, src))
+                    .unwrap_or_default();
+                if matches!(key, "value" | "path" | "uri" | "uris")
+                    && let Some(v) = child.child_by_field_name("value")
+                    && v.kind() == "string_literal"
+                {
+                    return Some(java_string_inner(v, src));
+                }
+            }
+            "string_literal" if bare.is_none() => bare = Some(java_string_inner(child, src)),
+            _ => {}
+        }
+    }
+    bare.or_else(|| extract_annotation_string(text_of(args, src)))
+}
+
+/// The route prefix a type contributes to its action methods: the first of
+/// Spring `@RequestMapping`, Micronaut `@Controller` or JAX-RS `@Path` that
+/// carries a non-empty string argument. Empty when the type is not prefixed.
+fn class_route_prefix(type_node: TsNode, src: &[u8]) -> String {
+    for (name, arg) in own_annotations(type_node, src) {
+        if matches!(name.as_str(), "RequestMapping" | "Controller" | "Path")
+            && let Some(p) = arg
+            && !p.is_empty()
+        {
+            return p;
+        }
+    }
+    String::new()
+}
+
+/// Spring `@GetMapping`-style and Micronaut `@Get`-style verb annotations.
+fn mapping_verb(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "GetMapping" | "Get" => "GET",
+        "PostMapping" | "Post" => "POST",
+        "PutMapping" | "Put" => "PUT",
+        "DeleteMapping" | "Delete" => "DELETE",
+        "PatchMapping" | "Patch" => "PATCH",
+        "Head" => "HEAD",
+        "Options" => "OPTIONS",
+        _ => return None,
+    })
+}
+
+/// JAX-RS verb markers (`@GET`, `@POST`, …) — upper-case, so they never
+/// collide with Micronaut's `@Get` / `@Post`.
+fn jaxrs_verb(anns: &[(String, Option<String>)]) -> Option<&'static str> {
+    anns.iter().find_map(|(n, _)| match n.as_str() {
+        "GET" => Some("GET"),
+        "POST" => Some("POST"),
+        "PUT" => Some("PUT"),
+        "DELETE" => Some("DELETE"),
+        "PATCH" => Some("PATCH"),
+        "HEAD" => Some("HEAD"),
+        "OPTIONS" => Some("OPTIONS"),
+        _ => None,
+    })
+}
+
+/// Compose a class-level prefix with an action template. Spring, Micronaut and
+/// JAX-RS all CONCATENATE — a leading `/` on the method template does not make
+/// it absolute — so `@RequestMapping("/api/v1/users")` + `@GetMapping("/{id}")`
+/// is `/api/v1/users/{id}`. `join_path` does the slash bookkeeping; `abs_path`
+/// supplies the leading `/` that `join_path` deliberately does not force.
+fn compose_route_path(class_prefix: &str, tmpl: &str) -> String {
+    if tmpl.is_empty() {
+        return endpoint::abs_path(class_prefix);
+    }
+    endpoint::abs_path(&endpoint::join_path(class_prefix, tmpl))
+}
+
+/// Emit the ROUTEs declared by THIS declaration's own annotations, composed
+/// onto `class_prefix` (empty at class level, the enclosing type's prefix at
+/// method level). Returns how many routes were emitted.
 fn check_route_annotations(
     node: TsNode,
     src: &[u8],
     _file_rel: &str,
     handler_id: NodeId,
     repo: RepoId,
+    class_prefix: &str,
     acc: &mut Acc,
-) {
-    // Walk siblings/markers before this node looking for annotations.
-    // In Java tree-sitter, annotations are modifiers on the declaration.
-    let text = text_of(node, src);
+) -> usize {
+    let anns = own_annotations(node, src);
+    let mut emitted = 0usize;
+    // A marker annotation (`@PostMapping`) carries no template of its own: it
+    // maps the class prefix itself. With no prefix either there is nothing to
+    // name, so stay silent rather than invent a route.
+    let mut emit = |verb: &str, tmpl: Option<&str>, acc: &mut Acc| {
+        if tmpl.is_none() && class_prefix.is_empty() {
+            return;
+        }
+        emit_route(
+            verb,
+            &compose_route_path(class_prefix, tmpl.unwrap_or_default()),
+            handler_id,
+            repo,
+            acc,
+        );
+        emitted += 1;
+    };
 
-    // Spring: @GetMapping("/path"), @PostMapping, @RequestMapping
-    // Micronaut: @Get("/path"), @Post, @Put, @Delete, @Patch, @Head, @Options (no Mapping suffix)
-    let patterns = [
-        ("@GetMapping", "GET"),
-        ("@PostMapping", "POST"),
-        ("@PutMapping", "PUT"),
-        ("@DeleteMapping", "DELETE"),
-        ("@PatchMapping", "PATCH"),
-        ("@Get(", "GET"),
-        ("@Post(", "POST"),
-        ("@Put(", "PUT"),
-        ("@Delete(", "DELETE"),
-        ("@Patch(", "PATCH"),
-        ("@Head(", "HEAD"),
-        ("@Options(", "OPTIONS"),
-    ];
-    for (prefix, method) in &patterns {
-        if let Some(pos) = text.find(prefix)
-            && let Some(path) = extract_annotation_string(&text[pos..])
-        {
-            emit_route(method, &path, handler_id, repo, acc);
+    for (name, arg) in &anns {
+        // Spring @GetMapping("/x") / Micronaut @Get("/x").
+        if let Some(verb) = mapping_verb(name) {
+            emit(verb, arg.as_deref(), acc);
+        }
+        // Spring @RequestMapping — `method = RequestMethod.GET` is not read, so
+        // it stays the ANY wildcard it has always been.
+        // Micronaut @Controller("/api") — the class base route.
+        if matches!(name.as_str(), "RequestMapping" | "Controller") {
+            emit("ANY", arg.as_deref(), acc);
         }
     }
-    // Micronaut @Controller("/api") at class level — emit as ANY base route.
-    if let Some(pos) = text.find("@Controller(")
-        && let Some(path) = extract_annotation_string(&text[pos..])
-    {
-        emit_route("ANY", &path, handler_id, repo, acc);
+
+    // JAX-RS: @Path("/x") with the verb from a marker on the SAME declaration.
+    let verb = jaxrs_verb(&anns);
+    if let Some((_, arg)) = anns.iter().find(|(n, _)| n == "Path") {
+        emit(verb.unwrap_or("ANY"), arg.as_deref(), acc);
+    } else if let Some(verb) = verb {
+        // A verb marker with no @Path maps the resource root itself.
+        emit(verb, None, acc);
     }
-    // @RequestMapping with method param
-    if let Some(pos) = text.find("@RequestMapping")
-        && let Some(path) = extract_annotation_string(&text[pos..])
-    {
-        emit_route("ANY", &path, handler_id, repo, acc);
-    }
-    // JAX-RS: @Path("/path") + @GET/@POST
-    if let Some(pos) = text.find("@Path")
-        && let Some(path) = extract_annotation_string(&text[pos..])
-    {
-        let method = if text.contains("@GET") {
-            "GET"
-        } else if text.contains("@POST") {
-            "POST"
-        } else if text.contains("@PUT") {
-            "PUT"
-        } else if text.contains("@DELETE") {
-            "DELETE"
-        } else {
-            "ANY"
-        };
-        emit_route(method, &path, handler_id, repo, acc);
-    }
+    emitted
 }
 
 fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
@@ -1479,10 +1611,87 @@ public class ThingsController {
             .filter(|(_, k)| **k == node_kind::ROUTE)
             .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
             .collect();
-        assert!(routes.contains(&"GET /things"));
-        assert!(routes.contains(&"PUT /things/{id}"));
-        assert!(routes.contains(&"DELETE /things/{id}"));
+        assert!(routes.contains(&"GET /api/things"));
+        assert!(routes.contains(&"PUT /api/things/{id}"));
+        assert!(routes.contains(&"DELETE /api/things/{id}"));
         assert!(routes.contains(&"ANY /api"));
+    }
+
+    const SPRING_CLASS_PREFIXED: &str = r#"
+package com.example;
+
+@RestController
+@RequestMapping("/api/v1/users")
+public class UserController {
+    @GetMapping("/{id}")
+    public String getUser(String id) { return "user " + id; }
+
+    @PostMapping
+    public String createUser(String body) { return "created"; }
+}
+"#;
+
+    #[test]
+    fn spring_class_request_mapping_composes() {
+        let fp = parse_file(
+            SPRING_CLASS_PREFIXED,
+            "server/UserController.java",
+            "com::example",
+            repo(),
+        )
+        .unwrap();
+        let routes: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        assert!(
+            routes.contains(&"GET /api/v1/users/{id}"),
+            "class @RequestMapping must compose onto @GetMapping: {routes:?}"
+        );
+        assert!(
+            routes.contains(&"POST /api/v1/users"),
+            "a bare @PostMapping marker must inherit the class prefix: {routes:?}"
+        );
+        assert!(routes.contains(&"ANY /api/v1/users"), "class base route: {routes:?}");
+        assert!(
+            !routes.contains(&"GET /{id}"),
+            "the uncomposed relative template must not survive: {routes:?}"
+        );
+        assert!(
+            !routes.iter().any(|r| r.starts_with("POST created")),
+            "the marker form must not scan forward into the method body: {routes:?}"
+        );
+    }
+
+    #[test]
+    fn spring_class_scan_does_not_duplicate_action_routes() {
+        let fp = parse_file(
+            SPRING_CLASS_PREFIXED,
+            "server/UserController.java",
+            "com::example",
+            repo(),
+        )
+        .unwrap();
+        let route_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            "GET /api/v1/users/{id}",
+        );
+        let handled: Vec<&str> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY && e.from == route_id)
+            .filter_map(|e| fp.nav.name_by_id.get(&e.to).map(|s| s.as_str()))
+            .collect();
+        assert_eq!(
+            handled,
+            vec!["getUser"],
+            "the class scan must not also claim the class itself as a handler"
+        );
     }
 
     #[test]

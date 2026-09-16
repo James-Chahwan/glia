@@ -3,10 +3,10 @@
   "language": "java",
   "dirs": ["."],
   "expect_nodes": [
-    {"kind": "ROUTE", "name": "/{id}", "note": "GET route (class prefix NOT composed - bug)"},
+    {"kind": "ROUTE", "name": "/{id}", "note": "GET route, class @RequestMapping(\"/users\") composed -> GET /users/{id}"},
     {"kind": "METHOD", "name": "getUser", "note": "handler method"}
   ],
   "expect_edges": [
-    {"from": "/{id}", "to": "getUser", "category": "HANDLED_BY", "note": "GET /{id} handled by getUser"}
+    {"from": "/{id}", "to": "getUser", "category": "HANDLED_BY", "note": "GET /users/{id} handled by getUser"}
   ]
 }
