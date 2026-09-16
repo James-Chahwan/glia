@@ -32,6 +32,35 @@ const LEGEND: &str = "\
 [LEGEND]
 > depends    * entry point    @ external";
 
+/// JSON string-body escaper for the hand-rolled projections (audit 2026-06-10
+/// #16). Covers everything RFC 8259 requires: quote, backslash, and EVERY
+/// control character below 0x20 — the four-`replace` version in `py` missed
+/// 0x00-0x08, 0x0B, 0x0C and 0x0E-0x1F, any one of which makes `json.loads`
+/// raise `Invalid control character` and takes the whole graph down with it.
+///
+/// Returns the escaped *body* only: the caller supplies the surrounding quotes.
+pub fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            // Writing to a String is infallible, but the Result must be
+            // consumed and CODE_RULES forbids unwrap() in non-test code.
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Render a single-repo graph. Code cells are one-line previews.
 pub fn render_repo_graph(g: &RepoGraph) -> String {
     let slice: &[&RepoGraph] = &[g];
@@ -1106,5 +1135,63 @@ mod tests {
             alias.starts_with("SC"),
             "should extend from initials: {alias}"
         );
+    }
+}
+
+// ============================================================================
+// escape_json_string — audit 2026-06-10 #16
+// ============================================================================
+
+#[cfg(test)]
+mod escape_json_string_tests {
+    use super::escape_json_string;
+
+    /// The defect: the four-`replace` escaper in `py` covered only backslash,
+    /// quote, \n, \r and \t, so 0x00-0x08, 0x0B, 0x0C and 0x0E-0x1F went
+    /// through raw and `json.loads` raised `Invalid control character` on the
+    /// whole graph.
+    #[test]
+    fn escapes_all_control_characters() {
+        assert_eq!(escape_json_string("a\u{1}b\u{1f}c"), r"a\u0001b\u001fc");
+
+        // Every codepoint below 0x20 must leave as an escape, never raw.
+        for c in 0u32..0x20 {
+            let raw = char::from_u32(c).unwrap_or('?').to_string();
+            let out = escape_json_string(&raw);
+            assert!(
+                out.starts_with('\\'),
+                "0x{c:02x} escaped to {out:?}, expected a backslash escape"
+            );
+            assert!(
+                !out.chars().any(|ch| (ch as u32) < 0x20),
+                "0x{c:02x} left a raw control character in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn escapes_quote_backslash_and_named_whitespace() {
+        assert_eq!(escape_json_string("\""), r#"\""#);
+        assert_eq!(escape_json_string("\\"), r"\\");
+        assert_eq!(escape_json_string("\n"), r"\n");
+        assert_eq!(escape_json_string("\r"), r"\r");
+        assert_eq!(escape_json_string("\t"), r"\t");
+        assert_eq!(escape_json_string("\u{08}"), r"\b");
+        assert_eq!(escape_json_string("\u{0c}"), r"\f");
+        // Combined, in a shape a real qname could take.
+        assert_eq!(escape_json_string("a\"b\\c\nd"), r#"a\"b\\c\nd"#);
+    }
+
+    #[test]
+    fn leaves_printable_and_non_ascii_untouched() {
+        assert_eq!(escape_json_string("héllo ✓"), "héllo ✓");
+        assert_eq!(
+            escape_json_string("Server::Controllers::get"),
+            "Server::Controllers::get"
+        );
+        assert_eq!(escape_json_string(""), "");
+        // 0x7f (DEL) is not a JSON control character — RFC 8259 only requires
+        // escaping below 0x20 — so it passes through.
+        assert_eq!(escape_json_string("\u{7f}"), "\u{7f}");
     }
 }

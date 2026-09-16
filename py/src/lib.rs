@@ -21,10 +21,21 @@ use repo_graph_store::{
 #[pyclass]
 struct PyGraph {
     merged: MergedGraph,
+    /// Files this build could not parse. Empty for a `.gmap`-loaded graph.
+    parse_errors: Vec<String>,
 }
 
 #[pymethods]
 impl PyGraph {
+    /// Files this build could not parse, as `"<path>: <reason>"`, in walk
+    /// order. Empty for a graph loaded from a `.gmap` — parse state is not
+    /// persisted. Lets a caller tell "this repo has no gRPC" apart from "the
+    /// 40 files that would have shown gRPC all failed to parse".
+    #[getter]
+    fn parse_errors(&self) -> Vec<String> {
+        self.parse_errors.clone()
+    }
+
     fn node_count(&self) -> usize {
         self.merged.graphs.iter().map(|g| g.nodes.len()).sum()
     }
@@ -364,11 +375,11 @@ impl PyGraph {
 }
 
 fn escape_json(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    // Delegates to the shared escaper: the four-`replace` version this
+    // replaced let every other control character below 0x20 through raw, so a
+    // single stray 0x01 in one symbol name or file path made `json.loads`
+    // raise `Invalid control character` for the entire graph (audit #16).
+    repo_graph_projection_text::escape_json_string(s)
 }
 
 // ============================================================================
@@ -417,8 +428,15 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
             );
         }
     }
+    if !result.parse_errors.is_empty() {
+        eprintln!(
+            "[parse] {} file(s) failed to parse (see PyGraph.parse_errors)",
+            result.parse_errors.len()
+        );
+    }
     Ok(PyGraph {
         merged: result.merged,
+        parse_errors: result.parse_errors,
     })
 }
 
@@ -429,8 +447,15 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
 #[pyfunction]
 fn generate_many(repo_paths: Vec<String>) -> PyResult<PyGraph> {
     let result = engine_generate_many(&repo_paths).map_err(PyValueError::new_err)?;
+    if !result.parse_errors.is_empty() {
+        eprintln!(
+            "[parse] {} file(s) failed to parse (see PyGraph.parse_errors)",
+            result.parse_errors.len()
+        );
+    }
     Ok(PyGraph {
         merged: result.merged,
+        parse_errors: result.parse_errors,
     })
 }
 
@@ -478,7 +503,10 @@ fn parse_file_to_json(source: &str, path: &str, lang: &str) -> PyResult<String> 
 fn load_from_gmap(dir: &str) -> PyResult<PyGraph> {
     let merged = read_merged_sharded(Path::new(dir))
         .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))?;
-    Ok(PyGraph { merged })
+    Ok(PyGraph {
+        merged,
+        parse_errors: Vec::new(),
+    })
 }
 
 /// Conventional gmap directory path for a repo: `<repo>/.ai/repo-graph`.
