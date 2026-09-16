@@ -1,0 +1,53 @@
+{
+  "framework": "xcut-config-env-value",
+  "language": "yaml",
+  "dirs": ["."],
+  "mechanism": "config",
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "API_URL", "note": ".env KEY=value"},
+    {"kind": "CONFIG_KEY", "name": "DATABASE_URL", "note": ".env, URL with userinfo"},
+    {"kind": "CONFIG_KEY", "name": "STRIPE_SECRET_KEY", "note": ".env, secret-named"},
+    {"kind": "CONFIG_KEY", "name": "FEATURE_FLAG", "note": ".env, export + quoted value"},
+    {"kind": "CONFIG_KEY", "name": "QUEUE_URL", "note": "Dockerfile ENV pair 1 of 2"},
+    {"kind": "CONFIG_KEY", "name": "LOG_LEVEL", "note": "Dockerfile ENV pair 2 of 2"},
+    {"kind": "CONFIG_KEY", "name": "APP_HOME", "note": "Dockerfile ENV KEY value (space form)"},
+    {"kind": "CONFIG_KEY", "name": "CACHE_HOST", "note": "k8s env: - name:/value: pair"},
+    {"kind": "CONFIG_KEY", "name": "DB_PASSWORD", "note": "k8s env: valueFrom -> no value"},
+    {"kind": "CONFIG_KEY", "name": "RUNTIME_MODE", "note": "read side only, os.environ[]"}
+  ],
+  "expect_edges": [
+    {"from": ".env.example", "to": "API_URL", "category": "DEFINES_CONFIG"},
+    {"from": ".env.example", "to": "DATABASE_URL", "category": "DEFINES_CONFIG"},
+    {"from": ".env.example", "to": "STRIPE_SECRET_KEY", "category": "DEFINES_CONFIG"},
+    {"from": ".env.example", "to": "FEATURE_FLAG", "category": "DEFINES_CONFIG"},
+    {"from": "Dockerfile", "to": "QUEUE_URL", "category": "DEFINES_CONFIG"},
+    {"from": "Dockerfile", "to": "LOG_LEVEL", "category": "DEFINES_CONFIG"},
+    {"from": "Dockerfile", "to": "APP_HOME", "category": "DEFINES_CONFIG"},
+    {"from": "deploy.yaml", "to": "CACHE_HOST", "category": "DEFINES_CONFIG"},
+    {"from": "deploy.yaml", "to": "DB_PASSWORD", "category": "DEFINES_CONFIG"},
+    {"from": "app", "to": "RUNTIME_MODE", "category": "READS_CONFIG"}
+  ],
+  "expect_cells": [
+    {"kind": "CONFIG_KEY", "node": "API_URL", "cell": "ENV", "contains": "users-svc:8080",
+     "note": "A11 contract: the define-side value is what service-hostname pairing reads"},
+    {"kind": "CONFIG_KEY", "node": "DATABASE_URL", "cell": "ENV", "contains": "postgres://***@db.internal:5432/app",
+     "note": "userinfo masked, HOST deliberately kept so the URL stays pairable"},
+    {"kind": "CONFIG_KEY", "node": "STRIPE_SECRET_KEY", "cell": "ENV", "contains": "\"redacted\":true",
+     "note": "secret-named key: cell records that a value exists, never the value"},
+    {"kind": "CONFIG_KEY", "node": "FEATURE_FLAG", "cell": "ENV", "contains": "\"value\":\"on\"",
+     "note": "export prefix stripped, surrounding quotes stripped"},
+    {"kind": "CONFIG_KEY", "node": "QUEUE_URL", "cell": "ENV", "contains": "rabbit:5672",
+     "note": "Dockerfile multi-pair ENV, first pair"},
+    {"kind": "CONFIG_KEY", "node": "LOG_LEVEL", "cell": "ENV", "contains": "\"value\":\"debug\"",
+     "note": "Dockerfile multi-pair ENV, second pair"},
+    {"kind": "CONFIG_KEY", "node": "APP_HOME", "cell": "ENV", "contains": "/srv/app",
+     "note": "Dockerfile space form ENV KEY value"},
+    {"kind": "CONFIG_KEY", "node": "CACHE_HOST", "cell": "ENV", "contains": "redis.svc.cluster.local:6379",
+     "note": "k8s value: on the sibling line of the same list item"}
+  ],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "db-secret", "max_nodes": 0,
+     "note": "secretKeyRef `name:` is the Secret's name, not an env-var name"}
+  ],
+  "note": "A13.7: define-side env VALUES on an ENV cell (CellTypeId 12) with mandatory redaction. The expect_cells block is the A11 contract -- service-hostname pairing must read this cell, never re-parse .env/Dockerfile/k8s. Node and edge recall already pass on main; the eight cell assertions are the new gate."
+}
