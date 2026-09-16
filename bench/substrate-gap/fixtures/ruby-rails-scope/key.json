@@ -1,0 +1,18 @@
+{
+  "framework": "ruby-rails-scope",
+  "language": "ruby",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/v1/users/:id", "note": "namespace :api + scope :v1 composed onto the verb route"},
+    {"kind": "ROUTE", "name": "ANY /api/v1/orders", "note": "resources :orders inherits the same nesting"},
+    {"kind": "ROUTE", "name": "GET /health", "note": "control: outside the blocks, must NOT gain the prefix"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v1/users/:id", "to": "show", "category": "HANDLED_BY", "note": "composed route -> UsersController#show"},
+    {"from": "/api/v1/users", "to": "GET /api/v1/users/:id", "category": "HTTP_CALLS", "note": "TS fetch pairs with the composed route"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /users/:id", "note": "precision lock: the un-prefixed verb route must not survive"},
+    {"kind": "ROUTE", "name": "ANY /orders", "note": "precision lock: the un-prefixed resources route must not survive"}
+  ]
+}

@@ -1,3 +1,4 @@
+use repo_graph_code_domain::endpoint::{abs_path, join_path};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -37,7 +38,7 @@ pub fn parse_file(
     visit_body(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
 
     if is_rails_routes_file(file_rel_path) {
-        scan_rails_routes(root, src, module_id, repo, &mut acc);
+        scan_rails_routes(root, src, file_rel_path, module_id, repo, &mut acc);
     } else {
         scan_sinatra_routes(root, src, module_id, repo, &mut acc);
     }
@@ -406,6 +407,13 @@ fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
 //   resources :users      → emits ANY /users
 //   resource :profile     → emits ANY /profile
 //
+// `namespace :api do ... end` and `scope :v1 do ... end` compose a path prefix
+// onto every route declared inside them (`/api/v1/users/:id`); `scope path:`
+// overrides the positional segment and `scope module:` / `scope as:` add no
+// path at all. A `namespace` also scopes the controller MODULE
+// (`Api::V1::UsersController`), which the HANDLED_BY ref deliberately does not
+// model — the handler spec is still taken verbatim from `to:`.
+//
 // Routes are emitted in shape B — `<METHOD> <path>` qname + Text
 // ROUTE_METHOD cell — the resolver compat shape that HttpStackResolver
 // accepts uniformly across parser-java/csharp/php/rust/python/ruby.
@@ -414,20 +422,153 @@ fn is_rails_routes_file(rel_path: &str) -> bool {
     rel_path.ends_with("routes.rb") || rel_path.ends_with("/routes.rb")
 }
 
-fn scan_rails_routes(root: TsNode, src: &[u8], module_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let mut stack = vec![root];
-    while let Some(n) = stack.pop() {
-        if n.kind() == "call" {
-            try_emit_rails_route(n, src, module_id, repo, acc);
-        }
-        let mut cursor = n.walk();
-        for c in n.named_children(&mut cursor) {
-            stack.push(c);
-        }
+/// Running tally for the `[ruby-routes]` fired-on marker: how many routes were
+/// emitted with a non-empty scope prefix, and how many `namespace` / `scope`
+/// blocks actually contributed a path segment.
+#[derive(Default)]
+struct RailsScopeStats {
+    routes: usize,
+    scopes: usize,
+}
+
+fn scan_rails_routes(
+    root: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut stats = RailsScopeStats::default();
+    walk_rails(root, src, "", module_id, repo, acc, &mut stats);
+    if stats.routes > 0 {
+        eprintln!(
+            "[ruby-routes] composed {} rails routes under {} scopes in {file_rel}",
+            stats.routes, stats.scopes
+        );
     }
 }
 
-fn try_emit_rails_route(call: TsNode, src: &[u8], module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+/// Recursive routes.rb walk that carries the enclosing `namespace` / `scope`
+/// path prefix down to every emit site, so `namespace :api do scope :v1 do
+/// get "/users/:id" end end` yields `/api/v1/users/:id` rather than the bare
+/// `/users/:id` the old prefix-less explicit-stack walk produced.
+///
+/// A `call` whose method is `namespace` / `scope` is a scope former: it
+/// recurses into its block with the extended prefix and is deliberately NOT
+/// also offered to `try_emit_rails_route` (it declares no route of its own,
+/// and passing it on would double-count). Every other node recurses with the
+/// prefix unchanged, which is what keeps a sibling route declared outside the
+/// blocks un-prefixed.
+fn walk_rails(
+    n: TsNode,
+    src: &[u8],
+    prefix: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+    stats: &mut RailsScopeStats,
+) {
+    if n.kind() == "call" {
+        let method = n
+            .child_by_field_name("method")
+            .map(|m| text_of(m, src))
+            .unwrap_or("");
+        if matches!(method, "namespace" | "scope") {
+            let seg = rails_scope_segment(n, src);
+            let inner = if seg.is_empty() {
+                // `scope module: "admin"` / `scope as: :v1` scope the controller
+                // module or the route helper name, never the path.
+                prefix.to_string()
+            } else {
+                stats.scopes += 1;
+                join_path(prefix, &seg)
+            };
+            if let Some(block) = rails_block_child(n) {
+                walk_rails(block, src, &inner, module_id, repo, acc, stats);
+            }
+            return;
+        }
+        let before = acc.nodes.len();
+        try_emit_rails_route(n, src, prefix, module_id, repo, acc);
+        if !prefix.is_empty() {
+            stats.routes += acc.nodes.len() - before;
+        }
+    }
+    let mut cursor = n.walk();
+    for c in n.named_children(&mut cursor) {
+        walk_rails(c, src, prefix, module_id, repo, acc, stats);
+    }
+}
+
+/// The `do ... end` / `{ ... }` body of a scope-forming call.
+fn rails_block_child(call: TsNode) -> Option<TsNode> {
+    let mut cursor = call.walk();
+    call.named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "do_block" | "block"))
+}
+
+/// The path segment a `namespace` / `scope` block contributes, slash-trimmed
+/// and possibly empty.
+///
+/// `namespace :api` / `scope :v1` / `scope "/v1"` take the first positional
+/// symbol or string; an explicit `path:` keyword wins over it (Rails lets
+/// `namespace :api, path: "v2"` mount the module at a different path); and
+/// `module:` / `as:` / `defaults:` alone contribute nothing.
+fn rails_scope_segment(call: TsNode, src: &[u8]) -> String {
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return String::new();
+    };
+    let mut cursor = args.walk();
+    let mut positional: Option<String> = None;
+    let mut path_kw: Option<String> = None;
+    for arg in args.named_children(&mut cursor) {
+        match arg.kind() {
+            "pair" if is_path_pair(arg, src) => {
+                if let Some(v) = arg.child_by_field_name("value") {
+                    path_kw = Some(scope_literal(v, src));
+                }
+            }
+            "string" | "simple_symbol" if positional.is_none() => {
+                positional = Some(scope_literal(arg, src));
+            }
+            _ => {}
+        }
+    }
+    path_kw
+        .or(positional)
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('/')
+        .to_string()
+}
+
+/// True for a `path: "/v1"` (or `:path => "/v1"`) keyword argument — the Rails
+/// option that overrides the positional segment.
+fn is_path_pair(pair: TsNode, src: &[u8]) -> bool {
+    pair.child_by_field_name("key")
+        .map(|k| text_of(k, src).trim_matches(|c| c == ':' || c == ' ') == "path")
+        .unwrap_or(false)
+}
+
+/// A scope argument literal: `"/v1"` → `v1`, `:v1` → `v1`. Anything that is
+/// not a plain literal (a constant, a variable) yields the empty segment.
+fn scope_literal(n: TsNode, src: &[u8]) -> String {
+    match n.kind() {
+        "string" => string_inner(n, src),
+        "simple_symbol" => text_of(n, src).trim_start_matches(':').trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+fn try_emit_rails_route(
+    call: TsNode,
+    src: &[u8],
+    prefix: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     let method = call
         .child_by_field_name("method")
         .map(|n| text_of(n, src))
@@ -452,7 +593,10 @@ fn try_emit_rails_route(call: TsNode, src: &[u8], module_id: NodeId, repo: RepoI
                 .filter(|n| n.kind() == "string")
                 .map(|n| string_inner(n, src));
             let h = handler.as_deref().and_then(parse_handler);
-            emit_rails_route("GET", "/", h, module_id, repo, acc);
+            // Under a namespace the root IS the namespace path; with no prefix
+            // `join_path("", "/")` is a pass-through and `abs_path` keeps "/".
+            let path = abs_path(&join_path(prefix, "/"));
+            emit_rails_route("GET", &path, h, module_id, repo, acc);
             return;
         }
         "resources" | "resource" => {
@@ -465,7 +609,7 @@ fn try_emit_rails_route(call: TsNode, src: &[u8], module_id: NodeId, repo: RepoI
             if name.is_empty() {
                 return;
             }
-            let path = format!("/{name}");
+            let path = abs_path(&join_path(prefix, &format!("/{name}")));
             emit_rails_route("ANY", &path, None, module_id, repo, acc);
             return;
         }
@@ -502,6 +646,7 @@ fn try_emit_rails_route(call: TsNode, src: &[u8], module_id: NodeId, repo: RepoI
         return;
     }
     let handler = handler_spec.as_deref().and_then(parse_handler);
+    let path = abs_path(&join_path(prefix, &path));
     emit_rails_route(verb, &path, handler, module_id, repo, acc);
 }
 
@@ -673,11 +818,7 @@ fn emit_rails_route(
     repo: RepoId,
     acc: &mut Acc,
 ) {
-    let path = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("/{path}")
-    };
+    let path = abs_path(path);
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
@@ -915,6 +1056,104 @@ end
         assert!(fp.nodes.iter().any(|n| n.id == route_id("ANY", "/posts")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("ANY", "/profile")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/")));
+    }
+
+    #[test]
+    fn rails_namespace_composes() {
+        // `namespace :api` + `scope :v1` both contribute a path segment to the
+        // verb route declared inside them.
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    scope :v1 do
+      get '/users/:id', to: 'users#show'
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/api/v1/users/:id")),
+            "namespace+scope must compose onto the verb route"
+        );
+        assert!(
+            !fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/:id")),
+            "the un-prefixed route must not also be emitted"
+        );
+        // The HANDLED_BY ref still hangs off the (renamed) route node.
+        assert!(has_handled_by(&fp, "UsersController", "show"));
+        let show_ref = fp
+            .refs
+            .iter()
+            .find(|r| r.category == edge_category::HANDLED_BY)
+            .expect("show HANDLED_BY ref");
+        assert_eq!(show_ref.from, route_id("GET", "/api/v1/users/:id"));
+    }
+
+    #[test]
+    fn rails_namespace_resources_composes() {
+        // `resources` inside the same nesting inherits the composed prefix.
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    scope '/v1' do
+      resources :orders
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("ANY", "/api/v1/orders")),
+            "resources must inherit the namespace/scope prefix"
+        );
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("ANY", "/orders")));
+    }
+
+    #[test]
+    fn rails_route_outside_namespace_unaffected() {
+        // Regression lock for the recursion: leaving a scope block must restore
+        // the outer prefix, and a non-path scope option contributes nothing.
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :api do
+    get '/users', to: 'users#index'
+  end
+
+  scope module: 'admin' do
+    get '/reports', to: 'reports#index'
+  end
+
+  get '/health', to: 'health#index'
+  root 'home#index'
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/api/users")));
+        // `scope module:` scopes the controller module, not the path.
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/reports")));
+        // Sibling declared after the blocks keeps its bare path.
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/health")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/")));
+    }
+
+    #[test]
+    fn rails_namespaced_root_is_the_namespace_path() {
+        // `root` inside a namespace is that namespace's index, not "/".
+        let source = r#"
+Rails.application.routes.draw do
+  namespace :admin do
+    root 'dashboard#index'
+  end
+end
+"#;
+        let fp = parse_file(source, "config/routes.rb", "config::routes", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/admin")));
+        assert!(has_handled_by(&fp, "DashboardController", "index"));
     }
 
     #[test]
