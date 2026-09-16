@@ -153,3 +153,18 @@ Under the matrix, `run.py` prints five totals. Each is a gate:
 `results.jsonl` is the append-only history — one record per `run.py`, tagged with
 engine version, so the map is diffable across sessions and after each P1 fix.
 A fix is proven when its cell flips `0.00 → 1.00` here (the fired_on marker).
+
+## Precision gates match exactly (wave 2 correction)
+
+`forbid` uses **strict** identity — the normalised pattern must EQUAL the node's
+name or its qname — while `expect_nodes` / `expect_edges` keep the lenient
+substring matcher.
+
+This asymmetry is deliberate. Leniency in a *recall* gate can only turn a miss
+into a hit, so it is safe. Leniency in a *precision* gate turns it into a false
+accusation: `forbid {to: "UserController"}` also matched the method whose qname
+is `UserController::UserController::getUser`, and the harness reported a
+violation against a correct graph (wave 2, `java-spring-composed`).
+
+`test_grade.py` pins both directions — the strict matcher must not match an
+ancestor qname segment, and must still catch a real violation.

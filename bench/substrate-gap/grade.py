@@ -192,12 +192,26 @@ def build_graph(fixture_dir, key):
         _dematerialize(created)
 
 
+def _node_matches_exact(node, pattern):
+    """STRICT identity: the normalised pattern IS the node's name or qname.
+
+    Precision gates must not use the recall gates' substring matcher. Leniency
+    makes a recall gate generous (it can only turn a miss into a hit), but it
+    makes a precision gate FALSE-POSITIVE: `forbid {to: "UserController"}` would
+    also match the method `UserController::UserController::getUser`, because the
+    forbidden name is an ancestor segment of a perfectly legitimate target. That
+    fired on java-spring-composed in wave 2 and accused a correct graph.
+    """
+    p = _norm(pattern)
+    return p == _norm(node.get("name", "")) or p == _norm(node.get("qname", ""))
+
+
 def _grade_forbid(fixture, key, nodes, edges, by_id):
     """PRECISION gate: things that must NOT be emitted.
 
-    Uses the SAME lenient identity matcher and the SAME strict kind/category
-    ids as the recall gates — a precision gate that matched more loosely than
-    the recall gate would be unfalsifiable.
+    Strict identity (`_node_matches_exact`), NOT the recall gates' substring
+    matcher — see that function for why. Kind/category ids are strict here as
+    they are everywhere.
     """
     results = []
     for i, exp in enumerate(key.get("forbid", [])):
@@ -213,7 +227,7 @@ def _grade_forbid(fixture, key, nodes, edges, by_id):
                 if e["category"] != cat_id:
                     continue
                 fr, to = by_id.get(e["from"]), by_id.get(e["to"])
-                if fr and to and _node_matches(fr, exp["from"]) and _node_matches(to, exp["to"]):
+                if fr and to and _node_matches_exact(fr, exp["from"]) and _node_matches_exact(to, exp["to"]):
                     count += 1
             limit = 0
         else:  # --- node form ---
@@ -225,7 +239,7 @@ def _grade_forbid(fixture, key, nodes, edges, by_id):
             name = exp.get("name")
             count = sum(
                 1 for n in nodes
-                if n["kind"] == kind_id and (name is None or _node_matches(n, name))
+                if n["kind"] == kind_id and (name is None or _node_matches_exact(n, name))
             )
             limit = int(exp.get("max_nodes", 0))
         results.append({**exp, "matched": count, "max_allowed": limit,
