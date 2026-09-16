@@ -148,6 +148,120 @@ fn queue_resolver_no_match_on_different_topics() {
     assert!(merged.cross_edges.is_empty());
 }
 
+#[test]
+fn queue_resolver_ignores_unresolved_tag_nodes() {
+    // A2.3 — THE false-pairing case. Two unrelated services whose Kafka topics
+    // were both unreadable fall back to the extractor's framework tag. The tag
+    // is an identical string on both sides, so before this guard the resolver
+    // joined them and manufactured a cross-service QUEUE_FLOWS edge that
+    // blast_radius traverses and cross_stack_trace labels as a real mechanism.
+    let mut nav_a = CodeNav::default();
+    let (consumer_node, consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:unresolved:kafka",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_a,
+        consumer_id,
+        "unresolved:kafka",
+        "queue_consumer:unresolved:kafka",
+        node_kind::QUEUE_CONSUMER,
+    );
+    let ga = make_graph(repo_a(), vec![consumer_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (producer_node, producer_id) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:unresolved:kafka",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_b,
+        producer_id,
+        "unresolved:kafka",
+        "queue_producer:unresolved:kafka",
+        node_kind::QUEUE_PRODUCER,
+    );
+    let gb = make_graph(repo_b(), vec![producer_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    QueueStackResolver.resolve(&mut merged);
+
+    assert!(
+        merged.cross_edges.is_empty(),
+        "a topic-agnostic framework tag must never pair with anything, got {:?}",
+        merged.cross_edges
+    );
+}
+
+#[test]
+fn queue_resolver_unresolved_producer_cannot_reach_a_real_consumer() {
+    // The guard is per-SIDE: an unresolved producer must not fall through to a
+    // consumer that DID name a topic, and a real producer must not be dragged
+    // into the sentinel either. Both directions in one graph.
+    let mut nav_a = CodeNav::default();
+    let (real_consumer, real_consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:orders",
+        Confidence::Medium,
+    );
+    record(&mut nav_a, real_consumer_id, "orders", "queue_consumer:orders", node_kind::QUEUE_CONSUMER);
+    let (tag_consumer, tag_consumer_id) = make_node(
+        repo_a(),
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:unresolved:kafka",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_a,
+        tag_consumer_id,
+        "unresolved:kafka",
+        "queue_consumer:unresolved:kafka",
+        node_kind::QUEUE_CONSUMER,
+    );
+    let ga = make_graph(repo_a(), vec![real_consumer, tag_consumer], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (real_producer, real_producer_id) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:orders",
+        Confidence::Medium,
+    );
+    record(&mut nav_b, real_producer_id, "orders", "queue_producer:orders", node_kind::QUEUE_PRODUCER);
+    let (tag_producer, tag_producer_id) = make_node(
+        repo_b(),
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:unresolved:kafka",
+        Confidence::Weak,
+    );
+    record(
+        &mut nav_b,
+        tag_producer_id,
+        "unresolved:kafka",
+        "queue_producer:unresolved:kafka",
+        node_kind::QUEUE_PRODUCER,
+    );
+    let gb = make_graph(repo_b(), vec![real_producer, tag_producer], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    QueueStackResolver.resolve(&mut merged);
+
+    // Exactly the one real pairing survives — the named topic still resolves.
+    let queue_edges: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+        .collect();
+    assert_eq!(queue_edges.len(), 1, "got {queue_edges:?}");
+    assert_eq!(queue_edges[0].from, real_producer_id);
+    assert_eq!(queue_edges[0].to, real_consumer_id);
+}
+
 // ============================================================================
 // GraphQLStackResolver
 // ============================================================================

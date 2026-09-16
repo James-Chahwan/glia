@@ -11,6 +11,24 @@ pub struct QueueConsumer {
     pub identifier: String,
 }
 
+/// Qname marker for the identity-free framework-tag fallback:
+/// `queue_producer:unresolved:kafka`, never `queue_producer:kafka`.
+///
+/// A node carrying this prefix is a COVERAGE SIGNAL — "this file talks to
+/// Kafka, topic unknown" — and NEVER an identity. That distinction is the whole
+/// point: two unrelated services whose topics both failed to parse used to fall
+/// back to the same bare `kafka` tag, and `QueueStackResolver` joined tag to tag
+/// exactly as if it were a real topic, so every such repo got a QUEUE_FLOWS edge
+/// to every other such repo. `blast_radius` traverses those edges and
+/// `cross_stack_trace` labels them as a real mechanism, so the false dependency
+/// propagated into answers.
+///
+/// `graph` references THIS constant rather than a second copy of the literal —
+/// the extractor and the resolver must never be able to disagree about the
+/// spelling, because the failure mode of a disagreement is silent (the resolver
+/// simply resumes pairing tags).
+pub const UNRESOLVED_PREFIX: &str = "unresolved:";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueFramework {
     Celery,
@@ -185,7 +203,8 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Go Kafka producers: confluent `producer.Produce`, segmentio `writer.WriteMessages`.
     // A2.2: the trailing `(` is REQUIRED — without it this needle also swallows
     // C#'s `_producer.ProduceAsync(`, whose topic sits where this rule cannot
-    // read it, manufacturing a `queue_producer:kafka` tag beside the real node.
+    // read it, manufacturing a `queue_producer:unresolved:kafka` tag beside the
+    // real node.
     ("producer.Produce(", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
     ("writer.WriteMessages", QueueFramework::Kafka, &["kafka", "segmentio"], TopicRule::KeyedOrArg(&["topic"])),
     // Redis-as-queue producer side. .lpush / .rpush both push items onto a
@@ -217,8 +236,9 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `$topic->produce(PARTITION, flags, $payload)` is liveness only: arg #1 is
     // the msgflags int and NO argument ever holds the topic, which is bound to
     // the `$topic` object. NoIdentity (not ArgIndex(1), as first drafted) —
-    // otherwise this row's empty topic list falls back to a `queue_producer:kafka`
-    // tag standing beside the real node the `newTopic(` row just emitted.
+    // otherwise this row's empty topic list falls back to a
+    // `queue_producer:unresolved:kafka` tag standing beside the real node the
+    // `newTopic(` row just emitted.
     ("newTopic(", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
     ("->produce(", QueueFramework::Kafka, &["rdkafka"], TopicRule::NoIdentity),
     // Ruby — WaterDrop / Karafka: `produce_async(topic: "orders", payload: p)`.
@@ -339,6 +359,7 @@ fn emit_queue_nodes(
         for topic in &topics {
             if push_node(
                 &mut nodes, &mut nav, &mut seen, topic, framework, module_id, repo, kind, prefix,
+                Confidence::Medium,
             ) {
                 fired_on(pattern, framework, topic, path);
             }
@@ -348,9 +369,15 @@ fn emit_queue_nodes(
         // topic-less framework tag here would manufacture exactly the all-to-all
         // tag pairing A2.1 removed. Every other rule keeps the fallback.
         if topics.is_empty() && !matches!(rule, TopicRule::NoIdentity) {
+            // A2.3: `Weak`, not `Medium`. The tag proves the framework is live in
+            // this file and nothing else; ranking it level with a node that names
+            // a real topic overstated what was actually read off the source. The
+            // `seen` key is `{topic}:{framework:?}`, so one tag per (framework,
+            // direction) per file however many needles of that framework fired.
             let tag = framework_tag(framework);
             if push_node(
                 &mut nodes, &mut nav, &mut seen, &tag, framework, module_id, repo, kind, prefix,
+                Confidence::Weak,
             ) {
                 fired_on(pattern, framework, &tag, path);
             }
@@ -371,6 +398,7 @@ fn push_node(
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     prefix: &str,
+    confidence: Confidence,
 ) -> bool {
     if !seen.insert(format!("{topic}:{framework:?}")) {
         return false;
@@ -380,7 +408,7 @@ fn push_node(
     nodes.push(Node {
         id,
         repo,
-        confidence: Confidence::Medium,
+        confidence,
         cells: vec![],
     });
     nav.record(id, topic, &qname, kind, Some(module_id));
@@ -388,11 +416,16 @@ fn push_node(
 }
 
 /// Identity-free fallback when no occurrence of a needle named a topic.
-/// Unchanged spelling (`Debug`-lowercased) so existing tag qnames keep working;
-/// [`QueueFramework::family`] is deliberately NOT used here — it folds
-/// `RedisList`/`RedisPubSub` together and would silently rename a live qname.
+///
+/// BREAKING (A2.3): prefixed with [`UNRESOLVED_PREFIX`], so the tag is
+/// structurally unpairable — `queue_producer:unresolved:kafka`, not
+/// `queue_producer:kafka`. The bare spelling was indistinguishable from a repo
+/// that genuinely publishes to a topic literally named `kafka`, which is what
+/// let the resolver pair it. [`QueueFramework::family`] is deliberately NOT used
+/// for the suffix — it folds `RedisList`/`RedisPubSub` together and would
+/// silently merge two distinct coverage signals.
 fn framework_tag(f: &QueueFramework) -> String {
-    format!("{f:?}").to_lowercase()
+    format!("{UNRESOLVED_PREFIX}{}", format!("{f:?}").to_lowercase())
 }
 
 /// Grep-able proof that a needle passed its gate and produced a node.
@@ -578,7 +611,7 @@ func SubscribeOrders(nc *nats.Conn) (*nats.Subscription, error) {
     #[test]
     fn kafka_producer_and_consumer() {
         // BREAKING (A2.1): the producer half used to collapse to
-        // `queue_producer:kafka` because the object form was unreadable; it now
+        // `queue_producer:unresolved:kafka` because the object form was unreadable; it now
         // carries the real topic. The consumer half still reads as the tag: the
         // only needle that fires is `KafkaConsumer`, whose occurrences (an
         // import and a bare `new KafkaConsumer()`) name no topic — the topic
@@ -586,7 +619,7 @@ func SubscribeOrders(nc *nats.Conn) (*nats.Subscription, error) {
         // the table matches. A2.x can widen that needle; this asserts today.
         let consumer = "import { KafkaConsumer } from 'kafkajs';\nconst c = new KafkaConsumer();\nc.subscribe('user-events')";
         let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
-        assert_eq!(qnames(&cr), vec!["queue_consumer:kafka".to_string()]);
+        assert_eq!(qnames(&cr), vec!["queue_consumer:unresolved:kafka".to_string()]);
 
         let producer = "import { Kafka } from 'kafkajs';\nproducer.send({ topic: 'user-events' })";
         let pr = extract_queue_producer_nodes(producer, PATH, module_id(), repo());
@@ -671,9 +704,45 @@ func Publish(w *kafka.Writer, v []byte) error {
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(
             qnames(&pr),
-            vec!["queue_producer:kafka".to_string()],
+            vec!["queue_producer:unresolved:kafka".to_string()],
             "an unreadable topic must fall back to the framework tag, never to the payload"
         );
+    }
+
+    #[test]
+    fn unparseable_topic_emits_weak_unresolved_node() {
+        // A2.3: the topic is an env var, so nothing readable names it. The node
+        // must still exist (it is the coverage signal "this file talks to Kafka,
+        // topic unknown") but it must be spelled `unresolved:` so the resolver
+        // can refuse to pair it, and it must be Weak, not Medium.
+        let source = "import { Kafka } from 'kafkajs';\nconst topic = process.env.T;\nproducer.send({ topic, messages: [] });";
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&pr),
+            vec!["queue_producer:unresolved:kafka".to_string()],
+            "an unreadable topic must be a self-declaring sentinel, not a bare framework name"
+        );
+        assert_eq!(pr.nodes.len(), 1);
+        assert_eq!(
+            pr.nodes[0].confidence,
+            Confidence::Weak,
+            "the tag proves the framework is live, nothing more"
+        );
+        // The topic-bearing sibling stays Medium — this is the contrast the
+        // confidence split exists to express.
+        let named = "import { Kafka } from 'kafkajs';\nproducer.send({ topic: 'orders' });";
+        let ok = extract_queue_producer_nodes(named, PATH, module_id(), repo());
+        assert_eq!(qnames(&ok), vec!["queue_producer:orders".to_string()]);
+        assert_eq!(ok.nodes[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn unresolved_prefix_is_not_a_legal_topic_shape() {
+        // Guards the one way the sentinel could collide with a real topic: the
+        // resolver keys on this exact prefix, so it must stay in lockstep with
+        // what `framework_tag` actually emits.
+        assert!(framework_tag(&QueueFramework::Kafka).starts_with(UNRESOLVED_PREFIX));
+        assert_eq!(framework_tag(&QueueFramework::Kafka), "unresolved:kafka");
     }
 
     #[test]
@@ -687,7 +756,7 @@ nc.Publish(subjectB, b)
 nc.Publish(subjectC, c)
 "#;
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
-        assert_eq!(qnames(&pr), vec!["queue_producer:nats".to_string()]);
+        assert_eq!(qnames(&pr), vec!["queue_producer:unresolved:nats".to_string()]);
     }
 
     // ---- A2.2: receiver-agnostic needles + case-insensitive gates ---------
@@ -819,7 +888,7 @@ func Consume(ctx context.Context) error {
 "#;
         let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
         // `.ReadMessage(` is NoIdentity: it proves the consumer is live but
-        // names no topic, so it must NOT add a `queue_consumer:kafka` tag
+        // names no topic, so it must NOT add a `queue_consumer:unresolved:kafka` tag
         // beside the real topic the ReaderConfig row already named.
         assert_eq!(qnames(&cr), vec!["queue_consumer:orders".to_string()]);
     }
@@ -841,7 +910,7 @@ async fn publish(p: &FutureProducer, payload: &str) {
     fn php_rdkafka_new_topic() {
         // `RdKafka\Producer` lowercases to `rdkafka\producer`, so this is a
         // second case-insensitivity proof. `->produce(` is NoIdentity, so the
-        // real topic stands alone with no `queue_producer:kafka` tag beside it.
+        // real topic stands alone with no `queue_producer:unresolved:kafka` tag beside it.
         let source = r#"<?php
 $producer = new RdKafka\Producer();
 $topic = $producer->newTopic("orders");

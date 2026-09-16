@@ -9,7 +9,7 @@
   "cells": [
     "go/kafka"
   ],
-  "note": "Baseline 2026-09-16 = 0.00 with ZERO queue nodes on either side: the segmentio needles are spelled `writer.WriteMessages` / `reader.ReadMessage` and these files use the idiomatic short receivers `w` and `r`. Also grades the NoIdentity rule: `.ReadMessage(` proves the framework but names no topic, and must NOT fall back to a queue_consumer:kafka tag now that the ReaderConfig row named the real topic.",
+  "note": "Baseline 2026-09-16 = 0.00 with ZERO queue nodes on either side: the segmentio needles are spelled `writer.WriteMessages` / `reader.ReadMessage` and these files use the idiomatic short receivers `w` and `r`. Also grades the NoIdentity rule: `.ReadMessage(` proves the framework but names no topic, and must NOT fall back to a queue_consumer:unresolved:kafka tag now that the ReaderConfig row named the real topic.",
   "expect_nodes": [
     {
       "kind": "QUEUE_PRODUCER",
@@ -33,12 +33,12 @@
   "forbid": [
     {
       "kind": "QUEUE_PRODUCER",
-      "name": "queue_producer:kafka",
+      "name": "queue_producer:unresolved:kafka",
       "note": "both sides name a real topic; the framework-tag fallback must not survive"
     },
     {
       "kind": "QUEUE_CONSUMER",
-      "name": "queue_consumer:kafka",
+      "name": "queue_consumer:unresolved:kafka",
       "note": "NoIdentity needles (.ReadMessage() must not manufacture a topic-less tag node"
     }
   ]

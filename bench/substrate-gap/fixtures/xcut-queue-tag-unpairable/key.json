@@ -1,0 +1,46 @@
+{
+  "framework": "xcut-queue-tag-unpairable",
+  "language": "typescript",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "note": "Baseline 2026-09-16 = 1 FORBID VIOLATION + expect_nodes 0/2. Two UNRELATED services whose topics come from env/config, so no literal is readable on either side. Both fall back to the framework tag `queue_*:kafka` and QueueStackResolver joins tag to tag, manufacturing a cross-service QUEUE_FLOWS edge that blast_radius traverses and cross_stack_trace labels as a real mechanism. A2.3 keeps the node (it is a real coverage signal: 'this file talks to Kafka, topic unknown') but respells it `unresolved:kafka` and teaches the resolver to skip that prefix, so the tag is structurally unpairable. Graded on the qname and the forbidden pairing, never on a raw QUEUE_FLOWS count.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "note": "coverage sentinel: producer.send({ topic }) names no literal"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "coverage sentinel: consumer.subscribe({ topic: config.topic }) names no literal"
+    }
+  ],
+  "expect_edges": [],
+  "forbid": [
+    {
+      "from": "queue_producer:kafka",
+      "to": "queue_consumer:kafka",
+      "category": "QUEUE_FLOWS",
+      "note": "THE BUG: the pre-A2.3 tag spelling paired all-to-all across unrelated services"
+    },
+    {
+      "from": "queue_producer:unresolved:kafka",
+      "to": "queue_consumer:unresolved:kafka",
+      "category": "QUEUE_FLOWS",
+      "note": "the sentinel's new spelling must never pair either — the resolver skips the prefix"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:kafka",
+      "note": "the old topic-agnostic spelling is retired; a tag node must say it is unresolved"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:kafka",
+      "note": "the old topic-agnostic spelling is retired; a tag node must say it is unresolved"
+    }
+  ]
+}

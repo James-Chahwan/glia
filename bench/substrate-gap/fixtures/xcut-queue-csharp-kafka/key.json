@@ -33,12 +33,12 @@
   "forbid": [
     {
       "kind": "QUEUE_PRODUCER",
-      "name": "queue_producer:kafka",
+      "name": "queue_producer:unresolved:kafka",
       "note": "both sides name a real topic; the framework-tag fallback must not survive"
     },
     {
       "kind": "QUEUE_CONSUMER",
-      "name": "queue_consumer:kafka",
+      "name": "queue_consumer:unresolved:kafka",
       "note": "both sides name a real topic; the framework-tag fallback must not survive"
     }
   ]

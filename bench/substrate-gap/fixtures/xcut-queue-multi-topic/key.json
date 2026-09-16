@@ -61,12 +61,12 @@
     },
     {
       "kind": "QUEUE_PRODUCER",
-      "name": "queue_producer:kafka",
+      "name": "queue_producer:unresolved:kafka",
       "note": "framework-tag fallback must not survive once the topic is readable"
     },
     {
       "kind": "QUEUE_CONSUMER",
-      "name": "queue_consumer:kafka",
+      "name": "queue_consumer:unresolved:kafka",
       "note": "framework-tag fallback must not survive once the topic is readable"
     }
   ]
