@@ -1,0 +1,15 @@
+{
+  "framework": "py-router-prefix",
+  "language": "python",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/v1/users/{id}", "note": "APIRouter(prefix=…) composed onto @router.get"},
+    {"kind": "ROUTE", "name": "GET /api/v1/orders/<int:id>", "note": "Blueprint(url_prefix=…) composed onto @bp.route"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v1/users/{id}", "to": "get_user", "category": "HANDLED_BY", "note": "composed FastAPI route -> view fn"},
+    {"from": "GET /api/v1/orders/<int:id>", "to": "get_order", "category": "HANDLED_BY", "note": "composed Flask route -> view fn"},
+    {"from": "GET /api/v1/users", "to": "GET /api/v1/users/{id}", "category": "HTTP_CALLS", "note": "TS fetch pairs with the composed FastAPI route"}
+  ],
+  "note": "SAME-FILE prefix composition only. Cross-file `app.include_router(router, prefix=…)` from another module is NOT covered — the parser sees one file at a time; that needs a graph-crate pass. 1.00 here does not mean full FastAPI mount coverage."
+}
