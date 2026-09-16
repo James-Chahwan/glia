@@ -47,6 +47,24 @@ pub enum TopicRule {
     KeyedOrArg(&'static [&'static str]),
     /// The needle proves the framework but never names a topic.
     NoIdentity,
+    // --- A2.5: TASK-QUEUE IDENTITY. These read a SYMBOL, not a literal, ------
+    // because for Celery/Sidekiq/Dramatiq/Oban the join key is the task and the
+    // first string argument is a payload. See the block comment in `queues.rs`.
+    /// The symbol chain immediately BEFORE the needle, last segment:
+    /// `tasks.send_email.delay(` -> `send_email`, `HardWorker.perform_async(`
+    /// -> `HardWorker`.
+    Receiver,
+    /// The callee named by positional argument #0, stepping over a constructor
+    /// segment: `Oban.insert(EmailWorker.new(%{}))` -> `EmailWorker`.
+    ArgReceiver,
+    /// The first def-like identifier within [`LOOKAHEAD_LINES`] after the
+    /// needle's line — `@shared_task` over `def send_email` -> `send_email`.
+    /// Keeps scanning, so a stack of decorators does not hide the definition.
+    DeclaredSymbol,
+    /// The nearest `class` / `module` / `defmodule` / `struct` above the needle,
+    /// within [`ENCLOSING_LOOKBACK_LINES`] — `include Sidekiq::Worker` inside
+    /// `class HardWorker` -> `HardWorker`.
+    EnclosingSymbol,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -58,6 +76,35 @@ pub const MAX_REGION: usize = 2048;
 
 /// Longest topic accepted. Anything longer is a payload, not an identifier.
 pub const MAX_TOPIC_LEN: usize = 128;
+
+/// Lines examined after a decorator for the definition it decorates.
+pub const LOOKAHEAD_LINES: usize = 5;
+
+/// Lines walked back looking for the enclosing class/module. Bounded because
+/// this runs once per needle occurrence and a generated file can be huge.
+pub const ENCLOSING_LOOKBACK_LINES: usize = 200;
+
+/// Def-like keywords, tried IN THIS ORDER, so `public class Foo` reads as a
+/// class and not as a `public` whose next word is `class`.
+const DEF_KEYWORDS: &[&str] = &[
+    "def ",
+    "fn ",
+    "func ",
+    "function ",
+    "class ",
+    "void ",
+    "public ",
+];
+
+/// Scope-introducing keywords for [`TopicRule::EnclosingSymbol`], longest-first
+/// so `defmodule` is never read as `module`.
+const SCOPE_KEYWORDS: &[&str] = &["defmodule ", "class ", "module ", "struct "];
+
+/// Segments that are never a task identity — language keywords and the
+/// constructor segment of `Worker.new(...)`.
+const NOT_A_SYMBOL: &[&str] = &[
+    "return", "await", "self", "this", "new", "end", "do", "yield", "async", "let", "const", "var",
+];
 
 /// Truncate `s` to at most `n` bytes, walking back to a char boundary.
 /// (`str::floor_char_boundary` is still unstable; raw slicing would panic.)
@@ -80,9 +127,16 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
         return hits;
     }
     for (offset, _) in source.match_indices(needle).take(MAX_HITS_PER_NEEDLE) {
+        let after = offset.saturating_add(needle.len());
         let topic = match rule {
             TopicRule::NoIdentity => None,
-            _ => topic_at(source, offset.saturating_add(needle.len()), needle, rule),
+            // A2.5: identity rules read the code AROUND the call, not its
+            // arguments, so they need the needle's own offset.
+            TopicRule::Receiver => receiver_before(source, offset),
+            TopicRule::ArgReceiver => arg_receiver(source, after, needle),
+            TopicRule::DeclaredSymbol => declared_symbol(source, after),
+            TopicRule::EnclosingSymbol => enclosing_symbol(source, offset),
+            _ => topic_at(source, after, needle, rule),
         };
         hits.push(TopicHit { topic, offset });
     }
@@ -106,16 +160,33 @@ pub fn normalise_topic(raw: &str) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
-    let region = arg_region(source, after, needle)?;
+    let region = arg_region(source, after, needle);
     match rule {
-        TopicRule::ArgLiteral => arg_literal(region, 0),
-        TopicRule::ArgIndex(n) => arg_literal(region, n),
-        TopicRule::Keyed(keys) => keyed_literal(region, keys),
+        TopicRule::ArgLiteral => arg_literal(region?, 0),
+        TopicRule::ArgIndex(n) => arg_literal(region?, n),
+        // A2.5: Ruby and Elixir call the same APIs WITHOUT parentheses
+        // (`sidekiq_options queue: 'critical'`), so a keyed rule that found no
+        // bracketed region reads the rest of the LINE instead. Only the keyed
+        // rules get this fallback: a positional rule turned loose on a bare line
+        // would read the next string literal on it as argument #0.
+        TopicRule::Keyed(keys) => {
+            keyed_literal(region.unwrap_or_else(|| line_region(source, after)), keys)
+        }
         TopicRule::KeyedOrArg(keys) => {
+            let region = region?;
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
-        TopicRule::NoIdentity => None,
+        // `NoIdentity` and the A2.5 identity rules never read an argument
+        // region; `scan` dispatches them before it gets here.
+        _ => None,
     }
+}
+
+/// The rest of the line starting at `after`, for paren-less calls.
+fn line_region(source: &str, after: usize) -> &str {
+    let rest = source.get(after..).unwrap_or("");
+    let end = rest.find('\n').unwrap_or(rest.len());
+    rest.get(..end).unwrap_or("")
 }
 
 /// The bracketed argument region that follows a needle, without its brackets.
@@ -263,6 +334,145 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<String> {
             if let Some(topic) = read_literal(region, j) {
                 return Some(topic);
             }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// A2.5 — task-queue identity: the receiver / the definition / the enclosing type
+// ---------------------------------------------------------------------------
+
+/// Bytes that may appear in a symbol chain (`tasks.send_email`, `Sidekiq::Job`,
+/// `$queue`). `.` and `:` are included so the chain is captured whole and split
+/// afterwards — the last segment is the identity.
+fn is_chain_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'.' | b':')
+}
+
+/// A chain segment, if it can be a task identity at all.
+fn accept_symbol(seg: &str) -> Option<String> {
+    if NOT_A_SYMBOL.contains(&seg.to_ascii_lowercase().as_str()) {
+        return None;
+    }
+    let first = seg.as_bytes().first()?;
+    if !(first.is_ascii_alphabetic() || matches!(first, b'_' | b'$')) {
+        return None;
+    }
+    normalise_topic(seg)
+}
+
+/// Last acceptable segment of a `.`/`::` chain. Returns None rather than a
+/// partial guess, so the caller falls through to the unresolved sentinel.
+fn last_segment(chain: &str) -> Option<String> {
+    let mut segs = chain.split(['.', ':']).filter(|s| !s.is_empty());
+    accept_symbol(segs.next_back()?)
+}
+
+/// Like [`last_segment`] but steps back over rejected segments, so Oban's
+/// `EmailWorker.new(%{...})` names the WORKER instead of failing on `new`.
+fn last_symbol(chain: &str) -> Option<String> {
+    chain
+        .split(['.', ':'])
+        .filter(|s| !s.is_empty())
+        .rev()
+        .find_map(accept_symbol)
+}
+
+/// Trailing symbol chain of `s`, reduced to its last segment.
+fn ident_before(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut i = b.len();
+    // Only ASCII bytes are stepped over, so `i` stays on a char boundary.
+    while i > 0 && is_chain_byte(b[i - 1]) {
+        i -= 1;
+    }
+    last_segment(s.get(i..)?)
+}
+
+/// Leading symbol chain of `s`, reduced to its last segment
+/// (`MyApp.EmailWorker do` -> `EmailWorker`, `Foo:` -> `Foo`).
+fn ident_at(s: &str) -> Option<String> {
+    let t = s.trim_start();
+    let b = t.as_bytes();
+    let mut i = 0usize;
+    while matches!(b.get(i), Some(c) if is_chain_byte(*c)) {
+        i += 1;
+    }
+    last_segment(t.get(..i)?)
+}
+
+/// [`TopicRule::Receiver`] — the chain immediately before the needle.
+fn receiver_before(source: &str, offset: usize) -> Option<String> {
+    ident_before(source.get(..offset)?)
+}
+
+/// [`TopicRule::ArgReceiver`] — the callee of positional argument #0.
+fn arg_receiver(source: &str, after: usize, needle: &str) -> Option<String> {
+    let region = arg_region(source, after, needle)?;
+    let arg = *split_args(region).first()?;
+    let call = arg.find('(')?;
+    last_symbol(arg.get(..call)?)
+}
+
+/// Byte just past `kw` in `line`, when `kw` starts at a word edge — so
+/// `backoff_func = x` does not read as a `func ` definition.
+fn find_kw(line: &str, kw: &str) -> Option<usize> {
+    let b = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = line.get(from..).and_then(|s| s.find(kw)) {
+        let start = from + rel;
+        from = start + kw.len();
+        if word_edge(b, start.checked_sub(1)) {
+            return Some(from);
+        }
+    }
+    None
+}
+
+/// The name a def-like line declares: the identifier just before the parameter
+/// list (`public async Task HandleAsync(Foo f)` -> `HandleAsync`, not the return
+/// type), else the one right after the keyword (`def perform`, `class Foo:`).
+fn declared_name(line: &str, kw_end: usize) -> Option<String> {
+    let tail = line.get(kw_end..)?;
+    match tail.find('(') {
+        Some(p) => ident_before(tail.get(..p)?).or_else(|| ident_at(tail)),
+        None => ident_at(tail),
+    }
+}
+
+/// [`TopicRule::DeclaredSymbol`] — the definition under a decorator. Non-def
+/// lines are SKIPPED, not failed, so a stack of decorators
+/// (`@shared_task` / `@retry(...)` / `def send_email`) still finds the def.
+fn declared_symbol(source: &str, after: usize) -> Option<String> {
+    let rest = source.get(after..)?;
+    let body = rest.get(rest.find('\n')? + 1..)?;
+    for line in body
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(LOOKAHEAD_LINES)
+    {
+        let Some(kw_end) = DEF_KEYWORDS.iter().find_map(|k| find_kw(line, k)) else {
+            continue;
+        };
+        if let Some(name) = declared_name(line, kw_end) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// [`TopicRule::EnclosingSymbol`] — the nearest scope above the needle. The
+/// needle's own line is included, so `class Foo; include Sidekiq::Worker; end`
+/// resolves too.
+fn enclosing_symbol(source: &str, offset: usize) -> Option<String> {
+    let head = source.get(..offset)?;
+    for line in head.lines().rev().take(ENCLOSING_LOOKBACK_LINES) {
+        let Some(kw_end) = SCOPE_KEYWORDS.iter().find_map(|k| find_kw(line, k)) else {
+            continue;
+        };
+        if let Some(name) = line.get(kw_end..).and_then(ident_at) {
+            return Some(name);
         }
     }
     None
@@ -466,6 +676,154 @@ mod tests {
             one(src, "consumer.subscribe", TopicRule::KeyedOrArg(&["topic"])),
             Some("orders".to_string())
         );
+    }
+
+    // ---- A2.5: task-queue identity ------------------------------------
+
+    #[test]
+    fn receiver_is_the_task_not_the_payload() {
+        let src = "send_email.delay(\"welcome@example.com\")";
+        assert_eq!(
+            one(src, ".delay(", TopicRule::Receiver),
+            Some("send_email".into())
+        );
+        // the payload literal must be nowhere near the answer
+        assert_eq!(
+            one(src, ".delay(", TopicRule::ArgLiteral),
+            Some("welcome@example.com".into())
+        );
+    }
+
+    #[test]
+    fn receiver_keeps_only_the_last_chain_segment() {
+        let src = "await app.tasks.send_email.apply_async(args=[1])";
+        assert_eq!(
+            one(src, ".apply_async(", TopicRule::Receiver),
+            Some("send_email".into())
+        );
+    }
+
+    #[test]
+    fn receiver_before_a_bare_needle_reads_the_class() {
+        let src = "HardWorker.perform_async(order.id)";
+        assert_eq!(
+            one(src, "perform_async", TopicRule::Receiver),
+            Some("HardWorker".into())
+        );
+    }
+
+    #[test]
+    fn receiver_with_nothing_before_it_is_none() {
+        // Honest miss -> the caller falls through to the unresolved sentinel.
+        assert_eq!(
+            one("  perform_async(1)", "perform_async", TopicRule::Receiver),
+            None
+        );
+        assert_eq!(
+            one("return .delay(1)", ".delay(", TopicRule::Receiver),
+            None
+        );
+    }
+
+    #[test]
+    fn declared_symbol_skips_a_decorator_stack() {
+        let src =
+            "@shared_task\n@retry(max_retries=3)\n@wraps(f)\ndef send_email(address):\n    pass\n";
+        assert_eq!(
+            one(src, "@shared_task", TopicRule::DeclaredSymbol),
+            Some("send_email".into())
+        );
+    }
+
+    #[test]
+    fn declared_symbol_reads_the_name_before_the_parameter_list() {
+        let src = "@dramatiq.actor\npublic async Task HandleAsync(Order o)\n";
+        assert_eq!(
+            one(src, "@dramatiq.actor", TopicRule::DeclaredSymbol),
+            Some("HandleAsync".into())
+        );
+    }
+
+    #[test]
+    fn declared_symbol_gives_up_rather_than_guessing() {
+        let src = "@shared_task\nx = 1\ny = 2\nz = 3\nw = 4\nv = 5\ndef send_email(a):\n";
+        assert_eq!(one(src, "@shared_task", TopicRule::DeclaredSymbol), None);
+    }
+
+    #[test]
+    fn enclosing_symbol_finds_the_class_above() {
+        let src = "class HardWorker < ApplicationJob\n  include Sidekiq::Worker\n  def perform; end\nend\n";
+        assert_eq!(
+            one(src, "include Sidekiq::Worker", TopicRule::EnclosingSymbol),
+            Some("HardWorker".into())
+        );
+    }
+
+    #[test]
+    fn enclosing_symbol_reads_an_elixir_defmodule_tail() {
+        let src = "defmodule MyApp.EmailWorker do\n  use Oban.Worker\nend\n";
+        assert_eq!(
+            one(src, "use Oban.Worker", TopicRule::EnclosingSymbol),
+            Some("EmailWorker".into())
+        );
+    }
+
+    #[test]
+    fn enclosing_symbol_without_a_scope_is_none() {
+        assert_eq!(
+            one(
+                "include Sidekiq::Worker\n",
+                "include Sidekiq::Worker",
+                TopicRule::EnclosingSymbol
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn arg_receiver_steps_over_the_constructor() {
+        let src = "Oban.insert(EmailWorker.new(%{to: \"a@b.com\"}))";
+        assert_eq!(
+            one(src, "Oban.insert", TopicRule::ArgReceiver),
+            Some("EmailWorker".into())
+        );
+        // ArgLiteral is what used to run here: a payload minted as a topic.
+        assert_eq!(
+            one(src, "Oban.insert", TopicRule::ArgLiteral),
+            Some("a@b.com".into())
+        );
+    }
+
+    #[test]
+    fn keyed_falls_back_to_the_line_for_paren_less_calls() {
+        let src = "class HardWorker\n  sidekiq_options queue: 'critical', retry: 3\nend\n";
+        assert_eq!(
+            one(src, "sidekiq_options", TopicRule::Keyed(&["queue"])),
+            Some("critical".into())
+        );
+    }
+
+    #[test]
+    fn keyed_line_fallback_does_not_reach_the_next_line() {
+        let src = "sidekiq_options\nqueue: 'critical'\n";
+        assert_eq!(
+            one(src, "sidekiq_options", TopicRule::Keyed(&["queue"])),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_rules_never_panic_on_multibyte_or_eof() {
+        for rule in [
+            TopicRule::Receiver,
+            TopicRule::ArgReceiver,
+            TopicRule::DeclaredSymbol,
+            TopicRule::EnclosingSymbol,
+        ] {
+            let _ = one("日本語.delay(", ".delay(", rule);
+            let _ = one(".delay(", ".delay(", rule);
+            let _ = one("クラス ø::delay(", ".delay(", rule);
+        }
     }
 
     #[test]

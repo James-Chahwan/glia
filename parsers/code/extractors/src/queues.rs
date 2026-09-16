@@ -103,6 +103,23 @@ pub fn extract_queue_consumers(source: &str, from: NodeId) -> Vec<QueueConsumer>
     consumers
 }
 
+// ---- A2.5: TASK-QUEUE IDENTITY IS NOT A BROKER TOPIC ----------------------
+// For Celery / Dramatiq / Sidekiq / Oban the join key is the TASK, and the
+// first string argument is a PAYLOAD. `send_email.delay("welcome@example.com")`
+// minted `queue_producer:welcome@example.com` — a topic named after user data,
+// which then pairs with nothing — while the worker side (`@shared_task`,
+// `include Sidekiq::Worker`) found no literal at all and collapsed to the
+// framework tag, so the producer and the consumer of the SAME task never met
+// while every celery repo paired with every other celery repo.
+//
+// The rows below therefore read an IDENTITY rather than a literal: the receiver
+// before the call (`TopicRule::Receiver`), the definition under the decorator
+// (`TopicRule::DeclaredSymbol`), or the enclosing class
+// (`TopicRule::EnclosingSymbol`). This is the ONE place where the qname is
+// deliberately NOT a broker topic, and it is why `queue_consumer:HardWorker`
+// and `queue_consumer:critical` can both be right for one class: the first is
+// the job, the second is the broker queue `sidekiq_options` names.
+// ---------------------------------------------------------------------------
 /// (needle, framework, framework-presence signals, topic rule). The signals list gates
 /// emission: if NONE of the substrings appears in the same source file
 /// (case-INSENSITIVELY — every signal literal here MUST be lowercase, see
@@ -117,17 +134,25 @@ pub fn extract_queue_consumers(source: &str, from: NodeId) -> Vec<QueueConsumer>
 /// the kafkajs object form `send({ topic: 'x' })` and the Go struct field
 /// `kafka.Message{Topic: "x"}`, which the old scanner could not see at all.
 const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
-    ("@celery.task", QueueFramework::Celery, &[], TopicRule::ArgLiteral),
-    ("@shared_task", QueueFramework::Celery, &[], TopicRule::ArgLiteral),
-    ("@dramatiq.actor", QueueFramework::Dramatiq, &[], TopicRule::ArgLiteral),
+    // A2.5: the task is the DEF under the decorator, never an argument of it.
+    ("@celery.task", QueueFramework::Celery, &[], TopicRule::DeclaredSymbol),
+    ("@shared_task", QueueFramework::Celery, &[], TopicRule::DeclaredSymbol),
+    ("@dramatiq.actor", QueueFramework::Dramatiq, &[], TopicRule::DeclaredSymbol),
     // `new Worker(` is a common JS shape (web workers, BullMQ, etc.); require
     // BullMQ presence.
     ("new Worker(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::ArgLiteral),
     ("BullModule", QueueFramework::BullMQ, &[], TopicRule::ArgLiteral),
-    ("include Sidekiq::Worker", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
-    ("include Sidekiq::Job", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
-    ("use Oban.Worker", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
-    ("use Oban.Pro.Worker", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
+    // A2.5: a mixin names no task — the ENCLOSING class/module is the job.
+    ("include Sidekiq::Worker", QueueFramework::Sidekiq, &[], TopicRule::EnclosingSymbol),
+    ("include Sidekiq::Job", QueueFramework::Sidekiq, &[], TopicRule::EnclosingSymbol),
+    ("use Oban.Worker", QueueFramework::Oban, &[], TopicRule::EnclosingSymbol),
+    ("use Oban.Pro.Worker", QueueFramework::Oban, &[], TopicRule::EnclosingSymbol),
+    // A2.5: an explicitly named Sidekiq queue, usually written WITHOUT
+    // parentheses (`sidekiq_options queue: 'critical'`) — the keyed rule falls
+    // back to the rest of the line for exactly this shape. One class can
+    // legitimately carry this node AND its EnclosingSymbol one: the first is
+    // the broker queue, the second is the job.
+    ("sidekiq_options", QueueFramework::Sidekiq, &[], TopicRule::Keyed(&["queue"])),
     // `nc.subscribe` collides with Backbone events / Redis pubsub vars; gate.
     ("nc.subscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     // Go's nats.go exports Capitalized APIs (`nc.Subscribe`, `nc.QueueSubscribe`);
@@ -180,18 +205,23 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `.delay(` collides with `setTimeout.delay`, jQuery `.delay`, Carrierwave,
     // and many JS animation libs; require Celery presence.
-    (".delay(", QueueFramework::Celery, &["celery", "@shared_task"], TopicRule::ArgLiteral),
-    (".apply_async(", QueueFramework::Celery, &[], TopicRule::ArgLiteral),
+    // A2.5: `send_email.delay("welcome@example.com")` — the receiver is the
+    // task, the argument is the payload.
+    (".delay(", QueueFramework::Celery, &["celery", "@shared_task"], TopicRule::Receiver),
+    (".apply_async(", QueueFramework::Celery, &[], TopicRule::Receiver),
     // `.send(` is wildly overloaded (`res.send`, `socket.send`, ...). Require
     // Dramatiq import — `import dramatiq` or `@dramatiq.actor`.
-    (".send(", QueueFramework::Dramatiq, &["dramatiq"], TopicRule::ArgLiteral),
+    (".send(", QueueFramework::Dramatiq, &["dramatiq"], TopicRule::Receiver),
     // `queue.add(` — generic var name; require BullMQ context.
     ("queue.add(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::ArgLiteral),
     // `new Queue(` — also generic; require BullMQ.
     ("new Queue(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::ArgLiteral),
-    ("perform_async", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
-    ("perform_in", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
-    ("Oban.insert", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
+    // A2.5: `HardWorker.perform_async(order.id)` — receiver, not the id.
+    ("perform_async", QueueFramework::Sidekiq, &[], TopicRule::Receiver),
+    ("perform_in", QueueFramework::Sidekiq, &[], TopicRule::Receiver),
+    // A2.5: nothing precedes `Oban.insert`; the worker is the callee of its
+    // first argument, `Oban.insert(EmailWorker.new(%{}))`.
+    ("Oban.insert", QueueFramework::Oban, &[], TopicRule::ArgReceiver),
     ("nc.publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     // Go's nats.go exports Capitalized `nc.Publish`; the lowercase JS needle
     // never matches Go source, so Go NATS producers went blind.
@@ -356,6 +386,16 @@ fn emit_queue_nodes(
                 topics.join(",")
             );
         }
+        // A2.5 marker — the one place a qname is a SYMBOL, not a broker topic,
+        // so it gets its own grep-able line:
+        //   GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] taskq rule='
+        if debug_enabled() && is_identity_rule(rule) {
+            for sym in &topics {
+                eprintln!(
+                    "[queues] taskq rule={rule:?} symbol={sym} framework={framework:?} file={path}"
+                );
+            }
+        }
         for topic in &topics {
             if push_node(
                 &mut nodes, &mut nav, &mut seen, topic, framework, module_id, repo, kind, prefix,
@@ -413,6 +453,17 @@ fn push_node(
     });
     nav.record(id, topic, &qname, kind, Some(module_id));
     true
+}
+
+/// True for the A2.5 rules that read a task SYMBOL rather than a broker topic.
+fn is_identity_rule(rule: &TopicRule) -> bool {
+    matches!(
+        rule,
+        TopicRule::Receiver
+            | TopicRule::ArgReceiver
+            | TopicRule::DeclaredSymbol
+            | TopicRule::EnclosingSymbol
+    )
 }
 
 /// Identity-free fallback when no occurrence of a needle named a topic.
@@ -506,6 +557,9 @@ mod tests {
         let result = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nav.kind_by_id[&result.nodes[0].id], node_kind::QUEUE_PRODUCER);
+        // BREAKING (A2.5): was `queue_producer:hello` — the PAYLOAD. This test
+        // asserted only the kind, so the phantom topic was invisible to it.
+        assert_eq!(qnames(&result), vec!["queue_producer:send_email".to_string()]);
     }
 
     #[test]
@@ -545,6 +599,8 @@ greet.send('alice')
 "#;
         let result = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert!(!result.nodes.is_empty(), "dramatiq import unlocks .send pattern");
+        // BREAKING (A2.5): was `queue_producer:alice` — the PAYLOAD.
+        assert_eq!(qnames(&result), vec!["queue_producer:greet".to_string()]);
     }
 
     #[test]
@@ -918,5 +974,102 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
 "#;
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    // ---- A2.5: the task, not the first string argument --------------------
+
+    #[test]
+    fn celery_delay_uses_receiver_not_payload() {
+        // THE packet's reason to exist: the argument is an email ADDRESS.
+        let source = "from celery import Celery\nsend_email.delay(\"welcome@example.com\")\n";
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:send_email".to_string()]);
+        assert!(
+            !qnames(&pr).iter().any(|q| q.contains("welcome")),
+            "a payload literal must never become a topic, got {:?}",
+            qnames(&pr)
+        );
+    }
+
+    #[test]
+    fn shared_task_uses_def_name() {
+        let source =
+            "from celery import shared_task\n\n@shared_task\ndef send_email(address):\n    pass\n";
+        let cr = extract_queue_consumer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:send_email".to_string()]);
+    }
+
+    #[test]
+    fn decorator_stack_skips_to_def() {
+        let source = "from celery import shared_task\n\n@shared_task\n@retry(max_retries=3)\ndef send_email(address):\n    pass\n";
+        let cr = extract_queue_consumer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:send_email".to_string()]);
+    }
+
+    #[test]
+    fn celery_producer_and_consumer_pair_on_the_task() {
+        // The two halves live in different services; the ONLY thing that can
+        // join them is the task name. Before A2.5 the producer said
+        // `welcome@example.com` and the consumer said `unresolved:celery`.
+        let producer = "from celery import Celery\nsend_email.delay(\"welcome@example.com\")\n";
+        let consumer =
+            "from celery import shared_task\n@shared_task\ndef send_email(address):\n    pass\n";
+        let pr = extract_queue_producer_nodes(producer, PATH, module_id(), repo());
+        let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&pr)[0].trim_start_matches("queue_producer:"),
+            qnames(&cr)[0].trim_start_matches("queue_consumer:"),
+            "producer and consumer of one task must share a join key"
+        );
+    }
+
+    #[test]
+    fn sidekiq_perform_async_uses_class() {
+        let source = "class OrdersController\n  def create\n    HardWorker.perform_async(order.id)\n  end\nend\n";
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:HardWorker".to_string()]);
+    }
+
+    #[test]
+    fn sidekiq_worker_uses_enclosing_class() {
+        // Two nodes for one class, deliberately: the JOB (the class) and the
+        // broker QUEUE that `sidekiq_options` names, written without parens.
+        let source = "class HardWorker\n  include Sidekiq::Worker\n  sidekiq_options queue: 'critical', retry: 3\n\n  def perform(id); end\nend\n";
+        let cr = extract_queue_consumer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&cr),
+            vec![
+                "queue_consumer:HardWorker".to_string(),
+                "queue_consumer:critical".to_string()
+            ]
+        );
+        assert!(
+            !qnames(&cr).iter().any(|q| q.contains(UNRESOLVED_PREFIX)),
+            "the job IS named; no coverage sentinel should stand beside it"
+        );
+    }
+
+    #[test]
+    fn oban_insert_names_the_worker() {
+        let source = "Oban.insert(EmailWorker.new(%{to: \"a@b.com\"}))\n";
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:EmailWorker".to_string()]);
+
+        let worker = "defmodule MyApp.EmailWorker do\n  use Oban.Worker\n\n  def perform(job), do: :ok\nend\n";
+        let cr = extract_queue_consumer_nodes(worker, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:EmailWorker".to_string()]);
+    }
+
+    #[test]
+    fn an_unnamed_task_still_falls_back_to_the_sentinel() {
+        // The identity rules return None rather than guessing, and A2.3's
+        // unpairable coverage signal is what must show up then.
+        // The receiver is an INDEX EXPRESSION, so no symbol precedes the call.
+        let anonymous = "from celery import Celery\nhandlers[kind].apply_async(payload)\n";
+        let ar = extract_queue_producer_nodes(anonymous, PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&ar),
+            vec!["queue_producer:unresolved:celery".to_string()]
+        );
     }
 }

@@ -1,0 +1,20 @@
+{
+  "framework": "xcut-queue-py-celery",
+  "language": "python",
+  "dirs": ["api", "worker"],
+  "cells": ["python/taskq"],
+  "mechanism": "taskq",
+  "note": "A2.5. Baseline 2026-09-16 = 0.00 on every row: the producer emits queue_producer:welcome@example.com (a PAYLOAD minted into a topic) and the worker, finding no literal at all, collapses to the framework tag queue_consumer:unresolved:celery -- so the two sides of the SAME task never pair. For a task queue the join key is the TASK: the receiver of `.delay(` on the producer side, the decorated `def` on the consumer side. Graded on the task qname, never on a raw QUEUE_FLOWS count.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:send_email", "note": "receiver of send_email.delay(...), not its argument"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:send_email", "note": "the def below @shared_task"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:send_email", "to": "queue_consumer:send_email", "category": "QUEUE_FLOWS", "note": "producer and consumer of one task, paired across two services"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:welcome@example.com", "note": "THE BUG: a payload literal minted as a topic, which then pairs with nothing"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:celery", "note": "the task IS named here; a coverage sentinel beside it would overstate the blind spot"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:celery", "note": "@shared_task collapsing to the framework tag is exactly what made every celery repo pair with every other"}
+  ]
+}

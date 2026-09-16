@@ -1,0 +1,20 @@
+{
+  "framework": "xcut-queue-rb-sidekiq",
+  "language": "ruby",
+  "dirs": ["api", "worker"],
+  "cells": ["ruby/taskq"],
+  "mechanism": "taskq",
+  "note": "A2.5. Baseline 2026-09-16 = 0.00 on every row: `HardWorker.perform_async(order.id)` reads no literal and `include Sidekiq::Worker` reads no literal, so BOTH sides collapse to the framework tag `unresolved:sidekiq` and never pair. Ruby names the task nowhere as a string: the identity is the receiver on the producer side and the enclosing class on the consumer side. The paren-less `sidekiq_options queue: 'critical'` additionally names a real broker queue -- both nodes exist for one class, deliberately.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:HardWorker", "note": "receiver of perform_async, not the order id payload"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:HardWorker", "note": "class enclosing `include Sidekiq::Worker`"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:critical", "note": "the explicitly named Sidekiq queue, read off a paren-less call"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:HardWorker", "to": "queue_consumer:HardWorker", "category": "QUEUE_FLOWS", "note": "producer and consumer of one job, paired across two services"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:sidekiq", "note": "the job IS named here; the coverage sentinel must not stand beside it"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:sidekiq", "note": "same, consumer side"}
+  ]
+}
