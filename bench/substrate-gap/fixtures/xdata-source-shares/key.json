@@ -1,0 +1,12 @@
+{
+  "framework": "xdata-source-shares",
+  "language": "python+typescript",
+  "dirs": ["svc-a", "svc-b"],
+  "expect_nodes": [
+    {"kind": "CACHE", "name": "redis", "note": "python redis client"},
+    {"kind": "CACHE", "name": "redis", "note": "ts ioredis client"}
+  ],
+  "expect_edges": [
+    {"from": "redis", "to": "redis", "category": "SHARES_DATA_SOURCE", "note": "two services on one cache"}
+  ]
+}

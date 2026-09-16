@@ -334,13 +334,20 @@ pub mod edge_category {
     // RESERVED ids — central locked-id allocation (packet W0.3). Edge
     // categories are allocated here and nowhere else; see the matching block
     // in `node_kind` for the rule. Owning packet per id:
-    //   33 SHARES_DATA_SOURCE — A13.3
+    //   33 SHARES_DATA_SOURCE — A13.3 (LANDED: DbResolver emits it)
     //   34 RPC_CALLS          — A10.10
     // ------------------------------------------------------------------
 
-    /// RESERVED (A13.3) — cross-repo pairing: two nodes reach the same external
-    /// data source (the same database / bucket / broker instance). The
-    /// cross-graph counterpart of intra-repo `ACCESSES_DATA`.
+    /// Cross-repo pairing: two nodes reach the same external data source
+    /// (`data_source:redis` — the same database / cache / bucket / search /
+    /// email provider). The cross-graph counterpart of intra-repo
+    /// `ACCESSES_DATA`. Emitted by `DbResolver` over DATABASE / CACHE /
+    /// BLOB_STORE / SEARCH_INDEX / EMAIL_SERVICE nodes, always at
+    /// `Confidence::Weak` (the provider needles are substring matches).
+    ///
+    /// Deliberately NOT in `blast_carry_edges()`: a shared Postgres is an
+    /// operational fact, not a code dependency, and carrying it would fan every
+    /// blast radius across every service in the stack. (A13.3)
     pub const SHARES_DATA_SOURCE: EdgeCategoryId = EdgeCategoryId(33);
 
     /// RESERVED (A10.10) — call site → remote procedure. The transport-generic
@@ -383,9 +390,9 @@ pub mod edge_category {
         (DEPENDS_ON, "DEPENDS_ON"),
         (SHARES_DEPENDENCY, "SHARES_DEPENDENCY"),
         (IMPLEMENTS, "IMPLEMENTS"),
-        // Reserved ids (see the RESERVED block above) — no emitter yet.
-        (SHARES_DATA_SOURCE, "SHARES_DATA_SOURCE"),
-        (RPC_CALLS, "RPC_CALLS"),
+        // Centrally-allocated ids (see the RESERVED block above).
+        (SHARES_DATA_SOURCE, "SHARES_DATA_SOURCE"), // emitted by DbResolver (A13.3)
+        (RPC_CALLS, "RPC_CALLS"),                   // no emitter yet
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
