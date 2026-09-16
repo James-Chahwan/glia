@@ -30,8 +30,28 @@ key.json schema:
     "expect_edges": [                      # edge-extraction ground truth
       {"from": "AppComponent", "to": "ApiService",
        "category": "INJECTS", "note": "constructor DI"}
-    ]
+    ],
+    "forbid": [                            # PRECISION: must NOT be emitted
+      {"kind": "ROUTE", "name": "/users"},                 # no such node
+      {"kind": "ROUTE", "name": "/users", "max_nodes": 1}, # at most N such
+      {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}  # no edge
+    ],
+    "expect_cells": [                      # cell-level ground truth
+      {"kind": "ENDPOINT", "node": "GET /users", "cell": "POSITION",
+       "contains": "app.ts"}               # "contains" is optional
+    ],
+    "mechanism": "http",                   # optional: matrix row/col binding
+    "cells": ["typescript/http"],          # optional: "<language>/<mechanism>"
+    "note": "free-form commentary"         # optional, ignored by the grader
   }
+
+This vocabulary is FROZEN. `grade_fixture` RAISES ValueError on any
+unrecognised top-level field, and on unrecognised sub-fields of the lists
+above. Silent tolerance of unknown fields is exactly what would let a
+precision gate ship "green" while never executing, so do NOT invent a fifth
+spelling of `forbid` (no forbid_edges / expect_absent_edges /
+expect_absent_nodes / expect_literals) — extend the allow-lists below and
+document it in README.md.
 
 Matching is deliberately lenient on identity (case-folded substring over name OR
 qname, with `::`/`.` normalised to `/`) and STRICT on kind/category id. We are
@@ -56,6 +76,36 @@ _CAT_BY_NAME = {n: i for i, n in rg.category_names()}
 _CAT_BY_ID = {i: n for i, n in rg.category_names()}
 _KIND_BY_NAME = {n: i for i, n in rg.kind_names()}
 _KIND_BY_ID = {i: n for i, n in rg.kind_names()}
+_CELL_BY_NAME = {n: i for i, n in rg.cell_type_names()}
+_CELL_BY_ID = {i: n for i, n in rg.cell_type_names()}
+
+# ---- FROZEN key.json vocabulary (W0.4) -----------------------------------
+# One spelling per concept. Anything not listed here RAISES — see module doc.
+TOP_FIELDS = {
+    "framework", "language", "dirs",     # identity
+    "expect_nodes", "expect_edges",      # recall
+    "expect_cells",                      # recall, cell level
+    "forbid",                            # precision
+    "mechanism", "cells",                # matrix binding (echoed, not graded)
+    "note",                              # commentary
+}
+NODE_FIELDS = {"kind", "name", "note"}
+EDGE_FIELDS = {"from", "to", "category", "note"}
+FORBID_NODE_FIELDS = {"kind", "name", "max_nodes", "note"}
+FORBID_EDGE_FIELDS = {"from", "to", "category", "note"}
+CELL_FIELDS = {"kind", "node", "cell", "contains", "note"}
+
+
+def _reject_unknown(fixture, obj, allowed, where="key.json field"):
+    """Raise on the first (sorted => deterministic) unrecognised field."""
+    for k in sorted(set(obj) - allowed):
+        raise ValueError(f"{fixture}: unknown {where} {k!r}")
+
+
+def _require(fixture, obj, fields, where):
+    for f in fields:
+        if f not in obj:
+            raise ValueError(f"{fixture}: {where} is missing required field {f!r}")
 
 
 def _norm(s):
@@ -77,17 +127,97 @@ def build_graph(fixture_dir, key):
     nodes = json.loads(g.nodes_json())
     edges = json.loads(g.edges_json())
     by_id = {n["id"]: n for n in nodes}
-    return nodes, edges, by_id
+    return g, nodes, edges, by_id
+
+
+def _grade_forbid(fixture, key, nodes, edges, by_id):
+    """PRECISION gate: things that must NOT be emitted.
+
+    Uses the SAME lenient identity matcher and the SAME strict kind/category
+    ids as the recall gates — a precision gate that matched more loosely than
+    the recall gate would be unfalsifiable.
+    """
+    results = []
+    for i, exp in enumerate(key.get("forbid", [])):
+        where = f"forbid[{i}]"
+        if {"from", "to", "category"} & set(exp):  # --- edge form ---
+            _reject_unknown(fixture, exp, FORBID_EDGE_FIELDS, f"key.json field in {where}")
+            _require(fixture, exp, ("from", "to", "category"), where)
+            cat_id = _CAT_BY_NAME.get(exp["category"])
+            if cat_id is None:
+                raise ValueError(f"{fixture}: unknown category {exp['category']!r}")
+            count = 0
+            for e in edges:
+                if e["category"] != cat_id:
+                    continue
+                fr, to = by_id.get(e["from"]), by_id.get(e["to"])
+                if fr and to and _node_matches(fr, exp["from"]) and _node_matches(to, exp["to"]):
+                    count += 1
+            limit = 0
+        else:  # --- node form ---
+            _reject_unknown(fixture, exp, FORBID_NODE_FIELDS, f"key.json field in {where}")
+            _require(fixture, exp, ("kind",), where)
+            kind_id = _KIND_BY_NAME.get(exp["kind"])
+            if kind_id is None:
+                raise ValueError(f"{fixture}: unknown kind {exp['kind']!r}")
+            name = exp.get("name")
+            count = sum(
+                1 for n in nodes
+                if n["kind"] == kind_id and (name is None or _node_matches(n, name))
+            )
+            limit = int(exp.get("max_nodes", 0))
+        results.append({**exp, "matched": count, "max_allowed": limit,
+                        "violated": count > limit})
+    return results
+
+
+def _grade_cells(fixture, key, g, nodes):
+    """Cell-level recall: node of `kind` matching `node` carries cell `cell`.
+
+    An unregistered cell NAME scores a miss rather than raising, so a 0.00
+    baseline is recordable for a cell type a later packet still has to add.
+    `contains` is a case-folded plain substring of the cell payload (NOT the
+    `_norm` identity matcher — payloads are literals, not qnames).
+    """
+    results = []
+    for i, exp in enumerate(key.get("expect_cells", [])):
+        where = f"expect_cells[{i}]"
+        _reject_unknown(fixture, exp, CELL_FIELDS, f"key.json field in {where}")
+        _require(fixture, exp, ("kind", "node", "cell"), where)
+        kind_id = _KIND_BY_NAME.get(exp["kind"])
+        if kind_id is None:
+            raise ValueError(f"{fixture}: unknown kind {exp['kind']!r}")
+        cell_id = _CELL_BY_NAME.get(exp["cell"])
+        cands = [n for n in nodes
+                 if n["kind"] == kind_id and _node_matches(n, exp["node"])]
+        want = (exp.get("contains") or "").casefold()
+        hit = False
+        if cell_id is not None:
+            for n in cands:
+                for ct, payload in g.node_cells(n["id"]):
+                    if ct == cell_id and (not want or want in (payload or "").casefold()):
+                        hit = True
+                        break
+                if hit:
+                    break
+        results.append({**exp, "found": hit, "candidates": len(cands),
+                        "registered": cell_id is not None})
+    return results
 
 
 def grade_fixture(fixture_dir):
     fixture_dir = Path(fixture_dir)
     key = json.loads((fixture_dir / "key.json").read_text())
-    nodes, edges, by_id = build_graph(fixture_dir, key)
+    fixture = fixture_dir.name
+    # FROZEN vocabulary: an unknown field is a dead gate, so refuse to run.
+    _reject_unknown(fixture, key, TOP_FIELDS)
+    g, nodes, edges, by_id = build_graph(fixture_dir, key)
 
     # ---- node-level extraction recall (per kind) ----
     node_results = []
-    for exp in key.get("expect_nodes", []):
+    for i, exp in enumerate(key.get("expect_nodes", [])):
+        _reject_unknown(fixture, exp, NODE_FIELDS, f"key.json field in expect_nodes[{i}]")
+        _require(fixture, exp, ("kind", "name"), f"expect_nodes[{i}]")
         kind_id = _KIND_BY_NAME.get(exp["kind"])
         if kind_id is None:
             raise ValueError(f"{fixture_dir.name}: unknown kind {exp['kind']!r}")
@@ -96,7 +226,9 @@ def grade_fixture(fixture_dir):
 
     # ---- edge-level extraction recall (per category) ----
     edge_results = []
-    for exp in key.get("expect_edges", []):
+    for i, exp in enumerate(key.get("expect_edges", [])):
+        _reject_unknown(fixture, exp, EDGE_FIELDS, f"key.json field in expect_edges[{i}]")
+        _require(fixture, exp, ("from", "to", "category"), f"expect_edges[{i}]")
         cat_id = _CAT_BY_NAME.get(exp["category"])
         if cat_id is None:
             raise ValueError(f"{fixture_dir.name}: unknown category {exp['category']!r}")
@@ -128,6 +260,17 @@ def grade_fixture(fixture_dir):
     for slot in node_by_kind.values():
         slot["recall"] = slot["found"] / slot["expected"] if slot["expected"] else None
 
+    # ---- precision gate + cell-level recall (frozen vocabulary) ----
+    forbid_results = _grade_forbid(fixture, key, nodes, edges, by_id)
+    cell_results = _grade_cells(fixture, key, g, nodes)
+    per_cell = {}
+    for r in cell_results:
+        slot = per_cell.setdefault(r["cell"], {"expected": 0, "found": 0})
+        slot["expected"] += 1
+        slot["found"] += 1 if r["found"] else 0
+    for slot in per_cell.values():
+        slot["recall"] = slot["found"] / slot["expected"] if slot["expected"] else None
+
     return {
         "framework": key.get("framework", fixture_dir.name),
         "language": key.get("language", ""),
@@ -137,12 +280,20 @@ def grade_fixture(fixture_dir):
         "edge_recall": edge_results,
         "per_category": per_cat,
         "node_by_kind": node_by_kind,
+        # --- W0.4 frozen-vocabulary additions ---
+        "cell_recall": cell_results,
+        "per_cell": per_cell,
+        "forbid_results": forbid_results,
+        "forbid_violations": sum(1 for r in forbid_results if r["violated"]),
+        # echoed for the derived (language x mechanism) matrix; not graded here
+        "mechanism": key.get("mechanism", ""),
+        "cells": key.get("cells", []),
     }
 
 
 def _dump(fixture_dir):
     key = json.loads((Path(fixture_dir) / "key.json").read_text())
-    nodes, edges, by_id = build_graph(Path(fixture_dir), key)
+    _, nodes, edges, by_id = build_graph(Path(fixture_dir), key)
     print(f"\n=== NODES ({len(nodes)}) ===")
     for n in sorted(nodes, key=lambda n: (n["kind"], n.get("qname", ""))):
         kn = _KIND_BY_ID.get(n["kind"], n["kind"])
@@ -168,11 +319,38 @@ def _print_verbose(res):
         for r in res["edge_recall"]:
             mark = "OK " if r["found"] else "XX "
             print(f"    {mark} {r['category']:<14} {r['from']!r} -> {r['to']!r}  — {r.get('note','')}")
+    if res["cell_recall"]:
+        print("  cells:")
+        for r in res["cell_recall"]:
+            mark = "OK " if r["found"] else "XX "
+            extra = "" if r["registered"] else "  (UNREGISTERED cell type)"
+            sub_ = f" contains {r['contains']!r}" if r.get("contains") else ""
+            print(f"    {mark} {r['cell']:<14} {r['kind']} {r['node']!r}{sub_}"
+                  f"  — {r.get('note','')}{extra}")
+    if res["forbid_results"]:
+        print("  forbid:")
+        for r in res["forbid_results"]:
+            mark = "XX " if r["violated"] else "OK "
+            what = (f"{r['category']:<14} {r['from']!r} -> {r['to']!r}"
+                    if "category" in r else
+                    f"{r['kind']:<14} {r.get('name', '*')!r}")
+            print(f"    {mark} {what}  matched={r['matched']} "
+                  f"max={r['max_allowed']}  — {r.get('note','')}")
+        print(f"  FORBID VIOLATIONS: {res['forbid_violations']}")
     print("  per-category recall:")
     for cat, v in sorted(res["per_category"].items()):
         pct = "n/a" if v["recall"] is None else f"{v['recall']:.2f}"
-        flag = "  <-- BLIND SPOT" if v["recall"] == 0.0 else ""
+        flag = ""
+        if v["recall"] == 0.0:
+            flag = "  <-- BLIND SPOT"
+        elif v["recall"] is not None and v["recall"] < 1.0:
+            flag = "  <-- PARTIAL"
         print(f"    {cat:<16} {v['found']}/{v['expected']}  ({pct}){flag}")
+    if res["per_cell"]:
+        print("  per-cell recall:")
+        for cell, v in sorted(res["per_cell"].items()):
+            pct = "n/a" if v["recall"] is None else f"{v['recall']:.2f}"
+            print(f"    {cell:<16} {v['found']}/{v['expected']}  ({pct})")
 
 
 if __name__ == "__main__":
