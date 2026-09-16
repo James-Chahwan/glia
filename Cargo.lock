@@ -1194,6 +1194,7 @@ dependencies = [
  "repo-graph-parser-go",
  "repo-graph-parser-typescript",
  "repo-graph-projection-text",
+ "repo-graph-stamp",
  "rkyv",
  "serde",
  "serde_json",
