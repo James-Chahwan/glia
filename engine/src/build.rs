@@ -23,6 +23,12 @@ pub struct GenerateResult {
     pub total_nodes: usize,
     pub total_edges: usize,
     pub parse_errors: Vec<String>,
+    /// `RepoId.0` → human repo label (A9.2). `RepoId::from_canonical` xxhashes
+    /// the path away, so this is the ONLY place the human name survives — it is
+    /// captured here, where the path and the id still coexist, and deliberately
+    /// NOT on `MergedGraph`, which would change the `.gmap` bytes. Present only
+    /// on a freshly generated result; a `.gmap` load has none.
+    pub repo_labels: std::collections::BTreeMap<u64, String>,
 }
 
 /// Generate a `MergedGraph` from a single repo path. The repo gets one RepoId
@@ -65,6 +71,7 @@ fn generate_one_inner(
     }
     let canonical = format!("file://{repo_path}");
     let repo = RepoId::from_canonical(&canonical);
+    let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
     let (files, regions, md) = walk_source_files(&root);
     let go_prefix = read_go_module_prefix(&root);
     // Cached parses are only valid under the exact repo identity + go.mod
@@ -93,6 +100,7 @@ fn generate_one_inner(
         total_nodes,
         total_edges,
         parse_errors,
+        repo_labels,
     })
 }
 
@@ -102,6 +110,7 @@ fn generate_one_inner(
 pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
+    let mut label_inputs: Vec<(u64, String)> = Vec::new();
     for path in repo_paths {
         let root = PathBuf::from(path);
         if !root.is_dir() {
@@ -109,6 +118,7 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
             continue;
         }
         let repo = RepoId::from_canonical(&format!("file://{path}"));
+        label_inputs.push((repo.0, path.clone()));
         let (files, regions, md) = walk_source_files(&root);
         let go_prefix = read_go_module_prefix(&root);
         let (graphs, parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, None);
@@ -141,6 +151,7 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
         total_nodes,
         total_edges,
         parse_errors: all_errors,
+        repo_labels: crate::arch::repo_label_map(&label_inputs),
     })
 }
 

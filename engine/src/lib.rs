@@ -9,6 +9,7 @@
 //!     cross-graph resolvers (HTTP, gRPC, DbResolver, etc.) fire across the
 //!     boundary. The pyo3 wrapper and the `glia` CLI both call into here.
 
+pub mod arch;
 pub mod cache;
 
 mod answers;
@@ -22,6 +23,10 @@ mod walk;
 
 pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
 
+pub use arch::{
+    ServiceKeying, ServiceLink, ServiceMap, ServiceSummary, default_keying, node_file,
+    repo_label_for, repo_label_map, service_map, service_map_with, service_of,
+};
 pub use cache::{CacheStats, ParseCache};
 /// Build identity of THIS binary: `<release>+p<parser stamp>`. Re-exported so
 /// `cli` and `py` can report which code they contain without taking a direct

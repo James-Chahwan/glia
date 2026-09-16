@@ -124,7 +124,7 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
 }
 
 /// Map a file path's extension to the analyzer language name used in caveats.
-fn ext_to_language(path: &str) -> Option<&'static str> {
+pub(crate) fn ext_to_language(path: &str) -> Option<&'static str> {
     let ext = path.rsplit('.').next()?;
     Some(match ext {
         "py" => "python",
