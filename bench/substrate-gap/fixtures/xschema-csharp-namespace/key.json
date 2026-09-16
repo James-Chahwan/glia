@@ -1,0 +1,12 @@
+{
+  "framework": "xschema-csharp-namespace",
+  "language": "csharp",
+  "dirs": ["svc_a", "svc_b"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "OrderDto", "note": "same contract type declared in both services"},
+    {"kind": "PACKAGE", "name": "Contracts", "note": "the namespace node the resolver never descends into"}
+  ],
+  "expect_edges": [
+    {"from": "Shop/Contracts/OrderDto", "to": "Store/Contracts/OrderDto", "category": "SHARES_SCHEMA", "note": "cross-repo shared DTO; invisible because SharedSchemaResolver walks MODULE children only"}
+  ]
+}
