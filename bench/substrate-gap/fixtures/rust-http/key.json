@@ -1,0 +1,17 @@
+{
+  "framework": "rust-http",
+  "language": "rust",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /api/users", "note": "client.get(format!(\"http://users-svc/api/users/{}\", id)) — host stripped, {} -> ${…}"},
+    {"kind": "ENDPOINT", "name": "POST /api/users", "note": "client.post literal path"}
+  ],
+  "expect_edges": [
+    {"from": "fetch_user", "to": "GET /api/users", "category": "CALLS", "note": "enclosing method -> ENDPOINT"},
+    {"from": "POST /api/users", "to": "/api/users", "category": "HTTP_CALLS", "note": "pairs with the Go chi route"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "max_nodes": 1, "note": "only the Go chi route; the rust client must not mint a phantom ROUTE"},
+    {"kind": "ENDPOINT", "max_nodes": 2, "note": "cache.get(id) / cache.get(\"default\") must not become ENDPOINTs"}
+  ]
+}

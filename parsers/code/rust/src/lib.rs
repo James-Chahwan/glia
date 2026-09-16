@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -104,6 +105,13 @@ pub fn parse_file(
     scan_at_path_chains(source, repo, &mut acc);
     scan_salvo_routes(source, repo, &mut acc);
 
+    if acc.client_endpoints > 0 {
+        eprintln!(
+            "[rust-http-client] {} endpoints in {}",
+            acc.client_endpoints, file_rel_path
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -123,6 +131,10 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// Dedups the ENDPOINT node across this file (the CALLS edge is per site).
+    endpoint_seen: HashSet<NodeId>,
+    /// Outbound HTTP call sites seen in this file — drives the fired_on marker.
+    client_endpoints: usize,
 }
 
 fn visit_function(
@@ -158,6 +170,8 @@ fn visit_function(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
+        let n = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
+        acc.client_endpoints += n;
     }
 }
 
@@ -228,6 +242,8 @@ fn visit_impl(
 
             if let Some(fn_body) = child.child_by_field_name("body") {
                 collect_calls_in(fn_body, src, id, acc);
+                let n = collect_client_endpoints_in(fn_body, src, id, repo, file_rel, acc);
+                acc.client_endpoints += n;
             }
         }
     }
@@ -751,6 +767,190 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
 }
 
 // ============================================================================
+// Outbound HTTP (reqwest) — client ENDPOINT emission
+// ============================================================================
+//
+// A Rust service that only published its axum ROUTEs was a one-way node in a
+// polyglot graph: inbound calls resolved, outbound ones vanished. Here each
+// fn/method body is walked for reqwest call sites and each becomes a shared
+// ENDPOINT node (qname `endpoint:<METHOD>:<path>` — what HttpStackResolver
+// pairs with a server ROUTE) plus a CALLS edge from the enclosing fn.
+//
+// `.get(` is ubiquitous in Rust (HashMap / Vec / headers / Option chains), so
+// `url_to_path` is the gate: a literal that is not a request path
+// (`"default"`, `"x-trace-id"`) and any non-literal argument are both dropped.
+
+/// Receiver-method names that name an HTTP verb on a reqwest client.
+const CLIENT_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head"];
+
+/// Walk `body` for outbound HTTP calls, emitting one ENDPOINT per (method,path)
+/// and one CALLS edge per call site. Returns the number of call sites found.
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut found = 0usize;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression"
+            && let Some(func) = n.child_by_field_name("function")
+            && let Some(args) = n.child_by_field_name("arguments")
+            && let Some((method, raw, confidence)) = client_call_target(func, args, src)
+            && let Some(path) = url_to_path(&raw)
+        {
+            let pos = n.start_position();
+            let ep = ClientEndpoint {
+                method,
+                path,
+                file: file_rel.to_string(),
+                line: pos.row + 1,
+                col: pos.column + 1,
+                confidence,
+            };
+            push_client_endpoint(
+                repo,
+                &ep,
+                from,
+                &mut acc.nodes,
+                &mut acc.edges,
+                &mut acc.nav,
+                &mut acc.endpoint_seen,
+            );
+            found += 1;
+        }
+        // Don't recurse into nested function items (closures are ok).
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if child.kind() != "function_item" {
+                stack.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// Classify a call as an outbound HTTP request → `(VERB, raw url, confidence)`.
+/// Recognises `client.<verb>(url)`, `client.request(Method::VERB, url)` and the
+/// free functions `reqwest::get` / `reqwest::blocking::get`.
+fn client_call_target(
+    func: TsNode,
+    args: TsNode,
+    src: &[u8],
+) -> Option<(String, String, Confidence)> {
+    match func.kind() {
+        "field_expression" => {
+            let field = text_of(func.child_by_field_name("field")?, src);
+            if CLIENT_VERBS.contains(&field) {
+                let (raw, conf) = url_arg(args.named_child(0)?, src)?;
+                return Some((field.to_ascii_uppercase(), raw, conf));
+            }
+            if field == "request" {
+                let verb = method_const_verb(args.named_child(0)?, src)?;
+                let (raw, conf) = url_arg(args.named_child(1)?, src)?;
+                return Some((verb, raw, conf));
+            }
+            None
+        }
+        "scoped_identifier" => {
+            if text_of(func.child_by_field_name("name")?, src) != "get" {
+                return None;
+            }
+            let path = text_of(func.child_by_field_name("path")?, src);
+            if path != "reqwest" && path != "reqwest::blocking" {
+                return None;
+            }
+            let (raw, conf) = url_arg(args.named_child(0)?, src)?;
+            Some(("GET".to_string(), raw, conf))
+        }
+        _ => None,
+    }
+}
+
+/// `Method::GET` → `"GET"`. Any other first-argument shape (or a non-verb
+/// associated item) → None, so `client.request(build(), url)` is dropped.
+fn method_const_verb(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() != "scoped_identifier" {
+        return None;
+    }
+    let name = text_of(node.child_by_field_name("name")?, src).to_ascii_uppercase();
+    CLIENT_VERBS
+        .iter()
+        .any(|v| v.eq_ignore_ascii_case(&name))
+        .then_some(name)
+}
+
+/// The URL argument: a `string_literal`/`raw_string_literal` (Strong), or
+/// `format!("…{}…", …)` with the holes rewritten to the `${…}` substitution
+/// marker `normalise_http_path` collapses (Medium). A variable → None.
+fn url_arg(node: TsNode, src: &[u8]) -> Option<(String, Confidence)> {
+    match node.kind() {
+        "string_literal" | "raw_string_literal" => {
+            Some((string_content(node, src), Confidence::Strong))
+        }
+        "macro_invocation" => {
+            if text_of(node.child_by_field_name("macro")?, src) != "format" {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let tt = node
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "token_tree")?;
+            let mut inner = tt.walk();
+            let lit = tt
+                .named_children(&mut inner)
+                .find(|c| matches!(c.kind(), "string_literal" | "raw_string_literal"))?;
+            Some((
+                expand_format_holes(&string_content(lit, src)),
+                Confidence::Medium,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Text between the quotes. An empty literal has no `string_content` child.
+fn string_content(lit: TsNode, src: &[u8]) -> String {
+    let mut cursor = lit.walk();
+    lit.named_children(&mut cursor)
+        .find(|c| c.kind() == "string_content")
+        .map(|c| text_of(c, src).to_string())
+        .unwrap_or_default()
+}
+
+/// `"/api/users/{}"` and `"/api/v/{name}"` → `"/api/users/${…}"`. `{{`/`}}` are
+/// escaped braces in a format string and pass through as one literal brace.
+fn expand_format_holes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push('{');
+            }
+            '{' => {
+                for inner in chars.by_ref() {
+                    if inner == '}' {
+                        break;
+                    }
+                }
+                out.push_str("${\u{2026}}");
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                out.push('}');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -1086,5 +1286,139 @@ fn run(items: &[&str]) {
         let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
         let names = route_names(&fp);
         assert!(names.is_empty(), "non-`/` `.at(...)` args must not emit routes");
+    }
+
+    fn endpoint_names(fp: &FileParse) -> Vec<&str> {
+        fp.nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ENDPOINT))
+            .map(|(_, n)| n.as_str())
+            .collect()
+    }
+
+    fn id_of(fp: &FileParse, name: &str) -> NodeId {
+        *fp.nav
+            .name_by_id
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(id, _)| id)
+            .expect("node not found")
+    }
+
+    const REQWEST_CLIENT: &str = r#"
+use reqwest::Client;
+use std::collections::HashMap;
+
+struct ApiClient {
+    client: Client,
+    cache: HashMap<String, String>,
+}
+
+impl ApiClient {
+    async fn fetch_user(&self, id: &str) -> String {
+        self.client.get(format!("http://users-svc/api/users/{}", id)).send().await
+    }
+
+    async fn create_user(&self, body: String) -> String {
+        self.client.post("/api/users").body(body).send().await
+    }
+
+    fn cached(&self, id: &str) -> Option<&String> {
+        self.cache.get(id)
+    }
+}
+"#;
+
+    #[test]
+    fn reqwest_client_get_emits_endpoint() {
+        let fp = parse_file(REQWEST_CLIENT, "src/client.rs", "myapp", repo()).unwrap();
+        let names = endpoint_names(&fp);
+        assert!(
+            names.contains(&"POST /api/users"),
+            "literal client.post path missing: {names:?}"
+        );
+        // Free function + explicit-method forms land on the same node shape.
+        let fp2 = parse_file(
+            "fn f() { let _ = reqwest::get(\"http://svc/api/ping\"); }",
+            "src/f.rs",
+            "myapp",
+            repo(),
+        )
+        .unwrap();
+        assert!(endpoint_names(&fp2).contains(&"GET /api/ping"));
+        let fp3 = parse_file(
+            "fn f() { let _ = c.request(Method::DELETE, \"http://svc/api/ping\"); }",
+            "src/f.rs",
+            "myapp",
+            repo(),
+        )
+        .unwrap();
+        assert!(endpoint_names(&fp3).contains(&"DELETE /api/ping"));
+
+        // CALLS edge: the enclosing method points at the ENDPOINT it hits.
+        let caller = id_of(&fp, "create_user");
+        let ep = id_of(&fp, "POST /api/users");
+        assert!(
+            fp.edges.iter().any(|e| e.from == caller
+                && e.to == ep
+                && e.category == edge_category::CALLS),
+            "no CALLS edge create_user -> POST /api/users"
+        );
+    }
+
+    #[test]
+    fn reqwest_format_macro_path_becomes_wildcard() {
+        let fp = parse_file(REQWEST_CLIENT, "src/client.rs", "myapp", repo()).unwrap();
+        let names = endpoint_names(&fp);
+        assert!(
+            names.contains(&"GET /api/users/${\u{2026}}"),
+            "format! host+hole path not normalised: {names:?}"
+        );
+        // Named holes normalise identically.
+        let fp2 = parse_file(
+            "fn f() { let _ = c.put(format!(\"/api/v/{name}\")); }",
+            "src/f.rs",
+            "myapp",
+            repo(),
+        )
+        .unwrap();
+        assert!(endpoint_names(&fp2).contains(&"PUT /api/v/${\u{2026}}"));
+    }
+
+    #[test]
+    fn rust_client_calls_emit_no_route() {
+        // A pure client file has no `.route(` / `.at(` / `Router::with_path(`
+        // needle, so the server-route scanners must stay silent — an outbound
+        // call must never be mistaken for an inbound route.
+        let fp = parse_file(REQWEST_CLIENT, "src/client.rs", "myapp", repo()).unwrap();
+        assert!(
+            route_names(&fp).is_empty(),
+            "client call sites minted phantom ROUTEs: {:?}",
+            route_names(&fp)
+        );
+    }
+
+    #[test]
+    fn rust_map_get_is_dropped() {
+        // `.get(` is ubiquitous in Rust. `url_to_path` is the only gate, and it
+        // must reject both a variable key and a non-path string literal.
+        let source = r#"
+use std::collections::HashMap;
+
+fn lookup(map: &HashMap<String, String>, headers: &HashMap<String, String>) -> usize {
+    let _ = map.get("default");
+    let _ = map.get(&key);
+    let _ = headers.get("x-trace-id");
+    let _ = items.get(0);
+    0
+}
+"#;
+        let fp = parse_file(source, "src/util.rs", "myapp", repo()).unwrap();
+        assert!(
+            endpoint_names(&fp).is_empty(),
+            "map/header `.get(` became ENDPOINTs: {:?}",
+            endpoint_names(&fp)
+        );
     }
 }
