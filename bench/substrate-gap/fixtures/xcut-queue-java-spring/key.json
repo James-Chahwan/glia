@@ -1,18 +1,40 @@
 {
   "framework": "xcut-queue-java-spring",
   "language": "java",
-  "dirs": ["producer", "consumer"],
-  "mechanism": "queue",
-  "cells": ["java/queue"],
-  "note": "Baseline 2026-09-16 = 0.00 on QUEUE_FLOWS and 0/1 on QUEUE_PRODUCER: `kafkaTemplate.send(\"orders\", payload)` matches NO needle, because the table's needle is the receiver-bound `producer.send`. The consumer half ALREADY reads 1/1 (A2.1's scanner resolves `Arrays.asList(\"orders\")`), so this fixture grades the producer needle and the pairing. NOT forbidden here: `queue_consumer:kafka`, a tag node the `KafkaConsumer` needle still emits because its own occurrences (an import and a generic type position) name no topic — see the A2.x followup on suppressing a tag once a sibling needle in the same file named a real topic.",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "java/kafka"
+  ],
+  "note": "Baseline 2026-09-16 = 0.00 on QUEUE_FLOWS and 0/1 on QUEUE_PRODUCER: `kafkaTemplate.send(\"orders\", payload)` matches NO needle, because the table's needle is the receiver-bound `producer.send`. The consumer half ALREADY reads 1/1 (A2.1's scanner resolves `Arrays.asList(\"orders\")`), so this fixture grades the producer needle and the pairing. NOT forbidden here: `queue_consumer:kafka`, a tag node the `KafkaConsumer` needle still emits because its own occurrences (an import and a generic type position) name no topic \u2014 see the A2.x followup on suppressing a tag once a sibling needle in the same file named a real topic.",
   "expect_nodes": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "Spring kafkaTemplate.send(\"orders\", ...) — receiver-agnostic `Template.send(` needle"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "consumer.subscribe(Arrays.asList(\"orders\")) — already green at A2.1"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "Spring kafkaTemplate.send(\"orders\", ...) \u2014 receiver-agnostic `Template.send(` needle"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "consumer.subscribe(Arrays.asList(\"orders\")) \u2014 already green at A2.1"
+    }
   ],
   "expect_edges": [
-    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "topic-exact pairing across the two services"}
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing across the two services"
+    }
   ],
   "forbid": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:kafka", "note": "the producer names a real topic; no tag fallback on the producer side"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:kafka",
+      "note": "the producer names a real topic; no tag fallback on the producer side"
+    }
   ]
 }

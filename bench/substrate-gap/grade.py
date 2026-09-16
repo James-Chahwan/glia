@@ -105,6 +105,35 @@ FORBID_EDGE_FIELDS = {"from", "to", "category", "note"}
 CELL_FIELDS = {"kind", "node", "cell", "contains", "note"}
 
 
+def _validate_vocab(fixture, key):
+    """`mechanism` / `cells` must name the SHIPPED matrix vocabulary.
+
+    W0.4 froze which FIELDS a key.json may carry but not which VALUES, so wave-1
+    and wave-2 fixtures invented `http` / `queue` / `websocket` where the
+    vocabulary says `http_client` / `http_server` / `kafka` / `ws`. Nine fixtures
+    contributed nothing to the matrix and nothing said so: the field parsed, it
+    just named a column that does not exist.
+    """
+    import matrix_vocab as _V
+
+    mechs = set(_V.MECHANISM_IDS)
+    langs = set(_V.LANGUAGES)
+    mech = key.get("mechanism")
+    if mech is not None and mech not in mechs:
+        raise ValueError(
+            f"{fixture}: mechanism {mech!r} is not one of the {len(mechs)} matrix "
+            f"mechanisms (see matrix_vocab.py)"
+        )
+    for cell in key.get("cells", []) or []:
+        if cell.count("/") != 1:
+            raise ValueError(f"{fixture}: cell {cell!r} must be '<language>/<mechanism>'")
+        lang, m = cell.split("/")
+        if lang not in langs:
+            raise ValueError(f"{fixture}: cell {cell!r} names unknown language {lang!r}")
+        if m not in mechs:
+            raise ValueError(f"{fixture}: cell {cell!r} names unknown mechanism {m!r}")
+
+
 def _reject_unknown(fixture, obj, allowed, where="key.json field"):
     """Raise on the first (sorted => deterministic) unrecognised field."""
     for k in sorted(set(obj) - allowed):
@@ -287,6 +316,7 @@ def grade_fixture(fixture_dir):
     fixture = fixture_dir.name
     # FROZEN vocabulary: an unknown field is a dead gate, so refuse to run.
     _reject_unknown(fixture, key, TOP_FIELDS)
+    _validate_vocab(fixture, key)
     g, nodes, edges, by_id = build_graph(fixture_dir, key)
 
     # ---- node-level extraction recall (per kind) ----

@@ -1,24 +1,73 @@
 {
   "framework": "xcut-queue-multi-topic",
   "language": "typescript",
-  "dirs": ["producer", "consumer"],
-  "mechanism": "queue",
-  "cells": ["typescript/queue"],
-  "note": "Baseline 2026-09-16 = 0.00: extract_topic_near took the FIRST occurrence of the needle in the file and extract_first_string_literal only read a literal sitting immediately after an optional '(', so the kafkajs object form `producer.send({ topic: 'orders' })` was unreadable and both sides collapsed to queue_*:kafka — one false tag-to-tag QUEUE_FLOWS edge. Graded on the TOPIC QNAME, never on a raw QUEUE_FLOWS count.",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "typescript/kafka"
+  ],
+  "note": "Baseline 2026-09-16 = 0.00: extract_topic_near took the FIRST occurrence of the needle in the file and extract_first_string_literal only read a literal sitting immediately after an optional '(', so the kafkajs object form `producer.send({ topic: 'orders' })` was unreadable and both sides collapsed to queue_*:kafka \u2014 one false tag-to-tag QUEUE_FLOWS edge. Graded on the TOPIC QNAME, never on a raw QUEUE_FLOWS count.",
   "expect_nodes": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "first producer.send in publish.ts"},
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:payments", "note": "SECOND producer.send in the SAME file"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "consumer/consume.ts"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:payments", "note": "consumer/payments.ts"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "first producer.send in publish.ts"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:payments",
+      "note": "SECOND producer.send in the SAME file"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "consumer/consume.ts"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:payments",
+      "note": "consumer/payments.ts"
+    }
   ],
   "expect_edges": [
-    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "topic-exact pairing"},
-    {"from": "queue_producer:payments", "to": "queue_consumer:payments", "category": "QUEUE_FLOWS", "note": "topic-exact pairing"}
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing"
+    },
+    {
+      "from": "queue_producer:payments",
+      "to": "queue_consumer:payments",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing"
+    }
   ],
   "forbid": [
-    {"from": "queue_producer:orders", "to": "queue_consumer:payments", "category": "QUEUE_FLOWS", "note": "all-to-all regression guard"},
-    {"from": "queue_producer:payments", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "all-to-all regression guard"},
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:kafka", "note": "framework-tag fallback must not survive once the topic is readable"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:kafka", "note": "framework-tag fallback must not survive once the topic is readable"}
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:payments",
+      "category": "QUEUE_FLOWS",
+      "note": "all-to-all regression guard"
+    },
+    {
+      "from": "queue_producer:payments",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "all-to-all regression guard"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:kafka",
+      "note": "framework-tag fallback must not survive once the topic is readable"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:kafka",
+      "note": "framework-tag fallback must not survive once the topic is readable"
+    }
   ]
 }

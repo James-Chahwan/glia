@@ -1,20 +1,57 @@
 {
   "framework": "java-spring-composed",
   "language": "java",
-  "dirs": ["server", "client"],
-  "mechanism": "http",
-  "cells": ["java/http"],
+  "dirs": [
+    "server",
+    "client"
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "java/http_server"
+  ],
   "expect_nodes": [
-    {"kind": "ROUTE", "name": "GET /api/v1/users/{id}", "note": "class @RequestMapping(\"/api/v1/users\") + @GetMapping(\"/{id}\") composed"},
-    {"kind": "ROUTE", "name": "POST /api/v1/users", "note": "bare @PostMapping marker annotation inherits the class prefix"}
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v1/users/{id}",
+      "note": "class @RequestMapping(\"/api/v1/users\") + @GetMapping(\"/{id}\") composed"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /api/v1/users",
+      "note": "bare @PostMapping marker annotation inherits the class prefix"
+    }
   ],
   "expect_edges": [
-    {"from": "GET /api/v1/users/{id}", "to": "getUser", "category": "HANDLED_BY", "note": "composed route handled by the action method"},
-    {"from": "GET /api/v1/users", "to": "GET /api/v1/users/{id}", "category": "HTTP_CALLS", "note": "RestTemplate client pairs with the composed route"},
-    {"from": "POST /api/v1/users", "to": "POST /api/v1/users", "category": "HTTP_CALLS", "note": "postForObject pairs with the composed marker-annotation route"}
+    {
+      "from": "GET /api/v1/users/{id}",
+      "to": "getUser",
+      "category": "HANDLED_BY",
+      "note": "composed route handled by the action method"
+    },
+    {
+      "from": "GET /api/v1/users",
+      "to": "GET /api/v1/users/{id}",
+      "category": "HTTP_CALLS",
+      "note": "RestTemplate client pairs with the composed route"
+    },
+    {
+      "from": "POST /api/v1/users",
+      "to": "POST /api/v1/users",
+      "category": "HTTP_CALLS",
+      "note": "postForObject pairs with the composed marker-annotation route"
+    }
   ],
   "forbid": [
-    {"from": "GET /api/v1/users/{id}", "to": "UserController", "category": "HANDLED_BY", "note": "the class scan must not also claim the class as a handler"},
-    {"kind": "ROUTE", "name": "GET /{id}", "note": "the uncomposed relative template must not exist"}
+    {
+      "from": "GET /api/v1/users/{id}",
+      "to": "UserController",
+      "category": "HANDLED_BY",
+      "note": "the class scan must not also claim the class as a handler"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /{id}",
+      "note": "the uncomposed relative template must not exist"
+    }
   ]
 }

@@ -1,19 +1,45 @@
 {
   "framework": "xcut-queue-csharp-kafka",
   "language": "csharp",
-  "dirs": ["producer", "consumer"],
-  "mechanism": "queue",
-  "cells": ["csharp/queue"],
-  "note": "Baseline 2026-09-16 = 0.00 with ZERO queue nodes on either side. Two independent causes: (1) signals_present is case-sensitive, so the only Kafka evidence in these files — `using Confluent.Kafka;` — fails the lowercase [kafka, confluent] gate; (2) every Kafka needle is bound to a receiver NAME (`producer.produce`, `consumer.subscribe`), so `_producer.ProduceAsync(` and `consumer.Subscribe(` match nothing. Deliberately contains NO lowercase 'kafka' anywhere (no bootstrap.servers host), so the gate is the only thing under test.",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "csharp/kafka"
+  ],
+  "note": "Baseline 2026-09-16 = 0.00 with ZERO queue nodes on either side. Two independent causes: (1) signals_present is case-sensitive, so the only Kafka evidence in these files \u2014 `using Confluent.Kafka;` \u2014 fails the lowercase [kafka, confluent] gate; (2) every Kafka needle is bound to a receiver NAME (`producer.produce`, `consumer.subscribe`), so `_producer.ProduceAsync(` and `consumer.Subscribe(` match nothing. Deliberately contains NO lowercase 'kafka' anywhere (no bootstrap.servers host), so the gate is the only thing under test.",
   "expect_nodes": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "_producer.ProduceAsync(\"orders\", ...)"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "consumer.Subscribe(\"orders\")"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "_producer.ProduceAsync(\"orders\", ...)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "consumer.Subscribe(\"orders\")"
+    }
   ],
   "expect_edges": [
-    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "topic-exact pairing across the two services"}
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing across the two services"
+    }
   ],
   "forbid": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:kafka", "note": "both sides name a real topic; the framework-tag fallback must not survive"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:kafka", "note": "both sides name a real topic; the framework-tag fallback must not survive"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:kafka",
+      "note": "both sides name a real topic; the framework-tag fallback must not survive"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:kafka",
+      "note": "both sides name a real topic; the framework-tag fallback must not survive"
+    }
   ]
 }

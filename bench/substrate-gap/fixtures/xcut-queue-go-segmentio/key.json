@@ -1,19 +1,45 @@
 {
   "framework": "xcut-queue-go-segmentio",
   "language": "go",
-  "dirs": ["producer", "consumer"],
-  "mechanism": "queue",
-  "cells": ["go/queue"],
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "go/kafka"
+  ],
   "note": "Baseline 2026-09-16 = 0.00 with ZERO queue nodes on either side: the segmentio needles are spelled `writer.WriteMessages` / `reader.ReadMessage` and these files use the idiomatic short receivers `w` and `r`. Also grades the NoIdentity rule: `.ReadMessage(` proves the framework but names no topic, and must NOT fall back to a queue_consumer:kafka tag now that the ReaderConfig row named the real topic.",
   "expect_nodes": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "w.WriteMessages(ctx, kafka.Message{Topic: \"orders\"}) — Keyed over the struct literal"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "kafka.NewReader(kafka.ReaderConfig{Topic: \"orders\"})"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "w.WriteMessages(ctx, kafka.Message{Topic: \"orders\"}) \u2014 Keyed over the struct literal"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "kafka.NewReader(kafka.ReaderConfig{Topic: \"orders\"})"
+    }
   ],
   "expect_edges": [
-    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "topic-exact pairing across the two services"}
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing across the two services"
+    }
   ],
   "forbid": [
-    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:kafka", "note": "both sides name a real topic; the framework-tag fallback must not survive"},
-    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:kafka", "note": "NoIdentity needles (.ReadMessage() must not manufacture a topic-less tag node"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:kafka",
+      "note": "both sides name a real topic; the framework-tag fallback must not survive"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:kafka",
+      "note": "NoIdentity needles (.ReadMessage() must not manufacture a topic-less tag node"
+    }
   ]
 }

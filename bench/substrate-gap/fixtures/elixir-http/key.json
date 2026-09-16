@@ -9,27 +9,27 @@
     {
       "kind": "ENDPOINT",
       "name": "GET /api/users",
-      "note": "HTTPoison.get with #{id} interpolation -> GET /api/users/${…}, host stripped"
+      "note": "HTTPoison.get with #{id} interpolation -> GET /api/users/${\u2026}, host stripped"
     },
     {
       "kind": "ENDPOINT",
       "name": "POST /api/users",
-      "note": "Tesla.post(client(), \"/api/users\", body) — client-first form, URL is arg 2"
+      "note": "Tesla.post(client(), \"/api/users\", body) \u2014 client-first form, URL is arg 2"
     },
     {
       "kind": "ENDPOINT",
       "name": "GET /api/orders",
-      "note": "Req.get!(url: \"http://orders-svc/api/orders\") — URL from the url: keyword"
+      "note": "Req.get!(url: \"http://orders-svc/api/orders\") \u2014 URL from the url: keyword"
     },
     {
       "kind": "ENDPOINT",
       "name": "DELETE /api/users",
-      "note": "Finch.build(:delete, url) — verb from the leading atom"
+      "note": "Finch.build(:delete, url) \u2014 verb from the leading atom"
     },
     {
       "kind": "ROUTE",
       "name": "/api/users",
-      "note": "Go chi server route (control — already 1.00)"
+      "note": "Go chi server route (control \u2014 already 1.00)"
     }
   ],
   "expect_edges": [
@@ -73,11 +73,11 @@
     {
       "kind": "ROUTE",
       "max_nodes": 3,
-      "note": "exactly the 3 Go chi routes — scan_phoenix_routes must mint NO phantom ROUTE from the qualified client calls"
+      "note": "exactly the 3 Go chi routes \u2014 scan_phoenix_routes must mint NO phantom ROUTE from the qualified client calls"
     }
   ],
-  "mechanism": "http",
+  "mechanism": "http_client",
   "cells": [
-    "elixir/http"
+    "elixir/http_client"
   ]
 }
