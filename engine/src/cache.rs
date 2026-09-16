@@ -12,14 +12,20 @@ use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::FileParse;
 
-/// Tied to the WORKSPACE release version (`[workspace.package]` in the root
-/// Cargo.toml — the same single line that versions the wheel): a different glia
-/// release may parse differently, so a cache written by another version is
-/// discarded (one-time full rebuild after upgrade — also the fix for "stale
-/// cache after upgrade", backlog #10). The engine crate inherits the workspace
-/// version precisely so this stamp can never lag a release (audit 2026-06-10
-/// #4: a py-only bump left this frozen at 0.4.13).
-const CACHE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Build identity a cache must match to be reused: `<release>+p<parser stamp>`
+/// (see the `stamp` crate).
+///
+/// History. This was the WORKSPACE release version alone (`[workspace.package]`
+/// in the root Cargo.toml — the same line that versions the wheel), so a cache
+/// written by another glia release was discarded (the fix for "stale cache after
+/// upgrade", backlog #10; the engine inherits the workspace version precisely so
+/// it can never lag a release — audit 2026-06-10 #4, where a py-only bump left
+/// this frozen at 0.4.13). The release turned out to be the wrong GRANULARITY:
+/// a parser or extractor fix merged without a version bump left every
+/// incremental consumer serving the pre-fix `FileParse`, while `bench/substrate-gap`
+/// (which builds cold) reported the cell fixed. `BUILD_STAMP` folds in a content
+/// hash of every graph-shaping source, so a parser change invalidates on its own.
+pub(crate) const CACHE_VERSION: &str = repo_graph_stamp::BUILD_STAMP;
 const CACHE_FILE: &str = "parse_cache.bin";
 
 /// Conventional cache location, mirroring `repo_graph_store::default_gmap_dir`
@@ -58,7 +64,9 @@ pub struct CacheStats {
 /// (neuropil) or persist it next to the `.gmap` (CLI / pyo3).
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseCache {
-    version: String,
+    /// Build identity this cache was written under (`CACHE_VERSION`). First
+    /// serialized field, so it is the leading bincode string on disk.
+    stamp: String,
     /// Repo identity the cached parses were built under (`file://<repo_path>`,
     /// the exact string fed to `RepoId::from_canonical`). Every cached
     /// `FileParse` has that RepoId baked into its NodeIds, but the per-file
@@ -78,7 +86,7 @@ pub struct ParseCache {
 impl Default for ParseCache {
     fn default() -> Self {
         Self {
-            version: CACHE_VERSION.to_string(),
+            stamp: CACHE_VERSION.to_string(),
             repo_canonical: String::new(),
             go_prefix: String::new(),
             entries: HashMap::new(),
@@ -143,15 +151,25 @@ impl ParseCache {
     }
 
     /// Load `<repo>/.ai/repo-graph/parse_cache.bin`. Returns an empty cache if
-    /// missing, unreadable, corrupt, or written by a different engine version.
+    /// missing, unreadable, corrupt, or written by a different build identity.
     pub fn load(repo_path: &str) -> ParseCache {
         let path = gmap_dir(repo_path).join(CACHE_FILE);
         let Ok(bytes) = std::fs::read(&path) else {
             return ParseCache::new();
         };
         match bincode::deserialize::<ParseCache>(&bytes) {
-            Ok(c) if c.version == CACHE_VERSION => c,
-            _ => ParseCache::new(),
+            Ok(c) if c.stamp == CACHE_VERSION => c,
+            // A stamp mismatch is the parse cache doing its job, and it is the
+            // one discard a human needs to see (it explains a slow build), so it
+            // is never silent.
+            Ok(c) => {
+                eprintln!(
+                    "[incremental] cache stamp mismatch (disk={} build={CACHE_VERSION}) — full reparse",
+                    c.stamp
+                );
+                ParseCache::new()
+            }
+            Err(_) => ParseCache::new(),
         }
     }
 

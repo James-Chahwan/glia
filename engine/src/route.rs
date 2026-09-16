@@ -236,9 +236,13 @@ pub(crate) fn parse_repo_files(
         c.retain_paths(&live_paths);
         c.stats.reused = reused;
         c.stats.reparsed = reparsed;
+        // `stamp=` makes the always-on line grep-proof of WHICH code produced
+        // these parses — a rebuilt wheel that quietly kept the old .so shows the
+        // old stamp here (dev-notes memory: feedback_maturin_stale_wheel).
         eprintln!(
-            "[incremental] reused {reused}, reparsed {reparsed}, evicted {} (parse cache)",
-            c.stats.evicted
+            "[incremental] reused {reused}, reparsed {reparsed}, evicted {} (parse cache, stamp={})",
+            c.stats.evicted,
+            cache::CACHE_VERSION
         );
     }
 

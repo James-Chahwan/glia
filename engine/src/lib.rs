@@ -23,10 +23,14 @@ mod walk;
 pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use cache::{CacheStats, ParseCache};
+/// Build identity of THIS binary: `<release>+p<parser stamp>`. Re-exported so
+/// `cli` and `py` can report which code they contain without taking a direct
+/// dependency on the `stamp` crate.
+pub use repo_graph_stamp::{BUILD_STAMP, PARSER_STAMP, RELEASE, VERSION_LINE};
 
 pub use answers::{
     BlastAnswer, LocatedNode, TraceHop, blast_radius_by_qname, cross_stack_trace,
-    entrypoint_reachable, governing_docs, locate_node, resolve_signal_located,
+    entrypoint_reachable, governing_docs, locate_node, node_in_scope, resolve_signal_located,
 };
 pub use build::{
     GenerateResult, generate_many, generate_one, generate_one_incremental,

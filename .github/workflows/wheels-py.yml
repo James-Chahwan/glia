@@ -20,6 +20,13 @@ on:
       - "code-domain/**"
       - "graph/**"
       - "parsers/**"
+      # `engine` (the orchestrator) and `store` (the .gmap writer) were MISSING:
+      # a PR touching only those never built a wheel, even though nearly every
+      # parser/extractor change lands in one of them. `stamp` carries the build
+      # identity the wheel reports.
+      - "engine/**"
+      - "store/**"
+      - "stamp/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/wheels-py.yml"

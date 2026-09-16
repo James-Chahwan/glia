@@ -1,0 +1,9 @@
+[package]
+name = "repo-graph-stamp"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Build identity for glia: the release version plus PARSER_STAMP, a content hash of every source file that can change graph content. Deliberately a leaf crate with ZERO dependencies and ZERO build-dependencies — it sits upstream of `store` and `engine`, and a build-dependency would be compiled for the HOST target (built twice in the aarch64/manylinux cross matrix)."
+build = "build.rs"
+
+# No [dependencies] and no [build-dependencies], on purpose. See above.

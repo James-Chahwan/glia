@@ -25,6 +25,9 @@ parsers/code/
   react/   angular/  vue/    — framework parsers stacked on typescript
   extractors/ — cross-cutting: data_sources, cli, grpc, queues, websocket,
                 eventbus, graphql, ts_routes, angular/react/vue route extractors
+stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
+                    graph-shaping source). Keys the parse cache, so a parser fix
+                    invalidates caches without a version bump.
 py/                 pyo3 bindings — the only Rust crate published to PyPI (as repo-graph-py)
 ```
 

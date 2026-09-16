@@ -50,11 +50,16 @@ members = [
     "cli",
     "doc-sources",
     "py",
+    # Leaf crate, zero deps: carries RELEASE + PARSER_STAMP (a content hash of
+    # every graph-shaping source). Sits upstream of `store` and `engine`.
+    "stamp",
 ]
 
 # Single release version for the crates that must move in lockstep: the wheel
-# (`py`) and the engine's parse-cache stamp (`engine/src/cache.rs`). Bumping the
-# release happens HERE and nowhere else — a py-only bump used to leave the cache
-# stamp frozen (audit 2026-06-10 #4), so old parses survived upgrades.
+# (`py`) and the build identity (`stamp`, whose RELEASE half this is). Bumping
+# the release happens HERE and nowhere else — a py-only bump used to leave the
+# cache stamp frozen (audit 2026-06-10 #4), so old parses survived upgrades.
+# The release is now only HALF the cache key: `stamp` folds in a content hash of
+# every graph-shaping source, so a parser fix invalidates caches WITHOUT a bump.
 [workspace.package]
 version = "0.4.18"
