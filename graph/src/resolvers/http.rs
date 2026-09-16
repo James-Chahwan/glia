@@ -146,7 +146,7 @@ fn cell_method(cell: &Cell) -> Option<String> {
     }
 }
 
-fn parse_endpoint_qname(qname: &str) -> Option<(String, &str)> {
+pub(crate) fn parse_endpoint_qname(qname: &str) -> Option<(String, &str)> {
     let rest = qname.strip_prefix("endpoint:")?;
     let (method, path) = rest.split_once(':')?;
     Some((method.to_uppercase(), path))

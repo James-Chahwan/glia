@@ -37,6 +37,9 @@ pub use iac::IacResolver;
 pub use package::PackageResolver;
 pub use cli::CliInvocationResolver;
 pub use http::normalise_http_path;
+// A9.1 — `cross_links` reads the HTTP channel label off the same parse the
+// resolver uses; crate-internal only, the public surface is the facade.
+pub(crate) use http::parse_endpoint_qname;
 
 /// Emits edges that cross `RepoGraph` boundaries. v0.4.10 will add
 /// `GraphQLResolver`, `GrpcResolver`, `QueueResolver`, etc. against the same
@@ -82,7 +85,7 @@ fn build_kind_index(
     index
 }
 
-fn weakest(a: Confidence, b: Confidence) -> Confidence {
+pub(crate) fn weakest(a: Confidence, b: Confidence) -> Confidence {
     fn rank(c: Confidence) -> u8 {
         match c {
             Confidence::Strong => 2,

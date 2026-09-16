@@ -1,12 +1,12 @@
 //! `MergedGraph` — the multi-repo container plus its node-lookup surface
 //! (name / qname / span resolution, subsetting, clustering).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::CodeNav;
-use repo_graph_core::{Edge, Node, NodeId, NodeKindId};
+use repo_graph_code_domain::{CodeNav, edge_category};
+use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
-use crate::resolvers::CrossGraphResolver;
+use crate::resolvers::{CrossGraphResolver, parse_endpoint_qname, weakest};
 use crate::types::{RepoGraph, SymbolTable};
 
 // ============================================================================
@@ -274,6 +274,193 @@ impl MergedGraph {
     }
 }
 
+// ============================================================================
+// Service-level view of the cross-repo edges (A9.1)
+// ============================================================================
+
+/// Mechanisms whose resolvers emit the pair once, A→B, and never B→A. Which
+/// end lands in `from` depends on index order inside a `HashMap` bucket, so
+/// `cross_links` normalises them to `from <= to`. Without that the output
+/// flaps across processes exactly the way `impact` / `trace` did before
+/// `pick_primary`.
+const SYMMETRIC: &[EdgeCategoryId] = &[
+    edge_category::SHARES_SCHEMA,
+    edge_category::SHARES_DATA_ENTITY,
+    edge_category::SHARES_CRON_SCHEDULE,
+    edge_category::SHARES_CONFIG,
+    edge_category::SHARES_INFRA_REF,
+    edge_category::SHARES_DEPENDENCY,
+];
+
+/// One service-to-service link: every cross-repo edge running between the same
+/// pair of keys, over the same mechanism, on the same channel, collapsed into a
+/// single row with a count.
+///
+/// `from` / `to` are whatever the caller's `key_of` returns — repo id, service
+/// name, directory, anything. Nothing here assumes `RepoId`, which is precisely
+/// the partition key that fails for a monorepo.
+///
+/// Plain struct on purpose: `graph` carries no serde dependency, so shaping
+/// this for the wire is the engine's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossLink {
+    pub from: String,
+    pub to: String,
+    /// `edge_category::name` of the collapsed edges, e.g. `"HTTP_CALLS"`.
+    pub mechanism: &'static str,
+    /// The identifying literal the link travels over. See `channel_of`.
+    pub channel: String,
+    pub count: usize,
+    /// Weakest confidence in the bucket — a link is only as trustworthy as its
+    /// shakiest member edge.
+    pub confidence: Confidence,
+    pub example_from_qname: String,
+    pub example_to_qname: String,
+}
+
+/// The identifying literal a link travels over: a route, a topic, a gRPC
+/// service, a schema name.
+///
+/// Mirrors the qname-prefix vocabulary the cross-graph resolvers key on, so
+/// the channel never has to be re-derived from qname prefixes outside this
+/// crate. `strip_prefix` rather than `split_once` throughout, so a topic or
+/// schedule that itself contains `:` survives intact.
+///
+/// Total: falls back to `name`, then to `qname`, so there is no failure mode.
+pub fn channel_of(qname: &str, name: &str) -> String {
+    if let Some((method, path)) = parse_endpoint_qname(qname) {
+        return format!("{method} {path}");
+    }
+    // Ordered longest-discriminator-first; `grpc_client:` cannot be shadowed
+    // by `grpc:` (the fifth byte differs) but the order documents intent.
+    const SUFFIX_PREFIXES: &[&str] = &[
+        "queue_producer:",
+        "queue_consumer:",
+        "grpc_client:",
+        "grpc:",
+        "graphql_op:",
+        "graphql_resolver:",
+        "ws_client:",
+        "event_emit:",
+        "cli_invoke:",
+        "data_entity:",
+        "config:",
+        "cron:",
+        "infra:",
+        "route:",
+    ];
+    for p in SUFFIX_PREFIXES {
+        if let Some(rest) = qname.strip_prefix(p) {
+            return rest.to_string();
+        }
+    }
+    if name.is_empty() {
+        qname.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Group `merged.cross_edges` into `(from, to, mechanism, channel)` buckets.
+///
+/// Reads `cross_edges` only — a repo's own `g.edges` are internal wiring, not
+/// service links. `key_of` decides what a "service" is; returning `None` for a
+/// node drops that edge and bumps the second return value (`unplaced`), so a
+/// caller can tell "no links" from "nothing was placeable".
+///
+/// Self-links (`from == to`) are NOT filtered here: that is presentation
+/// policy and belongs to the caller.
+///
+/// Output is sorted and deterministic — `BTreeMap` ordering plus first-write-
+/// wins example qnames plus symmetric-mechanism normalisation.
+pub fn cross_links(
+    merged: &MergedGraph,
+    key_of: &dyn Fn(NodeId) -> Option<String>,
+) -> (Vec<CrossLink>, usize) {
+    // (qname, name) lookup, built by walking `g.nodes` — never by iterating
+    // `nav`'s HashMaps, whose order is per-process (CODE_RULES §3).
+    let mut meta: HashMap<NodeId, (&str, &str)> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            meta.entry(n.id).or_insert_with(|| {
+                (
+                    g.nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or(""),
+                    g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or(""),
+                )
+            });
+        }
+    }
+
+    struct Agg {
+        count: usize,
+        confidence: Confidence,
+        example_from: String,
+        example_to: String,
+    }
+
+    let mut buckets: BTreeMap<(String, String, &'static str, String), Agg> = BTreeMap::new();
+    let mut unplaced = 0usize;
+
+    for e in &merged.cross_edges {
+        let (Some(from_key), Some(to_key)) = (key_of(e.from), key_of(e.to)) else {
+            unplaced += 1;
+            continue;
+        };
+        let (fq, fname) = meta.get(&e.from).copied().unwrap_or(("", ""));
+        let (tq, tname) = meta.get(&e.to).copied().unwrap_or(("", ""));
+        // The channel is read off the `from` end; for every symmetric mechanism
+        // the resolver paired the two nodes *because* the literal matched, so
+        // both ends carry it and the choice is swap-invariant.
+        let mut channel = channel_of(fq, fname);
+        if channel.is_empty() {
+            channel = channel_of(tq, tname);
+        }
+        let swap = SYMMETRIC.contains(&e.category) && from_key > to_key;
+        let (from_key, to_key, example_from, example_to) = if swap {
+            (to_key, from_key, tq.to_string(), fq.to_string())
+        } else {
+            (from_key, to_key, fq.to_string(), tq.to_string())
+        };
+        buckets
+            .entry((from_key, to_key, edge_category::name(e.category), channel))
+            .and_modify(|a| {
+                a.count += 1;
+                a.confidence = weakest(a.confidence, e.confidence);
+            })
+            .or_insert_with(|| Agg {
+                count: 1,
+                confidence: e.confidence,
+                example_from,
+                example_to,
+            });
+    }
+
+    let links: Vec<CrossLink> = buckets
+        .into_iter()
+        .map(|((from, to, mechanism, channel), a)| CrossLink {
+            from,
+            to,
+            mechanism,
+            channel,
+            count: a.count,
+            confidence: a.confidence,
+            example_from_qname: a.example_from,
+            example_to_qname: a.example_to,
+        })
+        .collect();
+
+    // fired_on marker — proves a real build reached the grouping, not just that
+    // the unit tests compile.
+    eprintln!(
+        "[cross-links] buckets={} unplaced={} cross_edges={}",
+        links.len(),
+        unplaced,
+        merged.cross_edges.len()
+    );
+
+    (links, unplaced)
+}
+
 /// G17 — derive a stable cluster key for `node_id` at the requested depth.
 /// Splits the node's qname on `::` and returns the first `min(depth, n-1)`
 /// segments rejoined. Capping at `n-1` guarantees the leaf segment never
@@ -506,6 +693,184 @@ mod tests {
         assert!(suffix.is_some());
         let miss = merged.resolve_span("nonexistent");
         assert_eq!(miss, None);
+    }
+
+    // ------------------------------------------------------------------
+    // A9.1 — cross_links / channel_of
+    // ------------------------------------------------------------------
+
+    /// Map every node of `g` to `key`; anything unknown stays `None`.
+    fn keys_for(pairs: &[(&RepoGraph, &str)]) -> std::collections::HashMap<NodeId, String> {
+        let mut m = std::collections::HashMap::new();
+        for (g, key) in pairs {
+            for n in &g.nodes {
+                m.insert(n.id, (*key).to_string());
+            }
+        }
+        m
+    }
+
+    fn xedge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+        Edge { from, to, category, confidence: Confidence::Strong }
+    }
+
+    fn id_of(repo: RepoId, kind: NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo, kind, qname)
+    }
+
+    #[test]
+    fn channel_of_reads_every_resolver_prefix() {
+        assert_eq!(channel_of("endpoint:GET:/users", "GET /users"), "GET /users");
+        // Method is upper-cased by parse_endpoint_qname, path kept verbatim.
+        assert_eq!(channel_of("endpoint:get:/users/:id", ""), "GET /users/:id");
+        assert_eq!(channel_of("queue_producer:orders.v2", "kafka"), "orders.v2");
+        assert_eq!(channel_of("queue_consumer:orders.v2", "kafka"), "orders.v2");
+        assert_eq!(channel_of("grpc_client:Greeter", "Greeter"), "Greeter");
+        assert_eq!(channel_of("grpc:Greeter", "Greeter"), "Greeter");
+        assert_eq!(channel_of("graphql_op:getUser", "getUser"), "getUser");
+        assert_eq!(channel_of("graphql_resolver:getUser", "getUser"), "getUser");
+        assert_eq!(channel_of("ws_client:/notifications", "ws"), "/notifications");
+        assert_eq!(channel_of("event_emit:user.created", "emit"), "user.created");
+        assert_eq!(channel_of("cli_invoke:terraform", "run"), "terraform");
+        assert_eq!(channel_of("data_entity:sql:users", "users"), "sql:users");
+        assert_eq!(channel_of("config:env:DATABASE_URL", "DATABASE_URL"), "env:DATABASE_URL");
+        assert_eq!(channel_of("infra:image:api", "api"), "image:api");
+        assert_eq!(channel_of("route:/users", "/users"), "/users");
+        // strip_prefix, not split_once — a schedule full of colons survives.
+        assert_eq!(channel_of("cron:0 4 * * *:cleanup", "cleanup"), "0 4 * * *:cleanup");
+        // Fallbacks: name, then qname.
+        assert_eq!(channel_of("UserDto", "UserDto"), "UserDto");
+        assert_eq!(channel_of("a::b::UserDto", ""), "a::b::UserDto");
+    }
+
+    #[test]
+    fn cross_links_collapses_same_channel() {
+        let ra = RepoId::from_canonical("test://cl-a");
+        let rb = RepoId::from_canonical("test://cl-b");
+        let g_a = synth_repo_graph(ra, &[("endpoint:GET:/users", node_kind::ENDPOINT)]);
+        let g_b = synth_repo_graph(
+            rb,
+            &[("route:/users", node_kind::ROUTE), ("route:/users/", node_kind::ROUTE)],
+        );
+        let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
+        let ep = id_of(ra, node_kind::ENDPOINT, "endpoint:GET:/users");
+        let r1 = id_of(rb, node_kind::ROUTE, "route:/users");
+        let r2 = id_of(rb, node_kind::ROUTE, "route:/users/");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.cross_edges = vec![
+            xedge(ep, r1, edge_category::HTTP_CALLS),
+            xedge(ep, r2, edge_category::HTTP_CALLS),
+        ];
+
+        let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
+        assert_eq!(unplaced, 0);
+        assert_eq!(links.len(), 1, "same (from,to,mechanism,channel) must collapse");
+        assert_eq!(links[0].from, "a");
+        assert_eq!(links[0].to, "b");
+        assert_eq!(links[0].mechanism, "HTTP_CALLS");
+        assert_eq!(links[0].channel, "GET /users");
+        assert_eq!(links[0].count, 2);
+        assert_eq!(links[0].confidence, Confidence::Strong);
+        assert_eq!(links[0].example_from_qname, "endpoint:GET:/users");
+        assert_eq!(links[0].example_to_qname, "route:/users");
+    }
+
+    #[test]
+    fn cross_links_splits_distinct_channels() {
+        let ra = RepoId::from_canonical("test://cl2-a");
+        let rb = RepoId::from_canonical("test://cl2-b");
+        let g_a = synth_repo_graph(
+            ra,
+            &[
+                ("endpoint:POST:/users", node_kind::ENDPOINT),
+                ("endpoint:GET:/users", node_kind::ENDPOINT),
+            ],
+        );
+        let g_b = synth_repo_graph(rb, &[("route:/users", node_kind::ROUTE)]);
+        let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
+        let post = id_of(ra, node_kind::ENDPOINT, "endpoint:POST:/users");
+        let get = id_of(ra, node_kind::ENDPOINT, "endpoint:GET:/users");
+        let route = id_of(rb, node_kind::ROUTE, "route:/users");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        // POST first on the wire; the BTreeMap must still sort GET before POST.
+        merged.cross_edges = vec![
+            xedge(post, route, edge_category::HTTP_CALLS),
+            xedge(get, route, edge_category::HTTP_CALLS),
+        ];
+
+        let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
+        assert_eq!(unplaced, 0);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].channel, "GET /users");
+        assert_eq!(links[1].channel, "POST /users");
+        assert!(links.iter().all(|l| l.count == 1));
+    }
+
+    #[test]
+    fn cross_links_normalises_symmetric_and_counts_unplaced() {
+        let ra = RepoId::from_canonical("test://cl3-a");
+        let rb = RepoId::from_canonical("test://cl3-b");
+        let g_a = synth_repo_graph(ra, &[("svc_a::UserDto", node_kind::CLASS)]);
+        let g_b = synth_repo_graph(rb, &[("svc_b::UserDto", node_kind::CLASS)]);
+        let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
+        let a_dto = id_of(ra, node_kind::CLASS, "svc_a::UserDto");
+        let b_dto = id_of(rb, node_kind::CLASS, "svc_b::UserDto");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.cross_edges = vec![
+            // Emitted b -> a by the resolver; must land a -> b.
+            xedge(b_dto, a_dto, edge_category::SHARES_SCHEMA),
+            // `from` is unknown to key_of -> dropped, counted.
+            xedge(NodeId(0xdead_beef), a_dto, edge_category::SHARES_SCHEMA),
+        ];
+
+        let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
+        assert_eq!(unplaced, 1);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "a");
+        assert_eq!(links[0].to, "b");
+        assert_eq!(links[0].mechanism, "SHARES_SCHEMA");
+        // Example qnames swap with the keys, so from/to stay consistent.
+        assert_eq!(links[0].example_from_qname, "svc_a::UserDto");
+        assert_eq!(links[0].example_to_qname, "svc_b::UserDto");
+        // Channel is the shared literal; both ends carry it.
+        assert_eq!(links[0].channel, "UserDto");
+    }
+
+    #[test]
+    fn cross_links_folds_confidence_to_weakest_and_keeps_self_links() {
+        let r = RepoId::from_canonical("test://cl4");
+        let g = synth_repo_graph(
+            r,
+            &[
+                ("queue_producer:orders.v2", node_kind::CLASS),
+                ("queue_consumer:orders.v2", node_kind::CLASS),
+                ("queue_consumer:orders.v2.dlq", node_kind::CLASS),
+            ],
+        );
+        let keys = keys_for(&[(&g, "mono")]);
+        let prod = id_of(r, node_kind::CLASS, "queue_producer:orders.v2");
+        let c1 = id_of(r, node_kind::CLASS, "queue_consumer:orders.v2");
+        let c2 = id_of(r, node_kind::CLASS, "queue_consumer:orders.v2.dlq");
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.cross_edges = vec![
+            xedge(prod, c1, edge_category::QUEUE_FLOWS),
+            Edge {
+                from: prod,
+                to: c2,
+                category: edge_category::QUEUE_FLOWS,
+                confidence: Confidence::Weak,
+            },
+        ];
+
+        let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
+        assert_eq!(unplaced, 0);
+        // Self-link (mono -> mono) is NOT filtered — that is caller policy.
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].from, "mono");
+        assert_eq!(links[0].to, "mono");
+        assert_eq!(links[0].channel, "orders.v2");
+        assert_eq!(links[0].count, 2);
+        assert_eq!(links[0].confidence, Confidence::Weak, "weakest member wins");
     }
 
     #[test]

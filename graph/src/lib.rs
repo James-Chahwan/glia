@@ -32,7 +32,7 @@ mod test_support;
 pub use activation::{code_activation_defaults, code_activation_profile};
 pub use blast::{BlastHit, Reach, blast_carry_edges};
 pub use build::{build_dotted, build_go, build_python, build_ruby, build_typescript};
-pub use merged::{MergedGraph, cluster_key_for};
+pub use merged::{CrossLink, MergedGraph, channel_of, cluster_key_for, cross_links};
 pub use resolvers::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
