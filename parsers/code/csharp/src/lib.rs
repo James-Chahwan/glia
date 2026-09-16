@@ -9,6 +9,10 @@ pub use repo_graph_code_domain::{
 // force a leading slash, so every composed ASP.NET path goes through
 // `abs_path` explicitly.
 use repo_graph_code_domain::endpoint;
+// Client-side HTTP (A4.3). The ENDPOINT shape is shared, never re-derived
+// per-parser, so HttpStackResolver pairs a C# caller to a route from ANY
+// language exactly as it does a TS `fetch`.
+use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint};
 
 pub fn parse_file(
     source: &str,
@@ -40,6 +44,14 @@ pub fn parse_file(
 
     visit_children(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
 
+    let client_endpoints = acc.refit_endpoints + acc.httpclient_endpoints;
+    if client_endpoints > 0 {
+        eprintln!(
+            "[csharp-http-client] {client_endpoints} endpoints (refit={} httpclient={}) in {file_rel_path}",
+            acc.refit_endpoints, acc.httpclient_endpoints
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -59,6 +71,13 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// Dedups the ENDPOINT NODE per `(method, path)` within one file; the
+    /// CALLS edge is still pushed per call site (java:84 is the precedent).
+    endpoint_seen: std::collections::HashSet<NodeId>,
+    /// Marker counters, split by source so a regression in either half of the
+    /// client-HTTP surface is visible in the fired-on line.
+    refit_endpoints: usize,
+    httpclient_endpoints: usize,
 }
 
 fn visit_children(
@@ -223,6 +242,7 @@ fn visit_type_decl(
                     id,
                     &class_prefix,
                     name,
+                    kind == node_kind::INTERFACE,
                     repo,
                     acc,
                 );
@@ -359,6 +379,7 @@ fn visit_method(
     parent_id: NodeId,
     class_prefix: &str,
     type_name: &str,
+    in_interface: bool,
     repo: RepoId,
     acc: &mut Acc,
 ) -> usize {
@@ -386,7 +407,16 @@ fn visit_method(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
+        // A4.3, client side: an `_http.GetAsync("/users")` in this body is an
+        // outbound HTTP call, hung off the enclosing METHOD.
+        let n = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
+        acc.httpclient_endpoints += n;
     }
+
+    // A4.3, client side: a Refit contract carries the whole call in attributes,
+    // so there is no body to walk — the interface method IS the call site.
+    let n = check_refit_attrs(node, src, file_rel, id, repo, in_interface, acc);
+    acc.refit_endpoints += n;
 
     let emitted = check_route_attrs(node, src, id, repo, class_prefix, type_name, name, acc);
     check_minimal_api_routes(node, src, id, repo, acc);
@@ -640,6 +670,19 @@ fn replace_route_token(input: &str, token: &str, value: &str) -> String {
 /// PHP's). Reading only the node's own lists is what makes the class-level and
 /// method-level passes disjoint by construction.
 fn own_attributes(node: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
+    own_attribute_nodes(node, src)
+        .into_iter()
+        .map(|(name, arg, _)| (name, arg))
+        .collect()
+}
+
+/// `own_attributes` plus the `attribute` node itself, so a caller that needs a
+/// SOURCE POSITION for the attribute (the Refit endpoint's call site is the
+/// attribute, there being no call site in the body) does not have to re-walk.
+fn own_attribute_nodes<'a>(
+    node: TsNode<'a>,
+    src: &[u8],
+) -> Vec<(String, Option<String>, TsNode<'a>)> {
     let mut out = Vec::new();
     let mut cursor = node.walk();
     let lists: Vec<TsNode> = node
@@ -666,7 +709,7 @@ fn own_attributes(node: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
                 .strip_suffix("Attribute")
                 .filter(|s| !s.is_empty())
                 .unwrap_or(simple);
-            out.push((simple.to_string(), attr_string_arg(attr, src)));
+            out.push((simple.to_string(), attr_string_arg(attr, src), attr));
         }
     }
     out
@@ -753,6 +796,321 @@ fn check_minimal_api_routes(node: TsNode, src: &[u8], handler_id: NodeId, repo: 
             search_from = pos + search.len();
         }
     }
+}
+
+// ============================================================================
+// A4.3 — the CLIENT side of HTTP: C# code that CALLS another service.
+// ============================================================================
+//
+// Two disjoint shapes, because .NET has two idioms and they live in different
+// places in the AST:
+//
+//   Refit / RestEase — the contract IS an interface, the whole call is in the
+//     verb attribute (`[Get("/api/users/{id}")]`). No body, no call site.
+//   raw HttpClient   — the contract is at the call site inside a method body
+//     (`_http.GetAsync("/api/users")`).
+//
+// Both funnel through `push_client_endpoint`, so the ENDPOINT node is
+// byte-identical to the one a TS `fetch` produces and `HttpStackResolver`
+// pairs it to a ROUTE with no C#-specific code.
+//
+// PRECISION. `GetAsync` / `PostAsync` / `DeleteAsync` are also the vocabulary
+// of IDistributedCache, StackExchange.Redis and a dozen repositories. The ONLY
+// thing separating those from an HTTP call is that their argument is not a
+// path, so `endpoint::url_to_path` returning None is a hard gate every emit
+// goes through — never widen it into "looks stringy".
+
+/// Refit / RestEase verb attributes, keyed by the attribute's simple name (any
+/// `Attribute` suffix already stripped by `own_attributes`). Deliberately the
+/// BARE verbs: ASP.NET's server-side attributes are spelled `HttpGet`, so the
+/// two vocabularies cannot collide even before the interface gate.
+const REFIT_VERB_ATTRS: [(&str, &str); 7] = [
+    ("Get", "GET"),
+    ("Post", "POST"),
+    ("Put", "PUT"),
+    ("Delete", "DELETE"),
+    ("Patch", "PATCH"),
+    ("Head", "HEAD"),
+    ("Options", "OPTIONS"),
+];
+
+/// Emit one ENDPOINT per Refit verb attribute on this declaration.
+///
+/// GATED ON INTERFACE MEMBERSHIP. A Refit/RestEase contract is always an
+/// interface — the library generates the implementation — so requiring that
+/// makes a collision with a class-based `[Get]` (an unrelated attribute, a
+/// minimal-API filter, a source generator's marker) impossible by construction
+/// rather than by a name heuristic. Returns the number emitted.
+fn check_refit_attrs(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    from: NodeId,
+    repo: RepoId,
+    in_interface: bool,
+    acc: &mut Acc,
+) -> usize {
+    if !in_interface {
+        return 0;
+    }
+    let mut emitted = 0usize;
+    for (attr, arg, attr_node) in own_attribute_nodes(node, src) {
+        let Some((_, verb)) = REFIT_VERB_ATTRS.iter().find(|(a, _)| *a == attr) else {
+            continue;
+        };
+        // A verb attribute with no string template (`[Get]` alone) names no
+        // path; there is nothing to pair, so it is not an endpoint.
+        let Some(raw) = arg else { continue };
+        if emit_client_endpoint(verb, &raw, true, attr_node, file_rel, from, repo, acc) {
+            emitted += 1;
+        }
+    }
+    emitted
+}
+
+/// Map an `HttpClient` convenience-method name to its HTTP verb. Every name
+/// here is also used by non-HTTP APIs; `url_to_path` downstream is what makes
+/// that safe (see the module note above).
+fn http_client_verb(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "GetAsync" | "GetStringAsync" | "GetByteArrayAsync" | "GetStreamAsync"
+        | "GetFromJsonAsync" => "GET",
+        "PostAsync" | "PostAsJsonAsync" => "POST",
+        "PutAsync" | "PutAsJsonAsync" => "PUT",
+        "PatchAsync" | "PatchAsJsonAsync" => "PATCH",
+        "DeleteAsync" | "DeleteFromJsonAsync" => "DELETE",
+        _ => return None,
+    })
+}
+
+/// `HttpMethod.Get` → `"GET"`, for the `new HttpRequestMessage(verb, url)`
+/// shape that `SendAsync` takes. A variable or a custom `new HttpMethod(...)`
+/// names no verb we can read statically, so it yields None.
+fn http_method_verb(expr: TsNode, src: &[u8]) -> Option<&'static str> {
+    if expr.kind() != "member_access_expression" {
+        return None;
+    }
+    Some(match member_name_text(expr, src)? {
+        "Get" => "GET",
+        "Post" => "POST",
+        "Put" => "PUT",
+        "Patch" => "PATCH",
+        "Delete" => "DELETE",
+        "Head" => "HEAD",
+        "Options" => "OPTIONS",
+        "Trace" => "TRACE",
+        _ => return None,
+    })
+}
+
+/// Walk ONE method body and emit an ENDPOINT per outbound HTTP call site.
+///
+/// Mirrors `collect_calls_in`'s stack walk and its skip set, so a call made
+/// inside a nested declaration is attributed there (or not at all) rather than
+/// to this method. Returns the number of endpoints emitted.
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut emitted = 0usize;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "invocation_expression" => {
+                if client_call_endpoint(n, src, from, repo, file_rel, acc) {
+                    emitted += 1;
+                }
+            }
+            "object_creation_expression" => {
+                if request_message_endpoint(n, src, from, repo, file_rel, acc) {
+                    emitted += 1;
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if !matches!(
+                child.kind(),
+                "class_declaration"
+                    | "lambda_expression"
+                    | "local_function_statement"
+                    | "anonymous_method_expression"
+            ) {
+                stack.push(child);
+            }
+        }
+    }
+    emitted
+}
+
+/// `_http.GetAsync("/api/users")` → one ENDPOINT. False when the invocation is
+/// not a recognised verb, or its first argument is not a request path.
+fn client_call_endpoint(
+    inv: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> bool {
+    let Some(func) = inv.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "member_access_expression" {
+        return false;
+    }
+    let Some(verb) = member_name_text(func, src).and_then(http_client_verb) else {
+        return false;
+    };
+    let Some(arg) = nth_arg_expr(inv, 0) else {
+        return false;
+    };
+    let Some((raw, strong)) = client_path_arg(arg, src) else {
+        return false;
+    };
+    emit_client_endpoint(verb, &raw, strong, inv, file_rel, from, repo, acc)
+}
+
+/// `new HttpRequestMessage(HttpMethod.Get, "/users")` → one ENDPOINT. This is
+/// the idiomatic shape for any request that needs custom headers, so without
+/// it every authenticated .NET client call stays invisible.
+fn request_message_endpoint(
+    new_expr: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> bool {
+    let Some(type_node) = new_expr.child_by_field_name("type") else {
+        return false;
+    };
+    if !text_of(type_node, src)
+        .trim()
+        .ends_with("HttpRequestMessage")
+    {
+        return false;
+    }
+    let Some(verb) = nth_arg_expr(new_expr, 0).and_then(|a| http_method_verb(a, src)) else {
+        return false;
+    };
+    let Some((raw, strong)) = nth_arg_expr(new_expr, 1).and_then(|a| client_path_arg(a, src)) else {
+        return false;
+    };
+    emit_client_endpoint(verb, &raw, strong, new_expr, file_rel, from, repo, acc)
+}
+
+/// The request path an argument expression names, plus whether it was written
+/// literally. `true` → Strong; `false` → reconstructed from an interpolated
+/// string, so Medium. Anything else (a variable, a concatenation, a `nameof`)
+/// names no path we can read, and None keeps it out of the graph.
+fn client_path_arg(expr: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    if let Some(text) = string_literal_text(expr, src) {
+        return Some((text, true));
+    }
+    if expr.kind() == "interpolated_string_expression" {
+        return Some((interpolated_path(expr, src), false));
+    }
+    None
+}
+
+/// Flatten `$"/api/users/{id}"` to `/api/users/${…}`.
+///
+/// The `${…}` spelling is the shared contract (`ClientEndpoint::path`):
+/// `normalise_http_path` collapses any segment containing `${` to `{}`, so an
+/// interpolated client path matches a server template `{id}` / `:id` without
+/// either side knowing the other's syntax. Mirrors the python f-string and
+/// swift interpolation readers.
+fn interpolated_path(node: TsNode, src: &[u8]) -> String {
+    let mut out = String::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" | "escape_sequence" => out.push_str(text_of(child, src)),
+            "interpolation" => out.push_str("${…}"),
+            // interpolation_start / interpolation_quote are the `$` and `"`
+            // delimiters of a raw interpolated string — never path text.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The invoked member's simple name, with any generic argument list dropped
+/// (`GetFromJsonAsync<User>` → `GetFromJsonAsync`).
+fn member_name_text<'a>(access: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let name = access.child_by_field_name("name")?;
+    if name.kind() == "generic_name" {
+        let mut cursor = name.walk();
+        let ident = name
+            .named_children(&mut cursor)
+            .find(|c| c.kind() == "identifier")?;
+        return Some(text_of(ident, src));
+    }
+    Some(text_of(name, src))
+}
+
+/// The expression of the `n`-th POSITIONAL-or-named argument of an invocation /
+/// object creation. The `argument` node's optional `name` field (`uri: "/x"`)
+/// is a named child too, so it is skipped explicitly.
+fn nth_arg_expr<'a>(node: TsNode<'a>, n: usize) -> Option<TsNode<'a>> {
+    let args = node.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    let arg = args
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "argument")
+        .nth(n)?;
+    let label = arg.child_by_field_name("name");
+    let mut ac = arg.walk();
+    arg.named_children(&mut ac).find(|c| Some(*c) != label)
+}
+
+/// The one place a C# client ENDPOINT is minted. `raw` goes through
+/// `endpoint::url_to_path` FIRST: a bare cache key, a SQL fragment or a
+/// variable name is not `/`-leading and is dropped here, which is what lets the
+/// verb tables above be generous. Returns whether a node was emitted.
+#[allow(clippy::too_many_arguments)]
+fn emit_client_endpoint(
+    method: &str,
+    raw: &str,
+    strong: bool,
+    at: TsNode,
+    file_rel: &str,
+    from: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> bool {
+    let Some(path) = endpoint::url_to_path(raw) else {
+        return false;
+    };
+    let pos = at.start_position();
+    let ep = ClientEndpoint {
+        method: method.to_string(),
+        path,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence: if strong {
+            Confidence::Strong
+        } else {
+            Confidence::Medium
+        },
+    };
+    push_client_endpoint(
+        repo,
+        &ep,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
+    true
 }
 
 fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
@@ -1382,5 +1740,220 @@ public class Service {
             .filter(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(_)))
             .collect();
         assert_eq!(self_calls.len(), 1);
+    }
+    // ------------------------------------------------------------------
+    // A4.3 — client-side HTTP (Refit attributes + HttpClient call sites)
+    // ------------------------------------------------------------------
+
+    fn endpoint_id(method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        )
+    }
+
+    #[test]
+    fn refit_interface_attributes_emit_endpoints() {
+        // A Refit contract has no call site: the verb attribute on the
+        // interface method IS the outbound call, so the ENDPOINT hangs off the
+        // METHOD node and the CALLS edge runs method -> endpoint.
+        let source = r#"
+namespace Shop.Clients;
+
+public interface IUserApi {
+    [Get("/api/users/{id}")]
+    Task<User> GetUserAsync(int id);
+
+    [Post("/api/users")]
+    Task<User> CreateUserAsync(User user);
+}
+"#;
+        let fp = parse_file(source, "Clients/IUserApi.cs", "Shop::Clients", repo()).unwrap();
+        let get = endpoint_id("GET", "/api/users/{id}");
+        let post = endpoint_id("POST", "/api/users");
+        assert!(fp.nodes.iter().any(|n| n.id == get), "GET endpoint missing");
+        assert!(fp.nodes.iter().any(|n| n.id == post), "POST endpoint missing");
+
+        let method_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "Shop::Clients::IUserApi::GetUserAsync",
+        );
+        assert!(
+            fp.edges.iter().any(|e| e.from == method_id
+                && e.to == get
+                && e.category == edge_category::CALLS),
+            "expected CALLS from the interface method into its ENDPOINT"
+        );
+        // A client contract is not a server: no ROUTE, so nothing can be
+        // mistaken for something this service HANDLES.
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ROUTE)
+                .count(),
+            0,
+            "Refit attributes must not mint server ROUTEs"
+        );
+    }
+
+    #[test]
+    fn refit_attributes_on_a_class_are_ignored() {
+        // The interface gate. `[Get]` on a class is some other library's
+        // attribute (or a source-generator marker); treating it as a Refit
+        // contract would mint a phantom endpoint for every one of them.
+        let source = r#"
+namespace Shop.Clients;
+
+public class NotARefitClient {
+    [Get("/api/ghost")]
+    public void Ghost() { }
+}
+"#;
+        let fp = parse_file(source, "Clients/NotARefitClient.cs", "Shop::Clients", repo()).unwrap();
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENDPOINT)
+                .count(),
+            0,
+            "[Get] on a class must emit no ENDPOINT"
+        );
+    }
+
+    #[test]
+    fn httpclient_calls_emit_endpoints_not_routes() {
+        let source = r#"
+namespace Shop.Clients;
+
+public class OrderClient {
+    private readonly HttpClient _http;
+
+    public async Task<string> ListAsync() {
+        var res = await _http.GetAsync("/api/orders");
+        return await res.Content.ReadAsStringAsync();
+    }
+
+    public async Task<string> CreateAsync(object o) {
+        var res = await _http.PostAsJsonAsync("/api/orders", o);
+        return await res.Content.ReadAsStringAsync();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
+        assert!(
+            fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/api/orders")),
+            "GET /api/orders ENDPOINT missing"
+        );
+        assert!(
+            fp.nodes.iter().any(|n| n.id == endpoint_id("POST", "/api/orders")),
+            "POST /api/orders ENDPOINT missing"
+        );
+        let method_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "Shop::Clients::OrderClient::ListAsync",
+        );
+        assert!(
+            fp.edges.iter().any(|e| e.from == method_id
+                && e.to == endpoint_id("GET", "/api/orders")
+                && e.category == edge_category::CALLS),
+            "expected CALLS from the enclosing method into its ENDPOINT"
+        );
+        // The direction matters: a caller is not a handler.
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ROUTE)
+                .count(),
+            0,
+            "an HttpClient call site must not become a server ROUTE"
+        );
+    }
+
+    #[test]
+    fn httpclient_interpolated_path_becomes_wildcard() {
+        // `${…}` is the shared contract normalise_http_path collapses, so an
+        // interpolated C# path pairs with a server `{id}` template.
+        let source = r#"
+namespace Shop.Clients;
+
+public class OrderClient {
+    private readonly HttpClient _http;
+
+    public async Task<string> GetAsync(int id) {
+        var res = await _http.GetAsync($"/api/users/{id}");
+        return await res.Content.ReadAsStringAsync();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
+        assert!(
+            fp.nodes
+                .iter()
+                .any(|n| n.id == endpoint_id("GET", "/api/users/${…}")),
+            "interpolated path should become /api/users/${{…}}"
+        );
+    }
+
+    #[test]
+    fn httpclient_non_url_string_arg_is_dropped() {
+        // `GetAsync` is also IDistributedCache / Redis vocabulary. The argument
+        // not being a path is the ONLY gate, so this is the test that keeps the
+        // generous verb table honest.
+        let source = r#"
+namespace Shop.Clients;
+
+public class OrderClient {
+    private readonly ICache _cache;
+
+    public async Task<string> LookupAsync(string key) {
+        var a = await _cache.GetAsync("user:42");
+        var b = await _cache.GetAsync(key);
+        return a;
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENDPOINT)
+                .count(),
+            0,
+            "a non-path argument must emit no ENDPOINT"
+        );
+    }
+
+    #[test]
+    fn http_request_message_emits_endpoint() {
+        // `new HttpRequestMessage(HttpMethod.Get, "/x")` + SendAsync is the
+        // idiomatic shape whenever a request needs custom headers.
+        let source = r#"
+namespace Shop.Clients;
+
+public class OrderClient {
+    private readonly HttpClient _http;
+
+    public async Task<string> AuthedAsync() {
+        var req = new HttpRequestMessage(HttpMethod.Get, "/api/secure");
+        var res = await _http.SendAsync(req);
+        return await res.Content.ReadAsStringAsync();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients/OrderClient.cs", "Shop::Clients", repo()).unwrap();
+        assert!(
+            fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/api/secure")),
+            "HttpRequestMessage(HttpMethod.Get, …) should emit a GET ENDPOINT"
+        );
     }
 }

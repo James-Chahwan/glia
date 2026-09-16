@@ -1,0 +1,18 @@
+{
+  "framework": "csharp-httpclient-http",
+  "language": "csharp",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /api/users", "note": "_http.GetAsync with an interpolated path -> GET /api/users/${…}"},
+    {"kind": "ENDPOINT", "name": "POST /api/users", "note": "_http.PostAsJsonAsync literal path"}
+  ],
+  "expect_edges": [
+    {"from": "GetUserAsync", "to": "GET /api/users", "category": "CALLS", "note": "enclosing method -> ENDPOINT"},
+    {"from": "POST /api/users", "to": "/api/users", "category": "HTTP_CALLS", "note": "pairs with the Go chi route"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "GET user:42", "note": "_cache.GetAsync(\"user:42\") is not an HTTP call — url_to_path drops it"}
+  ],
+  "mechanism": "http_client",
+  "cells": ["csharp/http_client"]
+}

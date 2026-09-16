@@ -1,0 +1,19 @@
+{
+  "framework": "csharp-refit-http",
+  "language": "csharp",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /api/users/{id}", "note": "Refit [Get] on an interface method"},
+    {"kind": "ENDPOINT", "name": "POST /api/users", "note": "Refit [Post]"}
+  ],
+  "expect_edges": [
+    {"from": "GetUserAsync", "to": "GET /api/users/{id}", "category": "CALLS", "note": "interface method -> its ENDPOINT (push_client_endpoint edge)"},
+    {"from": "GET /api/users/{id}", "to": "/api/users/{id}", "category": "HTTP_CALLS", "note": "Refit client pairs with the Go chi route"},
+    {"from": "POST /api/users", "to": "/api/users", "category": "HTTP_CALLS", "note": "Refit POST pairs"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "GET /api/ghost", "note": "[Get] on a CLASS is not a Refit contract — the interface gate must hold"}
+  ],
+  "mechanism": "http_client",
+  "cells": ["csharp/http_client"]
+}
