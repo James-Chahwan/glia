@@ -295,6 +295,30 @@
       ],
       "via": "queue"
     },
+    "csharp/secrets": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/secrets"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        2
+      ],
+      "via": null
+    },
     "dart/http_client": {
       "extract": [
         2,
@@ -463,6 +487,81 @@
       ],
       "via": "call"
     },
+    "go/cli_def": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/go/cli_def"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
+    "go/cli_inv": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/go/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
+    "go/cron": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/go/cron"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "partial",
+      "literal": [
+        2,
+        3
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        2,
+        4
+      ],
+      "via": "cron"
+    },
     "go/db": {
       "extract": [
         1,
@@ -486,6 +585,30 @@
         1
       ],
       "via": "db"
+    },
+    "go/flags": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/go/flags"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        3
+      ],
+      "via": null
     },
     "go/grpc": {
       "extract": [
@@ -639,6 +762,30 @@
       ],
       "via": "queue"
     },
+    "go/subproject": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/go/subproject"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "contain"
+    },
     "go/ws": {
       "extract": [
         2,
@@ -710,6 +857,30 @@
         1
       ],
       "via": "db"
+    },
+    "java/eventbus": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-eventbus-spring"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "eventbus"
     },
     "java/http_client": {
       "extract": [
@@ -859,6 +1030,54 @@
       ],
       "via": "queue"
     },
+    "java/migrations": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/java/migrations"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "java/subproject": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/subproject"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "contain"
+    },
     "php/calls": {
       "extract": [
         2,
@@ -882,6 +1101,30 @@
         2
       ],
       "via": "call"
+    },
+    "php/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/php-http"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
     },
     "php/http_server": {
       "extract": [
@@ -932,6 +1175,81 @@
       ],
       "via": "call"
     },
+    "python/cli_def": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/python/cli_def"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "cli"
+    },
+    "python/cli_inv": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "python/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/config"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
     "python/db": {
       "extract": [
         1,
@@ -955,6 +1273,30 @@
         1
       ],
       "via": "db"
+    },
+    "python/flags": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/flags"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        3
+      ],
+      "via": null
     },
     "python/http_client": {
       "extract": [
@@ -1052,6 +1394,78 @@
         1
       ],
       "via": "import"
+    },
+    "python/migrations": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/migrations"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "python/secrets": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/secrets"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
+    "python/taskq": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-py-celery"
+      ],
+      "forbid": [
+        3,
+        3
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
     },
     "python/tests": {
       "extract": [
@@ -1198,6 +1612,54 @@
         1
       ],
       "via": "import"
+    },
+    "ruby/migrations": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/migrations"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "ruby/taskq": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-rb-sidekiq"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
     },
     "rust/calls": {
       "extract": [
@@ -1537,6 +1999,30 @@
       ],
       "via": "eventbus"
     },
+    "typescript/flags": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/typescript/flags"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        3
+      ],
+      "via": null
+    },
     "typescript/graphql": {
       "extract": [
         2,
@@ -1692,6 +2178,54 @@
       ],
       "via": "queue"
     },
+    "typescript/secrets": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/typescript/secrets"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
+    "typescript/subproject": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/subproject"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "contain"
+    },
     "typescript/tests": {
       "extract": [
         1,
@@ -1748,7 +2282,9 @@
   "legacy_only": [
     "fixtures/contract-openapi-yaml",
     "fixtures/csharp-aspnet-composed",
+    "fixtures/csharp-minimal-api",
     "fixtures/elixir-xmodule-calls",
+    "fixtures/http-nav-route-precision",
     "fixtures/k8s-multidoc-cron",
     "fixtures/php-laravel-prefix",
     "fixtures/py-router-prefix",
@@ -1762,17 +2298,18 @@
     "fixtures/xcut-config-env-value",
     "fixtures/xcut-queue-tag-unpairable",
     "fixtures/xdata-source-shares",
+    "fixtures/xiac-terraform-k8s",
     "fixtures/xschema-csharp-namespace"
   ],
   "schema": 1,
   "totals": {
-    "covered": 71,
+    "covered": 93,
     "error": 0,
-    "full": 69,
+    "full": 78,
     "grid": 480,
-    "none": 1,
-    "partial": 1,
-    "unknown": 409
+    "none": 12,
+    "partial": 3,
+    "unknown": 387
   },
   "vocabulary": {
     "digest": "a3672b018b49",
