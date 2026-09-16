@@ -25,7 +25,7 @@ local build). Grading is hermetic (`GLIA_NO_PERSIST=1`, non-incremental).
 ## Fixture shape — the FROZEN key.json vocabulary
 
 Each `fixtures/<name>/` has source file(s) for one framework plus `key.json`.
-The ten fields below are the **complete and only** vocabulary:
+The eleven fields below are the **complete and only** vocabulary:
 
 ```json
 {
@@ -51,6 +51,9 @@ The ten fields below are the **complete and only** vocabulary:
     {"from": "Nav", "to": "GET /users", "category": "HTTP_CALLS"}  // no such edge
   ],
 
+  // ---- files git refuses to track, copied in for the grade only ----
+  "materialize": {"libs/sdk/.git": "libs/sdk/_dotgit"},  // dest: source
+
   // ---- matrix binding: stored and echoed, NOT graded here ----
   "mechanism": "http",
   "cells": ["typescript/http"],
@@ -58,6 +61,23 @@ The ten fields below are the **complete and only** vocabulary:
   "note": "free-form commentary, ignored by the grader"
 }
 ```
+
+### `materialize` — shipping a file git will not track
+
+git silently refuses to track any path component named `.git`: in a tree holding
+`libs/sdk/.git` (a `gitdir:` file) plus `libs/sdk/a.py`, `git add -A` exits 0 and
+`git ls-files` lists **only** `libs/sdk/a.py`. So a fixture that must prove
+"a nested `.git` makes a REGION anchor instead of being walked into" cannot ship
+the file it needs. It ships a trackable stand-in (`libs/sdk/_dotgit`) and maps
+`destination -> source` here; `build_graph` copies each one into place before
+`generate()` sees the tree, prints `[materialize] <n> paths in <fixture>` on
+stderr, and removes them again in a `finally` — including when `generate()`
+raises, because a leaked `.git` under `fixtures/` would make the glia tree
+itself look like it contains a submodule. Both paths are relative to the fixture
+dir and both must stay inside it (`../escape` raises
+`ValueError: … materialize path escapes fixture dir`); an existing destination
+raises rather than being overwritten. `git status --porcelain
+bench/substrate-gap/fixtures` is empty after a grade.
 
 **`grade_fixture` RAISES `ValueError` on any unrecognised top-level field**, and
 on any unrecognised sub-field of `expect_nodes` / `expect_edges` / `expect_cells`

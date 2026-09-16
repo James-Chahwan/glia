@@ -40,6 +40,13 @@ key.json schema:
       {"kind": "ENDPOINT", "node": "GET /users", "cell": "POSITION",
        "contains": "app.ts"}               # "contains" is optional
     ],
+    "materialize": {                       # optional: copy trackable stand-ins
+      "libs/sdk/.git": "libs/sdk/_dotgit"  #   into place for the duration of
+    },                                     #   the grade — git refuses to track
+                                           #   a path component named `.git`,
+                                           #   so a fixture that needs one ships
+                                           #   `_dotgit` and names it here.
+                                           #   Removed again in a finally.
     "mechanism": "http",                   # optional: matrix row/col binding
     "cells": ["typescript/http"],          # optional: "<language>/<mechanism>"
     "note": "free-form commentary"         # optional, ignored by the grader
@@ -65,6 +72,7 @@ Usage:
 """
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -86,6 +94,7 @@ TOP_FIELDS = {
     "expect_nodes", "expect_edges",      # recall
     "expect_cells",                      # recall, cell level
     "forbid",                            # precision
+    "materialize",                       # untrackable stand-ins (see _materialize)
     "mechanism", "cells",                # matrix binding (echoed, not graded)
     "note",                              # commentary
 }
@@ -118,16 +127,69 @@ def _node_matches(node, pattern):
     return p in _norm(node.get("name", "")) or p in _norm(node.get("qname", ""))
 
 
+def _materialize(fixture_dir, key):
+    """Copy trackable stand-ins into the untrackable names a fixture needs.
+
+    git will not track a path component named `.git` (`git add -A` silently
+    keeps only its siblings), so a fixture proving "a nested .git makes a
+    REGION anchor instead of being walked into" cannot ship the file it needs.
+    It ships `libs/sdk/_dotgit` and maps it here; the copy exists only for the
+    duration of `build_graph` and is removed in its finally.
+    """
+    created = []
+    spec = key.get("materialize") or {}
+    root = Path(fixture_dir).resolve()
+    if not isinstance(spec, dict):
+        raise ValueError(f"{root.name}: materialize must be an object, got {type(spec).__name__}")
+    for dest_rel, src_rel in sorted(spec.items()):
+        if not isinstance(src_rel, str):
+            raise ValueError(f"{root.name}: materialize source must be a string: {dest_rel}")
+        dest = (root / dest_rel).resolve()
+        src = (root / src_rel).resolve()
+        if root not in dest.parents or root not in src.parents:
+            raise ValueError(f"{root.name}: materialize path escapes fixture dir: {dest_rel}")
+        if not src.exists():
+            raise ValueError(f"{root.name}: materialize source missing: {src_rel}")
+        if dest.exists() or dest.is_symlink():
+            raise ValueError(f"{root.name}: materialize destination already exists: {dest_rel}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dest) if src.is_dir() else shutil.copyfile(src, dest)
+        created.append(dest)
+    if created:
+        print(f"[materialize] {len(created)} paths in {root.name}", file=sys.stderr)
+    return created
+
+
+def _dematerialize(created):
+    """Remove every stand-in. One failure must not mask the rest: a leaked
+    `.git` under fixtures/ would make the glia tree itself look like it has a
+    submodule, so each removal is reported, never raised."""
+    for path in reversed(created):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+        except OSError as exc:  # pragma: no cover - cleanup must never mask
+            print(f"[materialize] FAILED to remove {path}: {exc}", file=sys.stderr)
+
+
 def build_graph(fixture_dir, key):
-    dirs = [str((fixture_dir / d).resolve()) for d in key.get("dirs", ["."])]
-    if len(dirs) == 1:
-        g = rg.generate(dirs[0], False)  # non-incremental => hermetic per run
-    else:
-        g = rg.generate_many(dirs)  # distinct RepoIds => cross resolvers fire
-    nodes = json.loads(g.nodes_json())
-    edges = json.loads(g.edges_json())
-    by_id = {n["id"]: n for n in nodes}
-    return g, nodes, edges, by_id
+    created = _materialize(fixture_dir, key)
+    try:
+        dirs = [str((fixture_dir / d).resolve()) for d in key.get("dirs", ["."])]
+        if len(dirs) == 1:
+            g = rg.generate(dirs[0], False)  # non-incremental => hermetic per run
+        else:
+            g = rg.generate_many(dirs)  # distinct RepoIds => cross resolvers fire
+        nodes = json.loads(g.nodes_json())
+        edges = json.loads(g.edges_json())
+        by_id = {n["id"]: n for n in nodes}
+        return g, nodes, edges, by_id
+    finally:
+        # Cells are read off the in-memory graph after this returns, so the
+        # stand-ins are safe to drop here even on the _dump / expect_cells path.
+        _dematerialize(created)
 
 
 def _grade_forbid(fixture, key, nodes, edges, by_id):
