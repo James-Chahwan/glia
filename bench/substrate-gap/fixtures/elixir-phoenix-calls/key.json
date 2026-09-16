@@ -2,6 +2,7 @@
   "framework": "elixir-phoenix",
   "language": "elixir",
   "dirs": ["."],
+  "cells": ["elixir/calls"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "compute", "note": "caller"},
     {"kind": "FUNCTION", "name": "helper", "note": "callee"}

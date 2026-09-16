@@ -2,6 +2,7 @@
   "framework": "ts-calls",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/calls"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "helper", "note": "callee"},
     {"kind": "FUNCTION", "name": "compute", "note": "caller"}

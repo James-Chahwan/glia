@@ -2,6 +2,11 @@
   "framework": "vue-http-calls",
   "language": "typescript",
   "dirs": ["client", "server"],
+  "cells": [
+    "typescript/http_client",
+    "go/http_server"
+  ],
+  "note": "Cell binding: the client dir is a .vue SFC (typescript row) but the server dir is main.go, so the ROUTE scores go/http_server, not typescript/http_server.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "/users", "note": "Vue axios client endpoint"},
     {"kind": "ROUTE", "name": "/users", "note": "Go chi route"}

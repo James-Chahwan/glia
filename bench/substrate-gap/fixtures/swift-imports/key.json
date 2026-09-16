@@ -2,7 +2,7 @@
   "framework": "swift-imports",
   "language": "swift",
   "dirs": ["."],
-  "note": "NOT-APPLICABLE: Swift is module-based — same-module files see each other with NO import statement, and `import Foundation` is an EXTERNAL framework (glia correctly emits no in-repo IMPORTS edge for external packages, matching every language). There is no in-repo file-level import for Swift to extract, so IMPORTS is not a meaningful cell here. Kept as a node-extraction check only.",
+  "note": "NOT-APPLICABLE: Swift is module-based — same-module files see each other with NO import statement, and `import Foundation` is an EXTERNAL framework (glia correctly emits no in-repo IMPORTS edge for external packages, matching every language). There is no in-repo file-level import for Swift to extract, so IMPORTS is not a meaningful cell here. Kept as a node-extraction check only. It therefore declares NO `cells`: binding swift/imports would render a \u25d0 in the matrix implying glia half-extracts Swift imports, when what was measured is that there is nothing to extract.",
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "greet", "note": "in util.swift — visible cross-file without any import (module-scoped)"}
   ],

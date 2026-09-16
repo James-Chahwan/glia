@@ -2,6 +2,7 @@
   "framework": "py-inherits",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/impl"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "Animal", "note": "base"},
     {"kind": "CLASS", "name": "Dog", "note": "subclass"}

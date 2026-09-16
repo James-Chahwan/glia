@@ -2,6 +2,7 @@
   "framework": "terraform",
   "language": "terraform",
   "dirs": ["."],
+  "note": "Deliberately legacy-only (no `cells`): DEPENDS_ON is scoped to the `imports` column (manifest-level PACKAGE_DEP), and a terraform resource-to-resource dependency is not a module import. Scoring it as terraform/imports would put a confident `full` in the wrong cell.",
   "expect_nodes": [
     {"kind": "INFRA_RESOURCE", "name": "aws_iam_role", "note": "role resource"},
     {"kind": "INFRA_RESOURCE", "name": "aws_s3_bucket", "note": "bucket resource"},

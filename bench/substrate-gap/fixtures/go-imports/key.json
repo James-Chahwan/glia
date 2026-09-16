@@ -2,6 +2,7 @@
   "framework": "go-imports",
   "language": "go",
   "dirs": ["."],
+  "cells": ["go/imports"],
   "expect_nodes": [
     {"kind": "MODULE", "name": "main", "note": "main package file"},
     {"kind": "FUNCTION", "name": "Double", "note": "imported symbol's def"}

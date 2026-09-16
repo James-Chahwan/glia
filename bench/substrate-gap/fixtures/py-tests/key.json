@@ -2,6 +2,7 @@
   "framework": "py-tests",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/tests"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "add", "note": "unit under test"},
     {"kind": "FUNCTION", "name": "test_add", "note": "pytest test"}

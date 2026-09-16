@@ -2,6 +2,7 @@
   "framework": "elixir-phoenix",
   "language": "elixir",
   "dirs": ["."],
+  "cells": ["elixir/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/api/users", "note": "get /users under scope /api"},
     {"kind": "FUNCTION", "name": "index", "note": "UserController.index action (Elixir def)"}

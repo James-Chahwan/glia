@@ -2,6 +2,7 @@
   "framework": "vue-imports",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/imports"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "greet", "note": "exported from greeter.ts"}
   ],

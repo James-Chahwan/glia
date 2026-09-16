@@ -2,6 +2,7 @@
   "framework": "go-handled-by",
   "language": "go",
   "dirs": ["."],
+  "cells": ["go/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/users", "note": "chi route"},
     {"kind": "FUNCTION", "name": "listUsers", "note": "handler fn"}

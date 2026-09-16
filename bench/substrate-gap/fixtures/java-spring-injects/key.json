@@ -2,6 +2,7 @@
   "framework": "java-spring",
   "language": "java",
   "dirs": ["."],
+  "cells": ["java/injects"],
   "expect_nodes": [
     {"kind": "SERVICE", "name": "UserService", "note": "@Service bean"},
     {"kind": "CLASS", "name": "UserController", "note": "consumer"}

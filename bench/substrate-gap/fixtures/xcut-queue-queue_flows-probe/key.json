@@ -3,6 +3,7 @@
   "language": "go",
   "note": "Lowercase-needle control (nc.publish/subscribe). Topic is now correctly parsed as the string arg 'orders' (was a framework-tag 'nats' fallback before extract_topic_near's paren-skip fix). The real analyzer row is xcut-queue-queue_flows.",
   "dirs": ["client", "server"],
+  "cells": ["go/nats"],
   "expect_nodes": [
     {"kind": "QUEUE_PRODUCER", "name": "orders"},
     {"kind": "QUEUE_CONSUMER", "name": "orders"}

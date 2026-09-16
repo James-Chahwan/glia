@@ -2,6 +2,7 @@
   "framework": "java-spring",
   "language": "java",
   "dirs": ["."],
+  "cells": ["java/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/{id}", "note": "GET route, class @RequestMapping(\"/users\") composed -> GET /users/{id}"},
     {"kind": "METHOD", "name": "getUser", "note": "handler method"}

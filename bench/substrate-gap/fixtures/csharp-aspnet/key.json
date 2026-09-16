@@ -2,6 +2,13 @@
   "framework": "csharp-aspnet",
   "language": "csharp",
   "dirs": ["."],
+  "cells": [
+    "csharp/http_server",
+    "csharp/calls",
+    "csharp/imports",
+    "csharp/injects",
+    "csharp/impl"
+  ],
   "expect_nodes": [
     {"kind": "INTERFACE", "name": "IUserService", "note": "DI service interface"},
     {"kind": "CLASS", "name": "UserService", "note": "impl"},

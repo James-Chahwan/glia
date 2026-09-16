@@ -2,6 +2,7 @@
   "framework": "go-accesses-data",
   "language": "go",
   "dirs": ["."],
+  "cells": ["go/db"],
   "expect_nodes": [
     {"kind": "DATA_ENTITY", "name": "users", "note": "table in SELECT ... FROM users"},
     {"kind": "FUNCTION", "name": "getUsers", "note": "fn issuing the query"}

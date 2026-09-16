@@ -2,6 +2,7 @@
   "framework": "dart-imports",
   "language": "dart",
   "dirs": ["."],
+  "cells": ["dart/imports"],
   "expect_nodes": [
     {"kind": "MODULE", "name": "service", "note": "importer file"},
     {"kind": "MODULE", "name": "models", "note": "imported relative file"}

@@ -2,6 +2,7 @@
   "framework": "rust-axum",
   "language": "rust",
   "dirs": ["."],
+  "cells": ["rust/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/users", "note": "axum route"},
     {"kind": "FUNCTION", "name": "list_users", "note": "handler"}

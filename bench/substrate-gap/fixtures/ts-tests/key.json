@@ -2,6 +2,7 @@
   "framework": "ts-tests",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/tests"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "add", "note": "unit under test"}
   ],

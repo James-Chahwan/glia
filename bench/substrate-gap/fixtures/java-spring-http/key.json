@@ -2,6 +2,10 @@
   "framework": "java-spring",
   "language": "java",
   "dirs": ["client", "server"],
+  "cells": [
+    "java/http_client",
+    "java/http_server"
+  ],
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "rest.getForObject(\"/users/\" + id, …) -> client ENDPOINT (Pattern A)"},
     {"kind": "ENDPOINT", "name": "POST /users", "note": "rest.postForObject(\"/users\", …) -> client ENDPOINT"},

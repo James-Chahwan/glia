@@ -2,6 +2,7 @@
   "framework": "ruby-rails",
   "language": "ruby",
   "dirs": ["."],
+  "cells": ["ruby/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "users", "note": "routes.rb GET users"},
     {"kind": "CLASS", "name": "UsersController", "note": "controller"},

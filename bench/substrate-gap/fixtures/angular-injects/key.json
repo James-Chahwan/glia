@@ -2,6 +2,7 @@
   "framework": "angular",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/injects"],
   "expect_nodes": [
     {"kind": "SERVICE", "name": "UserService", "note": "@Injectable service"},
     {"kind": "COMPONENT", "name": "UsersComponent", "note": "@Component"}

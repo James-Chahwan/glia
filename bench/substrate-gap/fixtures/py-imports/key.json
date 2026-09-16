@@ -2,6 +2,7 @@
   "framework": "py-imports",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/imports"],
   "expect_nodes": [
     {"kind": "MODULE", "name": "util", "note": "imported module"},
     {"kind": "MODULE", "name": "app", "note": "importer"}

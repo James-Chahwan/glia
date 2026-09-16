@@ -2,6 +2,7 @@
   "framework": "scala-inherits_from",
   "language": "scala",
   "dirs": ["."],
+  "cells": ["scala/impl"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "Dog", "note": "subclass"},
     {"kind": "INTERFACE", "name": "Animal", "note": "trait"}

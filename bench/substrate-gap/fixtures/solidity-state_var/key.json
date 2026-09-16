@@ -2,6 +2,7 @@
   "framework": "solidity-state_var",
   "language": "solidity",
   "dirs": ["."],
+  "note": "Deliberately legacy-only (no `cells`): STATE_VAR has no column in the 30-mechanism vocabulary.",
   "expect_nodes": [
     {"kind": "STATE_VAR", "name": "feeBasisPoints", "note": "public state variable"},
     {"kind": "STATE_VAR", "name": "treasury", "note": "public state variable"}

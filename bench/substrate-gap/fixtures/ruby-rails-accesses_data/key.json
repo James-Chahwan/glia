@@ -2,6 +2,7 @@
   "framework": "ruby-rails",
   "language": "ruby",
   "dirs": ["."],
+  "cells": ["ruby/db"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "User", "note": "ActiveRecord model"},
     {"kind": "METHOD", "name": "active", "note": "controller action querying"}

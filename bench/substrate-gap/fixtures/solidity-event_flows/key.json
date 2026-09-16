@@ -2,6 +2,7 @@
   "framework": "solidity-event_flows",
   "language": "solidity",
   "dirs": ["."],
+  "cells": ["solidity/eventbus"],
   "expect_nodes": [
     {"kind": "EVENT_EMITTER", "name": "BidPlaced", "note": "event declaration / emit site"}
   ],

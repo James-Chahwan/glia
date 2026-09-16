@@ -2,6 +2,7 @@
   "framework": "xcut-eventbus",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/eventbus"],
   "expect_nodes": [
     {"kind": "EVENT_EMITTER", "name": "userCreated", "note": "bus.emit('userCreated')"},
     {"kind": "EVENT_HANDLER", "name": "userCreated", "note": "bus.on('userCreated')"}

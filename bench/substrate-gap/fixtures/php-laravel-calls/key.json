@@ -2,6 +2,7 @@
   "framework": "php-laravel",
   "language": "php",
   "dirs": ["."],
+  "cells": ["php/calls"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "Greeter", "note": "service class"},
     {"kind": "METHOD", "name": "greet", "note": "callee method"},

@@ -2,6 +2,11 @@
   "framework": "dart-http-dio",
   "language": "dart",
   "dirs": ["client", "server"],
+  "cells": [
+    "dart/http_client",
+    "go/http_server"
+  ],
+  "note": "Cell binding: client is Dart, server is Go — the ENDPOINT scores dart/http_client and the ROUTE scores go/http_server.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "dio.get('/users/$id') -> client ENDPOINT (Pattern A fix)"},
     {"kind": "ENDPOINT", "name": "POST /users", "note": "dio.post('/users') -> client ENDPOINT"},

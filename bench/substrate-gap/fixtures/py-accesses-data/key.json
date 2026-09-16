@@ -2,6 +2,7 @@
   "framework": "py-accesses-data",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/db"],
   "expect_nodes": [
     {"kind": "DATA_ENTITY", "name": "users", "note": "table"},
     {"kind": "FUNCTION", "name": "find_users", "note": "accessor"}

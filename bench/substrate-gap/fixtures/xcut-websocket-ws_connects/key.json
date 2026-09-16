@@ -2,6 +2,11 @@
   "framework": "xcut-websocket",
   "language": "typescript+go",
   "dirs": ["client", "server"],
+  "cells": [
+    "typescript/ws",
+    "go/ws"
+  ],
+  "note": "Cell binding: WS_CLIENT is the TypeScript client and WS_HANDLER the Go server. `ws` scopes both kinds, so both rows grade off the same pair — which is the honest reading: one fixture proves the same connect for both.",
   "expect_nodes": [
     {"kind": "WS_CLIENT", "name": "/ws", "note": "TS new WebSocket(ws://.../ws)"},
     {"kind": "WS_HANDLER", "name": "ws", "note": "Go gorilla websocket.Upgrader handler"}

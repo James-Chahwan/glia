@@ -2,6 +2,7 @@
   "framework": "c_cpp-imports",
   "language": "c++",
   "dirs": ["."],
+  "cells": ["c_cpp/imports"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "square", "note": "declared in mathutil.h, defined in main.cpp"},
     {"kind": "FUNCTION", "name": "run", "note": "importer TU function"}

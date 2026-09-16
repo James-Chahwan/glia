@@ -2,6 +2,7 @@
   "framework": "scala-imports",
   "language": "scala",
   "dirs": ["."],
+  "cells": ["scala/imports"],
   "expect_nodes": [
     {"kind": "METHOD", "name": "greet", "note": "defined in Greeter"}
   ],

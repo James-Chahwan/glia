@@ -2,6 +2,8 @@
   "framework": "xcut-grpc",
   "language": "proto+go",
   "dirs": ["client", "server"],
+  "cells": ["go/grpc"],
+  "note": "Cell binding: go/grpc only. The server side is a .proto file and `proto` is not one of the 16 language rows, so the IDL side of this measurement has nowhere to be scored.",
   "expect_nodes": [
     {"kind": "GRPC_SERVICE", "name": "UserService", "note": "proto service node grpc:UserService"},
     {"kind": "GRPC_CLIENT", "name": "UserService", "note": "Go client stub pb.NewUserServiceClient -> grpc_client:UserService"}

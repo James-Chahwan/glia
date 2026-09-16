@@ -2,6 +2,7 @@
   "framework": "ts-imports-rel",
   "language": "typescript",
   "dirs": ["."],
+  "cells": ["typescript/imports"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "greet", "note": "exported from util.ts"}
   ],

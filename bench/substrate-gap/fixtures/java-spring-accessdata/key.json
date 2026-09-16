@@ -2,6 +2,7 @@
   "framework": "java-spring",
   "language": "java",
   "dirs": ["."],
+  "cells": ["java/db"],
   "expect_nodes": [
     {"kind": "DATA_ENTITY", "name": "User", "note": "@Entity"},
     {"kind": "INTERFACE", "name": "UserRepository", "note": "@Repository"}

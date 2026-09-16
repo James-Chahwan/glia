@@ -2,6 +2,7 @@
   "framework": "scala-calls",
   "language": "scala",
   "dirs": ["."],
+  "cells": ["scala/calls"],
   "expect_nodes": [
     {"kind": "METHOD", "name": "helper", "note": "callee"},
     {"kind": "METHOD", "name": "compute", "note": "caller"}

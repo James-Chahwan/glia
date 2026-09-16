@@ -2,6 +2,7 @@
   "framework": "solidity-inherits_from",
   "language": "solidity",
   "dirs": ["."],
+  "cells": ["solidity/impl"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "Token", "note": "derived contract"},
     {"kind": "CLASS", "name": "Ownable", "note": "base contract"}

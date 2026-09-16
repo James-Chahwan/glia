@@ -2,6 +2,7 @@
   "framework": "xcut-graphql",
   "language": "typescript",
   "dirs": ["client", "server"],
+  "cells": ["typescript/graphql"],
   "expect_nodes": [
     {"kind": "GRAPHQL_OPERATION", "name": "getUser", "note": "apollo gql query getUser (client)"},
     {"kind": "GRAPHQL_RESOLVER", "name": "getUser", "note": "nestjs @Query() method getUser (server)"}

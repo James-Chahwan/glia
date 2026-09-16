@@ -2,6 +2,7 @@
   "framework": "clojure-imports",
   "language": "clojure",
   "dirs": ["."],
+  "cells": ["clojure/imports"],
   "expect_nodes": [
     {"kind": "MODULE", "name": "core", "note": "importing ns"},
     {"kind": "MODULE", "name": "util", "note": "required ns"}

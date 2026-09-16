@@ -2,6 +2,10 @@
   "framework": "xstack-go-http",
   "language": "go",
   "dirs": ["client", "server"],
+  "cells": [
+    "go/http_client",
+    "go/http_server"
+  ],
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "http.Get('http://api.example.com/users') -> client ENDPOINT (Pattern A fix)"},
     {"kind": "ROUTE", "name": "/users", "note": "Go chi server route (r.Get)"}

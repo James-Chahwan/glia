@@ -2,6 +2,7 @@
   "framework": "java-spring",
   "language": "java",
   "dirs": ["."],
+  "cells": ["java/impl"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "Circle", "note": "subclass"},
     {"kind": "CLASS", "name": "Shape", "note": "superclass"},

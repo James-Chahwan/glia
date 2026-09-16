@@ -2,6 +2,7 @@
   "framework": "terraform",
   "language": "terraform",
   "dirs": ["."],
+  "note": "Deliberately legacy-only (no `cells`): INFRA_REFERENCES is in no mechanism's category list.",
   "expect_nodes": [
     {"kind": "INFRA_RESOURCE", "name": "aws_vpc", "note": "vpc resource"},
     {"kind": "INFRA_RESOURCE", "name": "aws_subnet", "note": "subnet resource"},

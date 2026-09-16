@@ -2,6 +2,7 @@
   "framework": "solidity-calls",
   "language": "solidity",
   "dirs": ["."],
+  "cells": ["solidity/calls"],
   "expect_nodes": [
     {"kind": "METHOD", "name": "deposit", "note": "caller"},
     {"kind": "METHOD", "name": "_credit", "note": "callee"}

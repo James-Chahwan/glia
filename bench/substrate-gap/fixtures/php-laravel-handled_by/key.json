@@ -2,6 +2,7 @@
   "framework": "php-laravel",
   "language": "php",
   "dirs": ["."],
+  "cells": ["php/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/users", "note": "Route::get('/users', ...)"},
     {"kind": "METHOD", "name": "index", "note": "UserController::index handler"}

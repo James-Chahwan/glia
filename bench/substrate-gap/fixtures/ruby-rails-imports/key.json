@@ -2,6 +2,7 @@
   "framework": "ruby-rails",
   "language": "ruby",
   "dirs": ["."],
+  "cells": ["ruby/imports"],
   "expect_nodes": [
     {"kind": "MODULE", "name": "main", "note": "requiring file"},
     {"kind": "MODULE", "name": "util", "note": "required file"}

@@ -2,6 +2,7 @@
   "framework": "c_cpp-calls",
   "language": "c++",
   "dirs": ["."],
+  "cells": ["c_cpp/calls"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "helper", "note": "callee"},
     {"kind": "FUNCTION", "name": "compute", "note": "caller"}

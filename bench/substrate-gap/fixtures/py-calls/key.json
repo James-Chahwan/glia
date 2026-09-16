@@ -2,6 +2,7 @@
   "framework": "py-calls",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/calls"],
   "expect_nodes": [
     {"kind": "FUNCTION", "name": "helper", "note": "callee"},
     {"kind": "FUNCTION", "name": "compute", "note": "caller"}

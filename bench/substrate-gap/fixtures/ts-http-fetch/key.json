@@ -2,6 +2,10 @@
   "framework": "ts-http-fetch",
   "language": "typescript",
   "dirs": ["client", "server"],
+  "cells": [
+    "typescript/http_client",
+    "typescript/http_server"
+  ],
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "/users", "note": "TS fetch endpoint (client)"},
     {"kind": "ROUTE", "name": "/users", "note": "Express route (server)"}

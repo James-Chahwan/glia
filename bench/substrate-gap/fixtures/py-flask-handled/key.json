@@ -2,6 +2,7 @@
   "framework": "py-flask-handled",
   "language": "python",
   "dirs": ["."],
+  "cells": ["python/http_server"],
   "expect_nodes": [
     {"kind": "ROUTE", "name": "/users", "note": "flask route"},
     {"kind": "FUNCTION", "name": "list_users", "note": "view fn"}

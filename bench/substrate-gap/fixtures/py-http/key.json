@@ -2,6 +2,10 @@
   "framework": "py-http",
   "language": "python",
   "dirs": ["client", "server"],
+  "cells": [
+    "python/http_client",
+    "python/http_server"
+  ],
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "requests.get(f'http://api/users/{uid}') -> client ENDPOINT (Pattern A); f-string seg -> ${…}"},
     {"kind": "ENDPOINT", "name": "POST /users", "note": "requests.post('http://api/users') -> client ENDPOINT"},

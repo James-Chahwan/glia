@@ -2,6 +2,11 @@
   "framework": "swift-http",
   "language": "swift",
   "dirs": ["client", "server"],
+  "cells": [
+    "swift/http_client",
+    "go/http_server"
+  ],
+  "note": "Cell binding: client is Swift, server is Go — the ENDPOINT scores swift/http_client and the ROUTE scores go/http_server.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "URL(string:) + URLSession.dataTask, GET default -> client ENDPOINT (Pattern A fix); path /users/${…}"},
     {"kind": "ENDPOINT", "name": "POST /users", "note": "URLRequest httpMethod=\"POST\" -> client ENDPOINT POST /users"},
