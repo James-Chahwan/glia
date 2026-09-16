@@ -44,6 +44,13 @@ pub fn parse_file(
 
     visit_children(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
 
+    if acc.minimal_api_routes > 0 {
+        eprintln!(
+            "[csharp-minimal-api] {} top-level Map* routes in {file_rel_path}",
+            acc.minimal_api_routes
+        );
+    }
+
     let client_endpoints = acc.refit_endpoints + acc.httpclient_endpoints;
     if client_endpoints > 0 {
         eprintln!(
@@ -78,6 +85,10 @@ struct Acc {
     /// client-HTTP surface is visible in the fired-on line.
     refit_endpoints: usize,
     httpclient_endpoints: usize,
+    /// A4.2 marker counter: ROUTEs minted by the minimal-API invocation scan,
+    /// counted separately from the attribute-routing pass so a regression in
+    /// either is visible on its own fired-on line.
+    minimal_api_routes: usize,
 }
 
 fn visit_children(
@@ -100,6 +111,15 @@ fn visit_children(
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
                 visit_type_decl(child, src, file_rel, parent_qname, parent_id, module_id, repo, acc);
+            }
+            // A4.2: C# 9 top-level statements. `app.MapGet("/health", …)` in a
+            // minimal-API Program.cs parses as `global_statement`, outside any
+            // class or method, so every class/method-anchored pass above misses
+            // it — and minimal APIs are the DEFAULT template for a new .NET
+            // service, so that miss is the whole server surface.
+            "global_statement" => {
+                acc.minimal_api_routes +=
+                    scan_minimal_api_routes(child, src, module_id, module_id, repo, acc);
             }
             _ => {}
         }
@@ -240,6 +260,7 @@ fn visit_type_decl(
                     file_rel,
                     &qname,
                     id,
+                    module_id,
                     &class_prefix,
                     name,
                     kind == node_kind::INTERFACE,
@@ -377,6 +398,7 @@ fn visit_method(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     class_prefix: &str,
     type_name: &str,
     in_interface: bool,
@@ -411,6 +433,10 @@ fn visit_method(
         // outbound HTTP call, hung off the enclosing METHOD.
         let n = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
         acc.httpclient_endpoints += n;
+        // A4.2: `app.UseEndpoints(e => e.MapGet("/health", …))` inside a
+        // `Configure(IApplicationBuilder app)` is the pre-.NET-6 spelling of
+        // the same registration. Same scanner, anchored on this method.
+        acc.minimal_api_routes += scan_minimal_api_routes(body, src, id, module_id, repo, acc);
     }
 
     // A4.3, client side: a Refit contract carries the whole call in attributes,
@@ -418,9 +444,7 @@ fn visit_method(
     let n = check_refit_attrs(node, src, file_rel, id, repo, in_interface, acc);
     acc.refit_endpoints += n;
 
-    let emitted = check_route_attrs(node, src, id, repo, class_prefix, type_name, name, acc);
-    check_minimal_api_routes(node, src, id, repo, acc);
-    emitted
+    check_route_attrs(node, src, id, repo, class_prefix, type_name, name, acc)
 }
 
 /// G12.5: heuristic — does this base-list name look like an interface?
@@ -773,29 +797,149 @@ fn string_literal_text(node: TsNode, src: &[u8]) -> Option<String> {
     }
 }
 
-/// Minimal-API registration inside a method body: `app.MapGet("/path", …)`.
-/// Still the pre-AST text scan, kept verbatim so no capability is lost before
-/// A4.2 re-homes it as a proper invocation walk; moved out of
-/// `check_route_attrs` and called from `visit_method` only, so the class-level
-/// pass can no longer re-emit each of these a second time.
-fn check_minimal_api_routes(node: TsNode, src: &[u8], handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let text = text_of(node, src);
-    for method_name in &[
-        "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapHead", "MapOptions",
-    ] {
-        let search = format!(".{method_name}(\"");
-        let mut search_from = 0;
-        while let Some(rel) = text[search_from..].find(&search) {
-            let pos = search_from + rel;
-            let after = &text[pos + search.len()..];
-            if let Some(end) = after.find('"') {
-                let path = &after[..end];
-                let method = method_name.trim_start_matches("Map").to_uppercase();
-                emit_route(&method, path, handler_id, repo, acc);
-            }
-            search_from = pos + search.len();
+/// The ASP.NET Core minimal-API registration verbs, keyed by the invoked member
+/// name. `Map` on its own is deliberately absent: `app.Map("/x", branch)` takes
+/// a whole sub-pipeline rather than a verb, so it names no HTTP method.
+const MINIMAL_API_MAPS: [&str; 7] = [
+    "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapHead", "MapOptions",
+];
+
+/// Walk a subtree and emit one ROUTE per `app.MapGet("/path", handler)`.
+///
+/// A4.2 re-homes what used to be a `text.find(".MapGet(\"")` scan of the raw
+/// source onto the AST, and — crucially — makes it callable from somewhere
+/// other than a method declaration, which is what the top-level-statements
+/// shape needs. Returns the number of routes emitted.
+///
+/// NO SKIP SET, unlike `collect_calls_in` / `collect_client_endpoints_in`.
+/// Those attribute a call to its nearest enclosing declaration, so they must
+/// stop at a lambda; a route is a global registration, and the two idiomatic
+/// spellings — `app.UseEndpoints(e => e.MapGet(…))` and a chained
+/// `MapGroup(…).MapGet(…)` — both put the registration INSIDE a lambda or a
+/// receiver expression. Pruning either would drop the majority of real
+/// minimal-API surfaces, and the text scan this replaces saw them all.
+fn scan_minimal_api_routes(
+    node: TsNode,
+    src: &[u8],
+    enclosing: NodeId,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> usize {
+    let mut emitted = 0usize;
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "invocation_expression"
+            && minimal_api_route(n, src, enclosing, module_id, repo, acc)
+        {
+            emitted += 1;
         }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
     }
+    emitted
+}
+
+/// One `app.MapGet("/path", handler)` → one ROUTE. False when the invocation is
+/// not a Map* verb or names no literal path.
+fn minimal_api_route(
+    inv: TsNode,
+    src: &[u8],
+    enclosing: NodeId,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> bool {
+    let Some(func) = inv.child_by_field_name("function") else {
+        return false;
+    };
+    if func.kind() != "member_access_expression" {
+        return false;
+    }
+    let Some(name) = member_name_text(func, src).filter(|n| MINIMAL_API_MAPS.contains(n)) else {
+        return false;
+    };
+    // PRECISION GATE — do NOT relax. `MapGet` is also a method on unrelated
+    // map/dictionary APIs; requiring a WRITTEN string literal as the first
+    // argument is the only thing separating those from a route registration.
+    let Some(raw) = nth_arg_expr(inv, 0).and_then(|a| string_literal_text(a, src)) else {
+        return false;
+    };
+    let method = name.trim_start_matches("Map").to_ascii_uppercase();
+    let path = endpoint::abs_path(&endpoint::join_path(&map_group_prefix(func, src), &raw));
+
+    // The handler argument decides what HANDLED_BY points at. A lambda names no
+    // node, so the route hangs off `enclosing` (the MODULE at top level) — the
+    // same convention the php/ruby module-scoped route scanners use. A method
+    // group (`HealthHandler.Get`) DOES name one, so it becomes an
+    // `UnresolvedRef` for the graph crate to bind. Exactly one of the two.
+    match nth_arg_expr(inv, 1) {
+        Some(h) if h.kind() == "identifier" => {
+            let route_id = emit_route_node(&method, &path, repo, acc);
+            push_handler_ref(
+                route_id,
+                module_id,
+                CallQualifier::Bare(text_of(h, src).to_string()),
+                acc,
+            );
+        }
+        Some(h) if h.kind() == "member_access_expression" => {
+            let base = h.child_by_field_name("expression");
+            match (base, member_name_text(h, src)) {
+                (Some(b), Some(m)) if b.kind() == "identifier" => {
+                    let route_id = emit_route_node(&method, &path, repo, acc);
+                    push_handler_ref(
+                        route_id,
+                        module_id,
+                        CallQualifier::Attribute {
+                            base: text_of(b, src).to_string(),
+                            name: m.to_string(),
+                        },
+                        acc,
+                    );
+                }
+                _ => emit_route(&method, &path, enclosing, repo, acc),
+            }
+        }
+        _ => emit_route(&method, &path, enclosing, repo, acc),
+    }
+    true
+}
+
+fn push_handler_ref(route_id: NodeId, module_id: NodeId, qualifier: CallQualifier, acc: &mut Acc) {
+    acc.refs.push(UnresolvedRef {
+        from: route_id,
+        from_module: module_id,
+        qualifier,
+        category: edge_category::HANDLED_BY,
+    });
+}
+
+/// The route prefix a chained `app.MapGroup("/api").MapGet("/x", …)` contributes.
+///
+/// Walks the RECEIVER chain, so nested groups compose. The other spelling —
+/// `var g = app.MapGroup("/api"); g.MapGet(…);` — needs local-variable tracking
+/// and falls back to no prefix. TODO(A4.2b) MapGroup prefix via a local binding.
+fn map_group_prefix(func: TsNode, src: &[u8]) -> String {
+    let Some(recv) = func
+        .child_by_field_name("expression")
+        .filter(|r| r.kind() == "invocation_expression")
+    else {
+        return String::new();
+    };
+    let Some(inner) = recv
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "member_access_expression")
+    else {
+        return String::new();
+    };
+    if member_name_text(inner, src) != Some("MapGroup") {
+        return String::new();
+    }
+    let Some(seg) = nth_arg_expr(recv, 0).and_then(|a| string_literal_text(a, src)) else {
+        return String::new();
+    };
+    endpoint::join_path(&map_group_prefix(inner, src), &seg)
 }
 
 // ============================================================================
@@ -1113,7 +1257,10 @@ fn emit_client_endpoint(
     true
 }
 
-fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
+/// A ROUTE node whose handler is a named node the graph must still bind. The
+/// caller pushes the `UnresolvedRef`; emitting the HANDLED_BY Edge here too
+/// would give one route both an edge and a ref, i.e. two handlers.
+fn emit_route_node(method: &str, path: &str, repo: RepoId, acc: &mut Acc) -> NodeId {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
@@ -1125,25 +1272,20 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
             payload: CellPayload::Text(method.to_string()),
         }],
     });
+    acc.nav
+        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+    route_id
+}
+
+/// A ROUTE node plus the HANDLED_BY edge to an already-known handler node.
+fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
+    let route_id = emit_route_node(method, path, repo, acc);
     acc.edges.push(Edge {
         from: route_id,
         to: handler_id,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
     });
-    acc.nav
-        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
-}
-
-/// First double-quoted run in a text slice. The attribute path now reads its
-/// string arguments off the AST, so nothing calls this today — it is kept for
-/// A4.2's minimal-API invocation walk, which still needs a literal reader.
-#[allow(dead_code)]
-fn extract_quoted(text: &str) -> Option<String> {
-    let start = text.find('"')?;
-    let rest = &text[start + 1..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
 }
 
 fn collect_using(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
@@ -1954,6 +2096,123 @@ public class OrderClient {
         assert!(
             fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/api/secure")),
             "HttpRequestMessage(HttpMethod.Get, …) should emit a GET ENDPOINT"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // A4.2 — minimal API. Top-level `app.MapGet(…)` is a `global_statement`,
+    // outside every class and method, so before A4.2 a Program.cs like this
+    // emitted ZERO routes.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn minimal_api_top_level_routes_emit() {
+        let source = r#"
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+app.MapGet("/health", () => "ok");
+app.MapPost("/orders", (Order o) => Results.Ok(o));
+app.MapGet("/orders/{id}", (int id) => Results.Ok(id));
+app.Run();
+"#;
+        let fp = parse_file(source, "server/Program.cs", "server::Program", repo()).unwrap();
+        let routes = route_names(&fp);
+        for want in ["GET /health", "POST /orders", "GET /orders/{id}"] {
+            assert!(routes.contains(&want.to_string()), "missing {want} in {routes:?}");
+        }
+        // A lambda handler names no node, so HANDLED_BY targets the MODULE.
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server::Program");
+        let handled: Vec<_> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY)
+            .collect();
+        assert_eq!(handled.len(), 3, "one HANDLED_BY per route: {handled:?}");
+        assert!(handled.iter().all(|e| e.to == module_id));
+    }
+
+    #[test]
+    fn minimal_api_method_group_handler_emits_ref() {
+        let source = r#"
+var app = WebApplication.Create(args);
+app.MapGet("/health", HealthHandler.Get);
+"#;
+        let fp = parse_file(source, "server/Program.cs", "server::Program", repo()).unwrap();
+        assert!(route_names(&fp).contains(&"GET /health".to_string()));
+        let refs: Vec<_> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .collect();
+        assert_eq!(refs.len(), 1, "expected one HANDLED_BY ref, got {refs:?}");
+        assert_eq!(
+            refs[0].qualifier,
+            CallQualifier::Attribute {
+                base: "HealthHandler".to_string(),
+                name: "Get".to_string()
+            }
+        );
+        // Exactly one handler: a method group must NOT also get an Edge.
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::HANDLED_BY),
+            "method-group route emitted both an Edge and a Ref"
+        );
+    }
+
+    #[test]
+    fn minimal_api_map_group_chain_composes_prefix() {
+        let source = r#"
+var app = WebApplication.Create(args);
+app.MapGroup("/api").MapGet("/users", () => "ok");
+app.MapGroup("/api").MapGroup("/v2").MapPost("/orders", () => "ok");
+"#;
+        let fp = parse_file(source, "server/Program.cs", "server::Program", repo()).unwrap();
+        let routes = route_names(&fp);
+        assert!(routes.contains(&"GET /api/users".to_string()), "{routes:?}");
+        assert!(routes.contains(&"POST /api/v2/orders".to_string()), "{routes:?}");
+    }
+
+    #[test]
+    fn minimal_api_non_literal_path_is_not_a_route() {
+        // PRECISION. `MapGet` is also a member of unrelated map/dictionary
+        // APIs; the string-literal gate is what keeps those out of the graph.
+        let source = r#"
+public class Cache {
+    public void Load(string key) {
+        var v = _entries.MapGet(key);
+        _routes.MapGet(RouteNames.Health, Handler);
+    }
+}
+"#;
+        let fp = parse_file(source, "Cache.cs", "App", repo()).unwrap();
+        assert!(route_names(&fp).is_empty(), "{:?}", route_names(&fp));
+    }
+
+    #[test]
+    fn minimal_api_use_endpoints_lambda_still_scanned() {
+        // Behaviour preservation: the pre-A4.2 text scan found these because it
+        // read the whole method text. The AST walk must descend into the lambda.
+        let source = r#"
+public class Startup {
+    public void Configure(IApplicationBuilder app) {
+        app.UseEndpoints(endpoints => {
+            endpoints.MapGet("/legacy", async context => { await context.Response.WriteAsync("ok"); });
+        });
+    }
+}
+"#;
+        let fp = parse_file(source, "Startup.cs", "App", repo()).unwrap();
+        let routes = route_names(&fp);
+        assert!(routes.contains(&"GET /legacy".to_string()), "{routes:?}");
+        // Anchored on the enclosing METHOD, not the module.
+        let configure = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "App::Startup::Configure");
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::HANDLED_BY && e.to == configure),
+            "UseEndpoints route should hang off Configure"
         );
     }
 }

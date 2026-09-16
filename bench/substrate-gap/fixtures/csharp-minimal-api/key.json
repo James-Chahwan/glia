@@ -1,0 +1,14 @@
+{
+  "framework": "csharp-minimal-api",
+  "language": "csharp",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /health", "note": "top-level app.MapGet in Program.cs (global_statement)"},
+    {"kind": "ROUTE", "name": "POST /orders", "note": "top-level app.MapPost"},
+    {"kind": "ROUTE", "name": "GET /orders/{id}", "note": "top-level MapGet with a route param"}
+  ],
+  "expect_edges": [
+    {"from": "GET /health", "to": "GET /health", "category": "HTTP_CALLS", "note": "TS fetch pairs with the minimal-API route"},
+    {"from": "POST /orders", "to": "POST /orders", "category": "HTTP_CALLS", "note": "TS fetch POST pairs"}
+  ]
+}
