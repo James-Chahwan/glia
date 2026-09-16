@@ -5,7 +5,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::join_scope;
+use repo_graph_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
 
 pub fn parse_file(
     source: &str,
@@ -45,6 +45,12 @@ pub fn parse_file(
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
 
     scan_phoenix_routes(source, repo, module_id, &mut acc);
+    if acc.endpoint_hits > 0 {
+        eprintln!(
+            "[elixir-http-client] {} endpoints in {}",
+            acc.endpoint_hits, file_rel_path
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -67,6 +73,10 @@ struct Acc {
     nav: CodeNav,
     /// File-stem MODULE qname; the `from_module` every import resolves against.
     module_qname: String,
+    /// Per-file dedup for the shared ENDPOINT nodes client calls mint.
+    endpoint_seen: std::collections::HashSet<NodeId>,
+    /// Client HTTP call sites emitted from this file (drives the fired-on marker).
+    endpoint_hits: usize,
 }
 
 fn visit_top(
@@ -204,6 +214,11 @@ fn visit_def(
             collect_calls_in(child, src, id, acc);
         }
     }
+    // Scan the WHOLE `def` call, not just its `do_block`: a one-liner
+    // `def f(x), do: HTTPoison.get(url)` carries its body in the `do:` keyword
+    // argument instead, and the head itself can never contain a client call.
+    let hits = collect_client_endpoints_in(node, src, id, repo, file_rel, acc);
+    acc.endpoint_hits += hits;
 }
 
 fn visit_defprotocol(
@@ -367,6 +382,167 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
+}
+
+// ---------------------------------------------------------------------------
+// Client HTTP calls (HTTPoison / Tesla / Req / Finch) -> shared ENDPOINT nodes
+// ---------------------------------------------------------------------------
+
+/// Elixir HTTP client modules. Matched on the FIRST dotted segment, so
+/// `HTTPoison.Base.get/1` counts as `HTTPoison`.
+const ELIXIR_HTTP_CLIENTS: &[&str] = &["HTTPoison", "Tesla", "Req", "Finch"];
+
+const ELIXIR_HTTP_VERBS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// Upper-case `s` if it names an HTTP verb. Tolerates the leading `:` of an
+/// atom (`:get`) and the trailing `!`/`?` of a bang/query function (`get!`).
+fn http_verb(s: &str) -> Option<String> {
+    let up = s
+        .trim()
+        .trim_start_matches(':')
+        .trim_end_matches(['!', '?'])
+        .to_ascii_uppercase();
+    ELIXIR_HTTP_VERBS.contains(&up.as_str()).then_some(up)
+}
+
+/// Reconstruct a `string` literal's text. An `#{…}` interpolation becomes
+/// `${…}` so `normalise_http_path` collapses that segment exactly as it does
+/// for a TypeScript template path. Returns `(text, had_interpolation)`.
+fn string_text(node: TsNode, src: &[u8]) -> (String, bool) {
+    let mut out = String::new();
+    let mut interpolated = false;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if child.kind() == "interpolation" {
+            out.push_str("${…}");
+            interpolated = true;
+        } else {
+            out.push_str(text_of(child, src));
+        }
+    }
+    (out, interpolated)
+}
+
+/// `(text, interpolated)` of the first DIRECT string-literal argument. Direct
+/// only, so a string buried in a nested call argument is never mistaken for
+/// the URL — and Tesla's client-first form `Tesla.get(client, "/x")` lands on
+/// `"/x"` for free.
+fn first_string_arg(args: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .find(|ch| ch.kind() == "string")
+        .map(|ch| string_text(ch, src))
+}
+
+/// `(text, interpolated)` of `<key>: "…"` among the call's keyword arguments —
+/// how `Req.get!(url: "…")` carries its URL.
+fn keyword_string_arg(args: TsNode, key: &str, src: &[u8]) -> Option<(String, bool)> {
+    let mut cursor = args.walk();
+    for child in args.named_children(&mut cursor) {
+        if child.kind() != "keywords" {
+            continue;
+        }
+        let mut pairs = child.walk();
+        for pair in child.named_children(&mut pairs) {
+            let (Some(k), Some(v)) = (
+                pair.child_by_field_name("key"),
+                pair.child_by_field_name("value"),
+            ) else {
+                continue;
+            };
+            // The `keyword` node's text is `"url: "` — colon AND trailing
+            // space — so trim the whitespace BEFORE the colon.
+            if v.kind() == "string" && text_of(k, src).trim().trim_end_matches(':') == key {
+                return Some(string_text(v, src));
+            }
+        }
+    }
+    None
+}
+
+/// `(verb, raw_url, interpolated)` for a `call` node that is an Elixir HTTP
+/// client call, else None. Four shapes:
+///   HTTPoison `HTTPoison.get("…")`            — verb is the function name
+///   Tesla     `Tesla.post(client(), "…", b)`  — client-first, URL is arg 2
+///   Req       `Req.get!(url: "…")`            — URL is the `url:` keyword
+///   Finch     `Finch.build(:get, "…")`        — verb is the leading atom
+fn client_call_candidate(n: TsNode, src: &[u8]) -> Option<(String, String, bool)> {
+    let target = n.child_by_field_name("target")?;
+    if target.kind() != "dot" {
+        return None;
+    }
+    let module = text_of(target.child_by_field_name("left")?, src);
+    let func = text_of(target.child_by_field_name("right")?, src);
+    if !ELIXIR_HTTP_CLIENTS.contains(&module.split('.').next().unwrap_or(module)) {
+        return None;
+    }
+    let args = find_args(n)?;
+    if func == "build" {
+        // `Finch.build(:get, url, …)` — the verb is the leading atom argument.
+        let mut cursor = args.walk();
+        let atom = args
+            .named_children(&mut cursor)
+            .find(|ch| ch.kind() == "atom")?;
+        let verb = http_verb(text_of(atom, src))?;
+        let (raw, interpolated) = first_string_arg(args, src)?;
+        return Some((verb, raw, interpolated));
+    }
+    let verb = http_verb(func)?;
+    let (raw, interpolated) =
+        first_string_arg(args, src).or_else(|| keyword_string_arg(args, "url", src))?;
+    Some((verb, raw, interpolated))
+}
+
+/// Outbound HTTP call sites inside a `def`/`defp` become shared ENDPOINT nodes
+/// (+ a CALLS edge from the enclosing function) so `HttpStackResolver` can pair
+/// them with a server ROUTE. Returns the number of call sites emitted.
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut hits = 0;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call"
+            && let Some((method, raw, interpolated)) = client_call_candidate(n, src)
+            && let Some(path) = url_to_path(&raw)
+        {
+            let pos = n.start_position();
+            // An interpolated path is Medium (the concrete segment is unknown);
+            // a plain literal is Strong — the same rule scala/swift use.
+            let ep = ClientEndpoint {
+                method,
+                path,
+                file: file_rel.to_string(),
+                line: pos.row + 1,
+                col: pos.column + 1,
+                confidence: if interpolated {
+                    Confidence::Medium
+                } else {
+                    Confidence::Strong
+                },
+            };
+            push_client_endpoint(
+                repo,
+                &ep,
+                from,
+                &mut acc.nodes,
+                &mut acc.edges,
+                &mut acc.nav,
+                &mut acc.endpoint_seen,
+            );
+            hits += 1;
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    hits
 }
 
 fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) {
@@ -785,6 +961,187 @@ end
                 && r.category == edge_category::HANDLED_BY
                 && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "index")),
             "expected HANDLED_BY from GET /api/users -> index"
+        );
+    }
+
+    // --- client HTTP calls (HTTPoison / Tesla / Req / Finch) -----------------
+
+    /// Every ENDPOINT display name the parse produced, sorted.
+    fn endpoint_names(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ENDPOINT))
+            .map(|(_, n)| n.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// True if a CALLS edge runs from the FUNCTION named `from` to the ENDPOINT
+    /// named `to`.
+    fn has_calls_edge(fp: &FileParse, from: &str, to: &str) -> bool {
+        let id_of = |name: &str, kind| {
+            fp.nav
+                .name_by_id
+                .iter()
+                .find(|(id, n)| n.as_str() == name && fp.nav.kind_by_id.get(*id) == Some(&kind))
+                .map(|(id, _)| *id)
+        };
+        let (Some(f), Some(t)) = (
+            id_of(from, node_kind::FUNCTION),
+            id_of(to, node_kind::ENDPOINT),
+        ) else {
+            return false;
+        };
+        fp.edges
+            .iter()
+            .any(|e| e.from == f && e.to == t && e.category == edge_category::CALLS)
+    }
+
+    #[test]
+    fn httpoison_get_emits_endpoint() {
+        let source = r#"
+defmodule ApiClient do
+  def fetch_user(id) do
+    HTTPoison.get("http://users-svc/api/users/#{id}")
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/api_client.ex", "lib::api_client", repo()).unwrap();
+        // Host stripped by `url_to_path`; `#{id}` reconstructed as `${…}` so the
+        // graph's `normalise_http_path` collapses it to `{}` and it pairs with a
+        // server route `/api/users/{id}`.
+        assert_eq!(endpoint_names(&fp), vec!["GET /api/users/${…}".to_string()]);
+        assert!(
+            has_calls_edge(&fp, "fetch_user", "GET /api/users/${…}"),
+            "expected CALLS from the enclosing def to the ENDPOINT"
+        );
+        // An interpolated path is Medium — the concrete segment is unknown.
+        let ep = fp
+            .nodes
+            .iter()
+            .find(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .expect("endpoint node");
+        assert_eq!(ep.confidence, Confidence::Medium);
+        assert!(
+            ep.cells.iter().any(|c| c.kind == cell_type::ENDPOINT_HIT),
+            "ENDPOINT must carry an ENDPOINT_HIT cell"
+        );
+    }
+
+    #[test]
+    fn tesla_client_first_arg_form_emits_endpoint() {
+        let source = r#"
+defmodule ApiClient do
+  def create_user(body) do
+    Tesla.post(client(), "/api/users", body)
+  end
+
+  defp client, do: Tesla.client([])
+end
+"#;
+        let fp = parse_file(source, "lib/api_client.ex", "lib::api_client", repo()).unwrap();
+        // The URL is the SECOND argument: `first_string_arg` scans DIRECT
+        // arguments for the first string literal, so `client()` is skipped.
+        assert_eq!(endpoint_names(&fp), vec!["POST /api/users".to_string()]);
+        assert!(has_calls_edge(&fp, "create_user", "POST /api/users"));
+        // `Tesla.client([])` is not a verb -> no endpoint from the private helper.
+        let ep = fp
+            .nodes
+            .iter()
+            .find(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .expect("endpoint node");
+        assert_eq!(ep.confidence, Confidence::Strong);
+    }
+
+    #[test]
+    fn req_keyword_url_and_finch_atom_verb_emit_endpoints() {
+        let source = r#"
+defmodule ApiClient do
+  def list_orders do
+    Req.get!(url: "http://orders-svc/api/orders")
+  end
+
+  def remove_user(id) do
+    Finch.build(:delete, "http://users-svc/api/users/#{id}")
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/api_client.ex", "lib::api_client", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec![
+                "DELETE /api/users/${…}".to_string(),
+                "GET /api/orders".to_string(),
+            ]
+        );
+        // Req's URL rides a `url:` keyword, whose `keyword` node text is
+        // `"url: "` — colon and trailing space.
+        assert!(has_calls_edge(&fp, "list_orders", "GET /api/orders"));
+        // Finch's verb is the leading atom, not the function name (`build`).
+        assert!(has_calls_edge(&fp, "remove_user", "DELETE /api/users/${…}"));
+    }
+
+    #[test]
+    fn elixir_client_calls_emit_no_route() {
+        // `scan_phoenix_routes` is a raw-source WORD scanner: a bare `get "/x"`
+        // mints a ROUTE. Every client call here is qualified (`HTTPoison.get`),
+        // and `is_word_start` rejects a word preceded by `.` or `:`, so none of
+        // them may be mistaken for a Phoenix route declaration.
+        let source = r#"
+defmodule ApiClient do
+  def fetch_user(id) do
+    HTTPoison.get("http://users-svc/api/users/#{id}")
+  end
+
+  def create_user(body) do
+    Tesla.post(client(), "/api/users", body)
+  end
+
+  def list_orders do
+    Req.get!(url: "http://orders-svc/api/orders")
+  end
+
+  def remove_user(id) do
+    Finch.build(:delete, "http://users-svc/api/users/#{id}")
+  end
+
+  defp client, do: Tesla.client([])
+end
+"#;
+        let fp = parse_file(source, "lib/api_client.ex", "lib::api_client", repo()).unwrap();
+        let routes: Vec<&String> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n)
+            .collect();
+        assert!(routes.is_empty(), "phantom ROUTEs minted: {routes:?}");
+        assert_eq!(endpoint_names(&fp).len(), 4, "{:?}", endpoint_names(&fp));
+    }
+
+    #[test]
+    fn elixir_non_url_string_is_dropped() {
+        let source = r#"
+defmodule ApiClient do
+  # Non-HTTP receiver: `Cache` is not a known client module.
+  def cached(id), do: Cache.get("user." <> id)
+
+  # Known client module, but the argument is not a URL path.
+  def bad_url, do: HTTPoison.get("users-svc")
+
+  # Known client module, unknown verb.
+  def started, do: HTTPoison.start()
+end
+"#;
+        let fp = parse_file(source, "lib/api_client.ex", "lib::api_client", repo()).unwrap();
+        assert!(
+            endpoint_names(&fp).is_empty(),
+            "no endpoint may be minted: {:?}",
+            endpoint_names(&fp)
         );
     }
 }

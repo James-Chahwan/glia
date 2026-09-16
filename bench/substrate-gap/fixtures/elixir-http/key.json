@@ -1,0 +1,83 @@
+{
+  "framework": "elixir-http",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/users",
+      "note": "HTTPoison.get with #{id} interpolation -> GET /api/users/${…}, host stripped"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /api/users",
+      "note": "Tesla.post(client(), \"/api/users\", body) — client-first form, URL is arg 2"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/orders",
+      "note": "Req.get!(url: \"http://orders-svc/api/orders\") — URL from the url: keyword"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "DELETE /api/users",
+      "note": "Finch.build(:delete, url) — verb from the leading atom"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/api/users",
+      "note": "Go chi server route (control — already 1.00)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "fetch_user",
+      "to": "GET /api/users",
+      "category": "CALLS",
+      "note": "enclosing def -> ENDPOINT"
+    },
+    {
+      "from": "create_user",
+      "to": "POST /api/users",
+      "category": "CALLS",
+      "note": "enclosing def -> ENDPOINT"
+    },
+    {
+      "from": "POST /api/users",
+      "to": "/api/users",
+      "category": "HTTP_CALLS",
+      "note": "pairs with the Go chi route"
+    },
+    {
+      "from": "GET /api/orders",
+      "to": "/api/orders",
+      "category": "HTTP_CALLS",
+      "note": "Req endpoint pairs with the Go chi route"
+    },
+    {
+      "from": "GET /api/users",
+      "to": "/api/users",
+      "category": "HTTP_CALLS",
+      "note": "interpolated path normalises to /api/users/{} -> chi /api/users/{id}"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "name": "user.",
+      "note": "Cache.get(\"user.\" <> id) is not an HTTP call"
+    },
+    {
+      "kind": "ROUTE",
+      "max_nodes": 3,
+      "note": "exactly the 3 Go chi routes — scan_phoenix_routes must mint NO phantom ROUTE from the qualified client calls"
+    }
+  ],
+  "mechanism": "http",
+  "cells": [
+    "elixir/http"
+  ]
+}
