@@ -1,0 +1,23 @@
+{
+  "framework": "http-base-prefix",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "cells": [
+    "typescript/http_client",
+    "go/http_server"
+  ],
+  "mechanism": "http_client",
+  "note": "A3.1 — the two prefix bugs, one fixture. (a) BaseFold: `fetch(`${environment.apiUrl}/users`)` is the single commonest Angular/React client shape and normalises to `/{}/users`; a leading interpolated segment is a base URL, not a resource, so it must be folded away before matching. (b) RoutePrefix: the old strip removed API prefixes from the ENDPOINT side only, so a client that calls `/orders` could never reach a server mounted at `/api/orders`. Both were dead cross-stack edges in every polyglot repo.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/users", "note": "template-literal base URL -> normalises to /{}/users"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/orders", "note": "client is unaware of the server's /api mount"},
+    {"kind": "ROUTE", "name": "route:/users", "note": "chi r.Get"},
+    {"kind": "ROUTE", "name": "route:/api/orders", "note": "chi r.Get under the api prefix"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:${…}/users", "to": "route:/users", "category": "HTTP_CALLS",
+     "note": "BaseFold tier: a leading interpolated segment is a base URL, not a resource"},
+    {"from": "endpoint:GET:/orders", "to": "route:/api/orders", "category": "HTTP_CALLS",
+     "note": "RoutePrefix tier: the strip must work route-side too, not only endpoint-side"}
+  ]
+}

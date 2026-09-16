@@ -560,3 +560,261 @@ fn all_resolvers_compose_cleanly() {
     assert!(merged.cross_edges.iter().any(|e| e.category == edge_category::QUEUE_FLOWS));
     assert!(merged.cross_edges.iter().any(|e| e.category == edge_category::CLI_INVOKES));
 }
+
+// ============================================================================
+// HttpStackResolver — the tier ladder (A3.1)
+// ============================================================================
+//
+// Before A3.1 the matcher was one exact HashMap hit plus an endpoint-side-only
+// strip of up to two API prefixes. Three whole classes of real pairing could
+// never form: a method-agnostic (`ANY`) server route, a server mounted behind a
+// prefix the client does not know about, and a client whose path starts with an
+// interpolated base URL. Each tier below is one of those, and the ladder returns
+// the FIRST tier that hits — never a union, which is where fan-out would live.
+
+/// A `ROUTE_METHOD` cell in the plain-Text shape parser-ruby / -java / -csharp /
+/// -dart emit. Fully qualified rather than imported so this block does not touch
+/// the file's shared `use` lines.
+fn route_method_cell(method: &str) -> repo_graph_core::Cell {
+    repo_graph_core::Cell {
+        kind: repo_graph_code_domain::cell_type::ROUTE_METHOD,
+        payload: repo_graph_core::CellPayload::Text(method.to_string()),
+    }
+}
+
+/// The ORIGIN cell A3.4's client-router extractors stamp on a browser
+/// navigation ROUTE. Spelled as a literal on purpose — see `http_nav_route.rs`.
+fn nav_route_cell() -> repo_graph_core::Cell {
+    repo_graph_core::Cell {
+        kind: repo_graph_code_domain::cell_type::ORIGIN,
+        payload: repo_graph_core::CellPayload::Json(
+            r#"{"provenance":"nav_route"}"#.to_string(),
+        ),
+    }
+}
+
+fn svc_repo(n: u8) -> RepoId {
+    RepoId::from_canonical(&format!("test://resolver/svc{n}"))
+}
+
+/// One server repo holding legacy-shape (`<METHOD> <path>`) ROUTE nodes.
+fn route_repo(repo: RepoId, routes: &[(&str, &str, Confidence)]) -> RepoGraph {
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::new();
+    for (method, path, conf) in routes {
+        let qname = format!("{method} {path}");
+        let (mut node, id) = make_node(repo, node_kind::ROUTE, &qname, *conf);
+        node.cells.push(route_method_cell(method));
+        record(&mut nav, id, &qname, &qname, node_kind::ROUTE);
+        nodes.push(node);
+    }
+    make_graph(repo, nodes, nav)
+}
+
+/// One client repo holding ENDPOINT nodes.
+fn endpoint_repo(repo: RepoId, endpoints: &[(&str, &str, Confidence)]) -> RepoGraph {
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::new();
+    for (method, path, conf) in endpoints {
+        let qname = format!("endpoint:{method}:{path}");
+        let (node, id) = make_node(repo, node_kind::ENDPOINT, &qname, *conf);
+        record(&mut nav, id, &qname, &qname, node_kind::ENDPOINT);
+        nodes.push(node);
+    }
+    make_graph(repo, nodes, nav)
+}
+
+fn http_edges(merged: &MergedGraph) -> Vec<repo_graph_core::Edge> {
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::HTTP_CALLS)
+        .copied()
+        .collect()
+}
+
+fn resolved(server: RepoGraph, client: RepoGraph) -> MergedGraph {
+    let mut merged = MergedGraph::new(vec![server, client]);
+    HttpStackResolver.resolve(&mut merged);
+    merged
+}
+
+fn node_id(repo: RepoId, kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    NodeId::from_parts(GRAPH_TYPE, repo, kind, qname)
+}
+
+#[test]
+fn http_any_route_matches_every_verb() {
+    // Rails `resources :posts`, Spring class-level `@RequestMapping`, Laravel
+    // `Route::any`, Go `HandleFunc`, Clojure `ANY`: nine parsers emit the method
+    // string "ANY" for a method-agnostic server route. Keyed on (METHOD, path),
+    // every one of those declarations was an unreachable HTTP_CALLS target.
+    let server = route_repo(repo_a(), &[("ANY", "/posts", Confidence::Strong)]);
+    let client = endpoint_repo(
+        repo_b(),
+        &[
+            ("GET", "/posts", Confidence::Strong),
+            ("POST", "/posts", Confidence::Strong),
+        ],
+    );
+    let merged = resolved(server, client);
+    let edges = http_edges(&merged);
+
+    let route = node_id(repo_a(), node_kind::ROUTE, "ANY /posts");
+    assert_eq!(edges.len(), 2, "both verbs must reach the ANY route: {edges:?}");
+    for verb in ["GET", "POST"] {
+        let ep = node_id(
+            repo_b(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{verb}:/posts"),
+        );
+        let e = edges
+            .iter()
+            .find(|e| e.from == ep && e.to == route)
+            .unwrap_or_else(|| panic!("{verb} endpoint → ANY route edge"));
+        // The server DECLARED the route method-agnostic, so this is a
+        // principled pairing, not a guess: no confidence floor.
+        assert_eq!(e.confidence, Confidence::Strong);
+    }
+}
+
+#[test]
+fn http_exact_and_endpoint_strip_still_win_over_any() {
+    // TIER ORDER REGRESSION. With the ANY tier placed second, `GET /api/users`
+    // would strip to `/users`, find the ANY route first and silently retarget an
+    // edge that binds the TYPED route today. Exact → endpoint-strip → ANY keeps
+    // every pre-A3.1 pairing exactly where it was, which is what makes this
+    // packet additive.
+    let server = route_repo(
+        repo_a(),
+        &[
+            ("GET", "/users", Confidence::Strong),
+            ("ANY", "/users", Confidence::Strong),
+        ],
+    );
+    let client = endpoint_repo(repo_b(), &[("GET", "/api/users", Confidence::Strong)]);
+    let merged = resolved(server, client);
+    let edges = http_edges(&merged);
+
+    assert_eq!(edges.len(), 1, "one tier only, never a union: {edges:?}");
+    assert_eq!(
+        edges[0].to,
+        node_id(repo_a(), node_kind::ROUTE, "GET /users"),
+        "the endpoint-side strip must still bind the typed route, not the ANY one"
+    );
+    assert_eq!(edges[0].confidence, Confidence::Strong);
+}
+
+#[test]
+fn http_route_side_prefix_strip() {
+    // The strip used to be endpoint-side ONLY, so a client calling `/orders`
+    // could never reach a server mounted at `/api/orders` — the single most
+    // common cross-service shape in a polyglot repo.
+    let server = route_repo(repo_a(), &[("GET", "/api/orders", Confidence::Strong)]);
+    let client = endpoint_repo(repo_b(), &[("GET", "/orders", Confidence::Strong)]);
+    let merged = resolved(server, client);
+    let edges = http_edges(&merged);
+
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].to, node_id(repo_a(), node_kind::ROUTE, "GET /api/orders"));
+    assert_eq!(
+        edges[0].confidence,
+        Confidence::Medium,
+        "a route-side strip is an inference — floored to Medium so a consumer \
+         can tell it from an exact pairing"
+    );
+}
+
+#[test]
+fn http_base_url_fold() {
+    // `fetch(`${environment.apiUrl}/users`)` normalises to `/{}/users`. The
+    // leading segment came from an interpolation, so it is a base URL, not a
+    // resource — fold it away before matching.
+    let server = route_repo(repo_a(), &[("GET", "/users", Confidence::Strong)]);
+    let client = endpoint_repo(repo_b(), &[("GET", "${…}/users", Confidence::Strong)]);
+    let merged = resolved(server, client);
+    let edges = http_edges(&merged);
+
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].to, node_id(repo_a(), node_kind::ROUTE, "GET /users"));
+    assert_eq!(edges[0].confidence, Confidence::Medium);
+}
+
+#[test]
+fn http_suffix_fallback_is_weak_and_bails_on_ambiguity() {
+    // Positive: one base-URL client, one deep-prefixed server, one candidate.
+    let server = route_repo(repo_a(), &[("GET", "/users", Confidence::Strong)]);
+    let client = endpoint_repo(
+        repo_b(),
+        &[("GET", "${…}/tenant/users", Confidence::Strong)],
+    );
+    let merged = resolved(server, client);
+    let edges = http_edges(&merged);
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(
+        edges[0].confidence,
+        Confidence::Weak,
+        "the suffix tier is the weakest thing this resolver will emit"
+    );
+
+    // Ambiguous: FOUR services expose `/users`. Emitting four edges off a
+    // suffix guess is exactly the multi-service fan-out this tier must not
+    // cause, so above MAX_SUFFIX_TARGETS it emits nothing at all.
+    let mut graphs: Vec<RepoGraph> = (1..=4)
+        .map(|i| route_repo(svc_repo(i), &[("GET", "/users", Confidence::Strong)]))
+        .collect();
+    graphs.push(endpoint_repo(
+        repo_b(),
+        &[("GET", "${…}/tenant/users", Confidence::Strong)],
+    ));
+    let mut merged = MergedGraph::new(graphs);
+    HttpStackResolver.resolve(&mut merged);
+    assert!(
+        http_edges(&merged).is_empty(),
+        "an ambiguous suffix must emit NOTHING rather than fan out: {:?}",
+        http_edges(&merged)
+    );
+}
+
+#[test]
+fn http_ordinary_path_never_suffix_matches() {
+    // The base-fold and suffix tiers are gated on a LEADING `{}` segment. An
+    // ordinary literal path must never reach them, or every `/tenant/users` in
+    // a repo would bind every `/users` route in it.
+    let server = route_repo(repo_a(), &[("GET", "/users", Confidence::Strong)]);
+    let client = endpoint_repo(repo_b(), &[("GET", "/tenant/users", Confidence::Strong)]);
+    let merged = resolved(server, client);
+    assert!(
+        http_edges(&merged).is_empty(),
+        "no leading interpolation => no fuzzy tier: {:?}",
+        http_edges(&merged)
+    );
+}
+
+#[test]
+fn http_any_nav_route_is_still_excluded() {
+    // A3.1 x A3.4. go_router / react-router / Angular Router mint their
+    // navigation entries with the method string "ANY", so the moment the ANY
+    // tier went live every nav entry in an SPA would have become an HTTP_CALLS
+    // target. A3.4's `provenance: nav_route` marking is what stops that, and it
+    // has to keep working now that "ANY" is pairable.
+    let mut nav = CodeNav::default();
+    let (mut route, route_qid) =
+        make_node(repo_a(), node_kind::ROUTE, "ANY /users", Confidence::Medium);
+    route.cells.push(route_method_cell("ANY"));
+    route.cells.push(nav_route_cell());
+    record(&mut nav, route_qid, "ANY /users", "ANY /users", node_kind::ROUTE);
+    let server = make_graph(repo_a(), vec![route], nav);
+
+    let client = endpoint_repo(repo_b(), &[("GET", "/users", Confidence::Strong)]);
+    let merged = resolved(server, client);
+    assert!(
+        http_edges(&merged).is_empty(),
+        "a nav ROUTE must not become pairable just because ANY now is: {:?}",
+        http_edges(&merged)
+    );
+    assert!(
+        merged.graphs[0].nodes.iter().any(|n| n.id == route_qid),
+        "the nav ROUTE node itself must survive"
+    );
+}

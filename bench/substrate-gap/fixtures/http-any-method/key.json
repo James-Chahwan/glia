@@ -1,0 +1,23 @@
+{
+  "framework": "http-any-method",
+  "language": "typescript+ruby",
+  "dirs": ["client", "server"],
+  "cells": [
+    "typescript/http_client",
+    "ruby/http_server"
+  ],
+  "mechanism": "http_server",
+  "note": "A3.1 — the ANY wildcard tier. Nine parsers emit method \"ANY\" for method-agnostic server routes (Rails `resources`, Spring class-level @RequestMapping, Laravel Route::any, Go HandleFunc, Clojure ANY, ...). The route index keys on (METHOD, path), so an ANY route could never be reached from a typed client verb and every one of those declarations was a dead HTTP_CALLS target. Rails chosen over Django/ASP.NET deliberately: those emit paths with no leading slash and are dropped by index_route_node's legacy branch regardless of this fix.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/posts", "note": "fetch('/posts')"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/posts", "note": "fetch with a method override"},
+    {"kind": "ROUTE", "name": "ANY /posts", "note": "Rails `resources :posts` -> one method-agnostic route"},
+    {"kind": "CLASS", "name": "PostsController", "note": "real handler class, so the server repo is not route-only"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/posts", "to": "ANY /posts", "category": "HTTP_CALLS",
+     "note": "ANY tier: a method-agnostic server route must match a GET client"},
+    {"from": "endpoint:POST:/posts", "to": "ANY /posts", "category": "HTTP_CALLS",
+     "note": "...and a POST client, off the same single declaration"}
+  ]
+}
