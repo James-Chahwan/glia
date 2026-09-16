@@ -84,6 +84,14 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
 /// `blast_radius`, resolved from a qname/name and fully located — the P3 answer
 /// that `find`→`impact`→`activate`→`read×N` collapses to. `direction` ∈
 /// {`forward`, `backward`, `both`}. Err on an unknown qname or bad direction.
+///
+/// `scope` (A8.3) restricts the answer to nodes whose file lives under that
+/// repo-relative path, applied BEFORE `top_k` truncation so a scoped `--top-k`
+/// spends its whole budget in scope instead of on whatever PPR liked globally.
+/// A node with no locatable file (ENDPOINT/ROUTE/DOC_SPACE — see
+/// [`node_in_scope`]) is KEPT, never dropped: those are the cross-boundary part
+/// of the answer. `scope` narrows WITHIN a repo — under a multi-repo merge each
+/// repo's POSITION paths are relative to its OWN root.
 pub fn blast_radius_by_qname(
     merged: &MergedGraph,
     qname: &str,
@@ -91,6 +99,7 @@ pub fn blast_radius_by_qname(
     max_depth: usize,
     top_k: Option<usize>,
     live_only: bool,
+    scope: Option<&str>,
 ) -> Result<Vec<BlastAnswer>, String> {
     let seed = merged
         .node_id_by_qname(qname)
@@ -104,7 +113,7 @@ pub fn blast_radius_by_qname(
     };
     let live = entrypoint_reachable(merged);
     let hits = merged.blast_radius(seed, reach, max_depth, None);
-    let mut out: Vec<BlastAnswer> = hits
+    let out: Vec<BlastAnswer> = hits
         .iter()
         .filter(|h| !live_only || live.contains(&h.id))
         .map(|h| {
@@ -123,6 +132,9 @@ pub fn blast_radius_by_qname(
             }
         })
         .collect();
+    // Scope BEFORE the cut: filtering after `truncate` would spend the budget
+    // on out-of-scope nodes and return fewer (or zero) in-scope answers.
+    let mut out = apply_scope(merged, out, scope, |a| NodeId(a.id), "blast_radius");
     if let Some(k) = top_k {
         out.truncate(k);
     }
@@ -151,6 +163,10 @@ pub struct TraceHop {
 /// (http/queue/grpc/call/…) and whether it crossed a service boundary — in one
 /// call. Where `blast_radius` returns a ranked *set*, this returns the *sequence*
 /// of typed edges, so an agent sees how a request flows end to end.
+///
+/// Deliberately takes NO `scope` (A8.3): a trace's entire value is that it
+/// crosses service/directory boundaries, so filtering its hops would delete the
+/// answer. Scope `blast_radius`/`resolve`/`governing_docs` instead.
 pub fn cross_stack_trace(
     merged: &MergedGraph,
     feature: &str,
@@ -222,13 +238,23 @@ pub struct LocatedNode {
 /// order is preserved (stacktrace frames stay in order); `score` is PPR
 /// relevance seeded by the whole resolved set, so shared-context nodes rank up.
 /// `kind` ∈ {`stacktrace`, `test`, `diff`, `auto`}.
+///
+/// `scope` (A8.3) filters the SEEDS before PPR, not the rendered result, so the
+/// scores genuinely change: `resolve_frame`/`resolve_file` match POSITION files
+/// by BASENAME ONLY, so an unscoped frame naming `utils.py` seeds every
+/// `utils.py` in the monorepo and those bogus seeds then shape the ranking of
+/// the real one. A node with no locatable file is KEPT (see [`node_in_scope`]).
+/// Any golden-output test on this function must pass `scope = None`.
 pub fn resolve_signal_located(
     merged: &MergedGraph,
     text: &str,
     kind: &str,
     top_k: Option<usize>,
+    scope: Option<&str>,
 ) -> Vec<LocatedNode> {
     let seeds = merged.resolve_signal(text, kind);
+    // Pre-PPR: `activate` below must only see in-scope seeds.
+    let seeds = apply_scope(merged, seeds, scope, |id| *id, "resolve");
     if seeds.is_empty() {
         return Vec::new();
     }
@@ -262,7 +288,15 @@ pub fn resolve_signal_located(
 /// symbol — "what are the rules for X?" — located, in one call. Direct
 /// `doc --DOCUMENTS--> symbol` predecessors (the conservative, precise linker
 /// signal). Reuses `LocatedNode` (score = 0; docs aren't PPR-ranked here).
-pub fn governing_docs(merged: &MergedGraph, qname: &str) -> Result<Vec<LocatedNode>, String> {
+///
+/// `scope` (A8.3) keeps only the doc sections whose own POSITION file lives
+/// under that repo-relative path. A section with no locatable file is KEPT (see
+/// [`node_in_scope`]).
+pub fn governing_docs(
+    merged: &MergedGraph,
+    qname: &str,
+    scope: Option<&str>,
+) -> Result<Vec<LocatedNode>, String> {
     let target = merged
         .node_id_by_qname(qname)
         .or_else(|| merged.resolve_name(qname))
@@ -286,6 +320,7 @@ pub fn governing_docs(merged: &MergedGraph, qname: &str) -> Result<Vec<LocatedNo
             });
         }
     }
+    let out = apply_scope(merged, out, scope, |d| NodeId(d.id), "governing_docs");
     Ok(out)
 }
 
@@ -325,4 +360,124 @@ pub fn locate_node(
         return (name, qname, kind, file, line);
     }
     (String::new(), format!("(unknown:{})", id.0), "UNKNOWN", None, None)
+}
+
+// ============================================================================
+// A8.3 — `scope`: restrict a P3 answer to one part of a monorepo.
+//
+// Two rules that are load-bearing rather than cosmetic:
+//   1. the filter runs BEFORE `truncate(top_k)` (blast_radius) and BEFORE
+//      `activate` (resolve), so it changes the RANKING, not just the display;
+//   2. a node with NO locatable file is KEPT. Dropping unlocatable nodes would
+//      silently delete every ENDPOINT / ROUTE / DOC_SPACE from a scoped answer
+//      and destroy the cross-service result these primitives exist for. The
+//      `[scope]` marker reports the kept-unlocatable count so that is visible.
+// ============================================================================
+
+/// The repo-relative path a node should be scoped by. POSITION first (the
+/// normal case), then the `ENDPOINT_HIT` cell's `file` for synthetic ENDPOINT
+/// nodes that carry no span. `None` for nodes with neither — ROUTE nodes
+/// included, because `ROUTE_METHOD` is a bare text cell holding only the HTTP
+/// verb, not a path.
+fn scope_file_of(merged: &MergedGraph, id: NodeId) -> Option<String> {
+    if let (_, _, _, Some(file), _) = locate_node(merged, id) {
+        return Some(file);
+    }
+    for g in &merged.graphs {
+        let Some(n) = g.nodes.iter().find(|n| n.id == id) else {
+            continue;
+        };
+        for c in &n.cells {
+            if c.kind != repo_graph_code_domain::cell_type::ENDPOINT_HIT {
+                continue;
+            }
+            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+                if let Some(f) = v.get("file").and_then(|f| f.as_str()) {
+                    return Some(f.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True when `file` lives under `scope`. Prefix match on a `/` boundary only,
+/// so `scope = "services/ap"` does NOT match `services/api/handler.py`. Both
+/// sides are normalised by trimming a leading `./` or `/` and a trailing `/`;
+/// an empty scope matches everything.
+fn in_scope(file: &str, scope: &str) -> bool {
+    let f = file.trim_start_matches("./").trim_start_matches('/');
+    let s = scope.trim_start_matches("./").trim_matches('/');
+    if s.is_empty() {
+        return true;
+    }
+    f == s || f.starts_with(&format!("{s}/"))
+}
+
+/// Would this node survive `scope`? `scope = None` is always true, and so is a
+/// node with no locatable file (the keep-unlocatable policy above). Public so
+/// the pyo3 `find_nodes_by_qname` surface applies exactly the same rule as the
+/// three scoped primitives rather than re-deriving a path guess in Python.
+///
+/// `scope` narrows WITHIN a repo: under a multi-repo merge each repo's POSITION
+/// paths are relative to its OWN root, so a path that was passed as a separate
+/// `--with` repo will not match as a scope.
+pub fn node_in_scope(merged: &MergedGraph, id: NodeId, scope: Option<&str>) -> bool {
+    let Some(s) = scope else { return true };
+    match scope_file_of(merged, id) {
+        Some(f) => in_scope(&f, s),
+        None => true,
+    }
+}
+
+/// One shared applier so the scoped call sites cannot drift apart. `scope =
+/// None` is a strict no-op: the input is returned untouched and no marker is
+/// emitted, so no existing answer, ranking or cell value changes.
+fn apply_scope<T>(
+    merged: &MergedGraph,
+    items: Vec<T>,
+    scope: Option<&str>,
+    id_of: impl Fn(&T) -> NodeId,
+    what: &str,
+) -> Vec<T> {
+    let Some(s) = scope else { return items };
+    let before = items.len();
+    let mut unlocatable = 0usize;
+    let out: Vec<T> = items
+        .into_iter()
+        .filter(|it| match scope_file_of(merged, id_of(it)) {
+            Some(f) => in_scope(&f, s),
+            None => {
+                unlocatable += 1;
+                true
+            }
+        })
+        .collect();
+    eprintln!(
+        "[scope] {what} scope={s}: {before} -> {} (unlocatable={unlocatable})",
+        out.len()
+    );
+    out
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::in_scope;
+
+    #[test]
+    fn in_scope_matches_on_segment_boundaries_only() {
+        assert!(in_scope("services/api/handler.py", "services/api"));
+        assert!(in_scope("./services/api/handler.py", "/services/api/"));
+        assert!(in_scope("services/api", "services/api"));
+        // The boundary rule: a prefix that stops mid-segment must not match.
+        assert!(!in_scope("services/api/handler.py", "services/ap"));
+        assert!(!in_scope("services-api/handler.py", "services"));
+        assert!(!in_scope("web/client.py", "services/api"));
+        // An empty scope is "everything", not "nothing".
+        assert!(in_scope("web/client.py", ""));
+        assert!(in_scope("web/client.py", "/"));
+    }
 }

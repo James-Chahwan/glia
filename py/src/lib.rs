@@ -220,7 +220,14 @@ impl PyGraph {
     /// {`forward` (what it affects), `backward` (what affects it), `both`}.
     /// Returns a JSON array, ranked by PPR score (desc). Errors if `qname`
     /// resolves to no node.
-    #[pyo3(signature = (qname, direction="both", depth=4, top_k=None, live_only=false))]
+    ///
+    /// `scope` (optional, default `None` = no-op) restricts the answer to nodes
+    /// whose file lives under that repo-relative path, applied BEFORE the
+    /// `top_k` cut so a scoped `top_k` spends its budget in scope. Nodes with no
+    /// locatable file (ENDPOINT/ROUTE/doc spaces) are KEPT. `scope` narrows
+    /// WITHIN a repo — under a multi-repo merge each repo's paths are relative
+    /// to its OWN root, so a path passed as a separate repo will not match.
+    #[pyo3(signature = (qname, direction="both", depth=4, top_k=None, live_only=false, scope=None))]
     fn blast_radius(
         &self,
         qname: &str,
@@ -228,6 +235,7 @@ impl PyGraph {
         depth: usize,
         top_k: Option<usize>,
         live_only: bool,
+        scope: Option<&str>,
     ) -> PyResult<String> {
         let answer = repo_graph_engine::blast_radius_by_qname(
             &self.merged,
@@ -236,6 +244,7 @@ impl PyGraph {
             depth,
             top_k,
             live_only,
+            scope,
         )
         .map_err(PyValueError::new_err)?;
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
@@ -244,8 +253,11 @@ impl PyGraph {
     /// **governing_docs** (tier-4 P3 payoff): the doc sections that DOCUMENTS
     /// `qname` — "what are the rules for X?" — located, in one call. Each record
     /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
-    fn governing_docs(&self, qname: &str) -> PyResult<String> {
-        let docs = repo_graph_engine::governing_docs(&self.merged, qname)
+    /// `scope` (optional) keeps only the sections whose own file lives under
+    /// that repo-relative path; sections with no file are KEPT.
+    #[pyo3(signature = (qname, scope=None))]
+    fn governing_docs(&self, qname: &str, scope: Option<&str>) -> PyResult<String> {
+        let docs = repo_graph_engine::governing_docs(&self.merged, qname, scope)
             .map_err(PyValueError::new_err)?;
         serde_json::to_string(&docs).map_err(|e| PyValueError::new_err(e.to_string()))
     }
@@ -279,9 +291,22 @@ impl PyGraph {
     /// one call — the answer that `resolve_signal`→`activate`→`read×N` collapses
     /// to. Resolution order preserved; each record
     /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
-    #[pyo3(signature = (text, kind="auto", top_k=None))]
-    fn resolve(&self, text: &str, kind: &str, top_k: Option<usize>) -> PyResult<String> {
-        let answer = repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k);
+    ///
+    /// `scope` (optional, default `None` = no-op) filters the SEEDS before the
+    /// PPR run, not the rendered result: frames resolve by file BASENAME, so an
+    /// unscoped `utils.py` frame seeds every `utils.py` in the monorepo and
+    /// those bogus seeds shape the scores of the real one. Scoped scores
+    /// therefore legitimately differ from unscoped ones.
+    #[pyo3(signature = (text, kind="auto", top_k=None, scope=None))]
+    fn resolve(
+        &self,
+        text: &str,
+        kind: &str,
+        top_k: Option<usize>,
+        scope: Option<&str>,
+    ) -> PyResult<String> {
+        let answer =
+            repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k, scope);
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -305,10 +330,16 @@ impl PyGraph {
         self.merged.resolve_signal(text, kind).into_iter().map(|id| id.0).collect()
     }
 
-    fn find_nodes_by_qname(&self, pattern: &str) -> Vec<u64> {
+    /// `scope` (optional) narrows the hits to one part of a monorepo using the
+    /// same `/`-boundary rule as `blast_radius`/`resolve`/`governing_docs`, so
+    /// a consumer never has to re-derive a path guess in Python. Nodes with no
+    /// locatable file are KEPT.
+    #[pyo3(signature = (pattern, scope=None))]
+    fn find_nodes_by_qname(&self, pattern: &str, scope: Option<&str>) -> Vec<u64> {
         self.merged
             .qnames_containing(pattern)
             .into_iter()
+            .filter(|id| repo_graph_engine::node_in_scope(&self.merged, *id, scope))
             .map(|id| id.0)
             .collect()
     }

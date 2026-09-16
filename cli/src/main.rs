@@ -76,6 +76,13 @@ enum Cmd {
         /// Drop nodes not reachable from an entrypoint (likely-dead code).
         #[arg(long)]
         live_only: bool,
+        /// Restrict the answer to nodes whose file is under this repo-relative
+        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
+        /// repo's paths are relative to its OWN root, so a path passed as a
+        /// separate repo will not match here. Nodes with no file (ENDPOINT /
+        /// ROUTE / doc spaces) are kept, not dropped.
+        #[arg(long)]
+        scope: Option<String>,
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -90,6 +97,13 @@ enum Cmd {
         /// Additional repos to merge in. Repeatable.
         #[arg(long)]
         with: Vec<String>,
+        /// Restrict the answer to nodes whose file is under this repo-relative
+        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
+        /// repo's paths are relative to its OWN root, so a path passed as a
+        /// separate repo will not match here. Nodes with no file (ENDPOINT /
+        /// ROUTE / doc spaces) are kept, not dropped.
+        #[arg(long)]
+        scope: Option<String>,
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -141,6 +155,14 @@ enum Cmd {
         /// Keep only the top-K by relevance.
         #[arg(long)]
         top_k: Option<usize>,
+        /// Restrict the answer to nodes whose file is under this repo-relative
+        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
+        /// repo's paths are relative to its OWN root, so a path passed as a
+        /// separate repo will not match here. Nodes with no file (ENDPOINT /
+        /// ROUTE / doc spaces) are kept, not dropped.
+        #[arg(long)]
+        scope: Option<String>,
+
         /// Emit JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -265,16 +287,36 @@ fn main() {
             direction,
             depth,
         } => cmd_impact(&repo, &qname, direction, depth),
-        Cmd::BlastRadius { repo, qname, with, direction, depth, top_k, live_only, json } => {
-            cmd_blast_radius(&repo, &qname, &with, direction, depth, top_k, live_only, json)
+        Cmd::BlastRadius {
+            repo,
+            qname,
+            with,
+            direction,
+            depth,
+            top_k,
+            live_only,
+            scope,
+            json,
+        } => cmd_blast_radius(
+            &repo,
+            &qname,
+            &with,
+            direction,
+            depth,
+            top_k,
+            live_only,
+            scope.as_deref(),
+            json,
+        ),
+        Cmd::DocsFor { repo, qname, with, scope, json } => {
+            cmd_docs_for(&repo, &qname, &with, scope.as_deref(), json)
         }
-        Cmd::DocsFor { repo, qname, with, json } => cmd_docs_for(&repo, &qname, &with, json),
         Cmd::Coverage { repo, with, json } => cmd_coverage(&repo, &with, json),
         Cmd::Trace { repo, feature, with, depth, json } => {
             cmd_trace(&repo, &feature, &with, depth, json)
         }
-        Cmd::Resolve { repo, signal, with, kind, top_k, json } => {
-            cmd_resolve(&repo, &signal, &with, &kind, top_k, json)
+        Cmd::Resolve { repo, signal, with, kind, top_k, scope, json } => {
+            cmd_resolve(&repo, &signal, &with, &kind, top_k, scope.as_deref(), json)
         }
         Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
         Cmd::Build { repo, out, no_incremental } => {
@@ -600,6 +642,7 @@ fn cmd_blast_radius(
     depth: usize,
     top_k: Option<usize>,
     live_only: bool,
+    scope: Option<&str>,
     json: bool,
 ) -> i32 {
     let result = match generate_for(repo, with) {
@@ -621,6 +664,7 @@ fn cmd_blast_radius(
         depth,
         top_k,
         live_only,
+        scope,
     ) {
         Ok(a) => a,
         Err(e) => {
@@ -660,7 +704,13 @@ fn cmd_blast_radius(
 // `docs-for` (tier-4 P3 payoff)
 // ----------------------------------------------------------------------------
 
-fn cmd_docs_for(repo: &str, qname: &str, with: &[String], json: bool) -> i32 {
+fn cmd_docs_for(
+    repo: &str,
+    qname: &str,
+    with: &[String],
+    scope: Option<&str>,
+    json: bool,
+) -> i32 {
     let result = match generate_for(repo, with) {
         Ok(r) => r,
         Err(e) => {
@@ -668,7 +718,7 @@ fn cmd_docs_for(repo: &str, qname: &str, with: &[String], json: bool) -> i32 {
             return 2;
         }
     };
-    let docs = match repo_graph_engine::governing_docs(&result.merged, qname) {
+    let docs = match repo_graph_engine::governing_docs(&result.merged, qname, scope) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e}");
@@ -782,12 +832,14 @@ fn cmd_trace(repo: &str, feature: &str, with: &[String], depth: usize, json: boo
 // `resolve` (P3)
 // ----------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_resolve(
     repo: &str,
     signal: &str,
     with: &[String],
     kind: &str,
     top_k: Option<usize>,
+    scope: Option<&str>,
     json: bool,
 ) -> i32 {
     let result = match generate_for(repo, with) {
@@ -797,7 +849,8 @@ fn cmd_resolve(
             return 2;
         }
     };
-    let answer = repo_graph_engine::resolve_signal_located(&result.merged, signal, kind, top_k);
+    let answer =
+        repo_graph_engine::resolve_signal_located(&result.merged, signal, kind, top_k, scope);
     if json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
         return 0;
