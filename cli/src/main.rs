@@ -226,6 +226,16 @@ enum DocsCmd {
         /// Confluence space key (e.g. `MFS`).
         #[arg(long)]
         space: String,
+        /// Keep only pages whose title matches. Repeatable; `*` wildcard;
+        /// case-insensitive substring when the pattern has no `*`. Applied
+        /// locally after the fetch (Confluence has no title-glob parameter),
+        /// so it scopes what is ingested, not what is downloaded.
+        #[arg(long, value_name = "PATTERN")]
+        include: Vec<String>,
+        /// Drop pages whose title matches. Repeatable; same syntax as
+        /// `--include`, and wins over it.
+        #[arg(long, value_name = "PATTERN")]
+        exclude: Vec<String>,
         #[arg(long)]
         site: Option<String>,
         #[arg(long)]
@@ -1031,7 +1041,7 @@ const HOOK_MARKER: &str = "# glia-install-hooks: managed";
 fn cmd_docs(action: DocsCmd) -> i32 {
     use repo_graph_doc_sources::confluence_rest::{self, Config};
     match action {
-        DocsCmd::Sync { repo, space, site, email, token } => {
+        DocsCmd::Sync { repo, space, include, exclude, site, email, token } => {
             let cfg = match Config::resolve(site, email, token) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1046,6 +1056,21 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                     return 1;
                 }
             };
+            let filter = repo_graph_doc_sources::TitleFilter::new(&include, &exclude);
+            let fetched = pages.len();
+            let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+            eprintln!(
+                "[docs] sync space={space} fetched={fetched} kept={} include={} exclude={}",
+                pages.len(),
+                include.len(),
+                exclude.len()
+            );
+            if pages.is_empty() && fetched > 0 {
+                eprintln!(
+                    "error: every one of {fetched} fetched page(s) was filtered out; refusing to overwrite the snapshot with an empty manifest"
+                );
+                return 1;
+            }
             let records: Vec<_> = pages.iter().map(repo_graph_doc_sources::record_from_page).collect();
             match repo_graph_doc_sources::write_snapshot(Path::new(&repo), &records) {
                 Ok(manifest) => {

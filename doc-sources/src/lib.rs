@@ -11,6 +11,8 @@
 
 pub mod confluence;
 pub mod confluence_rest;
+pub mod filter;
 pub mod snapshot;
 
+pub use filter::TitleFilter;
 pub use snapshot::{Page, record_from_page, slug, write_snapshot};
