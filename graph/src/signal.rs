@@ -22,10 +22,13 @@ impl MergedGraph {
         let kind = if kind == "auto" { sniff_signal_kind(text) } else { kind };
         let mut out: Vec<NodeId> = Vec::new();
         let mut seen: HashSet<NodeId> = HashSet::new();
+        // How each file/frame query landed, accumulated across the whole signal
+        // so the marker fires once per call and not once per stack frame.
+        let mut counts = MatchCounts::default();
         match kind {
             "stacktrace" => {
                 for (file, line) in parse_stack_frames(text) {
-                    if let Some(id) = self.resolve_frame(&file, line) {
+                    if let Some(id) = self.resolve_frame(&file, line, &mut counts) {
                         if seen.insert(id) {
                             out.push(id);
                         }
@@ -42,7 +45,7 @@ impl MergedGraph {
                         if p.is_empty() || !p.contains('.') {
                             continue;
                         }
-                        for id in self.resolve_file(p) {
+                        for id in self.resolve_file(p, &mut counts) {
                             if seen.insert(id) {
                                 out.push(id);
                             }
@@ -50,7 +53,7 @@ impl MergedGraph {
                     }
                 } else {
                     for (file, line) in frames {
-                        if let Some(id) = self.resolve_frame(&file, line) {
+                        if let Some(id) = self.resolve_frame(&file, line, &mut counts) {
                             if seen.insert(id) {
                                 out.push(id);
                             }
@@ -67,45 +70,92 @@ impl MergedGraph {
             }
             _ => {}
         }
+        if counts.precise + counts.loose > 0 {
+            eprintln!(
+                "[resolve] file signal: path-suffix={} basename-fallback={}",
+                counts.precise, counts.loose
+            );
+        }
         out
     }
 
     /// The single most specific node whose POSITION cell spans `line_1based` in
-    /// a file whose basename matches `file`. Narrowest span wins (method over
-    /// class over module).
-    fn resolve_frame(&self, file: &str, line_1based: u32) -> Option<NodeId> {
-        let base = basename(file);
+    /// a file matching `file`. Two passes: a boundary-aligned path suffix
+    /// first, the bare basename only if that found nothing — so a frame naming
+    /// `svc_b/utils.py` no longer seeds `svc_a/utils.py`. Narrowest span wins
+    /// within each pass (method over class over module).
+    fn resolve_frame(
+        &self,
+        file: &str,
+        line_1based: u32,
+        counts: &mut MatchCounts,
+    ) -> Option<NodeId> {
+        let want = normalize_query_path(file);
+        let base = basename(&want);
         let line0 = line_1based.saturating_sub(1);
-        let mut best: Option<(NodeId, u32)> = None;
+        let mut precise: Option<(NodeId, u32)> = None;
+        let mut loose: Option<(NodeId, u32)> = None;
         for g in &self.graphs {
             for n in &g.nodes {
                 if let Some((f, s, e)) = position_of(n) {
-                    if basename(&f) == base && line0 >= s && line0 <= e {
-                        let width = e - s;
-                        if best.map(|(_, w)| width < w).unwrap_or(true) {
-                            best = Some((n.id, width));
-                        }
+                    if line0 < s || line0 > e {
+                        continue;
+                    }
+                    let slot = if path_tail_matches(&f, &want) {
+                        &mut precise
+                    } else if basename(&f) == base {
+                        &mut loose
+                    } else {
+                        continue;
+                    };
+                    let width = e - s;
+                    if slot.map(|(_, w)| width < w).unwrap_or(true) {
+                        *slot = Some((n.id, width));
                     }
                 }
             }
         }
-        best.map(|(id, _)| id)
+        if let Some((id, _)) = precise {
+            counts.precise += 1;
+            return Some(id);
+        }
+        if let Some((id, _)) = loose {
+            counts.loose += 1;
+            return Some(id);
+        }
+        None
     }
 
-    /// Every node whose POSITION file basename matches `file` (a changed-file
-    /// seed when there's no line). Sorted by id for determinism.
-    fn resolve_file(&self, file: &str) -> Vec<NodeId> {
-        let base = basename(file);
-        let mut out = Vec::new();
+    /// Every node in the file `file` names (a changed-file seed when there's no
+    /// line). Two passes: nodes whose POSITION matches by boundary-aligned path
+    /// suffix, falling back to bare-basename matches only when that pass is
+    /// empty. Keeping the basename pass means a bare `utils.py` query behaves
+    /// exactly as before, and a query whose prefix disagrees with the stored
+    /// POSITION prefix still finds something rather than nothing. Sorted by id
+    /// for determinism.
+    fn resolve_file(&self, file: &str, counts: &mut MatchCounts) -> Vec<NodeId> {
+        let want = normalize_query_path(file);
+        let base = basename(&want);
+        let mut precise = Vec::new();
+        let mut loose = Vec::new();
         for g in &self.graphs {
             for n in &g.nodes {
                 if let Some((f, _, _)) = position_of(n) {
-                    if basename(&f) == base {
-                        out.push(n.id);
+                    if path_tail_matches(&f, &want) {
+                        precise.push(n.id);
+                    } else if basename(&f) == base {
+                        loose.push(n.id);
                     }
                 }
             }
         }
+        let mut out = if precise.is_empty() {
+            counts.loose += loose.len();
+            loose
+        } else {
+            counts.precise += precise.len();
+            precise
+        };
         out.sort_by_key(|id| id.0);
         out
     }
@@ -296,6 +346,38 @@ fn basename(path: &str) -> &str {
     path.rsplit(|c: char| c == '/' || c == '\\').next().unwrap_or(path)
 }
 
+/// Normalise a caller-supplied path for matching: trim, `\` → `/`, drop a
+/// leading `./`. POSITION paths are already repo-relative with forward slashes
+/// (CODE_RULES.md §4), so only the query side needs this.
+fn normalize_query_path(path: &str) -> String {
+    let p = path.trim().replace('\\', "/");
+    p.trim_start_matches("./").to_string()
+}
+
+/// True when `a` and `b` name the same file by a boundary-aligned path suffix:
+/// either is a suffix of the other and the cut lands on a `/`. Lets an absolute
+/// stacktrace frame (`/repo/svc_b/utils.py`) match a repo-relative POSITION
+/// (`svc_b/utils.py`) while `svc_a/utils.py` does not. Both sides must already
+/// use `/` separators — POSITION is canonical, queries go through
+/// [`normalize_query_path`].
+fn path_tail_matches(a: &str, b: &str) -> bool {
+    fn suffix_of(long: &str, short: &str) -> bool {
+        !short.is_empty()
+            && long.ends_with(short)
+            && (long.len() == short.len()
+                || long.as_bytes()[long.len() - short.len() - 1] == b'/')
+    }
+    suffix_of(a, b) || suffix_of(b, a)
+}
+
+/// How the file/frame queries in one signal landed: on a boundary-aligned path
+/// suffix (precise) or on the basename fallback (loose), counted in seed nodes.
+#[derive(Default)]
+struct MatchCounts {
+    precise: usize,
+    loose: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +442,67 @@ mod tests {
         assert!(m
             .resolve_signal("File \"other.py\", line 15, in q", "stacktrace")
             .is_empty());
+    }
+
+    /// Two same-basename MODULE nodes in different sub-projects — the monorepo
+    /// shape `resolve_file` / `resolve_frame` used to conflate.
+    fn graph_with_two_utils() -> (MergedGraph, NodeId, NodeId) {
+        let r = repo();
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        let mut ids = Vec::new();
+        for svc in ["svc_a", "svc_b"] {
+            let qname = format!("{svc}::utils");
+            let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, &qname);
+            nav.record(id, "utils", &qname, node_kind::MODULE, None);
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![Cell {
+                    kind: cell_type::POSITION,
+                    payload: CellPayload::Json(format!(
+                        r#"{{"file":"{svc}/utils.py","start_line":0,"end_line":5}}"#
+                    )),
+                }],
+            });
+            ids.push(id);
+        }
+        let g = RepoGraph {
+            repo: r,
+            nodes,
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        };
+        (MergedGraph::new(vec![g]), ids[0], ids[1])
+    }
+
+    #[test]
+    fn resolve_file_prefers_path_suffix_over_basename() {
+        let (m, a, b) = graph_with_two_utils();
+        // A query carrying a directory component must not drag in the
+        // same-basename file from the other sub-project.
+        assert_eq!(m.resolve_signal("svc_b/utils.py\n", "diff"), vec![b]);
+        // A bare basename is genuinely ambiguous: both, sorted by id (today's
+        // behaviour, kept byte-identical).
+        let mut both = vec![a, b];
+        both.sort_by_key(|id| id.0);
+        assert_eq!(m.resolve_signal("utils.py\n", "diff"), both);
+        // A prefix that disagrees with every stored POSITION prefix falls back
+        // to the basename pass rather than resolving to nothing.
+        assert_eq!(m.resolve_signal("src/utils.py\n", "diff"), both);
+    }
+
+    #[test]
+    fn resolve_frame_prefers_path_suffix() {
+        let (m, _a, b) = graph_with_two_utils();
+        // Absolute frame vs repo-relative POSITION: the `/`-boundary suffix
+        // match still lands, and it lands on svc_b only.
+        let tb = "Traceback:\n  File \"/repo/svc_b/utils.py\", line 3, in helper\n";
+        assert_eq!(m.resolve_signal(tb, "stacktrace"), vec![b]);
     }
 }

@@ -50,7 +50,7 @@ Payload: `{"file":"<rel_path>","start_line":N,"end_line":N}`. Paths are repo-rel
 
 Tracebacks are 1-indexed; SWE-bench gold patch hunk headers are 1-indexed. **When comparing traceback line to POSITION line, both are 1-indexed in the issue / patch and 1-indexed in POSITION already as stored — recheck the off-by-one when adding a new resolver.** (POSITION as actually stored in cycle 0.6 fixtures: 1-indexed. Verify before any new bin.)
 
-Path matching is **basename-only** for traceback frames (Windows `\` + Unix `/` both split via `rsplit(|c| c == '/' || c == '\\')`). Repo-relative full paths are used for non-traceback resolvers.
+Path matching for traceback frames and changed-file seeds is **path-suffix preferred, basename fallback** (A6.9): `resolve_frame` / `resolve_file` first take every node whose POSITION path is a `/`-boundary-aligned suffix of the query (or vice versa, so an absolute frame `/repo/svc_b/utils.py` matches the repo-relative POSITION `svc_b/utils.py` while `svc_a/utils.py` does not), and only fall back to bare-basename matching when that pass is empty. A query with no directory component therefore behaves exactly as the old basename-only rule did. Windows `\` is normalised to `/` on the query side; POSITION is canonical (repo-relative, forward slashes). Repo-relative full paths are used for non-traceback resolvers.
 
 ## 5. Tail-index pattern
 
