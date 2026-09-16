@@ -937,17 +937,23 @@ pub fn read_merged_sharded(
     })
 }
 
-/// Cheap freshness check: is any file under `repo_path` newer than the
-/// manifest in `gmap_dir`? Skips `.git`, `target`, `node_modules`, `.venv`,
-/// `__pycache__`, and the gmap dir itself.
+/// Cheap freshness check: is anything under `repo_path` that the BUILDER would
+/// look at newer than the manifest in `gmap_dir`? Directory gating is shared
+/// with the builder's walk (see `walk_gate`), so the scan skips exactly the
+/// trees the parse skips: VCS/editor metadata, the gmap dir itself, dependency
+/// and build-output directories, anything the top-level `.gitignore` names, and
+/// copied web bundles.
 ///
 /// Returns:
-/// - `true` if the gmap is missing/unreadable, OR any source file's mtime is
-///   newer than the manifest's mtime.
-/// - `false` if everything in the repo predates the manifest.
+/// - `true` if the gmap is missing/unreadable, if it was written by another
+///   build, if any un-gated file's mtime is newer than the manifest's, or if a
+///   GATED directory's own mtime is newer (the builder emits one REGION node
+///   per collapsed directory, so a region appearing or disappearing does change
+///   the graph).
+/// - `false` if everything the builder would read predates the manifest.
 ///
-/// Walks lazily and stops at the first newer file. Worst case O(N) over the
-/// source tree.
+/// Walks lazily and stops at the first newer entry. Worst case O(N) over the
+/// un-gated tree.
 pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     let manifest_path = gmap_dir.join(MANIFEST_NAME);
     let Ok(manifest_meta) = std::fs::metadata(&manifest_path) else {
@@ -982,9 +988,146 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
         return true;
     }
 
-    let skip_dirs = [".git", "target", "node_modules", ".venv", "__pycache__", DEFAULT_GMAP_SUBDIR.split('/').next().unwrap()];
+    scan_for_newer(repo_path, manifest_mtime)
+}
+
+/// Directory gating for [`is_gmap_stale`], mirroring the builder's walk in
+/// `engine/src/walk.rs` name-for-name so the freshness check and the parse see
+/// the same tree.
+///
+/// **Deliberate temporary duplicate.** Packet A8.1 lifts this gate into
+/// `repo_graph_code_domain::walk_gating` and points both the engine walker and
+/// this module at it. Until it lands, `store` cannot reach the engine's copy —
+/// `engine` dev-depends on `store`, so a `store -> engine` edge would invert
+/// the layering. Any change here must be mirrored in `engine/src/walk.rs`.
+mod walk_gate {
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    /// VCS internals and editor metadata. The builder skips these outright and
+    /// does not even record a region, so neither their contents nor their own
+    /// existence can change the graph.
+    pub(super) fn is_hard_skip(name: &str) -> bool {
+        matches!(name, ".git" | ".hg" | ".svn" | ".idea" | ".vscode")
+    }
+
+    /// Dependency trees and conventional build output: always collapsed to one
+    /// region anchor regardless of `.gitignore`.
+    fn always_region(name: &str) -> bool {
+        matches!(
+            name,
+            "node_modules"
+                | "vendor"
+                | "bower_components"
+                | ".venv"
+                | "site-packages"
+                | "target"
+                | "dist"
+                | "build"
+                | "out"
+                | "__pycache__"
+                | ".cache"
+                | ".next"
+                | ".nuxt"
+                | ".angular"
+                | "coverage"
+        )
+    }
+
+    /// Directory names the repo's top-level `.gitignore` marks ignored. Only
+    /// plain, non-glob, non-negated entries are honoured, matched by final path
+    /// component — the builder's deliberately narrow rule, copied exactly so
+    /// the two agree. Full gitignore semantics are A8.2's packet, not this one.
+    pub(super) fn load_gitignore_dirs(root: &Path) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) else {
+            return out;
+        };
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty()
+                || line.starts_with('#')
+                || line.starts_with('!')
+                || line.contains('*')
+                || line.contains('?')
+                || line.contains('[')
+            {
+                continue;
+            }
+            let trimmed = line.trim_matches('/');
+            let comp = trimmed.rsplit('/').next().unwrap_or(trimmed);
+            if !comp.is_empty() {
+                out.insert(comp.to_string());
+            }
+        }
+        out
+    }
+
+    /// A bundler-emitted, content-hashed chunk (`main.e188fddd19255ba1.js`):
+    /// a dot-delimited segment of >= 8 hex digits before a JS/CSS extension.
+    fn is_hashed_chunk(name: &str) -> bool {
+        let ext_ok = name.ends_with(".js")
+            || name.ends_with(".mjs")
+            || name.ends_with(".css")
+            || name.ends_with(".map");
+        if !ext_ok {
+            return false;
+        }
+        name.split('.')
+            .any(|seg| seg.len() >= 8 && seg.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+
+    /// A built web-bundle mirror: it directly contains several hashed chunks.
+    /// Catches copies `.gitignore` does not flag (Capacitor's `ios/App/App/
+    /// public`). Kept in the gate despite costing one `read_dir` per candidate
+    /// — dropping it would re-open the same divergence in a new place — and it
+    /// only runs for directories that survive the cheap name checks.
+    fn dir_is_build_bundle(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        let mut hashed = 0usize;
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && is_hashed_chunk(&entry.file_name().to_string_lossy())
+            {
+                hashed += 1;
+                if hashed >= 3 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// True when the builder collapses this directory to a region instead of
+    /// descending. Composed in the builder's order: always-region, then the
+    /// top-level `.gitignore`, then the hashed-bundle probe.
+    pub(super) fn dir_is_gated(path: &Path, name: &str, gitignore: &HashSet<String>) -> bool {
+        always_region(name) || gitignore.contains(name) || dir_is_build_bundle(path)
+    }
+}
+
+/// Walk `repo_path` for anything newer than the manifest, gating directories
+/// exactly as the builder's walk does (`walk_gate`, mirroring
+/// `engine/src/walk.rs`). Before this shared gate the scan used its own
+/// six-name list, so it descended into trees the builder collapses (`dist`,
+/// `coverage`, every `.gitignore`d directory) and regenerated the whole gmap
+/// for files no parser ever reads — and each wasted regenerate is a wasted
+/// full parse of the real tree.
+///
+/// Returns true at the first newer entry; worst case O(N) over the un-gated
+/// tree.
+fn scan_for_newer(repo_path: &Path, manifest_mtime: std::time::SystemTime) -> bool {
+    let gitignore = walk_gate::load_gitignore_dirs(repo_path);
+    // Our own output. Never mtime-checked: the gmap dir's mtime moves on every
+    // write, so checking it would make every gmap instantly stale.
+    let gmap_root = DEFAULT_GMAP_SUBDIR.split('/').next().unwrap_or(".ai");
+    let mut gated = 0usize;
+    let mut checked = 0usize;
+    let mut stale = false;
     let mut stack = vec![repo_path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    'walk: while let Some(dir) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
@@ -998,22 +1141,47 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
             if ftype.is_dir() {
                 let basename = entry.file_name();
                 let bn = basename.to_string_lossy();
-                if skip_dirs.iter().any(|d| bn == *d) {
+                if bn == gmap_root || walk_gate::is_hard_skip(&bn) {
+                    // No node of any kind, so nothing about it is observable.
+                    gated += 1;
+                    continue;
+                }
+                if walk_gate::dir_is_gated(&path, &bn, &gitignore) {
+                    gated += 1;
+                    // The builder turns a gated dir into ONE region node, so
+                    // its existence is graph-visible even though its contents
+                    // are not. A directory's own mtime moves when an entry is
+                    // created or removed directly inside it — exactly when the
+                    // region set can change.
+                    if let Ok(meta) = entry.metadata()
+                        && let Ok(mtime) = meta.modified()
+                        && mtime > manifest_mtime
+                    {
+                        stale = true;
+                        break 'walk;
+                    }
                     continue;
                 }
                 stack.push(path);
             } else if ftype.is_file() {
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(mtime) = meta.modified() {
-                        if mtime > manifest_mtime {
-                            return true;
-                        }
-                    }
+                checked += 1;
+                if let Ok(meta) = entry.metadata()
+                    && let Ok(mtime) = meta.modified()
+                    && mtime > manifest_mtime
+                {
+                    stale = true;
+                    break 'walk;
                 }
             }
         }
     }
-    false
+    // Diagnostic: env-gated like the shard-skip summary above, so the MCP
+    // status path stays quiet by default.
+    if std::env::var("GLIA_STORE_VERBOSE").as_deref() == Ok("1") {
+        let verdict = if stale { "stale" } else { "fresh" };
+        eprintln!("[gmap] stale-scan: gated={gated} files={checked} verdict={verdict}");
+    }
+    stale
 }
 
 // ============================================================================
@@ -1393,5 +1561,95 @@ mod tests {
         v.as_object_mut().unwrap().remove("build_stamp");
         std::fs::write(&manifest_path, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(is_gmap_stale(&gmap_dir, &repo_dir));
+    }
+
+    // ------------------------------------------------------------------
+    // is_gmap_stale gating (audit #17)
+    // ------------------------------------------------------------------
+
+    fn write_file(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn empty_graph(canonical: &str) -> RepoGraph {
+        RepoGraph {
+            repo: RepoId::from_canonical(canonical),
+            nodes: vec![],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        }
+    }
+
+    /// A repo whose only post-manifest churn is inside directories the builder
+    /// collapses to a REGION. The gated directories THEMSELVES predate the
+    /// manifest (a real `node_modules` / `dist` / `.venv-eval` was there before
+    /// the build that wrote the gmap); the files that move afterwards sit one
+    /// level down, so the top-level gated dir's own mtime does not move either.
+    /// That separation is what lets the gated-dir-mtime rule (which exists so a
+    /// NEW region still marks the gmap stale) coexist with skipping the trees.
+    fn gated_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let gmap_dir = dir.path().join("gmap");
+        let repo_dir = dir.path().join("repo");
+
+        write_file(&repo_dir.join("src/a.py"), "x = 1\n");
+        write_file(&repo_dir.join(".gitignore"), "# local eval venv\n.venv-eval/\n");
+        std::fs::create_dir_all(repo_dir.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(repo_dir.join("dist/assets")).unwrap();
+        std::fs::create_dir_all(repo_dir.join(".venv-eval/lib")).unwrap();
+
+        write_sharded(&[("a", &empty_graph("test://gating"))], &[], &gmap_dir).unwrap();
+        // mtime granularity: make "after the manifest" unambiguous.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        write_file(&repo_dir.join("node_modules/pkg/x.js"), "//\n");
+        write_file(&repo_dir.join("dist/assets/bundle.js"), "//\n");
+        write_file(&repo_dir.join(".venv-eval/lib/y.py"), "y = 1\n");
+
+        (dir, gmap_dir, repo_dir)
+    }
+
+    #[test]
+    fn stale_scan_skips_gated_dirs() {
+        let (_tmp, gmap_dir, repo_dir) = gated_repo();
+        // `node_modules` was already skipped; `dist` (always_region) and
+        // `.venv-eval` (top-level .gitignore) were not, so the old six-name
+        // list regenerated the whole gmap for files no parser ever reads.
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "churn confined to collapsed regions must not mark the gmap stale"
+        );
+    }
+
+    #[test]
+    fn new_gated_dir_still_marks_stale() {
+        let (_tmp, gmap_dir, repo_dir) = gated_repo();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        // A gated dir is not invisible to the graph: the builder emits one
+        // REGION node per collapsed directory, so a region that appears after
+        // the build DOES change the graph. Its own mtime is the signal.
+        write_file(&repo_dir.join("coverage/index.html"), "<html/>\n");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "a newly-appeared collapsed region must still mark the gmap stale"
+        );
+    }
+
+    #[test]
+    fn stale_scan_still_sees_real_source() {
+        let (_tmp, gmap_dir, repo_dir) = gated_repo();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        write_file(&repo_dir.join("src/a.py"), "x = 2\n");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "a touched source file must still mark the gmap stale"
+        );
     }
 }

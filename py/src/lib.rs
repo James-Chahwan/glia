@@ -518,10 +518,22 @@ fn default_gmap_dir(repo_path: &str) -> String {
         .into_owned()
 }
 
-/// Is the cached gmap at `gmap_dir` older than any source file under
-/// `repo_path`? Used by the wrapper to decide between load and regenerate.
-/// Returns `true` if the gmap is missing entirely. Skips `.git`, `target`,
-/// `node_modules`, `.venv`, `__pycache__`, and `.ai/`.
+/// Is the cached gmap at `gmap_dir` older than anything under `repo_path` that
+/// the builder would read? Used by the wrapper to decide between load and
+/// regenerate. Returns `true` if the gmap is missing entirely, or if it was
+/// written by a different engine build.
+///
+/// Directory gating is shared with the builder's walk, so the scan skips
+/// exactly what the parse skips: VCS/editor metadata (`.git`, `.hg`, `.svn`,
+/// `.idea`, `.vscode`), the gmap dir (`.ai/`), dependency and build-output
+/// trees (`node_modules`, `vendor`, `bower_components`, `.venv`,
+/// `site-packages`, `target`, `dist`, `build`, `out`, `__pycache__`, `.cache`,
+/// `.next`, `.nuxt`, `.angular`, `coverage`), plain directory entries in the
+/// repo's top-level `.gitignore`, and copied web bundles. Churn confined to
+/// one of those no longer forces a regenerate. A collapsed directory is still
+/// one REGION node, so a gated directory whose OWN mtime is newer than the
+/// manifest (an entry created or removed directly inside it) does mark the
+/// gmap stale.
 #[pyfunction]
 fn is_stale(gmap_dir: &str, repo_path: &str) -> bool {
     is_gmap_stale(Path::new(gmap_dir), Path::new(repo_path))
