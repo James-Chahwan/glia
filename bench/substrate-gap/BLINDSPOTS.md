@@ -1,9 +1,14 @@
 # Substrate blind-spot map — v1 (engine 0.4.16, 2026-07-08)
 
-Full `(framework × edge-category)` extraction-recall audit — 24 analyzers, 69
+Full `(framework × edge-category)` extraction-recall audit — 24 analyzers, 71
 fixtures, graded by `run.py` against hand-enumerated ground truth. Raw matrix +
 history in `results.jsonl`. Verdicts: **extracted** (1.0), **partial** (edge
 emitted but wrong granularity/target), **blind** (0.0, no edge).
+
+(The count read 69 until 2026-09-16; the commit that added this file carried 71
+`fixtures/*/key.json`. This is a v1 SNAPSHOT and the corpus has grown a lot
+since — for the live, measured picture read `COVERAGE.md`, which is regenerated
+by `matrix.py --emit` and committed, not hand-counted.)
 
 The gaps are not isolated cells — they cluster into **9 systemic patterns**.
 Independently re-verified: Go IMPORTS, Scala CALLS, Java IMPORTS all confirmed

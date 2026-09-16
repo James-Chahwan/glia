@@ -71,6 +71,13 @@ Usage:
   python3 matrix.py --language python    # filter rows
   python3 matrix.py --mechanism kafka    # filter columns
   python3 matrix.py --fail-on-error      # exit 1 on any error/invalid cell
+  python3 matrix.py --emit               # rewrite the COMMITTED artefacts
+  python3 matrix.py --check              # exit 1 if those artefacts are stale
+
+--emit / --check write and verify bench/substrate-gap/results-latest.json and
+COVERAGE.md (see matrix_emit.py). They always cover the FULL 16x30 grid, so they
+refuse to run alongside --cell/--language/--mechanism: a committed artefact
+rendered through a filter would silently claim every excluded cell is unknown.
 """
 import argparse
 import glob
@@ -81,10 +88,14 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 import matrix_vocab as vocab  # noqa: E402
+import matrix_emit  # noqa: E402  -- the committed-artefact emitter
 import grade as _grade  # noqa: E402  -- sets GLIA_NO_PERSIST at import
 
-GLYPH = {"full": "●", "partial": "◐", "none": "·",
-         "unknown": "?", "error": "!"}
+# Owned by matrix_emit so the terminal render and the committed COVERAGE.md
+# cannot drift apart. matrix_emit deliberately does NOT import this module back:
+# matrix.py is normally __main__, so the reverse import would load a second copy
+# under a different name and re-run collection.
+GLYPH = matrix_emit.GLYPH
 # increasing badness; MIN aggregation takes the highest rank.
 RANK = {"full": 0, "partial": 1, "none": 2, "error": 3}
 SEPARATORS = "-_."
@@ -384,7 +395,19 @@ def main(argv=None):
     ap.add_argument("--mechanism", help="filter columns")
     ap.add_argument("--fail-on-error", action="store_true",
                     help="exit 1 on any cell error or invalid cell declaration")
+    ap.add_argument("--emit", action="store_true",
+                    help="rewrite the committed results-latest.json + COVERAGE.md")
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 if the committed artefacts are stale")
     args = ap.parse_args(argv)
+
+    # A filtered artefact would record every excluded cell as `unknown`, which is
+    # a lie the committed file would then carry until someone re-emitted unfiltered.
+    if (args.emit or args.check) and (args.cell or args.language or args.mechanism
+                                      or args.json):
+        print("[matrix] --emit/--check cover the full 16x30 grid and cannot be "
+              "combined with --cell/--language/--mechanism/--json", file=sys.stderr)
+        return 2
 
     # Resolve the selection BEFORE grading: a typo in --cell should cost nothing
     # and must not surface as a traceback out of the vocabulary module.
@@ -401,6 +424,26 @@ def main(argv=None):
     print(f"[matrix] {len(languages)} languages x {len(mechanisms)} mechanisms, "
           f"{tally['full']} full, {tally['partial']} partial, {tally['none']} none, "
           f"{tally['unknown']} unknown", file=sys.stderr)
+
+    if args.emit or args.check:
+        payload = matrix_emit.build_payload(cells, legacy_only)
+        if args.emit:
+            matrix_emit.write_results(payload)
+            matrix_emit.write_markdown(payload)
+            print(f"[matrix] emit: {matrix_emit.RESULTS_PATH.name} "
+                  f"{len(payload['cells'])} cells, {matrix_emit.COVERAGE_PATH.name} "
+                  f"{len(languages)}x{len(mechanisms)}", file=sys.stderr)
+            return 0
+        drift, changed = matrix_emit.check(payload)
+        if not drift:
+            print("[matrix] check: OK", file=sys.stderr)
+            return 0
+        # stdout carries ONLY the drift lines: the falsification test greps it
+        # for one `<lang>/<mech>: <committed> -> <measured>` and nothing else.
+        for line in drift:
+            print(line)
+        print(f"[matrix] check: DRIFT {changed} cells changed", file=sys.stderr)
+        return 1
 
     if args.json:
         print(json.dumps({

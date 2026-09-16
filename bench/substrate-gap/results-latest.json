@@ -1,0 +1,1782 @@
+{
+  "cells": {
+    "c_cpp/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/c_cpp-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "c_cpp/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/c_cpp-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "clojure/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/clojure-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "clojure/imports": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/clojure-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "csharp/calls": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/csharp-aspnet"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "csharp/grpc": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-grpc-csharp"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "grpc"
+    },
+    "csharp/http_client": {
+      "extract": [
+        0,
+        4
+      ],
+      "fixtures": [
+        "fixtures/csharp-httpclient-http",
+        "fixtures/csharp-refit-http"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        3
+      ],
+      "via": null
+    },
+    "csharp/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/csharp-aspnet"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "csharp/impl": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/csharp-aspnet"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "type"
+    },
+    "csharp/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/csharp-aspnet"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "csharp/injects": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/csharp-aspnet"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "di"
+    },
+    "csharp/kafka": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-csharp-kafka"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "dart/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/dart-http-dio"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "dart/imports": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/dart-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "elixir/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/elixir-phoenix-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "elixir/http_client": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/elixir-http"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "http"
+    },
+    "elixir/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/elixir-phoenix-handled_by"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "elixir/imports": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/elixir-phoenix-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "go/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/go-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "go/db": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/go-accesses-data"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "go/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-grpc-grpc_calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
+    },
+    "go/http_client": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/xstack-go-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "go/http_server": {
+      "extract": [
+        8,
+        8
+      ],
+      "fixtures": [
+        "fixtures/angular-http-calls",
+        "fixtures/dart-http-dio",
+        "fixtures/go-handled-by",
+        "fixtures/react-http_calls",
+        "fixtures/swift-http",
+        "fixtures/vue-http-calls",
+        "fixtures/xstack-go-http",
+        "fixtures/xstack-ts-go-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        8,
+        8
+      ],
+      "reasons": [],
+      "route": [
+        10,
+        10
+      ],
+      "via": "http"
+    },
+    "go/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/go-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "go/kafka": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-go-segmentio"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "go/nats": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-queue_flows",
+        "fixtures/xcut-queue-queue_flows-probe"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "queue"
+    },
+    "go/ws": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-websocket-ws_connects"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "websocket"
+    },
+    "java/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/java-spring-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "java/db": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/java-spring-accessdata"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "java/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/java-spring-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "java/http_server": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/java-spring-composed",
+        "fixtures/java-spring-handled",
+        "fixtures/java-spring-http"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        6,
+        6
+      ],
+      "via": "http"
+    },
+    "java/impl": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/java-spring-inherits"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "type"
+    },
+    "java/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/java-spring-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "java/injects": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/java-spring-injects"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "di"
+    },
+    "java/kafka": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-java-spring"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "php/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/php-laravel-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "call"
+    },
+    "php/http_server": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/php-laravel-handled_by",
+        "fixtures/php-symfony-composed"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        4,
+        4
+      ],
+      "via": "http"
+    },
+    "python/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "python/db": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/py-accesses-data"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "python/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "python/http_server": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-flask-handled",
+        "fixtures/py-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "python/impl": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-inherits"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "type"
+    },
+    "python/imports": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "python/tests": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/py-tests"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "test"
+    },
+    "ruby/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/ruby-rails-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "ruby/db": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/ruby-rails-accesses_data"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "ruby/http_client": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "fixtures/ruby-http"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "ruby/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/ruby-rails-handled_by"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "ruby/imports": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/ruby-rails-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "rust/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/rust-axum-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "rust/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/rust-axum-handled_by"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "rust/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/rust-axum-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "scala/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/scala-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "scala/http_client": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "fixtures/scala-http"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "scala/impl": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/scala-inherits_from"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "type"
+    },
+    "scala/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/scala-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "solidity/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/solidity-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "solidity/eventbus": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/solidity-event_flows"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "solidity/impl": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/solidity-inherits_from"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "type"
+    },
+    "swift/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/swift-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "swift/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/swift-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "typescript/calls": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/ts-calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "call"
+    },
+    "typescript/eventbus": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-eventbus-event_flows"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "typescript/graphql": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/xcut-graphql-graphql_calls"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "graphql"
+    },
+    "typescript/http_client": {
+      "extract": [
+        5,
+        5
+      ],
+      "fixtures": [
+        "fixtures/angular-http-calls",
+        "fixtures/react-http_calls",
+        "fixtures/ts-http-fetch",
+        "fixtures/vue-http-calls",
+        "fixtures/xstack-ts-go-http"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        5,
+        5
+      ],
+      "reasons": [],
+      "route": [
+        5,
+        5
+      ],
+      "via": "http"
+    },
+    "typescript/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/ts-http-fetch"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
+    "typescript/imports": {
+      "extract": [
+        5,
+        5
+      ],
+      "fixtures": [
+        "fixtures/angular-imports",
+        "fixtures/react-imports",
+        "fixtures/ts-imports",
+        "fixtures/ts-imports-rel",
+        "fixtures/vue-imports"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        5,
+        5
+      ],
+      "via": "import"
+    },
+    "typescript/injects": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/angular-injects",
+        "fixtures/ts-angular-di"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "di"
+    },
+    "typescript/kafka": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-multi-topic"
+      ],
+      "forbid": [
+        4,
+        4
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "queue"
+    },
+    "typescript/tests": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/ts-tests"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "test"
+    },
+    "typescript/ws": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/xcut-websocket-precision",
+        "fixtures/xcut-websocket-ws_connects"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [
+        "no routing expected"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "websocket"
+    }
+  },
+  "engine": "0.4.18",
+  "legacy_only": [
+    "fixtures/contract-openapi-yaml",
+    "fixtures/csharp-aspnet-composed",
+    "fixtures/elixir-xmodule-calls",
+    "fixtures/k8s-multidoc-cron",
+    "fixtures/php-laravel-prefix",
+    "fixtures/py-router-prefix",
+    "fixtures/react-hook",
+    "fixtures/ruby-rails-scope",
+    "fixtures/rust-http",
+    "fixtures/solidity-state_var",
+    "fixtures/swift-imports",
+    "fixtures/terraform-depends_on",
+    "fixtures/terraform-infra_references",
+    "fixtures/xcut-config-env-value",
+    "fixtures/xcut-queue-tag-unpairable",
+    "fixtures/xdata-source-shares",
+    "fixtures/xschema-csharp-namespace"
+  ],
+  "schema": 1,
+  "totals": {
+    "covered": 71,
+    "error": 0,
+    "full": 67,
+    "grid": 480,
+    "none": 3,
+    "partial": 1,
+    "unknown": 409
+  },
+  "vocabulary": {
+    "digest": "a3672b018b49",
+    "languages": 16,
+    "mechanisms": 30
+  }
+}
