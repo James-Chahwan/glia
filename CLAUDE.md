@@ -147,6 +147,12 @@ Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + futu
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
 
 CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
+- `glia arch <repo> [--mermaid] [--include-shared]` — the whole-stack view: the
+  services present and the cross-service links between them, each with mechanism
+  + channel + count (A9.2 `service_map`). A single repo keys services by
+  top-level directory, so a monorepo does not collapse to one node. Non-flow
+  links (`SHARES_*`, `DOCUMENTS`) are hidden unless `--include-shared`.
+  `glia analyze --format mermaid` renders the same service graph.
 - `glia blast-radius <repo> <qname>` — edge-category-aware, PPR-ranked, located
   closure with per-node edge-reason + `live` flag (`--live-only`, `--direction`,
   `--depth`, `--top-k`). Excludes structural import/contain edges (no fan-out noise).
@@ -163,7 +169,8 @@ CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `resolve`, `coverage`,
 `governing_docs` (+ `activate`, `find_node`, `node_cells`, `dense_text*`). Engine
 entry points: `blast_radius_by_qname`, `cross_stack_trace`, `resolve_signal_located`,
-`coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`.
+`coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
+`service_map` / `service_map_with` (A9.2, behind `glia arch`).
 
 ## Roadmap
 

@@ -98,8 +98,19 @@ For LLM/MCP usage see [repo-graph](https://github.com/James-Chahwan/repo-graph),
 
 ```
 glia analyze <repo> [--format summary|mermaid|json]
-    Walk one repo. Default is a Markdown summary. `mermaid` renders a
-    `graph LR` of cross-stack edges. `json` is full nodes+edges.
+    Walk one repo. Default is a Markdown summary. `mermaid` renders the
+    service graph (same view as `glia arch --mermaid`). `json` is full
+    nodes+edges.
+
+glia arch <repo> [--with <repo>] [--json|--mermaid] [--include-shared]
+    What services are in here, and how do they talk. One table of
+    services (languages, files, nodes, routes, endpoints, in/out) and one
+    of the cross-service links, each labelled with its mechanism
+    (HTTP_CALLS / QUEUE_FLOWS / GRPC_CALLS / …) and the channel it travels
+    over. A single repo keys services by top-level directory, so a
+    monorepo does not collapse to one node; `--with` merges repos and
+    keys per repo. Non-flow links (SHARES_*, DOCUMENTS) are hidden unless
+    `--include-shared`.
 
 glia impact <repo> <qname> [--direction forward|backward|both] [--depth N]
     Reachability walk over the merged graph from one entity. Forward is
