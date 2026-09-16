@@ -1,0 +1,15 @@
+{
+  "framework": "csharp-aspnet-composed",
+  "language": "csharp",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/v2/orders/{id}", "note": "class [Route(\"api/v2/[controller]\")] + action [HttpGet(\"{id}\")] composed, [controller] token resolved, leading slash added"},
+    {"kind": "ROUTE", "name": "POST /api/v2/orders", "note": "bare [HttpPost] inherits the controller template"},
+    {"kind": "ROUTE", "name": "DELETE /admin/orders/{id}", "note": "leading-slash action template overrides the controller prefix (ASP.NET semantics)"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v2/orders/{id}", "to": "GetOrder", "category": "HANDLED_BY", "note": "composed route handled by the action method"},
+    {"from": "GET /api/v2/orders/${…}", "to": "GET /api/v2/orders/{id}", "category": "HTTP_CALLS", "note": "TS fetch pairs with the composed C# route"},
+    {"from": "POST /api/v2/orders", "to": "POST /api/v2/orders", "category": "HTTP_CALLS", "note": "TS fetch POST pairs with the bare [HttpPost] action"}
+  ]
+}

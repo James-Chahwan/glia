@@ -9,12 +9,12 @@
     {"kind": "METHOD", "name": "GetUser", "note": "action method"},
     {"kind": "METHOD", "name": "GetById", "note": "service method (same-class caller)"},
     {"kind": "METHOD", "name": "Load", "note": "same-class callee"},
-    {"kind": "ROUTE", "name": "users", "note": "[HttpGet] action route"}
+    {"kind": "ROUTE", "name": "GET /api/users/{id}", "note": "class [Route(\"api/users\")] + action [HttpGet(\"{id}\")] composed, leading slash"}
   ],
   "expect_edges": [
     {"from": "GetById", "to": "Load", "category": "CALLS", "note": "same-class call GetById()->Load() (bare => SelfMethod); field-typed instance dispatch _userService.GetById is Pattern-C 'instance dispatch blind' (no field-type resolution in resolve_calls)"},
     {"from": "UsersController", "to": "Shop/Services", "category": "IMPORTS", "note": "using Shop.Services in-repo namespace"},
-    {"from": "{id}", "to": "GetUser", "category": "HANDLED_BY", "note": "[HttpGet] route handled by action method"},
+    {"from": "GET /api/users/{id}", "to": "GetUser", "category": "HANDLED_BY", "note": "composed [Route(\"api/users\")] + [HttpGet(\"{id}\")] route handled by the action method"},
     {"from": "UsersController", "to": "IUserService", "category": "INJECTS", "note": "constructor DI of interface"},
     {"from": "UserService", "to": "IUserService", "category": "IMPLEMENTS", "note": "in-repo interface impl; heritage emitted as UnresolvedRef(Bare) and bound by resolve_refs (external ControllerBase stays unresolved)"}
   ]

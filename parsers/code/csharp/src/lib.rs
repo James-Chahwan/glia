@@ -5,6 +5,10 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+// Shared route-template primitives (A4.0). `join_path` deliberately does NOT
+// force a leading slash, so every composed ASP.NET path goes through
+// `abs_path` explicitly.
+use repo_graph_code_domain::endpoint;
 
 pub fn parse_file(
     source: &str,
@@ -192,6 +196,18 @@ fn visit_type_decl(
     // plain data class with a constructor doesn't emit spurious INJECTS edges.
     let is_di = is_di_class(name, text_of(node, src));
 
+    // ASP.NET attribute routing. The controller's OWN `[Route(...)]` is the
+    // prefix every relative action template composes onto; reading it from this
+    // node's own `attribute_list` children (never a text scan of the body) is
+    // what stops the class-level pass re-finding — and re-emitting — every
+    // action's `[HttpGet]`.
+    let class_prefix = controller_route_prefix(node, src, name);
+    if !class_prefix.is_empty() {
+        let own = endpoint::abs_path(&substitute_route_tokens(&class_prefix, name, ""));
+        emit_route("ANY", &own, id, repo, acc);
+    }
+    let mut composed_routes = 0usize;
+
     let Some(body) = node.child_by_field_name("body") else {
         return;
     };
@@ -199,7 +215,17 @@ fn visit_type_decl(
     for child in body.named_children(&mut cursor) {
         match child.kind() {
             "method_declaration" | "constructor_declaration" => {
-                visit_method(child, src, file_rel, &qname, id, repo, acc);
+                composed_routes += visit_method(
+                    child,
+                    src,
+                    file_rel,
+                    &qname,
+                    id,
+                    &class_prefix,
+                    name,
+                    repo,
+                    acc,
+                );
                 if is_di && child.kind() == "constructor_declaration" {
                     emit_ctor_injects(child, src, id, module_id, repo, acc);
                 }
@@ -215,7 +241,16 @@ fn visit_type_decl(
         }
     }
 
-    check_route_attrs(node, src, id, repo, acc);
+    if composed_routes > 0 {
+        let shown = if class_prefix.is_empty() {
+            "/".to_string()
+        } else {
+            endpoint::abs_path(&class_prefix)
+        };
+        eprintln!(
+            "[csharp-routes] composed {composed_routes} action routes under '{shown}' in {file_rel}"
+        );
+    }
 }
 
 /// Pattern E gate: does this type look like a DI consumer? ASP.NET controllers
@@ -313,17 +348,22 @@ fn is_primitive_type(name: &str) -> bool {
     )
 }
 
+/// Returns the number of ASP.NET action routes this method contributed, so
+/// `visit_type_decl` can emit the fired-on marker once per controller.
+#[allow(clippy::too_many_arguments)]
 fn visit_method(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    class_prefix: &str,
+    type_name: &str,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> usize {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return 0;
     };
     let name = text_of(name_node, src);
     let qname = format!("{parent_qname}::{name}");
@@ -348,7 +388,9 @@ fn visit_method(
         collect_calls_in(body, src, id, acc);
     }
 
-    check_route_attrs(node, src, id, repo, acc);
+    let emitted = check_route_attrs(node, src, id, repo, class_prefix, type_name, name, acc);
+    check_minimal_api_routes(node, src, id, repo, acc);
+    emitted
 }
 
 /// G12.5: heuristic — does this base-list name look like an interface?
@@ -467,46 +509,237 @@ fn is_primitive_literal(kind: &str) -> bool {
     )
 }
 
-fn check_route_attrs(node: TsNode, src: &[u8], handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let text = text_of(node, src);
-    let aspnet = [
-        ("[HttpGet", "GET"),
-        ("[HttpPost", "POST"),
-        ("[HttpPut", "PUT"),
-        ("[HttpDelete", "DELETE"),
-        ("[HttpPatch", "PATCH"),
-        ("[HttpHead", "HEAD"),
-        ("[HttpOptions", "OPTIONS"),
-    ];
-    for (prefix, method) in &aspnet {
-        let mut search_from = 0;
-        while let Some(rel) = text[search_from..].find(prefix) {
-            let pos = search_from + rel;
-            let after = &text[pos + prefix.len()..];
-            let path = if after.starts_with("(\"") {
-                extract_quoted(&after[1..])
-            } else {
-                Some("/".to_string())
-            };
-            if let Some(path) = path {
-                emit_route(method, &path, handler_id, repo, acc);
+/// ASP.NET verb attributes, keyed by the attribute's simple name (any
+/// `Attribute` suffix already stripped by `own_attributes`).
+const HTTP_VERB_ATTRS: [(&str, &str); 7] = [
+    ("HttpGet", "GET"),
+    ("HttpPost", "POST"),
+    ("HttpPut", "PUT"),
+    ("HttpDelete", "DELETE"),
+    ("HttpPatch", "PATCH"),
+    ("HttpHead", "HEAD"),
+    ("HttpOptions", "OPTIONS"),
+];
+
+/// ASP.NET attribute routing for ONE declaration, read off that declaration's
+/// own `attribute_list` children.
+///
+/// Composition follows ASP.NET's real rule: an action template with a leading
+/// `/` (or `~/`) OVERRIDES the controller prefix; anything else is appended to
+/// it. The emitted path is always absolute, because `index_route_node` in
+/// repo-graph-graph refuses to index a route whose path does not start with
+/// `/` — a relative ASP.NET route is invisible to every HTTP client resolver.
+///
+/// Returns the number of routes emitted (the fired-on marker's count).
+#[allow(clippy::too_many_arguments)]
+fn check_route_attrs(
+    node: TsNode,
+    src: &[u8],
+    handler_id: NodeId,
+    repo: RepoId,
+    class_prefix: &str,
+    type_name: &str,
+    action_name: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut emitted = 0usize;
+    for (attr, arg) in own_attributes(node, src) {
+        let method = if attr == "Route" {
+            "ANY"
+        } else {
+            match HTTP_VERB_ATTRS.iter().find(|(a, _)| *a == attr) {
+                Some((_, verb)) => verb,
+                None => continue,
             }
-            search_from = pos + prefix.len();
+        };
+        let raw = arg.unwrap_or_default();
+        // The override test is on the WRITTEN template, never on a normalised
+        // one: `[HttpGet("/")]` is an explicit root override, while a bare
+        // `[HttpPost]` (and `[HttpPost("")]`) means "the controller template
+        // itself". Normalising the empty template to `"/"` first would collapse
+        // the two and send every bare verb attribute to `/`.
+        let composed = if raw.starts_with('/') || raw.starts_with("~/") {
+            endpoint::abs_path(raw.trim_start_matches('~'))
+        } else {
+            // Relative or absent. `join_path(prefix, "/")` is defined to return
+            // the prefix as-is, which is exactly "inherit the controller
+            // template"; with no prefix it degrades to `/`, today's behaviour
+            // for a bare verb attribute outside a routed controller.
+            let rel = if raw.is_empty() { "/" } else { raw.as_str() };
+            endpoint::abs_path(&endpoint::join_path(class_prefix, rel))
+        };
+        let path = substitute_route_tokens(&composed, type_name, action_name);
+        emit_route(method, &path, handler_id, repo, acc);
+        emitted += 1;
+    }
+    emitted
+}
+
+/// The controller's own `[Route("...")]` template with the `[controller]` token
+/// resolved, or `""` when it carries none — `endpoint::join_path` treats an
+/// empty prefix as a pure pass-through. The `[action]` token is deliberately
+/// left in place: only the action itself knows its own name.
+fn controller_route_prefix(type_node: TsNode, src: &[u8], type_name: &str) -> String {
+    for (attr, arg) in own_attributes(type_node, src) {
+        if attr != "Route" {
+            continue;
+        }
+        if let Some(tmpl) = arg.filter(|t| !t.is_empty()) {
+            return replace_route_token(&tmpl, "controller", &controller_token(type_name));
         }
     }
-    // [Route("/path")] — ASP.NET conventional routing, ANY method.
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find("[Route(\"") {
-        let pos = search_from + rel;
-        let after = &text[pos + "[Route(\"".len()..];
-        if let Some(end) = after.find('"') {
-            let path = &after[..end];
-            emit_route("ANY", path, handler_id, repo, acc);
+    String::new()
+}
+
+/// `UsersController` → `users`. Total: `strip_suffix` falls back to the name.
+fn controller_token(type_name: &str) -> String {
+    type_name
+        .strip_suffix("Controller")
+        .unwrap_or(type_name)
+        .to_ascii_lowercase()
+}
+
+/// Resolve ASP.NET's `[controller]` / `[action]` route tokens (and the
+/// `{controller}` / `{action}` spellings) against the enclosing type and the
+/// action method. Case-insensitive, as ASP.NET is.
+fn substitute_route_tokens(tmpl: &str, type_name: &str, action_name: &str) -> String {
+    let out = replace_route_token(tmpl, "controller", &controller_token(type_name));
+    replace_route_token(&out, "action", &action_name.to_ascii_lowercase())
+}
+
+/// Replace every `[token]` / `{token}` occurrence (case-insensitive) with
+/// `value`. Byte indices stay valid because `to_ascii_lowercase` never changes
+/// a char's length.
+fn replace_route_token(input: &str, token: &str, value: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let needles = [format!("[{token}]"), format!("{{{token}}}")];
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < input.len() {
+        match needles.iter().find(|n| lower[i..].starts_with(n.as_str())) {
+            Some(n) => {
+                out.push_str(value);
+                i += n.len();
+            }
+            None => {
+                let step = input[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+                out.push_str(&input[i..i + step]);
+                i += step;
+            }
         }
-        search_from = pos + "[Route(\"".len();
     }
-    // Minimal API: app.MapGet("/path", ...)
-    for method_name in &["MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapHead", "MapOptions"] {
+    out
+}
+
+/// Every attribute on this declaration's OWN `attribute_list` children, as
+/// (simple name, first positional string-literal argument).
+///
+/// `attribute_list` is a direct NAMED CHILD of `class_declaration` /
+/// `interface_declaration` / `method_declaration` in tree-sitter-c-sharp — it
+/// is NOT reachable by `child_by_field_name("attributes")` (that spelling is
+/// PHP's). Reading only the node's own lists is what makes the class-level and
+/// method-level passes disjoint by construction.
+fn own_attributes(node: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    let lists: Vec<TsNode> = node
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "attribute_list")
+        .collect();
+    for list in lists {
+        let mut lc = list.walk();
+        let attrs: Vec<TsNode> = list
+            .named_children(&mut lc)
+            .filter(|c| c.kind() == "attribute")
+            .collect();
+        for attr in attrs {
+            let Some(name_node) = attr.child_by_field_name("name") else {
+                continue;
+            };
+            let raw = text_of(name_node, src);
+            // Strip generic args, then the namespace / alias qualifier, then
+            // C#'s optional `Attribute` suffix (`[RouteAttribute("x")]`).
+            let base = raw.split('<').next().unwrap_or(raw).trim();
+            let simple = base.rsplit('.').next().unwrap_or(base);
+            let simple = simple.rsplit(':').next().unwrap_or(simple).trim();
+            let simple = simple
+                .strip_suffix("Attribute")
+                .filter(|s| !s.is_empty())
+                .unwrap_or(simple);
+            out.push((simple.to_string(), attr_string_arg(attr, src)));
+        }
+    }
+    out
+}
+
+/// The first POSITIONAL string-literal argument of an attribute, e.g. the
+/// `"api/v2/[controller]"` of `[Route("api/v2/[controller]")]`. A named
+/// argument (`[HttpGet(Name = "x")]`) carries a `name` field and is skipped —
+/// it is a route NAME, never a template.
+fn attr_string_arg(attr: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = attr.walk();
+    let args = attr
+        .children(&mut cursor)
+        .find(|c| c.kind() == "attribute_argument_list")?;
+    let mut ac = args.walk();
+    let arg_nodes: Vec<TsNode> = args
+        .named_children(&mut ac)
+        .filter(|c| c.kind() == "attribute_argument" && c.child_by_field_name("name").is_none())
+        .collect();
+    for arg in arg_nodes {
+        let mut ec = arg.walk();
+        let exprs: Vec<TsNode> = arg.named_children(&mut ec).collect();
+        for expr in exprs {
+            if let Some(text) = string_literal_text(expr, src) {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+/// Inner text of any of C#'s three string-literal forms, or `None` for a
+/// non-literal expression (a `nameof(...)`, a const reference, …).
+fn string_literal_text(node: TsNode, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "string_literal" => {
+            let mut cursor = node.walk();
+            let parts: Vec<String> = node
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() == "string_literal_content")
+                .map(|c| text_of(c, src).to_string())
+                .collect();
+            Some(parts.concat())
+        }
+        "verbatim_string_literal" => {
+            let raw = text_of(node, src);
+            let body = raw.strip_prefix("@\"").unwrap_or(raw);
+            let body = body.strip_suffix('"').unwrap_or(body);
+            Some(body.replace("\"\"", "\""))
+        }
+        "raw_string_literal" => {
+            let mut cursor = node.walk();
+            let parts: Vec<String> = node
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() == "raw_string_content")
+                .map(|c| text_of(c, src).to_string())
+                .collect();
+            Some(parts.concat())
+        }
+        _ => None,
+    }
+}
+
+/// Minimal-API registration inside a method body: `app.MapGet("/path", …)`.
+/// Still the pre-AST text scan, kept verbatim so no capability is lost before
+/// A4.2 re-homes it as a proper invocation walk; moved out of
+/// `check_route_attrs` and called from `visit_method` only, so the class-level
+/// pass can no longer re-emit each of these a second time.
+fn check_minimal_api_routes(node: TsNode, src: &[u8], handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
+    let text = text_of(node, src);
+    for method_name in &[
+        "MapGet", "MapPost", "MapPut", "MapDelete", "MapPatch", "MapHead", "MapOptions",
+    ] {
         let search = format!(".{method_name}(\"");
         let mut search_from = 0;
         while let Some(rel) = text[search_from..].find(&search) {
@@ -544,6 +777,10 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
+/// First double-quoted run in a text slice. The attribute path now reads its
+/// string arguments off the AST, so nothing calls this today — it is kept for
+/// A4.2's minimal-API invocation walk, which still needs a literal reader.
+#[allow(dead_code)]
 fn extract_quoted(text: &str) -> Option<String> {
     let start = text.find('"')?;
     let rest = &text[start + 1..];
@@ -876,6 +1113,122 @@ public class ThingsController {
         assert!(routes.contains(&"HEAD /things"));
         assert!(routes.contains(&"OPTIONS /things"));
         assert!(routes.contains(&"ANY /api/v1"));
+    }
+
+    /// The composed-fixture shape: a controller template with the
+    /// `[controller]` token plus a RELATIVE action template. Before A4.1 this
+    /// emitted `GET {id}` — no leading `/`, so `index_route_node` refused it
+    /// and no client in any language could ever reach the action.
+    const COMPOSED_CONTROLLER: &str = r#"
+[ApiController]
+[Route("api/v2/[controller]")]
+public class OrdersController : ControllerBase {
+    [HttpGet("{id}")]
+    public Order GetOrder(int id) { return null; }
+
+    [HttpPost]
+    public Order Create(Order o) { return null; }
+
+    [HttpDelete("/admin/orders/{id}")]
+    public void Purge(int id) {}
+}
+"#;
+
+    fn route_names(fp: &FileParse) -> Vec<String> {
+        fp.nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect()
+    }
+
+    fn composed_fixture() -> FileParse {
+        parse_file(
+            COMPOSED_CONTROLLER,
+            "server/OrdersController.cs",
+            "Shop::Controllers",
+            repo(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn aspnet_relative_template_composes() {
+        // [Route("api/v2/[controller]")] + [HttpGet("{id}")] composes to an
+        // ABSOLUTE path with the [controller] token resolved.
+        let names = route_names(&composed_fixture());
+        assert!(
+            names.iter().any(|n| n == "GET /api/v2/orders/{id}"),
+            "expected composed 'GET /api/v2/orders/{{id}}', got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn aspnet_bare_verb_attribute_inherits_prefix() {
+        // A bare [HttpPost] with no template is the controller template itself.
+        let names = route_names(&composed_fixture());
+        assert!(
+            names.iter().any(|n| n == "POST /api/v2/orders"),
+            "expected bare [HttpPost] to inherit the controller prefix, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn aspnet_absolute_action_template_overrides_prefix() {
+        // ASP.NET semantics: a leading `/` on the action template discards the
+        // controller prefix rather than appending to it.
+        let names = route_names(&composed_fixture());
+        assert!(
+            names.iter().any(|n| n == "DELETE /admin/orders/{id}"),
+            "expected absolute action template to override the prefix, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("/api/v2/orders/admin")),
+            "absolute action template must not be appended to the prefix: {names:?}"
+        );
+    }
+
+    #[test]
+    fn aspnet_class_scan_does_not_duplicate_action_routes() {
+        // Regression lock for the dedupe. The old text scan read the whole
+        // class body at class level, so every action route got a SECOND
+        // HANDLED_BY edge pointing at the controller CLASS. Reading only each
+        // node's own attribute_list children makes the two passes disjoint.
+        let fp = composed_fixture();
+        let get_route = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            "GET /api/v2/orders/{id}",
+        );
+        let handled: Vec<&Edge> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY && e.from == get_route)
+            .collect();
+        assert_eq!(
+            handled.len(),
+            1,
+            "composed action route must have exactly ONE HANDLED_BY edge, got {}: {:?}",
+            handled.len(),
+            handled
+        );
+        let action = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "Shop::Controllers::OrdersController::GetOrder",
+        );
+        assert_eq!(
+            handled[0].to, action,
+            "the surviving HANDLED_BY must point at the action METHOD, not the controller CLASS"
+        );
+        // The controller's OWN [Route] still earns its class-level ANY route.
+        assert!(
+            route_names(&fp).iter().any(|n| n == "ANY /api/v2/orders"),
+            "controller [Route] must still emit its own ANY route"
+        );
     }
 
     #[test]
