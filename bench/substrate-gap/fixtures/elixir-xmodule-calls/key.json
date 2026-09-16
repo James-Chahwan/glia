@@ -1,0 +1,14 @@
+{
+  "framework": "elixir-xmodule",
+  "language": "elixir",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "PACKAGE", "name": "Accounts", "note": "defmodule MyApp.Accounts — the alias target"},
+    {"kind": "FUNCTION", "name": "show", "note": "caller"},
+    {"kind": "FUNCTION", "name": "get_user", "note": "callee under the PACKAGE node"}
+  ],
+  "expect_edges": [
+    {"from": "user_controller", "to": "Accounts", "category": "IMPORTS", "note": "alias MyApp.Accounts — already 1.00, the positive control"},
+    {"from": "show", "to": "get_user", "category": "CALLS", "note": "Accounts.get_user(id) — Attribute base binds to a PACKAGE (defmodule) node, which resolve_calls drops today"}
+  ]
+}

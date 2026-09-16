@@ -1,5 +1,7 @@
 //! Call / ref resolution and the nav-walking helpers it needs.
 
+use std::collections::HashMap;
+
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, UnresolvedRef, edge_category, node_kind,
 };
@@ -21,6 +23,7 @@ pub(crate) fn resolve_calls<H>(g: &mut RepoGraph, calls: &[CallSite], extra_hook
 where
     H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,
 {
+    let mut pkg_base_bound = 0usize;
     for site in calls {
         let Some(from_module) = enclosing_module(&g.nav, site.from) else {
             g.unresolved_calls.push(site.clone());
@@ -47,26 +50,15 @@ where
                         })
                     })
             }
-            CallQualifier::Attribute { base, name } => bindings
-                .and_then(|b| b.get(base).copied())
-                .and_then(|base_id| {
-                    let base_kind = g.nav.kind_by_id.get(&base_id).copied();
-                    if base_kind == Some(node_kind::MODULE) {
-                        g.symbols
-                            .module_symbols
-                            .get(&base_id)
-                            .and_then(|s| s.get(name).copied())
-                    } else if base_kind == Some(node_kind::CLASS)
-                        || base_kind == Some(node_kind::STRUCT)
-                    {
-                        g.symbols
-                            .class_methods
-                            .get(&base_id)
-                            .and_then(|m| m.get(name).copied())
-                    } else {
-                        None
-                    }
-                }),
+            CallQualifier::Attribute { base, name } => {
+                let hit = resolve_attribute_target(g, bindings, base, name);
+                if hit.is_some()
+                    && attribute_base_kind(g, bindings, base) == Some(node_kind::PACKAGE)
+                {
+                    pkg_base_bound += 1;
+                }
+                hit
+            }
             CallQualifier::SelfMethod(name) => {
                 enclosing_class_or_struct(&g.nav, site.from).and_then(|parent_id| {
                     g.symbols
@@ -92,6 +84,9 @@ where
             None => g.unresolved_calls.push(site.clone()),
         }
     }
+    if pkg_base_bound > 0 {
+        eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
+    }
 }
 
 /// Resolve `UnresolvedRef`s the same way `resolve_calls` resolves `CallSite`s,
@@ -103,6 +98,7 @@ where
 /// `HANDLED_BY` and the qualifier shape is either `Bare(name)` (handler is a
 /// same-package fn) or `Attribute { base, name }` (handler is `pkg.Name`).
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
+    let mut pkg_base_bound = 0usize;
     for r in refs {
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
         let resolved: Option<NodeId> = match &r.qualifier {
@@ -142,39 +138,27 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                         None
                     }
                 }),
-            CallQualifier::Attribute { base, name } => bindings
-                .and_then(|b| b.get(base).copied())
-                .and_then(|base_id| {
-                    let base_kind = g.nav.kind_by_id.get(&base_id).copied();
-                    if base_kind == Some(node_kind::MODULE) {
-                        g.symbols
-                            .module_symbols
-                            .get(&base_id)
-                            .and_then(|s| s.get(name).copied())
-                    } else if base_kind == Some(node_kind::CLASS)
-                        || base_kind == Some(node_kind::STRUCT)
-                    {
-                        g.symbols
-                            .class_methods
-                            .get(&base_id)
-                            .and_then(|m| m.get(name).copied())
-                    } else {
-                        None
-                    }
-                })
+            CallQualifier::Attribute { base, name } => {
+                let hit = resolve_attribute_target(g, bindings, base, name);
+                if hit.is_some()
+                    && attribute_base_kind(g, bindings, base) == Some(node_kind::PACKAGE)
+                {
+                    pkg_base_bound += 1;
+                }
                 // Global fallback for HANDLED_BY: in Go, route handlers
                 // are usually written `h.GetProfile` where `h` is a local
                 // struct-receiver variable (`h *Handlers`), not an import
                 // binding. So binding lookup fails. Scan all class_methods
                 // across the graph for a method matching `name`; emit
                 // only when exactly one match exists.
-                .or_else(|| {
+                hit.or_else(|| {
                     if r.category == edge_category::HANDLED_BY {
                         unique_global_method(g, name)
                     } else {
                         None
                     }
-                }),
+                })
+            }
             CallQualifier::SelfMethod(_)
             | CallQualifier::SuperMethod(_)
             | CallQualifier::ComplexReceiver { .. } => None,
@@ -185,6 +169,43 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
             None => g.unresolved_refs.push(r.clone()),
         }
     }
+    if pkg_base_bound > 0 {
+        eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
+    }
+}
+
+/// Resolve `base.name()` where `base` is a plain identifier already bound in
+/// this module's import table. MODULE and PACKAGE bases both scope top-level
+/// defs (`build_symbol_table` indexes both into `module_symbols`), so an Elixir
+/// `alias MyApp.Accounts` + `Accounts.get_user(id)` resolves through the
+/// `defmodule` PACKAGE node; CLASS and STRUCT bases scope methods.
+fn resolve_attribute_target(
+    g: &RepoGraph,
+    bindings: Option<&HashMap<String, NodeId>>,
+    base: &str,
+    name: &str,
+) -> Option<NodeId> {
+    let base_id = bindings?.get(base).copied()?;
+    match g.nav.kind_by_id.get(&base_id).copied() {
+        Some(k) if k == node_kind::MODULE || k == node_kind::PACKAGE => {
+            g.symbols.module_symbols.get(&base_id).and_then(|s| s.get(name).copied())
+        }
+        Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT => {
+            g.symbols.class_methods.get(&base_id).and_then(|m| m.get(name).copied())
+        }
+        _ => None,
+    }
+}
+
+/// Kind of the node `base` is bound to in this module's import table — used
+/// only to attribute the `[resolve] package-base` counter.
+fn attribute_base_kind(
+    g: &RepoGraph,
+    bindings: Option<&HashMap<String, NodeId>>,
+    base: &str,
+) -> Option<repo_graph_core::NodeKindId> {
+    let base_id = bindings?.get(base)?;
+    g.nav.kind_by_id.get(base_id).copied()
 }
 
 /// Search every class/struct's method map for a method named `name`.
@@ -284,4 +305,83 @@ pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: E
         category,
         confidence: Confidence::Strong,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::build_dotted;
+    use crate::test_support::repo;
+    use repo_graph_code_domain::{FileParse, GRAPH_TYPE, ImportStmt, ImportTarget};
+    use repo_graph_core::Node;
+    use std::collections::HashSet;
+
+    /// Elixir shape: `defmodule` emits a PACKAGE node holding the `def`s, and
+    /// `alias MyApp.Accounts` binds that PACKAGE by its short name. Before the
+    /// PACKAGE arm in `resolve_attribute_target`, `Accounts.get_user(id)` had a
+    /// bound base but an unaccepted base KIND, so it fell into unresolved_calls.
+    #[test]
+    fn attribute_call_binds_package_base() {
+        let r = repo();
+        let m2 = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "m2");
+        let pkg = NodeId::from_parts(GRAPH_TYPE, r, node_kind::PACKAGE, "m2::MyApp.Accounts");
+        let callee =
+            NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m2::MyApp.Accounts::get_user");
+        let m1 = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "m1");
+        let caller = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m1::show");
+
+        let mut nav2 = CodeNav::default();
+        nav2.record(m2, "m2", "m2", node_kind::MODULE, None);
+        nav2.record(pkg, "Accounts", "m2::MyApp.Accounts", node_kind::PACKAGE, Some(m2));
+        nav2.record(
+            callee,
+            "get_user",
+            "m2::MyApp.Accounts::get_user",
+            node_kind::FUNCTION,
+            Some(pkg),
+        );
+        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let accounts = FileParse {
+            nodes: vec![node(m2), node(pkg), node(callee)],
+            edges: vec![],
+            imports: vec![],
+            calls: vec![],
+            refs: vec![],
+            nav: nav2,
+            properties: HashSet::new(),
+        };
+
+        let mut nav1 = CodeNav::default();
+        nav1.record(m1, "m1", "m1", node_kind::MODULE, None);
+        nav1.record(caller, "show", "m1::show", node_kind::FUNCTION, Some(m1));
+        let controller = FileParse {
+            nodes: vec![node(m1), node(caller)],
+            edges: vec![],
+            imports: vec![ImportStmt {
+                from_module: "m1".to_string(),
+                target: ImportTarget::Module {
+                    path: "MyApp.Accounts".to_string(),
+                    alias: None,
+                },
+            }],
+            calls: vec![CallSite {
+                from: caller,
+                qualifier: CallQualifier::Attribute {
+                    base: "Accounts".to_string(),
+                    name: "get_user".to_string(),
+                },
+            }],
+            refs: vec![],
+            nav: nav1,
+            properties: HashSet::new(),
+        };
+
+        let g = build_dotted(r, vec![accounts, controller]).unwrap();
+        let calls: Vec<_> =
+            g.edges.iter().filter(|e| e.category == edge_category::CALLS).collect();
+        assert_eq!(calls.len(), 1, "expected exactly one CALLS edge, got {calls:?}");
+        assert_eq!(calls[0].from, caller);
+        assert_eq!(calls[0].to, callee);
+        assert!(g.unresolved_calls.is_empty(), "call should not land in unresolved_calls");
+    }
 }
