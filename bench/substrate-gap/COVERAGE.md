@@ -72,8 +72,8 @@ python           ●       ●       ?       ?       ?       ?       ?       ?  
 go               ●       ●       ●       ?       ?       ?       ?       ●       ?       ?       ?       ●       ?       ●       ?       ●       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 typescript       ●       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ◐       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ?       ●       ?       ?
 java             ●       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
-csharp           ·       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
-ruby             ·       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
+csharp           ●       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
+ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 php              ?       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 swift            ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 c_cpp            ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
@@ -86,7 +86,7 @@ solidity         ?       ?       ?       ?       ?       ?       ?       ?      
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?
 
 PER-MECHANISM  across 16 languages:
-  http_client  ● 8   ◐ 0   · 2   ? 6   ! 0
+  http_client  ● 10  ◐ 0   · 0   ? 6   ! 0
   http_server  ● 9   ◐ 0   · 0   ? 7   ! 0
   kafka        ● 4   ◐ 0   · 0   ? 12  ! 0
   amqp         ● 0   ◐ 0   · 0   ? 16  ! 0
@@ -122,8 +122,8 @@ PER-LANGUAGE  across 30 mechanisms:
   go           ● 9   ◐ 0   · 0   ? 21  ! 0
   typescript   ● 9   ◐ 1   · 0   ? 20  ! 0
   java         ● 8   ◐ 0   · 0   ? 22  ! 0
-  csharp       ● 6   ◐ 0   · 2   ? 22  ! 0
-  ruby         ● 4   ◐ 0   · 1   ? 25  ! 0
+  csharp       ● 7   ◐ 0   · 1   ? 22  ! 0
+  ruby         ● 5   ◐ 0   · 0   ? 25  ! 0
   php          ● 2   ◐ 0   · 0   ? 28  ! 0
   swift        ● 2   ◐ 0   · 0   ? 28  ! 0
   c_cpp        ● 2   ◐ 0   · 0   ? 28  ! 0
@@ -136,7 +136,7 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 71/480 cells have a fixture (14.8%) — 67 full, 1 partial, 3 none, 409 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 71/480 cells have a fixture (14.8%) — 69 full, 1 partial, 1 none, 409 unknown, 0 error.
 
 `legacy_only` (fixtures with no `cells`, graded by run.py only): 17
 

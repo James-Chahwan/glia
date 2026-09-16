@@ -452,7 +452,13 @@ def test_anchor_python_kafka_is_partial():
 
 
 def test_anchor_csharp_kafka_is_none():
-    _anchor("csharp/kafka", "none")
+    # Was `none` when this anchor was written: C# Kafka emitted no queue nodes
+    # at all. A2.2 (wave 2, 71052ff) shipped the receiver-agnostic needles and
+    # case-insensitive framework gates, and A2.3 (wave 3, dfe3969) made the
+    # topic-agnostic tag node unpairable, so the cell is now `full via=queue`
+    # on fixtures/xcut-queue-csharp-kafka. The anchor moves with the fix; the
+    # name is kept so the history of the cell stays greppable.
+    _anchor("csharp/kafka", "full", "queue")
 
 
 def test_anchor_clojure_kafka_is_unknown():

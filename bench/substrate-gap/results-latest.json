@@ -150,7 +150,7 @@
     },
     "csharp/http_client": {
       "extract": [
-        0,
+        4,
         4
       ],
       "fixtures": [
@@ -161,17 +161,17 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        4,
         4
       ],
       "reasons": [],
       "route": [
-        0,
+        3,
         3
       ],
-      "via": null
+      "via": "http"
     },
     "csharp/http_server": {
       "extract": [
@@ -1129,7 +1129,7 @@
     },
     "ruby/http_client": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1139,17 +1139,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "http"
     },
     "ruby/http_server": {
       "extract": [
@@ -1768,9 +1768,9 @@
   "totals": {
     "covered": 71,
     "error": 0,
-    "full": 67,
+    "full": 69,
     "grid": 480,
-    "none": 3,
+    "none": 1,
     "partial": 1,
     "unknown": 409
   },
