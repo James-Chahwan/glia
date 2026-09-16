@@ -70,8 +70,11 @@ impl QueueFramework {
 
 pub fn extract_queue_consumers(source: &str, from: NodeId) -> Vec<QueueConsumer> {
     let mut consumers = Vec::new();
+    // One allocation per call, reused by every gate below — see
+    // [`signals_present`] for why the gate reads a lowercased copy.
+    let lower = source.to_ascii_lowercase();
     for (pattern, framework, signals, _rule) in CONSUMER_PATTERNS {
-        if source.contains(pattern) && signals_present(source, signals) {
+        if source.contains(pattern) && signals_present(&lower, signals) {
             consumers.push(QueueConsumer {
                 from,
                 framework: framework.clone(),
@@ -83,8 +86,9 @@ pub fn extract_queue_consumers(source: &str, from: NodeId) -> Vec<QueueConsumer>
 }
 
 /// (needle, framework, framework-presence signals, topic rule). The signals list gates
-/// emission: if NONE of the substrings appears in the same source file, the
-/// pattern is skipped — this stops e.g. Express `res.send('Hello')` from
+/// emission: if NONE of the substrings appears in the same source file
+/// (case-INSENSITIVELY — every signal literal here MUST be lowercase, see
+/// [`signals_present`]), the pattern is skipped — this stops e.g. Express `res.send('Hello')` from
 /// being mis-classified as a Dramatiq producer. An empty signals list means
 /// the needle is unique enough to stand alone (Sidekiq's `perform_async`,
 /// `Oban.insert`, etc.).
@@ -107,34 +111,58 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("use Oban.Worker", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
     ("use Oban.Pro.Worker", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
     // `nc.subscribe` collides with Backbone events / Redis pubsub vars; gate.
-    ("nc.subscribe", QueueFramework::Nats, &["nats", "NATS"], TopicRule::ArgLiteral),
+    ("nc.subscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     // Go's nats.go exports Capitalized APIs (`nc.Subscribe`, `nc.QueueSubscribe`);
     // the lowercase JS needles never match Go source, so Go queues went blind.
-    ("nc.Subscribe", QueueFramework::Nats, &["nats", "NATS"], TopicRule::ArgLiteral),
-    ("nc.QueueSubscribe", QueueFramework::Nats, &["nats", "NATS"], TopicRule::ArgLiteral),
+    ("nc.Subscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
+    ("nc.QueueSubscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     ("channel.consume", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"], TopicRule::ArgLiteral),
     ("KafkaConsumer", QueueFramework::Kafka, &[], TopicRule::ArgLiteral),
     // `consumer.subscribe` is generic; require kafka library presence.
-    ("consumer.subscribe", QueueFramework::Kafka, &["kafka", "kafkajs", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
+    ("consumer.subscribe", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
     // Go Kafka consumers: segmentio `reader.ReadMessage`, confluent `consumer.ReadMessage`.
     ("reader.ReadMessage", QueueFramework::Kafka, &["kafka", "segmentio"], TopicRule::ArgLiteral),
     ("consumer.ReadMessage", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::ArgLiteral),
     // Redis-as-queue consumer side. BLPOP/BRPOP block until message; LPOP/RPOP
     // are non-blocking pops. .NET driver uses ListLeftPop/ListRightPop.
-    (".blpop(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    (".brpop(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    (".lpop(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    (".rpop(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    ("ListLeftPop(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListLeftPopAsync(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListRightPop(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListRightPopAsync(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
+    (".blpop(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    (".brpop(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    (".lpop(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    (".rpop(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    ("ListLeftPop(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListLeftPopAsync(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListRightPop(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListRightPopAsync(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    // ---- A2.2: receiver-agnostic needles ---------------------------------
+    // A leading-dot needle matches ANY receiver name, so C#'s `consumer.`,
+    // Go's `r.` and Rust's `consumer.` all hit the same row. The LIBRARY gate
+    // (never the bare framework word) is what keeps Rx/NATS/RxJS out.
+    // C# — Confluent.Kafka: `consumer.Subscribe("orders")`.
+    (".Subscribe(", QueueFramework::Kafka, &["confluent.kafka"], TopicRule::ArgLiteral),
+    // Java/Kotlin — Spring: `@KafkaListener(topics = "orders")`.
+    ("@KafkaListener", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::Keyed(&["topics", "topic"])),
+    // Go — segmentio/kafka-go: the topic is a ReaderConfig struct field.
+    ("kafka.NewReader(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
+    ("kafka.ReaderConfig{", QueueFramework::Kafka, &["kafka-go"], TopicRule::Keyed(&["topic"])),
+    // Go — `r.ReadMessage(ctx)` proves the consumer is live but names no topic.
+    // NoIdentity is the one rule that emits NOTHING rather than falling back to
+    // a framework tag, so it cannot shadow the ReaderConfig row above.
+    (".ReadMessage(", QueueFramework::Kafka, &["kafka"], TopicRule::NoIdentity),
+    // Scala — Alpakka / akka-stream-kafka: `Subscriptions.topics("orders")`.
+    ("Subscriptions.topics(", QueueFramework::Kafka, &["akka.kafka"], TopicRule::ArgLiteral),
+    // Rust — rdkafka: `consumer.subscribe(&["orders"])`.
+    (".subscribe(&[", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
+    // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
+    ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    ("basic_consume(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    // C# — RabbitMQ.Client: `channel.QueueDeclare(queue: "orders", ...)`.
+    (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
 ];
 
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `.delay(` collides with `setTimeout.delay`, jQuery `.delay`, Carrierwave,
     // and many JS animation libs; require Celery presence.
-    (".delay(", QueueFramework::Celery, &["celery", "@celery", "@shared_task"], TopicRule::ArgLiteral),
+    (".delay(", QueueFramework::Celery, &["celery", "@shared_task"], TopicRule::ArgLiteral),
     (".apply_async(", QueueFramework::Celery, &[], TopicRule::ArgLiteral),
     // `.send(` is wildly overloaded (`res.send`, `socket.send`, ...). Require
     // Dramatiq import — `import dramatiq` or `@dramatiq.actor`.
@@ -146,31 +174,85 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("perform_async", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
     ("perform_in", QueueFramework::Sidekiq, &[], TopicRule::ArgLiteral),
     ("Oban.insert", QueueFramework::Oban, &[], TopicRule::ArgLiteral),
-    ("nc.publish", QueueFramework::Nats, &["nats", "NATS"], TopicRule::ArgLiteral),
+    ("nc.publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     // Go's nats.go exports Capitalized `nc.Publish`; the lowercase JS needle
     // never matches Go source, so Go NATS producers went blind.
-    ("nc.Publish", QueueFramework::Nats, &["nats", "NATS"], TopicRule::ArgLiteral),
+    ("nc.Publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
     ("channel.publish", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"], TopicRule::ArgLiteral),
     ("channel.basic_publish", QueueFramework::RabbitMQ, &[], TopicRule::ArgLiteral),
-    ("producer.send", QueueFramework::Kafka, &["kafka", "kafkajs", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
+    ("producer.send", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
     ("producer.produce", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::ArgLiteral),
     // Go Kafka producers: confluent `producer.Produce`, segmentio `writer.WriteMessages`.
-    ("producer.Produce", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
+    // A2.2: the trailing `(` is REQUIRED — without it this needle also swallows
+    // C#'s `_producer.ProduceAsync(`, whose topic sits where this rule cannot
+    // read it, manufacturing a `queue_producer:kafka` tag beside the real node.
+    ("producer.Produce(", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
     ("writer.WriteMessages", QueueFramework::Kafka, &["kafka", "segmentio"], TopicRule::KeyedOrArg(&["topic"])),
     // Redis-as-queue producer side. .lpush / .rpush both push items onto a
     // list; consumers BLPOP/BRPOP off the other end.
-    (".lpush(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    (".rpush(", QueueFramework::RedisList, &["redis", "Redis", "ioredis"], TopicRule::ArgLiteral),
-    ("ListLeftPush(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListLeftPushAsync(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListRightPush(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
-    ("ListRightPushAsync(", QueueFramework::RedisList, &["StackExchange.Redis"], TopicRule::ArgLiteral),
+    (".lpush(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    (".rpush(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
+    ("ListLeftPush(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListLeftPushAsync(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListRightPush(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    ("ListRightPushAsync(", QueueFramework::RedisList, &["stackexchange.redis"], TopicRule::ArgLiteral),
+    // ---- A2.2: receiver-agnostic needles ---------------------------------
+    // C# — Confluent.Kafka: `_producer.ProduceAsync("orders", msg)`.
+    (".ProduceAsync(", QueueFramework::Kafka, &["confluent.kafka"], TopicRule::ArgLiteral),
+    (".Produce(", QueueFramework::Kafka, &["confluent.kafka"], TopicRule::ArgLiteral),
+    // Java/Kotlin — Spring: `kafkaTemplate.send("orders", payload)`. Carrying
+    // `Template.` keeps this off a bare `.send(` while matching any spelling of
+    // the field (kafkaTemplate / KafkaTemplate / ordersTemplate).
+    ("Template.send(", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::ArgLiteral),
+    // Java/Scala — plain client, diamond form: `new ProducerRecord<>("orders", v)`.
+    // KNOWN MISS: the explicit-generics form `new ProducerRecord<String,String>(`
+    // is unreachable because the argument-region walker cannot step over `<...>`.
+    ("ProducerRecord<>(", QueueFramework::Kafka, &["kafka"], TopicRule::ArgLiteral),
+    // Go — segmentio/kafka-go: `w.WriteMessages(ctx, kafka.Message{Topic: "x"})`.
+    (".WriteMessages(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
+    ("kafka.NewWriter(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
+    // Rust — rdkafka: `FutureRecord::to("orders")`.
+    ("FutureRecord::to(", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
+    // PHP — rdkafka: the topic is named on `$producer->newTopic("orders")`;
+    // `$topic->produce(PARTITION, flags, $payload)` is liveness only: arg #1 is
+    // the msgflags int and NO argument ever holds the topic, which is bound to
+    // the `$topic` object. NoIdentity (not ArgIndex(1), as first drafted) —
+    // otherwise this row's empty topic list falls back to a `queue_producer:kafka`
+    // tag standing beside the real node the `newTopic(` row just emitted.
+    ("newTopic(", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
+    ("->produce(", QueueFramework::Kafka, &["rdkafka"], TopicRule::NoIdentity),
+    // Ruby — WaterDrop / Karafka: `produce_async(topic: "orders", payload: p)`.
+    (".produce_async(", QueueFramework::Kafka, &["waterdrop", "karafka", "rdkafka"], TopicRule::Keyed(&["topic"])),
+    // C / C++ — librdkafka: `rd_kafka_topic_new(rk, "orders", NULL)`.
+    ("rd_kafka_topic_new(", QueueFramework::Kafka, &["rdkafka", "librdkafka"], TopicRule::ArgIndex(1)),
+    // Clojure — `(send! producer {:topic "orders" :value v})`. KNOWN MISS: the
+    // separator-less EDN map is unreadable to the keyed scanner, so this row is
+    // framework-tag liveness until the scanner learns `{:k v}`.
+    ("send!", QueueFramework::Kafka, &["kafka"], TopicRule::Keyed(&["topic"])),
+    // Java/Kotlin — Spring AMQP: `rabbitTemplate.convertAndSend("orders", msg)`.
+    ("Template.convertAndSend(", QueueFramework::RabbitMQ, &["springframework.amqp"], TopicRule::ArgLiteral),
+    // C# — RabbitMQ.Client: `BasicPublish(exchange, routingKey, props, body)`.
+    (".BasicPublish(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::ArgIndex(1)),
+    // Elixir — AMQP: `publish(chan, exchange, routing_key, payload)` — arg #2 is
+    // the routing key; arg #1 is the exchange, which is usually "".
+    ("AMQP.Basic.publish(", QueueFramework::RabbitMQ, &["amqp"], TopicRule::ArgIndex(2)),
+    // Python — pika, receiver-free: `ch.basic_publish(routing_key="orders")`.
+    // Positional arg #0 is deliberately NOT read: for pika it is the exchange.
+    ("basic_publish(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::Keyed(&["routing_key", "queue"])),
 ];
 
-/// True when `signals` is empty (always pass) or any signal substring appears
-/// in `source`. Lets distinct framework names gate their broad-needle patterns.
-fn signals_present(source: &str, signals: &[&str]) -> bool {
-    signals.is_empty() || signals.iter().any(|s| source.contains(s))
+/// True when `signals` is empty (always pass) or any signal substring appears in
+/// `lower_source`. Lets distinct framework names gate their broad-needle patterns.
+///
+/// `lower_source` MUST already be `to_ascii_lowercase`d, and every signal literal
+/// in both tables MUST be spelled lowercase (`signal_lists_are_lowercase` asserts
+/// it) — that is what makes the GATE case-insensitive. It used to compare the raw
+/// source, so `using Confluent.Kafka;` failed a `["kafka", "confluent"]` gate and
+/// a whole C# Kafka file emitted nothing at all.
+///
+/// The NEEDLES stay case-sensitive: API names are (`Produce` is not `produce`).
+fn signals_present(lower_source: &str, signals: &[&str]) -> bool {
+    signals.is_empty() || signals.iter().any(|s| lower_source.contains(s))
 }
 
 pub struct QueueNodes {
@@ -236,9 +318,13 @@ fn emit_queue_nodes(
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut seen = std::collections::HashSet::new();
+    // ONE allocation per emit call (two per file, both sides) — cheap beside the
+    // tree-sitter parse that already ran, and it is what makes the gate
+    // case-insensitive for every row at once.
+    let lower = source.to_ascii_lowercase();
 
     for (pattern, framework, signals, rule) in patterns {
-        if !source.contains(pattern) || !signals_present(source, signals) {
+        if !source.contains(pattern) || !signals_present(&lower, signals) {
             continue;
         }
         let hits = queue_topic::scan(source, pattern, *rule);
@@ -251,22 +337,23 @@ fn emit_queue_nodes(
             );
         }
         for topic in &topics {
-            push_node(
+            if push_node(
                 &mut nodes, &mut nav, &mut seen, topic, framework, module_id, repo, kind, prefix,
-            );
+            ) {
+                fired_on(pattern, framework, topic, path);
+            }
         }
-        if topics.is_empty() {
-            push_node(
-                &mut nodes,
-                &mut nav,
-                &mut seen,
-                &framework_tag(framework),
-                framework,
-                module_id,
-                repo,
-                kind,
-                prefix,
-            );
+        // A needle whose rule is `NoIdentity` NEVER names a topic (it is a
+        // liveness signal — Go's `r.ReadMessage(ctx)`), so falling back to a
+        // topic-less framework tag here would manufacture exactly the all-to-all
+        // tag pairing A2.1 removed. Every other rule keeps the fallback.
+        if topics.is_empty() && !matches!(rule, TopicRule::NoIdentity) {
+            let tag = framework_tag(framework);
+            if push_node(
+                &mut nodes, &mut nav, &mut seen, &tag, framework, module_id, repo, kind, prefix,
+            ) {
+                fired_on(pattern, framework, &tag, path);
+            }
         }
     }
 
@@ -306,6 +393,17 @@ fn push_node(
 /// `RedisList`/`RedisPubSub` together and would silently rename a live qname.
 fn framework_tag(f: &QueueFramework) -> String {
     format!("{f:?}").to_lowercase()
+}
+
+/// Grep-able proof that a needle passed its gate and produced a node.
+/// `GLIA_QUEUE_DEBUG=1 cargo test -p repo-graph-code-extractors -- --nocapture
+///  2>&1 | grep "\\[queues\\] needle '"`
+fn fired_on(needle: &str, framework: &QueueFramework, topic: &str, path: &str) {
+    if debug_enabled() {
+        eprintln!(
+            "[queues] needle '{needle}' framework={framework:?} gate=ok topic={topic} file={path}"
+        );
+    }
 }
 
 /// `GLIA_QUEUE_DEBUG=1` turns on the `[queues] scan needle=` marker, read once.
@@ -590,5 +688,166 @@ nc.Publish(subjectC, c)
 "#;
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(qnames(&pr), vec!["queue_producer:nats".to_string()]);
+    }
+
+    // ---- A2.2: receiver-agnostic needles + case-insensitive gates ---------
+
+    #[test]
+    fn signal_lists_are_lowercase() {
+        // The gate compares against a `to_ascii_lowercase`d copy of the source,
+        // so ONE upper-case letter in a signal literal is a permanently dead
+        // gate — the row can never fire again. Asserted, not commented.
+        for (needle, _, signals, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            for s in *signals {
+                assert_eq!(
+                    s.to_string(),
+                    s.to_ascii_lowercase(),
+                    "signal {s:?} gating needle {needle:?} must be spelled lowercase"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn csharp_confluent_gate_is_case_insensitive() {
+        // THE packet's reason to exist. The only Kafka evidence in either file
+        // is `using Confluent.Kafka;` — there is no lowercase "kafka" anywhere
+        // (no bootstrap.servers host). Under the old case-SENSITIVE gate both
+        // halves of this service emitted NOTHING AT ALL.
+        let producer = r#"using System.Threading.Tasks;
+using Confluent.Kafka;
+
+public sealed class OrderProducer
+{
+    private readonly IProducer<Null, string> _producer;
+
+    public async Task PublishAsync(string payload)
+    {
+        await _producer.ProduceAsync("orders", new Message<Null, string> { Value = payload });
+    }
+}"#;
+        assert!(!producer.contains("kafka"), "fixture must carry no lowercase 'kafka'");
+        let pr = extract_queue_producer_nodes(producer, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+
+        let consumer = r#"using System.Threading;
+using Confluent.Kafka;
+
+public sealed class OrderConsumer
+{
+    public void Run(ConsumerConfig config, CancellationToken ct)
+    {
+        var consumer = new ConsumerBuilder<Ignore, string>(config).Build();
+        consumer.Subscribe("orders");
+        var result = consumer.Consume(ct);
+    }
+}"#;
+        assert!(!consumer.contains("kafka"), "fixture must carry no lowercase 'kafka'");
+        let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:orders".to_string()]);
+    }
+
+    #[test]
+    fn rx_subscribe_without_kafka_gate_emits_nothing() {
+        // PRECISION GUARD for the receiver-agnostic `.Subscribe(` needle: the
+        // gate is the ONLY thing keeping Rx/ReactiveX out. Fails the moment the
+        // `confluent.kafka` signal list is dropped or widened to "kafka".
+        let source = r#"using System;
+using System.Reactive.Linq;
+
+public sealed class Ticker
+{
+    public IDisposable Start(IObservable<long> source)
+    {
+        return source.Subscribe("ignored");
+    }
+}"#;
+        let cr = extract_queue_consumer_nodes(source, PATH, module_id(), repo());
+        assert!(
+            cr.nodes.is_empty(),
+            "Rx .Subscribe( must not emit a Kafka consumer, got {:?}",
+            qnames(&cr)
+        );
+    }
+
+    #[test]
+    fn spring_kafka_template_producer() {
+        // `kafkaTemplate.send(` matched NO needle before: the table's row was
+        // the receiver-bound `producer.send`.
+        let source = r#"
+import org.springframework.kafka.core.KafkaTemplate;
+
+public class OrderProducer {
+    private final KafkaTemplate<String, String> kafkaTemplate;
+
+    public void publish(String payload) {
+        kafkaTemplate.send("orders", payload);
+    }
+}
+"#;
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn go_segmentio_writer_and_reader() {
+        // Idiomatic short receivers `w` / `r` — the old needles were spelled
+        // `writer.WriteMessages` / `reader.ReadMessage` and saw nothing here.
+        let producer = r#"
+import "github.com/segmentio/kafka-go"
+
+func Publish(ctx context.Context, w *kafka.Writer, body []byte) error {
+	return w.WriteMessages(ctx, kafka.Message{Topic: "orders", Value: body})
+}
+"#;
+        let pr = extract_queue_producer_nodes(producer, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+
+        let consumer = r#"
+import "github.com/segmentio/kafka-go"
+
+func Consume(ctx context.Context) error {
+	r := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: []string{"localhost:9092"},
+		Topic:   "orders",
+		GroupID: "svc",
+	})
+	m, err := r.ReadMessage(ctx)
+	_ = m
+	return err
+}
+"#;
+        let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
+        // `.ReadMessage(` is NoIdentity: it proves the consumer is live but
+        // names no topic, so it must NOT add a `queue_consumer:kafka` tag
+        // beside the real topic the ReaderConfig row already named.
+        assert_eq!(qnames(&cr), vec!["queue_consumer:orders".to_string()]);
+    }
+
+    #[test]
+    fn rust_rdkafka_future_record() {
+        let source = r#"
+use rdkafka::producer::{FutureProducer, FutureRecord};
+
+async fn publish(p: &FutureProducer, payload: &str) {
+    let _ = p.send(FutureRecord::to("orders").payload(payload), Timeout::Never).await;
+}
+"#;
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn php_rdkafka_new_topic() {
+        // `RdKafka\Producer` lowercases to `rdkafka\producer`, so this is a
+        // second case-insensitivity proof. `->produce(` is NoIdentity, so the
+        // real topic stands alone with no `queue_producer:kafka` tag beside it.
+        let source = r#"<?php
+$producer = new RdKafka\Producer();
+$topic = $producer->newTopic("orders");
+$topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
+"#;
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
     }
 }
