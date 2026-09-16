@@ -1,0 +1,22 @@
+{
+  "framework": "php-laravel-prefix",
+  "language": "php",
+  "dirs": ["server", "client"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/v1/users/{id}", "note": "Route::prefix('api/v1')->group composed onto the verb route"},
+    {"kind": "ROUTE", "name": "POST /api/v1/users", "note": "second route in the same group"},
+    {"kind": "ROUTE", "name": "GET /admin/stats", "note": "Route::group(['prefix' => 'admin'], ...) array-options form"},
+    {"kind": "ROUTE", "name": "GET /health", "note": "control: declared outside the group, must NOT gain the prefix"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v1/users/{id}", "to": "show", "category": "HANDLED_BY", "note": "composed route -> UserController::show"},
+    {"from": "GET /api/v1/users", "to": "GET /api/v1/users/{id}", "category": "HTTP_CALLS", "note": "TS fetch pairs with the composed route"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /users/{id}", "note": "precision lock: the un-prefixed verb route must not survive"},
+    {"kind": "ROUTE", "name": "POST /users", "note": "precision lock: the un-prefixed verb route must not survive"},
+    {"kind": "ROUTE", "name": "GET /stats", "note": "precision lock: the array-options group prefix must be applied"},
+    {"kind": "ROUTE", "name": "GET /api/v1/health", "note": "precision lock: the control route must not be swept into the group by bad brace arithmetic"}
+  ],
+  "note": "Same-file group composition. `Route::prefix(...)` chained-builder form, `Route::group(['prefix' => ...], ...)` array form, and a brace-in-string decoy that the range scanner must skip. Slim's `$app->group('/api', ...)` is NOT covered here — see scan_slim_routes."
+}

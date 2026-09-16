@@ -52,7 +52,7 @@ pub fn parse_file(
         &mut acc,
     );
 
-    scan_laravel_routes(source, module_id, repo, &mut acc);
+    scan_laravel_routes(source, file_rel_path, module_id, repo, &mut acc);
     scan_slim_routes(source, module_id, repo, &mut acc);
 
     Ok(FileParse {
@@ -512,7 +512,237 @@ fn parse_methods_kwarg(attr_text: &str) -> Vec<String> {
     out
 }
 
-fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc) {
+// ============================================================================
+// Laravel route-group prefix composition
+// ============================================================================
+//
+// `Route::prefix('api/v1')->group(function () { Route::get('/users', ...); })`
+// declares the shared path segment on the GROUP, not on the verb call, so a
+// scanner that reads only the verb's first string argument emits `GET /users`
+// and drops `/api/v1` entirely. Grouped routes are the default organisation of
+// every non-toy Laravel API, so that is most of the Laravel server surface.
+//
+// The Laravel scanner is byte-offset substring-driven rather than an AST walk,
+// so the composition state is expressed as byte RANGES rather than the scope
+// STACK the Phoenix/Rails walkers use: a pre-pass records `(open_brace,
+// close_brace, prefix)` for every group body, and each verb's already-computed
+// path offset is then looked up against those ranges. Nested groups fall out
+// for free — ranges nest, and `prefix_at` folds every containing range
+// outermost-first.
+//
+// NOT covered: heredoc/nowdoc bodies (`<<<EOT ... EOT;`) are not recognised by
+// `matching_brace`, so a `{` inside one shifts the range. No fixture exercises
+// that and PHP route files do not idiomatically contain heredocs.
+
+/// A group body as `(open_brace_index, close_brace_index, prefix_literal)`.
+/// `close_brace_index` is the index OF the `}`, so the containment test is a
+/// strict `open < offset < close`.
+type PrefixRange = (usize, usize, String);
+
+/// Index just past the string literal whose opening delimiter is at `start`.
+/// Returns `bytes.len()` for an unterminated literal, which terminates the
+/// caller's scan rather than looping.
+fn skip_php_string(bytes: &[u8], start: usize) -> usize {
+    let delim = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == delim {
+            return i + 1;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Index just past the end of the line containing `start`.
+fn skip_php_line(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i + 1
+}
+
+/// Index of the `}` matching the `{` at `open`, counting braces but SKIPPING
+/// those inside single/double-quoted strings, `//` and `#` line comments and
+/// `/* */` block comments. `None` when the source is unbalanced (truncated
+/// file, or a brace hidden in a construct this scanner does not model) —
+/// callers must then drop the group rather than defaulting to end-of-file,
+/// which would sweep every later route into it.
+fn matching_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' => {
+                i = skip_php_string(bytes, i);
+                continue;
+            }
+            // `#[Attr]` is a PHP 8 attribute, not a comment.
+            b'#' if bytes.get(i + 1) != Some(&b'[') => {
+                i = skip_php_line(bytes, i);
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i = skip_php_line(bytes, i);
+                continue;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = match source[i + 2..].find("*/") {
+                    Some(rel) => i + 2 + rel + 2,
+                    None => return None,
+                };
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Range of the closure body that follows `from`, for the `…, function () { … }`
+/// tail shared by both group spellings.
+///
+/// Bounded deliberately: a bare `Route::prefix('x')` assigned to a variable has
+/// no closure at all, and an unbounded `find("function")` would attach the NEXT
+/// group's body to it. The scan stops at the first `;` (statement end) or `}`
+/// (enclosing block end) seen before the `function` keyword, and yields `None`.
+fn closure_body_range(source: &str, from: usize) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut i = from;
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' | b'}' => return None,
+            b'\'' | b'"' => {
+                i = skip_php_string(bytes, i);
+                continue;
+            }
+            b'f' if source[i..].starts_with("function") => {
+                let open = i + source[i..].find('{')?;
+                let close = matching_brace(source, open)?;
+                return Some((open, close));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Byte ranges of every Laravel route-group body, paired with the path prefix
+/// that group contributes. Two spellings are recognised:
+///
+///   a) `Route::prefix('api/v1')->group(function () { … })`, and the chained
+///      builder `Route::middleware('auth')->prefix('api')->group(…)`,
+///   b) `Route::group(['prefix' => 'admin', …], function () { … })`.
+///
+/// A `Route::group([...])` with no `prefix` key (middleware-only grouping)
+/// contributes no range: it changes nothing about the path.
+fn laravel_prefix_ranges(source: &str) -> Vec<PrefixRange> {
+    let mut out: Vec<PrefixRange> = Vec::new();
+
+    // (a) chained builder. `Route::prefix(` and `->prefix(` are disjoint
+    // needles — neither text contains the other.
+    for needle in ["Route::prefix(", "->prefix("] {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let start = search_from + rel + needle.len();
+            search_from = start;
+            let Some((prefix, consumed)) = extract_first_string(&source[start..]) else {
+                continue;
+            };
+            search_from = start + consumed.max(1);
+            if prefix.is_empty() {
+                continue;
+            }
+            if let Some((open, close)) = closure_body_range(source, start + consumed) {
+                out.push((open, close, prefix));
+            }
+        }
+    }
+
+    // (b) array-options form.
+    let needle = "Route::group(";
+    let mut search_from = 0;
+    while let Some(rel) = source[search_from..].find(needle) {
+        let start = search_from + rel + needle.len();
+        search_from = start;
+        let rest = source[start..].trim_start();
+        let skipped = source[start..].len() - rest.len();
+        let Some((inner, consumed)) = extract_bracket_list(rest) else {
+            continue;
+        };
+        let after = start + skipped + consumed;
+        search_from = after;
+        let Some(prefix) = array_option(&inner, "prefix") else {
+            continue;
+        };
+        if prefix.is_empty() {
+            continue;
+        }
+        if let Some((open, close)) = closure_body_range(source, after) {
+            out.push((open, close, prefix));
+        }
+    }
+
+    out
+}
+
+/// Value of `'<key>' => '<string>'` inside a PHP array literal's inner text.
+fn array_option(inner: &str, key: &str) -> Option<String> {
+    for quote in ['\'', '"'] {
+        let needle = format!("{quote}{key}{quote}");
+        if let Some(pos) = inner.find(&needle) {
+            let after = &inner[pos + needle.len()..];
+            let after = after.trim_start();
+            let after = after.strip_prefix("=>")?;
+            let (val, _) = extract_first_string(after)?;
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// The composed prefix contributed by every group whose body contains
+/// `offset`, outermost first. `""` when the offset sits outside every group.
+fn prefix_at(ranges: &[PrefixRange], offset: usize) -> String {
+    let mut hits: Vec<&PrefixRange> = ranges
+        .iter()
+        .filter(|(open, close, _)| offset > *open && offset < *close)
+        .collect();
+    hits.sort_by_key(|(open, _, _)| *open);
+    let mut out = String::new();
+    for (_, _, prefix) in hits {
+        out = endpoint::join_path(&out, prefix);
+    }
+    out
+}
+
+fn scan_laravel_routes(
+    source: &str,
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let ranges = laravel_prefix_ranges(source);
+    let mut grouped = 0usize;
     let methods: &[(&str, &str)] = &[
         ("Route::get(", "GET"),
         ("Route::post(", "POST"),
@@ -527,7 +757,12 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
         while let Some(rel) = source[search_from..].find(needle) {
             let start = search_from + rel + needle.len();
             if let Some((path, consumed)) = extract_first_string(&source[start..]) {
-                let route_id = emit_route_medium(method, &path, module_id, repo, acc);
+                let prefix = prefix_at(&ranges, start);
+                if !prefix.is_empty() {
+                    grouped += 1;
+                }
+                let full = endpoint::abs_path(&endpoint::join_path(&prefix, &path));
+                let route_id = emit_route_medium(method, &full, module_id, repo, acc);
                 // Bind the route to its controller action via a HANDLED_BY ref;
                 // the graph resolves the Attribute base+name against the class.
                 if let Some(qualifier) = extract_laravel_handler(&source[start + consumed..]) {
@@ -549,8 +784,13 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
     while let Some(rel) = source[search_from..].find("Route::resource(") {
         let start = search_from + rel + "Route::resource(".len();
         if let Some((path, consumed)) = extract_first_string(&source[start..]) {
+            let prefix = prefix_at(&ranges, start);
+            let full = endpoint::abs_path(&endpoint::join_path(&prefix, &path));
             for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
-                emit_route_medium(m, &path, module_id, repo, acc);
+                if !prefix.is_empty() {
+                    grouped += 1;
+                }
+                emit_route_medium(m, &full, module_id, repo, acc);
             }
             search_from = start + consumed.max(1);
         } else {
@@ -562,13 +802,25 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
     while let Some(rel) = source[search_from..].find("Route::apiResource(") {
         let start = search_from + rel + "Route::apiResource(".len();
         if let Some((path, consumed)) = extract_first_string(&source[start..]) {
+            let prefix = prefix_at(&ranges, start);
+            let full = endpoint::abs_path(&endpoint::join_path(&prefix, &path));
             for m in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
-                emit_route_medium(m, &path, module_id, repo, acc);
+                if !prefix.is_empty() {
+                    grouped += 1;
+                }
+                emit_route_medium(m, &full, module_id, repo, acc);
             }
             search_from = start + consumed.max(1);
         } else {
             search_from = start;
         }
+    }
+
+    if grouped > 0 {
+        eprintln!(
+            "[php-routes] laravel {grouped} routes under {} prefix groups in {file_rel}",
+            ranges.len()
+        );
     }
 }
 
@@ -585,8 +837,12 @@ fn scan_laravel_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut 
 // `getName`, not `get`). Path-must-start-with-`/` filter rejects arbitrary
 // `$cache->get('key')` style false positives.
 //
-// `$app->group('/api', function ($g) { ... })` prefix tracking is skipped —
-// consistent with the Laravel scanner not tracking `Route::prefix(...)`.
+// `$app->group('/api', function ($g) { ... })` prefix tracking is STILL skipped
+// here, and is now the only remaining group gap in this file: the Laravel
+// scanner composes `Route::prefix(...)->group(...)` and
+// `Route::group(['prefix' => ...], ...)` via `laravel_prefix_ranges`. Slim has
+// no substrate-gap fixture, so wiring the same ranges through `$app->group` is
+// a follow-up, not drive-by work.
 
 fn scan_slim_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc) {
     let methods: &[(&str, &str)] = &[
@@ -1268,6 +1524,84 @@ Route::resource('/photos', PhotoController::class);
         assert!(route_names.iter().any(|n| n.starts_with("POST /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("PUT /photos")));
         assert!(route_names.iter().any(|n| n.starts_with("DELETE /photos")));
+    }
+
+    fn route_names(fp: &FileParse) -> Vec<String> {
+        fp.nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.clone())
+            .collect()
+    }
+
+    #[test]
+    fn laravel_route_prefix_group_composes() {
+        let source = r#"<?php
+Route::prefix('api/v1')->group(function () {
+    Route::get('/users/{id}', [UserController::class, 'show']);
+    Route::post('/users', [UserController::class, 'store']);
+});
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(
+            names.contains(&"GET /api/v1/users/{id}".to_string()),
+            "got {names:?}"
+        );
+        assert!(
+            names.contains(&"POST /api/v1/users".to_string()),
+            "got {names:?}"
+        );
+        assert!(!names.contains(&"GET /users/{id}".to_string()));
+    }
+
+    #[test]
+    fn laravel_route_group_array_prefix_composes() {
+        let source = r#"<?php
+Route::group(['prefix' => 'admin', 'middleware' => 'auth'], function () {
+    Route::get('/stats', [StatsController::class, 'index']);
+});
+Route::middleware('auth')->prefix('api')->group(function () {
+    Route::get('/me', [MeController::class, 'show']);
+});
+Route::group(['middleware' => 'auth'], function () {
+    Route::get('/plain', [PlainController::class, 'index']);
+});
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.contains(&"GET /admin/stats".to_string()), "got {names:?}");
+        assert!(names.contains(&"GET /api/me".to_string()), "got {names:?}");
+        // A middleware-only group contributes no path segment.
+        assert!(names.contains(&"GET /plain".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn laravel_route_outside_group_unaffected() {
+        // Regression lock for the range arithmetic: a `}` inside a string
+        // literal must not close the group early, and routes after the real
+        // closing brace must keep their bare path. The nested group proves the
+        // outer-to-inner fold.
+        let source = r#"<?php
+Route::prefix('api')->group(function () {
+    Route::prefix('v2')->group(function () {
+        Route::get('/users', [UserController::class, 'index']);
+    });
+    Route::get('/ping', function () { return '} not a brace'; });
+});
+Route::get('/health', [HealthController::class, 'index']);
+$builder = Route::prefix('orphan');
+Route::get('/after', [AfterController::class, 'index']);
+"#;
+        let fp = parse_file(source, "routes/web.php", "routes::web", repo()).unwrap();
+        let names = route_names(&fp);
+        assert!(names.contains(&"GET /api/v2/users".to_string()), "got {names:?}");
+        assert!(names.contains(&"GET /api/ping".to_string()), "got {names:?}");
+        assert!(names.contains(&"GET /health".to_string()), "got {names:?}");
+        assert!(names.contains(&"GET /after".to_string()), "got {names:?}");
+        assert!(!names.contains(&"GET /api/health".to_string()), "got {names:?}");
+        assert!(!names.contains(&"GET /orphan/after".to_string()), "got {names:?}");
     }
 
     #[test]
