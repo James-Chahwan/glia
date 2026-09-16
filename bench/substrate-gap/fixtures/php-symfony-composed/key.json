@@ -1,0 +1,20 @@
+{
+  "framework": "php-symfony-composed",
+  "language": "php",
+  "dirs": ["server", "client"],
+  "mechanism": "http",
+  "cells": ["php/http"],
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /api/v1/users/{id}", "note": "class #[Route('/api/v1/users')] + method #[Route('/{id}')] composed"},
+    {"kind": "ROUTE", "name": "POST /api/v1/users", "note": "empty action template resolves to the class prefix"}
+  ],
+  "expect_edges": [
+    {"from": "GET /api/v1/users/{id}", "to": "show", "category": "HANDLED_BY", "note": "composed route handled by the action"},
+    {"from": "GET /api/v1/users", "to": "GET /api/v1/users/{id}", "category": "HTTP_CALLS", "note": "TS fetch pairs with the composed route"},
+    {"from": "POST /api/v1/users", "to": "POST /api/v1/users", "category": "HTTP_CALLS", "note": "TS fetch POST pairs with the empty-template route"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /{id}", "note": "the uncomposed action template must not exist"},
+    {"kind": "ROUTE", "max_nodes": 3, "note": "class ANY route + the two composed action routes, nothing stray"}
+  ]
+}

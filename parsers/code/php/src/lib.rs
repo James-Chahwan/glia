@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
+use repo_graph_code_domain::endpoint;
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -176,16 +177,29 @@ fn visit_class(
     acc.nav
         .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
 
+    // Symfony composes a controller's class-level `#[Route('/prefix')]` onto
+    // every action template, so the prefix must be known before the body walk.
+    let class_prefix = class_route_prefix(node, src);
+    let mut composed = 0usize;
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             if child.kind() == "method_declaration" {
-                visit_method(child, src, file_rel, &qname, id, repo, acc);
+                composed +=
+                    visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
             }
         }
     }
 
-    check_route_attrs(node, src, id, repo, acc);
+    // The controller's OWN `#[Route]` still becomes a route node (unchanged
+    // behaviour); it is the prefix itself, so it composes against nothing.
+    check_route_attrs(node, src, id, repo, "", acc);
+
+    if composed > 0 && !class_prefix.is_empty() {
+        eprintln!(
+            "[php-routes] composed {composed} attribute routes under '{class_prefix}' in {file_rel}"
+        );
+    }
 }
 
 fn visit_interface(
@@ -289,6 +303,8 @@ fn visit_function(
     }
 }
 
+/// Returns how many `#[Route]` attribute routes this method contributed, so
+/// `visit_class` can report the composition in its `[php-routes]` marker.
 fn visit_method(
     node: TsNode,
     src: &[u8],
@@ -296,10 +312,11 @@ fn visit_method(
     parent_qname: &str,
     parent_id: NodeId,
     repo: RepoId,
+    class_prefix: &str,
     acc: &mut Acc,
-) {
+) -> usize {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return 0;
     };
     let name = text_of(name_node, src);
     let qname = format!("{parent_qname}::{name}");
@@ -325,31 +342,110 @@ fn visit_method(
         collect_calls_in(body, src, id, acc, &types);
     }
 
-    check_route_attrs(node, src, id, repo, acc);
+    check_route_attrs(node, src, id, repo, class_prefix, acc)
 }
 
-fn check_route_attrs(node: TsNode, src: &[u8], handler_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let text = text_of(node, src);
-    // Walk every #[Route(...)] occurrence — a class or method may carry multiple.
-    let mut search_from = 0;
-    while let Some(rel) = text[search_from..].find("#[Route(") {
-        let start = search_from + rel + 8;
-        let Some((path, consumed)) = extract_first_string(&text[start..]) else {
-            search_from = start;
+/// The PHP attributes declared directly ON `node` — its `attributes` field,
+/// never the ones nested inside its body. `class_declaration` and
+/// `method_declaration` both expose `attributes: attribute_list`, which holds
+/// `attribute_group`s of `attribute`s (tree-sitter-php 0.24 node-types).
+///
+/// Returns `(simple attribute name, attribute node)`: a leading namespace
+/// qualifier (`\App\Route`, `\Symfony\...\Route`) is stripped, and the node
+/// is handed back so the string/kwarg helpers run over THAT attribute's text
+/// only instead of the whole declaration.
+fn own_attributes<'a>(node: TsNode<'a>, src: &'a [u8]) -> Vec<(String, TsNode<'a>)> {
+    let mut out = Vec::new();
+    let Some(list) = node.child_by_field_name("attributes") else {
+        return out;
+    };
+    let mut list_cursor = list.walk();
+    for group in list.named_children(&mut list_cursor) {
+        if group.kind() != "attribute_group" {
+            continue;
+        }
+        let mut group_cursor = group.walk();
+        for attr in group.named_children(&mut group_cursor) {
+            if attr.kind() != "attribute" {
+                continue;
+            }
+            let mut attr_cursor = attr.walk();
+            let name_node = attr
+                .named_children(&mut attr_cursor)
+                .find(|c| matches!(c.kind(), "name" | "qualified_name" | "relative_name"));
+            let Some(name_node) = name_node else {
+                continue;
+            };
+            let raw = text_of(name_node, src);
+            let simple = raw.rsplit('\\').next().unwrap_or(raw).trim();
+            out.push((simple.to_string(), attr));
+        }
+    }
+    out
+}
+
+/// A controller's class-level `#[Route('/prefix')]` template, or `""` when the
+/// class carries no `Route` attribute. Symfony prepends this to every action
+/// template in the class.
+fn class_route_prefix(class_node: TsNode, src: &[u8]) -> String {
+    for (name, attr) in own_attributes(class_node, src) {
+        if name != "Route" {
+            continue;
+        }
+        if let Some((path, _)) = extract_first_string(text_of(attr, src)) {
+            return path;
+        }
+    }
+    String::new()
+}
+
+/// Emit the route(s) declared by the `#[Route(...)]` attributes ON `node`
+/// itself, composed under `class_prefix` (empty at class level and for a
+/// prefix-less controller, where composition is a pass-through).
+///
+/// Reads the `attributes` FIELD rather than text-scanning the declaration:
+/// scanning a `class_declaration` re-found every method attribute in the body
+/// and re-emitted each action route against the CLASS as handler.
+///
+/// Returns the number of `#[Route]` attributes that produced a route.
+fn check_route_attrs(
+    node: TsNode,
+    src: &[u8],
+    handler_id: NodeId,
+    repo: RepoId,
+    class_prefix: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut emitted = 0usize;
+    for (name, attr) in own_attributes(node, src) {
+        if name != "Route" {
+            continue;
+        }
+        // Scoped to this attribute, so a `methods:` kwarg can never be read off
+        // the NEXT attribute the way the old `find_attr_end` fallback could.
+        let attr_text = text_of(attr, src);
+        let Some((path, _)) = extract_first_string(attr_text) else {
             continue;
         };
-        let attr_end = find_attr_end(&text[start..]).unwrap_or(text.len() - start);
-        let attr_text = &text[start..start + attr_end];
+        // Symfony's rule is prefix-always: `#[Route('/{id}')]` under a class
+        // `#[Route('/api/v1/users')]` is `/api/v1/users/{id}`, and an EMPTY
+        // action template is the prefix itself.
+        let full = if path.is_empty() {
+            endpoint::abs_path(class_prefix)
+        } else {
+            endpoint::abs_path(&endpoint::join_path(class_prefix, &path))
+        };
         let methods = parse_methods_kwarg(attr_text);
         if methods.is_empty() {
-            emit_route_strong("ANY", &path, handler_id, repo, acc);
+            emit_route_strong("ANY", &full, handler_id, repo, acc);
         } else {
             for m in methods {
-                emit_route_strong(&m, &path, handler_id, repo, acc);
+                emit_route_strong(&m, &full, handler_id, repo, acc);
             }
         }
-        search_from = start + consumed.max(1);
+        emitted += 1;
     }
+    emitted
 }
 
 fn extract_first_string(s: &str) -> Option<(String, usize)> {
@@ -372,37 +468,6 @@ fn extract_first_string(s: &str) -> Option<(String, usize)> {
                 return Some((s[start..j].to_string(), j + 1));
             }
             return None;
-        }
-        i += 1;
-    }
-    None
-}
-
-fn find_attr_end(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 1usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            b'\'' | b'"' => {
-                let delim = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != delim {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            _ => {}
         }
         i += 1;
     }
@@ -1084,6 +1149,84 @@ class C {
             .map(|(_, n)| n.as_str())
             .collect();
         assert!(route_names.contains(&"ANY /health"));
+    }
+
+    #[test]
+    fn symfony_class_route_prefix_composes() {
+        let source = r#"<?php
+namespace App\Controller;
+
+use Symfony\Component\Routing\Annotation\Route;
+
+#[Route('/api/v1/users')]
+class UserController {
+    #[Route('/{id}', methods: ['GET'])]
+    public function show(int $id) {}
+
+    #[Route('', methods: ['POST'])]
+    public function create() {}
+}
+"#;
+        let fp = parse_file(source, "src/UserController.php", "App::Controller", repo()).unwrap();
+        let route_names: Vec<&str> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.as_str())
+            .collect();
+        assert!(
+            route_names.contains(&"GET /api/v1/users/{id}"),
+            "class prefix must compose onto the action template: {route_names:?}"
+        );
+        assert!(
+            route_names.contains(&"POST /api/v1/users"),
+            "an empty action template is the prefix itself: {route_names:?}"
+        );
+        // The uncomposed templates must be gone, not merely joined by the new ones.
+        assert!(!route_names.contains(&"GET /{id}"), "{route_names:?}");
+        assert!(!route_names.contains(&"POST "), "{route_names:?}");
+        // The controller's own #[Route] still lands (unchanged behaviour).
+        assert!(
+            route_names.contains(&"ANY /api/v1/users"),
+            "{route_names:?}"
+        );
+    }
+
+    #[test]
+    fn symfony_class_scan_does_not_duplicate_action_routes() {
+        let source = r#"<?php
+#[Route('/api/v1/users')]
+class UserController {
+    #[Route('/{id}', methods: ['GET'])]
+    public function show(int $id) {}
+}
+"#;
+        let fp = parse_file(source, "src/UserController.php", "App", repo()).unwrap();
+        let class_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "App::UserController");
+        let handled: Vec<NodeId> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY)
+            .map(|e| e.to)
+            .collect();
+        // Exactly one HANDLED_BY points at the class: its OWN #[Route]. The old
+        // text scan re-found the method attribute at class level and emitted a
+        // second `<action route> -> UserController`.
+        assert_eq!(
+            handled.iter().filter(|t| **t == class_id).count(),
+            1,
+            "class must be claimed once, by its own #[Route]"
+        );
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::HANDLED_BY)
+                .count(),
+            2,
+            "one class route + one action route"
+        );
     }
 
     #[test]
