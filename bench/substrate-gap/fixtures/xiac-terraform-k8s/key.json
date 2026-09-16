@@ -1,0 +1,13 @@
+{
+  "framework": "xiac-terraform-k8s",
+  "language": "terraform+yaml",
+  "dirs": ["infra", "deploy"],
+  "note": "Deliberately legacy-only (no `cells`): the only matrix column listing SHARES_INFRA_REF is `service`, whose EXTRACTION kinds are SERVICE/REGION — this fixture extracts INFRA_RESOURCE, so binding it to terraform/service would score a `partial` for a mechanism it does not implement. Two dirs => generate_many => IacResolver fires.",
+  "expect_nodes": [
+    {"kind": "INFRA_RESOURCE", "name": "aws_ecs_service", "note": "terraform resource"},
+    {"kind": "INFRA_RESOURCE", "name": "api", "note": "k8s Service from iac.rs"}
+  ],
+  "expect_edges": [
+    {"from": "api", "to": "api", "category": "SHARES_INFRA_REF", "note": "terraform aws_ecs_service.api == k8s Service/api"}
+  ]
+}

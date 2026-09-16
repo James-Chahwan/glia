@@ -5,8 +5,24 @@ use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
-    UnresolvedRef, cell_type, edge_category, node_kind,
+    UnresolvedRef, cell_type, edge_category, infra, node_kind,
 };
+
+/// The INFRA_RESOURCE qname for a Terraform `resource "<ty>" "<name>"` block.
+///
+/// A13.5: this is the SAME shape `parsers/code/extractors/src/iac.rs` emits for
+/// k8s / compose / Dockerfile resources, so `IacResolver` — which pairs on the
+/// verbatim qname — can finally join a terraform-declared service to the k8s
+/// Service another repo declares. The old shape was `<module_qname>::<ty>.<name>`,
+/// which embedded the file's module path and therefore never joined anything,
+/// not even terraform-to-terraform.
+///
+/// Both the emitter (`visit_block`) and the `collect_resource_addresses`
+/// pre-pass call THIS function: if they ever disagree, every INFRA_REFERENCES /
+/// DEPENDS_ON edge silently dangles.
+fn resource_qname(ty: &str, name: &str) -> String {
+    infra::qname(infra::canonical_kind(ty), name)
+}
 
 pub fn parse_file(
     source: &str,
@@ -27,7 +43,7 @@ pub fn parse_file(
 
     // Pre-pass: map each resource's Terraform address ("aws_vpc.main") to its
     // NodeId so intra-file references resolve directly to concrete resource nodes.
-    collect_resource_addresses(root, src, module_qname, repo, &mut acc.resource_ids);
+    collect_resource_addresses(root, src, repo, &mut acc.resource_ids);
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -108,8 +124,10 @@ fn visit_block(
     let block_type = labels[0].as_str();
     match block_type {
         "resource" if labels.len() >= 3 => {
+            // NAME stays the Terraform address (`aws_vpc.main`) — it is what a
+            // reader recognises. Only the qname (= node identity) is canonical.
             let name = format!("{}.{}", labels[1], labels[2]);
-            let qname = format!("{parent_qname}::{name}");
+            let qname = resource_qname(&labels[1], &labels[2]);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
             acc.nodes.push(Node {
                 id,
@@ -263,7 +281,6 @@ fn find_attribute(node: TsNode, src: &[u8], attr_name: &str) -> Option<String> {
 fn collect_resource_addresses(
     node: TsNode,
     src: &[u8],
-    parent_qname: &str,
     repo: RepoId,
     out: &mut HashMap<String, NodeId>,
 ) {
@@ -274,12 +291,12 @@ fn collect_resource_addresses(
                 let labels = collect_labels(child, src);
                 if labels.len() >= 3 && labels[0] == "resource" {
                     let address = format!("{}.{}", labels[1], labels[2]);
-                    let qname = format!("{parent_qname}::{address}");
+                    let qname = resource_qname(&labels[1], &labels[2]);
                     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
                     out.insert(address, id);
                 }
             }
-            "body" => collect_resource_addresses(child, src, parent_qname, repo, out),
+            "body" => collect_resource_addresses(child, src, repo, out),
             _ => {}
         }
     }
@@ -437,8 +454,10 @@ output "instance_id" {
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 2);
     }
 
+    /// `address` is the Terraform address, e.g. "aws_vpc.main".
     fn node_id(address: &str) -> NodeId {
-        let qname = format!("main::{address}");
+        let (ty, name) = address.split_once('.').expect("ty.name");
+        let qname = resource_qname(ty, name);
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INFRA_RESOURCE, &qname)
     }
 
@@ -523,6 +542,40 @@ resource "aws_instance" "worker" {
             fp.edges.iter().filter(|e| e.category == edge_category::DEPENDS_ON).count(),
             2
         );
+    }
+
+    #[test]
+    fn resource_qname_is_canonical_infra_shape() {
+        let source = r#"
+resource "aws_ecs_service" "api" {
+  name = "api"
+}
+
+resource "aws_s3_bucket" "data" {
+  bucket = "my-app-data"
+}
+"#;
+        let fp = parse_file(source, "infra/main.tf", "infra::main", repo()).unwrap();
+        let qnames: Vec<&String> = fp.nav.qname_by_id.values().collect();
+        // Aliased type: joins the k8s/compose `service` kind emitted by iac.rs.
+        assert!(
+            qnames.iter().any(|q| *q == "infra:service:api"),
+            "aws_ecs_service.api -> infra:service:api, got {qnames:?}"
+        );
+        // Unaliased type: uniform shape, no false k8s join.
+        assert!(
+            qnames.iter().any(|q| *q == "infra:aws_s3_bucket:data"),
+            "aws_s3_bucket.data -> infra:aws_s3_bucket:data, got {qnames:?}"
+        );
+        // The module path must NOT leak into the resource identity any more —
+        // that is what stopped terraform joining anything cross-repo.
+        assert!(
+            !qnames.iter().any(|q| q.contains("infra::main::")),
+            "module path leaked into an INFRA_RESOURCE qname: {qnames:?}"
+        );
+        // NAME is unchanged: the Terraform address a reader recognises.
+        let names: Vec<&String> = fp.nav.name_by_id.values().collect();
+        assert!(names.iter().any(|n| *n == "aws_ecs_service.api"), "{names:?}");
     }
 
     #[test]

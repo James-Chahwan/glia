@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId, RepoId};
+use repo_graph_code_domain::{cell_type, edge_category, node_kind};
+use repo_graph_core::{CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
 use crate::merged::MergedGraph;
@@ -18,9 +18,36 @@ use crate::merged::MergedGraph;
 
 pub struct IacResolver;
 
+/// The canonical INFRA_RESOURCE qname prefix, shared by the terraform parser
+/// and the k8s/compose/Dockerfile extractor (`code_domain::infra::qname`).
+const INFRA_PREFIX: &str = "infra:";
+
+/// Which side of the IaC graph a resource came from, derived from its POSITION
+/// cell's file extension rather than from confidence or node order. The
+/// terraform parser attaches CODE + POSITION cells to every resource; the
+/// manifest path (`extractors/src/iac.rs`) attaches none, so "no `.tf`
+/// position" means the manifest side.
+fn is_terraform_resource(n: &Node) -> bool {
+    n.cells.iter().any(|c| {
+        c.kind == cell_type::POSITION
+            && match &c.payload {
+                // `<file>:<start>-<end>` — strip the line range back off.
+                CellPayload::Text(t) => {
+                    t.rsplit_once(':').map(|(path, _)| path).unwrap_or(t).ends_with(".tf")
+                }
+                _ => false,
+            }
+    })
+}
+
 impl CrossGraphResolver for IacResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
         let mut index: HashMap<String, Vec<(NodeId, RepoId, Confidence)>> = HashMap::new();
+        // fired_on counters. `tf + k8s == resources` is the proof both emitters
+        // agree on `infra:<kind>:<name>`: before A13.5 the terraform parser
+        // emitted `<module_qname>::<type>.<name>`, so tf was always 0 here and
+        // terraform could never pair with anything.
+        let (mut resources, mut tf, mut k8s) = (0usize, 0usize, 0usize);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::INFRA_RESOURCE) {
@@ -29,12 +56,21 @@ impl CrossGraphResolver for IacResolver {
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                     continue;
                 };
+                if qname.starts_with(INFRA_PREFIX) {
+                    resources += 1;
+                    if is_terraform_resource(n) {
+                        tf += 1;
+                    } else {
+                        k8s += 1;
+                    }
+                }
                 index
                     .entry(qname.clone())
                     .or_default()
                     .push((n.id, g.repo, n.confidence));
             }
         }
+        let mut paired = 0usize;
         for refs in index.values() {
             if refs.len() < 2 {
                 continue;
@@ -52,9 +88,15 @@ impl CrossGraphResolver for IacResolver {
                             category: edge_category::SHARES_INFRA_REF,
                             confidence: weakest(refs[i].2, refs[j].2),
                         });
+                        paired += 1;
                     }
                 }
             }
+        }
+        // One line per BUILD, and only when this resolver had anything to say —
+        // the `[queues]` house style, so builds with no IaC stay silent.
+        if resources > 0 {
+            eprintln!("[iac] resources={resources} paired={paired} tf={tf} k8s={k8s}");
         }
     }
 }
@@ -63,7 +105,7 @@ impl CrossGraphResolver for IacResolver {
 mod tests {
     use super::*;
     use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::Node;
+    use repo_graph_core::{Cell, Node};
     use crate::types::{RepoGraph, SymbolTable};
 
     fn graph_with_infra(repo_id: RepoId, qname: &str) -> RepoGraph {
@@ -107,6 +149,35 @@ mod tests {
             .filter(|e| e.category == edge_category::SHARES_INFRA_REF)
             .collect();
         assert_eq!(edges.len(), 1);
+    }
+
+    #[test]
+    fn iac_resolver_pairs_terraform_to_k8s_service() {
+        // A13.5: `resource "aws_ecs_service" "api"` now emits the SAME qname the
+        // k8s `kind: Service` / `metadata.name: api` path emits, so the two
+        // finally pair. Before, the terraform side was `main::aws_ecs_service.api`.
+        let tf_repo = RepoId(21);
+        let k8s_repo = RepoId(22);
+        let mut g_tf = graph_with_infra(tf_repo, "infra:service:api");
+        // Give the terraform node the POSITION cell its parser attaches, so the
+        // tf/k8s split in the fired_on marker is exercised too.
+        g_tf.nodes[0].cells = vec![Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Text("infra/main.tf:1-6".to_string()),
+        }];
+        assert!(is_terraform_resource(&g_tf.nodes[0]));
+        let g_k8s = graph_with_infra(k8s_repo, "infra:service:api");
+        assert!(!is_terraform_resource(&g_k8s.nodes[0]));
+        let mut merged = MergedGraph::new(vec![g_tf, g_k8s]);
+        merged.run(&IacResolver);
+        assert_eq!(
+            merged
+                .cross_edges
+                .iter()
+                .filter(|e| e.category == edge_category::SHARES_INFRA_REF)
+                .count(),
+            1
+        );
     }
 
     #[test]

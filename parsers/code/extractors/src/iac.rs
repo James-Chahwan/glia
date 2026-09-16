@@ -29,7 +29,7 @@
 //!     Deployment.metadata.labels — needs label-set comparison)
 //!   - Ingress → Service routing (host-path-rules)
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, infra, node_kind};
 use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct IacNodes {
@@ -65,14 +65,14 @@ pub fn extract_dockerfile(
                     GRAPH_TYPE,
                     repo,
                     node_kind::INFRA_RESOURCE,
-                    &format!("infra:image:{image_name}"),
+                    &infra::qname("image", &image_name),
                 );
                 emit_resource(&mut out, "image", &base_name, module_id, repo);
                 let to_id = NodeId::from_parts(
                     GRAPH_TYPE,
                     repo,
                     node_kind::INFRA_RESOURCE,
-                    &format!("infra:image:{base_name}"),
+                    &infra::qname("image", &base_name),
                 );
                 out.edges.push(Edge {
                     from: from_id,
@@ -115,7 +115,7 @@ fn emit_resource(
     module_id: NodeId,
     repo: RepoId,
 ) {
-    let qname = format!("infra:{kind}:{name}");
+    let qname = infra::qname(kind, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INFRA_RESOURCE, &qname);
     // Dedupe within this extraction call.
     if out.nodes.iter().any(|n| n.id == id) {
@@ -224,7 +224,7 @@ fn extract_k8s_documents(
             GRAPH_TYPE,
             repo,
             node_kind::INFRA_RESOURCE,
-            &format!("infra:{kind_lower}:{name}"),
+            &infra::qname(&kind_lower, &name),
         );
         for image in image_refs_in_doc(doc) {
             let basename = image_basename(&image);
@@ -236,7 +236,7 @@ fn extract_k8s_documents(
                 GRAPH_TYPE,
                 repo,
                 node_kind::INFRA_RESOURCE,
-                &format!("infra:image:{basename}"),
+                &infra::qname("image", &basename),
             );
             out.edges.push(Edge {
                 from: from_id,
@@ -383,13 +383,13 @@ fn extract_compose_services(
                             GRAPH_TYPE,
                             repo,
                             node_kind::INFRA_RESOURCE,
-                            &format!("infra:service:{svc}"),
+                            &infra::qname("service", svc),
                         );
                         let to_id = NodeId::from_parts(
                             GRAPH_TYPE,
                             repo,
                             node_kind::INFRA_RESOURCE,
-                            &format!("infra:image:{basename}"),
+                            &infra::qname("image", &basename),
                         );
                         out.edges.push(Edge {
                             from: from_id,

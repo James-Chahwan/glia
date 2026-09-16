@@ -1013,6 +1013,75 @@ pub mod endpoint {
 }
 
 // ============================================================================
+// Shared INFRA_RESOURCE identity (A13.5)
+// ============================================================================
+//
+// Two crates emit INFRA_RESOURCE nodes — `parsers/code/extractors/src/iac.rs`
+// (k8s manifests, docker-compose, Dockerfiles) and
+// `parsers/code/terraform/src/lib.rs`. `IacResolver` pairs them on the VERBATIM
+// qname, so they only ever join if they build the identical string. They did
+// not: iac.rs emitted `infra:<kind>:<name>` while terraform emitted
+// `<module_qname>::<type>.<name>`, which additionally embedded the file's module
+// path and so could not even join terraform-to-terraform across repos. This
+// module is the single definition of that string, so the shape cannot drift
+// again by a copied `format!`.
+
+pub mod infra {
+    /// `infra:<kind>:<name>` — the single INFRA_RESOURCE qname shape.
+    pub fn qname(kind: &str, name: &str) -> String {
+        format!("infra:{kind}:{name}")
+    }
+
+    /// Provider-specific resource type → the canonical kind k8s/compose also
+    /// use (the lower-cased `K8S_KINDS` vocabulary in `iac.rs`, plus `image`).
+    ///
+    /// Deliberately partial: anything absent is returned VERBATIM, so
+    /// `aws_s3_bucket` stays `infra:aws_s3_bucket:data` — a uniform shape
+    /// without a false k8s join. Two entries must never map onto one kind if a
+    /// repo realistically declares both side by side under the same name: the
+    /// qname is the node identity, so such a pair would COLLAPSE into one node.
+    const ALIASES: &[(&str, &str)] = &[
+        // Long-running workloads → `service`
+        ("aws_ecs_service", "service"),
+        ("aws_apprunner_service", "service"),
+        ("google_cloud_run_service", "service"),
+        ("azurerm_container_group", "service"),
+        // Function-as-a-service → also `service` (the callable unit)
+        ("aws_lambda_function", "service"),
+        ("google_cloudfunctions_function", "service"),
+        ("azurerm_function_app", "service"),
+        // Container registries → `image`
+        ("aws_ecr_repository", "image"),
+        ("google_artifact_registry_repository", "image"),
+        ("docker_image", "image"),
+        // Terraform's own kubernetes provider → the same kinds the YAML path
+        // emits, so a repo declaring an object in BOTH places pairs them.
+        ("kubernetes_deployment", "deployment"),
+        ("kubernetes_service", "service"),
+        ("kubernetes_cron_job", "cronjob"),
+        ("kubernetes_cron_job_v1", "cronjob"),
+        ("kubernetes_config_map", "configmap"),
+        ("kubernetes_secret", "secret"),
+        ("aws_secretsmanager_secret", "secret"),
+        ("kubernetes_ingress", "ingress"),
+        ("kubernetes_ingress_v1", "ingress"),
+        ("aws_lb", "ingress"),
+    ];
+
+    /// Fold a provider-specific resource type onto the canonical kind, or
+    /// return it verbatim when it has no counterpart. Case-insensitive on the
+    /// ASCII resource type (HCL types are ASCII by construction).
+    pub fn canonical_kind(raw_type: &str) -> &str {
+        for (from, to) in ALIASES {
+            if raw_type.eq_ignore_ascii_case(from) {
+                return to;
+            }
+        }
+        raw_type
+    }
+}
+
+// ============================================================================
 // Doc ingestion (Tier-4 seam)
 // ============================================================================
 //
@@ -1266,5 +1335,34 @@ mod tests {
         assert_eq!(node_kind::name(NodeKindId(50)), "UNKNOWN");
         assert_eq!(edge_category::name(EdgeCategoryId(35)), "UNKNOWN");
         assert_eq!(cell_type::name(CellTypeId(19)), "UNKNOWN");
+    }
+
+    #[test]
+    fn canonical_kind_maps_ecs_service_to_service() {
+        assert_eq!(infra::canonical_kind("aws_ecs_service"), "service");
+        assert_eq!(infra::canonical_kind("AWS_ECS_SERVICE"), "service");
+        assert_eq!(infra::canonical_kind("kubernetes_deployment"), "deployment");
+        assert_eq!(infra::canonical_kind("aws_ecr_repository"), "image");
+        // The whole point: terraform and the k8s YAML path land on ONE qname.
+        assert_eq!(
+            infra::qname(infra::canonical_kind("aws_ecs_service"), "api"),
+            infra::qname("service", "api")
+        );
+        assert_eq!(infra::qname("service", "api"), "infra:service:api");
+    }
+
+    #[test]
+    fn canonical_kind_passes_unknown_type_through() {
+        assert_eq!(infra::canonical_kind("aws_s3_bucket"), "aws_s3_bucket");
+        assert_eq!(infra::canonical_kind("random_pet"), "random_pet");
+        assert_eq!(
+            infra::qname(infra::canonical_kind("aws_s3_bucket"), "data"),
+            "infra:aws_s3_bucket:data"
+        );
+        // No alias may collapse two DIFFERENT canonical kinds onto each other.
+        assert_ne!(
+            infra::canonical_kind("kubernetes_service"),
+            infra::canonical_kind("kubernetes_deployment")
+        );
     }
 }
