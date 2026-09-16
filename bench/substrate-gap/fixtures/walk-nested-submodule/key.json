@@ -1,0 +1,14 @@
+{
+  "framework": "walk-nested-submodule",
+  "language": "python",
+  "dirs": ["."],
+  "materialize": {"libs/sdk/.git": "libs/sdk/_dotgit"},
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "run", "note": "control: parent-repo source still parsed"},
+    {"kind": "REGION", "name": "region:libs/sdk", "note": "nested .git file => submodule anchor, never descended"}
+  ],
+  "expect_edges": [
+    {"from": "run", "to": "helper", "category": "CALLS", "note": "control: 1.00 before and after"}
+  ],
+  "note": "A8.1 — a directory guarded by a .git FILE is another repo's tree. Pre-A8.1 it is walked into the PARENT RepoId (libs::sdk::vendor_client::VendorClient), which is the duplicate-name class that makes MergedGraph::resolve_name pick between two equal-degree copies. Absence of those symbols is proved by the engine unit test, not by this key."
+}

@@ -1,0 +1,14 @@
+{
+  "framework": "walk-dotnet-obj",
+  "language": "csharp",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS",  "name": "Startup",     "note": "control: authored C# still parsed"},
+    {"kind": "REGION", "name": "region:obj", "note": "collapsed: sibling Api.csproj + obj/project.assets.json"},
+    {"kind": "REGION", "name": "region:bin", "note": "collapsed: sibling Api.csproj"}
+  ],
+  "expect_edges": [
+    {"from": "Configure", "to": "Boot", "category": "CALLS", "note": "control: same-class SelfMethod call survives the gating (1.00 before and after)"}
+  ],
+  "note": "A8.1 — dotnet bin/obj collapse. The generated C# under obj/** and bin/** (PhantomAssemblyInfo, PhantomBinClass, the phantom PACKAGE Shop::Api::Generated) is ranked and located like authored source on pre-A8.1 main; the precision half of that claim is proved by the engine unit tests, since grade.py has no expect_absent_nodes."
+}

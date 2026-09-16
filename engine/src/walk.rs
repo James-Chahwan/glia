@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
@@ -14,8 +15,8 @@ use crate::extract::detect_language;
 pub(crate) struct RegionAnchor {
     /// Repo-relative path of the collapsed directory (`www`, `packages/x/dist`).
     rel_path: String,
-    /// `vendored` | `build_output` — recorded in the anchor's ORIGIN cell.
-    provenance: &'static str,
+    /// Why it collapsed — rendered into the anchor's ORIGIN cell `provenance`.
+    provenance: Collapse,
     /// The directory's own name (`www`, `node_modules`).
     region: String,
 }
@@ -32,100 +33,18 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     let mut files = Vec::new();
     let mut regions = Vec::new();
     let mut md = Vec::new();
-    let gitignore_dirs = load_gitignore_dirs(root);
-    walk_dir(root, root, &gitignore_dirs, &mut files, &mut regions, &mut md);
+    let mut counts = GateCounts::default();
+    let gitignore_dirs = walk_gating::load_gitignore_dirs(root);
+    walk_dir(root, root, &gitignore_dirs, &mut files, &mut regions, &mut md, &mut counts);
+    // Attributable collapse tally. Gated on non-zero so a region-free repo stays
+    // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
+    if counts.total() > 0 {
+        eprintln!("[walk] {}", counts.marker());
+    }
     (files, regions, md)
 }
 
-/// VCS internals and editor metadata: no graph-meaningful content, skipped
-/// outright (not even recorded as a region).
-fn is_hard_skip(name: &str) -> bool {
-    matches!(name, ".git" | ".hg" | ".svn" | ".idea" | ".vscode")
-}
-
-/// Provenance for directories always collapsed to a region anchor regardless of
-/// `.gitignore` — dependency trees and conventional build output. `None` for an
-/// ordinary source directory.
-fn always_region(name: &str) -> Option<&'static str> {
-    match name {
-        "node_modules" | "vendor" | "bower_components" | ".venv" | "site-packages" => {
-            Some("vendored")
-        }
-        "target" | "dist" | "build" | "out" | "__pycache__" | ".cache" | ".next" | ".nuxt"
-        | ".angular" | "coverage" => Some("build_output"),
-        _ => None,
-    }
-}
-
-/// Directory names the repo's top-level `.gitignore` marks ignored. Build
-/// mirrors a project gitignores (Capacitor's `www/`, `android/`) collapse to a
-/// region anchor rather than being parsed as source. Only plain, non-glob,
-/// non-negated entries are honored, matched by final path component against
-/// directory names during the walk. (glia-v2 G10)
-fn load_gitignore_dirs(root: &Path) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    let Ok(text) = std::fs::read_to_string(root.join(".gitignore")) else {
-        return out;
-    };
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty()
-            || line.starts_with('#')
-            || line.starts_with('!')
-            || line.contains('*')
-            || line.contains('?')
-            || line.contains('[')
-        {
-            continue;
-        }
-        let trimmed = line.trim_matches('/');
-        let comp = trimmed.rsplit('/').next().unwrap_or(trimmed);
-        if !comp.is_empty() {
-            out.insert(comp.to_string());
-        }
-    }
-    out
-}
-
-/// True for a filename that looks like a bundler-emitted, content-hashed chunk
-/// (`main.e188fddd19255ba1.js`, `1624.4e9cc6119b4878fe.js`, `styles.<hash>.css`)
-/// — i.e. build output, not authored source. The signal is a dot-delimited
-/// segment of ≥8 hex digits before a JS/CSS extension.
-fn is_hashed_chunk(name: &str) -> bool {
-    let ext_ok = name.ends_with(".js")
-        || name.ends_with(".mjs")
-        || name.ends_with(".css")
-        || name.ends_with(".map");
-    if !ext_ok {
-        return false;
-    }
-    name.split('.').any(|seg| {
-        seg.len() >= 8 && seg.bytes().all(|b| b.is_ascii_hexdigit())
-    })
-}
-
-/// True when a directory is a built web-bundle mirror — it directly contains
-/// several content-hashed chunk files. Catches Capacitor's copied bundle
-/// (`android/app/src/main/assets/public`, `ios/App/App/public`) and any other
-/// build mirror that `.gitignore` doesn't flag, regardless of path. (glia-v2 G10)
-fn dir_is_build_bundle(dir: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    let mut hashed = 0usize;
-    for entry in entries.flatten() {
-        if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-            && is_hashed_chunk(&entry.file_name().to_string_lossy())
-        {
-            hashed += 1;
-            if hashed >= 3 {
-                return true;
-            }
-        }
-    }
-    false
-}
-
+#[allow(clippy::too_many_arguments)]
 fn walk_dir(
     root: &Path,
     dir: &Path,
@@ -133,6 +52,7 @@ fn walk_dir(
     files: &mut Vec<(String, String)>,
     regions: &mut Vec<RegionAnchor>,
     md: &mut Vec<(String, String)>,
+    counts: &mut GateCounts,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     // Sort by name: read_dir yields filesystem/inode order, which leaked into
@@ -143,17 +63,19 @@ fn walk_dir(
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if is_hard_skip(&name) {
+        // Also guards FILES: a `.git`/`.hg` file must never be read as source.
+        if walk_gating::is_hard_skip(&name) {
             continue;
         }
         if path.is_dir() {
-            // Collapse vendored/build/gitignored directories to one anchor and
-            // do NOT descend — categorise the region instead of dropping it or
-            // emitting a node per file inside. (glia-v2 G1/G2/G10)
-            let provenance = always_region(&name)
-                .or_else(|| gitignore_dirs.contains(&name).then_some("build_output"))
-                .or_else(|| dir_is_build_bundle(&path).then_some("build_output"));
-            if let Some(provenance) = provenance {
+            // Collapse vendored / build / gitignored / other-repo directories to
+            // one anchor and do NOT descend — categorise the region instead of
+            // dropping it or emitting a node per file inside. The rules live in
+            // `code_domain::walk_gating` so `store::is_gmap_stale` scans exactly
+            // this tree. (glia-v2 G1/G2/G10, A8.1)
+            let gate = walk_gating::gate_dir(&path, &name, gitignore_dirs.contains(&name));
+            counts.record(gate);
+            if let Some(provenance) = gate.collapse() {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
                 regions.push(RegionAnchor {
                     rel_path: rel.to_string_lossy().to_string(),
@@ -162,7 +84,10 @@ fn walk_dir(
                 });
                 continue;
             }
-            walk_dir(root, &path, gitignore_dirs, files, regions, md);
+            if gate == Gate::HardSkip {
+                continue;
+            }
+            walk_dir(root, &path, gitignore_dirs, files, regions, md, counts);
         } else if path.is_file() {
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().to_string();
@@ -200,7 +125,8 @@ pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> repo
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::REGION, &qname);
         let origin = format!(
             r#"{{"provenance":"{}","region":"{}"}}"#,
-            r.provenance, r.region
+            r.provenance.provenance(),
+            r.region
         );
         nodes.push(Node {
             id,
@@ -256,15 +182,15 @@ mod walk_tests {
 
     #[test]
     fn hashed_chunk_detection() {
-        assert!(is_hashed_chunk("main.e188fddd19255ba1.js"));
-        assert!(is_hashed_chunk("1624.4e9cc6119b4878fe.js"));
-        assert!(is_hashed_chunk("styles.0a1b2c3d4e5f6a7b.css"));
+        assert!(walk_gating::is_hashed_chunk("main.e188fddd19255ba1.js"));
+        assert!(walk_gating::is_hashed_chunk("1624.4e9cc6119b4878fe.js"));
+        assert!(walk_gating::is_hashed_chunk("styles.0a1b2c3d4e5f6a7b.css"));
         // Authored source is not a hashed chunk.
-        assert!(!is_hashed_chunk("app.component.ts"));
-        assert!(!is_hashed_chunk("index.js"));
-        assert!(!is_hashed_chunk("user_service.py"));
+        assert!(!walk_gating::is_hashed_chunk("app.component.ts"));
+        assert!(!walk_gating::is_hashed_chunk("index.js"));
+        assert!(!walk_gating::is_hashed_chunk("user_service.py"));
         // 8-hex-ish word but wrong extension.
-        assert!(!is_hashed_chunk("deadbeef.txt"));
+        assert!(!walk_gating::is_hashed_chunk("deadbeef.txt"));
     }
 
     #[test]
@@ -277,7 +203,7 @@ mod walk_tests {
             "# comment\n/www\nandroid/\n*.log\n!keep\n/dist\nsrc/generated\n",
         )
         .unwrap();
-        let dirs = load_gitignore_dirs(&root);
+        let dirs = walk_gating::load_gitignore_dirs(&root);
         assert!(dirs.contains("www"));
         assert!(dirs.contains("android"));
         assert!(dirs.contains("dist"));
@@ -323,13 +249,115 @@ mod walk_tests {
         );
         // node_modules is vendored; the bundle mirrors are build_output.
         let nm = regions.iter().find(|r| r.rel_path == "node_modules").unwrap();
-        assert_eq!(nm.provenance, "vendored");
+        assert_eq!(nm.provenance, Collapse::Vendored);
         let pub_region = regions
             .iter()
             .find(|r| r.rel_path.ends_with("assets/public"))
             .unwrap();
-        assert_eq!(pub_region.provenance, "build_output");
+        assert_eq!(pub_region.provenance, Collapse::BuildOutput);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Fresh temp root per test name; `walk_collapses_*` already owns the
+    /// pid-suffixed `glia_walk_` prefix, so these take their own.
+    fn walk_tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("glia_walk_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dotnet_bin_obj_collapse_next_to_a_project() {
+        let root = walk_tmp("dotnet");
+        std::fs::create_dir_all(root.join("obj/Debug/net8.0")).unwrap();
+        std::fs::create_dir_all(root.join("bin/Debug")).unwrap();
+        std::fs::write(root.join("Api.csproj"), "<Project/>").unwrap();
+        std::fs::write(root.join("Program.cs"), "public class Startup {}").unwrap();
+        std::fs::write(root.join("obj/project.assets.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("obj/Debug/net8.0/Api.AssemblyInfo.cs"),
+            "internal sealed class PhantomAssemblyInfo {}",
+        )
+        .unwrap();
+        std::fs::write(root.join("bin/Debug/Api.g.cs"), "internal sealed class PhantomBinClass {}")
+            .unwrap();
+
+        let (files, regions, _md) = walk_source_files(&root);
+
+        // PRECISION: the generated C# never reaches a parser. grade.py has no
+        // expect_absent_nodes, so this half of the fix is provable only here.
+        assert!(
+            files.iter().all(|(p, _)| !p.starts_with("obj/") && !p.starts_with("bin/")),
+            "generated .NET output must not be parsed: {files:?}"
+        );
+        assert!(files.iter().any(|(p, _)| p == "Program.cs"), "{files:?}");
+        for dir in ["obj", "bin"] {
+            let r = regions
+                .iter()
+                .find(|r| r.rel_path == dir)
+                .unwrap_or_else(|| panic!("no region for {dir}: {:?}", regions.len()));
+            assert_eq!(r.provenance, Collapse::BuildOutput);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dotnet_gate_requires_a_project_sibling() {
+        let root = walk_tmp("nodotnet");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join("bin/console_entry.py"), "x = 1\n").unwrap();
+
+        let (files, regions, _md) = walk_source_files(&root);
+
+        // A Python repo's `bin/` of console scripts is authored source.
+        assert!(files.iter().any(|(p, _)| p == "bin/console_entry.py"), "{files:?}");
+        assert!(regions.is_empty(), "no project file => no collapse: {}", regions.len());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nested_git_becomes_a_region() {
+        let root = walk_tmp("nested");
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        std::fs::create_dir_all(root.join("libs/sdk")).unwrap();
+        std::fs::write(root.join("app/main.py"), "def run():\n    pass\n").unwrap();
+        std::fs::write(root.join("libs/sdk/.git"), "gitdir: ../../.git/modules/sdk\n").unwrap();
+        std::fs::write(root.join("libs/sdk/vendor_client.py"), "class VendorClient:\n    pass\n")
+            .unwrap();
+
+        let (files, regions, _md) = walk_source_files(&root);
+
+        // The submodule's symbols must not be minted into the PARENT RepoId —
+        // that is the duplicate-name pair `resolve_name` had to pick between.
+        assert!(
+            files.iter().all(|(p, _)| !p.starts_with("libs/sdk/")),
+            "submodule source must not be parsed into the parent: {files:?}"
+        );
+        assert!(files.iter().any(|(p, _)| p == "app/main.py"), "{files:?}");
+        let r = regions.iter().find(|r| r.rel_path == "libs/sdk").unwrap();
+        assert_eq!(r.provenance, Collapse::Submodule);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_and_nested_clone_get_their_own_provenance() {
+        let root = walk_tmp("worktree");
+        std::fs::create_dir_all(root.join("wt")).unwrap();
+        std::fs::create_dir_all(root.join("clone/.git")).unwrap();
+        std::fs::write(root.join("wt/.git"), "gitdir: /main/.git/worktrees/wt\n").unwrap();
+        std::fs::write(root.join("wt/a.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("clone/b.py"), "y = 2\n").unwrap();
+
+        let (files, regions, _md) = walk_source_files(&root);
+
+        assert!(files.is_empty(), "no source outside the two other repos: {files:?}");
+        let wt = regions.iter().find(|r| r.rel_path == "wt").unwrap();
+        assert_eq!(wt.provenance, Collapse::Worktree);
+        assert_eq!(wt.provenance.provenance(), "worktree");
+        let clone = regions.iter().find(|r| r.rel_path == "clone").unwrap();
+        assert_eq!(clone.provenance, Collapse::NestedRepo);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

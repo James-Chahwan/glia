@@ -15,6 +15,11 @@ use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node,
 /// Graph-type tag for any code-language graph. First arg to `NodeId::from_parts`.
 pub const GRAPH_TYPE: &str = "code";
 
+/// Which directories the repo walk descends into and which collapse to a single
+/// REGION anchor. Shared so the builder's walk and `store::is_gmap_stale` cannot
+/// drift apart. (A8.1)
+pub mod walk_gating;
+
 // ============================================================================
 // Node kinds
 // ============================================================================
@@ -422,7 +427,10 @@ pub mod cell_type {
     pub const CONV: CellTypeId = CellTypeId(13);
     pub const VECTOR: CellTypeId = CellTypeId(14);
     /// Provenance/locality of a node: a JSON cell
-    /// `{"provenance":"build_output|vendored|generated|authored","region":"www","files":N}`.
+    /// `{"provenance":"build_output|vendored|generated|authored|submodule|worktree|nested_repo","region":"www","files":N}`.
+    /// The last three are collapsed REGION anchors for a tree that belongs to
+    /// ANOTHER repository (a `.git` dir, a submodule's or a linked worktree's
+    /// `.git` file) — see `walk_gating::Collapse`. (A8.1)
     /// Lets consumers (engram, neuropil) filter by *coordinate* rather than by
     /// string-matching keys, and preserves the spatial map of a repo without
     /// emitting a node per file inside a collapsed region. (glia-v2 G10/G14)
