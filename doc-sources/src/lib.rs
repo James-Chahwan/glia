@@ -8,10 +8,16 @@
 //! because it faithfully preserves code spans (`` `X` `` / fenced blocks) so the
 //! existing backtick-identifier linker fires. The REST fetch + snapshot store +
 //! Notion/wiki adapters build on top of it.
+//!
+//! The write direction is [`markdown`] — **markdown → storage-format XHTML**,
+//! also pure and offline-testable, round-trip-pinned to `storage_to_markdown`.
+//! It is what lets `glia docs push --markdown` take a plain `.md` file instead
+//! of hand-written `ac:`/`ri:` macro XHTML.
 
 pub mod confluence;
 pub mod confluence_rest;
 pub mod filter;
+pub mod markdown;
 pub mod snapshot;
 
 pub use filter::TitleFilter;

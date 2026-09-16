@@ -244,7 +244,8 @@ enum DocsCmd {
         token: Option<String>,
     },
     /// Push a storage-format (XHTML) page body to Confluence — create a new
-    /// page, or update an existing one with `--page-id`.
+    /// page, or update an existing one with `--page-id`. With `--markdown` the
+    /// file is converted from markdown first.
     Push {
         /// Confluence space key.
         #[arg(long)]
@@ -255,6 +256,10 @@ enum DocsCmd {
         /// File containing the Confluence storage-format (XHTML) body.
         #[arg(long)]
         file: String,
+        /// Treat --file as markdown and convert it to Confluence storage format
+        /// first (headings, fenced code, lists, inline code, links).
+        #[arg(long)]
+        markdown: bool,
         /// Update this page id instead of creating a new page.
         #[arg(long)]
         page_id: Option<String>,
@@ -1084,7 +1089,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 }
             }
         }
-        DocsCmd::Push { space, title, file, page_id, site, email, token } => {
+        DocsCmd::Push { space, title, file, markdown, page_id, site, email, token } => {
             let cfg = match Config::resolve(site, email, token) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1092,12 +1097,30 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                     return 2;
                 }
             };
-            let storage = match std::fs::read_to_string(&file) {
+            let body = match std::fs::read_to_string(&file) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("error: reading {file}: {e}");
                     return 1;
                 }
+            };
+            // Converted before any network call, so the marker below proves the
+            // conversion ran even when the push itself fails on credentials.
+            let storage = if markdown {
+                let (s, st) =
+                    repo_graph_doc_sources::markdown::markdown_to_storage_with_stats(&body);
+                eprintln!(
+                    "[docs] push markdown→storage: {} md bytes → {} storage bytes (h={} code={} link={} inline={})",
+                    body.len(),
+                    s.len(),
+                    st.headings,
+                    st.code_blocks,
+                    st.links,
+                    st.inline_code
+                );
+                s
+            } else {
+                body
             };
             let result = match &page_id {
                 Some(id) => confluence_rest::update_page(&cfg, id, &space, &title, &storage),
