@@ -24,7 +24,9 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
+use repo_graph_code_domain::endpoint::{
+    ClientEndpoint, join_path, push_client_endpoint, url_to_path,
+};
 
 // ============================================================================
 // Public entry point
@@ -1388,23 +1390,6 @@ fn string_literal_text(n: TsNode, src: &[u8]) -> Option<String> {
             }
         }
         _ => None,
-    }
-}
-
-/// Join a group prefix with a relative path. Empty prefix returns path as-is.
-/// A trailing `/` on the prefix and a leading `/` on the path don't double up.
-fn join_path(prefix: &str, path: &str) -> String {
-    if prefix.is_empty() {
-        return path.to_string();
-    }
-    if path == "/" {
-        return prefix.to_string();
-    }
-    let p = prefix.trim_end_matches('/');
-    if path.starts_with('/') {
-        format!("{p}{path}")
-    } else {
-        format!("{p}/{path}")
     }
 }
 

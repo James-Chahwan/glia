@@ -5,6 +5,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::endpoint::join_scope;
 
 pub fn parse_file(
     source: &str,
@@ -484,27 +485,6 @@ fn first_quoted(s: &str) -> Option<String> {
         i += 1;
     }
     None
-}
-
-fn join_scope(stack: &[String], path: &str) -> String {
-    let mut full = String::new();
-    for s in stack {
-        if !s.is_empty() {
-            if !s.starts_with('/') {
-                full.push('/');
-            }
-            full.push_str(s.trim_end_matches('/'));
-        }
-    }
-    if !path.starts_with('/') {
-        full.push('/');
-    }
-    full.push_str(path);
-    if full.is_empty() {
-        "/".to_string()
-    } else {
-        full
-    }
 }
 
 fn emit_phoenix_route(

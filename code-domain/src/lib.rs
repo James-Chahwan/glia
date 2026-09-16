@@ -840,6 +840,101 @@ pub mod endpoint {
         )
     }
 
+    /// Join a group/router prefix with a relative path template.
+    ///
+    /// The shared primitive every framework route extractor needs (go
+    /// chi/gin, elixir, and the framework packets that follow), hoisted here
+    /// so the prefix edge cases cannot drift apart per-parser. Semantics are
+    /// the ones the go router walker has always had:
+    ///
+    /// - an empty `prefix` returns `path` unchanged — it deliberately does NOT
+    ///   force a leading `/` (that is [`abs_path`], kept separate precisely so
+    ///   hoisting this fn could not move existing go route qnames);
+    /// - `path == "/"` returns the prefix as-is, so a group's index route is
+    ///   the group itself rather than `"/api/"`;
+    /// - a trailing `/` run on the prefix and a leading `/` on the path never
+    ///   double up.
+    ///
+    /// ```text
+    /// join_path("",      "users")  == "users"
+    /// join_path("/api",  "users")  == "/api/users"
+    /// join_path("/api/", "/users") == "/api/users"
+    /// join_path("/api",  "/")      == "/api"
+    /// ```
+    pub fn join_path(prefix: &str, path: &str) -> String {
+        if prefix.is_empty() {
+            return path.to_string();
+        }
+        if path == "/" {
+            return prefix.to_string();
+        }
+        let p = prefix.trim_end_matches('/');
+        if path.starts_with('/') {
+            format!("{p}{path}")
+        } else {
+            format!("{p}/{path}")
+        }
+    }
+
+    /// Join a stack of nested scope prefixes with a relative path template.
+    ///
+    /// The elixir `scope` / `resources` walker's semantics, hoisted verbatim:
+    /// each non-empty stack entry contributes `/` + itself with its trailing
+    /// `/` run trimmed, then `path` is appended with a `/` inserted when it
+    /// does not already start with one. The result is always absolute.
+    ///
+    /// ```text
+    /// join_scope(&[],                            "/users") == "/users"
+    /// join_scope(&["/api".into()],               "users")  == "/api/users"
+    /// join_scope(&["/api".into(), "v1".into()],  "users")  == "/api/v1/users"
+    /// ```
+    pub fn join_scope(stack: &[String], path: &str) -> String {
+        let mut full = String::new();
+        for s in stack {
+            if !s.is_empty() {
+                if !s.starts_with('/') {
+                    full.push('/');
+                }
+                full.push_str(s.trim_end_matches('/'));
+            }
+        }
+        if !path.starts_with('/') {
+            full.push('/');
+        }
+        full.push_str(path);
+        if full.is_empty() {
+            "/".to_string()
+        } else {
+            full
+        }
+    }
+
+    /// Force a route template to have exactly one leading `/`.
+    ///
+    /// The single place the "route qnames are absolute" precondition that
+    /// `index_route_node` relies on is satisfied, so the framework route
+    /// extractors do not each re-derive it. Trims surrounding whitespace and
+    /// collapses a run of leading slashes; an empty or slash-only input is the
+    /// root `"/"`. Never panics.
+    ///
+    /// Deliberately does NOT trim a trailing `/`: `normalise_http_path` in
+    /// repo-graph-graph already does that downstream, and stripping it twice
+    /// would change existing route qnames.
+    ///
+    /// ```text
+    /// abs_path("api/users") == "/api/users"
+    /// abs_path("//x")       == "/x"
+    /// abs_path("")          == "/"
+    /// abs_path("/api/")     == "/api/"
+    /// ```
+    pub fn abs_path(p: &str) -> String {
+        let body = p.trim().trim_start_matches('/');
+        if body.is_empty() {
+            return "/".to_string();
+        }
+        format!("/{body}")
+    }
+
     /// Extract the request PATH from a URL literal. Absolute URLs
     /// (`http://host/x`, `https://…/x`) → the path (`/x`); already-relative
     /// paths (`/x`) pass through; a bare host, a non-path string, or a variable
@@ -1063,6 +1158,85 @@ mod tests {
             cell_type::ALL.iter().map(|(_, n)| *n).collect(),
             18,
         );
+    }
+
+    // ------------------------------------------------------------------
+    // A4.0 — shared endpoint path helpers. These four are the contract eight
+    // later route-composition packets build on, so the edge cases are pinned
+    // here rather than re-derived per parser.
+    // ------------------------------------------------------------------
+
+    /// An empty prefix is a pure pass-through: `join_path` must NOT force a
+    /// leading `/`, or go's chi/gin route qnames move (graph/tests/
+    /// go_smoke_graph.rs). Forcing the slash is `abs_path`'s separate job.
+    #[test]
+    fn join_path_empty_prefix_passthrough() {
+        assert_eq!(endpoint::join_path("", "users"), "users");
+        assert_eq!(endpoint::join_path("", "/users"), "/users");
+        assert_eq!(endpoint::join_path("", "/"), "/");
+        assert_eq!(endpoint::join_path("", ""), "");
+    }
+
+    /// A trailing `/` run on the prefix and a leading `/` on the path never
+    /// double up, and `path == "/"` is the group's own index route.
+    #[test]
+    fn join_path_no_double_slash() {
+        assert_eq!(endpoint::join_path("/api/", "/users"), "/api/users");
+        assert_eq!(endpoint::join_path("/api", "/users"), "/api/users");
+        assert_eq!(endpoint::join_path("/api", "users"), "/api/users");
+        assert_eq!(endpoint::join_path("/api/", "users"), "/api/users");
+        assert_eq!(endpoint::join_path("/api///", "/users"), "/api/users");
+        // A group's index route collapses to the group itself, not `/api/`.
+        assert_eq!(endpoint::join_path("/api", "/"), "/api");
+        // ...and the prefix is returned verbatim in that branch, trailing
+        // slash included — pinned because it is the one asymmetry.
+        assert_eq!(endpoint::join_path("/api/", "/"), "/api/");
+        // A relative prefix stays relative.
+        assert_eq!(endpoint::join_path("api", "users"), "api/users");
+    }
+
+    /// Nested elixir `scope` stacks compose left-to-right: every entry gets
+    /// exactly one leading `/`, its trailing `/` run trimmed, empty entries
+    /// skipped, and the result is always absolute.
+    #[test]
+    fn join_scope_nested() {
+        assert_eq!(
+            endpoint::join_scope(&["/api".into(), "v1".into()], "users"),
+            "/api/v1/users"
+        );
+        assert_eq!(endpoint::join_scope(&[], "/users"), "/users");
+        assert_eq!(endpoint::join_scope(&[], "users"), "/users");
+        assert_eq!(endpoint::join_scope(&["api".into()], "/users"), "/api/users");
+        assert_eq!(
+            endpoint::join_scope(&["/api/".into(), String::new(), "v1/".into()], "/users"),
+            "/api/v1/users"
+        );
+        // Degenerate: nothing at all still yields the absolute root.
+        assert_eq!(endpoint::join_scope(&[], ""), "/");
+    }
+
+    /// `abs_path` is the single place a route template is forced to exactly
+    /// one leading `/`. It must never trim a trailing one — `normalise_http_path`
+    /// in repo-graph-graph already does that, and doing it twice would move
+    /// existing route qnames.
+    #[test]
+    fn abs_path_forces_single_leading_slash() {
+        assert_eq!(endpoint::abs_path("api/users"), "/api/users");
+        assert_eq!(endpoint::abs_path("//x"), "/x");
+        assert_eq!(endpoint::abs_path(""), "/");
+        // Already absolute → unchanged.
+        assert_eq!(endpoint::abs_path("/api/users"), "/api/users");
+        // Leading runs collapse; interior doubles are left alone.
+        assert_eq!(endpoint::abs_path("////api//users"), "/api//users");
+        // Whitespace-only / slash-only degenerate to the root.
+        assert_eq!(endpoint::abs_path("   "), "/");
+        assert_eq!(endpoint::abs_path("/"), "/");
+        assert_eq!(endpoint::abs_path("///"), "/");
+        // Trailing slash is PRESERVED.
+        assert_eq!(endpoint::abs_path("/api/"), "/api/");
+        assert_eq!(endpoint::abs_path("api/"), "/api/");
+        // Surrounding whitespace is trimmed.
+        assert_eq!(endpoint::abs_path("  /api  "), "/api");
     }
 
     /// W0.3 — every reserved id decodes to its own name (the reservation is
