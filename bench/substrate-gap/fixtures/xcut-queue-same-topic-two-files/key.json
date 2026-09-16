@@ -1,0 +1,66 @@
+{
+  "framework": "xcut-queue-same-topic-two-files",
+  "language": "go",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "note": "A2.8 / completeness-critic gap: SAME-REPO NodeId collision for two files publishing ONE topic. queue_producer:orders is minted identically by publish_orders.go and publish_orders_retry.go, so merge_parses folds them into a single node. Before A2.8 a queue node carried NO cells and NO edge at all, so the only link back to a file was CodeNav.parent_of - a SINGLE pointer that merge_nav overwrites, which made one of the two publishing files structurally invisible. Graded on the per-file POSITION cells that survive the fold, never on a node count. Deliberately declares no `cells`: go/nats is already bound by xcut-queue-queue_flows and this fixture is a precision/provenance probe, not a second vote on that matrix column.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "ONE producer node for the topic, however many files publish to it"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "consumer/consume_orders.go"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "topic-exact pairing still fires with two producing files"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "POSITION",
+      "contains": "publish_orders.go",
+      "note": "first publishing file keeps its provenance"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "POSITION",
+      "contains": "publish_orders_retry.go",
+      "note": "THE COLLISION CASE: the SECOND publishing file must still be reachable from the folded node. This is the assertion the review's 'same-repo NodeId collision' bullet asked for."
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "CODE",
+      "contains": "\"family\":\"nats\"",
+      "note": "per-site provenance cell, one per contributing file after merge_parses"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders",
+      "cell": "POSITION",
+      "contains": "consume_orders.go",
+      "note": "consumer half is locatable too"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:nats",
+      "note": "both files name a real subject; no framework-tag fallback may survive"
+    }
+  ]
+}

@@ -1,13 +1,54 @@
 {
   "framework": "xcut-queue",
   "language": "go",
-  "dirs": ["client", "server"],
-  "cells": ["go/nats"],
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "cells": [
+    "go/nats"
+  ],
   "expect_nodes": [
-    {"kind": "QUEUE_PRODUCER", "name": "orders", "note": "NATS nc.Publish producer (server)"},
-    {"kind": "QUEUE_CONSUMER", "name": "orders", "note": "NATS nc.Subscribe consumer (client)"}
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "NATS nc.Publish producer (server)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "NATS nc.Subscribe consumer (client)"
+    }
   ],
   "expect_edges": [
-    {"from": "orders", "to": "orders", "category": "QUEUE_FLOWS", "note": "producer -> consumer paired by topic 'orders'"}
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer -> consumer paired by topic 'orders'"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "POSITION",
+      "contains": "publisher.go",
+      "note": "A2.8: queue nodes were emitted with cells: vec![], so locate_node returned file=None and every blast-radius / trace row for a queue topic was unlocatable"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders",
+      "cell": "POSITION",
+      "contains": "consumer.go",
+      "note": "A2.8: the consumer half, same story"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "CODE",
+      "contains": "\"family\":\"nats\"",
+      "note": "A2.8: per-site provenance cell \u2014 framework/family plus every call site, so multi-file provenance survives merge_parses"
+    }
   ]
 }

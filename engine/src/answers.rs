@@ -349,11 +349,24 @@ pub fn locate_node(
                 if c.kind != repo_graph_code_domain::cell_type::POSITION {
                     continue;
                 }
-                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                        file = v.get("file").and_then(|f| f.as_str()).map(String::from);
-                        line = v.get("start_line").and_then(serde_json::Value::as_i64);
-                    }
+                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+                {
+                    file = v.get("file").and_then(|f| f.as_str()).map(String::from);
+                    line = v.get("start_line").and_then(serde_json::Value::as_i64);
+                    // FIRST POSITION WINS — A2.8, and it is load-bearing, not
+                    // cosmetic. Do NOT remove this `break`.
+                    //
+                    // A node can carry MORE than one POSITION cell:
+                    // `merge_parses` appends the cells of every `FileParse` that
+                    // minted the same NodeId, which is the normal case for a
+                    // queue topic two files publish to. Without the break the
+                    // LAST file parsed won, so `blast_radius` / `trace` /
+                    // `resolve` reported a different file from
+                    // `passes::position_file` and
+                    // `projection_text::node_position`, both of which return the
+                    // first. This aligns all three on the first.
+                    break;
                 }
             }
         }
@@ -461,6 +474,69 @@ fn apply_scope<T>(
         out.len()
     );
     out
+}
+
+#[cfg(test)]
+mod locate_tests {
+    use super::locate_node;
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+
+    /// A2.8 — FIRST POSITION WINS, and the `break` in `locate_node` is what
+    /// makes it so. `merge_parses` appends the cells of every `FileParse` that
+    /// minted the same NodeId, so a queue topic published from two files
+    /// carries TWO POSITION cells. Without the break the LAST file parsed won,
+    /// which disagreed with `passes::position_file` and
+    /// `projection_text::node_position` — both of which return the first.
+    ///
+    /// A3.6 refactors these lines: this test is the contract. If it starts
+    /// failing with `b.go`, first-wins was reverted.
+    #[test]
+    fn locate_node_uses_first_position() {
+        let repo = RepoId::from_canonical("test://locate");
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::QUEUE_PRODUCER,
+            "queue_producer:orders",
+        );
+        let pos = |file: &str, line: u32| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":{line},"end_line":{line}}}"#
+            )),
+        };
+        let mut nav = CodeNav::default();
+        nav.record(
+            id,
+            "orders",
+            "queue_producer:orders",
+            node_kind::QUEUE_PRODUCER,
+            None,
+        );
+        let g = RepoGraph {
+            repo,
+            nodes: vec![Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: vec![pos("a.go", 4), pos("b.go", 11)],
+            }],
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let (name, qname, kind, file, line) = locate_node(&MergedGraph::new(vec![g]), id);
+        assert_eq!(name, "orders");
+        assert_eq!(qname, "queue_producer:orders");
+        assert_eq!(kind, "QUEUE_PRODUCER");
+        assert_eq!(file.as_deref(), Some("a.go"));
+        assert_eq!(line, Some(4));
+    }
 }
 
 #[cfg(test)]

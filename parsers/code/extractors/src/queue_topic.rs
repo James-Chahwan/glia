@@ -155,6 +155,37 @@ pub fn normalise_topic(raw: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// 0-indexed line number containing byte `offset`.
+///
+/// 0-indexed is the tree-sitter convention every other span in the graph uses
+/// (CODE_RULES §4, `parsers/code/docs/src/lib.rs`), so a queue POSITION cell is
+/// directly comparable with a FUNCTION's. `offset` always comes from
+/// `str::match_indices`, so `source[..offset]` is on a char boundary; the
+/// `get()` keeps it panic-free anyway, because a panic here happens inside the
+/// engine's `catch_unwind` and silently drops the whole file's parse.
+pub fn line_of(source: &str, offset: usize) -> usize {
+    source
+        .get(..offset.min(source.len()))
+        .unwrap_or("")
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count()
+}
+
+/// Minimal JSON string escaping for a cell payload built by `format!`.
+///
+/// Same shape as `cron.rs`'s private `escape_json`; the two are deliberately
+/// NOT shared yet because unifying them means editing `cron.rs`, which belongs
+/// to another packet's file set this wave. See the `followups` note: one
+/// `repo_graph_code_domain` helper should replace both.
+///
+/// Backslash FIRST, then the quote — reversing the order would double-escape
+/// the backslash it just inserted. Windows paths (`src\\a.ts`) are exactly why
+/// the backslash case matters for a POSITION payload.
+pub fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 // ---------------------------------------------------------------------------
 // internals
 // ---------------------------------------------------------------------------

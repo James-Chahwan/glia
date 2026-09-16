@@ -166,10 +166,13 @@ pub(crate) fn apply_cross_cutting_extractors(
         }};
     }
 
-    run!(queues::extract_queue_consumer_nodes(
+    // A2.8: `run_with_edges!`, not `run!` — queue nodes now carry a CONTAINS
+    // edge from the module that publishes/consumes the topic. Dropping
+    // `out.edges` here would silently discard them.
+    run_with_edges!(queues::extract_queue_consumer_nodes(
         source, path, module_id, repo
     ));
-    run!(queues::extract_queue_producer_nodes(
+    run_with_edges!(queues::extract_queue_producer_nodes(
         source, path, module_id, repo
     ));
     run!(cli::extract_cli_command_nodes(source, module_id, repo));

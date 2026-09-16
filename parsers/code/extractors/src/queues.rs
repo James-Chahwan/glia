@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::queue_topic::{self, TopicRule};
 
@@ -307,13 +307,46 @@ fn signals_present(lower_source: &str, signals: &[&str]) -> bool {
 
 pub struct QueueNodes {
     pub nodes: Vec<Node>,
+    /// A2.8: one `module -> node` CONTAINS edge per emitted node.
+    ///
+    /// Queue nodes used to have NO in-repo edge at all, so nothing linked a
+    /// topic back to the file that publishes to it: `CodeNav.parent_of` was the
+    /// only link, and it is a SINGLE pointer that `merge_nav` overwrites, so
+    /// when two files published the same topic one of them simply vanished.
+    ///
+    /// CONTAINS is deliberate rather than a semantic category: it is excluded
+    /// from `blast_carry_edges`, so linking the publishing file does NOT fan
+    /// the blast radius back out through every symbol in that file.
+    /// `QUEUE_FLOWS` stays the semantic path.
+    pub edges: Vec<Edge>,
     pub nav: CodeNav,
+}
+
+/// Call sites recorded per (topic, framework) per file. A generated file can
+/// call the same publish helper hundreds of times; the CODE cell is provenance,
+/// not an index, and 16 names every place a human would actually open.
+const MAX_SITES: usize = 16;
+
+/// One (topic, framework) accumulated across every needle in ONE file, before
+/// it becomes a `Node`.
+///
+/// The old code deduped with a `HashSet` and dropped the duplicate outright, so
+/// the second and later call sites for a topic were lost. They are the
+/// provenance this packet exists to keep, so dedup now MERGES.
+struct Pending {
+    id: NodeId,
+    topic: String,
+    qname: String,
+    framework: QueueFramework,
+    confidence: Confidence,
+    /// 0-indexed lines, first-seen order, deduped, capped at [`MAX_SITES`].
+    lines: Vec<usize>,
 }
 
 /// Queue-consumer nodes for one file — one node per DISTINCT (topic, framework).
 ///
-/// `path` is the file the source came from; it is only used by the
-/// `GLIA_QUEUE_DEBUG` marker today (A2.8 attaches it to the node).
+/// `path` is the file the source came from: it names the POSITION cell and
+/// every entry of the CODE cell's `sites` array.
 pub fn extract_queue_consumer_nodes(
     source: &str,
     path: &str,
@@ -365,9 +398,8 @@ fn emit_queue_nodes(
     kind: repo_graph_core::NodeKindId,
     prefix: &str,
 ) -> QueueNodes {
-    let mut nodes = Vec::new();
-    let mut nav = CodeNav::default();
-    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<Pending> = Vec::new();
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     // ONE allocation per emit call (two per file, both sides) — cheap beside the
     // tree-sitter parse that already ran, and it is what makes the gate
     // case-insensitive for every row at once.
@@ -378,11 +410,23 @@ fn emit_queue_nodes(
             continue;
         }
         let hits = queue_topic::scan(source, pattern, *rule);
-        let topics: Vec<String> = hits.into_iter().filter_map(|h| h.topic).collect();
-        if debug_enabled() && !topics.is_empty() {
+        // A2.8: keep each hit's OFFSET next to its topic. A topic read at byte
+        // 402 is a call SITE at line 11, and that is the only provenance a
+        // queue node has ever been able to carry. `line_of` is 0-indexed, the
+        // tree-sitter convention every other span in the graph uses.
+        let sites: Vec<(String, usize)> = hits
+            .iter()
+            .filter_map(|h| {
+                h.topic
+                    .clone()
+                    .map(|t| (t, queue_topic::line_of(source, h.offset)))
+            })
+            .collect();
+        if debug_enabled() && !sites.is_empty() {
+            let topics: Vec<&str> = sites.iter().map(|(t, _)| t.as_str()).collect();
             eprintln!(
                 "[queues] scan needle='{pattern}' rule={rule:?} hits={} path={path} topics={}",
-                topics.len(),
+                sites.len(),
                 topics.join(",")
             );
         }
@@ -390,16 +434,23 @@ fn emit_queue_nodes(
         // so it gets its own grep-able line:
         //   GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] taskq rule='
         if debug_enabled() && is_identity_rule(rule) {
-            for sym in &topics {
+            for (sym, _) in &sites {
                 eprintln!(
                     "[queues] taskq rule={rule:?} symbol={sym} framework={framework:?} file={path}"
                 );
             }
         }
-        for topic in &topics {
-            if push_node(
-                &mut nodes, &mut nav, &mut seen, topic, framework, module_id, repo, kind, prefix,
+        for (topic, line) in &sites {
+            if record_site(
+                &mut pending,
+                &mut seen,
+                topic,
+                framework,
+                repo,
+                kind,
+                prefix,
                 Confidence::Medium,
+                *line,
             ) {
                 fired_on(pattern, framework, topic, path);
             }
@@ -408,51 +459,149 @@ fn emit_queue_nodes(
         // liveness signal — Go's `r.ReadMessage(ctx)`), so falling back to a
         // topic-less framework tag here would manufacture exactly the all-to-all
         // tag pairing A2.1 removed. Every other rule keeps the fallback.
-        if topics.is_empty() && !matches!(rule, TopicRule::NoIdentity) {
+        if sites.is_empty() && !matches!(rule, TopicRule::NoIdentity) {
             // A2.3: `Weak`, not `Medium`. The tag proves the framework is live in
             // this file and nothing else; ranking it level with a node that names
             // a real topic overstated what was actually read off the source. The
             // `seen` key is `{topic}:{framework:?}`, so one tag per (framework,
             // direction) per file however many needles of that framework fired.
             let tag = framework_tag(framework);
-            if push_node(
-                &mut nodes, &mut nav, &mut seen, &tag, framework, module_id, repo, kind, prefix,
+            // The tag's site is the needle occurrence itself — the one thing
+            // that WAS actually read off this file.
+            let line = hits
+                .first()
+                .map_or(0, |h| queue_topic::line_of(source, h.offset));
+            if record_site(
+                &mut pending,
+                &mut seen,
+                &tag,
+                framework,
+                repo,
+                kind,
+                prefix,
                 Confidence::Weak,
+                line,
             ) {
                 fired_on(pattern, framework, &tag, path);
             }
         }
     }
 
-    QueueNodes { nodes, nav }
+    finish(pending, path, module_id, repo, kind)
 }
 
+/// Record one call site for a (topic, framework).
+///
+/// Returns true only the FIRST time that pair is seen in this file, so
+/// [`fired_on`] still fires once per NODE rather than once per site. Every
+/// later occurrence merges its line into the existing entry.
 #[allow(clippy::too_many_arguments)]
-fn push_node(
-    nodes: &mut Vec<Node>,
-    nav: &mut CodeNav,
-    seen: &mut std::collections::HashSet<String>,
+fn record_site(
+    pending: &mut Vec<Pending>,
+    seen: &mut std::collections::HashMap<String, usize>,
     topic: &str,
     framework: &QueueFramework,
-    module_id: NodeId,
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     prefix: &str,
     confidence: Confidence,
+    line: usize,
 ) -> bool {
-    if !seen.insert(format!("{topic}:{framework:?}")) {
+    let key = format!("{topic}:{framework:?}");
+    if let Some(&idx) = seen.get(&key) {
+        let lines = &mut pending[idx].lines;
+        if lines.len() < MAX_SITES && !lines.contains(&line) {
+            lines.push(line);
+        }
         return false;
     }
     let qname = format!("{prefix}{topic}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
-    nodes.push(Node {
+    seen.insert(key, pending.len());
+    pending.push(Pending {
         id,
-        repo,
+        topic: topic.to_string(),
+        qname,
+        framework: framework.clone(),
         confidence,
-        cells: vec![],
+        lines: vec![line],
     });
-    nav.record(id, topic, &qname, kind, Some(module_id));
     true
+}
+
+/// Turn the per-file accumulation into nodes + cells + module edges.
+///
+/// fired_on marker (A2.8):
+///   `GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] position sites='`
+fn finish(
+    pending: Vec<Pending>,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    kind: repo_graph_core::NodeKindId,
+) -> QueueNodes {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut nav = CodeNav::default();
+    let file = queue_topic::escape_json(path);
+
+    for p in pending {
+        // POSITION names the FIRST site. Every reader of a POSITION cell
+        // (`locate_node`, `position_file`, `projection_text::node_position`)
+        // takes the first one, and after `merge_parses` a topic published from
+        // two files carries one POSITION cell PER FILE — so "first" has to mean
+        // something stable, and it does: earliest site in the earliest-parsed
+        // file that publishes the topic.
+        let first = p.lines.first().copied().unwrap_or(0);
+        let sites = p
+            .lines
+            .iter()
+            .map(|l| format!(r#"{{"file":"{file}","line":{l}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        // CODE, not a new CellTypeId: the payload is JSON, and
+        // `projection_text::extract_code_cell` only reads `CellPayload::Text`,
+        // so this never leaks into dense text as if it were source. `cron.rs`
+        // sets the same precedent.
+        let code = format!(
+            r#"{{"framework":"{:?}","family":"{}","sites":[{sites}]}}"#,
+            p.framework,
+            p.framework.family()
+        );
+        if debug_enabled() {
+            eprintln!(
+                "[queues] position sites={} first_line={first} qname={} file={path}",
+                p.lines.len(),
+                p.qname
+            );
+        }
+        nodes.push(Node {
+            id: p.id,
+            repo,
+            confidence: p.confidence,
+            cells: vec![
+                Cell {
+                    kind: cell_type::POSITION,
+                    payload: CellPayload::Json(format!(
+                        r#"{{"file":"{file}","start_line":{first},"end_line":{first}}}"#
+                    )),
+                },
+                Cell {
+                    kind: cell_type::CODE,
+                    payload: CellPayload::Json(code),
+                },
+            ],
+        });
+        nav.record(p.id, &p.topic, &p.qname, kind, Some(module_id));
+        edges.push(Edge {
+            from: module_id,
+            to: p.id,
+            category: edge_category::CONTAINS,
+            confidence: Confidence::Medium,
+        });
+    }
+
+    QueueNodes { nodes, edges, nav }
 }
 
 /// True for the A2.5 rules that read a task SYMBOL rather than a broker topic.
@@ -1070,6 +1219,89 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
         assert_eq!(
             qnames(&ar),
             vec!["queue_producer:unresolved:celery".to_string()]
+        );
+    }
+
+    // ---- A2.8: POSITION + per-site provenance + module edge ---------------
+
+    fn payload(c: &Cell) -> &str {
+        match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => s.as_str(),
+            _ => "",
+        }
+    }
+
+    fn cell_of(n: &Node, kind: repo_graph_core::CellTypeId) -> &Cell {
+        n.cells
+            .iter()
+            .find(|c| c.kind == kind)
+            .expect("cell present on queue node")
+    }
+
+    #[test]
+    fn producer_node_carries_position_and_sites() {
+        // Two `nc.Publish("orders", …)` calls in ONE file: ONE node, TWO sites.
+        // Before A2.8 the node was `cells: vec![]` and the second call site was
+        // dropped by the `seen` HashSet, so nothing in the graph could say
+        // WHERE the topic was published from.
+        let source = concat!(
+            "package main\n",                                       // line 0
+            "\n",                                                   // line 1
+            "import \"github.com/nats-io/nats.go\"\n",              // line 2
+            "\n",                                                   // line 3
+            "func A(nc *nats.Conn) { nc.Publish(\"orders\", nil) }\n", // line 4
+            "\n",                                                   // line 5
+            "func B(nc *nats.Conn) { nc.Publish(\"orders\", nil) }\n", // line 6
+        );
+        let r = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(r.nodes.len(), 1, "two sites, one topic => one node");
+
+        // 0-indexed, tree-sitter convention — the FIRST site, not the last.
+        assert_eq!(
+            payload(cell_of(&r.nodes[0], cell_type::POSITION)),
+            r#"{"file":"src/test.rs","start_line":4,"end_line":4}"#
+        );
+        // Both sites survive dedup; this is the cell A2.7 reads for `family`.
+        assert_eq!(
+            payload(cell_of(&r.nodes[0], cell_type::CODE)),
+            concat!(
+                r#"{"framework":"Nats","family":"nats","sites":["#,
+                r#"{"file":"src/test.rs","line":4},"#,
+                r#"{"file":"src/test.rs","line":6}]}"#
+            )
+        );
+
+        // One CONTAINS edge module → topic. CONTAINS, not a semantic category,
+        // because `blast_carry_edges` excludes it.
+        assert_eq!(r.edges.len(), 1);
+        assert_eq!(r.edges[0].from, module_id());
+        assert_eq!(r.edges[0].to, r.nodes[0].id);
+        assert_eq!(r.edges[0].category, edge_category::CONTAINS);
+    }
+
+    #[test]
+    fn framework_tag_fallback_is_still_located() {
+        // The unpairable coverage sentinel (A2.3) is a real observation about a
+        // real file, so it gets a position too — otherwise `glia coverage`
+        // reports a Kafka signal it cannot point at.
+        let source = "import { KafkaConsumer } from 'kafkajs';\nconst c = new KafkaConsumer();\n";
+        let r = extract_queue_consumer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:unresolved:kafka".to_string()]);
+        assert_eq!(
+            payload(cell_of(&r.nodes[0], cell_type::POSITION)),
+            r#"{"file":"src/test.rs","start_line":0,"end_line":0}"#
+        );
+    }
+
+    #[test]
+    fn position_path_is_json_escaped() {
+        // Windows separators and quotes must not break the payload — the
+        // engine parses it with serde_json in `locate_node`.
+        let source = "import redis\nr = redis.Redis()\nr.rpush('votes', vote)\n";
+        let r = extract_queue_producer_nodes(source, r#"src\a"b.py"#, module_id(), repo());
+        assert_eq!(
+            payload(cell_of(&r.nodes[0], cell_type::POSITION)),
+            r#"{"file":"src\\a\"b.py","start_line":2,"end_line":2}"#
         );
     }
 }
