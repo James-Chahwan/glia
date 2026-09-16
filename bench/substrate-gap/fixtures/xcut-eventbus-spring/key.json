@@ -1,0 +1,13 @@
+{
+  "framework": "xcut-eventbus-spring",
+  "language": "java",
+  "dirs": ["publisher", "consumer"],
+  "cells": ["java/eventbus"],
+  "expect_nodes": [
+    {"kind": "EVENT_EMITTER", "name": "event_emit:OrderPlacedEvent", "note": "publisher.publishEvent(new OrderPlacedEvent(id))"},
+    {"kind": "EVENT_HANDLER", "name": "event_handle:OrderPlacedEvent", "note": "@EventListener on a method whose first param is the event type"}
+  ],
+  "expect_edges": [
+    {"from": "event_emit:OrderPlacedEvent", "to": "event_handle:OrderPlacedEvent", "category": "EVENT_FLOWS", "note": "type-keyed pairing across two services"}
+  ]
+}

@@ -429,6 +429,78 @@ fn event_resolver_links_emitter_to_handler() {
     assert_eq!(event_edges[0].confidence, Confidence::Weak);
 }
 
+#[test]
+fn event_resolver_folds_event_suffix() {
+    // Spring publishes `OrderPlacedEvent`; the listener's parameter is often
+    // spelled `OrderPlaced`. Type-named keys fold to one event.
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "event_handle:OrderPlaced", Confidence::Medium);
+    record(&mut nav_a, handler_id, "OrderPlaced", "event_handle:OrderPlaced", node_kind::EVENT_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:OrderPlacedEvent", Confidence::Medium);
+    record(&mut nav_b, emitter_id, "OrderPlacedEvent", "event_emit:OrderPlacedEvent", node_kind::EVENT_EMITTER);
+    let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    EventBusResolver.resolve(&mut merged);
+
+    let event_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::EVENT_FLOWS).collect();
+    assert_eq!(event_edges.len(), 1, "{:?}", merged.cross_edges);
+    assert_eq!(event_edges[0].from, emitter_id);
+    assert_eq!(event_edges[0].to, handler_id);
+}
+
+#[test]
+fn event_resolver_indexes_bare_code_qnames() {
+    // The Solidity parser emits EVENT_* nodes with real code qnames, not the
+    // extractor's `event_handle:` prefix. Those used to be `continue`d out of
+    // the index, which made every parser-emitted event a disconnected island.
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "notify::Listener::OrderPlaced", Confidence::Medium);
+    record(&mut nav_a, handler_id, "OrderPlaced", "notify::Listener::OrderPlaced", node_kind::EVENT_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:OrderPlaced", Confidence::Medium);
+    record(&mut nav_b, emitter_id, "OrderPlaced", "event_emit:OrderPlaced", node_kind::EVENT_EMITTER);
+    let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    EventBusResolver.resolve(&mut merged);
+
+    let event_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::EVENT_FLOWS).collect();
+    assert_eq!(event_edges.len(), 1, "{:?}", merged.cross_edges);
+    assert_eq!(event_edges[0].from, emitter_id);
+    assert_eq!(event_edges[0].to, handler_id);
+}
+
+#[test]
+fn event_resolver_keeps_string_topics_exact() {
+    // The fold is guarded to type-shaped keys. A dotted lowercase topic is not
+    // one, so `user.created` must never reach `user.updated` — no separator
+    // folding, no lowercasing, no all-to-all.
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::EVENT_HANDLER, "event_handle:user.updated", Confidence::Weak);
+    record(&mut nav_a, handler_id, "user.updated", "event_handle:user.updated", node_kind::EVENT_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (emitter_node, emitter_id) = make_node(repo_b(), node_kind::EVENT_EMITTER, "event_emit:user.created", Confidence::Weak);
+    record(&mut nav_b, emitter_id, "user.created", "event_emit:user.created", node_kind::EVENT_EMITTER);
+    let gb = make_graph(repo_b(), vec![emitter_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    EventBusResolver.resolve(&mut merged);
+
+    assert!(
+        merged.cross_edges.is_empty(),
+        "two different string topics must not pair, got {:?}",
+        merged.cross_edges
+    );
+}
+
 // ============================================================================
 // CliInvocationResolver
 // ============================================================================
