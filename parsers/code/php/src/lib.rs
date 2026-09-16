@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
-use repo_graph_code_domain::endpoint;
+use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -55,6 +55,13 @@ pub fn parse_file(
     scan_laravel_routes(source, file_rel_path, module_id, repo, &mut acc);
     scan_slim_routes(source, module_id, repo, &mut acc);
 
+    if !acc.endpoint_seen.is_empty() {
+        eprintln!(
+            "[php-http-client] {} endpoints in {file_rel_path}",
+            acc.endpoint_seen.len()
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -74,6 +81,9 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// ENDPOINT ids already minted in THIS file — `push_client_endpoint` dedups
+    /// the node through it while still pushing one CALLS edge per call site.
+    endpoint_seen: std::collections::HashSet<NodeId>,
 }
 
 fn visit_children(
@@ -300,6 +310,7 @@ fn visit_function(
     let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc, &types);
+        collect_client_endpoints_in(body, src, id, repo, file_rel, &types, acc);
     }
 }
 
@@ -340,6 +351,7 @@ fn visit_method(
     let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc, &types);
+        collect_client_endpoints_in(body, src, id, repo, file_rel, &types, acc);
     }
 
     check_route_attrs(node, src, id, repo, class_prefix, acc)
@@ -857,7 +869,12 @@ fn scan_slim_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
     for (needle, method) in methods {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
-            let start = search_from + rel + needle.len();
+            let arrow = search_from + rel;
+            let start = arrow + needle.len();
+            if !slim_receiver_is_bare_var(source, arrow) {
+                search_from = start;
+                continue;
+            }
             if let Some((path, consumed)) = extract_first_string(&source[start..]) {
                 if path.starts_with('/') {
                     emit_route_medium(method, &path, module_id, repo, acc);
@@ -871,7 +888,12 @@ fn scan_slim_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
     // `$app->map(['GET', 'POST'], '/path', $h)` — variable methods + one path.
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("->map(") {
-        let start = search_from + rel + "->map(".len();
+        let arrow = search_from + rel;
+        let start = arrow + "->map(".len();
+        if !slim_receiver_is_bare_var(source, arrow) {
+            search_from = start;
+            continue;
+        }
         let tail = &source[start..];
         if let Some((methods_text, after_methods)) = extract_bracket_list(tail) {
             // After the closing `]`, find the next `,` then the path string.
@@ -896,6 +918,36 @@ fn scan_slim_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
         }
         search_from = start + 1;
     }
+}
+
+/// Is the receiver of the `->` at byte `arrow` a BARE `$var`?
+///
+/// Slim's router idiom is always a bare variable — `$app->get('/x', $h)`,
+/// `$group->post(...)`. A member chain (`$this->client->get('/api/users')`) is a
+/// Guzzle / Symfony HttpClient *outbound* call, and minting a ROUTE for it made
+/// every outbound call look like an inbound one (the client half is owned by
+/// `collect_client_endpoints_in`). So the receiver must be a `$identifier` that
+/// is not itself reached through `->` or `::`.
+///
+/// Byte-wise throughout: `source` is arbitrary UTF-8 and a `&str` slice on a
+/// non-char boundary would panic.
+fn slim_receiver_is_bare_var(source: &str, arrow: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut i = arrow;
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    if i == 0 || bytes[i - 1] != b'$' {
+        return false; // `$this->client->get(` / a bare `->get(` in prose
+    }
+    i -= 1; // step onto the `$`
+    if i >= 2
+        && ((bytes[i - 2] == b'-' && bytes[i - 1] == b'>')
+            || (bytes[i - 2] == b':' && bytes[i - 1] == b':'))
+    {
+        return false; // `$obj->$http->get(` / `self::$client->get(`
+    }
+    true
 }
 
 /// Read a bracket-list `[...]` starting at `s[0]` (which must be `[`).
@@ -1230,6 +1282,306 @@ fn collect_calls_in(
                         name: name.to_string(),
                     },
                 });
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if !matches!(
+                child.kind(),
+                "function_definition"
+                    | "class_declaration"
+                    | "anonymous_function_creation_expression"
+            ) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Client-side HTTP call sites -> ENDPOINT nodes
+// ============================================================================
+//
+// The OUTBOUND half of a cross-service hop (the inbound half is
+// `scan_laravel_routes` / `scan_slim_routes` / `check_route_attrs`). Without it
+// a Laravel or Symfony service calling another service is a dead end for
+// `cross_stack_trace` in the outbound direction. Shapes covered:
+//
+//   Guzzle shorthand  `$this->client->get('/api/users/' . $id)`  verb <- name
+//   Guzzle / Symfony  `$this->client->request('POST', '/api/users', ...)`
+//                     — both libraries share `request(VERB, URL, ...)`, so the
+//                     verb comes from the FIRST argument
+//   async variants    `getAsync` / `requestAsync` — the `Async` suffix is
+//                     stripped and the shape is otherwise identical
+//   ext-curl          `curl_setopt($ch, CURLOPT_URL, '/api/users')` — GET
+//                     unless the same body carries an explicit
+//                     `CURLOPT_CUSTOMREQUEST, 'PUT'` literal (or CURLOPT_POST)
+//
+// `endpoint::url_to_path` is the ONLY precision gate that matters: the string
+// must be a path (or an absolute URL whose path we keep) after the host is
+// stripped, which is what keeps `$collection->get('user-1')` — the canonical
+// PHP false positive, `->get(` being ubiquitous on collections, containers and
+// config bags — out of the graph.
+
+/// `Async`-suffix-stripped method name -> HTTP verb.
+fn php_http_verb(name: &str) -> Option<&'static str> {
+    match name {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "patch" => Some("PATCH"),
+        "delete" => Some("DELETE"),
+        "head" => Some("HEAD"),
+        "options" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+/// The `arguments` child at index `i` (an `argument` wrapper node).
+fn nth_arg<'a>(args: Option<TsNode<'a>>, i: usize) -> Option<TsNode<'a>> {
+    let a = args?;
+    let mut c = a.walk();
+    a.named_children(&mut c).nth(i)
+}
+
+/// Unwrap an `argument` to the expression it carries. PHP named arguments
+/// (`method: 'GET'`) put a `name` node first, so it is skipped.
+fn arg_expr<'a>(arg: TsNode<'a>) -> Option<TsNode<'a>> {
+    if arg.kind() != "argument" {
+        return Some(arg);
+    }
+    let name_id = arg.child_by_field_name("name").map(|n| n.id());
+    let mut c = arg.walk();
+    arg.named_children(&mut c).find(|n| Some(n.id()) != name_id)
+}
+
+/// Inner text of a non-interpolating `string` node (its `string_content` /
+/// `escape_sequence` children); falls back to quote-trimming for `''`.
+fn php_string_inner(node: TsNode, src: &[u8]) -> String {
+    let mut out = String::new();
+    let mut c = node.walk();
+    for part in node.named_children(&mut c) {
+        out.push_str(text_of(part, src));
+    }
+    if out.is_empty() {
+        return text_of(node, src)
+            .trim_matches('\'')
+            .trim_matches('"')
+            .to_string();
+    }
+    out
+}
+
+/// `"…/users/$id"` -> `…/users/${…}`. Every non-literal child of the
+/// `encapsed_string` becomes the `${…}` wildcard that
+/// `normalise_http_path` (repo-graph-graph) collapses to `{}`, so an
+/// interpolated client path pairs with route `/users/{id}`.
+fn php_encapsed_template(node: TsNode, src: &[u8]) -> String {
+    let mut out = String::new();
+    let mut c = node.walk();
+    for part in node.named_children(&mut c) {
+        match part.kind() {
+            "string_content" | "escape_sequence" => out.push_str(text_of(part, src)),
+            _ => out.push_str("${…}"),
+        }
+    }
+    out
+}
+
+/// `(raw_path, strong)` for an argument used as a URL.
+///
+/// A plain `'…'` literal is Strong. An `encapsed_string` and a `.`
+/// concatenation (`'/api/users/' . $id`) both reconstruct with `${…}` in place
+/// of every non-literal operand and are Medium — the same treatment java gives
+/// `"/users/" + id`. Concatenation recurses so the left-associative chain
+/// `'/a/' . $x . '/b'` rebuilds in order. At least one literal must survive, so
+/// `$base . $path` (no path text at all) extracts nothing.
+fn php_url_from_arg(arg: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    match arg.kind() {
+        "string" => Some((php_string_inner(arg, src), true)),
+        "encapsed_string" => Some((php_encapsed_template(arg, src), false)),
+        "binary_expression" => {
+            let op = arg.child_by_field_name("operator")?;
+            if text_of(op, src) != "." {
+                return None;
+            }
+            let mut out = String::new();
+            let mut saw_literal = false;
+            for side in [
+                arg.child_by_field_name("left")?,
+                arg.child_by_field_name("right")?,
+            ] {
+                match php_url_from_arg(side, src) {
+                    Some((s, _)) => {
+                        out.push_str(&s);
+                        saw_literal = true;
+                    }
+                    None => out.push_str("${…}"),
+                }
+            }
+            if saw_literal {
+                Some((out, false))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// May a verb-named call on THIS receiver be an outbound HTTP call?
+///
+/// The mirror of `slim_receiver_is_bare_var`, and deliberately disjoint from
+/// it: a member chain (`$this->client`, `self::$http`) is a field-held client,
+/// while a bare `$app->get('/x', $h)` is Slim's ROUTE idiom. A bare variable
+/// therefore only counts when `local_receiver_types` binds it to a class whose
+/// name carries `Client` (Guzzle `Client`, Symfony `HttpClientInterface`,
+/// `CurlHttpClient`). An unbound `$client->get('/x')` is a known miss — see the
+/// follow-up note on the fixture.
+fn php_client_receiver_ok(n: TsNode, src: &[u8], types: &HashMap<String, String>) -> bool {
+    let Some(obj) = n.child_by_field_name("object") else {
+        return false;
+    };
+    if obj.kind() != "variable_name" {
+        return true;
+    }
+    types
+        .get(text_of(obj, src))
+        .is_some_and(|cls| cls.contains("Client"))
+}
+
+/// `(VERB, url argument)` for a member call that is an outbound HTTP request.
+fn php_client_call_shape<'a>(
+    n: TsNode<'a>,
+    src: &'a [u8],
+    types: &HashMap<String, String>,
+) -> Option<(String, TsNode<'a>)> {
+    let name = text_of(n.child_by_field_name("name")?, src);
+    let base = name.strip_suffix("Async").unwrap_or(name);
+    let args = n.child_by_field_name("arguments");
+
+    if base == "request" {
+        // Verb-first shape. Slim has no `->request(` route idiom and the verb
+        // literal is itself the discriminator, so no receiver gate is needed.
+        let verb_arg = arg_expr(nth_arg(args, 0)?)?;
+        if verb_arg.kind() != "string" {
+            return None;
+        }
+        let verb = php_string_inner(verb_arg, src).trim().to_ascii_uppercase();
+        php_http_verb(&verb.to_ascii_lowercase())?;
+        return Some((verb, arg_expr(nth_arg(args, 1)?)?));
+    }
+
+    let verb = php_http_verb(base)?;
+    if !php_client_receiver_ok(n, src, types) {
+        return None;
+    }
+    Some((verb.to_string(), arg_expr(nth_arg(args, 0)?)?))
+}
+
+/// The URL argument of `curl_setopt($ch, CURLOPT_URL, '…')`.
+fn php_curl_url_arg<'a>(n: TsNode<'a>, src: &'a [u8]) -> Option<TsNode<'a>> {
+    if text_of(n.child_by_field_name("function")?, src) != "curl_setopt" {
+        return None;
+    }
+    let args = n.child_by_field_name("arguments");
+    let opt = arg_expr(nth_arg(args, 1)?)?;
+    if !text_of(opt, src).trim().ends_with("CURLOPT_URL") {
+        return None;
+    }
+    arg_expr(nth_arg(args, 2)?)
+}
+
+/// ext-curl carries the verb on a SIBLING `curl_setopt`, so it is read from the
+/// whole body once: an explicit `CURLOPT_CUSTOMREQUEST, 'PUT'` literal wins,
+/// then `CURLOPT_POST*`, else the curl default GET.
+fn php_curl_body_verb(body: TsNode, src: &[u8]) -> String {
+    let text = text_of(body, src);
+    const CUSTOM: &str = "CURLOPT_CUSTOMREQUEST";
+    if let Some(i) = text.find(CUSTOM)
+        && let Some((v, _)) = extract_first_string(&text[i + CUSTOM.len()..])
+    {
+        let v = v.trim().to_ascii_uppercase();
+        if php_http_verb(&v.to_ascii_lowercase()).is_some() {
+            return v;
+        }
+    }
+    if text.contains("CURLOPT_POST") {
+        return "POST".to_string();
+    }
+    "GET".to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_php_endpoint(
+    n: TsNode,
+    url_arg: TsNode,
+    src: &[u8],
+    method: &str,
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let Some((raw, strong)) = php_url_from_arg(url_arg, src) else {
+        return;
+    };
+    let Some(path) = endpoint::url_to_path(&raw) else {
+        return;
+    };
+    let pos = n.start_position();
+    let ep = ClientEndpoint {
+        method: method.to_string(),
+        path,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence: if strong {
+            Confidence::Strong
+        } else {
+            Confidence::Medium
+        },
+    };
+    push_client_endpoint(
+        repo,
+        &ep,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
+}
+
+/// Walk one function/method body for outbound HTTP call sites. Mirrors
+/// `collect_calls_in`'s stack walk (and its nested-scope skips) so a call
+/// inside a closure is attributed to that closure's own owner, not this one.
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    types: &HashMap<String, String>,
+    acc: &mut Acc,
+) {
+    let mut curl_verb: Option<String> = None;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "member_call_expression" | "nullsafe_member_call_expression" => {
+                if let Some((method, url_arg)) = php_client_call_shape(n, src, types) {
+                    push_php_endpoint(n, url_arg, src, &method, from, repo, file_rel, acc);
+                }
+            }
+            "function_call_expression" => {
+                if let Some(url_arg) = php_curl_url_arg(n, src) {
+                    let verb = curl_verb
+                        .get_or_insert_with(|| php_curl_body_verb(body, src))
+                        .clone();
+                    push_php_endpoint(n, url_arg, src, &verb, from, repo, file_rel, acc);
+                }
             }
             _ => {}
         }
@@ -1826,6 +2178,166 @@ class Service {
             bases,
             vec![("$helper".to_string(), "process".to_string())],
             "an unbound receiver keeps the raw `$var` fallback"
+        );
+    }
+
+    // ========================================================================
+    // Client HTTP call sites -> ENDPOINT (A4.10)
+    // ========================================================================
+
+    /// Every ENDPOINT node name in a parse, sorted.
+    fn endpoint_names(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ENDPOINT))
+            .map(|(_, n)| n.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn guzzle_client_get_emits_endpoint() {
+        let source = r#"<?php
+class ApiClient {
+    private $client;
+    public function fetchUser($id) {
+        return $this->client->get('/api/users/' . $id);
+    }
+}
+"#;
+        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["GET /api/users/${…}".to_string()],
+            "`'/api/users/' . $id` folds the non-literal tail to a wildcard segment"
+        );
+        // and the enclosing method -> ENDPOINT CALLS edge exists
+        let ep_id = endpoint::endpoint_id(repo(), "GET", "/api/users/${…}");
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.to == ep_id && e.category == edge_category::CALLS),
+            "the enclosing method must CALL the endpoint"
+        );
+    }
+
+    #[test]
+    fn guzzle_request_verb_first_arg_emits_endpoint() {
+        // Guzzle AND Symfony HttpClient share `request(VERB, URL, ...)`.
+        let source = r#"<?php
+class ApiClient {
+    private $client;
+    public function createUser($body) {
+        return $this->client->request('POST', '/api/users', ['json' => $body]);
+    }
+    public function fetchOne($id) {
+        return $this->http->requestAsync('GET', "/api/users/$id");
+    }
+}
+"#;
+        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec![
+                "GET /api/users/${…}".to_string(),
+                "POST /api/users".to_string()
+            ],
+            "verb comes from the first argument; `Async` is stripped; \"$id\" interpolates"
+        );
+    }
+
+    #[test]
+    fn php_client_calls_emit_no_route() {
+        // The Slim/Laravel SOURCE scanners must not fire on a client file:
+        // `$this->client->get('/api/users')` is outbound, not a route.
+        let source = r#"<?php
+class ApiClient {
+    private $client;
+    public function fetchUser($id) {
+        return $this->client->get('/api/users/' . $id);
+    }
+    public function createUser($body) {
+        return $this->client->post('/api/users', $body);
+    }
+}
+"#;
+        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        let routes: Vec<&String> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n)
+            .collect();
+        assert!(
+            routes.is_empty(),
+            "a member-chain receiver is a client, not a Slim router: {routes:?}"
+        );
+        assert_eq!(endpoint_names(&fp).len(), 2);
+    }
+
+    #[test]
+    fn php_non_url_string_arg_is_dropped() {
+        // `->get(` is ubiquitous in PHP (collections, containers, config bags);
+        // `url_to_path` is the only gate, so this is the load-bearing negative.
+        let source = r#"<?php
+class Cache {
+    private $collection;
+    public function cached($id) {
+        return $this->collection->get('user-' . $id);
+    }
+    public function opt() {
+        return $this->config->get('app.name');
+    }
+}
+"#;
+        let fp = parse_file(source, "src/Cache.php", "App", repo()).unwrap();
+        assert!(
+            endpoint_names(&fp).is_empty(),
+            "a non-path string argument must not become an ENDPOINT"
+        );
+    }
+
+    #[test]
+    fn bare_variable_receiver_needs_a_client_binding() {
+        // `$app->get('/x', $h)` is Slim's ROUTE idiom — the ENDPOINT half must
+        // stay off it, while a `new Client()` binding opts the same shape in.
+        let source = r#"<?php
+function boot() {
+    $app = AppFactory::create();
+    $app->get('/health', UserHandler::class);
+}
+function fetch() {
+    $client = new \GuzzleHttp\Client();
+    return $client->get('/api/users');
+}
+"#;
+        let fp = parse_file(source, "src/boot.php", "App", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["GET /api/users".to_string()],
+            "only the Client-typed receiver yields an ENDPOINT"
+        );
+    }
+
+    #[test]
+    fn curl_setopt_url_emits_endpoint_with_custom_verb() {
+        let source = r#"<?php
+function push($id) {
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, 'https://users-svc/api/users');
+    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');
+    return curl_exec($ch);
+}
+"#;
+        let fp = parse_file(source, "src/push.php", "App", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["PUT /api/users".to_string()],
+            "host stripped by url_to_path; verb upgraded by the sibling CUSTOMREQUEST"
         );
     }
 }

@@ -1,0 +1,67 @@
+{
+  "framework": "php-http",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "php/http_client"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/users",
+      "note": "$this->client->get('/api/users/' . $id) — concat tail folds to ${…}"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /api/users",
+      "note": "$this->client->request('POST', '/api/users', …) — Guzzle/Symfony shared shape"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/api/users",
+      "note": "Go chi route (server, control)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "fetchUser",
+      "to": "GET /api/users",
+      "category": "CALLS",
+      "note": "enclosing method -> ENDPOINT"
+    },
+    {
+      "from": "createUser",
+      "to": "POST /api/users",
+      "category": "CALLS",
+      "note": "enclosing method -> ENDPOINT"
+    },
+    {
+      "from": "GET /api/users/${…}",
+      "to": "/api/users/{id}",
+      "category": "HTTP_CALLS",
+      "note": "interpolated client path pairs with the parameterised chi route"
+    },
+    {
+      "from": "POST /api/users",
+      "to": "/api/users",
+      "category": "HTTP_CALLS",
+      "note": "pairs with the Go chi route"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "max_nodes": 2,
+      "note": "only the two Go chi routes; the PHP client must not mint a phantom ROUTE"
+    },
+    {
+      "kind": "ENDPOINT",
+      "max_nodes": 2,
+      "note": "$this->collection->get('user-' . $id) must not become an ENDPOINT"
+    }
+  ]
+}
