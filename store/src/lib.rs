@@ -649,6 +649,19 @@ pub struct Manifest {
     /// `default` so pre-0.4.17 manifests deserialize (as "", always stale).
     #[serde(default)]
     pub engine_version: String,
+    /// Build identity of the code that produced this layout:
+    /// `<release>+p<16 hex>` (`repo_graph_stamp::BUILD_STAMP`).
+    /// `engine_version` above is the RELEASE, which does not move when a
+    /// parser fix is merged — so a mismatch *here* is what forces a
+    /// regenerate for a graph-shaping change made *within* a release
+    /// (audit 2026-06-10 #5 fixed upgrade-between-releases; this is the
+    /// finer granularity). `default` so pre-0.4.19 manifests deserialize
+    /// (as "", always stale). `MANIFEST_VERSION` is deliberately NOT bumped:
+    /// serde ignores unknown fields, so an older glia still loads a newer
+    /// manifest instead of hard-erroring, while a newer glia reading an
+    /// older manifest simply regenerates once.
+    #[serde(default)]
+    pub build_stamp: String,
     pub shards: Vec<ShardEntry>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cross: Option<ShardEntry>,
@@ -747,6 +760,7 @@ pub fn write_sharded(
     let manifest = Manifest {
         schema_version: MANIFEST_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_stamp: repo_graph_stamp::BUILD_STAMP.to_string(),
         shards: entries,
         cross,
     };
@@ -942,15 +956,29 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     let Ok(manifest_mtime) = manifest_meta.modified() else {
         return true;
     };
-    // A layout written by a different release is stale regardless of source
+    // A layout written by a different build is stale regardless of source
     // mtimes — otherwise an old engine's output is served until a source file
-    // happens to change. Unreadable/unparseable manifest → stale.
-    let version_matches = std::fs::read(&manifest_path)
+    // happens to change. `engine_version` catches an upgrade between releases;
+    // `build_stamp` catches a graph-shaping change within one.
+    // Unreadable/unparseable manifest → stale.
+    let parsed: Option<Manifest> = std::fs::read(&manifest_path)
         .ok()
-        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok())
-        .map(|m| m.engine_version == env!("CARGO_PKG_VERSION"))
-        .unwrap_or(false);
-    if !version_matches {
+        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok());
+    let Some(m) = parsed else {
+        return true;
+    };
+    if m.engine_version != env!("CARGO_PKG_VERSION")
+        || m.build_stamp != repo_graph_stamp::BUILD_STAMP
+    {
+        // Un-gated on purpose (not behind GLIA_STORE_VERBOSE): it fires rarely
+        // and it is the only explanation a user gets for an expensive
+        // regenerate, matching the `[incremental] build context changed` line.
+        eprintln!(
+            "[gmap] stale: build stamp mismatch (manifest={}+{} build={}) — regenerating",
+            m.engine_version,
+            m.build_stamp,
+            repo_graph_stamp::BUILD_STAMP
+        );
         return true;
     }
 
@@ -1211,6 +1239,13 @@ mod tests {
         let archived = shard_b.1.archived().unwrap();
         let node = &archived.nodes[0];
         assert_eq!(node.cells.len(), 1);
+
+        // The upsert round-trips the manifest struct, so the build stamp must
+        // survive it — the layout was still produced by THIS build.
+        let m: Manifest =
+            serde_json::from_slice(&std::fs::read(shard_dir.join(MANIFEST_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(m.build_stamp, repo_graph_stamp::BUILD_STAMP);
     }
 
     #[test]
@@ -1308,6 +1343,55 @@ mod tests {
         // Pre-0.4.17 manifest (no engine_version field at all) → stale.
         m.engine_version = String::new();
         std::fs::write(&manifest_path, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir));
+    }
+
+    #[test]
+    fn stale_when_manifest_written_by_other_build_stamp() {
+        // `engine_version` is the RELEASE, which does not move when a parser
+        // fix is merged. `build_stamp` is the build identity, so a within-a-
+        // release parser change forces a regenerate. Patched as raw JSON (not
+        // through `Manifest`) so the test exercises what is actually on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let gmap_dir = dir.path().join("gmap");
+        let repo_dir = dir.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let repo = RepoId::from_canonical("test://stamp");
+        let g = RepoGraph {
+            repo,
+            nodes: vec![],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        write_sharded(&[("a", &g)], &[], &gmap_dir).unwrap();
+        let manifest_path = gmap_dir.join(MANIFEST_NAME);
+
+        // (1) The written manifest carries a non-empty build stamp.
+        let read_json = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap()
+        };
+        let mut v = read_json();
+        let stamp = v["build_stamp"].as_str().unwrap_or("");
+        assert!(!stamp.is_empty(), "manifest.json has no build_stamp: {v}");
+        assert_eq!(stamp, repo_graph_stamp::BUILD_STAMP);
+
+        // (2) Fresh layout from this build, no newer sources -> not stale.
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+
+        // (3) Same release, different build stamp -> stale. Shard hashes and
+        // `engine_version` are untouched, so only the stamp can trigger it.
+        v["build_stamp"] = serde_json::json!("0.4.18+p0000000000000000");
+        assert_eq!(v["engine_version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+        std::fs::write(&manifest_path, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir));
+
+        // (4) Pre-0.4.19 manifest (no `build_stamp` field at all) -> stale.
+        v.as_object_mut().unwrap().remove("build_stamp");
+        std::fs::write(&manifest_path, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(is_gmap_stale(&gmap_dir, &repo_dir));
     }
 }

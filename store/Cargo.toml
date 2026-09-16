@@ -8,6 +8,7 @@ publish = false
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
+repo-graph-stamp = { path = "../stamp" }
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 thiserror = "2"
