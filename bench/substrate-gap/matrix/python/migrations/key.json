@@ -1,0 +1,21 @@
+{
+  "framework": "python-alembic-migration",
+  "language": "python",
+  "dirs": ["."],
+  "mechanism": "migrations",
+  "cells": ["python/migrations"],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "users",
+     "note": "INTENDED: `op.create_table(\"users\", ...)` in an alembic revision declares the table. No migration routing exists today (matrix_vocab: 'no dedicated kind exists; review rank 15 proposes migration routing'), so this is EXPECTED to miss."}
+  ],
+  "expect_edges": [
+    {"from": "0001_create_users", "to": "users", "category": "ACCESSES_DATA",
+     "note": "INTENDED: the revision module touches the table it creates. MEASURED: the only ACCESSES_DATA edge goes to the DATABASE node `data_source:sqlalchemy` — the driver, not the table."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "sqlalchemy", "max_nodes": 0,
+     "note": "precision: the ORM/driver name must never be minted as a table entity. It is currently emitted as kind DATABASE, which is correct; this pins that it does not drift into DATA_ENTITY and make the cell look covered."}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Measures, rather than asserts, that an alembic migration yields no table entity. Baseline 2026-09-16 on the installed 0.4.18 wheel: 4 nodes / 4 edges, DATA_ENTITY 0."
+}

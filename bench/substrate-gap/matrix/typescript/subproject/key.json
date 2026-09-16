@@ -1,0 +1,27 @@
+{
+  "framework": "typescript-two-package-monorepo",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "subproject",
+  "cells": ["typescript/subproject"],
+  "expect_nodes": [
+    {"kind": "REGION", "name": "apps/web",
+     "note": "INTENDED: a sub-project anchor per manifest root (apps/web/package.json). EXPECTED to miss — review section 2 #2: 'No sub-project notion anywhere (grep = 0)'."},
+    {"kind": "REGION", "name": "apps/admin",
+     "note": "INTENDED: the second manifest root. EXPECTED to miss."}
+  ],
+  "expect_edges": [
+    {"from": "apps/web", "to": "apps/web/src/index", "category": "CONTAINS",
+     "note": "INTENDED: the sub-project region contains its own modules — the scoping merged-plan item 8 (walker scoping -> project_roots) has to produce."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "apps/admin", "to": "apps/web/src/index", "category": "CONTAINS",
+     "note": "PRECISION half: when regions land, one sub-project must not contain the other's modules. Vacuously clean today (no REGION nodes at all) — it is the gate the fix must not break."},
+    {"kind": "MODULE", "name": "apps/web/src/index", "max_nodes": 1,
+     "note": "MEASURED: module qnames ARE path-qualified (apps::web::src::index), so the two index.ts files do NOT collide on identity. Deliberately NOT forbidding on the bare NAME 'index' — both modules are named 'index' and that is correct, not a precision defect."},
+    {"from": "apps/web/src/index", "to": "apps/admin/src/helper", "category": "IMPORTS",
+     "note": "MEASURED CLEAN, and it contradicts the packet spec: `./helper` resolves inside its own sub-project, so the predicted basename cross-binding does NOT fire. Unscoped to this cell (IMPORTS is not a subproject category) — it documents the measurement, graded by grade.py."}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Two manifest-rooted sub-projects in ONE walked dir, with a deliberate apps/web vs apps/admin basename collision on index.ts AND helper.ts. Baseline 2026-09-16 on the installed 0.4.18 wheel: 8 nodes / 8 edges, REGION 0. The walker's region collapse does nothing surprising with two manifest roots — it simply does not notice them. Six files rather than the AUTHORING budget of two per dir: the collision IS the fixture."
+}

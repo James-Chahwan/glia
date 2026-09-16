@@ -1,0 +1,25 @@
+{
+  "framework": "python-click-command",
+  "language": "python",
+  "dirs": ["client", "server"],
+  "mechanism": "cli_def",
+  "cells": ["python/cli_def"],
+  "expect_nodes": [
+    {"kind": "CLI_COMMAND", "name": "sync",
+     "note": "`@click.command(\"sync\")` — the SUBCOMMAND. Extracted."},
+    {"kind": "CLI_COMMAND", "name": "mytool",
+     "note": "INTENDED: the BINARY name, declared in pyproject.toml `[project.scripts] mytool = ...`. EXPECTED to miss — cli.rs reads decorator/struct literals only, never the packaging manifest. This is the half that makes the pairing below impossible."}
+  ],
+  "expect_edges": [
+    {"from": "mytool", "to": "mytool", "category": "CLI_INVOKES",
+     "note": "INTENDED: the invoker's `mytool` pairs with the declared binary. CliInvocationResolver joins `cli_invoke:<tool>` to `cli:<tool>` by EXACT tool name, so this needs both the binary declaration (absent) and a captured invocation (also absent, see python/cli_inv)."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CLI_COMMAND", "name": "cli", "max_nodes": 0,
+     "note": "precision: the bare `@click.group()` has no name literal, so the decorated function's name must not be minted as a command"},
+    {"kind": "CLI_COMMAND", "name": "sync-records", "max_nodes": 0,
+     "note": "precision: the docstring/help text is not a command name"}
+  ],
+  "note": "A15.11 measured the thinly-covered cli_def column. Baseline 2026-09-16 on the installed 0.4.18 wheel: 6 nodes / 3 edges. The review's prediction — 'declarations are subcommands but invocations are binaries so they never pair' — holds for PYTHON, and the root cause is precise: click declares `sync`, the binary name lives only in pyproject.toml, and cli.rs never reads it. Contrast go/cli_def, where cobra's rootCmd DOES carry the binary name and the pairing fires."
+}

@@ -1,0 +1,30 @@
+{
+  "framework": "python-env-dockerfile-config",
+  "language": "python",
+  "dirs": ["client", "server"],
+  "mechanism": "config",
+  "cells": ["python/config"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "DB_URL",
+     "note": "single qname per name across the merged graph: config:env:DB_URL"}
+  ],
+  "expect_edges": [
+    {"from": "reader", "to": "DB_URL", "category": "READS_CONFIG",
+     "note": "read side: os.environ[\"DB_URL\"], intra-repo"},
+    {"from": "Dockerfile", "to": "DB_URL", "category": "DEFINES_CONFIG",
+     "note": "define side: Dockerfile ENV KEY=value, intra-repo in the deploy dir"},
+    {"from": "DB_URL", "to": "DB_URL", "category": "SHARES_CONFIG",
+     "note": "the cross-repo pairing — why this cell ships two dirs"}
+  ],
+  "expect_cells": [
+    {"kind": "CONFIG_KEY", "node": "DB_URL", "cell": "ENV", "contains": "db.internal:5432",
+     "note": "A13.7 contract: the define-side VALUE rides an ENV cell, host kept so service pairing can read it. The review says ConfigResolver discards env values; measured, it does not."}
+  ],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "postgres://db.internal:5432/app", "max_nodes": 0,
+     "note": "precision: the env VALUE must never become a CONFIG_KEY identity — only the payload cell carries it"},
+    {"kind": "CONFIG_KEY", "name": "python:3.12-slim", "max_nodes": 0,
+     "note": "precision: the Dockerfile FROM image is not an env var"}
+  ],
+  "note": "A15.11 measured the 'thinly covered' config column end to end. Baseline 2026-09-16 on the installed 0.4.18 wheel: 9 nodes / 9 edges and the full READS_CONFIG + DEFINES_CONFIG + SHARES_CONFIG triple fires — this cell is NOT a zero."
+}

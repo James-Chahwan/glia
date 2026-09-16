@@ -1,0 +1,25 @@
+{
+  "framework": "go-two-module-workspace",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "subproject",
+  "cells": ["go/subproject"],
+  "expect_nodes": [
+    {"kind": "REGION", "name": "svc-a",
+     "note": "INTENDED: a sub-project anchor per go.mod root. EXPECTED to miss — no sub-project notion exists."},
+    {"kind": "REGION", "name": "svc-b",
+     "note": "INTENDED: the second go.mod root. EXPECTED to miss."}
+  ],
+  "expect_edges": [
+    {"from": "svc-a", "to": "svc-a/util", "category": "CONTAINS",
+     "note": "INTENDED: the module region contains its own package files."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "svc-b", "to": "svc-a/util", "category": "CONTAINS",
+     "note": "PRECISION half: one go module must not contain the other's files. Vacuously clean today (no REGION nodes)."},
+    {"kind": "MODULE", "name": "svc-a/util", "max_nodes": 1,
+     "note": "MEASURED: qnames are path-qualified (svc-a::util vs svc-b::util), so the two util.go files do not collide on identity."}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Two go.mod roots in one walked dir with colliding util.go basenames. Baseline 2026-09-16 on the installed 0.4.18 wheel: 4 nodes / 2 edges, REGION 0 — and neither go.mod contributed a node of any kind, so the module boundary is invisible even at manifest level."
+}

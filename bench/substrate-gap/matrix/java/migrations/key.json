@@ -1,0 +1,21 @@
+{
+  "framework": "java-flyway-migration",
+  "language": "java",
+  "dirs": ["."],
+  "mechanism": "migrations",
+  "cells": ["java/migrations"],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "users",
+     "note": "INTENDED: the Flyway BaseJavaMigration executes `CREATE TABLE users (...)`. EXPECTED to miss — no migration routing, and inline DDL in a Java string literal is not scanned."}
+  ],
+  "expect_edges": [
+    {"from": "V1__Create_users", "to": "users", "category": "ACCESSES_DATA",
+     "note": "INTENDED: the migration class touches the table it creates. MEASURED: java/migrations emits NO data node at all — not even the driver-flavour DATABASE node python and ruby get."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "V1__Create_users", "max_nodes": 0,
+     "note": "precision: the migration class must never be minted as a table entity."}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Baseline 2026-09-16 on the installed 0.4.18 wheel: 3 nodes / 2 edges, DATA_ENTITY 0 and no DATABASE node either."
+}

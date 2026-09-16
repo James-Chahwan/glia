@@ -1,0 +1,27 @@
+{
+  "framework": "python-unleash-flag",
+  "language": "python",
+  "dirs": ["client", "server"],
+  "mechanism": "flags",
+  "cells": ["python/flags"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "new_checkout",
+     "note": "INTENDED: `client.is_enabled(\"new_checkout\")` names a feature flag. EXPECTED to miss — matrix_vocab: 'no flag-provider needles; only flags that arrive as env vars are visible'."}
+  ],
+  "expect_edges": [
+    {"from": "reader", "to": "new_checkout", "category": "READS_CONFIG",
+     "note": "INTENDED: an SDK flag check is a config read"},
+    {"from": "features", "to": "new_checkout", "category": "DEFINES_CONFIG",
+     "note": "INTENDED: the Flipt-style features.yml is the define side. MEASURED: the deploy dir contributes NO node at all — a flag-definition yaml is not routed."},
+    {"from": "new_checkout", "to": "new_checkout", "category": "SHARES_CONFIG",
+     "note": "INTENDED cross-repo pairing — why this cell ships two dirs"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "is_enabled", "max_nodes": 0,
+     "note": "precision, forward-looking: when a flag needle lands it must key on the ARGUMENT, not the SDK method — the framework_tag() fallback failure mode queues.rs already has"},
+    {"kind": "CONFIG_KEY", "name": "UnleashClient", "max_nodes": 0,
+     "note": "precision: the provider name is not a flag key"}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Baseline 2026-09-16 on the installed 0.4.18 wheel: 2 nodes / 1 edge, CONFIG_KEY 0. Both halves are blind — the SDK call site AND the features.yml declaration, which emits no module node whatsoever."
+}

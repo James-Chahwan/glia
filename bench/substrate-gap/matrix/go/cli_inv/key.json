@@ -1,0 +1,21 @@
+{
+  "framework": "go-exec-command-invocation",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "mechanism": "cli_inv",
+  "cells": ["go/cli_inv"],
+  "expect_nodes": [
+    {"kind": "CLI_INVOCATION", "name": "mytool",
+     "note": "`exec.Command(\"mytool\", \"sync\")` — the tool is the FIRST quoted argument, which is exactly what cli.rs extract_quoted() reads"}
+  ],
+  "expect_edges": [
+    {"from": "mytool", "to": "mytool", "category": "CLI_INVOKES",
+     "note": "invocation -> declaration, joined on the exact tool name by CliInvocationResolver"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CLI_INVOCATION", "name": "sync", "max_nodes": 0,
+     "note": "precision: the subcommand argument must never be minted as a separate invoked tool"}
+  ],
+  "note": "A15.11 measured the thinly-covered cli_inv column. Baseline 2026-09-16 on the installed 0.4.18 wheel: 9 nodes / 5 edges. Go's `exec.Command(\"tool\", ...)` puts the tool in the first quoted slot and is captured; python/cli_inv's argv-list form is not. The mechanism is not blind — one LANGUAGE's canonical call shape is."
+}

@@ -1,0 +1,25 @@
+{
+  "framework": "go-cobra-command",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "mechanism": "cli_def",
+  "cells": ["go/cli_def"],
+  "expect_nodes": [
+    {"kind": "CLI_COMMAND", "name": "mytool",
+     "note": "the BINARY, from rootCmd's `Use: \"mytool\"`"},
+    {"kind": "CLI_COMMAND", "name": "sync",
+     "note": "the SUBCOMMAND, from syncCmd's `Use: \"sync\"`"}
+  ],
+  "expect_edges": [
+    {"from": "mytool", "to": "mytool", "category": "CLI_INVOKES",
+     "note": "the cross-repo pairing: `exec.Command(\"mytool\", ...)` in the caller repo joins `cli:mytool` in the tool repo"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CLI_COMMAND", "name": "rootCmd", "max_nodes": 0,
+     "note": "precision: the Go variable name is not a command name"},
+    {"kind": "CLI_COMMAND", "name": "Sync records", "max_nodes": 0,
+     "note": "precision: cobra's `Short:` help text is not a command name — extract_cobra_command_name must key on `Use:`"}
+  ],
+  "note": "A15.11 measured the thinly-covered cli_def column, and it CONTRADICTS the review. Baseline 2026-09-16 on the installed 0.4.18 wheel: 9 nodes / 5 edges, and CLI_INVOKES fires. cobra's rootCmd carries the binary name in the same `Use:` field as a subcommand, so declaration and invocation DO pair in Go. The 'they never pair' claim is a Python/click-shaped finding, not a mechanism-wide one."
+}

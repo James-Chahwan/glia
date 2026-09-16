@@ -1,0 +1,27 @@
+{
+  "framework": "go-launchdarkly-flag",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "mechanism": "flags",
+  "cells": ["go/flags"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "new-checkout",
+     "note": "INTENDED: `client.BoolVariation(\"new-checkout\", ...)` names a feature flag. EXPECTED to miss — no flag-provider needles."}
+  ],
+  "expect_edges": [
+    {"from": "reader", "to": "new-checkout", "category": "READS_CONFIG",
+     "note": "INTENDED: an SDK flag check is a config read"},
+    {"from": "features", "to": "new-checkout", "category": "DEFINES_CONFIG",
+     "note": "INTENDED: the Flipt-style features.yml is the define side. MEASURED: the deploy dir contributes NO node at all."},
+    {"from": "new-checkout", "to": "new-checkout", "category": "SHARES_CONFIG",
+     "note": "INTENDED cross-repo pairing — why this cell ships two dirs"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "BoolVariation", "max_nodes": 0,
+     "note": "precision, forward-looking: key on the ARGUMENT, not the SDK method"},
+    {"kind": "CONFIG_KEY", "name": "go-server-sdk", "max_nodes": 0,
+     "note": "precision: the provider package is not a flag key"}
+  ],
+  "note": "ZERO-EVERYWHERE PROBE (A15.11). Baseline 2026-09-16 on the installed 0.4.18 wheel: 2 nodes / 1 edge, CONFIG_KEY 0. The LDClient is passed in, so no env read — an env read here would mint an unrelated CONFIG_KEY and flip the extract probe green while the flag itself stayed invisible."
+}

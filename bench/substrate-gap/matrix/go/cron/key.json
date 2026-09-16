@@ -1,0 +1,33 @@
+{
+  "framework": "go-robfig-and-k8s-cron",
+  "language": "go",
+  "dirs": ["client", "server"],
+  "mechanism": "cron",
+  "cells": ["go/cron"],
+  "expect_nodes": [
+    {"kind": "CRON_JOB", "name": "0 * * * *",
+     "note": "k8s CronJob document 1 (cleanup)"},
+    {"kind": "CRON_JOB", "name": "*/5 * * * *",
+     "note": "k8s CronJob document 2 (report) — the review claims a multi-doc manifest keeps only the LAST schedule; measured, both survive (cron.rs splits on `\\n---` per document)"},
+    {"kind": "CRON_JOB", "name": "15 3 * * *",
+     "note": "INTENDED: the Go-native schedule, `robfig/cron` c.AddFunc(\"15 3 * * *\", ...). EXPECTED to miss — cron.rs covers GitHub Actions, k8s CronJob, node-cron and Celery beat, but has no Go needle."}
+  ],
+  "expect_edges": [
+    {"from": "cronjobs", "to": "0 * * * *", "category": "SCHEDULES",
+     "note": "manifest module -> job, document 1"},
+    {"from": "cronjobs", "to": "*/5 * * * *", "category": "SCHEDULES",
+     "note": "manifest module -> job, document 2"},
+    {"from": "worker", "to": "15 3 * * *", "category": "SCHEDULES",
+     "note": "INTENDED: the Go module schedules its own in-process job. EXPECTED to miss with the node."},
+    {"from": "0 * * * *", "to": "0 * * * *", "category": "SHARES_CRON_SCHEDULE",
+     "note": "INTENDED cross-repo pairing: the deploy repo's CronJob and the app repo's worker share a schedule. EXPECTED to miss — the Go side emits no CRON_JOB to pair with, which is exactly why this cell ships two dirs."}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "CRON_JOB", "name": "cron:0 * * * *:report", "max_nodes": 0,
+     "note": "PRECISION: cross-document bleed. Document 1's schedule must never be paired with document 2's target. Clean today."},
+    {"kind": "CRON_JOB", "name": "cron:*/5 * * * *:cleanup", "max_nodes": 0,
+     "note": "PRECISION: the mirror-image bleed. Clean today."}
+  ],
+  "note": "A15.11 measured the 'thinly covered' cron column. Baseline 2026-09-16 on the installed 0.4.18 wheel: 8 nodes / 8 edges. TWO findings against the review: (1) the multi-document k8s bug is already FIXED — both schedules survive with their own targets; (2) the Go-language cron path is blind, so a `go/cron` cell is really measuring a YAML file that happens to sit next to Go code."
+}
