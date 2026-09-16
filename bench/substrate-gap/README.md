@@ -19,8 +19,19 @@ python3 grade.py fixtures/<name>  # grade one fixture (verbose)
 python3 grade.py fixtures/<name> --dump   # + dump ALL emitted nodes/edges (author keys against reality)
 ```
 
-Requires the `repo_graph_py` wheel importable (`maturin develop` in `py/` for a
-local build). Grading is hermetic (`GLIA_NO_PERSIST=1`, non-incremental).
+Requires the `repo_graph_py` wheel importable. **`grade.py` imports the INSTALLED
+wheel, never the working tree** — a Rust change is invisible to grading until you
+rebuild. The working recipe on this machine — there is no venv, so the `develop` flow
+does not apply, and `maturin build` alone can repackage a stale `.so`, which is what
+the `clean` is for:
+
+```bash
+cargo clean -p repo-graph-engine -p repo-graph-py
+maturin build
+pip install --force-reinstall target/wheels/<wheel>
+```
+
+Grading is hermetic (`GLIA_NO_PERSIST=1`, non-incremental).
 
 ## Fixture shape — the FROZEN key.json vocabulary
 

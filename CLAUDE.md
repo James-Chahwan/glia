@@ -1,6 +1,6 @@
 # CLAUDE.md (glia engine)
 
-This file provides guidance to Claude Code when working in the Rust workspace. After v0.4.12 this directory will be split into its own `glia` repo via `git filter-repo`; these docs travel with it.
+This file provides guidance to Claude Code when working in the Rust workspace. The split is **done** — this is its own repo (`James-Chahwan/glia`, mirrored to GitLab), not a subdirectory of repo-graph, and these docs travelled with it.
 
 **Companion docs:** `WORKFLOW.md` is the session rhythm (orient→work→record, knowledge routing across the four memory systems, ≥100-instance pre-flight, house style) — **run `/orient` at the start of every session**. `CODE_RULES.md` is the operational code conventions. This file is architecture.
 
@@ -16,6 +16,11 @@ Designed to be domain-agnostic: code is the first primitive, but other domains (
 core/               Node, Edge, QName, shared primitives (no domain assumptions)
 code-domain/        Code-specific registries: NodeKind, EdgeCategory, CellType (u32 IDs)
 graph/              Per-repo graph builder, universal resolver, cross-graph resolvers
+                    src/ is MODULES, not one lib.rs (see "Module layout" below)
+engine/             Orchestration: walk → parse → extract → build → merge → resolve.
+                    Owns every parser dependency. src/ is MODULES; lib.rs is a facade
+cli/                The `glia` binary
+doc-sources/        Tier-4 doc ingestion (Confluence REST + local snapshot)
 store/              .gmap binary format — rkyv + mmap, sharded layout
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights
@@ -32,6 +37,30 @@ py/                 pyo3 bindings — the only Rust crate published to PyPI (as 
 ```
 
 Parsers live at `parsers/<domain>/<language>/`. When v0.5.0 adds non-code domains, they nest alongside `parsers/code/`.
+
+### Module layout — `engine` and `graph` are split, not monolithic
+
+Both crates' `lib.rs` is a **facade**: `mod` declarations plus the `pub use` list that
+fixes the crate's public surface. No logic lives there. **Never trust a line number in
+older prose — `grep -rn` the symbol name.**
+
+```
+engine/src/   walk.rs     repo walk, gitignore, region graph
+              route.rs    per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache
+              extract.rs  detect_language, parse_one, parse_one_with, cross-cutting extractors
+              build.rs    generate_one*, generate_many, build_graphs_for_repo, run_all_resolvers
+              docs.rs     markdown ingest          passes.rs   doc-linker, TESTS edge
+              coverage.rs coverage_report          answers.rs  the P3 primitives
+              cache.rs    incremental parse cache
+graph/src/    types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
+              blast.rs activation.rs signal.rs
+              resolvers/  one module per mechanism (http, grpc, queue, graphql,
+                          websocket, eventbus, shared_schema, db, cron, config,
+                          iac, package, cli) + mod.rs
+```
+
+To widen something across a new module boundary use `pub(crate)`, never `pub` — the
+public API is exactly what the facade re-exports.
 
 ## Data Flow
 
@@ -69,6 +98,11 @@ See `dev-notes/glia-memory/reference_format_spec.md` and `reference_rkyv_design.
 
 Locked `u32` IDs for `NodeKind`, `EdgeCategory`, `CellType`. Qualified names use `::` as the separator. Extraction vs. resolution split is enforced across all code parsers so the graph builder sees a uniform shape.
 
+**IDs are allocated in `code-domain/src/lib.rs` and nowhere else.** Each registry has a
+`RESERVED ids` block; take the next free value there, in the same commit as the emitter,
+and never pick one inline in a parser. An id is **locked once allocated** — it is baked
+into every `.gmap` on disk, so reusing or renumbering one silently corrupts old stores.
+
 IDs ref: `dev-notes/glia-memory/reference_kind_category_ids.md` and `reference_code_domain_registries.md`.
 
 ## Activation (PPR)
@@ -82,13 +116,22 @@ Personalised PageRank with damping = 0.5 (not custom spreading activation). `Act
 3. Implement `parse()` → `ExtractedItems` with raw nodes + `UnresolvedRef`s
 4. Emit qnames with `::` separator; use the locked `NodeKind` IDs from `code-domain`
 5. Add the crate to `Cargo.toml` workspace members
-6. Add it to `rust/py/Cargo.toml` and re-export through pyo3 if it should be user-visible
+6. Add it to `engine/Cargo.toml` and wire it into `detect_language` + `parse_one_with`
+   (`engine/src/extract.rs`) — **the engine owns every parser dependency**. `py/` lists
+   no parser crates at all, so it only changes if the language needs a new pyo3 function.
 
 If the language needs routes (HTTP, gRPC, queues, etc.), the extractor belongs in `parsers/code/extractors/` as a cross-cutting module, not inside the language parser.
 
 ## Adding a New Cross-Graph Resolver
 
-Implement `CrossGraphResolver`; register it so `MergedGraph` calls it during cross-repo resolution. `HttpStackResolver` is the canonical example. Backlog of planned resolvers: GraphQL, gRPC, Queue, WebSocket, SharedSchema, EventBus, DB, CLI. See `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
+Create **`graph/src/resolvers/<name>.rs`** and implement `CrossGraphResolver` there, then
+add exactly two lines to `graph/src/resolvers/mod.rs` — `mod <name>;` and
+`pub use <name>::<Name>Resolver;`. Nothing goes in `graph/src/lib.rs`; add the resolver to
+its `pub use resolvers::{…}` list only if it must be public. Register it so `MergedGraph`
+calls it during cross-repo resolution (`run_all_resolvers` in `engine/src/build.rs`).
+`resolvers/http.rs` is the canonical example. Shipped: HTTP, gRPC, Queue, GraphQL,
+WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
+`dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
 
 ## Key Design Decisions
 
@@ -128,8 +171,11 @@ entry points: `blast_radius_by_qname`, `cross_stack_trace`, `resolve_signal_loca
   `bench/substrate-gap`), P2 coverage signaling, P3 answer-shaped primitives
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
-- **0.5.0** — rename to **glia**; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain
+- **0.5.0** — finish the **glia** rename; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain.
+  Already renamed: the repo and the `glia` binary (`cli/Cargo.toml`). Still `repo-graph-*`:
+  every library crate name and the PyPI package (`repo-graph-py`) — renaming those breaks
+  downstream pins, so it is a 0.5.0 gate, not a drive-by.
 
 ## Memory
 
-Relevant architecture/spec memories from the repo-graph project memory system are copied under `dev-notes/glia-memory/`. When this directory becomes its own repo, those files seed the new Claude memory directory there.
+Relevant architecture/spec memories from the repo-graph project memory system are copied under `dev-notes/glia-memory/`. They seeded this repo's Claude memory directory when the split landed. **Files under `dev-notes/glia-memory/` are point-in-time snapshots and are not updated in place** — several still cite the pre-split `rust/` layout and pre-wave-0 `lib.rs` line numbers. Read them as history; this file is the current architecture.

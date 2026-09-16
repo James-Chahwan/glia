@@ -39,12 +39,12 @@ The two sources overlap heavily. De-duplicated:
 | — | **GR-3** subset/prose projection | NEW P1 |
 | — | **GR-5** profile presets | NEW P2 |
 | — | **GR-6** with/without bench axis | NEW P1 (glia-side) |
-| resolver determinism fix | (rides cut A) | DONE 2026-06-06, uncommitted |
+| resolver determinism fix | (rides cut A) | SHIPPED 2026-06-06 (`e230e69`) |
 
 ## Work packages (verified scope, LOC not time)
 
-**WP-0 · resolver determinism fix** — DONE, uncommitted (`graph`+`py`+`cli`). impact/trace
-flapping → `pick_primary`. Rides the first wheel cut.
+**WP-0 · resolver determinism fix** — SHIPPED, commits `e230e69` + `efba1af`
+(`graph`+`py`+`cli`). impact/trace flapping → `pick_primary`. Rode the v0.4.15 cut.
 
 **WP-A · GR-1 node spans · P0 · ~30 LOC pyo3.** VERIFIED CHEAP: the `{file,start_line,end_line}`
 JSON already lives in the `POSITION` cell (`CellType(3)`) on every source node via
@@ -124,12 +124,19 @@ node. Cross-benefit (Engram emission + neuropil + any client). Bundle with WP-I.
    `category→weight` table for the active profile rather than per-edge. Recommend: keep internal.
 3. **`read` truncation:** wrapper caps the span; no engine change. dense_text already truncates. ✓
 
-## Build status — v0.4.15 cut (2026-06-09)
+## Build status — SUPERSEDED (see the release history)
 
-Branch `feat/v0.4.15-cut`, **not pushed/tagged** (release gate = James). 10 of 11
-WPs shipped, each its own commit + tests; full workspace suite green except the
-**pre-existing** `py_smoke_fixture::every_code_entity_has_code_and_position_cells`
-(fails identically on base `eedcd65` — confirmed, not caused by this cut).
+**Every WP in this plan shipped.** v0.4.15, v0.4.16, v0.4.17 and v0.4.18 are all
+tagged and live on PyPI; work is consolidated onto `main` (WORKFLOW.md §1) and the
+per-cut branches (`feat/v0.4.15-cut`, `feat/v0.4.16-incremental`,
+`fix/v0.4.17-cache-determinism`) are merged leftovers — deleting them is an owner
+git action, not a docs one. The plan body below is kept as the historical record of
+what each WP was; read it for scope, not for status.
+
+Historical note from the v0.4.15 cut: 10 of 11 WPs shipped, each its own commit +
+tests; the suite was green except the then-**pre-existing**
+`py_smoke_fixture::every_code_entity_has_code_and_position_cells` (failed
+identically on base `eedcd65` — not caused by that cut).
 
 Done: WP-0 resolver fix · WP-A spans · WP-I decode tables · WP-J cells ·
 WP-G Go import leak (note: needed both prefix threading AND a domain-aware

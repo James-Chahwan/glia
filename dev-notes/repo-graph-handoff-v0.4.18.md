@@ -7,6 +7,13 @@ Read it in the repo-graph session; act on repo-graph only (glia is done + releas
 **glia is now at v0.4.18** (tag pushed, wheel builds as `repo-graph-py 0.4.18`).
 Everything below is available once PyPI has 0.4.18 and repo-graph pins it.
 
+> **Successor note (2026-09-16).** This is a point-in-time handoff and is kept as
+> written — §0–§6 still describe repo-graph's work, which is unchanged. But glia did
+> **not** stay still: the 2026-09-15 review
+> (`dev-notes/review-2026-09-15-coverage-and-issues.md`) opened a multi-wave extraction
+> programme (`dev-notes/wave-plan-2026-09-16.md`). Re-check **§7 "What is NOT done"**
+> against the current git log before relying on it — items there may have shipped.
+
 ---
 
 ## 0. First, the mechanical chores (from the older backlog, still open)

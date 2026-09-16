@@ -1,6 +1,9 @@
-# Issues surfacing now — plans to address
+# [ARCHIVE · bench cycle 2.0] Issues surfacing now — SWE-bench harness, not a glia task list
 
-Live observations from cycle 2.0-gpu-14b (in flight) + codebase review.
+> **Historical.** These are SWE-bench / lens harness observations from cycle
+> 2.0-gpu-14b (see `bench/lens/`) — pool-cap, `normalize_diff`, FIM prompts.
+> **NOT open glia-engine work**, and nothing here is a parser, graph or `.gmap`
+> task. Kept for the cycle record; do not read it as a task list.
 
 ## Issue 1 — pool-cap may be too aggressive
 

@@ -106,8 +106,12 @@ just Angular.
 **Tier 3 — correctness/granularity:** Patterns F, G, H, I remainder.
 
 Each fix is proven when its eval cell flips 0→1 in `results.jsonl` (fired_on
-marker); the full matrix is the regression guard. Rebuild wheel (`maturin develop`)
-+ `run.py` + `cargo test` + byte-identical determinism gate after each.
+marker); the full matrix is the regression guard. Rebuild the wheel — `cargo clean -p
+repo-graph-engine -p repo-graph-py && maturin build && pip install --force-reinstall
+target/wheels/<wheel>`. There is no venv on this machine, so the `develop` flow does
+not apply, and the `clean` is load-bearing — see the stale-`.so` warning in the
+PROGRESS LOG below. Then `run.py` + `cargo test` +
+byte-identical determinism gate after each.
 
 ---
 
@@ -115,10 +119,24 @@ marker); the full matrix is the regression guard. Rebuild wheel (`maturin develo
 
 Every `(framework × edge-category)` cell now passes (recall > 0). Full workspace
 tests pass except the pre-existing `py_smoke` (fails identically on clean HEAD);
-byte-identical determinism gate green throughout. The only non-edge residue is 3
-`expect_nodes` cosmetics that gate no edge: react null-returning component labelled
-FUNCTION not COMPONENT, and two ruby methods labelled FUNCTION — node-kind labels,
-not blind spots (their CALLS/etc. edges all resolve).
+byte-identical determinism gate green throughout.
+
+**Re-verified 2026-09-16 on engine 0.4.18** (`python3 run.py --no-log`, 79 fixtures at
+the wave-1 mark — the count grows as the 2026-09-16 wave programme lands):
+`BLIND SPOTS (recall 0.00): 0` · `PARTIAL (0 < recall < 1): 0` · `FORBID VIOLATIONS: 0`
+· `MISSING CELLS: 0` · `GRADER ERRORS: 0`, and **zero `expect_nodes` misses** — so the
+three node-kind label residues recorded here in July are cleared. The last cell that
+sat below 1.00 (`php-laravel · CALLS` — `$greeter->greet()` after
+`$greeter = new Greeter()`) reached 1.00 in `0dcb452` "feat(php): bind local
+`$x = new Cls()` / typed-param receivers to their class"; `grade.py
+fixtures/php-laravel-calls` now reports `CALLS 2/2 (1.00)`.
+
+Two notes for anyone reading the v1 body above:
+- Its `file:line` anchors (e.g. `engine/src/lib.rs:412`) **predate the module split** —
+  `engine/src/lib.rs` and `graph/src/lib.rs` are now thin facades. Grep the symbol name.
+- `key.json`'s field vocabulary is **frozen**, and `grade.py` raises on any unknown
+  field. The single authority is `README.md` → "Fixture shape — the FROZEN key.json
+  vocabulary"; it is deliberately not restated here.
 
 Waves (all verified, determinism-green, regression-guarded by the full matrix):
 - **A client HTTP ×5** (dart/go/py/java/swift), **E INJECTS ×3** (angular/java/csharp),

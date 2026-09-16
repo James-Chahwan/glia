@@ -5,6 +5,14 @@ adversarial critic, and a 5-family × 16-language coverage inventory with a grep
 verify pass on every `none` cell. All claims below carry file:line; the critic
 refuted or corrected 9 investigator claims (noted inline). LOC not time.
 
+> **Status pointer (2026-09-16).** This document is the **source of truth for what was
+> found**; it is not edited as work lands. The execution plan derived from §1–§3 is
+> `dev-notes/wave-plan-2026-09-16.md` (index + decisions), with per-packet specs in
+> `dev-notes/wave-packets.json` and critic corrections in `dev-notes/packet-corrections.json`.
+> Read current status from the git log and `bench/substrate-gap/run.py`, not from here.
+> (Already superseded: §0's "only untracked file … (commit it)" — both dev-notes are
+> tracked as of `9f51350`.)
+
 ## 0. State
 
 - `main` = v0.4.18, released to PyPI (6 artifacts), nothing unpushed. Only untracked
