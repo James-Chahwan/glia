@@ -29,12 +29,17 @@ pub(crate) fn post_passes(merged: &mut MergedGraph) {
 /// identifiers in the markdown (`` `MyClass` ``, `` `parse_file()` ``) — matched
 /// against code-symbol names. Emits DOCUMENTS cross-edges (doc → symbol), capped
 /// per doc node to bound noise.
+///
+/// A16.3: the mention is resolved against a two-tier index rather than a bare
+/// name→id map, so a qualified mention (`` `PaymentGateway.charge` ``) binds to
+/// that member instead of whichever same-named symbol happened to hold the
+/// lowest NodeId, and an ambiguous bare name is stamped `Weak` instead of
+/// claiming `Medium` for a coin flip.
 fn link_doc_sections(merged: &mut MergedGraph) {
     use repo_graph_code_domain::cell_type;
     use repo_graph_core::CellPayload;
 
-    // Index code symbols by simple name; lowest NodeId wins (deterministic).
-    let mut symbol_by_name: HashMap<String, NodeId> = HashMap::new();
+    let mut idx = DocSymbolIndex::default();
     for g in &merged.graphs {
         for n in &g.nodes {
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
@@ -46,27 +51,22 @@ fn link_doc_sections(merged: &mut MergedGraph) {
             let Some(name) = g.nav.name_by_id.get(&n.id) else {
                 continue;
             };
-            symbol_by_name
-                .entry(name.clone())
-                .and_modify(|cur| {
-                    if n.id.0 < cur.0 {
-                        *cur = n.id;
-                    }
-                })
-                .or_insert(n.id);
+            idx.add(name, g.nav.qname_by_id.get(&n.id).map(String::as_str), n.id);
         }
     }
-    if symbol_by_name.is_empty() {
+    if idx.by_name.is_empty() {
         return;
     }
 
     const MAX_LINKS_PER_DOC: usize = 25;
     let mut new_edges: Vec<Edge> = Vec::new();
+    let (mut strong, mut medium, mut weak, mut doc_sections) = (0usize, 0usize, 0usize, 0usize);
     for g in &merged.graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
                 continue;
             }
+            doc_sections += 1;
             let Some(text) = n.cells.iter().find_map(|c| match &c.payload {
                 CellPayload::Text(s) if c.kind == cell_type::CODE => Some(s.as_str()),
                 _ => None,
@@ -74,24 +74,102 @@ fn link_doc_sections(merged: &mut MergedGraph) {
                 continue;
             };
             let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-            for ident in backtick_identifiers(text) {
-                if let Some(&sym) = symbol_by_name.get(&ident) {
-                    if sym != n.id && seen.insert(sym) {
-                        new_edges.push(Edge {
-                            from: n.id,
-                            to: sym,
-                            category: edge_category::DOCUMENTS,
-                            confidence: Confidence::Medium,
-                        });
-                        if seen.len() >= MAX_LINKS_PER_DOC {
-                            break;
-                        }
-                    }
+            // Iterate RAW spans: `identifier_from_span` would throw away the
+            // qualifier the doc author supplied, which is the whole signal.
+            for span in backtick_spans(text) {
+                let Some((sym, confidence)) = resolve_doc_mention(span, &idx) else {
+                    continue;
+                };
+                if sym == n.id || !seen.insert(sym) {
+                    continue;
+                }
+                match confidence {
+                    Confidence::Strong => strong += 1,
+                    Confidence::Medium => medium += 1,
+                    Confidence::Weak => weak += 1,
+                }
+                new_edges.push(Edge {
+                    from: n.id,
+                    to: sym,
+                    category: edge_category::DOCUMENTS,
+                    confidence,
+                });
+                if seen.len() >= MAX_LINKS_PER_DOC {
+                    break;
                 }
             }
         }
     }
+    if doc_sections > 0 {
+        eprintln!(
+            "[doclink] {} DOCUMENTS edges (strong={strong} qualified, medium={medium} unique, \
+             weak={weak} ambiguous) over {doc_sections} doc sections",
+            new_edges.len()
+        );
+    }
     merged.cross_edges.extend(new_edges);
+}
+
+/// Doc→code mention index. `by_tail2` keys the last two qname segments so a
+/// qualified mention (`Class.method`) binds to the right member; `by_name` keeps
+/// today's bare-name lookup but carries the collision count so an ambiguous hit
+/// can be graded instead of silently picking the lowest NodeId. Both maps are
+/// only ever LOOKED UP, never iterated (CODE_RULES §3).
+#[derive(Default)]
+struct DocSymbolIndex {
+    /// `name`            → (lowest id, how many symbols share it)
+    by_name: HashMap<String, (NodeId, usize)>,
+    /// `"Class::method"` → (lowest id, how many symbols share it)
+    by_tail2: HashMap<String, (NodeId, usize)>,
+}
+
+impl DocSymbolIndex {
+    fn record(map: &mut HashMap<String, (NodeId, usize)>, key: String, id: NodeId) {
+        map.entry(key)
+            .and_modify(|(cur, n)| {
+                if id.0 < cur.0 {
+                    *cur = id;
+                }
+                *n += 1;
+            })
+            .or_insert((id, 1));
+    }
+
+    fn add(&mut self, name: &str, qname: Option<&str>, id: NodeId) {
+        Self::record(&mut self.by_name, name.to_string(), id);
+        // Same identifier rules as the lookup side, so a key is never stored
+        // that `resolve_doc_mention` could not ask for.
+        if let Some(q) = qname {
+            let mut segs = q.rsplit("::");
+            if let (Some(last), Some(prev)) = (segs.next(), segs.next())
+                && is_identifier(prev)
+                && is_identifier(last)
+            {
+                Self::record(&mut self.by_tail2, format!("{prev}::{last}"), id);
+            }
+        }
+    }
+}
+
+/// (target, confidence) for one inline-code span, or `None` when it names
+/// nothing in the graph.
+fn resolve_doc_mention(span: &str, idx: &DocSymbolIndex) -> Option<(NodeId, Confidence)> {
+    let norm = span.trim().trim_end_matches("()").replace('.', "::");
+    // Tier 1 — qualified mention, e.g. `PaymentGateway.charge` / `mod::Thing`.
+    if norm.contains("::") {
+        let mut segs = norm.rsplit("::");
+        if let (Some(last), Some(prev)) = (segs.next(), segs.next())
+            && is_identifier(prev)
+            && is_identifier(last)
+            && let Some(&(id, n)) = idx.by_tail2.get(&format!("{prev}::{last}"))
+        {
+            return Some((id, if n == 1 { Confidence::Strong } else { Confidence::Medium }));
+        }
+    }
+    // Tiers 2/3 — bare tail name (the pre-A16.3 behaviour), graded by ambiguity.
+    let ident = identifier_from_span(span)?;
+    let &(id, n) = idx.by_name.get(&ident)?;
+    Some((id, if n == 1 { Confidence::Medium } else { Confidence::Weak }))
 }
 
 /// Node kinds a doc section can meaningfully document.
@@ -109,18 +187,23 @@ fn is_doc_linkable_symbol(kind: repo_graph_core::NodeKindId) -> bool {
         || kind == nk::DATA_ENTITY
 }
 
-/// Identifiers inside single-backtick inline-code spans in markdown. Triple-
+/// Contents of single-backtick inline-code spans in markdown, unreduced. Triple-
 /// backtick fenced blocks fall on even split segments and are skipped.
+fn backtick_spans(text: &str) -> Vec<&str> {
+    text.split('`')
+        .enumerate()
+        .filter_map(|(i, seg)| (i % 2 == 1).then_some(seg))
+        .collect()
+}
+
+/// Bare identifiers inside inline-code spans — the pre-A16.3 reduction, kept as
+/// the reference behaviour the tier-2/3 fallback must stay identical to.
+#[cfg(test)]
 fn backtick_identifiers(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for (i, seg) in text.split('`').enumerate() {
-        if i % 2 == 1 {
-            if let Some(id) = identifier_from_span(seg) {
-                out.push(id);
-            }
-        }
-    }
-    out
+    backtick_spans(text)
+        .into_iter()
+        .filter_map(identifier_from_span)
+        .collect()
 }
 
 /// Reduce an inline-code span to a bare identifier: drop trailing `()`, take the
@@ -128,18 +211,18 @@ fn backtick_identifiers(text: &str) -> Vec<String> {
 fn identifier_from_span(span: &str) -> Option<String> {
     let s = span.trim().trim_end_matches("()");
     let s = s.rsplit(|c| c == '.' || c == ':').next().unwrap_or(s);
-    if s.len() < 3 {
-        return None;
-    }
-    let mut chars = s.chars();
-    let first = chars.next()?;
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return None;
-    }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
-    }
-    Some(s.to_string())
+    is_identifier(s).then(|| s.to_string())
+}
+
+/// ≥3 chars, first char ascii-alpha or `_`, rest ascii-alphanumeric or `_`.
+/// Extracted verbatim from `identifier_from_span` so tier 1 can never match
+/// something the pre-A16.3 path would have rejected.
+fn is_identifier(s: &str) -> bool {
+    s.len() >= 3
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Tag the substrate-only synthetic node kinds with an `ORIGIN` cell so
@@ -418,6 +501,79 @@ fn strip_test_affixes(name: &str) -> &str {
 #[cfg(test)]
 mod passes_tests {
     use super::*;
+
+    /// A16.3 — hand-built index, no MergedGraph needed. Mirrors the doc-link
+    /// fixture: `PaymentGateway::charge` is a unique member, `charge` is a
+    /// unique bare name, `save` is shared by two classes.
+    fn fixture_index() -> DocSymbolIndex {
+        let mut idx = DocSymbolIndex::default();
+        idx.add("charge", Some("ordering::PaymentGateway::charge"), NodeId(7));
+        idx.add("get_user", Some("users::get_user"), NodeId(3));
+        idx.add("save", Some("ordering::OrderService::save"), NodeId(11));
+        idx.add("save", Some("users::UserRepo::save"), NodeId(4));
+        idx
+    }
+
+    #[test]
+    fn doc_mention_qualified_is_strong() {
+        let idx = fixture_index();
+        assert_eq!(idx.by_tail2["PaymentGateway::charge"], (NodeId(7), 1));
+        assert_eq!(
+            resolve_doc_mention("PaymentGateway.charge", &idx),
+            Some((NodeId(7), Confidence::Strong))
+        );
+        // The `::` spelling and a trailing `()` reach the same tier-1 answer.
+        assert_eq!(
+            resolve_doc_mention("PaymentGateway::charge()", &idx),
+            Some((NodeId(7), Confidence::Strong))
+        );
+    }
+
+    #[test]
+    fn doc_mention_bare_unique_is_medium() {
+        let idx = fixture_index();
+        assert_eq!(
+            resolve_doc_mention("get_user", &idx),
+            Some((NodeId(3), Confidence::Medium))
+        );
+    }
+
+    #[test]
+    fn doc_mention_bare_ambiguous_is_weak() {
+        let idx = fixture_index();
+        // Two symbols named `save`: same lowest-id target as the pre-A16.3
+        // path picked, but no longer claiming Medium for a coin flip.
+        assert_eq!(idx.by_name["save"], (NodeId(4), 2));
+        assert_eq!(
+            resolve_doc_mention("save", &idx),
+            Some((NodeId(4), Confidence::Weak))
+        );
+    }
+
+    #[test]
+    fn doc_mention_qualified_miss_falls_back_to_bare() {
+        let idx = fixture_index();
+        // No `Invoice::charge` member — tier 1 misses, tiers 2/3 answer with
+        // the unique bare `charge`.
+        assert!(!idx.by_tail2.contains_key("Invoice::charge"));
+        assert_eq!(
+            resolve_doc_mention("Invoice.charge", &idx),
+            Some((NodeId(7), Confidence::Medium))
+        );
+        // Ambiguous bare fallback still degrades to Weak.
+        assert_eq!(
+            resolve_doc_mention("Whatever.save", &idx),
+            Some((NodeId(4), Confidence::Weak))
+        );
+    }
+
+    #[test]
+    fn doc_mention_unknown_is_none() {
+        let idx = fixture_index();
+        assert_eq!(resolve_doc_mention("npm install", &idx), None);
+        assert_eq!(resolve_doc_mention("--flag", &idx), None);
+        assert_eq!(resolve_doc_mention("nothing_here", &idx), None);
+    }
 
     #[test]
     fn backtick_identifiers_extract_inline_code(){

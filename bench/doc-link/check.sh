@@ -6,8 +6,22 @@ cd "$(dirname "$0")/../.."
 cargo run -q -p repo-graph-doc-sources --bin docsync -- \
     bench/doc-link/fixture-repo bench/doc-link/pages/pages.jsonl
 
-tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
-cargo run -q -p glia-cli -- analyze bench/doc-link/fixture-repo --format json 2>/dev/null > "$tmp"
+tmp="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$tmp" "$err"' EXIT
+cargo run -q -p glia-cli -- analyze bench/doc-link/fixture-repo --format json 2>"$err" > "$tmp"
+
+# A16.3 — doc-linker precision marker. stderr used to be discarded; capture it
+# so the confidence TIERS are asserted, not just the edge set. The fixture's two
+# qualified mentions (`PaymentGateway.charge`, `OrderService.place_order`) must
+# bind by qname (strong=2), and none of its bare mentions is ambiguous (weak=0).
+marker="$(grep -F '[doclink]' "$err" || true)"
+if [ -z "$marker" ]; then
+    echo "FAIL: no [doclink] marker on stderr"; sed -n '1,40p' "$err"; exit 1
+fi
+echo "$marker"
+case "$marker" in
+    *"strong=2 qualified"*"weak=0 ambiguous"*) ;;
+    *) echo "FAIL: marker want strong=2 qualified / weak=0 ambiguous"; exit 1 ;;
+esac
 
 python3 - "$tmp" <<'PY'
 import json, sys, collections
