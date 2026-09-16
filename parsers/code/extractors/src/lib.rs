@@ -9,6 +9,7 @@ pub mod packages;
 pub mod eventbus;
 pub mod graphql;
 pub mod grpc;
+pub mod queue_topic;
 pub mod queues;
 pub mod react;
 pub mod services;

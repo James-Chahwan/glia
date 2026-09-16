@@ -144,8 +144,12 @@ pub(crate) fn apply_cross_cutting_extractors(
         }};
     }
 
-    run!(queues::extract_queue_consumer_nodes(source, module_id, repo));
-    run!(queues::extract_queue_producer_nodes(source, module_id, repo));
+    run!(queues::extract_queue_consumer_nodes(
+        source, path, module_id, repo
+    ));
+    run!(queues::extract_queue_producer_nodes(
+        source, path, module_id, repo
+    ));
     run!(cli::extract_cli_command_nodes(source, module_id, repo));
     run!(cli::extract_cli_invocation_nodes(source, module_id, repo));
     run!(websocket::extract_ws_handler_nodes(source, module_id, repo));
