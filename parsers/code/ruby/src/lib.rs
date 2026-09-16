@@ -1,4 +1,6 @@
-use repo_graph_code_domain::endpoint::{abs_path, join_path};
+use repo_graph_code_domain::endpoint::{
+    ClientEndpoint, abs_path, join_path, push_client_endpoint, url_to_path,
+};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -43,6 +45,13 @@ pub fn parse_file(
         scan_sinatra_routes(root, src, module_id, repo, &mut acc);
     }
 
+    if acc.endpoint_hits > 0 {
+        eprintln!(
+            "[ruby-http-client] {} endpoints in {}",
+            acc.endpoint_hits, file_rel_path
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -66,6 +75,10 @@ struct Acc {
     data_entities: std::collections::HashSet<NodeId>,
     /// (accessor, entity) pairs already linked (dedup repeated queries).
     access_edges: std::collections::HashSet<(NodeId, NodeId)>,
+    /// Dedups the ENDPOINT node per `(method, path)` within a file.
+    endpoint_seen: std::collections::HashSet<NodeId>,
+    /// Client HTTP call sites emitted in this file (drives the fired_on marker).
+    endpoint_hits: usize,
 }
 
 fn visit_body(
@@ -205,6 +218,8 @@ fn visit_method(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, repo, acc);
+        let hits = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
+        acc.endpoint_hits += hits;
     }
 }
 
@@ -392,6 +407,163 @@ fn try_emit_accesses_data(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
+}
+
+// ============================================================================
+// Client HTTP calls (Net::HTTP / Faraday / RestClient / HTTParty) -> ENDPOINT
+// ============================================================================
+//
+// A Rails/Sinatra service calling another service was invisible to
+// `HttpStackResolver`: ruby never emitted an ENDPOINT, so `blast_radius` and
+// `cross_stack_trace` stopped dead at the ruby boundary. We mint the SAME
+// shared ENDPOINT shape every other client-side parser emits (the helper lives
+// in code-domain, so path handling cannot drift per-language).
+//
+// PRECISION. The receiver rule here is the loosest of any language — a Faraday
+// connection is just a local (`conn.post(...)`, `@client.get(...)`), so we
+// cannot key on the receiver's name. `url_to_path` is the ONLY gate: it returns
+// None for anything that is not an absolute URL or a `/`-rooted path, which is
+// what keeps `@cache.get("user:42")` and `params.get(:id)` out. Never emit
+// before it returns Some.
+
+/// HTTP verbs usable as a ruby client method name (lower-case, as written).
+const RUBY_HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "options"];
+
+/// Constant receivers that unambiguously name an HTTP client library.
+/// `Net::HTTP` arrives as a `scope_resolution` whose text is exactly that.
+const HTTP_CLIENT_RECEIVERS: &[&str] = &["Net::HTTP", "RestClient", "HTTParty", "Faraday"];
+
+/// Map a ruby client method name onto an upper-case HTTP verb.
+/// `Net::HTTP` spells two of them differently (`get_response`, `post_form`).
+fn ruby_http_verb(method: &str) -> Option<String> {
+    match method {
+        "get_response" => Some("GET".to_string()),
+        "post_form" => Some("POST".to_string()),
+        m if RUBY_HTTP_VERBS.contains(&m) => Some(m.to_ascii_uppercase()),
+        _ => None,
+    }
+}
+
+/// Reconstruct a ruby `string` node, replacing every `#{expr}` interpolation
+/// with `${…}` so it normalises like a TS template path (`normalise_http_path`
+/// collapses any segment containing `${` to `{}`, so `/users/${…}` matches
+/// route `/users/{id}`). Returns `(text, had_interpolation)`.
+fn ruby_string_path(string_node: TsNode, src: &[u8]) -> (String, bool) {
+    let mut out = String::new();
+    let mut interpolated = false;
+    let mut cursor = string_node.walk();
+    for child in string_node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" | "escape_sequence" => out.push_str(text_of(child, src)),
+            "interpolation" => {
+                out.push_str("${…}");
+                interpolated = true;
+            }
+            _ => {}
+        }
+    }
+    (out, interpolated)
+}
+
+/// First `string` node in document order at or under `n`. Makes a wrapping
+/// `URI(...)` / `URI.parse(...)` call transparent, which is how `Net::HTTP`
+/// is always written.
+fn first_string_descendant<'a>(n: TsNode<'a>, depth: usize) -> Option<TsNode<'a>> {
+    if n.kind() == "string" {
+        return Some(n);
+    }
+    if depth == 0 {
+        return None;
+    }
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        if let Some(found) = first_string_descendant(child, depth - 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// `(VERB, raw_url, interpolated)` for a `call` node that is a client HTTP
+/// call, else None. The URL is the first string literal anywhere inside the
+/// first argument. `url_to_path` is applied by the caller.
+fn client_call_candidate(call: TsNode, src: &[u8]) -> Option<(String, String, bool)> {
+    // A receiver-less `get '/users' do … end` is a Sinatra ROUTE, not a client
+    // call — requiring a receiver keeps the two scanners from colliding.
+    let recv = call.child_by_field_name("receiver")?;
+    let recv_ok = match recv.kind() {
+        "constant" | "scope_resolution" => HTTP_CLIENT_RECEIVERS.contains(&text_of(recv, src)),
+        // A Faraday/RestClient connection held in a local or an ivar
+        // (`conn`, `@client`). Loose by necessity; `url_to_path` is the gate.
+        "identifier" | "instance_variable" => true,
+        _ => false,
+    };
+    if !recv_ok {
+        return None;
+    }
+    let method = call.child_by_field_name("method")?;
+    let verb = ruby_http_verb(text_of(method, src))?;
+    let args = call.child_by_field_name("arguments")?;
+    let first_arg = args.named_child(0)?;
+    let string_node = first_string_descendant(first_arg, 4)?;
+    let (raw, interpolated) = ruby_string_path(string_node, src);
+    Some((verb, raw, interpolated))
+}
+
+/// Outbound HTTP call sites in a method body become shared ENDPOINT nodes
+/// (+ a CALLS edge from the enclosing method) so `HttpStackResolver` can pair
+/// them with a server ROUTE. Returns the number of call sites emitted.
+fn collect_client_endpoints_in(
+    body: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut hits = 0;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call"
+            && let Some((method, raw, interpolated)) = client_call_candidate(n, src)
+            && let Some(path) = url_to_path(&raw)
+        {
+            let pos = n.start_position();
+            // An interpolated path is Medium (a segment we could not resolve);
+            // a plain literal is Strong. Same rule as swift/scala.
+            let confidence = if interpolated {
+                Confidence::Medium
+            } else {
+                Confidence::Strong
+            };
+            let ep = ClientEndpoint {
+                method,
+                path,
+                file: file_rel.to_string(),
+                line: pos.row + 1,
+                col: pos.column + 1,
+                confidence,
+            };
+            push_client_endpoint(
+                repo,
+                &ep,
+                from,
+                &mut acc.nodes,
+                &mut acc.edges,
+                &mut acc.nav,
+                &mut acc.endpoint_seen,
+            );
+            hits += 1;
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            // A nested definition is visited (and attributed) on its own.
+            if !matches!(child.kind(), "method" | "singleton_method" | "class" | "module") {
+                stack.push(child);
+            }
+        }
+    }
+    hits
 }
 
 // ============================================================================
@@ -1407,5 +1579,126 @@ end
         let fp = parse_file(source, "lib/client.rb", "lib::client", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "call without trailing block must not emit a route");
+    }
+
+    // ---- client HTTP calls -> ENDPOINT (A4.9) ----------------------------
+
+    fn endpoint_names(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn net_http_get_emits_endpoint() {
+        let source = r#"
+class ApiClient
+  def fetch_user(id)
+    Net::HTTP.get(URI("http://users-svc/api/users/#{id}"))
+  end
+end
+"#;
+        let fp = parse_file(source, "client/api_client.rb", "client::api_client", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["GET /api/users/${\u{2026}}".to_string()],
+            "host stripped, interpolation normalised"
+        );
+        let ep_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/api/users/${\u{2026}}",
+        );
+        let from_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "client::api_client::ApiClient::fetch_user",
+        );
+        assert!(
+            fp.edges.iter().any(|e| e.from == from_id
+                && e.to == ep_id
+                && e.category == edge_category::CALLS),
+            "enclosing method -> ENDPOINT CALLS edge"
+        );
+    }
+
+    #[test]
+    fn faraday_conn_get_emits_endpoint() {
+        let source = r#"
+class ApiClient
+  def list_users
+    conn = Faraday.new
+    conn.get('/api/users')
+  end
+
+  def create_user(body)
+    @client.post("/api/users", body)
+  end
+end
+"#;
+        let fp = parse_file(source, "client/api_client.rb", "client::api_client", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["GET /api/users".to_string(), "POST /api/users".to_string()],
+            "local and ivar Faraday connections both emit"
+        );
+    }
+
+    #[test]
+    fn ruby_client_calls_emit_no_route() {
+        // The ruby parser carries two ROUTE scanners (rails + sinatra). Neither
+        // may fire on a pure client file, or the graph gains a phantom server.
+        let source = r#"
+require 'net/http'
+
+class ApiClient
+  def fetch_user(id)
+    Net::HTTP.get(URI("http://users-svc/api/users/#{id}"))
+  end
+
+  def create_user(body)
+    conn = Faraday.new
+    conn.post('/api/users', body)
+  end
+end
+"#;
+        let fp = parse_file(source, "client/api_client.rb", "client::api_client", repo()).unwrap();
+        let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
+        assert!(!has_route, "a client file must not mint a ROUTE");
+        assert_eq!(endpoint_names(&fp).len(), 2);
+    }
+
+    #[test]
+    fn ruby_non_url_string_arg_is_dropped() {
+        // `url_to_path` is the only precision gate on the loose receiver rule.
+        let source = r#"
+class ApiClient
+  def cached(id)
+    @cache.get("user:#{id}")
+  end
+
+  def setting
+    config.get('database.host')
+  end
+
+  def lookup(id)
+    params.get(id)
+  end
+end
+"#;
+        let fp = parse_file(source, "client/api_client.rb", "client::api_client", repo()).unwrap();
+        assert!(
+            endpoint_names(&fp).is_empty(),
+            "non-URL string args must emit nothing, got {:?}",
+            endpoint_names(&fp)
+        );
     }
 }

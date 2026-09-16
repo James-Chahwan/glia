@@ -1,0 +1,61 @@
+{
+  "framework": "ruby-http",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/users",
+      "note": "Net::HTTP.get(URI(\"http://users-svc/api/users/#{id}\")) — host stripped by url_to_path, interpolation -> ${…}"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /api/users",
+      "note": "Faraday conn.post literal path"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/api/users",
+      "note": "Go chi route (server, control)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "fetch_user",
+      "to": "GET /api/users",
+      "category": "CALLS",
+      "note": "enclosing method -> ENDPOINT"
+    },
+    {
+      "from": "create_user",
+      "to": "POST /api/users",
+      "category": "CALLS",
+      "note": "enclosing method -> ENDPOINT"
+    },
+    {
+      "from": "POST /api/users",
+      "to": "/api/users",
+      "category": "HTTP_CALLS",
+      "note": "pairs with the Go chi route"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "max_nodes": 2,
+      "note": "only the two Go chi routes; the ruby client must not mint a phantom ROUTE"
+    },
+    {
+      "kind": "ENDPOINT",
+      "max_nodes": 2,
+      "note": "@cache.get(\"user:#{id}\") must not become an ENDPOINT"
+    }
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "ruby/http_client"
+  ]
+}
