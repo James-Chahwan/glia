@@ -7,7 +7,18 @@
 //! step, never the (cheap, global) resolve/merge step. See
 //! `dev-notes/incremental_gmap_plan.md`.
 
-use std::collections::{HashMap, HashSet};
+// BTreeMap, not HashMap: `bincode::serialize` walks the map in iteration
+// order, and a HashMap walks a per-instance RandomState, so two runs over
+// identical inputs wrote different sidecar bytes. HashSet stays — `retain_paths`
+// only needs membership, and it is never serialized.
+//
+// This is sidecar HYGIENE, not a `.gmap` determinism fix: graph build order comes
+// from the name-sorted walk (`walk::walk_source_files`) and the sorted
+// `parses_by_lang` (`build::build_graphs_for_repo`), never from this map, and
+// `engine/tests/byte_identical.rs` already held with the HashMap. What it buys is
+// "same input, same bytes", which makes the sidecar diffable and
+// content-addressable — what a future Engram `--since` diff would stand on.
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::FileParse;
@@ -27,6 +38,25 @@ use repo_graph_code_domain::FileParse;
 /// hash of every graph-shaping source, so a parser change invalidates on its own.
 pub(crate) const CACHE_VERSION: &str = repo_graph_stamp::BUILD_STAMP;
 const CACHE_FILE: &str = "parse_cache.bin";
+
+/// Staging file name `save` writes through before the atomic rename.
+///
+/// Per-pid. A fixed `parse_cache.bin.tmp` is shared by every writer, and two
+/// builds of the same repo at once — the repo-graph MCP server plus a
+/// `glia build`, a routine combination — interleave their writes on it, so the
+/// rename publishes whichever partial byte sequence won. It is self-healing (a
+/// truncated sidecar fails to deserialize and [`ParseCache::load`] returns an
+/// empty cache) but it silently throws the cache away, and it reads as a stamp
+/// problem. The rename was already atomic within the directory; the fix is only
+/// that two writers no longer share the staging path.
+///
+/// No stale-tmp sweep: a crashed build leaves a `parse_cache.bin.<pid>.tmp`
+/// behind, and sweeping `*.tmp` older than the sidecar races a concurrent
+/// writer's live staging file. The leftovers are small and live in a gitignored
+/// directory (`.gitignore` `**/.ai/repo-graph/`).
+fn tmp_name() -> String {
+    format!("{CACHE_FILE}.{}.tmp", std::process::id())
+}
 
 /// Conventional cache location, mirroring `repo_graph_store::default_gmap_dir`
 /// (`<repo>/.ai/repo-graph`). The engine is store-independent, so the literal is
@@ -78,7 +108,7 @@ pub struct ParseCache {
     /// every `.go` file parses (internal-vs-library imports, WP-G) without
     /// changing any `.go` content hash (audit 2026-06-10 #3).
     go_prefix: String,
-    entries: HashMap<String, CacheEntry>,
+    entries: BTreeMap<String, CacheEntry>,
     #[serde(skip)]
     pub stats: CacheStats,
 }
@@ -89,7 +119,7 @@ impl Default for ParseCache {
             stamp: CACHE_VERSION.to_string(),
             repo_canonical: String::new(),
             go_prefix: String::new(),
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             stats: CacheStats::default(),
         }
     }
@@ -184,15 +214,89 @@ impl ParseCache {
         }
     }
 
-    /// Persist atomically next to the `.gmap`. Best-effort: the cache is an
-    /// optimization, never load-bearing.
+    /// Persist atomically next to the `.gmap`, staging through a per-process
+    /// tmp file (see [`tmp_name`]). Best-effort: the cache is an optimization,
+    /// never load-bearing.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {
         let dir = gmap_dir(repo_path);
         std::fs::create_dir_all(&dir)?;
         let bytes = bincode::serialize(self).map_err(std::io::Error::other)?;
-        let tmp = dir.join(format!("{CACHE_FILE}.tmp"));
+        let tmp = dir.join(tmp_name());
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, dir.join(CACHE_FILE))?;
+        eprintln!(
+            "[incremental] saved {} entries (btree) via {}",
+            self.entries.len(),
+            tmp.file_name().unwrap_or_default().to_string_lossy()
+        );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cache with `n` entries inserted in a fixed order, under a fixed build
+    /// context. Every `FileParse` is `default()` (empty vecs/maps), so the only
+    /// thing that can vary between two of these is the order `entries` walks.
+    fn filled(n: usize) -> ParseCache {
+        let mut c = ParseCache::new();
+        c.validate_context("file:///repo/a13", "example.com/a13");
+        for i in 0..n {
+            c.put(format!("src/f{i:02}.rs"), i as u64, "rust", FileParse::default());
+        }
+        c
+    }
+
+    fn sidecar(dir: &Path) -> PathBuf {
+        gmap_dir(dir.to_string_lossy().as_ref()).join(CACHE_FILE)
+    }
+
+    /// Sidecar hygiene (NOT a `.gmap` determinism fix — graph order comes from
+    /// the name-sorted walk and the sorted `parses_by_lang`, never from this
+    /// map). Same input, same bytes makes the sidecar diffable and
+    /// content-addressable, which a future `--since` diff can stand on.
+    #[test]
+    fn sidecar_bytes_are_stable_for_identical_content() {
+        let a = tempfile::tempdir().expect("tempdir a");
+        let b = tempfile::tempdir().expect("tempdir b");
+        filled(32).save(a.path().to_string_lossy().as_ref()).expect("save a");
+        filled(32).save(b.path().to_string_lossy().as_ref()).expect("save b");
+        let ba = std::fs::read(sidecar(a.path())).expect("read a");
+        let bb = std::fs::read(sidecar(b.path())).expect("read b");
+        assert_eq!(
+            ba, bb,
+            "two caches with identical content serialised to different bytes — \
+             `entries` is walking a per-instance hash order"
+        );
+    }
+
+    /// Two builds of the same repo at once (the repo-graph MCP server plus a
+    /// `glia build`) must not share a staging path, or the rename publishes
+    /// whichever partial byte sequence won.
+    #[test]
+    fn tmp_file_is_per_process() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        filled(3).save(&repo).expect("save");
+
+        let dir = gmap_dir(&repo);
+        assert!(dir.join(CACHE_FILE).is_file(), "sidecar was not published");
+        assert!(
+            !dir.join(format!("{CACHE_FILE}.tmp")).exists(),
+            "a fixed-name staging file was left behind"
+        );
+
+        let name = tmp_name();
+        assert_ne!(
+            name,
+            format!("{CACHE_FILE}.tmp"),
+            "staging path is the fixed name shared by every concurrent writer"
+        );
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "staging name {name} does not carry this pid"
+        );
     }
 }
