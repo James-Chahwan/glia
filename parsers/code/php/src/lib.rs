@@ -1,4 +1,6 @@
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use std::collections::HashMap;
+use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
@@ -31,10 +33,23 @@ pub fn parse_file(
         cells: file_cells(&root, src, file_rel_path),
     });
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
-    acc.nav
-        .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.nav.record(
+        module_id,
+        module_simple,
+        module_qname,
+        node_kind::MODULE,
+        None,
+    );
 
-    visit_children(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    visit_children(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        module_id,
+        repo,
+        &mut acc,
+    );
 
     scan_laravel_routes(source, module_id, repo, &mut acc);
     scan_slim_routes(source, module_id, repo, &mut acc);
@@ -158,7 +173,8 @@ fn visit_class(
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
     });
-    acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+    acc.nav
+        .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
 
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
@@ -267,8 +283,9 @@ fn visit_function(
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
 
+    let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc);
+        collect_calls_in(body, src, id, acc, &types);
     }
 }
 
@@ -303,8 +320,9 @@ fn visit_method(
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
+    let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc);
+        collect_calls_in(body, src, id, acc, &types);
     }
 
     check_route_attrs(node, src, id, repo, acc);
@@ -617,7 +635,13 @@ fn emit_route_strong(method: &str, path: &str, handler_id: NodeId, repo: RepoId,
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
-fn emit_route_medium(method: &str, path: &str, _module_id: NodeId, repo: RepoId, acc: &mut Acc) -> NodeId {
+fn emit_route_medium(
+    method: &str,
+    path: &str,
+    _module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> NodeId {
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
@@ -687,10 +711,7 @@ fn extract_laravel_handler(after_path: &str) -> Option<CallQualifier> {
 
 fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     let text = text_of(node, src).trim().to_string();
-    let path = text
-        .trim_start_matches("use ")
-        .trim_end_matches(';')
-        .trim();
+    let path = text.trim_start_matches("use ").trim_end_matches(';').trim();
 
     if let Some(last_bs) = path.rfind('\\') {
         let module_part = &path[..last_bs];
@@ -715,7 +736,113 @@ fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     }
 }
 
-fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+/// `GLIA_PHP_DEBUG=1` turns on the `[php-local-bind]` marker, read once. Off by
+/// default: parsers run per file inside a panic-suppressed loop and must stay
+/// silent on a normal build.
+fn bind_debug_enabled() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var("GLIA_PHP_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Type names that are never a resolvable class, so never a receiver binding.
+const NON_CLASS_TYPES: &[&str] = &[
+    "string", "int", "float", "bool", "array", "mixed", "void", "callable", "iterable", "object",
+    "self", "static", "parent", "null", "never", "false", "true",
+];
+
+/// Local `$var` -> class-name bindings inside ONE function/method.
+///
+/// PHP's dominant intra-file dispatch is `$x = new Thing(); $x->m();`, and that
+/// binding is a same-file, same-scope syntactic fact — the parser can settle it
+/// exactly the way it already settles `$this->m()` as `SelfMethod`. Nothing
+/// cross-file is decided here: the call site just carries the CLASS name
+/// instead of the raw `$var` text, and the graph crate resolves it as usual.
+///
+/// Covers `$x = new Cls()` and type-hinted parameters (`f(Cls $x)`, including
+/// constructor property promotion). Nested closures / classes are skipped with
+/// the same skip set `collect_calls_in` uses, so their bindings do not leak.
+/// Last write in source order wins, so a rebinding shadows.
+fn local_receiver_types(func: TsNode, src: &[u8]) -> HashMap<String, String> {
+    let mut types: HashMap<String, String> = HashMap::new();
+    let mut stack = vec![func];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "assignment_expression" => {
+                if let (Some(lhs), Some(rhs)) = (
+                    n.child_by_field_name("left"),
+                    n.child_by_field_name("right"),
+                ) {
+                    if lhs.kind() == "variable_name" && rhs.kind() == "object_creation_expression" {
+                        if let Some(cls) = created_class_name(rhs, src) {
+                            types.insert(text_of(lhs, src).to_string(), cls);
+                        }
+                    }
+                }
+            }
+            "simple_parameter" | "property_promotion_parameter" => {
+                if let (Some(ty), Some(nm)) =
+                    (n.child_by_field_name("type"), n.child_by_field_name("name"))
+                {
+                    if let Some(cls) = class_type_name(text_of(ty, src)) {
+                        types.insert(text_of(nm, src).to_string(), cls);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = n.walk();
+        let kids: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        // Push reversed so `pop` yields source order — later rebindings win.
+        for child in kids.into_iter().rev() {
+            if !matches!(
+                child.kind(),
+                "function_definition"
+                    | "class_declaration"
+                    | "anonymous_function_creation_expression"
+            ) {
+                stack.push(child);
+            }
+        }
+    }
+    types
+}
+
+/// `new Foo(...)` / `new \App\Foo(...)` -> `Foo`. `object_creation_expression`
+/// carries no fields, so read the first named child; anything that is not a
+/// static class reference (`new $cls()`, `new class {}`) binds nothing.
+fn created_class_name(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let first = node.named_children(&mut cursor).next()?;
+    match first.kind() {
+        "name" | "qualified_name" | "relative_name" => class_type_name(text_of(first, src)),
+        _ => None,
+    }
+}
+
+/// A type / class reference's text -> its bare class name, or `None` when it is
+/// a builtin or not a single class (union, intersection, empty).
+fn class_type_name(text: &str) -> Option<String> {
+    let trimmed = text.trim().trim_start_matches('?').trim_start_matches('\\');
+    let last = trimmed.rsplit('\\').next().unwrap_or(trimmed);
+    if last.is_empty() || last.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    if !last.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None; // union/intersection/generic-ish text — not a single class
+    }
+    if NON_CLASS_TYPES.iter().any(|b| b.eq_ignore_ascii_case(last)) {
+        return None;
+    }
+    Some(last.to_string())
+}
+
+fn collect_calls_in(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    acc: &mut Acc,
+    types: &HashMap<String, String>,
+) {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         match n.kind() {
@@ -740,6 +867,21 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                     acc.calls.push(CallSite {
                         from,
                         qualifier: CallQualifier::SelfMethod(name.to_string()),
+                    });
+                } else if let Some(cls) = types.get(obj) {
+                    if bind_debug_enabled() {
+                        eprintln!("[php-local-bind] {obj} -> {cls}::{name}");
+                    }
+                    // Locally bound receiver (`$x = new Cls()` / `f(Cls $x)`):
+                    // hand the graph resolver the CLASS name, which it already
+                    // knows how to look up, instead of the `$var` text, which
+                    // can never hit `module_import_bindings`.
+                    acc.calls.push(CallSite {
+                        from,
+                        qualifier: CallQualifier::Attribute {
+                            base: cls.clone(),
+                            name: name.to_string(),
+                        },
                     });
                 } else {
                     acc.calls.push(CallSite {
@@ -774,7 +916,9 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
         for child in n.named_children(&mut cursor) {
             if !matches!(
                 child.kind(),
-                "function_definition" | "class_declaration" | "anonymous_function_creation_expression"
+                "function_definition"
+                    | "class_declaration"
+                    | "anonymous_function_creation_expression"
             ) {
                 stack.push(child);
             }
@@ -840,7 +984,13 @@ class UserService {
     private function validate(User $u): void {}
 }
 "#;
-        let fp = parse_file(source, "src/Services/UserService.php", "App::Services", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/Services/UserService.php",
+            "App::Services",
+            repo(),
+        )
+        .unwrap();
         let names: Vec<&str> = fp.nav.name_by_id.values().map(|s| s.as_str()).collect();
         assert!(names.contains(&"UserService"));
         assert!(names.contains(&"getUser"));
@@ -862,8 +1012,22 @@ enum Color {
 }
 "#;
         let fp = parse_file(source, "src/Types.php", "App", repo()).unwrap();
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::INTERFACE)
+                .count(),
+            1
+        );
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ENUM)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1116,5 +1280,75 @@ class Service {
             .filter(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(_)))
             .collect();
         assert_eq!(self_calls.len(), 1);
+    }
+
+    /// Attribute-qualified call bases, for the local-receiver tests below.
+    fn attr_bases(fp: &FileParse) -> Vec<(String, String)> {
+        fp.calls
+            .iter()
+            .filter_map(|c| match &c.qualifier {
+                CallQualifier::Attribute { base, name } => Some((base.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_new_binding_rewrites_receiver() {
+        let source = r#"<?php
+namespace App\Http;
+
+use App\Services\Greeter;
+
+class HomeController {
+    public function index() {
+        $greeter = new Greeter();
+        return $greeter->greet("world");
+    }
+}
+"#;
+        let fp = parse_file(source, "src/HomeController.php", "App::Http", repo()).unwrap();
+        let bases = attr_bases(&fp);
+        assert_eq!(
+            bases,
+            vec![("Greeter".to_string(), "greet".to_string())],
+            "`$greeter = new Greeter()` must rebase the call onto the class"
+        );
+    }
+
+    #[test]
+    fn typed_parameter_binds_receiver() {
+        let source = r#"<?php
+namespace App\Http;
+
+function f(\App\Services\Greeter $g, string $name) {
+    return $g->greet($name);
+}
+"#;
+        let fp = parse_file(source, "src/f.php", "App::Http", repo()).unwrap();
+        let bases = attr_bases(&fp);
+        assert_eq!(
+            bases,
+            vec![("Greeter".to_string(), "greet".to_string())],
+            "a class-typed parameter must bind the receiver; `string` must not"
+        );
+    }
+
+    #[test]
+    fn unbound_variable_receiver_is_unchanged() {
+        let source = r#"<?php
+class Service {
+    public function handle(): void {
+        $helper->process();
+    }
+}
+"#;
+        let fp = parse_file(source, "src/Service.php", "App", repo()).unwrap();
+        let bases = attr_bases(&fp);
+        assert_eq!(
+            bases,
+            vec![("$helper".to_string(), "process".to_string())],
+            "an unbound receiver keeps the raw `$var` fallback"
+        );
     }
 }
