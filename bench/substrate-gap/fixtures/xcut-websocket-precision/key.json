@@ -1,0 +1,16 @@
+{
+  "framework": "xcut-websocket-precision",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "WS_CLIENT", "name": "ws_client:/notifications", "note": "real path from the wss:// URL"},
+    {"kind": "WS_HANDLER", "name": "ws:ws", "note": "gorilla Upgrader; name falls back to the literal 'ws'"}
+  ],
+  "forbid": [
+    {"from": "ws_client:/notifications", "to": "ws:ws", "category": "WS_CONNECTS",
+     "note": "unconditional wildcard fan-out: present at baseline, gone after A5.6"}
+  ],
+  "mechanism": "websocket",
+  "cells": ["typescript/websocket"],
+  "note": "Precision twin of xcut-websocket-ws_connects: a client on a real path and a handler whose name fell back to the generic 'ws' must NOT pair."
+}

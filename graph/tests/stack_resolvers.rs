@@ -174,6 +174,97 @@ fn ws_resolver_links_client_to_handler() {
     assert_eq!(ws_edges[0].to, handler_id);
 }
 
+/// A5.6: the WS extractor falls back to the literal name `ws` for any handler
+/// whose path it cannot read. That name used to pair with EVERY client in the
+/// merge via an unconditional wildcard term in `ws_paths_match`.
+#[test]
+fn ws_resolver_does_not_wildcard_unparsed_handler() {
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:ws", Confidence::Medium);
+    record(&mut nav_a, handler_id, "ws", "ws:ws", node_kind::WS_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/notifications", Confidence::Medium);
+    record(&mut nav_b, client_id, "/notifications", "ws_client:/notifications", node_kind::WS_CLIENT);
+    let gb = make_graph(repo_b(), vec![client_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    WebSocketStackResolver.resolve(&mut merged);
+
+    let ws_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::WS_CONNECTS).collect();
+    assert!(ws_edges.is_empty(), "generic handler name must not fan out to unrelated clients");
+}
+
+/// `@WebSocketGateway` / `Phoenix.Channel` / `ActionCable` handlers are named
+/// `default` because they carry no path; that is not a licence to pair either.
+#[test]
+fn ws_resolver_does_not_wildcard_default_handler() {
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:default", Confidence::Medium);
+    record(&mut nav_a, handler_id, "default", "ws:default", node_kind::WS_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/notifications", Confidence::Medium);
+    record(&mut nav_b, client_id, "/notifications", "ws_client:/notifications", node_kind::WS_CLIENT);
+    let gb = make_graph(repo_b(), vec![client_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    WebSocketStackResolver.resolve(&mut merged);
+
+    assert!(
+        merged.cross_edges.iter().all(|e| e.category != edge_category::WS_CONNECTS),
+        "handler named `default` must not pair with an unrelated client path"
+    );
+}
+
+/// Suffix matching is kept, but on segment boundaries: a client mounted under a
+/// prefix still reaches the handler it actually talks to.
+#[test]
+fn ws_resolver_suffix_matches_on_segment_boundary() {
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:/chat", Confidence::Strong);
+    record(&mut nav_a, handler_id, "chat", "ws:/chat", node_kind::WS_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/api/v1/chat", Confidence::Medium);
+    record(&mut nav_b, client_id, "/api/v1/chat", "ws_client:/api/v1/chat", node_kind::WS_CLIENT);
+    let gb = make_graph(repo_b(), vec![client_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    WebSocketStackResolver.resolve(&mut merged);
+
+    let ws_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::WS_CONNECTS).collect();
+    assert_eq!(ws_edges.len(), 1);
+    assert_eq!(ws_edges[0].from, client_id);
+    assert_eq!(ws_edges[0].to, handler_id);
+}
+
+/// The old `ends_with` was byte-level, so `/news` "ended with" a handler named
+/// `ws`. Segment slicing kills that class of pairing outright.
+#[test]
+fn ws_resolver_rejects_byte_suffix() {
+    let mut nav_a = CodeNav::default();
+    let (handler_node, handler_id) = make_node(repo_a(), node_kind::WS_HANDLER, "ws:/socket", Confidence::Strong);
+    record(&mut nav_a, handler_id, "socket", "ws:/socket", node_kind::WS_HANDLER);
+    let ga = make_graph(repo_a(), vec![handler_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client_node, client_id) = make_node(repo_b(), node_kind::WS_CLIENT, "ws_client:/websocket", Confidence::Medium);
+    record(&mut nav_b, client_id, "/websocket", "ws_client:/websocket", node_kind::WS_CLIENT);
+    let gb = make_graph(repo_b(), vec![client_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    WebSocketStackResolver.resolve(&mut merged);
+
+    assert!(
+        merged.cross_edges.iter().all(|e| e.category != edge_category::WS_CONNECTS),
+        "`/websocket` byte-ends-with `socket` but is a different mount point"
+    );
+}
+
 // ============================================================================
 // EventBusResolver
 // ============================================================================
