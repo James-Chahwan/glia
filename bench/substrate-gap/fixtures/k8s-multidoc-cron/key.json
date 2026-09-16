@@ -1,0 +1,17 @@
+{
+  "framework": "k8s-multidoc-cron",
+  "language": "yaml",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CRON_JOB", "name": "cleanup", "note": "doc 1 target from its own command"},
+    {"kind": "CRON_JOB", "name": "report", "note": "doc 2 target from its own command"}
+  ],
+  "expect_edges": [
+    {"from": "cronjobs", "to": "cleanup", "category": "SCHEDULES", "note": "module -> job, doc 1"},
+    {"from": "cronjobs", "to": "report", "category": "SCHEDULES", "note": "module -> job, doc 2"}
+  ],
+  "forbid": [
+    {"kind": "CRON_JOB", "name": "server", "note": "cross-document bleed: doc 3 Deployment command must never become a CronJob target"}
+  ],
+  "note": "Multi-document k8s manifest. Whole-file line walk overwrites schedule/command across `---` boundaries, so the file yields ONE mashed node instead of one per CronJob document."
+}

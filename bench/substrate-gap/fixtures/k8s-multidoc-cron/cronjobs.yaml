@@ -1,0 +1,42 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-cleanup
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: ghcr.io/example/cleanup:1.4
+            command: ["/usr/local/bin/cleanup", "--all"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-report
+spec:
+  schedule: "0 6 * * 1"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: report
+            image: ghcr.io/example/report:2.1
+            command: ["/app/report"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/example/api:1.0
+        command: ["/app/server"]

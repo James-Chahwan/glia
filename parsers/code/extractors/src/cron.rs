@@ -56,7 +56,14 @@ pub fn extract_cron_nodes(
         jobs.extend(extract_github_actions(source, path));
     }
     if looks_like_k8s_cronjob(source) {
-        jobs.extend(extract_k8s_cronjob(source));
+        let scan = extract_k8s_cronjob(source);
+        // fired_on marker — only when at least one document really declared
+        // `kind: CronJob`, so it stays quiet on unrelated YAML that merely
+        // mentions the word.
+        if scan.cronjob_docs > 0 {
+            eprintln!("[cron] k8s docs={} jobs={}", scan.docs, scan.jobs.len());
+        }
+        jobs.extend(scan.jobs);
     }
     jobs.extend(extract_node_cron(source));
     jobs.extend(extract_celery_beat(source));
@@ -146,21 +153,81 @@ fn workflow_target_from_path(path: &str) -> String {
 }
 
 // ----------------------------------------------------------------------------
-// k8s CronJob: any YAML containing `kind: CronJob` (case-sensitive — k8s
-// kinds are PascalCase). Pull `schedule:` and a target hint from the first
-// container's `command:` / `args:` / `image:` if present.
+// k8s CronJob. A manifest file is a stream of `---`-separated documents, so
+// every document is scanned on its own: a whole-file line walk would let a
+// later document's `schedule:` / `command:` overwrite an earlier CronJob's
+// and emit one node pairing fields that never belonged together. Mirrors the
+// document split `iac::extract_k8s_documents` already does on the same files.
+// Pull `schedule:` and a target hint from the first container's `command:` /
+// `args:` / `image:` if present.
 // ----------------------------------------------------------------------------
 
+/// Cheap whole-file pre-gate, deliberately wider than the per-document check:
+/// case-insensitive so `kind: "CronJob"`, `kind:  CronJob` and the like still
+/// reach `doc_is_cronjob`. A false hit costs one `split` and is then filtered
+/// out document by document.
 fn looks_like_k8s_cronjob(source: &str) -> bool {
-    source.contains("kind: CronJob")
+    source
+        .as_bytes()
+        .windows(b"cronjob".len())
+        .any(|w| w.eq_ignore_ascii_case(b"cronjob"))
 }
 
-fn extract_k8s_cronjob(source: &str) -> Vec<CronJob> {
-    let mut out = Vec::new();
+/// Per-document kind gate, mirroring `iac::read_k8s_kind`: the first `kind:`
+/// line in the document decides, tolerating extra whitespace and quoting.
+/// Deciding on the FIRST `kind:` (rather than the first one that says
+/// `CronJob`) is what keeps a nested `kind:` inside a Deployment from
+/// promoting that document to a CronJob.
+fn doc_is_cronjob(doc: &str) -> bool {
+    for line in doc.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('-') {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("kind:") {
+            return rest.trim().trim_matches(|c| c == '"' || c == '\'') == "CronJob";
+        }
+    }
+    false
+}
+
+/// What one file's k8s scan found. `docs` / `cronjob_docs` exist for the
+/// fired_on marker; `jobs` is the extraction result.
+struct K8sScan {
+    docs: usize,
+    cronjob_docs: usize,
+    jobs: Vec<CronJob>,
+}
+
+fn extract_k8s_cronjob(source: &str) -> K8sScan {
+    let mut scan = K8sScan {
+        docs: 0,
+        cronjob_docs: 0,
+        jobs: Vec::new(),
+    };
+    for doc in source.split("\n---") {
+        let doc = doc.trim_start_matches('\n');
+        if doc.is_empty() {
+            continue;
+        }
+        scan.docs += 1;
+        if !doc_is_cronjob(doc) {
+            continue;
+        }
+        scan.cronjob_docs += 1;
+        if let Some(job) = extract_k8s_cronjob_doc(doc) {
+            scan.jobs.push(job);
+        }
+    }
+    scan
+}
+
+/// One document in, at most one `CronJob` out.
+fn extract_k8s_cronjob_doc(doc: &str) -> Option<CronJob> {
     let mut current_schedule: Option<String> = None;
     let mut current_image: Option<String> = None;
     let mut current_command: Option<String> = None;
-    for line in source.lines() {
+    for line in doc.lines() {
         // Strip both leading whitespace and a YAML list marker (`- `). k8s
         // container blocks live inside a list, so `- image: foo` and `- name:
         // bar` both arrive trimmed-but-prefixed.
@@ -186,17 +253,15 @@ fn extract_k8s_cronjob(source: &str) -> Vec<CronJob> {
             }
         }
     }
-    if let Some(schedule) = current_schedule {
-        let target = current_command
-            .or(current_image)
-            .unwrap_or_else(|| "anon".to_string());
-        out.push(CronJob {
-            schedule,
-            target,
-            source: "k8s_cronjob",
-        });
-    }
-    out
+    let schedule = current_schedule?;
+    let target = current_command
+        .or(current_image)
+        .unwrap_or_else(|| "anon".to_string());
+    Some(CronJob {
+        schedule,
+        target,
+        source: "k8s_cronjob",
+    })
 }
 
 fn image_basename(image: &str) -> String {
@@ -690,6 +755,96 @@ spec:
         let out = extract_cron_nodes(src, "k8s/poller.yaml", module_id(repo), repo);
         let qnames = cron_qnames(&out);
         assert!(qnames.contains(&"cron:*/15 * * * *:poller".to_string()));
+    }
+
+    #[test]
+    fn k8s_multidoc_emits_one_job_per_document() {
+        let repo = RepoId(1);
+        // Three documents. The trailing Deployment is the trap: before the
+        // per-document split its `command:` overwrote the last CronJob's and
+        // the file yielded ONE node `cron:0 6 * * 1:server`.
+        let src = r#"
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-cleanup
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: cleanup
+            image: ghcr.io/example/cleanup:1.4
+            command: ["/usr/local/bin/cleanup", "--all"]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-report
+spec:
+  schedule: "0 6 * * 1"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: report
+            image: ghcr.io/example/report:2.1
+            command: ["/app/report"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  template:
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/example/api:1.0
+        command: ["/app/server"]
+"#;
+        let out = extract_cron_nodes(src, "k8s/cronjobs.yaml", module_id(repo), repo);
+        let mut qnames = cron_qnames(&out);
+        qnames.sort();
+        assert_eq!(
+            qnames,
+            vec![
+                "cron:0 2 * * *:cleanup".to_string(),
+                "cron:0 6 * * 1:report".to_string(),
+            ],
+            "one job per CronJob document, no cross-document bleed"
+        );
+        assert!(
+            !qnames.iter().any(|q| q.ends_with(":server")),
+            "the Deployment's command must never become a CronJob target: {qnames:?}"
+        );
+        // Module -> job edge for each.
+        assert_eq!(out.edges.len(), 2, "one SCHEDULES edge per job");
+    }
+
+    #[test]
+    fn k8s_cronjob_kind_tolerates_quotes_and_extra_space() {
+        let repo = RepoId(1);
+        let src = r#"
+kind:   "CronJob"
+spec:
+  schedule: "30 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - image: ghcr.io/example/vacuum:latest
+"#;
+        let out = extract_cron_nodes(src, "k8s/vacuum.yaml", module_id(repo), repo);
+        let qnames = cron_qnames(&out);
+        assert!(
+            qnames.contains(&"cron:30 3 * * *:vacuum".to_string()),
+            "quoted / extra-spaced `kind:` must still gate in: {qnames:?}"
+        );
     }
 
     #[test]
