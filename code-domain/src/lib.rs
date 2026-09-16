@@ -129,6 +129,49 @@ pub mod node_kind {
     // repo `.md` docs stay flat (no space). Carries source/url/version provenance.
     pub const DOC_SPACE: NodeKindId = NodeKindId(44);
 
+    // ------------------------------------------------------------------
+    // RESERVED ids — central locked-id allocation (packet W0.3)
+    //
+    // Node-kind, edge-category and cell-type ids are allocated HERE and
+    // NOWHERE ELSE. A packet that needs a new id takes the next free one in
+    // this file, in its own commit, together with its mandatory `ALL` row —
+    // it never picks an id inside a parser, resolver or extractor. Ids are
+    // locked once allocated: they are baked into `.gmap` node ids and into
+    // every consumer's decode table, so they are never renumbered or reused.
+    //
+    // The constants below are RESERVATIONS. The id and its `ALL` row exist so
+    // that `name()` / pyo3 `kind_names()` decode correctly the moment the
+    // first emitter lands; nothing emits them yet. Owning packet per id:
+    //   45 PROJECT        — A8.4
+    //   46 MESSAGE_TYPE   — A10.5 / A12.1
+    //   47 GRPC_SERVER    — A5.3
+    //   48 RPC_PROCEDURE  — A10.9
+    //   49 RPC_CALL       — A10.9
+    // ------------------------------------------------------------------
+
+    /// RESERVED (A8.4) — a build/workspace project unit: an MSBuild `.csproj`,
+    /// a Gradle subproject, a Cargo workspace member. The anchor a repo's
+    /// modules hang off when one repo holds several independent projects.
+    pub const PROJECT: NodeKindId = NodeKindId(45);
+
+    /// RESERVED (A10.5 / A12.1) — a declared message / payload schema type
+    /// (protobuf `message`, Avro record, Thrift struct) that RPC procedures
+    /// and queue payloads reference by name.
+    pub const MESSAGE_TYPE: NodeKindId = NodeKindId(46);
+
+    /// RESERVED (A5.3) — the server-side registration that binds a service
+    /// implementation into a gRPC server. Distinct from `GRPC_SERVICE` (the
+    /// declared service) and `GRPC_CLIENT` (the calling stub).
+    pub const GRPC_SERVER: NodeKindId = NodeKindId(47);
+
+    /// RESERVED (A10.9) — a single declared remote procedure within a service
+    /// (a proto `rpc`, a tRPC procedure, a JSON-RPC method).
+    pub const RPC_PROCEDURE: NodeKindId = NodeKindId(48);
+
+    /// RESERVED (A10.9) — a call site that invokes a remote procedure, the
+    /// caller-side counterpart of `RPC_PROCEDURE`.
+    pub const RPC_CALL: NodeKindId = NodeKindId(49);
+
     /// Canonical id→name for every node kind. Single source of truth for decode
     /// tables (pyo3 `kind_names`), the CLI, and projection-text's display
     /// fallback — so no consumer reimplements a table that goes stale when a
@@ -178,6 +221,13 @@ pub mod node_kind {
         (DOC_SECTION, "DOC_SECTION"),
         (STATE_VAR, "STATE_VAR"),
         (DOC_SPACE, "DOC_SPACE"),
+        // Reserved ids (see the RESERVED block above) — no emitter yet, but
+        // present so every decode table already labels them correctly.
+        (PROJECT, "PROJECT"),
+        (MESSAGE_TYPE, "MESSAGE_TYPE"),
+        (GRPC_SERVER, "GRPC_SERVER"),
+        (RPC_PROCEDURE, "RPC_PROCEDURE"),
+        (RPC_CALL, "RPC_CALL"),
     ];
 
     /// Name for a node-kind id, or `"UNKNOWN"` if unregistered.
@@ -280,6 +330,23 @@ pub mod edge_category {
     /// Solidity `is <Interface>`. Maps to `EdgeKind::Implements`. (glia-v5 G12.5)
     pub const IMPLEMENTS: EdgeCategoryId = EdgeCategoryId(32);
 
+    // ------------------------------------------------------------------
+    // RESERVED ids — central locked-id allocation (packet W0.3). Edge
+    // categories are allocated here and nowhere else; see the matching block
+    // in `node_kind` for the rule. Owning packet per id:
+    //   33 SHARES_DATA_SOURCE — A13.3
+    //   34 RPC_CALLS          — A10.10
+    // ------------------------------------------------------------------
+
+    /// RESERVED (A13.3) — cross-repo pairing: two nodes reach the same external
+    /// data source (the same database / bucket / broker instance). The
+    /// cross-graph counterpart of intra-repo `ACCESSES_DATA`.
+    pub const SHARES_DATA_SOURCE: EdgeCategoryId = EdgeCategoryId(33);
+
+    /// RESERVED (A10.10) — call site → remote procedure. The transport-generic
+    /// counterpart of `GRPC_CALLS`, for tRPC / JSON-RPC / Thrift.
+    pub const RPC_CALLS: EdgeCategoryId = EdgeCategoryId(34);
+
     /// Canonical id→name for every edge category. Single source of truth for
     /// decode tables (pyo3 `category_names`) and the CLI. Keep in lockstep with
     /// the constants above.
@@ -316,6 +383,9 @@ pub mod edge_category {
         (DEPENDS_ON, "DEPENDS_ON"),
         (SHARES_DEPENDENCY, "SHARES_DEPENDENCY"),
         (IMPLEMENTS, "IMPLEMENTS"),
+        // Reserved ids (see the RESERVED block above) — no emitter yet.
+        (SHARES_DATA_SOURCE, "SHARES_DATA_SOURCE"),
+        (RPC_CALLS, "RPC_CALLS"),
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
@@ -356,6 +426,22 @@ pub mod cell_type {
     /// lookup; gives the encoder library context. (glia-v5 G15)
     pub const IMPORTS: CellTypeId = CellTypeId(16);
 
+    // ------------------------------------------------------------------
+    // RESERVED ids — central locked-id allocation (packet W0.3). Cell types
+    // are allocated here and nowhere else; see the matching block in
+    // `node_kind` for the rule. Owning packet per id:
+    //   17 MESSAGE_TYPE — A12.1
+    //   18 RPC_PACKAGE  — A5.1
+    // ------------------------------------------------------------------
+
+    /// RESERVED (A12.1) — the message / payload schema type a node sends or
+    /// receives, as the declared type name.
+    pub const MESSAGE_TYPE: CellTypeId = CellTypeId(17);
+
+    /// RESERVED (A5.1) — the RPC package / namespace a service declaration
+    /// lives in (a proto `package foo.bar;`).
+    pub const RPC_PACKAGE: CellTypeId = CellTypeId(18);
+
     /// Canonical id→name for every cell type. Backs the pyo3 `cell_type_names`
     /// decode table so consumers that read structured cells (WP-J) can label
     /// them without a local table. Keep in lockstep with the constants above.
@@ -376,6 +462,9 @@ pub mod cell_type {
         (VECTOR, "VECTOR"),
         (ORIGIN, "ORIGIN"),
         (IMPORTS, "IMPORTS"),
+        // Reserved ids (see the RESERVED block above) — no emitter yet.
+        (MESSAGE_TYPE, "MESSAGE_TYPE"),
+        (RPC_PACKAGE, "RPC_PACKAGE"),
     ];
 
     /// Name for a cell-type id, or `"UNKNOWN"` if unregistered.
@@ -923,5 +1012,78 @@ mod tests {
             assert_eq!(cell_type::name(*id), *n);
         }
         assert_eq!(cell_type::name(cell_type::POSITION), "POSITION");
+    }
+
+    /// W0.3 guard — `registry_ids_are_unique_and_contiguous` (fired_on marker).
+    ///
+    /// Ids are allocated centrally in this file and locked forever. Two packets
+    /// planned in parallel both reaching for "the next free id" is the exact
+    /// failure this catches: a duplicate makes `name()`'s `.iter().find()`
+    /// return whichever row comes first — a silently wrong label handed to
+    /// pyo3 `kind_names()` / `category_names()` / `cell_type_names()`.
+    ///
+    /// Each table must be exactly `1..=len` — no duplicate, no gap — so a
+    /// duplicate allocation fails twice over (the dup, and the hole it leaves).
+    /// The pinned counts must be bumped deliberately when an id is reserved.
+    #[test]
+    fn registry_ids_are_unique_and_contiguous() {
+        fn check(what: &str, ids: Vec<u32>, names: Vec<&str>, expect_len: usize) {
+            assert_eq!(
+                ids.len(),
+                expect_len,
+                "{what}: ALL length changed - bump the pinned count deliberately"
+            );
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), ids.len(), "{what}: duplicate id in ALL");
+            let expected: Vec<u32> = (1..=ids.len() as u32).collect();
+            assert_eq!(sorted, expected, "{what}: ids must be a gap-free 1..=len range");
+            let mut n = names.clone();
+            n.sort_unstable();
+            n.dedup();
+            assert_eq!(n.len(), names.len(), "{what}: duplicate name in ALL");
+        }
+
+        check(
+            "node_kind",
+            node_kind::ALL.iter().map(|(id, _)| id.0).collect(),
+            node_kind::ALL.iter().map(|(_, n)| *n).collect(),
+            49,
+        );
+        check(
+            "edge_category",
+            edge_category::ALL.iter().map(|(id, _)| id.0).collect(),
+            edge_category::ALL.iter().map(|(_, n)| *n).collect(),
+            34,
+        );
+        check(
+            "cell_type",
+            cell_type::ALL.iter().map(|(id, _)| id.0).collect(),
+            cell_type::ALL.iter().map(|(_, n)| *n).collect(),
+            18,
+        );
+    }
+
+    /// W0.3 — every reserved id decodes to its own name (the reservation is
+    /// only worth having if the decode tables already carry it).
+    #[test]
+    fn reserved_ids_decode() {
+        assert_eq!(node_kind::name(node_kind::PROJECT), "PROJECT");
+        assert_eq!(node_kind::name(node_kind::MESSAGE_TYPE), "MESSAGE_TYPE");
+        assert_eq!(node_kind::name(node_kind::GRPC_SERVER), "GRPC_SERVER");
+        assert_eq!(node_kind::name(node_kind::RPC_PROCEDURE), "RPC_PROCEDURE");
+        assert_eq!(node_kind::name(node_kind::RPC_CALL), "RPC_CALL");
+        assert_eq!(
+            edge_category::name(edge_category::SHARES_DATA_SOURCE),
+            "SHARES_DATA_SOURCE"
+        );
+        assert_eq!(edge_category::name(edge_category::RPC_CALLS), "RPC_CALLS");
+        assert_eq!(cell_type::name(cell_type::MESSAGE_TYPE), "MESSAGE_TYPE");
+        assert_eq!(cell_type::name(cell_type::RPC_PACKAGE), "RPC_PACKAGE");
+        // Reserved, not emitted: the next free ids stay UNKNOWN.
+        assert_eq!(node_kind::name(NodeKindId(50)), "UNKNOWN");
+        assert_eq!(edge_category::name(EdgeCategoryId(35)), "UNKNOWN");
+        assert_eq!(cell_type::name(CellTypeId(19)), "UNKNOWN");
     }
 }
