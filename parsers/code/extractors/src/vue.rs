@@ -8,9 +8,14 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
+use crate::react::nav_route_origin_cell;
+
 pub struct VueNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
+    /// `provenance: nav_route` ORIGIN cell.
+    pub nav_routes: usize,
 }
 
 pub fn extract_vue_nodes(
@@ -63,7 +68,10 @@ pub fn extract_vue_nodes(
         nav.record(id, &name, &qname, node_kind::COMPOSABLE, Some(module_id));
     }
 
-    // --- Vue Router routes: `{ path: '/x', component: X }`.
+    // --- Vue Router routes: `{ path: '/x', component: X }`. BROWSER
+    // navigation, not server endpoints (A3.4) — marked so the HTTP route
+    // index skips them.
+    let mut nav_routes = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path_str in scan_router_paths(source) {
         // Drop template-source expressions (`/${...}`) captured from framework
@@ -85,15 +93,23 @@ pub fn extract_vue_nodes(
             id,
             repo,
             confidence: Confidence::Medium,
-            cells: vec![Cell {
-                kind: cell_type::ROUTE_METHOD,
-                payload: CellPayload::Text("GET".to_string()),
-            }],
+            cells: vec![
+                Cell {
+                    kind: cell_type::ROUTE_METHOD,
+                    payload: CellPayload::Text("GET".to_string()),
+                },
+                nav_route_origin_cell(),
+            ],
         });
         nav.record(id, &canonical, &canonical, node_kind::ROUTE, None);
+        nav_routes += 1;
     }
 
-    VueNodes { nodes, nav }
+    VueNodes {
+        nodes,
+        nav,
+        nav_routes,
+    }
 }
 
 fn vue_component_name_from_path(path: &str) -> Option<String> {
@@ -199,7 +215,9 @@ fn first_string_literal(s: &str) -> Option<String> {
 fn take_ident(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+    {
         i += 1;
     }
     if i == 0 {
@@ -235,7 +253,13 @@ mod tests {
 
     #[test]
     fn component_from_vue_path() {
-        let r = extract_vue_nodes("", "src/components/UserCard.vue", "test", module_id(), repo());
+        let r = extract_vue_nodes(
+            "",
+            "src/components/UserCard.vue",
+            "test",
+            module_id(),
+            repo(),
+        );
         let names: Vec<&str> = r
             .nav
             .kind_by_id
@@ -249,7 +273,13 @@ mod tests {
     #[test]
     fn composable_detected() {
         let src = "export function useAuth() { return {} }";
-        let r = extract_vue_nodes(src, "src/composables/useAuth.ts", "test", module_id(), repo());
+        let r = extract_vue_nodes(
+            src,
+            "src/composables/useAuth.ts",
+            "test",
+            module_id(),
+            repo(),
+        );
         let names: Vec<&str> = r
             .nav
             .kind_by_id
@@ -281,6 +311,27 @@ createRouter({ history: createWebHistory(), routes });
         assert!(names.contains(&"GET /"));
         assert!(names.contains(&"GET /users"));
         assert!(names.contains(&"GET /users/:id"));
+        assert_eq!(r.nav_routes, 3, "A3.4: every client-router ROUTE counted");
+        // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
+        // is what `graph::resolvers::http::is_nav_route` reads to keep it out of
+        // the HTTP pairing index.
+        let route_ids: Vec<_> = r
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(route_ids.len(), 3);
+        for id in route_ids {
+            let node = r.nodes.iter().find(|n| n.id == id).expect("route node");
+            assert!(
+                node.cells.iter().any(|c| c.kind == cell_type::ORIGIN
+                    && matches!(&c.payload, CellPayload::Json(j)
+                                if j.contains("\"provenance\":\"nav_route\""))),
+                "nav route must carry the ORIGIN provenance mark"
+            );
+        }
     }
 
     #[test]

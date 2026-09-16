@@ -12,7 +12,8 @@ use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
 use crate::extract::{
-    apply_cross_cutting_extractors, detect_language, merge_nav, parse_one_with, path_to_qname,
+    ExtractStats, apply_cross_cutting_extractors, detect_language, merge_nav, parse_one_with,
+    path_to_qname,
 };
 use crate::walk::{is_dockerfile_path, is_dotenv_path};
 
@@ -42,6 +43,10 @@ pub(crate) fn parse_repo_files(
     let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut reused = 0usize;
     let mut reparsed = 0usize;
+    // A3.4 `[extract]` marker counter. Only counts files actually reparsed this
+    // build — a cache hit replays a FileParse whose ROUTE nodes already carry
+    // the mark, so the graph-side `[http]` marker is the complete figure.
+    let mut nav_routes_marked = 0usize;
 
     for (path, source) in files {
         let yaml_ext = matches!(
@@ -239,15 +244,19 @@ pub(crate) fn parse_repo_files(
                 node_kind::MODULE,
                 &path_to_qname(path),
             );
-            apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo);
+            let mut stats = ExtractStats::default();
+            apply_cross_cutting_extractors(
+                &mut fp, source, path, lang, module_id, repo, &mut stats,
+            );
             // G15: denormalize the file's external library names onto every node
             // as an IMPORTS cell (one place, all languages).
             repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
-            Ok::<_, String>(fp)
+            Ok::<_, String>((fp, stats))
         }));
         match parse_result {
-            Ok(Ok(fp)) => {
+            Ok(Ok((fp, stats))) => {
                 reparsed += 1;
+                nav_routes_marked += stats.nav_routes;
                 if let (Some(c), Some(h)) = (cache.as_deref_mut(), hash) {
                     c.put(path.clone(), h, lang, fp.clone());
                 }
@@ -280,6 +289,13 @@ pub(crate) fn parse_repo_files(
             c.stats.evicted,
             cache::CACHE_VERSION
         );
+    }
+
+    // A3.4 fired_on marker: client-router ROUTE nodes were tagged
+    // `provenance: nav_route` so the HTTP route index can skip them. Only
+    // printed when a build actually marked one.
+    if nav_routes_marked > 0 {
+        eprintln!("[extract] nav-routes marked: {nav_routes_marked}");
     }
 
     // A5.1 fired_on marker: a `.proto` is now a first-class parsed file, not a

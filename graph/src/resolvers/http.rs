@@ -72,6 +72,7 @@ fn build_route_index(
     graphs: &[RepoGraph],
 ) -> HashMap<(String, String), Vec<RouteTarget>> {
     let mut index: HashMap<(String, String), Vec<RouteTarget>> = HashMap::new();
+    let mut excluded = 0usize;
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -80,6 +81,13 @@ fn build_route_index(
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                 continue;
             };
+            // A3.4: a client-router ROUTE is a browser navigation target, not a
+            // server endpoint. It stays a node (it answers "where is /dashboard
+            // rendered?"), but it must never be an HTTP_CALLS target.
+            if is_nav_route(&n.cells) {
+                excluded += 1;
+                continue;
+            }
             let target = RouteTarget {
                 route_id: n.id,
                 confidence: n.confidence,
@@ -87,7 +95,29 @@ fn build_route_index(
             index_route_node(&mut index, qname, &n.cells, target);
         }
     }
+    // A3.4 fired_on marker. Only printed when a build actually saw one, like
+    // the `[proto]` / `[contract]` markers in the engine.
+    if excluded > 0 {
+        eprintln!("[http] nav-routes excluded from route index: {excluded}");
+    }
     index
+}
+
+/// A ROUTE node tagged `provenance: nav_route` by a client-router extractor
+/// (react-router / Angular Router / vue-router / go_router). It is a browser
+/// navigation target, not a server endpoint, so it must never be an
+/// `HTTP_CALLS` target.
+///
+/// Cheap substring test — the payload is written by us (the extractors crate's
+/// `nav_route_origin_cell`), not by user JSON, matching `extract_method_field`'s
+/// existing tight scan and keeping serde_json out of the graph crate. Both
+/// payload spellings are accepted so a future Text-payload emitter still marks.
+fn is_nav_route(cells: &[Cell]) -> bool {
+    cells.iter().any(|c| {
+        c.kind == cell_type::ORIGIN
+            && matches!(&c.payload, CellPayload::Json(j) | CellPayload::Text(j)
+                        if j.contains("\"provenance\":\"nav_route\""))
+    })
 }
 
 /// Register a ROUTE node into the (METHOD, path) index. Handles both qname

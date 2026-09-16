@@ -11,9 +11,14 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 
+use crate::react::nav_route_origin_cell;
+
 pub struct AngularNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
+    /// `provenance: nav_route` ORIGIN cell.
+    pub nav_routes: usize,
 }
 
 pub fn extract_angular_nodes(
@@ -37,6 +42,9 @@ pub fn extract_angular_nodes(
         nav.record(id, &name, &qname, kind, Some(module_id));
     }
 
+    // Angular Router entries are BROWSER navigation, not server endpoints
+    // (A3.4) — marked so the HTTP route index skips them.
+    let mut nav_routes = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in scan_angular_router_paths(source) {
         let normalized = if path.starts_with('/') {
@@ -53,15 +61,23 @@ pub fn extract_angular_nodes(
             id,
             repo,
             confidence: Confidence::Medium,
-            cells: vec![Cell {
-                kind: cell_type::ROUTE_METHOD,
-                payload: CellPayload::Text("GET".to_string()),
-            }],
+            cells: vec![
+                Cell {
+                    kind: cell_type::ROUTE_METHOD,
+                    payload: CellPayload::Text("GET".to_string()),
+                },
+                nav_route_origin_cell(),
+            ],
         });
         nav.record(id, &canonical, &canonical, node_kind::ROUTE, None);
+        nav_routes += 1;
     }
 
-    AngularNodes { nodes, nav }
+    AngularNodes {
+        nodes,
+        nav,
+        nav_routes,
+    }
 }
 
 fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
@@ -178,7 +194,9 @@ fn find_next_class_name(s: &str) -> Option<String> {
 }
 
 fn extract_class_name(line: &str) -> Option<String> {
-    let trimmed = line.trim_start_matches("export ").trim_start_matches("default ");
+    let trimmed = line
+        .trim_start_matches("export ")
+        .trim_start_matches("default ");
     let rest = trimmed.strip_prefix("class ")?;
     let name_end = rest
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
@@ -319,7 +337,10 @@ export class JwtService {}
             .filter_map(|(id, _)| r.nav.name_by_id.get(id).map(|s| s.as_str()))
             .collect();
         assert!(comps.contains(&"AppComponent"), "got components: {comps:?}");
-        assert!(comps.contains(&"ProfileComponent"), "got components: {comps:?}");
+        assert!(
+            comps.contains(&"ProfileComponent"),
+            "got components: {comps:?}"
+        );
 
         let services: Vec<&str> = r
             .nav
@@ -366,5 +387,26 @@ RouterModule.forRoot(routes);
         assert!(names.contains(&"GET /users"));
         assert!(names.contains(&"GET /users/:id"));
         assert!(names.contains(&"GET /"));
+        assert_eq!(r.nav_routes, 3, "A3.4: every client-router ROUTE counted");
+        // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
+        // is what `graph::resolvers::http::is_nav_route` reads to keep it out of
+        // the HTTP pairing index.
+        let route_ids: Vec<_> = r
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(route_ids.len(), 3);
+        for id in route_ids {
+            let node = r.nodes.iter().find(|n| n.id == id).expect("route node");
+            assert!(
+                node.cells.iter().any(|c| c.kind == cell_type::ORIGIN
+                    && matches!(&c.payload, CellPayload::Json(j)
+                                if j.contains("\"provenance\":\"nav_route\""))),
+                "nav route must carry the ORIGIN provenance mark"
+            );
+        }
     }
 }

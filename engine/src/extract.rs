@@ -114,6 +114,16 @@ pub fn parse_one_with(
     }
 }
 
+/// Per-file counters the cross-cutting extractors accumulate for the build's
+/// greppable stderr markers. An out-param rather than a return value so a new
+/// counter is one field, not another signature churn at the single call site.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ExtractStats {
+    /// A3.4: ROUTE nodes marked `provenance: nav_route` (client-router browser
+    /// navigation targets, excluded from the HTTP pairing index downstream).
+    pub nav_routes: usize,
+}
+
 pub(crate) fn apply_cross_cutting_extractors(
     fp: &mut FileParse,
     source: &str,
@@ -121,6 +131,7 @@ pub(crate) fn apply_cross_cutting_extractors(
     lang: &str,
     module_id: NodeId,
     repo: RepoId,
+    stats: &mut ExtractStats,
 ) {
     use repo_graph_code_extractors::{
         angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc, queues,
@@ -130,6 +141,17 @@ pub(crate) fn apply_cross_cutting_extractors(
     macro_rules! run {
         ($call:expr) => {{
             let out = $call;
+            fp.nodes.extend(out.nodes);
+            merge_nav(&mut fp.nav, out.nav);
+        }};
+    }
+
+    /// Like `run!` but also accumulates the extractor's own counters into
+    /// `stats` for the build markers (A3.4 `nav_routes`).
+    macro_rules! run_counted {
+        ($call:expr) => {{
+            let out = $call;
+            stats.nav_routes += out.nav_routes;
             fp.nodes.extend(out.nodes);
             merge_nav(&mut fp.nav, out.nav);
         }};
@@ -180,7 +202,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run!(react::extract_react_nodes(
+        run_counted!(react::extract_react_nodes(
             source, &module_qname, module_id, repo
         ));
     }
@@ -191,7 +213,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run!(angular::extract_angular_nodes(
+        run_counted!(angular::extract_angular_nodes(
             source, &module_qname, module_id, repo
         ));
     }
@@ -202,7 +224,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run!(vue::extract_vue_nodes(
+        run_counted!(vue::extract_vue_nodes(
             source, path, &module_qname, module_id, repo
         ));
     }

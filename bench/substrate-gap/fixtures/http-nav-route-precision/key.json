@@ -1,0 +1,15 @@
+{
+  "framework": "http-nav-route-precision",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "Deliberately legacy-only (no `cells`): this is a PRECISION twin of ts-http-fetch, not a new recall cell — typescript/http_client is already measured there. A single-repo React SPA that both navigates to /dashboard (react-router) and fetches /dashboard. The react-router ROUTE is a browser navigation target, but index_route_node's legacy `<METHOD> <path>` branch cannot tell it from a Spring/Express server route, so the same-repo fetch pairs to the app's own navigation table and HttpStackResolver emits a false HTTP_CALLS edge (a blast_radius carry edge and a weight-5.0 PPR edge). A3.4 marks client-router ROUTEs with an ORIGIN `provenance: nav_route` cell and skips them when building the route index. Both nodes must survive — only the pairing dies.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /dashboard", "note": "react-router nav route — still a node ('where is /dashboard rendered?' is a real query), just not an HTTP target"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/dashboard", "note": "the same-repo fetch"}
+  ],
+  "expect_edges": [],
+  "forbid": [
+    {"from": "endpoint:GET:/dashboard", "to": "GET /dashboard", "category": "HTTP_CALLS",
+     "note": "THE BUG: a browser navigation target is not a server endpoint; nothing in this SPA may pair. Matched on the endpoint's qname and the nav ROUTE's name, since forbid matches EXACTLY (both nodes share the display name 'GET /dashboard')."}
+  ]
+}

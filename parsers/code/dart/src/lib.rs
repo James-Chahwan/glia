@@ -678,7 +678,9 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
     while let Some(pos) = source[idx..].find(needle) {
         let start = idx + pos + needle.len();
         if let Some(path) = extract_kwarg_string(&source[start..], "path") {
-            emit_dart_route("ANY", &path, repo, acc, &mut seen);
+            // A3.4: go_router is BROWSER/app navigation, not a server
+            // endpoint — mark it so the HTTP route index skips it.
+            emit_dart_route("ANY", &path, repo, acc, &mut seen, true);
         }
         idx = start;
     }
@@ -698,7 +700,7 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 && !is_http_client_receiver(ident_before(source, dot_at))
             {
                 let verb = method.to_ascii_uppercase();
-                emit_dart_route(&verb, &path, repo, acc, &mut seen);
+                emit_dart_route(&verb, &path, repo, acc, &mut seen, false);
             }
             idx = dot_at + needle.len();
         }
@@ -761,12 +763,22 @@ fn first_string_literal_dart(s: &str) -> Option<String> {
     Some(lit.to_string())
 }
 
+/// Emit one ROUTE node. `nav` marks a *browser/app navigation* target
+/// (go_router) as opposed to a real server route (shelf): A3.4 adds an ORIGIN
+/// `provenance: nav_route` cell so the graph crate's HTTP route index skips it
+/// and a same-app `dio.get('/users')` cannot pair to the app's own navigation
+/// table. The node itself survives — only the pairing is suppressed.
+///
+/// Dart has no stats channel out of `parse_file`, so nav routes marked here are
+/// not counted in the engine's `[extract] nav-routes marked` line; the
+/// graph-side `[http] nav-routes excluded from route index` marker covers them.
 fn emit_dart_route(
     method: &str,
     path: &str,
     repo: RepoId,
     acc: &mut Acc,
     seen: &mut std::collections::HashSet<(String, String)>,
+    nav: bool,
 ) {
     let key = (method.to_string(), path.to_string());
     if !seen.insert(key) {
@@ -774,14 +786,21 @@ fn emit_dart_route(
     }
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+    let mut cells = vec![Cell {
+        kind: cell_type::ROUTE_METHOD,
+        payload: CellPayload::Text(method.to_string()),
+    }];
+    if nav {
+        cells.push(Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(r#"{"provenance":"nav_route"}"#.to_string()),
+        });
+    }
     acc.nodes.push(Node {
         id: route_id,
         repo,
         confidence: Confidence::Medium,
-        cells: vec![Cell {
-            kind: cell_type::ROUTE_METHOD,
-            payload: CellPayload::Text(method.to_string()),
-        }],
+        cells,
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);

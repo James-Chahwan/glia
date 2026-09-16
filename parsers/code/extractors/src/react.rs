@@ -12,9 +12,39 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
+/// A3.4 — the ORIGIN cell that marks a ROUTE node as a *browser navigation*
+/// target rather than a server endpoint.
+///
+/// react-router / Angular Router / vue-router all mint a ROUTE with qname
+/// `GET <path>`, which `index_route_node`'s legacy branch cannot tell apart
+/// from a Spring / Express / Rails route — so a same-repo `fetch('/dashboard')`
+/// pairs to the SPA's own navigation table and HttpStackResolver emits a false
+/// `HTTP_CALLS` edge. The node itself is legitimate ("where is /dashboard
+/// rendered?"), so we MARK it rather than dropping it; the graph crate's
+/// `is_nav_route` reads this cell and skips the node when building the HTTP
+/// route index.
+///
+/// Reuses the existing `cell_type::ORIGIN` with an additional `provenance`
+/// value — the provenance vocabulary is already open-ended (the doc pipeline
+/// writes `"provenance":"documentation"`), so no new CellType id is minted.
+///
+/// Canonical for the whole extractors crate: `angular` and `vue` import this
+/// rather than re-spelling the payload, since the graph-side matcher is a
+/// literal substring test on exactly this text.
+pub(crate) fn nav_route_origin_cell() -> Cell {
+    Cell {
+        kind: cell_type::ORIGIN,
+        payload: CellPayload::Json(r#"{"provenance":"nav_route"}"#.to_string()),
+    }
+}
+
 pub struct ReactNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
+    /// `provenance: nav_route` ORIGIN cell. Feeds the engine's
+    /// `[extract] nav-routes marked: N` marker.
+    pub nav_routes: usize,
 }
 
 pub fn extract_react_nodes(
@@ -53,6 +83,7 @@ pub fn extract_react_nodes(
     }
 
     // --- React Router routes (browser-side, GET-only by nature).
+    let mut nav_routes = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in scan_react_router_paths(source) {
         if !looks_like_url_path(&path) {
@@ -72,15 +103,23 @@ pub fn extract_react_nodes(
             id,
             repo,
             confidence: Confidence::Medium,
-            cells: vec![Cell {
-                kind: cell_type::ROUTE_METHOD,
-                payload: CellPayload::Text("GET".to_string()),
-            }],
+            cells: vec![
+                Cell {
+                    kind: cell_type::ROUTE_METHOD,
+                    payload: CellPayload::Text("GET".to_string()),
+                },
+                nav_route_origin_cell(),
+            ],
         });
         nav.record(id, &canonical, &canonical, node_kind::ROUTE, None);
+        nav_routes += 1;
     }
 
-    ReactNodes { nodes, nav }
+    ReactNodes {
+        nodes,
+        nav,
+        nav_routes,
+    }
 }
 
 fn scan_component_names(source: &str) -> Vec<String> {
@@ -178,7 +217,10 @@ fn scan_react_router_paths(source: &str) -> Vec<String> {
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("<Route") {
         let start = search_from + rel;
-        let end_gt = source[start..].find('>').map(|e| start + e).unwrap_or(source.len());
+        let end_gt = source[start..]
+            .find('>')
+            .map(|e| start + e)
+            .unwrap_or(source.len());
         let tag = &source[start..end_gt];
         if let Some(path) = extract_attr(tag, "path") {
             out.push(path);
@@ -238,7 +280,9 @@ fn first_string_literal(s: &str) -> Option<String> {
 fn take_ident(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+    {
         i += 1;
     }
     if i == 0 {
@@ -334,6 +378,27 @@ export function UserCard({ user }: Props) {
             .collect();
         assert!(names.contains(&"GET /users"));
         assert!(names.contains(&"GET /users/:id"));
+        assert_eq!(r.nav_routes, 2, "A3.4: every client-router ROUTE counted");
+        // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
+        // is what `graph::resolvers::http::is_nav_route` reads to keep it out of
+        // the HTTP pairing index.
+        let route_ids: Vec<_> = r
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(route_ids.len(), 2);
+        for id in route_ids {
+            let node = r.nodes.iter().find(|n| n.id == id).expect("route node");
+            assert!(
+                node.cells.iter().any(|c| c.kind == cell_type::ORIGIN
+                    && matches!(&c.payload, CellPayload::Json(j)
+                                if j.contains("\"provenance\":\"nav_route\""))),
+                "nav route must carry the ORIGIN provenance mark"
+            );
+        }
     }
 
     #[test]
@@ -360,8 +425,10 @@ createBrowserRouter([
     fn lowercase_function_not_component() {
         let src = "function helper() { return <div />; }";
         let r = extract_react_nodes(src, "test", module_id(), repo());
-        assert!(r.nodes.iter().all(|n| {
-            r.nav.kind_by_id.get(&n.id) != Some(&node_kind::COMPONENT)
-        }));
+        assert!(
+            r.nodes
+                .iter()
+                .all(|n| { r.nav.kind_by_id.get(&n.id) != Some(&node_kind::COMPONENT) })
+        );
     }
 }
