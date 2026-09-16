@@ -175,7 +175,7 @@ fn build_graphs_for_repo(
     // panic in non-loop code still gets the user-visible report.
     let _hook_guard = SuppressPanicHook::install();
 
-    let (parses_by_lang, proto_parses, mut parse_errors) =
+    let (parses_by_lang, mut parse_errors) =
         parse_repo_files(files, repo, go_module_prefix, cache);
 
     let mut graphs = Vec::new();
@@ -220,12 +220,6 @@ fn build_graphs_for_repo(
             Ok(g) => graphs.push(g),
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
-    }
-
-    if !proto_parses.is_empty()
-        && let Ok(g) = repo_graph_graph::build_python(repo, proto_parses)
-    {
-        graphs.push(g);
     }
 
     (graphs, parse_errors)

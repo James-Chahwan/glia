@@ -64,6 +64,30 @@ fn grpc_resolver_links_client_to_service() {
 }
 
 #[test]
+fn grpc_resolver_pairs_bare_client_to_package_qualified_service() {
+    // A5.1: the proto service qname is now package-qualified, but a client
+    // stub reconstructed from generated code only knows the bare name. The
+    // index's bare-last-segment fallback keeps the pairing alive.
+    let mut nav_a = CodeNav::default();
+    let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:user.UserService", Confidence::Strong);
+    record(&mut nav_a, svc_id, "UserService", "grpc:user.UserService", node_kind::GRPC_SERVICE);
+    let ga = make_graph(repo_a(), vec![svc_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client_node, client_id) = make_node(repo_b(), node_kind::GRPC_CLIENT, "grpc_client:UserService", Confidence::Medium);
+    record(&mut nav_b, client_id, "UserService", "grpc_client:UserService", node_kind::GRPC_CLIENT);
+    let gb = make_graph(repo_b(), vec![client_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+
+    let grpc_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::GRPC_CALLS).collect();
+    assert_eq!(grpc_edges.len(), 1, "exactly one edge — the dual key must not double-emit");
+    assert_eq!(grpc_edges[0].from, client_id);
+    assert_eq!(grpc_edges[0].to, svc_id);
+}
+
+#[test]
 fn grpc_resolver_method_level_matches_service() {
     let mut nav_a = CodeNav::default();
     let (svc_node, svc_id) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:OrderService", Confidence::Strong);

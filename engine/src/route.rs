@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
 use crate::extract::{
@@ -18,20 +18,22 @@ use crate::walk::{is_dockerfile_path, is_dotenv_path};
 
 /// The per-file half of `build_graphs_for_repo`: route every walked file to
 /// its parser or synthetic extractor and return the parses grouped by
-/// language tag, the `.proto` parses, and the per-file errors.
+/// language tag and the per-file errors. `.proto` files are no longer a
+/// separate bucket — they stash under the `"proto"` lang tag like any other
+/// synthetic parse (A5.1), so they get a MODULE node and a file position.
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
     go_module_prefix: &str,
     mut cache: Option<&mut ParseCache>,
-) -> (
-    HashMap<&'static str, Vec<FileParse>>,
-    Vec<FileParse>,
-    Vec<String>,
-) {
+) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
-    let mut proto_parses = Vec::new();
     let mut parse_errors = Vec::new();
+    // A5.1 `[proto]` marker counters.
+    let mut proto_files = 0usize;
+    let mut proto_services = 0usize;
+    let mut proto_rpcs = 0usize;
+    let mut proto_packages = 0usize;
     // WP-D incremental: track which main-parser files we saw so deleted files
     // get evicted; count reuse vs reparse for the marker.
     let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -72,6 +74,7 @@ pub(crate) fn parse_repo_files(
                     vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes],
                     vec![cron_out.edges, cfg_out.edges, iac_out.edges],
                     vec![cron_out.nav, cfg_out.nav, iac_out.nav],
+                    vec![],
                     &mut parses_by_lang,
                 );
             }
@@ -100,6 +103,7 @@ pub(crate) fn parse_repo_files(
                     vec![cfg_out.nodes, iac_out.nodes],
                     vec![cfg_out.edges, iac_out.edges],
                     vec![cfg_out.nav, iac_out.nav],
+                    vec![],
                     &mut parses_by_lang,
                 );
             }
@@ -125,6 +129,7 @@ pub(crate) fn parse_repo_files(
                     vec![pkg_out.nodes],
                     vec![pkg_out.edges],
                     vec![pkg_out.nav],
+                    vec![],
                     &mut parses_by_lang,
                 );
             }
@@ -150,6 +155,7 @@ pub(crate) fn parse_repo_files(
                     vec![cfg_out.nodes],
                     vec![cfg_out.edges],
                     vec![cfg_out.nav],
+                    vec![],
                     &mut parses_by_lang,
                 );
             }
@@ -165,15 +171,32 @@ pub(crate) fn parse_repo_files(
                 node_kind::MODULE,
                 &path_to_qname(path),
             );
-            let svc_nodes = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
-                source, module_id, repo,
+            let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
+                source, path, module_id, repo,
             );
-            let fp = FileParse {
-                nodes: svc_nodes.nodes,
-                nav: svc_nodes.nav,
-                ..Default::default()
-            };
-            proto_parses.push(fp);
+            proto_files += 1;
+            proto_services += out.service_count;
+            proto_rpcs += out.rpc_count;
+            if out.package.is_some() {
+                proto_packages += 1;
+            }
+            if !out.nodes.is_empty() {
+                // Same synthetic path as yaml / Dockerfile / manifest / dotenv:
+                // the file itself becomes a MODULE (with a POSITION cell) that
+                // parents the GRPC_SERVICE, so `locate_node` / `docs-for` can
+                // answer "where is this service declared".
+                stash_synthetic_parse(
+                    "proto",
+                    path,
+                    module_id,
+                    repo,
+                    vec![out.nodes],
+                    vec![out.edges],
+                    vec![out.nav],
+                    out.module_cells,
+                    &mut parses_by_lang,
+                );
+            }
             continue;
         }
 
@@ -246,7 +269,15 @@ pub(crate) fn parse_repo_files(
         );
     }
 
-    (parses_by_lang, proto_parses, parse_errors)
+    // A5.1 fired_on marker: a `.proto` is now a first-class parsed file, not a
+    // floating service node. Only printed when a build actually saw one.
+    if proto_files > 0 {
+        eprintln!(
+            "[proto] {proto_files} files -> {proto_services} services, {proto_rpcs} rpcs, {proto_packages} packages"
+        );
+    }
+
+    (parses_by_lang, parse_errors)
 }
 
 /// Best-effort string extraction from a panic payload returned by
@@ -271,13 +302,17 @@ fn stash_synthetic_parse(
     node_groups: Vec<Vec<Node>>,
     edge_groups: Vec<Vec<Edge>>,
     nav_groups: Vec<CodeNav>,
+    // Cells for the synthetic MODULE node itself (e.g. a `.proto`'s whole-file
+    // POSITION). Empty for the extractors that have nothing to say about the
+    // file as a whole.
+    module_cells: Vec<Cell>,
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
 ) {
     let mut nodes = vec![Node {
         id: module_id,
         repo,
         confidence: Confidence::Strong,
-        cells: vec![],
+        cells: module_cells,
     }];
     let mut edges = Vec::new();
     let mut merged_nav = CodeNav::default();

@@ -50,13 +50,21 @@ fn build_grpc_service_index(graphs: &[RepoGraph]) -> HashMap<String, Vec<Service
             }
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
             let Some(svc_name) = qname.strip_prefix("grpc:") else { continue };
-            index
-                .entry(svc_name.to_string())
-                .or_default()
-                .push(ServiceTarget {
-                    id: n.id,
-                    confidence: n.confidence,
-                });
+            let target = ServiceTarget {
+                id: n.id,
+                confidence: n.confidence,
+            };
+            index.entry(svc_name.to_string()).or_default().push(target);
+            // A5.1: proto service qnames are package-qualified
+            // (`grpc:user.UserService`), but a client stub reconstructed from
+            // generated code only ever knows the bare last segment
+            // (`grpc_client:UserService`). Index both so the pairing survives
+            // the qualification.
+            if let Some(bare) = svc_name.rsplit('.').next()
+                && bare != svc_name
+            {
+                index.entry(bare.to_string()).or_default().push(target);
+            }
         }
     }
     index

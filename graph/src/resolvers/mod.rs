@@ -51,6 +51,7 @@ pub trait CrossGraphResolver {
 
 /// Index entry for the name-keyed resolvers (gRPC services, queue topics,
 /// GraphQL resolvers, WS handlers, event handlers, CLI commands).
+#[derive(Clone, Copy)]
 struct ServiceTarget {
     id: NodeId,
     confidence: Confidence,

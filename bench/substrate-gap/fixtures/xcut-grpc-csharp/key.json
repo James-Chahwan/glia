@@ -1,0 +1,27 @@
+{
+  "framework": "xcut-grpc-csharp",
+  "language": "proto+csharp",
+  "dirs": ["server", "client"],
+  "mechanism": "grpc",
+  "cells": ["csharp/grpc"],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "helloworld", "note": "A5.1: .proto gets a MODULE node via stash_synthetic_parse"},
+    {"kind": "GRPC_SERVICE", "name": "helloworld.Greeter", "note": "A5.1: package-qualified service qname"},
+    {"kind": "METHOD", "name": "helloworld.Greeter::SayHello", "note": "A5.1: one METHOD node per rpc (qualified so it cannot match the C# override)"},
+    {"kind": "GRPC_CLIENT", "name": "grpc_client:Greeter", "note": "A5.2: data-driven needle GreeterClient( — no Service/Svc suffix"},
+    {"kind": "GRPC_SERVER", "name": "grpc_server:Greeter", "note": "A5.3: Greeter.GreeterBase server impl"}
+  ],
+  "expect_edges": [
+    {"from": "grpc:helloworld.Greeter", "to": "helloworld.Greeter::SayHello", "category": "DEFINES", "note": "A5.1: service DEFINES one METHOD per rpc"},
+    {"from": "grpc_client:Greeter", "to": "grpc:helloworld.Greeter", "category": "GRPC_CALLS", "note": "A5.2"},
+    {"from": "grpc:helloworld.Greeter", "to": "grpc_server:Greeter", "category": "HANDLED_BY", "note": "A5.3"},
+    {"from": "FetchGreeting", "to": "grpc_client:Greeter", "category": "USES", "note": "A5.8: client stub anchored to its enclosing method"},
+    {"from": "grpc_server:Greeter", "to": "GreeterService::SayHello", "category": "HANDLED_BY", "note": "A5.8: server marker anchored to the override method"}
+  ],
+  "expect_cells": [
+    {"kind": "GRPC_SERVICE", "node": "grpc:helloworld.Greeter", "cell": "POSITION", "contains": "helloworld.proto", "note": "A5.1: the service is located in the .proto, not floating"},
+    {"kind": "GRPC_SERVICE", "node": "grpc:helloworld.Greeter", "cell": "RPC_PACKAGE", "contains": "helloworld", "note": "A5.1: proto package + csharp_namespace carried on the service"},
+    {"kind": "METHOD", "node": "helloworld.Greeter::SayHello", "cell": "POSITION", "contains": "helloworld.proto", "note": "A5.1: each rpc METHOD is located at its declaration line"}
+  ],
+  "note": "The review's named gRPC fixture. The .proto lives in server/ ONLY, so the client repo must recognise a C# stub for a service named Greeter with no Service/Svc suffix and no proto of its own. A5.1 owns MODULE/GRPC_SERVICE/METHOD/POSITION/RPC_PACKAGE/DEFINES; the GRPC_CLIENT+GRPC_CALLS rows are A5.2, the GRPC_SERVER+HANDLED_BY rows A5.3, and the USES / method-anchored HANDLED_BY rows A5.8. Those read XX until their packet lands."
+}
