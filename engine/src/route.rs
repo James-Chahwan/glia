@@ -34,6 +34,9 @@ pub(crate) fn parse_repo_files(
     let mut proto_services = 0usize;
     let mut proto_rpcs = 0usize;
     let mut proto_packages = 0usize;
+    // A10.1 `[contract]` marker counters. All four arms are declared now so
+    // A10.3 (asyncapi) / A10.8 (pact) only ever increment.
+    let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
     // WP-D incremental: track which main-parser files we saw so deleted files
     // get evicted; count reuse vs reparse for the marker.
     let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -62,18 +65,28 @@ pub(crate) fn parse_repo_files(
             );
             let iac_out =
                 repo_graph_code_extractors::iac::extract_yaml(source, module_id, repo);
+            // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
+            // API surface. Non-contract yaml takes a cheap sniff-miss here.
+            let contract_out = repo_graph_code_extractors::contracts::extract_yaml_contracts(
+                source, path, module_id, repo,
+            );
+            if !contract_out.nodes.is_empty() {
+                contracts.files += 1;
+                contracts.openapi += contract_out.nodes.len();
+            }
             if !cron_out.nodes.is_empty()
                 || !cfg_out.nodes.is_empty()
                 || !iac_out.nodes.is_empty()
+                || !contract_out.nodes.is_empty()
             {
                 stash_synthetic_parse(
                     "yaml",
                     path,
                     module_id,
                     repo,
-                    vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes],
-                    vec![cron_out.edges, cfg_out.edges, iac_out.edges],
-                    vec![cron_out.nav, cfg_out.nav, iac_out.nav],
+                    vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes, contract_out.nodes],
+                    vec![cron_out.edges, cfg_out.edges, iac_out.edges, contract_out.edges],
+                    vec![cron_out.nav, cfg_out.nav, iac_out.nav, contract_out.nav],
                     vec![],
                     &mut parses_by_lang,
                 );
@@ -274,6 +287,16 @@ pub(crate) fn parse_repo_files(
     if proto_files > 0 {
         eprintln!(
             "[proto] {proto_files} files -> {proto_services} services, {proto_rpcs} rpcs, {proto_packages} packages"
+        );
+    }
+
+    // A10.1 fired_on marker: the repo's own API contract is now substrate.
+    // Only printed when a build actually saw a spec file.
+    let contract_ops = contracts.openapi + contracts.asyncapi + contracts.pact;
+    if contract_ops > 0 {
+        eprintln!(
+            "[contract] files={} ops={contract_ops} (openapi={} asyncapi={} pact={})",
+            contracts.files, contracts.openapi, contracts.asyncapi, contracts.pact
         );
     }
 

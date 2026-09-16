@@ -1,0 +1,11 @@
+{
+  "framework": "contract-openapi-yaml",
+  "language": "yaml+python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "GET /api/v1/users", "note": "OpenAPI op; servers url /api/v1 joined to path /users"},
+    {"kind": "DOC_SECTION", "name": "POST /api/v1/users", "note": "OpenAPI op"},
+    {"kind": "ROUTE", "name": "/users", "note": "positive control: flask route already extracted today"}
+  ],
+  "note": "A10.1 node half: one DOC_SECTION per OpenAPI operation, discriminated by an ORIGIN cell provenance=contract. A10.2 adds the SPECIFIES edge from the op to the ROUTE."
+}
