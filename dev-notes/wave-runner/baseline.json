@@ -1,0 +1,16 @@
+{
+  "measured_at_head": "8dfae5b",
+  "after_wave": 5,
+  "cargo_test_workspace": {"passed": 734, "failed": 0},
+  "history_passed": [481, 483, 565, 606, 652, 706, 734],
+  "run_py": {
+    "fixtures": 109,
+    "blind_spots": 3,
+    "blind_spot_detail": "all on xcut-grpc-csharp (GRPC_CALLS / HANDLED_BY / USES) plus 2 missing nodes there — DELIBERATE baselines for A5.2 / A5.3 / A5.8",
+    "partial": 0, "forbid_violations": 0, "missing_cells": 0, "grader_errors": 0
+  },
+  "matrix_py": {"full": 79, "partial": 16, "none": 12, "unknown": 373, "covered": 107, "grid": 480, "invalid_cell_declarations": 0, "check_exit": 0},
+  "test_matrix_py": "25 passed / 1 skipped / 0 failed",
+  "test_grade_py": "all passed",
+  "wheel_current_as_of_head": true
+}
