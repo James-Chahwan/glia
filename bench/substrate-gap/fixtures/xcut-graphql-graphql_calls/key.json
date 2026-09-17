@@ -8,6 +8,15 @@
     {"kind": "GRAPHQL_RESOLVER", "name": "getUser", "note": "nestjs @Query() method getUser (server)"}
   ],
   "expect_edges": [
-    {"from": "getUser", "to": "getUser", "category": "GRAPHQL_CALLS", "note": "client gql getUser -> server resolver getUser (paired by field name)"}
+    {"from": "getUser", "to": "getUser", "category": "GRAPHQL_CALLS", "note": "client gql getUser -> server resolver getUser (paired by field name)"},
+    {"from": "query::UserProfile", "to": "graphql_op:getUser", "category": "USES", "note": "A5.8: the useQuery( call that mints the operation sits inside UserProfile"},
+    {"from": "graphql_resolver:getUser", "to": "UserResolver::getUser", "category": "HANDLED_BY", "note": "A5.8: the field resolver is handled by the method it was read from"}
+  ],
+  "expect_cells": [
+    {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:getUser", "cell": "POSITION", "contains": "\"file\":\"query.ts\",\"start_line\":12,\"end_line\":12", "note": "A5.8: 0-indexed useQuery( line"},
+    {"kind": "GRAPHQL_RESOLVER", "node": "graphql_resolver:getUser", "cell": "POSITION", "contains": "\"file\":\"resolver.ts\",\"start_line\":8,\"end_line\":8", "note": "A5.8: 0-indexed `async getUser(` line"}
+  ],
+  "forbid": [
+    {"from": "query", "to": "graphql_op:getUser", "category": "CONTAINS", "note": "A5.8: the operation has an owner function, so the module fallback must not fire"}
   ]
 }

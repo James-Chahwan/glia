@@ -8,6 +8,15 @@
     {"kind": "EVENT_HANDLER", "name": "userCreated", "note": "bus.on('userCreated')"}
   ],
   "expect_edges": [
-    {"from": "userCreated", "to": "userCreated", "category": "EVENT_FLOWS", "note": "EventBusResolver pairs emitter->handler by event name"}
+    {"from": "userCreated", "to": "userCreated", "category": "EVENT_FLOWS", "note": "EventBusResolver pairs emitter->handler by event name"},
+    {"from": "publisher::createUser", "to": "event_emit:userCreated", "category": "USES", "note": "A5.8: bus.emit( sits inside createUser"},
+    {"from": "event_handle:userCreated", "to": "subscriber::registerHandlers", "category": "HANDLED_BY", "note": "A5.8: bus.on( sits inside registerHandlers (the arrow callback is not a node, so the enclosing function is the innermost owner)"}
+  ],
+  "expect_cells": [
+    {"kind": "EVENT_EMITTER", "node": "event_emit:userCreated", "cell": "POSITION", "contains": "\"file\":\"publisher.ts\",\"start_line\":6,\"end_line\":6", "note": "A5.8: 0-indexed bus.emit( line"},
+    {"kind": "EVENT_HANDLER", "node": "event_handle:userCreated", "cell": "POSITION", "contains": "\"file\":\"subscriber.ts\",\"start_line\":3,\"end_line\":3", "note": "A5.8: 0-indexed bus.on( line"}
+  ],
+  "forbid": [
+    {"from": "event_handle:userCreated", "to": "subscriber::sendWelcomeEmail", "category": "HANDLED_BY", "note": "A5.8: the owner is the function whose span holds the needle, not a callee of the callback"}
   ]
 }

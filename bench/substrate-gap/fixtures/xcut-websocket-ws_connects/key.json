@@ -12,6 +12,15 @@
     {"kind": "WS_HANDLER", "name": "ws", "note": "Go gorilla websocket.Upgrader handler"}
   ],
   "expect_edges": [
-    {"from": "/ws", "to": "ws:ws", "category": "WS_CONNECTS", "note": "WS_CLIENT -> WS_HANDLER cross-graph pairing"}
+    {"from": "/ws", "to": "ws:ws", "category": "WS_CONNECTS", "note": "WS_CLIENT -> WS_HANDLER cross-graph pairing"},
+    {"from": "chat::connectChat", "to": "ws_client:/ws", "category": "USES", "note": "A5.8: `new WebSocket(` sits inside connectChat, which USES the client"},
+    {"from": "hub", "to": "ws:ws", "category": "CONTAINS", "note": "A5.8: the needle is the package-level `var upgrader = websocket.Upgrader{`; no function encloses it, so the marker falls back to a structural edge from its module"}
+  ],
+  "expect_cells": [
+    {"kind": "WS_CLIENT", "node": "ws_client:/ws", "cell": "POSITION", "contains": "\"file\":\"chat.ts\",\"start_line\":2,\"end_line\":2", "note": "A5.8: 0-indexed `new WebSocket(` line"},
+    {"kind": "WS_HANDLER", "node": "ws:ws", "cell": "POSITION", "contains": "\"file\":\"hub.go\",\"start_line\":8,\"end_line\":8", "note": "A5.8: 0-indexed `websocket.Upgrader{` line"}
+  ],
+  "forbid": [
+    {"from": "hub::ServeWs", "to": "ws:ws", "category": "CONTAINS", "note": "A5.8: the module-fallback edge comes from the MODULE, never from a neighbouring function"}
   ]
 }

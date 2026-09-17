@@ -1,3 +1,4 @@
+pub mod anchor;
 pub mod angular;
 pub mod cli;
 pub mod config;

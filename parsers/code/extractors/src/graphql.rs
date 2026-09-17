@@ -1,9 +1,13 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
+use crate::anchor::{Anchor, line_of};
+
 pub struct GraphqlNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A5.8: the line that minted each node (see `crate::anchor`).
+    pub anchors: Vec<Anchor>,
 }
 
 const OPERATION_PATTERNS: &[&str] = &[
@@ -69,9 +73,10 @@ pub fn extract_graphql_operation_nodes(
 ) -> GraphqlNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
+    let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for line in source.lines() {
+    for (line_no, line) in source.lines().enumerate() {
         let trimmed = line.trim();
         for &pattern in OPERATION_PATTERNS {
             if trimmed.contains(pattern) {
@@ -94,13 +99,15 @@ pub fn extract_graphql_operation_nodes(
                         cells: vec![],
                     });
                     nav.record(id, &op_name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
+                    let line = u32::try_from(line_no).unwrap_or(u32::MAX);
+                    anchors.push(Anchor { node: id, line });
                 }
                 break;
             }
         }
     }
 
-    for name in extract_gql_template_operations(source) {
+    for (name, at) in extract_gql_template_operations(source) {
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
@@ -111,10 +118,11 @@ pub fn extract_graphql_operation_nodes(
                 cells: vec![],
             });
             nav.record(id, &name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
+            anchors.push(Anchor { node: id, line: line_of(source, at) });
         }
     }
 
-    GraphqlNodes { nodes, nav }
+    GraphqlNodes { nodes, nav, anchors }
 }
 
 pub fn extract_graphql_resolver_nodes(
@@ -124,13 +132,15 @@ pub fn extract_graphql_resolver_nodes(
 ) -> GraphqlNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
+    let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    let mut resolver_names: Vec<String> = Vec::new();
+    // (name, 0-indexed line the name was read from)
+    let mut resolver_names: Vec<(String, u32)> = Vec::new();
 
     // Type-level / decorator-noun extraction (unchanged): "Query", "Mutation", …
     for &pattern in RESOLVER_PATTERNS {
-        if source.contains(pattern) {
+        if let Some(idx) = source.find(pattern) {
             let resolver_name = pattern
                 .trim_start_matches('@')
                 .trim_end_matches('(')
@@ -138,7 +148,7 @@ pub fn extract_graphql_resolver_nodes(
                 .trim_end_matches("):")
                 .replace("type ", "")
                 .replace("graphene.", "");
-            resolver_names.push(resolver_name);
+            resolver_names.push((resolver_name, line_of(source, idx)));
         }
     }
 
@@ -147,7 +157,7 @@ pub fn extract_graphql_resolver_nodes(
     // name a client `gql query getUser` pairs against.
     resolver_names.extend(extract_resolver_field_names(source));
 
-    for resolver_name in resolver_names {
+    for (resolver_name, line) in resolver_names {
         if seen.insert(resolver_name.clone()) {
             let qname = format!("graphql_resolver:{resolver_name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_RESOLVER, &qname);
@@ -158,20 +168,24 @@ pub fn extract_graphql_resolver_nodes(
                 cells: vec![],
             });
             nav.record(id, &resolver_name, &qname, node_kind::GRAPHQL_RESOLVER, Some(module_id));
+            anchors.push(Anchor { node: id, line });
         }
     }
 
-    GraphqlNodes { nodes, nav }
+    GraphqlNodes { nodes, nav, anchors }
 }
 
 /// Collect resolver *field* names: the method following a `@Query()` /
 /// `@Mutation()` / `@Subscription()` / `@ResolveField()` decorator, and each
 /// field declared inside an SDL `type Query {}` / `type Mutation {}` block.
-fn extract_resolver_field_names(source: &str) -> Vec<String> {
+/// Each name carries the 0-indexed line it was read from (the method
+/// declaration line, not the decorator's).
+fn extract_resolver_field_names(source: &str) -> Vec<(String, u32)> {
     let mut names = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
 
     let mut in_sdl_type = false;
+    let line_u32 = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
 
@@ -180,7 +194,7 @@ fn extract_resolver_field_names(source: &str) -> Vec<String> {
             if trimmed.starts_with('}') {
                 in_sdl_type = false;
             } else if let Some(field) = sdl_field_name(trimmed) {
-                names.push(field);
+                names.push((field, line_u32(i)));
             }
             continue;
         }
@@ -196,13 +210,13 @@ fn extract_resolver_field_names(source: &str) -> Vec<String> {
         {
             // The method usually sits on a following line; allow same-line
             // (`@ResolveField() name() {}`) and skip stacked decorators.
-            for candidate in lines.iter().skip(i).take(4) {
+            for (j, candidate) in lines.iter().enumerate().skip(i).take(4) {
                 let t = candidate.trim();
                 if t.is_empty() || t.starts_with('@') {
                     continue;
                 }
                 if let Some(name) = method_name_from_line(t) {
-                    names.push(name);
+                    names.push((name, line_u32(j)));
                     break;
                 }
             }
@@ -266,13 +280,16 @@ fn extract_gql_operation_name(source: &str, _line: &str) -> Option<String> {
     None
 }
 
-fn extract_gql_template_operations(source: &str) -> Vec<String> {
+/// Every named operation in a `` gql` `` template, with the byte offset of
+/// its `` gql` `` tag.
+fn extract_gql_template_operations(source: &str) -> Vec<(String, usize)> {
     let mut ops = Vec::new();
     let mut search_from = 0;
     while let Some(idx) = source[search_from..].find("gql`") {
-        let abs = search_from + idx + 4;
+        let tag = search_from + idx;
+        let abs = tag + 4;
         if let Some(name) = extract_operation_from_body(&source[abs..]) {
-            ops.push(name);
+            ops.push((name, tag));
         }
         search_from = abs;
     }
@@ -396,5 +413,41 @@ mod tests {
             Some("getUser".to_string())
         );
         assert_eq!(method_name_from_line("constructor(private x: Y) {"), None);
+    }
+
+    fn anchor_line(out: &GraphqlNodes, qname: &str) -> Option<u32> {
+        let id = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)?;
+        out.anchors.iter().find(|a| a.node == id).map(|a| a.line)
+    }
+
+    #[test]
+    fn anchors_operations_at_their_minting_line() {
+        let src = "const GET_USER = gql`\n  query getUser { u }\n`;\n\nexport function P() {\n  const { data } = useQuery(GET_USER);\n}\nconst OTHER = gql`query listUsers { u }`;";
+        let out = extract_graphql_operation_nodes(src, module_id(), repo());
+        // The useQuery( line mints getUser (the file's first gql tag).
+        assert_eq!(anchor_line(&out, "graphql_op:getUser"), Some(5));
+        // A template-only operation anchors at its gql` tag.
+        assert_eq!(anchor_line(&out, "graphql_op:listUsers"), Some(7));
+        assert_eq!(out.anchors.len(), out.nodes.len(), "one anchor per node");
+    }
+
+    #[test]
+    fn anchors_resolvers_at_the_method_and_sdl_lines() {
+        let src = "@Resolver('User')\nexport class R {\n  @Query(() => User)\n  async getUser(id: string) {\n    return 1;\n  }\n}";
+        let out = extract_graphql_resolver_nodes(src, module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Resolver"), Some(0));
+
+        let sdl = "const typeDefs = `\ntype Query {\n  getUser(id: ID!): User\n  listUsers: [User]\n}\n`;";
+        let out = extract_graphql_resolver_nodes(sdl, module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(2));
+        assert_eq!(anchor_line(&out, "graphql_resolver:listUsers"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1));
     }
 }

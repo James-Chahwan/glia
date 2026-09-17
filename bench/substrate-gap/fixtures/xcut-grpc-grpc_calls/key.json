@@ -11,12 +11,15 @@
     {"kind": "MESSAGE_TYPE", "name": "user.GetUserRequest", "note": "A10.5: proto message declaration -> message:proto:user.GetUserRequest"}
   ],
   "expect_edges": [
-    {"from": "UserService", "to": "UserService", "category": "GRPC_CALLS", "note": "GrpcStackResolver pairs GRPC_CLIENT -> GRPC_SERVICE by service name"}
+    {"from": "UserService", "to": "UserService", "category": "GRPC_CALLS", "note": "GrpcStackResolver pairs GRPC_CLIENT -> GRPC_SERVICE by service name"},
+    {"from": "main::FetchUser", "to": "grpc_client:UserService", "category": "USES", "note": "A5.8: the stub is built inside FetchUser, so the function that reaches out USES it and a trace can cross into the gRPC hop"}
   ],
   "expect_cells": [
-    {"kind": "MESSAGE_TYPE", "node": "user.User", "cell": "POSITION", "contains": "\"file\":\"user.proto\",\"start_line\":13,\"end_line\":16", "note": "A10.5: 0-indexed `message User {` line through its closing brace"}
+    {"kind": "MESSAGE_TYPE", "node": "user.User", "cell": "POSITION", "contains": "\"file\":\"user.proto\",\"start_line\":13,\"end_line\":16", "note": "A10.5: 0-indexed `message User {` line through its closing brace"},
+    {"kind": "GRPC_CLIENT", "node": "grpc_client:UserService", "cell": "POSITION", "contains": "\"file\":\"main.go\",\"start_line\":17,\"end_line\":17", "note": "A5.8: a one-line span at the 0-indexed `pb.NewUserServiceClient(` line, so locate_node / glia arch can place the client"}
   ],
   "forbid": [
+    {"from": "main", "to": "grpc_client:UserService", "category": "CONTAINS", "note": "A5.8: the module fallback is for markers NO function encloses; this one has an owner"},
     {"kind": "MESSAGE_TYPE", "name": "ListUsersRequest", "note": "A10.5: referenced by `rpc ListUsers`, declared nowhere -> no node"},
     {"kind": "MESSAGE_TYPE", "name": "UserService", "note": "A10.5: a `service` block is not a message"},
     {"kind": "MESSAGE_TYPE", "name": "User", "max_nodes": 1, "note": "A10.5: one declaration, one node"}

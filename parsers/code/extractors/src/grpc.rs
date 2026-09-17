@@ -1,6 +1,8 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
+use crate::anchor::{Anchor, line_of};
+
 /// One `rpc` declaration inside a proto `service` block.
 pub struct ProtoRpc {
     pub name: String,
@@ -214,6 +216,10 @@ pub fn extract_grpc_from_proto(source: &str, from: NodeId) -> Vec<GrpcService> {
 pub struct GrpcNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A5.8: one anchor per stub construction site (see `crate::anchor`).
+    /// The engine attaches them after the data-driven pass too, so both
+    /// client passes end up located and owned.
+    pub anchors: Vec<Anchor>,
 }
 
 /// Everything one `.proto` contributes to the graph.
@@ -409,8 +415,17 @@ fn ident_start(bytes: &[u8], pos: usize) -> usize {
 /// The canonical service names the suffix-convention patterns recover from
 /// `source`, deduplicated, in emission order.
 fn suffix_pattern_names(source: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    suffix_pattern_hits(source)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// [`suffix_pattern_names`] with every construction site: each name once, in
+/// emission order, with the byte offsets of all the needles that recovered it.
+fn suffix_pattern_hits(source: &str) -> Vec<(String, Vec<usize>)> {
+    let mut names: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let bytes = source.as_bytes();
 
     for &(needle, suffix) in GRPC_CLIENT_PATTERNS {
@@ -430,17 +445,24 @@ fn suffix_pattern_names(source: &str) -> Vec<String> {
                 continue;
             }
             let canonical = format!("{prefix}{suffix}");
-            if seen.insert(canonical.clone()) {
-                names.push(canonical);
+            match slot.get(&canonical) {
+                Some(&i) => names[i].1.push(pos),
+                None => {
+                    slot.insert(canonical.clone(), names.len());
+                    names.push((canonical, vec![pos]));
+                }
             }
         }
     }
     names
 }
 
+/// Push one GRPC_CLIENT and an anchor for each of its construction `sites`
+/// (byte offsets into `source`). Both client passes go through here.
 fn push_client_node(
-    nodes: &mut Vec<Node>,
-    nav: &mut CodeNav,
+    out: &mut GrpcNodes,
+    source: &str,
+    sites: &[usize],
     name: &str,
     module_id: NodeId,
     repo: RepoId,
@@ -448,13 +470,18 @@ fn push_client_node(
 ) {
     let qname = format!("grpc_client:{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_CLIENT, &qname);
-    nodes.push(Node {
+    out.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Medium,
         cells: evidence.cloned().into_iter().collect(),
     });
-    nav.record(id, name, &qname, node_kind::GRPC_CLIENT, Some(module_id));
+    out.nav
+        .record(id, name, &qname, node_kind::GRPC_CLIENT, Some(module_id));
+    out.anchors.extend(sites.iter().map(|&at| Anchor {
+        node: id,
+        line: line_of(source, at),
+    }));
 }
 
 /// How far into a client file the package-evidence scan reads. Every binding
@@ -640,17 +667,28 @@ impl RpcPackageCell {
 /// which the resolver uses to pick one service when a bare name is declared in
 /// more than one proto package (A5.4).
 pub fn extract_grpc_client_nodes(source: &str, module_id: NodeId, repo: RepoId) -> GrpcNodes {
-    let mut nodes = Vec::new();
-    let mut nav = CodeNav::default();
-    let names = suffix_pattern_names(source);
-    if names.is_empty() {
-        return GrpcNodes { nodes, nav };
+    let mut out = GrpcNodes {
+        nodes: Vec::new(),
+        nav: CodeNav::default(),
+        anchors: Vec::new(),
+    };
+    let hits = suffix_pattern_hits(source);
+    if hits.is_empty() {
+        return out;
     }
     let evidence = client_evidence_cell(source);
-    for canonical in names {
-        push_client_node(&mut nodes, &mut nav, &canonical, module_id, repo, evidence.as_ref());
+    for (canonical, sites) in hits {
+        push_client_node(
+            &mut out,
+            source,
+            &sites,
+            &canonical,
+            module_id,
+            repo,
+            evidence.as_ref(),
+        );
     }
-    GrpcNodes { nodes, nav }
+    out
 }
 
 /// One gRPC service a `.proto` in the build declares: the key the data-driven
@@ -770,10 +808,13 @@ pub fn extract_known_grpc_client_nodes(
     repo: RepoId,
     known: &[ProtoServiceRef],
 ) -> GrpcNodes {
-    let mut nodes = Vec::new();
-    let mut nav = CodeNav::default();
+    let mut out = GrpcNodes {
+        nodes: Vec::new(),
+        nav: CodeNav::default(),
+        anchors: Vec::new(),
+    };
     if known.is_empty() || !file_has_grpc_context(source) {
-        return GrpcNodes { nodes, nav };
+        return out;
     }
     // The fallback's names count as already emitted: one node per client.
     let mut seen: std::collections::HashSet<String> =
@@ -795,7 +836,9 @@ pub fn extract_known_grpc_client_nodes(
         if seen.contains(name) {
             continue;
         }
-        let hit = CLIENT_SUFFIXES.iter().any(|suffix| {
+        // Every construction site of this service's stub, in offset order.
+        let mut sites: Vec<usize> = Vec::new();
+        for suffix in CLIENT_SUFFIXES {
             let needle = format!("{name}{suffix}");
             let mut search_from = 0;
             while let Some(rel) = source[search_from..].find(&needle) {
@@ -803,18 +846,19 @@ pub fn extract_known_grpc_client_nodes(
                 search_from = pos + needle.len();
                 let prefix = &source[ident_start(bytes, pos)..pos];
                 if prefix.is_empty() || prefix == "New" {
-                    return true;
+                    sites.push(pos);
                 }
             }
-            false
-        });
-        if hit {
+        }
+        if !sites.is_empty() {
+            sites.sort_unstable();
+            sites.dedup();
             seen.insert(name.to_string());
             let cell = evidence.get_or_insert_with(|| client_evidence_cell(source));
-            push_client_node(&mut nodes, &mut nav, name, module_id, repo, cell.as_ref());
+            push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
         }
     }
-    GrpcNodes { nodes, nav }
+    out
 }
 
 #[cfg(test)]
@@ -1042,6 +1086,28 @@ let db = makeDbClient(uri);
         assert_eq!(out.nav.parent_of[&id], module_id());
         // The suffix fallback alone is blind to it — that is the gap.
         assert!(extract_grpc_client_nodes(source, module_id(), repo()).nodes.is_empty());
+    }
+
+    #[test]
+    fn both_client_passes_anchor_every_construction_site() {
+        // Suffix pass: two stubs of one service in two functions.
+        let go = "import \"google.golang.org/grpc\"\n\nfunc A() {\n\tc := pb.NewUserServiceClient(conn)\n}\n\nfunc B() {\n\tc := pb.NewUserServiceClient(conn)\n}\n";
+        let out = extract_grpc_client_nodes(go, module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
+        let id = out.nodes[0].id;
+        assert_eq!(
+            out.anchors,
+            vec![Anchor { node: id, line: 3 }, Anchor { node: id, line: 7 }]
+        );
+
+        // Data-driven pass: the C# fixture shape, one site.
+        let cs = "using Grpc.Net.Client;\nclass H {\n  void F() {\n    var c = new Greeter.GreeterClient(ch);\n  }\n}";
+        let out = extract_known_grpc_client_nodes(cs, module_id(), repo(), &[svc("Greeter")]);
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+
+        // No client, no anchor.
+        let none = extract_grpc_client_nodes("package main\n", module_id(), repo());
+        assert!(none.nodes.is_empty() && none.anchors.is_empty());
     }
 
     #[test]

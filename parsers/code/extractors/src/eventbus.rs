@@ -1,9 +1,15 @@
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
+use crate::anchor::{Anchor, line_of};
+
 pub struct EventNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A5.8: where each node's needle fired (see `crate::anchor`). The
+    /// type-keyed needles anchor every site; the string-keyed needles anchor
+    /// the one site that minted the node.
+    pub anchors: Vec<Anchor>,
 }
 
 /// (needle, extract_name, broker_ambiguous).
@@ -81,6 +87,8 @@ const QUEUE_OWNED_PUBLISH: &[&str] = &[
 
 /// Push one event node, deduplicated on the event name so a file matched by
 /// both the type-keyed and the string-keyed pass emits one node, not two.
+/// Returns the node's id whether or not this call minted it (the id is a
+/// function of kind + qname), so a later site of the same event can anchor.
 #[allow(clippy::too_many_arguments)]
 fn push_event_node(
     nodes: &mut Vec<Node>,
@@ -92,12 +100,12 @@ fn push_event_node(
     confidence: Confidence,
     module_id: NodeId,
     repo: RepoId,
-) {
-    if !seen.insert(event_name.to_string()) {
-        return;
-    }
+) -> (NodeId, bool) {
     let qname = format!("{prefix}{event_name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
+    if !seen.insert(event_name.to_string()) {
+        return (id, false);
+    }
     nodes.push(Node {
         id,
         repo,
@@ -105,18 +113,20 @@ fn push_event_node(
         cells: vec![],
     });
     nav.record(id, event_name, &qname, kind, Some(module_id));
+    (id, true)
 }
 
 pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
+    let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     // Type-keyed FIRST: it is stronger evidence (a real type name, not a
     // framework tag), so when both passes see the same event the Medium
     // confidence is the one that lands.
-    for name in scan_type_needles(source, TYPE_EMITTER_NEEDLES.iter().map(|n| (*n, None))) {
-        push_event_node(
+    for (name, at) in scan_type_needles(source, TYPE_EMITTER_NEEDLES.iter().map(|n| (*n, None))) {
+        let (id, _) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
@@ -127,6 +137,7 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
             module_id,
             repo,
         );
+        anchors.push(Anchor { node: id, line: line_of(source, at) });
     }
 
     let mut broker = BrokerGate::default();
@@ -140,7 +151,7 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
             continue;
         }
 
-        push_event_node(
+        let (id, minted) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
@@ -151,18 +162,22 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
             module_id,
             repo,
         );
+        if minted {
+            anchors.push(Anchor { node: id, line: line_of(source, idx) });
+        }
     }
 
-    EventNodes { nodes, nav }
+    EventNodes { nodes, nav, anchors }
 }
 
 pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
+    let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    for name in scan_type_needles(source, TYPE_HANDLER_NEEDLES.iter().copied()) {
-        push_event_node(
+    for (name, at) in scan_type_needles(source, TYPE_HANDLER_NEEDLES.iter().copied()) {
+        let (id, _) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
@@ -173,6 +188,7 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
             module_id,
             repo,
         );
+        anchors.push(Anchor { node: id, line: line_of(source, at) });
     }
 
     let mut broker = BrokerGate::default();
@@ -186,7 +202,7 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
             continue;
         }
 
-        push_event_node(
+        let (id, minted) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
@@ -197,9 +213,12 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
             module_id,
             repo,
         );
+        if minted {
+            anchors.push(Anchor { node: id, line: line_of(source, idx) });
+        }
     }
 
-    EventNodes { nodes, nav }
+    EventNodes { nodes, nav, anchors }
 }
 
 /// The event a string-keyed needle names: the quoted literal after it, else
@@ -276,18 +295,20 @@ fn queue_owned_publish(source: &str, at: usize) -> bool {
         .any(|owned| source[..end].ends_with(owned))
 }
 
-/// Every occurrence of every needle, in needle order. The string-keyed path
-/// calls `find` ONCE per needle, so a file publishing three event types
-/// contributed one node; the type-keyed pass walks the whole file.
+/// Every occurrence of every needle, in needle order, with the byte offset of
+/// the needle. The string-keyed path calls `find` ONCE per needle, so a file
+/// publishing three event types contributed one node; the type-keyed pass
+/// walks the whole file.
 fn scan_type_needles<'a>(
     source: &str,
     needles: impl Iterator<Item = (&'a str, Option<char>)>,
-) -> Vec<String> {
+) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for (needle, close) in needles {
         let mut from = 0usize;
         while let Some(rel) = source[from..].find(needle) {
-            let at = from + rel + needle.len();
+            let site = from + rel;
+            let at = site + needle.len();
             let token = match close {
                 Some(c) => extract_type_token(&source[at..], Some(c)),
                 // A bracketed needle bounds its own token; a bare annotation
@@ -296,7 +317,7 @@ fn scan_type_needles<'a>(
                 None => extract_type_token(&source[at..], None),
             };
             if let Some(token) = token {
-                out.push(token);
+                out.push((token, site));
             }
             from = at;
         }
@@ -647,5 +668,28 @@ mod tests {
             ),
             vec!["event_emit:OrderPlaced"]
         );
+    }
+
+    #[test]
+    fn anchors_type_sites_all_and_string_sites_once() {
+        // Two type-keyed publishes of one event: one node, two anchors.
+        let src = "class A {\n  void a() { publisher.publishEvent(new OrderPlaced(1)); }\n  void b() {\n    publisher.publishEvent(new OrderPlaced(2));\n  }\n}";
+        let out = extract_event_emitter_nodes(src, module_id(), repo());
+        assert_eq!(out.nodes.len(), 1);
+        let id = out.nodes[0].id;
+        assert_eq!(
+            out.anchors,
+            vec![Anchor { node: id, line: 1 }, Anchor { node: id, line: 3 }]
+        );
+
+        // String-keyed: the minting site only, at its own line.
+        let src = "import x;\nexport function f() {\n  bus.on('user.created', h);\n}";
+        let out = extract_event_handler_nodes(src, module_id(), repo());
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 2 }]);
+
+        // A suppressed broker call mints nothing, so it anchors nothing.
+        let src = "import { connect } from 'mqtt';\nclient.subscribe('t');";
+        let out = extract_event_handler_nodes(src, module_id(), repo());
+        assert!(out.nodes.is_empty() && out.anchors.is_empty());
     }
 }

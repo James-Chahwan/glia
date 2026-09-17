@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use repo_graph_code_domain::{
     FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, di_stats, edge_category, node_kind,
 };
+use repo_graph_code_extractors::anchor;
 use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
 use repo_graph_core::{NodeId, RepoId};
@@ -269,6 +270,10 @@ impl RpcContext {
 ///
 /// Every code parser emits the file's MODULE node first, and that is how a
 /// parse is paired back to its source. Returns the GRPC_CLIENT nodes it added.
+///
+/// A5.8: the added clients are anchored here too (POSITION + the owning
+/// method's USES edge), because the per-file anchor pass in
+/// `apply_cross_cutting_extractors` ran before they existed.
 fn apply_rpc_client_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -310,16 +315,27 @@ fn apply_rpc_client_needles(
         if out.nodes.is_empty() {
             continue;
         }
+        let grpc::GrpcNodes {
+            nodes,
+            nav,
+            mut anchors,
+        } = out;
+        // Anchor first, then add the IMPORTS cell, so a data-driven client's
+        // cells come in the same order as a fallback client's (whose POSITION
+        // lands in the extractor pass, before the router's IMPORTS cell).
+        let first_new = fp.nodes.len();
+        fp.nodes.extend(nodes);
+        merge_nav(&mut fp.nav, nav);
+        anchor::attach(fp, path, module_id, &mut anchors);
         // The same G15 IMPORTS cell the router gave every other node in the file.
         let mut extra = FileParse {
-            nodes: out.nodes,
+            nodes: fp.nodes.split_off(first_new),
             imports: fp.imports.clone(),
             ..Default::default()
         };
         attach_imports_cell(&mut extra, lang);
         added += extra.nodes.len();
         fp.nodes.extend(extra.nodes);
-        merge_nav(&mut fp.nav, out.nav);
     }
     added
 }
@@ -404,6 +420,14 @@ fn build_graphs_for_repo(
             rpc.services.len()
         );
     }
+    // A5.8 fired_on marker, once per repo that holds an RPC-family marker node:
+    //   `[marker-anchor] {a} anchored to methods, {m} to module, {u} unanchored repo=<label>`
+    // Counted off the finished parses, so cache-served files count too.
+    let mut anchored = anchor::AnchorStats::default();
+    for fp in parses_by_lang.values().flatten() {
+        anchored.add(anchor::census(fp));
+    }
+    anchor::report(anchored, repo_label);
 
     let mut graphs = Vec::new();
     // Deterministic per-language build order: HashMap iteration is seeded per
@@ -868,10 +892,40 @@ mod rpc_needle_tests {
         ));
 
         // A data-driven client is shaped exactly like a fallback one: same
-        // cells (the file's IMPORTS), same incoming structural edges.
+        // cells in the same order (the file's IMPORTS), same incoming
+        // structural edges. POSITION is the one per-client cell (A5.8): each
+        // stub is located at its own construction line.
         let greeter_cells = cells_of(&merged, greeter);
+        let orders_cells = cells_of(&merged, orders);
         assert!(greeter_cells.iter().any(|c| c.kind == cell_type::IMPORTS));
-        assert_eq!(greeter_cells, cells_of(&merged, orders));
+        let kinds = |cells: &[Cell]| cells.iter().map(|c| c.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&greeter_cells), kinds(&orders_cells));
+        let without_position = |cells: &[Cell]| {
+            cells
+                .iter()
+                .filter(|c| c.kind != cell_type::POSITION)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(without_position(&greeter_cells), without_position(&orders_cells));
+        let position = |cells: &[Cell]| {
+            cells
+                .iter()
+                .find(|c| c.kind == cell_type::POSITION)
+                .map(|c| c.payload.clone())
+        };
+        assert_eq!(
+            position(&greeter_cells),
+            Some(repo_graph_core::CellPayload::Json(
+                r#"{"file":"main.go","start_line":9,"end_line":9}"#.to_string()
+            ))
+        );
+        assert_eq!(
+            position(&orders_cells),
+            Some(repo_graph_core::CellPayload::Json(
+                r#"{"file":"main.go","start_line":10,"end_line":10}"#.to_string()
+            ))
+        );
         let mut in_greeter = incoming(&merged, greeter);
         let mut in_orders = incoming(&merged, orders);
         in_greeter.retain(|c| *c != edge_category::GRPC_CALLS);

@@ -134,8 +134,8 @@ pub(crate) fn apply_cross_cutting_extractors(
     stats: &mut ExtractStats,
 ) {
     use repo_graph_code_extractors::{
-        angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc, queues,
-        react, services, trpc, ts_routes, vue, websocket,
+        anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
+        queues, react, services, trpc, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -152,6 +152,19 @@ pub(crate) fn apply_cross_cutting_extractors(
         ($call:expr) => {{
             let out = $call;
             stats.nav_routes += out.nav_routes;
+            fp.nodes.extend(out.nodes);
+            merge_nav(&mut fp.nav, out.nav);
+        }};
+    }
+
+    // A5.8: `run_marked!` is `run!` plus the extractor's marker anchors, which
+    // `anchor::attach` turns into POSITION cells and owner edges once every
+    // node of the file is in.
+    let mut anchors: Vec<anchor::Anchor> = Vec::new();
+    macro_rules! run_marked {
+        ($call:expr) => {{
+            let out = $call;
+            anchors.extend(out.anchors);
             fp.nodes.extend(out.nodes);
             merge_nav(&mut fp.nav, out.nav);
         }};
@@ -177,13 +190,13 @@ pub(crate) fn apply_cross_cutting_extractors(
     ));
     run!(cli::extract_cli_command_nodes(source, module_id, repo));
     run!(cli::extract_cli_invocation_nodes(source, module_id, repo));
-    run!(websocket::extract_ws_handler_nodes(source, module_id, repo));
-    run!(websocket::extract_ws_client_nodes(source, module_id, repo));
-    run!(eventbus::extract_event_emitter_nodes(source, module_id, repo));
-    run!(eventbus::extract_event_handler_nodes(source, module_id, repo));
-    run!(graphql::extract_graphql_operation_nodes(source, module_id, repo));
-    run!(graphql::extract_graphql_resolver_nodes(source, module_id, repo));
-    run!(grpc::extract_grpc_client_nodes(source, module_id, repo));
+    run_marked!(websocket::extract_ws_handler_nodes(source, module_id, repo));
+    run_marked!(websocket::extract_ws_client_nodes(source, module_id, repo));
+    run_marked!(eventbus::extract_event_emitter_nodes(source, module_id, repo));
+    run_marked!(eventbus::extract_event_handler_nodes(source, module_id, repo));
+    run_marked!(graphql::extract_graphql_operation_nodes(source, module_id, repo));
+    run_marked!(graphql::extract_graphql_resolver_nodes(source, module_id, repo));
+    run_marked!(grpc::extract_grpc_client_nodes(source, module_id, repo));
     run_with_edges!(data_sources::extract_data_source_nodes(
         source, module_id, repo
     ));
@@ -246,6 +259,13 @@ pub(crate) fn apply_cross_cutting_extractors(
             source, path, &module_qname, module_id, repo
         ));
     }
+
+    // A5.8: locate every RPC-family marker and tie it to the METHOD/FUNCTION
+    // whose span holds its needle (module CONTAINS when none does). Runs after
+    // every extractor above so the owner index sees all of the file's spans.
+    // The result is a function of this file alone, so it is cached with the
+    // parse; the build-level `[marker-anchor]` marker counts it post-cache.
+    anchor::attach(fp, path, module_id, &mut anchors);
 
     // G14: cross-language SERVICE classification. Runs LAST so the per-file
     // nav already has every CLASS / STRUCT and its METHOD children populated
