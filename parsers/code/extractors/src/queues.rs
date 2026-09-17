@@ -45,8 +45,7 @@ pub enum QueueFramework {
     RedisList,
     // --- pre-allocated for the rest of batch A2. Sqs/Sns/PubSub/
     // --- AzureServiceBus have rows since A2.6, Jms a consumer row since A2.4
-    // --- (`@JmsListener`, no producer row yet); Mqtt/RedisPubSub stay inert
-    // --- until A2.9 adds needles for them.
+    // --- and a producer row since A2.9, Mqtt/RedisPubSub rows since A2.9.
     /// AWS SQS (`sqs.sendMessage`, `SendMessageRequest`, ...).
     Sqs,
     /// AWS SNS fan-out (`sns.publish`, `PublishRequest`, ...).
@@ -272,6 +271,24 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // arg #0 is the TOPIC and arg #1 the subscription, so arg #0 joins the
     // sender either way — the `CreateProcessor(` precedent above.
     ("[ServiceBusTrigger(", QueueFramework::AzureServiceBus, &["webjobs", "azure.functions.worker", "azure.messaging.servicebus"], TopicRule::ArgLiteral),
+    // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
+    // These verbs are the broadest needles in the table, so every row below is
+    // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
+    // row that already claimed the call site, and it reads a channel only when
+    // the literal LEADS argument #0 — an Rx `.subscribe(x => log('hi'))` in a
+    // file that happens to import redis must not mint `queue_consumer:hi`.
+    // eventbus.rs suppresses its own `.subscribe(` / `.on(` twin in the same
+    // files (its gate is derived from these signals — [`broker_signal_present`]).
+    // Redis pub/sub — redis-py `p.subscribe('ch')`, node-redis / ioredis
+    // `sub.subscribe('ch')`, Ruby `redis.subscribe('ch')`. `redis` also covers
+    // `ioredis`. `psubscribe` is a GLOB pattern; the resolver has no Redis
+    // dialect yet, so it pairs only literally.
+    (".subscribe(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
+    (".psubscribe(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
+    // MQTT — paho (Python / Java) and mqtt.js: `client.subscribe('sensors/temp')`.
+    (".subscribe(", QueueFramework::Mqtt, &["mqtt", "paho"], TopicRule::ArgLiteral),
+    // Go — eclipse/paho.mqtt.golang exports Capitalised APIs.
+    (".Subscribe(", QueueFramework::Mqtt, &["paho.mqtt"], TopicRule::ArgLiteral),
 ];
 
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
@@ -373,8 +390,9 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `software.amazon.awssdk.services.sqs`, hence the `services.` gate.
     (".sendMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs"], TopicRule::Keyed(&["queueurl"])),
     // SNS — boto3 / JS / Java: `sns.publish(TopicArn="arn:aws:sns:...:orders")`.
-    // BROAD needle: until A2.9 lands, a gated file ALSO mints an eventbus
-    // EVENT_EMITTER here. C# spells it `PublishAsync`, so it never matches.
+    // BROAD needle; since A2.9 eventbus.rs no longer mints an EVENT_EMITTER
+    // twin in a file these signals gate. C# spells it `PublishAsync`, so it
+    // never matches.
     (".publish(", QueueFramework::Sns, &["boto3", "aws-sdk", "amazon.simplenotification", "awssdk.services.sns", "amazonaws.services.sns"], TopicRule::Keyed(&["topicarn"])),
     // JS — AWS SDK v3: `new PublishCommand({ TopicArn: "..." })`.
     ("PublishCommand(", QueueFramework::Sns, &["@aws-sdk/client-sns"], TopicRule::Keyed(&["topicarn"])),
@@ -394,6 +412,19 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     (".createSender(", QueueFramework::AzureServiceBus, &["@azure/service-bus"], TopicRule::ArgLiteral),
     ("get_queue_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["queue_name"])),
     ("get_topic_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["topic_name"])),
+    // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
+    // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
+    // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
+    // more specific row, which claims the call site first.
+    (".publish(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
+    // MQTT — paho / mqtt.js `client.publish('sensors/temp', payload)`, and Go
+    // paho's `client.Publish("sensors/temp", qos, retained, payload)`.
+    (".publish(", QueueFramework::Mqtt, &["mqtt", "paho"], TopicRule::ArgLiteral),
+    (".Publish(", QueueFramework::Mqtt, &["paho.mqtt"], TopicRule::ArgLiteral),
+    // Java/Kotlin — Spring JMS: `jmsTemplate.convertAndSend("orders", msg)`,
+    // the producer half of the A2.4 `@JmsListener(` row. Same needle as the
+    // Spring AMQP row above; a file importing both is attributed to AMQP.
+    ("Template.convertAndSend(", QueueFramework::Jms, &["springframework.jms"], TopicRule::ArgLiteral),
 ];
 
 /// True when `signals` is empty (always pass) or any signal substring appears in
@@ -408,6 +439,79 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
 /// The NEEDLES stay case-sensitive: API names are (`Produce` is not `produce`).
 fn signals_present(lower_source: &str, signals: &[&str]) -> bool {
     signals.is_empty() || signals.iter().any(|s| lower_source.contains(s))
+}
+
+/// A2.9: true for a message BROKER, false for a task queue. Exhaustive on
+/// purpose — a new variant must decide which side of eventbus.rs's broker
+/// gate its signals belong on.
+fn is_broker(f: &QueueFramework) -> bool {
+    match f {
+        QueueFramework::Nats
+        | QueueFramework::RabbitMQ
+        | QueueFramework::Kafka
+        | QueueFramework::RedisList
+        | QueueFramework::RedisPubSub
+        | QueueFramework::Sqs
+        | QueueFramework::Sns
+        | QueueFramework::PubSub
+        | QueueFramework::AzureServiceBus
+        | QueueFramework::Mqtt
+        | QueueFramework::Jms => true,
+        // BullMQ workers are real EventEmitters (`worker.on('completed')`).
+        QueueFramework::Celery
+        | QueueFramework::Dramatiq
+        | QueueFramework::BullMQ
+        | QueueFramework::Sidekiq
+        | QueueFramework::Oban => false,
+    }
+}
+
+/// Every library signal that gates a broker row in either table, deduped, in
+/// table order. Derived, never re-typed: see [`broker_signal_present`].
+fn broker_signals() -> &'static [&'static str] {
+    static SIGNALS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    SIGNALS.get_or_init(|| {
+        let mut out: Vec<&'static str> = Vec::new();
+        for (_, framework, signals, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            if !is_broker(framework) {
+                continue;
+            }
+            for s in signals.iter().copied() {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    })
+}
+
+/// A2.9: does this (already lowercased) file import a message-broker client?
+/// eventbus.rs asks before minting an EVENT_* node from a verb brokers share
+/// with in-process buses (`publish(`, `.subscribe(`, `.on(`); a yes means the
+/// call is broker traffic, which this module owns.
+pub(crate) fn broker_signal_present(lower_source: &str) -> bool {
+    broker_signals().iter().any(|s| lower_source.contains(s))
+}
+
+/// A2.9: rows whose needle is a bare pub/sub verb (`.publish(` /
+/// `.subscribe(`) shared with Rx, in-process buses and every other broker.
+fn is_generic_verb_row(f: &QueueFramework) -> bool {
+    matches!(f, QueueFramework::RedisPubSub | QueueFramework::Mqtt)
+}
+
+/// A2.9: rows that give way when an EARLIER row already read the same call
+/// site, so one call never mints two nodes of different frameworks.
+fn yields_to_earlier_rows(f: &QueueFramework) -> bool {
+    is_generic_verb_row(f) || matches!(f, QueueFramework::Jms)
+}
+
+/// True when the argument region after `after` opens with a quoted literal,
+/// or with an array whose first element is one (`subscribe(['a', 'b'])`).
+fn literal_leads(source: &str, after: usize) -> bool {
+    let rest = source.get(after..).unwrap_or("").trim_start();
+    let rest = rest.strip_prefix('[').map_or(rest, str::trim_start);
+    matches!(rest.as_bytes().first(), Some(b'\'' | b'"' | b'`'))
 }
 
 pub struct QueueNodes {
@@ -505,6 +609,8 @@ fn emit_queue_nodes(
 ) -> QueueNodes {
     let mut pending: Vec<Pending> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    // A2.9: byte spans of every needle occurrence an earlier row read.
+    let mut claimed: Vec<(usize, usize)> = Vec::new();
     // ONE allocation per emit call (two per file, both sides) — cheap beside the
     // tree-sitter parse that already ran, and it is what makes the gate
     // case-insensitive for every row at once.
@@ -514,7 +620,22 @@ fn emit_queue_nodes(
         if !source.contains(pattern) || !signals_present(&lower, signals) {
             continue;
         }
-        let hits = queue_topic::scan(source, pattern, *rule);
+        let mut hits = queue_topic::scan(source, pattern, *rule);
+        if yields_to_earlier_rows(framework) {
+            let len = pattern.len();
+            hits.retain(|h| !claimed.iter().any(|&(s, e)| h.offset < e && s < h.offset + len));
+        }
+        if is_generic_verb_row(framework) {
+            for h in &mut hits {
+                if !literal_leads(source, h.offset + pattern.len()) {
+                    h.topic = None;
+                }
+            }
+        }
+        if hits.is_empty() {
+            continue;
+        }
+        claimed.extend(hits.iter().map(|h| (h.offset, h.offset + pattern.len())));
         // A2.8: keep each hit's OFFSET next to its topic. A topic read at byte
         // 402 is a call SITE at line 11, and that is the only provenance a
         // queue node has ever been able to carry. `line_of` is 0-indexed, the
@@ -794,7 +915,9 @@ fn is_cloud_broker(f: &QueueFramework) -> bool {
 }
 
 /// `GLIA_QUEUE_DEBUG=1` turns on the `[queues] scan needle=` marker, read once.
-fn debug_enabled() -> bool {
+/// `pub(crate)`: eventbus.rs's `[queues] broker-event suppressed` line (A2.9)
+/// shares the switch.
+pub(crate) fn debug_enabled() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG.get_or_init(|| {
         std::env::var("GLIA_QUEUE_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
@@ -1789,5 +1912,128 @@ public class AuditFunction
                 );
             }
         }
+    }
+
+    // ---- A2.9: broker pub/sub rows ----------------------------------------
+
+    fn producers(src: &str) -> Vec<String> {
+        qnames(&extract_queue_producer_nodes(src, PATH, module_id(), repo()))
+    }
+
+    #[test]
+    fn redis_pubsub_channel_becomes_queue_nodes() {
+        let publisher = "import redis\nr = redis.Redis()\nr.publish(\"notifications\", json.dumps(p))\n";
+        let pr = extract_queue_producer_nodes(publisher, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:notifications".to_string()]);
+        assert!(framework_of(&pr).contains(r#""framework":"RedisPubSub""#));
+
+        let subscriber = "import redis\np = r.pubsub()\np.subscribe(\"notifications\")\np.psubscribe('news.*')\n";
+        assert_eq!(
+            consumers(subscriber),
+            vec![
+                "queue_consumer:news.*".to_string(),
+                "queue_consumer:notifications".to_string()
+            ]
+        );
+        // ioredis spells the gate differently and still passes it.
+        assert_eq!(
+            consumers("import Redis from 'ioredis';\nsub.subscribe('notifications');"),
+            vec!["queue_consumer:notifications".to_string()]
+        );
+    }
+
+    #[test]
+    fn mqtt_topic_becomes_queue_nodes() {
+        for (publisher, subscriber, what) in [
+            (
+                "import paho.mqtt.client as mqtt\nclient.publish(\"sensors/temp\", payload)\n",
+                "import paho.mqtt.client as mqtt\nclient.subscribe(\"sensors/temp\")\n",
+                "python paho",
+            ),
+            (
+                "import mqtt from 'mqtt';\nclient.publish('sensors/temp', String(v));",
+                "import mqtt from 'mqtt';\nclient.on('connect', () => { client.subscribe(['sensors/temp']); });",
+                "mqtt.js",
+            ),
+            (
+                "import mqtt \"github.com/eclipse/paho.mqtt.golang\"\ntoken := client.Publish(\"sensors/temp\", 0, false, payload)\n",
+                "import mqtt \"github.com/eclipse/paho.mqtt.golang\"\ntoken := client.Subscribe(\"sensors/temp\", 0, handler)\n",
+                "go paho",
+            ),
+        ] {
+            let pr = extract_queue_producer_nodes(publisher, PATH, module_id(), repo());
+            assert_eq!(qnames(&pr), vec!["queue_producer:sensors/temp".to_string()], "{what}");
+            assert!(framework_of(&pr).contains(r#""framework":"Mqtt""#), "{what}");
+            assert_eq!(consumers(subscriber), vec!["queue_consumer:sensors/temp".to_string()], "{what}");
+        }
+    }
+
+    #[test]
+    fn generic_verb_rows_never_read_a_callback_literal() {
+        // PRECISION GUARD: an Rx subscription in a file that imports redis. The
+        // only literal is inside the callback, so it must not become a channel.
+        let rx = "import Redis from 'ioredis';\nthis.events$.subscribe((e) => log('hi', e));";
+        assert_eq!(
+            consumers(rx),
+            vec!["queue_consumer:unresolved:redispubsub".to_string()],
+            "a non-literal channel is the coverage sentinel, never the callback's literal"
+        );
+    }
+
+    #[test]
+    fn generic_verb_rows_yield_to_an_earlier_row() {
+        // One call, one node: a NATS file that also imports redis must not
+        // mint a RedisPubSub twin of the NATS producer or consumer.
+        let src = "import { connect } from 'nats';\nimport Redis from 'ioredis';\nnc.publish('orders', b);\nnc.subscribe('orders');";
+        let pr = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+        assert_eq!(pr.nodes.len(), 1);
+        assert!(framework_of(&pr).contains(r#""framework":"Nats""#));
+        let cr = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(cr.nodes.len(), 1, "{:?}", qnames(&cr));
+        assert!(framework_of(&cr).contains(r#""framework":"Nats""#));
+        // A kafkajs subscriber in a redis-importing file stays Kafka-only.
+        let kafka = "import { Kafka } from 'kafkajs';\nimport Redis from 'ioredis';\nawait consumer.subscribe({ topic: 'orders' });";
+        let kr = extract_queue_consumer_nodes(kafka, PATH, module_id(), repo());
+        assert_eq!(qnames(&kr), vec!["queue_consumer:orders".to_string()]);
+        assert!(framework_of(&kr).contains(r#""framework":"Kafka""#));
+    }
+
+    #[test]
+    fn broker_rows_stay_off_without_their_library() {
+        // No broker import: the verbs belong to eventbus.rs, not here.
+        for src in [
+            "bus.publish('user.created', u);",
+            "bus.subscribe('user.created', h);",
+            "client.Publish(\"sensors/temp\", 0, false, p)",
+        ] {
+            assert!(producers(src).is_empty() && consumers(src).is_empty(), "{src}");
+        }
+    }
+
+    #[test]
+    fn spring_jms_template_producer() {
+        let src = "import org.springframework.jms.core.JmsTemplate;\npublic void send(String p) { jmsTemplate.convertAndSend(\"orders\", p); }";
+        let pr = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+        assert!(framework_of(&pr).contains(r#""framework":"Jms""#));
+        // A file importing Spring AMQP too is attributed to the earlier row, once.
+        let both = format!("import org.springframework.amqp.rabbit.core.RabbitTemplate;\n{src}");
+        let br = extract_queue_producer_nodes(&both, PATH, module_id(), repo());
+        assert_eq!(br.nodes.len(), 1);
+        assert!(framework_of(&br).contains(r#""framework":"RabbitMQ""#));
+    }
+
+    #[test]
+    fn broker_signals_are_derived_and_exclude_task_queues() {
+        let signals = broker_signals();
+        for s in ["redis", "nats", "amqp", "kafka", "mqtt", "paho", "boto3", "awssdk.services.sqs", "google.cloud"] {
+            assert!(signals.contains(&s), "broker signal {s:?} missing from {signals:?}");
+        }
+        for s in ["celery", "dramatiq", "bullmq", "@shared_task", "pubsub"] {
+            assert!(!signals.contains(&s), "{s:?} is not a broker signal");
+        }
+        assert!(broker_signal_present("import paho.mqtt.client as mqtt"));
+        assert!(!broker_signal_present("from celery import celery"));
     }
 }

@@ -6,25 +6,36 @@ pub struct EventNodes {
     pub nav: CodeNav,
 }
 
-const EMITTER_PATTERNS: &[(&str, bool)] = &[
-    (".emit(", true),
-    (".dispatch(", true),
-    ("Subject.next(", true),
-    ("EventBridge.putEvents", false),
-    ("eventBridge.putEvents", false),
-    ("publish(", true),
-    (".trigger(", true),
-    ("dispatchEvent(", true),
+/// (needle, extract_name, broker_ambiguous).
+///
+/// `broker_ambiguous` (A2.9) marks the verbs a message-broker client shares with
+/// an in-process bus: `publish(`, `.subscribe(`, `.on(`. In a file that imports
+/// a broker client ([`broker_present`]) those needles are skipped outright —
+/// the call is broker traffic, and `queues.rs` owns it as QUEUE_* +
+/// QUEUE_FLOWS. They used to mint Weak EVENT_* nodes joined by EVENT_FLOWS, so
+/// `trace` labelled a Redis/MQTT/NATS hop an in-process event, and NATS/Kafka
+/// producers double-emitted. The in-process-only verbs (`.emit(`,
+/// `.dispatch(`, `dispatchEvent(`, `@OnEvent(` ...) are never flagged, and a
+/// file with no broker signal behaves exactly as before.
+const EMITTER_PATTERNS: &[(&str, bool, bool)] = &[
+    (".emit(", true, false),
+    (".dispatch(", true, false),
+    ("Subject.next(", true, false),
+    ("EventBridge.putEvents", false, false),
+    ("eventBridge.putEvents", false, false),
+    ("publish(", true, true),
+    (".trigger(", true, false),
+    ("dispatchEvent(", true, false),
 ];
 
-const HANDLER_PATTERNS: &[(&str, bool)] = &[
-    (".on(", true),
-    (".addEventListener(", true),
-    (".subscribe(", true),
-    ("@EventPattern(", true),
-    ("@OnEvent(", true),
-    ("handle_event", false),
-    (".addListener(", true),
+const HANDLER_PATTERNS: &[(&str, bool, bool)] = &[
+    (".on(", true, true),
+    (".addEventListener(", true, false),
+    (".subscribe(", true, true),
+    ("@EventPattern(", true, false),
+    ("@OnEvent(", true, false),
+    ("handle_event", false, false),
+    (".addListener(", true, false),
 ];
 
 /// Buses keyed by MESSAGE TYPE rather than by a string topic. The captured
@@ -53,14 +64,14 @@ const TYPE_HANDLER_NEEDLES: &[(&str, Option<char>)] = &[
     ("@TransactionalEventListener", None),
 ];
 
-/// Call sites the QUEUE extractor already claims: `nc.publish(` is NATS and
-/// `channel.publish(` / `basic_publish(` are RabbitMQ (queues.rs QUEUE_PRODUCER
-/// needles). The generic `publish(` needle above is ungated, so every such
-/// producer used to DOUBLE-emit — a real QUEUE_PRODUCER *and* a phantom Weak
-/// EVENT_EMITTER keyed on the queue's own topic literal. Brokers with no
-/// `QueueFramework` variant (MQTT, Redis pub/sub, SQS/SNS, Pub/Sub, Azure SB)
-/// are deliberately NOT listed: the generic needle is their only measured path
-/// (bench/substrate-gap/matrix_vocab.py records them as `via_first="eventbus"`).
+/// Call sites the QUEUE extractor claims even in a file that carries no broker
+/// signal: `nc.publish(` is NATS and `channel.publish(` / `basic_publish(` are
+/// RabbitMQ (queues.rs QUEUE_PRODUCER needles; `channel.basic_publish` has an
+/// empty gate). Per call site, so it still matters where the file-level
+/// [`broker_present`] gate does not fire. Everything else a broker publishes
+/// through — MQTT, Redis pub/sub, SQS/SNS, Pub/Sub, Azure SB, Kafka — is
+/// handled by that gate (A2.9), which is keyed on the queue rows' own library
+/// signals rather than on a second hand-written list.
 const QUEUE_OWNED_PUBLISH: &[&str] = &[
     "nc.publish(",
     "channel.publish(",
@@ -118,16 +129,16 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
         );
     }
 
-    for &(pattern, extract_name) in EMITTER_PATTERNS {
+    let mut broker = BrokerGate::default();
+    for &(pattern, extract_name, ambiguous) in EMITTER_PATTERNS {
         let Some(idx) = find_needle(source, pattern) else {
             continue;
         };
-        let event_name = if extract_name {
-            extract_event_name(source, idx + pattern.len())
-        } else {
-            None
+        let event_name = event_name_at(source, pattern, idx, extract_name);
+        if ambiguous && broker.present(source) {
+            suppressed("emitter", pattern, &event_name);
+            continue;
         }
-        .unwrap_or_else(|| pattern.trim_matches('.').trim_end_matches('(').to_string());
 
         push_event_node(
             &mut nodes,
@@ -164,16 +175,16 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
         );
     }
 
-    for &(pattern, extract_name) in HANDLER_PATTERNS {
+    let mut broker = BrokerGate::default();
+    for &(pattern, extract_name, ambiguous) in HANDLER_PATTERNS {
         let Some(idx) = find_needle(source, pattern) else {
             continue;
         };
-        let event_name = if extract_name {
-            extract_event_name(source, idx + pattern.len())
-        } else {
-            None
+        let event_name = event_name_at(source, pattern, idx, extract_name);
+        if ambiguous && broker.present(source) {
+            suppressed("handler", pattern, &event_name);
+            continue;
         }
-        .unwrap_or_else(|| pattern.trim_matches('.').trim_end_matches('(').to_string());
 
         push_event_node(
             &mut nodes,
@@ -189,6 +200,60 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     EventNodes { nodes, nav }
+}
+
+/// The event a string-keyed needle names: the quoted literal after it, else
+/// the needle word itself (`publish`, `subscribe`).
+fn event_name_at(source: &str, pattern: &str, idx: usize, extract_name: bool) -> String {
+    if extract_name {
+        extract_event_name(source, idx + pattern.len())
+    } else {
+        None
+    }
+    .unwrap_or_else(|| pattern.trim_matches('.').trim_end_matches('(').to_string())
+}
+
+/// A2.9: does this file import a message-broker client? Computed lazily, once
+/// per extract call, and only when a broker-ambiguous needle actually matched
+/// — so a file with no `publish(` / `.subscribe(` / `.on(` never pays for the
+/// lowercase copy.
+#[derive(Default)]
+struct BrokerGate(Option<bool>);
+
+impl BrokerGate {
+    fn present(&mut self, source: &str) -> bool {
+        *self
+            .0
+            .get_or_insert_with(|| broker_present(&source.to_ascii_lowercase()))
+    }
+}
+
+/// True when `lower_source` carries any library signal that gates a BROKER row
+/// in queues.rs (task-queue rows excluded). The list is DERIVED from those
+/// rows, never re-typed here: a broker the queue extractor learns to gate is
+/// suppressed on the event side in the same edit, and the two files cannot
+/// disagree about which library makes a verb broker traffic.
+///
+/// Deliberately NOT the bare word `pubsub`: graphql-subscriptions' `PubSub`
+/// is an in-process bus (`pubsub.publish('POST_ADDED', ...)`). Google Pub/Sub
+/// is recognised by its package (`@google-cloud/pubsub`, `google.cloud`).
+///
+/// Accepted trade: a file that imports a broker client AND uses an in-process
+/// emitter loses that emitter's `.on(` / `.subscribe(` / `publish(` nodes.
+fn broker_present(lower_source: &str) -> bool {
+    crate::queues::broker_signal_present(lower_source)
+}
+
+/// fired_on marker (A2.9). It lives here but speaks in the `[queues]`
+/// namespace on purpose — that is where the suppressed traffic went, and the
+/// queue-side `[queues] needle '...'` line is its other half:
+///   `GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] broker-event suppressed'`
+/// The extractor is called without a path, so the line names the event, not
+/// the file; the paired `[queues] needle` line carries `file=`.
+fn suppressed(side: &str, needle: &str, name: &str) {
+    if crate::queues::debug_enabled() {
+        eprintln!("[queues] broker-event suppressed {side}='{needle}' name={name}");
+    }
 }
 
 /// First occurrence of `pattern` that is not a call the queue extractor owns.
@@ -482,6 +547,105 @@ mod tests {
                 .qname_by_id
                 .values()
                 .any(|q| q == "event_emit:user.created")
+        );
+    }
+
+    // ---- A2.9: broker pub/sub leaves the event bus -------------------------
+
+    fn emitted(source: &str) -> Vec<String> {
+        let mut v: Vec<String> = extract_event_emitter_nodes(source, module_id(), repo())
+            .nav
+            .qname_by_id
+            .into_values()
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn handled(source: &str) -> Vec<String> {
+        let mut v: Vec<String> = extract_event_handler_nodes(source, module_id(), repo())
+            .nav
+            .qname_by_id
+            .into_values()
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn redis_publish_is_not_an_event_emitter() {
+        let publisher = "import redis\nr = redis.Redis()\nr.publish('notifications', payload)\n";
+        assert!(emitted(publisher).is_empty(), "{:?}", emitted(publisher));
+        let subscriber = "import redis\np = redis.Redis().pubsub()\np.subscribe('notifications')\n";
+        assert!(handled(subscriber).is_empty(), "{:?}", handled(subscriber));
+    }
+
+    #[test]
+    fn plain_emitter_still_emits_without_broker_signal() {
+        // Regression guard: the same verbs with no broker import are an
+        // in-process bus, exactly as before A2.9.
+        assert_eq!(
+            emitted("bus.publish('user.created', u);"),
+            vec!["event_emit:user.created"]
+        );
+        assert_eq!(
+            handled("bus.subscribe('user.created', h);"),
+            vec!["event_handle:user.created"]
+        );
+        assert_eq!(
+            handled("emitter.on('user.created', h);"),
+            vec!["event_handle:user.created"]
+        );
+    }
+
+    #[test]
+    fn broker_suppression_covers_every_measured_shape() {
+        // mqtt.js, both sides, and its `client.on('connect')` lifecycle hook.
+        let mqtt_sub = "import mqtt from 'mqtt';\nclient.on('connect', () => { client.subscribe('sensors/temp'); });";
+        assert!(handled(mqtt_sub).is_empty(), "{:?}", handled(mqtt_sub));
+        assert!(emitted("import mqtt from 'mqtt';\nclient.publish('sensors/temp', v);").is_empty());
+        // kafkajs object argument: used to mint the method-named `event_handle:subscribe`.
+        let kafkajs =
+            "import { Kafka } from 'kafkajs';\nawait consumer.subscribe({ topic: 'orders' });";
+        assert!(handled(kafkajs).is_empty(), "{:?}", handled(kafkajs));
+        // Spring: a method DECLARATION `publish(` in a broker file.
+        let spring = "import org.springframework.kafka.core.KafkaTemplate;\npublic void publish(String p) { kafkaTemplate.send(\"orders\", p); }";
+        assert!(emitted(spring).is_empty(), "{:?}", emitted(spring));
+        // AWS SDK v2 SQS (the java/sqs_sns cell) and SNS via boto3.
+        let sqs = "import software.amazon.awssdk.services.sqs.SqsClient;\npublic void publish(String p) {}";
+        assert!(emitted(sqs).is_empty(), "{:?}", emitted(sqs));
+        assert!(emitted("import boto3\nsns.publish(TopicArn=arn, Message=m)").is_empty());
+        // Google Pub/Sub by package, both sides.
+        let gcp = "from google.cloud import pubsub_v1\npublisher.publish(topic_path, data)\nsubscriber.subscribe(path, callback=cb)";
+        assert!(emitted(gcp).is_empty() && handled(gcp).is_empty());
+    }
+
+    #[test]
+    fn in_process_verbs_and_buses_are_never_suppressed() {
+        // `.emit(` is not broker-ambiguous: kept even in a broker file.
+        assert_eq!(
+            emitted("import redis\nemitter.emit('cache.flushed', k);"),
+            vec!["event_emit:cache.flushed"]
+        );
+        // graphql-subscriptions' `PubSub` is an in-process bus; the bare word
+        // `pubsub` is deliberately not a broker signal.
+        assert_eq!(
+            emitted(
+                "import { PubSub } from 'graphql-subscriptions';\npubsub.publish('POST_ADDED', p);"
+            ),
+            vec!["event_emit:POST_ADDED"]
+        );
+        // A task-queue library is not a broker: BullMQ workers are EventEmitters.
+        assert_eq!(
+            handled("import { Worker } from 'bullmq';\nworker.on('completed', done);"),
+            vec!["event_handle:completed"]
+        );
+        // Type-keyed buses (NestJS CQRS) stay, broker import or not.
+        assert_eq!(
+            emitted(
+                "import { Kafka } from 'kafkajs';\nthis.eventBus.publish(new OrderPlaced(id));"
+            ),
+            vec!["event_emit:OrderPlaced"]
         );
     }
 }

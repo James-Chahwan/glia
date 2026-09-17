@@ -1,0 +1,27 @@
+{
+  "framework": "xcut-queue-redis-pubsub",
+  "language": "python",
+  "dirs": ["api", "worker"],
+  "mechanism": "redis",
+  "cells": ["python/redis"],
+  "note": "A2.9. Redis PUBLISH/SUBSCRIBE, the pub/sub variant that matrix/python/redis (the LPUSH/BLPOP list shape) leaves uncovered. Baseline 2026-09-17 against the wheel at HEAD 98efd08: QUEUE_FLOWS 0.00, both QUEUE_* nodes missing, and 3 forbid violations -- the pair existed only as Weak event_emit/event_handle:notifications joined by EVENT_FLOWS, because eventbus.rs's generic `publish(` / `.subscribe(` needles fired in a broker file, so `trace` labelled a Redis broker hop as an in-process event.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:notifications", "note": "redis-py r.publish('notifications', ...) -- QueueFramework::RedisPubSub `.publish(` row"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:notifications", "note": "redis-py p = r.pubsub(); p.subscribe('notifications') -- RedisPubSub `.subscribe(` row"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:notifications", "to": "queue_consumer:notifications", "category": "QUEUE_FLOWS", "note": "paired across the two repos by channel, within the redis family"}
+  ],
+  "expect_cells": [
+    {"kind": "QUEUE_PRODUCER", "node": "queue_producer:notifications", "cell": "CODE", "contains": "\"framework\":\"RedisPubSub\"", "note": "pub/sub, not the RedisList queue shape"},
+    {"kind": "QUEUE_PRODUCER", "node": "queue_producer:notifications", "cell": "POSITION", "contains": "publish.py"},
+    {"kind": "QUEUE_CONSUMER", "node": "queue_consumer:notifications", "cell": "POSITION", "contains": "subscribe.py"}
+  ],
+  "forbid": [
+    {"from": "event_emit:notifications", "to": "event_handle:notifications", "category": "EVENT_FLOWS", "note": "broker traffic must not be classified as an in-process event bus"},
+    {"kind": "EVENT_EMITTER", "name": "event_emit:notifications", "note": "the eventbus twin of the Redis publish -- suppressed by eventbus.rs's broker gate"},
+    {"kind": "EVENT_HANDLER", "name": "event_handle:notifications", "note": "the eventbus twin of the Redis subscribe"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:redispubsub", "note": "both sides name the channel literally, so a topic-less framework-tag sentinel would overstate the blind spot"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:redispubsub", "note": "both sides name the channel literally, so a topic-less framework-tag sentinel would overstate the blind spot"}
+  ]
+}
