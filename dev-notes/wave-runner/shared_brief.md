@@ -8,7 +8,7 @@ PROGRAMME. dev-notes/wave-plan-2026-09-16.md is the plan; dev-notes/wave-packets
 The repo-graph MCP server indexes THIS repo and is fresh. Load its tools with ToolSearch (`select:mcp__repo-graph__find,mcp__repo-graph__impact,mcp__repo-graph__trace,mcp__repo-graph__read,mcp__repo-graph__orient`) and use them BEFORE grepping for any structural question: `find <symbol>` to locate a function by name (it returns path:line), `impact <node>` for what your change affects, `trace` for a flow. Grep is the fallback, not the default. Report in your result which graph queries you ran. If a symbol you expect is missing from the graph, that is itself a finding — say so.
 
 === COMMITTED ARTEFACTS ARE NOT YOURS ===
-`bench/substrate-gap/results-latest.json` and `COVERAGE.md` are committed and guarded by `matrix.py --check`. DO NOT regenerate or commit them. Grading them before the end-of-wave wheel rebuild freezes cells at the wrong level (wave 3 did exactly this; `--check` then reported DRIFT 2). They are regenerated once, after the rebuild, at end of wave.
+`bench/substrate-gap/results-latest.json`, `COVERAGE.md` and `legacy-latest.json` are committed and guarded by `matrix.py --check` / `run.py --check`. DO NOT regenerate or commit them — never run `matrix.py --emit` or `run.py --emit`. Grading them before the end-of-wave wheel rebuild freezes cells at the wrong level (wave 3 did exactly this; `--check` then reported DRIFT 2). They are regenerated once, after the rebuild, at end of wave.
 
 === THE TREE HAS MOVED UNDER YOUR SPEC ===
 Your packet's entry_points cite line numbers from BEFORE wave 0, and five waves have landed since. NEVER trust a line number in your spec. Find symbols by name (repo-graph `find`, then grep).
