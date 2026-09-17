@@ -7,5 +7,13 @@
     {"kind": "DOC_SECTION", "name": "POST /api/v1/users", "note": "OpenAPI op"},
     {"kind": "ROUTE", "name": "/users", "note": "positive control: flask route already extracted today"}
   ],
-  "note": "A10.1 node half: one DOC_SECTION per OpenAPI operation, discriminated by an ORIGIN cell provenance=contract. A10.2 adds the SPECIFIES edge from the op to the ROUTE."
+  "expect_edges": [
+    {"from": "contract::openapi::GET", "to": "GET /users", "category": "DOCUMENTS", "note": "A10.2: GET op -> flask ROUTE; the servers base /api/v1 is prefix-stripped, so Medium"},
+    {"from": "contract::openapi::POST", "to": "POST /users", "category": "DOCUMENTS", "note": "A10.2: POST op -> flask ROUTE; Medium, same strip"}
+  ],
+  "forbid": [
+    {"from": "contract::openapi::GET:/api/v1/users", "to": "POST /users", "category": "DOCUMENTS", "note": "A10.2 precision: the pairing is keyed on the method, so an op never documents the other verb's route"},
+    {"from": "contract::openapi::POST:/api/v1/users", "to": "GET /users", "category": "DOCUMENTS", "note": "A10.2 precision: as above, other direction"}
+  ],
+  "note": "A10.1 node half: one DOC_SECTION per OpenAPI operation, discriminated by an ORIGIN cell provenance=contract. A10.2 edge half: the engine post-pass link_contract_routes pairs each op to the ROUTE that implements it with a DOCUMENTS edge (contract -> ROUTE, so governing_docs(route) answers with the op). The exact-vs-prefix confidence split is gated by the engine unit tests, since this fixture only exercises the prefix-stripped path."
 }

@@ -13,6 +13,7 @@ pub(crate) fn post_passes(merged: &mut MergedGraph) {
     demote_unmatched_http_nodes(merged);
     emit_tests_edges(merged);
     link_doc_sections(merged);
+    link_contract_routes(merged);
     tag_synthetic_provenance(merged);
     // Deterministic cross-edge order: several resolvers emit pairs by
     // iterating HashMap indexes (per-process seed), so the edge SET was stable
@@ -108,6 +109,170 @@ fn link_doc_sections(merged: &mut MergedGraph) {
         );
     }
     merged.cross_edges.extend(new_edges);
+}
+
+/// A10.2: pair each contract operation — a DOC_SECTION whose ORIGIN cell says
+/// `provenance: contract` (A10.1's OpenAPI ops; A10.8's Pact interactions
+/// carry the same shape) — with the ROUTE nodes that implement it, as
+/// DOCUMENTS cross-edges **contract → ROUTE**. That direction is what
+/// `governing_docs(route)` / `glia docs-for <route>` already collects, so those
+/// answer with the spec'd operation with no change to the primitive.
+///
+/// Matching is the HTTP resolver's own route index and tiers 1-4
+/// (`HttpRouteMatcher`), so a contract pairs with exactly the routes a client
+/// calling the same `METHOD path` would. Confidence:
+/// - `Strong` — the declared `(method, path)` hit a route outright;
+/// - `Medium` — it needed an API-prefix strip (an OpenAPI `servers: /api/v1`
+///   base), the route's `ANY` method, or the un-prefixed `raw_path` retry (a
+///   server base that is not API-shaped, e.g. `/billing-svc`).
+///
+/// Neither is ever above the ROUTE node's own confidence.
+///
+/// Runs after the resolvers and before the cross-edge sort in `post_passes`, so
+/// the new edges are covered by that sort and the written bytes stay stable.
+fn link_contract_routes(merged: &mut MergedGraph) {
+    let (edges, stats) = contract_route_edges(merged);
+    if stats.ops > 0 {
+        eprintln!(
+            "[contract-link] ops={} exact={} prefix={} unmatched={} edges={}",
+            stats.ops,
+            stats.exact,
+            stats.prefix,
+            stats.unmatched,
+            edges.len()
+        );
+    }
+    merged.cross_edges.extend(edges);
+}
+
+/// Counters behind the `[contract-link]` marker. `exact` + `prefix` +
+/// `unmatched` == `ops`: each op is counted once, by the tier that paired it
+/// (`prefix` = every non-exact pairing, see `link_contract_routes`).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ContractLinkStats {
+    ops: usize,
+    exact: usize,
+    prefix: usize,
+    unmatched: usize,
+}
+
+/// The HTTP half of a contract operation, read off its ORIGIN cell.
+#[derive(Debug, PartialEq, Eq)]
+struct ContractOp {
+    method: String,
+    path: String,
+    raw_path: Option<String>,
+}
+
+/// The edges `link_contract_routes` adds, without touching the graph. Split out
+/// so the unit tests can assert edges and counters on a hand-built merge.
+fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) {
+    use repo_graph_graph::HttpRouteMatcher;
+
+    let mut stats = ContractLinkStats::default();
+    // Collect the ops first: almost no build has a contract file, and those
+    // builds must not pay for a second ROUTE index.
+    let mut ops: Vec<(NodeId, ContractOp)> = Vec::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
+                continue;
+            }
+            if let Some(op) = contract_op(&n.cells) {
+                ops.push((n.id, op));
+            }
+        }
+    }
+    if ops.is_empty() {
+        return (Vec::new(), stats);
+    }
+    stats.ops = ops.len();
+
+    let matcher = HttpRouteMatcher::new(&merged.graphs);
+    if matcher.is_empty() {
+        stats.unmatched = ops.len();
+        return (Vec::new(), stats);
+    }
+    let mut edges: Vec<Edge> = Vec::new();
+    for (op_id, op) in &ops {
+        let mut hits = matcher.lookup(&op.method, &op.path);
+        // Every hit comes from one tier, so the first speaks for all of them.
+        let mut exact = hits.first().is_some_and(|h| h.exact);
+        if hits.is_empty()
+            && let Some(raw) = op.raw_path.as_deref()
+            && raw != op.path
+        {
+            hits = matcher.lookup(&op.method, raw);
+            // Dropping the server base is itself an inference.
+            exact = false;
+        }
+        if hits.is_empty() {
+            stats.unmatched += 1;
+            continue;
+        }
+        if exact {
+            stats.exact += 1;
+        } else {
+            stats.prefix += 1;
+        }
+        let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        for h in hits {
+            // One route node can carry the same method twice (stacked
+            // ROUTE_METHOD cells); it is still one DOCUMENTS edge.
+            if !seen.insert(h.route) {
+                continue;
+            }
+            // Non-exact pairings are capped at Medium; a weaker route stays weaker.
+            let confidence = match h.confidence {
+                Confidence::Strong if !exact => Confidence::Medium,
+                c => c,
+            };
+            edges.push(Edge {
+                from: *op_id,
+                to: h.route,
+                category: edge_category::DOCUMENTS,
+                confidence,
+            });
+        }
+    }
+    (edges, stats)
+}
+
+/// The contract operation a DOC_SECTION's ORIGIN cell declares, or `None` when
+/// the node is not a contract op (markdown sections have no ORIGIN here) or the
+/// op is not an HTTP one (an AsyncAPI channel op is A10.3's to pair).
+fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::CellPayload;
+
+    let json = cells.iter().find_map(|c| match &c.payload {
+        CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j.as_str()),
+        _ => None,
+    })?;
+    // Cheap reject before parsing: every other ORIGIN payload (nav_route,
+    // region anchors, ...) takes this path.
+    if !json.contains("\"contract\"") {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if v.get("provenance")?.as_str()? != "contract" {
+        return None;
+    }
+    let method = v.get("method")?.as_str()?.to_ascii_uppercase();
+    if !is_http_verb(&method) {
+        return None;
+    }
+    let path = v.get("path")?.as_str()?.to_string();
+    let raw_path = v.get("raw_path").and_then(|p| p.as_str()).map(str::to_string);
+    Some(ContractOp { method, path, raw_path })
+}
+
+/// One of the verbs an OpenAPI path item may declare — literally the allow-list
+/// the contract extractor gates emission on.
+fn is_http_verb(method: &str) -> bool {
+    repo_graph_code_extractors::contracts::METHODS
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(method))
 }
 
 /// Doc→code mention index. `by_tail2` keys the last two qname segments so a
@@ -573,6 +738,192 @@ mod passes_tests {
         assert_eq!(resolve_doc_mention("npm install", &idx), None);
         assert_eq!(resolve_doc_mention("--flag", &idx), None);
         assert_eq!(resolve_doc_mention("nothing_here", &idx), None);
+    }
+
+    // ------------------------------------------------------------------
+    // A10.2 — link_contract_routes, on a hand-built merge
+    // ------------------------------------------------------------------
+
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type};
+    use repo_graph_core::{Cell, CellPayload, Node, NodeKindId, RepoId};
+    use repo_graph_graph::RepoGraph;
+
+    /// A merge under construction: nodes + nav for one repo.
+    struct Hand {
+        repo: RepoId,
+        nodes: Vec<Node>,
+        nav: CodeNav,
+    }
+
+    impl Hand {
+        fn new(canonical: &str) -> Self {
+            Hand { repo: RepoId::from_canonical(canonical), nodes: vec![], nav: CodeNav::default() }
+        }
+
+        fn add(&mut self, kind: NodeKindId, name: &str, qname: &str, cells: Vec<Cell>) -> NodeId {
+            let id = NodeId::from_parts(GRAPH_TYPE, self.repo, kind, qname);
+            self.nav.record(id, name, qname, kind, None);
+            self.nodes.push(Node { id, repo: self.repo, confidence: Confidence::Strong, cells });
+            id
+        }
+
+        /// A ROUTE in the legacy `<METHOD> <path>` shape (flask, spring, ...).
+        fn route(&mut self, method: &str, path: &str) -> NodeId {
+            let qname = format!("{method} {path}");
+            let cell = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(method.into()) };
+            self.add(node_kind::ROUTE, &qname, &qname, vec![cell])
+        }
+
+        /// A DOC_SECTION carrying `origin` as its ORIGIN payload.
+        fn doc(&mut self, qname: &str, origin: &str) -> NodeId {
+            let cell = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin.into()) };
+            self.add(node_kind::DOC_SECTION, qname, qname, vec![cell])
+        }
+
+        fn graph(self) -> RepoGraph {
+            RepoGraph {
+                repo: self.repo,
+                nodes: self.nodes,
+                edges: vec![],
+                nav: self.nav,
+                symbols: Default::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            }
+        }
+    }
+
+    /// The exact ORIGIN payload A10.1's extractor writes (see
+    /// contracts.rs `server_prefix_is_joined_onto_the_path`).
+    fn op_origin(method: &str, path: &str, raw_path: &str) -> String {
+        format!(
+            r#"{{"provenance":"contract","source":"openapi","method":"{method}","path":"{path}","raw_path":"{raw_path}","operation_id":"op"}}"#
+        )
+    }
+
+    fn documents(edges: &[Edge], from: NodeId) -> Vec<(NodeId, Confidence)> {
+        edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::DOCUMENTS)
+            .map(|e| (e.to, e.confidence))
+            .collect()
+    }
+
+    #[test]
+    fn contract_link_strong_on_exact_medium_on_prefix_none_on_docs() {
+        let mut h = Hand::new("test://contract-link/one");
+        let get_users = h.route("GET", "/users");
+        let exact = h.doc("contract::openapi::GET:/users", &op_origin("GET", "/users", "/users"));
+        let prefixed = h.doc(
+            "contract::openapi::GET:/api/v1/users",
+            &op_origin("GET", "/api/v1/users", "/users"),
+        );
+        // A markdown section may carry the same fields; only a contract pairs.
+        let prose = h.doc(
+            "README::users",
+            r#"{"provenance":"documentation","method":"GET","path":"/users"}"#,
+        );
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = contract_route_edges(&merged);
+        assert_eq!(documents(&edges, exact), vec![(get_users, Confidence::Strong)]);
+        assert_eq!(documents(&edges, prefixed), vec![(get_users, Confidence::Medium)]);
+        assert!(documents(&edges, prose).is_empty());
+        assert_eq!(edges.len(), 2);
+        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 1, prefix: 1, unmatched: 0 });
+    }
+
+    #[test]
+    fn contract_link_retries_raw_path_for_a_non_api_server_base() {
+        let mut h = Hand::new("test://contract-link/raw");
+        let get_orders = h.route("GET", "/orders");
+        // `billing-svc` is not an API prefix, so only the raw path pairs — and
+        // having dropped the declared base, it is not Strong.
+        let op = h.doc(
+            "contract::billing::GET:/billing-svc/orders",
+            &op_origin("GET", "/billing-svc/orders", "/orders"),
+        );
+        // The method is part of the key: POST pairs with nothing, and in
+        // particular not with GET /orders.
+        let miss = h.doc(
+            "contract::billing::POST:/billing-svc/orders",
+            &op_origin("POST", "/billing-svc/orders", "/orders"),
+        );
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = contract_route_edges(&merged);
+        assert_eq!(documents(&edges, op), vec![(get_orders, Confidence::Medium)]);
+        assert!(documents(&edges, miss).is_empty());
+        assert_eq!(edges.len(), 1);
+        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 0, prefix: 1, unmatched: 1 });
+    }
+
+    #[test]
+    fn contract_link_pairs_across_repos_and_lands_in_cross_edges() {
+        let mut spec = Hand::new("test://contract-link/spec");
+        let op = spec.doc("contract::api::DELETE:/users/{id}", &op_origin("delete", "/users/{id}", "/users/{id}"));
+        let mut svc = Hand::new("test://contract-link/svc");
+        let del = svc.route("DELETE", "/users/:id");
+        let mut merged = MergedGraph::new(vec![spec.graph(), svc.graph()]);
+
+        link_contract_routes(&mut merged);
+        // Method is case-folded; `{id}` and `:id` normalise to one key.
+        assert_eq!(documents(&merged.cross_edges, op), vec![(del, Confidence::Strong)]);
+    }
+
+    #[test]
+    fn contract_link_is_silent_without_contract_ops_or_routes() {
+        // No contract op: nothing, and no route index is built.
+        let mut h = Hand::new("test://contract-link/none");
+        h.route("GET", "/users");
+        h.doc("README::intro", r#"{"provenance":"test_fixture"}"#);
+        let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
+        assert!(edges.is_empty());
+        assert_eq!(stats, ContractLinkStats::default());
+
+        // Ops but no routes: every op is unmatched.
+        let mut h = Hand::new("test://contract-link/no-routes");
+        h.doc("contract::api::GET:/users", &op_origin("GET", "/users", "/users"));
+        let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
+        assert!(edges.is_empty());
+        assert_eq!(stats, ContractLinkStats { ops: 1, exact: 0, prefix: 0, unmatched: 1 });
+    }
+
+    #[test]
+    fn contract_op_reads_only_http_contract_origins() {
+        let origin = |j: &str| vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+        // operation_id is OMITTED, not null, when the spec has none.
+        assert_eq!(
+            contract_op(&origin(
+                r#"{"provenance":"contract","source":"openapi","method":"get","path":"/api/v1/users","raw_path":"/users"}"#
+            )),
+            Some(ContractOp {
+                method: "GET".into(),
+                path: "/api/v1/users".into(),
+                raw_path: Some("/users".into()),
+            })
+        );
+        // An AsyncAPI channel op is not an HTTP op.
+        assert_eq!(
+            contract_op(&origin(r#"{"provenance":"contract","source":"asyncapi","method":"publish","path":"orders"}"#)),
+            None
+        );
+        // "contract" as some OTHER field's value passes the cheap substring
+        // reject, and the parsed provenance still refuses it.
+        assert_eq!(
+            contract_op(&origin(
+                r#"{"provenance":"documentation","source":"contract","method":"GET","path":"/x"}"#
+            )),
+            None
+        );
+        // Malformed JSON and a Text payload are both ignored, never a panic.
+        assert_eq!(contract_op(&origin(r#"{"provenance":"contract""#)), None);
+        let text = vec![Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Text(op_origin("GET", "/users", "/users")),
+        }];
+        assert_eq!(contract_op(&text), None);
     }
 
     #[test]

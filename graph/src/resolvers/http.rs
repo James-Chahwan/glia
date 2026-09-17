@@ -36,6 +36,7 @@ impl CrossGraphResolver for HttpStackResolver {
         let prefixes = api_prefixes();
         let mut stats = HttpMatchStats::default();
         let (index, stripped) = build_route_index(&merged.graphs, &prefixes, &mut stats);
+        stats.report_nav_excluded();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
@@ -134,6 +135,8 @@ impl MatchTier {
 #[derive(Default)]
 struct HttpMatchStats {
     routes: usize,
+    /// Client-router NAV routes kept out of the index (A3.4).
+    nav_excluded: usize,
     endpoints: usize,
     paired: usize,
     exact: usize,
@@ -154,6 +157,17 @@ impl HttpMatchStats {
             MatchTier::RoutePrefix => self.rprefix += 1,
             MatchTier::BaseFold => self.base += 1,
             MatchTier::Suffix => self.suffix += 1,
+        }
+    }
+
+    /// A3.4 fired_on marker. Only printed when a build actually saw a nav
+    /// route, like the `[proto]` / `[contract]` markers in the engine.
+    ///
+    /// Printed by the resolver, not by `build_route_index`, so a second index
+    /// build (`HttpRouteMatcher`, A10.2) cannot print the line twice.
+    fn report_nav_excluded(&self) {
+        if self.nav_excluded > 0 {
+            eprintln!("[http] nav-routes excluded from route index: {}", self.nav_excluded);
         }
     }
 
@@ -198,7 +212,6 @@ fn build_route_index(
     // additionally registered under each of its stripped forms here, kept in a
     // second map so the strong `index` stays exactly what it was.
     let mut stripped: RouteIndex = HashMap::new();
-    let mut excluded = 0usize;
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -216,7 +229,7 @@ fn build_route_index(
             // moment the ANY tier below goes live, EVERY navigation entry in an
             // SPA would otherwise become an HTTP_CALLS target.
             if is_nav_route(&n.cells) {
-                excluded += 1;
+                stats.nav_excluded += 1;
                 continue;
             }
             stats.routes += 1;
@@ -227,12 +240,68 @@ fn build_route_index(
             index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes);
         }
     }
-    // A3.4 fired_on marker. Only printed when a build actually saw one, like
-    // the `[proto]` / `[contract]` markers in the engine.
-    if excluded > 0 {
-        eprintln!("[http] nav-routes excluded from route index: {excluded}");
-    }
     (index, stripped)
+}
+
+/// The resolver's ROUTE index and match ladder, reusable by a pass that pairs
+/// something OTHER than a client `ENDPOINT` with the ROUTE that serves it.
+/// First consumer: the engine's contract linker (A10.2), which pairs OpenAPI
+/// operations with their implementing routes.
+///
+/// Same index (both route qname shapes, NAV routes excluded, the symmetric
+/// API-prefix strip, `GLIA_API_PREFIXES` read once here) and the same tiers 1-4
+/// in the same order. Tiers 5-6 are deliberately NOT offered: they infer a base
+/// URL from a client-side `${…}` interpolation. A caller holding a DECLARED path
+/// has no interpolation to infer from, and a leading `{param}` in a declared
+/// path is a real path parameter that must not be folded away.
+///
+/// Building one is silent — the `[http]` markers stay the resolver's.
+pub struct HttpRouteMatcher {
+    index: RouteIndex,
+    stripped: RouteIndex,
+    prefixes: Vec<String>,
+}
+
+/// One ROUTE an [`HttpRouteMatcher`] lookup reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteMatch {
+    pub route: NodeId,
+    /// The ROUTE node's own confidence, capped at the matching tier's ceiling.
+    pub confidence: Confidence,
+    /// `(METHOD, path)` hit the index outright: no prefix strip on either side
+    /// and no method-agnostic `ANY` fallback.
+    pub exact: bool,
+}
+
+impl HttpRouteMatcher {
+    pub fn new(graphs: &[RepoGraph]) -> Self {
+        let prefixes = api_prefixes();
+        let mut scratch = HttpMatchStats::default();
+        let (index, stripped) = build_route_index(graphs, &prefixes, &mut scratch);
+        Self { index, stripped, prefixes }
+    }
+
+    /// No server route anywhere in the build. (`stripped` is only ever filled
+    /// alongside `index`, so this one check covers both.)
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    /// Routes serving `method path`, from the FIRST tier that yields anything —
+    /// never a union across tiers, so every hit shares one `exact` value.
+    /// `path` is raw; it is normalised here with [`normalise_http_path`].
+    pub fn lookup(&self, method: &str, path: &str) -> Vec<RouteMatch> {
+        let norm = normalise_http_path(path);
+        lookup_direct(&self.index, &self.stripped, method, &norm, &self.prefixes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(t, tier)| RouteMatch {
+                route: t.route_id,
+                confidence: weakest(t.confidence, tier.ceiling()),
+                exact: tier == MatchTier::Exact,
+            })
+            .collect()
+    }
 }
 
 /// A ROUTE node tagged `provenance: nav_route` by a client-router extractor
@@ -388,9 +457,9 @@ fn normalise_segment(seg: &str) -> String {
 }
 
 /// Default API mount prefixes stripped from either side of a path when
-/// matching. `pub(crate)` so the SDD slice-1c work — which wants
-/// `build_route_index` / the matcher promoted to `pub` — has a stable name to
-/// promote later. Override per build with `GLIA_API_PREFIXES`.
+/// matching. `pub(crate)` so the SDD slice-1c work has a stable name to promote
+/// later; the index and matcher themselves are already public as
+/// `HttpRouteMatcher` (A10.2). Override per build with `GLIA_API_PREFIXES`.
 pub(crate) const API_PREFIXES: &[&str] =
     &["protected", "api", "public", "internal", "v1", "v2", "v3"];
 
@@ -642,6 +711,88 @@ mod tests {
         assert_eq!(MatchTier::RoutePrefix.ceiling(), Confidence::Medium);
         assert_eq!(MatchTier::BaseFold.ceiling(), Confidence::Medium);
         assert_eq!(MatchTier::Suffix.ceiling(), Confidence::Weak);
+    }
+
+    /// A10.2 — one RepoGraph holding both ROUTE qname shapes, a NAV route and
+    /// an `ANY` route, for the public matcher.
+    fn matcher_graph() -> (RepoGraph, [NodeId; 4]) {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_core::Node;
+
+        let r = crate::test_support::repo();
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        let mut add = |qname: &str, confidence: Confidence, cells: Vec<Cell>| {
+            let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, qname);
+            nav.record(id, qname, qname, node_kind::ROUTE, None);
+            nodes.push(Node { id, repo: r, confidence, cells });
+            id
+        };
+        let text = |m: &str| Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(m.into()) };
+        let json = |m: &str| Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Json(format!(r#"{{"method":"{m}"}}"#)),
+        };
+        let users = add("GET /users", Confidence::Strong, vec![text("GET")]);
+        let orders = add("route:/api/orders/:id", Confidence::Strong, vec![json("POST")]);
+        let health = add("ANY /health", Confidence::Medium, vec![text("ANY")]);
+        let nav_route = add(
+            "route:/dashboard",
+            Confidence::Strong,
+            vec![
+                json("GET"),
+                Cell {
+                    kind: cell_type::ORIGIN,
+                    payload: CellPayload::Json(r#"{"provenance":"nav_route"}"#.into()),
+                },
+            ],
+        );
+        let g = RepoGraph {
+            repo: r,
+            nodes,
+            edges: vec![],
+            symbols: Default::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        (g, [users, orders, health, nav_route])
+    }
+
+    #[test]
+    fn route_matcher_flags_exact_and_caps_confidence_by_tier() {
+        let (g, [users, orders, health, _]) = matcher_graph();
+        let m = HttpRouteMatcher::new(std::slice::from_ref(&g));
+        assert!(!m.is_empty());
+        let hit = |route, confidence, exact| vec![RouteMatch { route, confidence, exact }];
+
+        // Tier 1, legacy `<METHOD> <path>` shape. Method is case-folded.
+        assert_eq!(m.lookup("get", "/users"), hit(users, Confidence::Strong, true));
+        // Tier 1, `route:` shape; any param spelling normalises the same way.
+        assert_eq!(m.lookup("POST", "/api/orders/{id}"), hit(orders, Confidence::Strong, true));
+        // Tier 2: an OpenAPI `servers: /api/v1` base is a caller-side prefix.
+        assert_eq!(m.lookup("GET", "/api/v1/users"), hit(users, Confidence::Strong, false));
+        // Tier 4: route mounted under /api, caller declares the bare path.
+        assert_eq!(m.lookup("POST", "/orders/{oid}"), hit(orders, Confidence::Medium, false));
+        // Tier 3: an ANY route serves every verb, but is not an exact hit, and
+        // the route's own Medium confidence is kept.
+        assert_eq!(m.lookup("DELETE", "/health"), hit(health, Confidence::Medium, false));
+    }
+
+    #[test]
+    fn route_matcher_misses_other_verbs_nav_routes_and_base_folds() {
+        let (g, _) = matcher_graph();
+        let m = HttpRouteMatcher::new(std::slice::from_ref(&g));
+        // The method is part of the key.
+        assert!(m.lookup("POST", "/users").is_empty());
+        // A3.4: a NAV route is never a server route, for this caller either.
+        assert!(m.lookup("GET", "/dashboard").is_empty());
+        // Tiers 5-6 are client-only: a declared leading `{tenant}` is a real
+        // path parameter, so `/{tenant}/users` must not fold onto `/users`.
+        assert!(m.lookup("GET", "/{tenant}/users").is_empty());
+        // An empty build is empty.
+        assert!(HttpRouteMatcher::new(&[]).is_empty());
     }
 
     #[test]

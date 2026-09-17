@@ -39,4 +39,7 @@ pub use resolvers::{
     PackageResolver, QueueStackResolver, SharedSchemaResolver, WebSocketStackResolver,
     normalise_http_path,
 };
+// A10.2 — the HTTP route index + match ladder, for passes that pair a declared
+// path (a contract operation) with the ROUTE that serves it.
+pub use resolvers::{HttpRouteMatcher, RouteMatch};
 pub use types::{GraphError, RepoGraph, SymbolTable};
