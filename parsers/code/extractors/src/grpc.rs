@@ -444,6 +444,7 @@ fn push_client_node(
     name: &str,
     module_id: NodeId,
     repo: RepoId,
+    evidence: Option<&Cell>,
 ) {
     let qname = format!("grpc_client:{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_CLIENT, &qname);
@@ -451,20 +452,203 @@ fn push_client_node(
         id,
         repo,
         confidence: Confidence::Medium,
-        cells: vec![],
+        cells: evidence.cloned().into_iter().collect(),
     });
     nav.record(id, name, &qname, node_kind::GRPC_CLIENT, Some(module_id));
+}
+
+/// How far into a client file the package-evidence scan reads. Every binding
+/// the client passes recognise puts its imports at the top; the bound keeps a
+/// `from … import` or `use …` deep in a function body out of the evidence.
+const EVIDENCE_SCAN_LINES: usize = 120;
+/// At most this many import paths ride on one client's evidence cell.
+const EVIDENCE_MAX_PATHS: usize = 32;
+/// Longer "paths" are not import paths; they are skipped, not truncated.
+const EVIDENCE_MAX_PATH_LEN: usize = 200;
+
+/// The text between the first quote (`"`, `'` or a backtick) in `s` and its
+/// closing twin.
+fn first_quoted(s: &str) -> Option<&str> {
+    let start = s.find(['"', '\'', '`'])?;
+    let quote = s.as_bytes()[start] as char;
+    let rest = &s[start + 1..];
+    rest.find(quote).map(|end| &rest[..end])
+}
+
+/// A quoted string that starts `s` (after leading whitespace), and nothing else:
+/// `from './x'` qualifies, `from users where` does not.
+fn leading_quoted(s: &str) -> Option<&str> {
+    let t = s.trim_start();
+    t.starts_with(['"', '\'', '`']).then(|| first_quoted(t)).flatten()
+}
+
+/// An unquoted import path: up to the first whitespace or `; { ( , =`, minus a
+/// trailing wildcard (`.*` `._` `::*` `\*`) and dangling separators.
+fn bare_path(s: &str) -> &str {
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, ';' | '{' | '(' | ',' | '='))
+        .unwrap_or(s.len());
+    let mut p = &s[..end];
+    for wildcard in [".*", "._", "::*", "\\*"] {
+        if let Some(stripped) = p.strip_suffix(wildcard) {
+            p = stripped;
+            break;
+        }
+    }
+    p.trim_end_matches(['.', ':', '\\'])
+}
+
+/// `line` minus the keyword `kw`, when `kw` is a whole leading word.
+fn after_keyword<'a>(line: &'a str, kw: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(kw)?;
+    rest.starts_with(char::is_whitespace).then(|| rest.trim_start())
+}
+
+/// The import path one head-of-file line names, if any. `in_go_block` carries
+/// Go's parenthesised `import ( … )` across lines.
+fn import_path_of(line: &str, in_go_block: &mut bool) -> Option<String> {
+    if *in_go_block {
+        if line.starts_with(')') {
+            *in_go_block = false;
+            return None;
+        }
+        return first_quoted(line).map(str::to_string);
+    }
+    // Go `import (` opens a block; JS `import('x')` has a quote after the paren.
+    if line.strip_prefix("import").map(str::trim) == Some("(") {
+        *in_go_block = true;
+        return None;
+    }
+    // Rust tonic `tonic::include_proto!("billing")` names the proto package itself;
+    // JS `const pb = require('./gen/billing/x')`; TS `} from './gen/billing/x';`.
+    for marker in ["include_proto!(", "require(", " from "] {
+        if let Some(i) = line.find(marker)
+            && let Some(q) = leading_quoted(&line[i + marker.len()..])
+        {
+            return Some(q.to_string());
+        }
+    }
+    let path = if let Some(rest) = after_keyword(line, "import") {
+        // Go / TS / Dart quote the path; Java, Kotlin, Scala, Swift, Python do not.
+        match first_quoted(rest) {
+            Some(q) => q,
+            None => bare_path(rest.strip_prefix("static ").unwrap_or(rest).trim_start()),
+        }
+    } else if let Some(rest) = after_keyword(line, "from") {
+        // Python `from gen.billing import payments_pb2_grpc`.
+        leading_quoted(rest).or_else(|| rest.split_once(" import").map(|(m, _)| m.trim()))?
+    } else if let Some(rest) = after_keyword(line, "using")
+        .or_else(|| after_keyword(line, "global").and_then(|r| after_keyword(r, "using")))
+    {
+        // C# directive, never the `using (…)` / `using var x = …` statements.
+        if rest.starts_with('(') || after_keyword(rest, "var").is_some() {
+            return None;
+        }
+        let rest = rest.strip_prefix("static ").unwrap_or(rest);
+        // `using Alias = Some.Namespace;` names the namespace after the `=`.
+        let rest = rest.split_once('=').map_or(rest, |(_, target)| target.trim_start());
+        bare_path(rest)
+    } else if let Some(rest) = after_keyword(line, "use") {
+        // Rust `use billing::client::X;`, PHP `use Billing\X;`.
+        bare_path(rest)
+    } else if let Some(rest) = line.strip_prefix("#include").or_else(|| line.strip_prefix("# include")) {
+        let rest = rest.trim_start();
+        match rest.strip_prefix('<') {
+            Some(angled) => angled.split_once('>').map(|(p, _)| p)?,
+            None => first_quoted(rest)?,
+        }
+    } else if line.starts_with("require") {
+        // Ruby `require 'billing/payments_services_pb'` / `require_relative`.
+        first_quoted(line)?
+    } else {
+        return None;
+    };
+    Some(path.to_string())
+}
+
+/// Every import-like path in the head of `source`, in source order, deduplicated:
+/// Go `pb "example.com/gen/billing"` (single or block form), C# `using GreeterApi;`,
+/// Java/Kotlin/Scala `import shop.billing.*;`, Python `from gen.billing import x`,
+/// TS/JS/Dart `from './gen/billing/x'` / `require('x')`, Ruby `require 'x'`,
+/// Rust `use billing::x;` / `include_proto!("billing")`, PHP `use Billing\X;`,
+/// C++ `#include "billing/x.grpc.pb.h"`.
+///
+/// No package knowledge lives here: which of these paths (if any) names a proto
+/// package is decided by the graph crate's gRPC resolver, against the build's
+/// whole service set. Parsers extract; the graph crate resolves (A5.4).
+pub fn client_package_evidence(source: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_go_block = false;
+    for raw in source.lines().take(EVIDENCE_SCAN_LINES) {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") || line.starts_with("/*") || line.starts_with('*') {
+            continue;
+        }
+        let Some(path) = import_path_of(line, &mut in_go_block) else { continue };
+        if path.is_empty() || path.len() > EVIDENCE_MAX_PATH_LEN || out.contains(&path) {
+            continue;
+        }
+        out.push(path);
+        if out.len() == EVIDENCE_MAX_PATHS {
+            break;
+        }
+    }
+    out
+}
+
+/// The RPC_PACKAGE cell a GRPC_CLIENT carries: `{"imports":[…]}`, the package
+/// evidence its file names. `None` when the file names nothing — the cell is
+/// null-free, like the service's.
+fn client_evidence_cell(source: &str) -> Option<Cell> {
+    let imports = client_package_evidence(source);
+    if imports.is_empty() {
+        return None;
+    }
+    Some(Cell {
+        kind: repo_graph_code_domain::cell_type::RPC_PACKAGE,
+        payload: CellPayload::Json(serde_json::json!({ "imports": imports }).to_string()),
+    })
+}
+
+/// A decoded RPC_PACKAGE cell. A GRPC_SERVICE carries the declaring `.proto`'s
+/// `package` and generated-namespace options; a GRPC_CLIENT carries `imports`
+/// (see [`client_package_evidence`]). Absent keys decode as `None` / empty, and
+/// unknown keys are ignored, so either shape decodes through this one type.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct RpcPackageCell {
+    pub package: Option<String>,
+    pub go_package: Option<String>,
+    pub java_package: Option<String>,
+    pub csharp_namespace: Option<String>,
+    pub imports: Vec<String>,
+}
+
+impl RpcPackageCell {
+    /// `None` for a payload that is not a JSON object.
+    pub fn parse(payload: &str) -> Option<Self> {
+        serde_json::from_str(payload).ok()
+    }
 }
 
 /// The suffix-convention client pass: recognises `<Foo>Service` / `<Foo>Svc`
 /// stubs with no knowledge of the build's `.proto` files. Kept as the fallback
 /// for repos whose contract lives outside the build; the data-driven pass is
 /// [`extract_known_grpc_client_nodes`].
+///
+/// Each client carries its file's package evidence ([`client_evidence_cell`]),
+/// which the resolver uses to pick one service when a bare name is declared in
+/// more than one proto package (A5.4).
 pub fn extract_grpc_client_nodes(source: &str, module_id: NodeId, repo: RepoId) -> GrpcNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
-    for canonical in suffix_pattern_names(source) {
-        push_client_node(&mut nodes, &mut nav, &canonical, module_id, repo);
+    let names = suffix_pattern_names(source);
+    if names.is_empty() {
+        return GrpcNodes { nodes, nav };
+    }
+    let evidence = client_evidence_cell(source);
+    for canonical in names {
+        push_client_node(&mut nodes, &mut nav, &canonical, module_id, repo, evidence.as_ref());
     }
     GrpcNodes { nodes, nav }
 }
@@ -605,6 +789,8 @@ pub fn extract_known_grpc_client_nodes(
     names.dedup();
 
     let bytes = source.as_bytes();
+    // Computed on the first hit only: most gRPC-context files mint no client here.
+    let mut evidence: Option<Option<Cell>> = None;
     for name in names {
         if seen.contains(name) {
             continue;
@@ -624,7 +810,8 @@ pub fn extract_known_grpc_client_nodes(
         });
         if hit {
             seen.insert(name.to_string());
-            push_client_node(&mut nodes, &mut nav, name, module_id, repo);
+            let cell = evidence.get_or_insert_with(|| client_evidence_cell(source));
+            push_client_node(&mut nodes, &mut nav, name, module_id, repo, cell.as_ref());
         }
     }
     GrpcNodes { nodes, nav }
@@ -934,5 +1121,114 @@ let db = makeDbClient(uri);
         assert!(refs.iter().all(|r| r.package.as_deref() == Some("helloworld")));
         assert!(refs.iter().all(|r| r.csharp_namespace.as_deref() == Some("GreeterApi")));
         assert!(refs.iter().all(|r| r.go_package.is_none() && r.java_package.is_none()));
+    }
+
+    // ---- A5.4: client package evidence -----------------------------------
+
+    fn evidence_of(out: &GrpcNodes) -> Vec<RpcPackageCell> {
+        out.nodes
+            .iter()
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => RpcPackageCell::parse(j).expect("evidence decodes"),
+                other => panic!("RPC_PACKAGE must be Json, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn evidence_reads_go_import_block_and_single_imports() {
+        let block = "package main\n\nimport (\n\t\"context\"\n\n\t\"google.golang.org/grpc\"\n\n\tpb \"example.com/gen/billing\"\n)\n\nfunc main() {}\n";
+        assert_eq!(
+            client_package_evidence(block),
+            vec!["context", "google.golang.org/grpc", "example.com/gen/billing"]
+        );
+        let single = "package main\nimport pb \"example.com/gen/legacy\"\nimport \"fmt\"\n";
+        assert_eq!(client_package_evidence(single), vec!["example.com/gen/legacy", "fmt"]);
+    }
+
+    #[test]
+    fn evidence_reads_each_binding_shape() {
+        let cases: &[(&str, &[&str])] = &[
+            ("using Grpc.Net.Client;\nusing static GreeterApi.Helpers;\nusing Api = GreeterApi.V2;\nglobal using GreeterApi;\n", &["Grpc.Net.Client", "GreeterApi.Helpers", "GreeterApi.V2", "GreeterApi"]),
+            ("import io.grpc.ManagedChannel;\nimport shop.billing.*;\nimport static shop.legacy.Util.helper;\n", &["io.grpc.ManagedChannel", "shop.billing", "shop.legacy.Util.helper"]),
+            ("import grpc\nfrom gen.billing import payments_pb2_grpc\nimport gen.legacy.payments_pb2 as lp\n", &["grpc", "gen.billing", "gen.legacy.payments_pb2"]),
+            ("import * as grpc from '@grpc/grpc-js';\nimport {\n  PaymentsServiceClient,\n} from './gen/billing/payments_grpc_pb';\nconst x = require(\"./gen/legacy/payments_pb\");\n", &["@grpc/grpc-js", "./gen/billing/payments_grpc_pb", "./gen/legacy/payments_pb"]),
+            ("use tonic::transport::Channel;\npub mod billing { tonic::include_proto!(\"billing\"); }\nuse billing::payments_service_client::{PaymentsServiceClient};\n", &["tonic::transport::Channel", "billing", "billing::payments_service_client"]),
+            ("require 'grpc'\nrequire_relative 'gen/billing/payments_services_pb'\n", &["grpc", "gen/billing/payments_services_pb"]),
+            ("#include <grpcpp/grpcpp.h>\n#include \"billing/payments.grpc.pb.h\"\n", &["grpcpp/grpcpp.h", "billing/payments.grpc.pb.h"]),
+            ("<?php\nuse Billing\\PaymentsServiceClient;\n", &["Billing\\PaymentsServiceClient"]),
+            ("import 'package:grpc/grpc.dart';\nimport 'package:shop/gen/billing/payments.pbgrpc.dart';\n", &["package:grpc/grpc.dart", "package:shop/gen/billing/payments.pbgrpc.dart"]),
+        ];
+        for (source, want) in cases {
+            assert_eq!(&client_package_evidence(source), want, "source: {source}");
+        }
+    }
+
+    #[test]
+    fn evidence_ignores_statements_prose_and_the_file_body() {
+        let source = "using (var channel = GrpcChannel.ForAddress(url)) {}\nusing var ch = GrpcChannel.ForAddress(url);\nselect id\nfrom users where id = 1\n// import billing.Nope;\n";
+        assert!(client_package_evidence(source).is_empty(), "got {:?}", client_package_evidence(source));
+        let mut deep = "x = 1\n".repeat(EVIDENCE_SCAN_LINES);
+        deep.push_str("from gen.billing import payments_pb2_grpc\n");
+        assert!(client_package_evidence(&deep).is_empty(), "past the head-of-file bound");
+    }
+
+    #[test]
+    fn evidence_is_deduplicated_and_capped() {
+        let mut source = String::from("import grpc\nimport grpc\n");
+        for i in 0..(EVIDENCE_MAX_PATHS + 8) {
+            source.push_str(&format!("import pkg{i}\n"));
+        }
+        let got = client_package_evidence(&source);
+        assert_eq!(got.len(), EVIDENCE_MAX_PATHS);
+        assert_eq!(got.iter().filter(|p| *p == "grpc").count(), 1);
+    }
+
+    #[test]
+    fn fallback_client_carries_its_files_package_evidence() {
+        let source = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/gen/billing\"\n)\n\nfunc Charge() {\n\tc := pb.NewPaymentsServiceClient(conn)\n}\n";
+        let out = extract_grpc_client_nodes(source, module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:PaymentsService".to_string()], "qname stays bare");
+        let evidence = evidence_of(&out);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].imports, vec!["google.golang.org/grpc", "example.com/gen/billing"]);
+        assert_eq!(evidence[0].package, None, "a client names no package of its own");
+    }
+
+    #[test]
+    fn data_driven_client_carries_evidence_and_no_evidence_means_no_cell() {
+        let source = "using Grpc.Net.Client;\nusing GreeterApi;\nvar c = new Greeter.GreeterClient(channel);";
+        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Greeter")]);
+        let evidence = evidence_of(&out);
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].imports, vec!["Grpc.Net.Client", "GreeterApi"]);
+
+        // A stub with no import line at all carries no RPC_PACKAGE cell.
+        let bare = extract_grpc_client_nodes("c := pb.NewOrderServiceClient(conn)", module_id(), repo());
+        assert_eq!(bare.nodes.len(), 1);
+        assert!(bare.nodes[0].cells.is_empty(), "null-free: no evidence, no cell");
+    }
+
+    #[test]
+    fn rpc_package_cell_decodes_the_service_payload_too() {
+        let source = "syntax = \"proto3\";\npackage billing;\noption go_package = \"example.com/gen/billing;billingpb\";\noption csharp_namespace = \"Shop.Billing\";\nservice PaymentsService {\n  rpc Charge (Req) returns (Resp);\n}\n";
+        let out = extract_grpc_service_nodes(source, "billing/payments.proto", module_id(), repo());
+        let payload = out.nodes[0]
+            .cells
+            .iter()
+            .find_map(|c| match (&c.payload, c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE) {
+                (CellPayload::Json(j), true) => Some(j.clone()),
+                _ => None,
+            })
+            .expect("service carries RPC_PACKAGE");
+        let decoded = RpcPackageCell::parse(&payload).expect("decodes");
+        assert_eq!(decoded.package.as_deref(), Some("billing"));
+        assert_eq!(decoded.go_package.as_deref(), Some("example.com/gen/billing;billingpb"));
+        assert_eq!(decoded.csharp_namespace.as_deref(), Some("Shop.Billing"));
+        assert_eq!(decoded.java_package, None);
+        assert!(decoded.imports.is_empty());
+        assert_eq!(RpcPackageCell::parse("not json"), None);
     }
 }

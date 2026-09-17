@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package legacy;
+
+option go_package = "example.com/gen/legacy";
+
+service PaymentsService {
+  rpc Charge (ChargeRequest) returns (ChargeReply);
+}
+
+message ChargeRequest {
+  string id = 1;
+}
+
+message ChargeReply {
+  bool ok = 1;
+}

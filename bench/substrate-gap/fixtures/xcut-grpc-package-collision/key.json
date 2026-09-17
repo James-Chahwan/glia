@@ -1,0 +1,24 @@
+{
+  "framework": "xcut-grpc-package-collision",
+  "language": "proto+go",
+  "dirs": ["billing", "legacy", "client"],
+  "mechanism": "grpc",
+  "cells": ["go/grpc"],
+  "note": "A5.4. Two proto packages (billing, legacy) declare the same `service PaymentsService`; the Go storefront imports only `pb \"example.com/gen/billing\"`. Before A5.4 the bare client key pairs with BOTH services, so the forbid row fires. After it the client's package evidence (its import paths, carried on an RPC_PACKAGE cell) matches billing's go_package and nothing of legacy's, so exactly one GRPC_CALLS edge survives. The client qname stays bare: qualification is an edge decision taken in the resolver, not a qname shape change. Cell binding go/grpc only: `proto` is not one of the 16 language rows.",
+  "expect_nodes": [
+    {"kind": "GRPC_SERVICE", "name": "grpc:billing.PaymentsService", "note": "A5.1 package-qualified"},
+    {"kind": "GRPC_SERVICE", "name": "grpc:legacy.PaymentsService", "note": "same bare name, different package"},
+    {"kind": "GRPC_CLIENT", "name": "grpc_client:PaymentsService", "note": "Go stub pb.NewPaymentsServiceClient (suffix-convention pass)"}
+  ],
+  "expect_edges": [
+    {"from": "grpc_client:PaymentsService", "to": "grpc:billing.PaymentsService", "category": "GRPC_CALLS", "note": "regression guard: 1.00 before AND after"}
+  ],
+  "expect_cells": [
+    {"kind": "GRPC_CLIENT", "node": "grpc_client:PaymentsService", "cell": "RPC_PACKAGE", "contains": "example.com/gen/billing", "note": "A5.4: the client carries the package evidence its file names"},
+    {"kind": "GRPC_SERVICE", "node": "grpc:legacy.PaymentsService", "cell": "RPC_PACKAGE", "contains": "\"go_package\":\"example.com/gen/legacy\"", "note": "A5.1: the option the resolver matches imports against"}
+  ],
+  "forbid": [
+    {"from": "grpc_client:PaymentsService", "to": "grpc:legacy.PaymentsService", "category": "GRPC_CALLS", "note": "A5.4: the package collision; present at baseline, gone after the fix"},
+    {"kind": "GRPC_CLIENT", "name": "grpc_client:billing.PaymentsService", "note": "A5.4: no second, qualified client node for the same stub"}
+  ]
+}

@@ -105,6 +105,233 @@ fn grpc_resolver_method_level_matches_service() {
     assert_eq!(merged.cross_edges.len(), 1);
 }
 
+// ---- A5.4: package-aware pairing -------------------------------------------
+//
+// Fully qualified rather than imported so this block does not touch the file's
+// shared `use` lines.
+
+/// An `RPC_PACKAGE` cell with exactly the given JSON payload.
+fn rpc_package_cell(json: &str) -> repo_graph_core::Cell {
+    repo_graph_core::Cell {
+        kind: repo_graph_code_domain::cell_type::RPC_PACKAGE,
+        payload: repo_graph_core::CellPayload::Json(json.to_string()),
+    }
+}
+
+/// A package-qualified GRPC_SERVICE in `repo`, carrying the RPC_PACKAGE cell
+/// the proto extractor writes.
+fn grpc_service(repo: RepoId, nav: &mut CodeNav, package: &str, name: &str, pkg_json: &str) -> (Node, NodeId) {
+    let qname = format!("grpc:{package}.{name}");
+    let (mut node, id) = make_node(repo, node_kind::GRPC_SERVICE, &qname, Confidence::Strong);
+    node.cells.push(rpc_package_cell(pkg_json));
+    record(nav, id, name, &qname, node_kind::GRPC_SERVICE);
+    (node, id)
+}
+
+/// A GRPC_CLIENT in `repo` for `svc_name`, with one RPC_PACKAGE evidence cell
+/// per entry of `evidence` (one per file that constructs the stub).
+fn grpc_client(repo: RepoId, nav: &mut CodeNav, svc_name: &str, evidence: &[&str]) -> (Node, NodeId) {
+    let qname = format!("grpc_client:{svc_name}");
+    let (mut node, id) = make_node(repo, node_kind::GRPC_CLIENT, &qname, Confidence::Medium);
+    for json in evidence {
+        node.cells.push(rpc_package_cell(json));
+    }
+    let bare = svc_name.rsplit('.').next().unwrap_or(svc_name);
+    record(nav, id, bare, &qname, node_kind::GRPC_CLIENT);
+    (node, id)
+}
+
+/// `billing.PaymentsService` and `legacy.PaymentsService` in repo A, and one
+/// client in repo B. Returns (merged-after-resolve, billing id, legacy id, client id).
+fn payments_collision(client_name: &str, evidence: &[&str]) -> (MergedGraph, NodeId, NodeId, NodeId) {
+    let mut nav_a = CodeNav::default();
+    let (billing, billing_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "billing",
+        "PaymentsService",
+        r#"{"package":"billing","go_package":"example.com/gen/billing"}"#,
+    );
+    let (legacy, legacy_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "legacy",
+        "PaymentsService",
+        r#"{"package":"legacy","go_package":"example.com/gen/legacy"}"#,
+    );
+    let ga = make_graph(repo_a(), vec![billing, legacy], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (client, client_id) = grpc_client(repo_b(), &mut nav_b, client_name, evidence);
+    let gb = make_graph(repo_b(), vec![client], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+    (merged, billing_id, legacy_id, client_id)
+}
+
+fn grpc_call_targets(merged: &MergedGraph, from: NodeId) -> Vec<NodeId> {
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::GRPC_CALLS && e.from == from)
+        .map(|e| e.to)
+        .collect()
+}
+
+#[test]
+fn grpc_resolver_drops_ambiguous_bare_service_name() {
+    // A bare client whose file names neither package: pairing it with both is
+    // the silent wrong edge, so it pairs with neither.
+    let (merged, _, _, client_id) =
+        payments_collision("PaymentsService", &[r#"{"imports":["context","google.golang.org/grpc"]}"#]);
+    assert_eq!(grpc_call_targets(&merged, client_id), Vec::<NodeId>::new());
+
+    // No evidence cell at all: the same drop.
+    let (merged, _, _, client_id) = payments_collision("PaymentsService", &[]);
+    assert!(merged.cross_edges.is_empty(), "got {:?}", merged.cross_edges);
+    assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
+}
+
+#[test]
+fn grpc_resolver_pairs_qualified_client_exactly() {
+    let (merged, billing_id, _, client_id) = payments_collision("billing.PaymentsService", &[]);
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id]);
+
+    // A qualified client naming a package nobody declares pairs with nothing.
+    let (merged, _, _, client_id) = payments_collision("payments.PaymentsService", &[]);
+    assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
+}
+
+#[test]
+fn grpc_resolver_narrows_bare_client_by_go_package_import() {
+    // The xcut-grpc-package-collision fixture in miniature.
+    let (merged, billing_id, _, client_id) = payments_collision(
+        "PaymentsService",
+        &[r#"{"imports":["context","google.golang.org/grpc","example.com/gen/billing"]}"#],
+    );
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id]);
+}
+
+#[test]
+fn grpc_resolver_narrows_by_proto_package_segment_case_insensitively() {
+    // Python / TS generated code: no option matches, the proto package is a
+    // path segment. C# PascalCases it.
+    let (merged, _, legacy_id, client_id) =
+        payments_collision("PaymentsService", &[r#"{"imports":["grpc","gen.legacy"]}"#]);
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![legacy_id]);
+    let (merged, billing_id, _, client_id) =
+        payments_collision("PaymentsService", &[r#"{"imports":["Shop.Billing.Grpc"]}"#]);
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id]);
+}
+
+#[test]
+fn grpc_resolver_drops_when_one_file_names_both_packages() {
+    let (merged, _, _, client_id) = payments_collision(
+        "PaymentsService",
+        &[r#"{"imports":["example.com/gen/billing","example.com/gen/legacy"]}"#],
+    );
+    assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
+}
+
+#[test]
+fn grpc_resolver_option_evidence_beats_package_segment_evidence() {
+    // `example.com/legacy/example.com/gen/billing` carries a `legacy` segment
+    // (a tier-2 hit for legacy), but it contains billing's whole go_package
+    // path: the option match (tier 1) wins.
+    let (merged, billing_id, _, client_id) = payments_collision(
+        "PaymentsService",
+        &[r#"{"imports":["example.com/legacy/example.com/gen/billing"]}"#],
+    );
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id]);
+}
+
+#[test]
+fn grpc_resolver_two_files_decide_separately() {
+    // Two files construct the same stub (one node id, two evidence cells), one
+    // per package: each file's evidence contributes its own edge.
+    let (merged, billing_id, legacy_id, client_id) = payments_collision(
+        "PaymentsService",
+        &[
+            r#"{"imports":["example.com/gen/billing"]}"#,
+            r#"{"imports":["example.com/gen/legacy"]}"#,
+            r#"{"imports":["context"]}"#,
+        ],
+    );
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![billing_id, legacy_id]);
+}
+
+#[test]
+fn grpc_resolver_maps_csharp_namespace_back_to_its_package() {
+    // `using GreeterApi;` names the csharp_namespace, not the proto package
+    // (`helloworld`): the match must select the service that declares it.
+    let mut nav_a = CodeNav::default();
+    let (hello, hello_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "helloworld",
+        "Greeter",
+        r#"{"package":"helloworld","csharp_namespace":"GreeterApi"}"#,
+    );
+    let (v2, _) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "helloworld.v2",
+        "Greeter",
+        r#"{"package":"helloworld.v2","csharp_namespace":"GreeterApi.V2"}"#,
+    );
+    let ga = make_graph(repo_a(), vec![hello, v2], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (client, client_id) = grpc_client(
+        repo_b(),
+        &mut nav_b,
+        "Greeter",
+        &[r#"{"imports":["Grpc.Net.Client","GreeterApi"]}"#],
+    );
+    let gb = make_graph(repo_b(), vec![client], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![hello_id]);
+}
+
+#[test]
+fn grpc_resolver_same_package_in_two_repos_is_not_ambiguous() {
+    // The server and a vendored copy both declare billing.PaymentsService: one
+    // package, two nodes — both pairings stand, with no evidence needed.
+    let mut nav_a = CodeNav::default();
+    let (server, server_id) =
+        grpc_service(repo_a(), &mut nav_a, "billing", "PaymentsService", r#"{"package":"billing"}"#);
+    let ga = make_graph(repo_a(), vec![server], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (copy, copy_id) =
+        grpc_service(repo_b(), &mut nav_b, "billing", "PaymentsService", r#"{"package":"billing"}"#);
+    let (client, client_id) = grpc_client(repo_b(), &mut nav_b, "PaymentsService", &[]);
+    let gb = make_graph(repo_b(), vec![copy, client], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert_eq!(grpc_call_targets(&merged, client_id), vec![server_id, copy_id]);
+}
+
+#[test]
+fn grpc_resolver_package_falls_back_to_the_qname_without_a_cell() {
+    // Services with no RPC_PACKAGE cell still differ by their A5.1 qname prefix.
+    let mut nav_a = CodeNav::default();
+    let (b, _) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:billing.PaymentsService", Confidence::Strong);
+    record(&mut nav_a, b.id, "PaymentsService", "grpc:billing.PaymentsService", node_kind::GRPC_SERVICE);
+    let (l, _) = make_node(repo_a(), node_kind::GRPC_SERVICE, "grpc:legacy.PaymentsService", Confidence::Strong);
+    record(&mut nav_a, l.id, "PaymentsService", "grpc:legacy.PaymentsService", node_kind::GRPC_SERVICE);
+    let ga = make_graph(repo_a(), vec![b, l], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (client, client_id) = grpc_client(repo_b(), &mut nav_b, "PaymentsService", &[]);
+    let gb = make_graph(repo_b(), vec![client], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
+}
+
 // ============================================================================
 // QueueStackResolver
 // ============================================================================
