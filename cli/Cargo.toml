@@ -1,6 +1,6 @@
 [package]
 name = "glia-cli"
-version = "0.4.13"
+version.workspace = true
 edition = "2024"
 publish = false
 description = "glia CLI — analyze a repo, query impact reachability, merge multiple .gmap-style scans into a cross-service graph."

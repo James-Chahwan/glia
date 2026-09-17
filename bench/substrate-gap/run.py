@@ -133,6 +133,7 @@ def main():
         rec = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "engine": _engine_version(),
+            "build_stamp": _build_stamp(),
             "blind_spots": [{"framework": fw, "category": c} for fw, c in blind],
             "partial_cells": [{"framework": fw, "category": c, "recall": r}
                               for fw, c, r in partials],
@@ -155,6 +156,17 @@ def _engine_version():
         import repo_graph_py as rg
         return rg.version()
     except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _build_stamp():
+    """`<release>+p<16 hex>` of the INSTALLED wheel. Two records with the same
+    `engine` but different stamps graded different parser code; the same stamp
+    across a claimed rebuild means maturin repackaged a stale .so."""
+    try:
+        import repo_graph_py as rg
+        return rg.build_stamp()
+    except Exception:  # noqa: BLE001 — older wheel without the symbol
         return "unknown"
 
 

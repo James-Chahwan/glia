@@ -623,6 +623,17 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Build identity of THIS wheel: `<release>+p<16 hex>`, where the hex half is a
+/// content hash of every graph-shaping source file (repo_graph_stamp). Two
+/// wheels with the same `version()` but different `build_stamp()` contain
+/// different parsers — which is how you catch a stale `.so` that maturin
+/// repackaged without rebuilding. `version()` above stays the bare release:
+/// the repo-graph wrapper and bench/substrate-gap/run.py read it.
+#[pyfunction]
+fn build_stamp() -> &'static str {
+    repo_graph_engine::BUILD_STAMP
+}
+
 // ============================================================================
 // Module definition
 // ============================================================================
@@ -639,6 +650,7 @@ fn repo_graph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(category_names, m)?)?;
     m.add_function(wrap_pyfunction!(cell_type_names, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(build_stamp, m)?)?;
     m.add_class::<PyGraph>()?;
     Ok(())
 }
@@ -646,6 +658,21 @@ fn repo_graph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A1.6: `build_stamp()` extends `version()` — same release, plus the
+    /// parser hash — so a wrapper that reads `version()` keeps working and a
+    /// stale `.so` shows up as a stamp that did not move across a rebuild.
+    #[test]
+    fn build_stamp_is_the_release_plus_the_parser_stamp() {
+        let stamp = build_stamp();
+        assert_eq!(stamp, repo_graph_engine::BUILD_STAMP);
+        let hex = stamp
+            .strip_prefix(version())
+            .and_then(|rest| rest.strip_prefix("+p"))
+            .unwrap_or_default();
+        assert_eq!(hex, repo_graph_engine::PARSER_STAMP, "build_stamp() = {stamp:?}");
+        assert_eq!(hex.len(), 16, "build_stamp() = {stamp:?}");
+    }
 
     /// A9.3: the binding is transport only, so the thing worth pinning is the
     /// wiring — the engine's `ServiceMap` serialises and the shape Python

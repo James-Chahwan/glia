@@ -23,10 +23,15 @@ use repo_graph_engine::{
 };
 use repo_graph_graph::MergedGraph;
 
+/// `glia --version` body: `<release> (build <release>+p<parser stamp>)`. The
+/// build half is a content hash of every graph-shaping source, so two binaries
+/// that print the same release but different builds contain different parsers.
+const VERSION: &str = repo_graph_engine::VERSION_LINE;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "glia",
-    version,
+    version = VERSION,
     about = "glia — cross-service code-graph engine"
 )]
 struct Cli {
@@ -1477,6 +1482,37 @@ mod tests {
             example_from_qname: String::new(),
             example_to_qname: String::new(),
         }
+    }
+
+    /// A1.6: `glia --version` must name the engine it was built from. Before
+    /// the fix cli/Cargo.toml pinned 0.4.13 against a 0.4.18 workspace, so the
+    /// release half lied (audit-2026-06-10 #4's bug class); the build half did
+    /// not exist, so a stale binary was indistinguishable from a fresh one.
+    #[test]
+    fn version_names_the_workspace_release_and_the_build_stamp() {
+        use clap::CommandFactory;
+        assert_eq!(
+            env!("CARGO_PKG_VERSION"),
+            repo_graph_engine::RELEASE,
+            "glia-cli's version drifted from the workspace release"
+        );
+        let rendered = Cli::command().render_version();
+        let line = rendered.trim_end();
+        let want_prefix = format!(
+            "glia {rel} (build {rel}+p",
+            rel = repo_graph_engine::RELEASE
+        );
+        assert!(line.starts_with(&want_prefix), "--version printed {line:?}");
+        let hex = line
+            .strip_prefix(&want_prefix)
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_default();
+        assert_eq!(hex, repo_graph_engine::PARSER_STAMP, "--version printed {line:?}");
+        assert_eq!(hex.len(), 16, "--version printed {line:?}");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "--version printed {line:?}"
+        );
     }
 
     #[test]
