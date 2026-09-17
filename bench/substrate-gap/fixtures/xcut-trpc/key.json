@@ -1,0 +1,18 @@
+{
+  "framework": "xcut-trpc",
+  "language": "typescript",
+  "dirs": ["server", "client"],
+  "note": "A10.9: a T3 tRPC router and the Next.js page that calls it. Node half only; the RPC_CALLS pairing edge is A10.10 (edge_category 34). No matrix column exists for tRPC, so no mechanism/cells binding.",
+  "expect_nodes": [
+    {"kind": "RPC_PROCEDURE", "name": "user.list", "note": "userRouter.list procedure -> rpc:user.list"},
+    {"kind": "RPC_PROCEDURE", "name": "user.byId", "note": "multi-line .input(...).query(...) chain"},
+    {"kind": "RPC_CALL", "name": "user.list", "note": "api.user.list.useQuery() -> rpc_call:user.list"}
+  ],
+  "forbid": [
+    {"kind": "GRAPHQL_OPERATION", "max_nodes": 0, "note": "the tRPC hook line must not mint the phantom graphql_op:useQuery"},
+    {"kind": "RPC_PROCEDURE", "max_nodes": 2, "note": "exactly the two declared procedures, nothing from resolver bodies or mounts"},
+    {"kind": "RPC_PROCEDURE", "name": "user.where", "note": "an object key inside a resolver body is not a procedure"},
+    {"kind": "RPC_PROCEDURE", "name": "user", "note": "the appRouter mount key is a sub-router, not a procedure"},
+    {"kind": "RPC_CALL", "max_nodes": 1, "note": "one call site, deduped"}
+  ]
+}

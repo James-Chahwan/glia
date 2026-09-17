@@ -14,6 +14,7 @@ pub mod queue_topic;
 pub mod queues;
 pub mod react;
 pub mod services;
+pub mod trpc;
 pub mod ts_routes;
 pub mod vue;
 pub mod websocket;

@@ -135,7 +135,7 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc, queues,
-        react, services, ts_routes, vue, websocket,
+        react, services, trpc, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -197,6 +197,21 @@ pub(crate) fn apply_cross_cutting_extractors(
         run!(ts_routes::extract_ts_backend_routes(
             source, path, module_id, repo
         ));
+        // A10.9: tRPC routers/procedures (server) and hook/vanilla calls
+        // (client). Per-file marker, printed only when the file yielded one —
+        // the aggregation point (route.rs) is a sibling packet's file.
+        let procs = trpc::extract_trpc_procedure_nodes(source, module_id, repo);
+        let calls = trpc::extract_trpc_call_nodes(source, module_id, repo);
+        if !procs.nodes.is_empty() || !calls.nodes.is_empty() {
+            eprintln!(
+                "[trpc] routers={} procedures={} calls={} path={path}",
+                procs.routers,
+                procs.nodes.len(),
+                calls.nodes.len()
+            );
+        }
+        run!(procs);
+        run!(calls);
     }
     if matches!(lang, "react" | "typescript") {
         let module_qname = fp

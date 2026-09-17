@@ -75,6 +75,13 @@ pub fn extract_graphql_operation_nodes(
         let trimmed = line.trim();
         for &pattern in OPERATION_PATTERNS {
             if trimmed.contains(pattern) {
+                // A10.9: `api.user.list.useQuery()` is a tRPC hook, not a
+                // GraphQL operation. With no gql tag in the file the fallback
+                // below would mint `graphql_op:useQuery`, which the GraphQL
+                // resolver then pairs to any `Query` resolver by substring.
+                if crate::trpc::is_trpc_client_line(trimmed) {
+                    break;
+                }
                 let op_name = extract_gql_operation_name(source, trimmed)
                     .unwrap_or_else(|| pattern.trim_end_matches('(').to_string());
                 if seen.insert(op_name.clone()) {
@@ -304,6 +311,28 @@ mod tests {
         let source = "const { data } = useQuery(GET_USERS);";
         let result = extract_graphql_operation_nodes(source, module_id(), repo());
         assert!(!result.nodes.is_empty());
+    }
+
+    #[test]
+    fn trpc_hook_lines_mint_no_graphql_operation() {
+        for source in [
+            "const { data } = trpc.user.list.useQuery();",
+            "const m = api.post.create.useMutation();",
+        ] {
+            let result = extract_graphql_operation_nodes(source, module_id(), repo());
+            assert!(
+                result.nodes.is_empty(),
+                "{source} -> {:?}",
+                result.nav.qname_by_id.values().collect::<Vec<_>>()
+            );
+        }
+        // The Apollo shapes beside them still count.
+        let mixed = "const a = trpc.user.list.useQuery();\nconst { data } = useQuery(GET_USERS);";
+        let result = extract_graphql_operation_nodes(mixed, module_id(), repo());
+        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:useQuery"));
+        let apollo = "const res = await client.query({ query: GET_USERS });";
+        let result = extract_graphql_operation_nodes(apollo, module_id(), repo());
+        assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:client.query"));
     }
 
     #[test]
