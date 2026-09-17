@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "02f8589",
-  "after_wave": 9,
+  "measured_at_head": "be05c0b",
+  "after_wave": 10,
   "cargo_test_workspace": {
-    "passed": 877,
+    "passed": 901,
     "failed": 0
   },
   "history_passed": [
@@ -16,10 +16,11 @@
     791,
     828,
     861,
-    877
+    877,
+    901
   ],
   "run_py": {
-    "fixtures": 126,
+    "fixtures": 127,
     "blind_spots": 2,
     "blind_spot_detail": "blind: ['xcut-grpc-csharp: HANDLED_BY', 'xcut-grpc-csharp: USES']; missing nodes: [\"xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'\"]; missing cells: [\"arch-monorepo-flows: POSITION on WS_CLIENT 'ws_client:/ws'\", \"arch-monorepo-flows: POSITION on WS_HANDLER 'ws:ws'\", \"arch-monorepo-flows: POSITION on GRAPHQL_OPERATION 'graphql_op:getUser'\", \"arch-monorepo-flows: POSITION on GRAPHQL_RESOLVER 'graphql_resolver:getUser'\", \"arch-monorepo-flows: POSITION on GRPC_CLIENT 'grpc_client:UserService'\", \"arch-monorepo-flows: POSITION on EVENT_EMITTER 'event_emit:orderPlaced'\", \"arch-monorepo-flows: POSITION on EVENT_HANDLER 'event_handle:orderPlaced'\"]. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,

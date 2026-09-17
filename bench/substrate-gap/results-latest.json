@@ -3638,6 +3638,7 @@
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/elixir-xmodule-calls",
+    "fixtures/http-absolute-url-client",
     "fixtures/http-dart-nav-precision",
     "fixtures/http-nav-route-precision",
     "fixtures/http-placeholder-fold",
