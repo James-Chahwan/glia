@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts};
+use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
@@ -34,12 +34,21 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     let mut regions = Vec::new();
     let mut md = Vec::new();
     let mut counts = GateCounts::default();
-    let gitignore_dirs = walk_gating::load_gitignore_dirs(root);
-    walk_dir(root, root, &gitignore_dirs, &mut files, &mut regions, &mut md, &mut counts);
+    // Per-directory `.gitignore` layers: pushed on the way down, popped on the
+    // way back up, so each verdict sees exactly the files git would. (A8.2)
+    let mut ignores = IgnoreStack::default();
+    let pushed = ignores.push_dir(root);
+    walk_dir(root, root, &mut ignores, &mut files, &mut regions, &mut md, &mut counts);
+    if pushed {
+        ignores.pop();
+    }
     // Attributable collapse tally. Gated on non-zero so a region-free repo stays
     // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
     if counts.total() > 0 {
         eprintln!("[walk] {}", counts.marker());
+    }
+    if ignores.files > 0 {
+        eprintln!("[walk] {}", ignores.marker());
     }
     (files, regions, md)
 }
@@ -48,7 +57,7 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
 fn walk_dir(
     root: &Path,
     dir: &Path,
-    gitignore_dirs: &std::collections::HashSet<String>,
+    ignores: &mut IgnoreStack,
     files: &mut Vec<(String, String)>,
     regions: &mut Vec<RegionAnchor>,
     md: &mut Vec<(String, String)>,
@@ -73,7 +82,7 @@ fn walk_dir(
             // dropping it or emitting a node per file inside. The rules live in
             // `code_domain::walk_gating` so `store::is_gmap_stale` scans exactly
             // this tree. (glia-v2 G1/G2/G10, A8.1)
-            let gate = walk_gating::gate_dir(&path, &name, gitignore_dirs.contains(&name));
+            let gate = walk_gating::gate_dir(&path, &name, ignores.is_ignored(&path, true));
             counts.record(gate);
             if let Some(provenance) = gate.collapse() {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -87,8 +96,18 @@ fn walk_dir(
             if gate == Gate::HardSkip {
                 continue;
             }
-            walk_dir(root, &path, gitignore_dirs, files, regions, md, counts);
+            let pushed = ignores.push_dir(&path);
+            walk_dir(root, &path, ignores, files, regions, md, counts);
+            if pushed {
+                ignores.pop();
+            }
         } else if path.is_file() {
+            // File-level gitignore: committed-but-ignored output (`*.min.js`,
+            // `*_pb2.py`) beside authored source never reaches a parser. Before
+            // the markdown branch, so an ignored doc is not ingested either.
+            if ignores.skip_file(&path) {
+                continue;
+            }
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().to_string();
             // Markdown docs (G18) — collected separately; the include/skip rules
@@ -193,23 +212,55 @@ mod walk_tests {
         assert!(!walk_gating::is_hashed_chunk("deadbeef.txt"));
     }
 
+    /// Git's `.gitignore` semantics end to end through the builder walk (A8.2).
+    /// Replaces `gitignore_dir_parsing`, which pinned the old final-component
+    /// match that collapsed every `generated` directory anywhere in the tree.
     #[test]
-    fn gitignore_dir_parsing() {
+    fn gitignore_matcher_semantics() {
         let root = std::env::temp_dir().join(format!("glia_gi_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(
-            root.join(".gitignore"),
-            "# comment\n/www\nandroid/\n*.log\n!keep\n/dist\nsrc/generated\n",
-        )
-        .unwrap();
-        let dirs = walk_gating::load_gitignore_dirs(&root);
-        assert!(dirs.contains("www"));
-        assert!(dirs.contains("android"));
-        assert!(dirs.contains("dist"));
-        assert!(dirs.contains("generated")); // final component of src/generated
-        assert!(!dirs.contains("keep")); // negation skipped
-        assert!(dirs.iter().all(|d| !d.contains('*'))); // globs skipped
+        for d in ["gen", "src/gen", "dist-x", "dist-keep", "src/generated", "notes/generated"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "/gen\ndist-*\n!dist-keep\n*.min.js\n").unwrap();
+        std::fs::write(root.join("src/.gitignore"), "generated/\n").unwrap();
+        for f in [
+            "app.js",
+            "vendor.min.js",
+            "gen/g.py",
+            "src/gen/builder.py",
+            "dist-x/d.py",
+            "dist-keep/k.py",
+            "src/generated/out.py",
+            "notes/generated/n.py",
+        ] {
+            std::fs::write(root.join(f), "x = 1\n").unwrap();
+        }
+
+        let (files, regions, _md) = walk_source_files(&root);
+        let parsed: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
+
+        // Anchoring: `/gen` collapses the root `gen` only.
+        assert!(region_paths.contains(&"gen"), "{region_paths:?}");
+        assert!(parsed.contains(&"src/gen/builder.py"), "{parsed:?}");
+        // Globs: `dist-*` collapses `dist-x`.
+        assert!(region_paths.contains(&"dist-x"), "{region_paths:?}");
+        assert!(!parsed.contains(&"dist-x/d.py"), "{parsed:?}");
+        // Negation: `!dist-keep` stays source.
+        assert!(parsed.contains(&"dist-keep/k.py"), "{parsed:?}");
+        // Nested file: `src/.gitignore` collapses `src/generated`...
+        assert!(region_paths.contains(&"src/generated"), "{region_paths:?}");
+        // ...and does not leak upward to a sibling tree.
+        assert!(parsed.contains(&"notes/generated/n.py"), "{parsed:?}");
+        assert!(!region_paths.contains(&"notes/generated"), "{region_paths:?}");
+        // File-level: `*.min.js` drops the bundle beside the authored file.
+        assert!(parsed.contains(&"app.js"), "{parsed:?}");
+        assert!(!parsed.contains(&"vendor.min.js"), "{parsed:?}");
+        // Exactly the four sources above, and gitignore-attributed regions only.
+        assert_eq!(parsed.len(), 4, "{parsed:?}");
+        assert_eq!(regions.len(), 3, "{region_paths:?}");
+        assert!(regions.iter().all(|r| r.provenance == Collapse::BuildOutput));
         let _ = std::fs::remove_dir_all(&root);
     }
 

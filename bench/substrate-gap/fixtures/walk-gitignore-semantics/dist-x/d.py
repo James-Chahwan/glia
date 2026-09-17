@@ -1,0 +1,2 @@
+class DistPhantom:
+    pass

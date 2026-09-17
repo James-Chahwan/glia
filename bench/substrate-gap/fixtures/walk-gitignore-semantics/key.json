@@ -1,0 +1,21 @@
+{
+  "framework": "walk-gitignore-semantics",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "CLASS",  "name": "Main",              "note": "control: root source always parsed"},
+    {"kind": "REGION", "name": "region:generated",  "note": "control: anchored /generated still collapses (1.00 before and after)"},
+    {"kind": "CLASS",  "name": "Builder",           "note": "ANCHORING: /generated must NOT collapse src/generated (0.00 -> 1.00)"},
+    {"kind": "REGION", "name": "region:dist-x",     "note": "GLOBS: dist-* must collapse dist-x (0.00 -> 1.00)"},
+    {"kind": "CLASS",  "name": "KeptTool",          "note": "NEGATION: !dist-keep stays parsed (1.00 before and after)"}
+  ],
+  "expect_edges": [
+    {"from": "run_build", "to": "compile_assets", "category": "CALLS", "note": "0.00 before (the final-component match collapses src/generated, so neither endpoint exists) -> 1.00"}
+  ],
+  "forbid": [
+    {"kind": "CLASS",  "name": "DistPhantom",          "note": "GLOBS: dist-x/d.py is gitignored by dist-*, so it must not be parsed"},
+    {"kind": "CLASS",  "name": "GeneratedPhantom",     "note": "control: the root generated/ collapses before and after"},
+    {"kind": "REGION", "name": "region:src/generated", "note": "ANCHORING: /generated is root-anchored, so src/generated is source, not a region"}
+  ],
+  "note": "A8.2 — full .gitignore semantics via the `ignore` crate's matcher. The anchoring case uses `generated`, NOT `build`: `build` is an always_region name, which outranks .gitignore in walk_gating::gate_dir, so `src/build` collapses whatever the .gitignore says. The fixture's own .gitignore also applies to the glia checkout, so generated/gen.py and dist-x/d.py are tracked with `git add -f`. Nested .gitignore files, file-level patterns and the nested-rule-does-not-leak-upward case are proved by the engine unit test gitignore_matcher_semantics."
+}

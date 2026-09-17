@@ -1,0 +1,2 @@
+class GeneratedPhantom:
+    pass

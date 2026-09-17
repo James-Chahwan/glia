@@ -943,8 +943,8 @@ pub fn read_merged_sharded(
 /// with the builder's walk (`repo_graph_code_domain::walk_gating`), so the scan
 /// skips exactly the
 /// trees the parse skips: VCS/editor metadata, the gmap dir itself, dependency
-/// and build-output directories, anything the top-level `.gitignore` names, and
-/// copied web bundles.
+/// and build-output directories, anything a `.gitignore` (root or nested)
+/// matches — directories and files alike — and copied web bundles.
 ///
 /// Returns:
 /// - `true` if the gmap is missing/unreadable, if it was written by another
@@ -1001,6 +1001,14 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
 /// and regenerated the whole gmap for files no parser ever reads — and each
 /// wasted regenerate is a wasted full parse of the real tree.
 ///
+/// `.gitignore` semantics are the builder's too (A8.2): each stack entry carries
+/// the matcher layers of its ancestors, the directory's own layer is pushed when
+/// it is scanned, and a gitignored FILE is skipped just as the builder skips it.
+/// The FULL nested stack is used, not a root-only approximation, because any
+/// rule the scan honours less precisely than the builder is exactly the
+/// builder/store divergence the shared gate exists to close. A `.gitignore`
+/// edit is itself an un-ignored file, so changing the rules still marks stale.
+///
 /// Returns true at the first newer entry; worst case O(N) over the un-gated
 /// tree.
 fn scan_for_newer(
@@ -1008,7 +1016,6 @@ fn scan_for_newer(
     gmap_dir: &Path,
     manifest_mtime: std::time::SystemTime,
 ) -> bool {
-    let gitignore = walk_gating::load_gitignore_dirs(repo_path);
     // Our own output, skipped by PREFIX rather than by the name `.ai`. The
     // shards and the parse cache beside them are written after the manifest, so
     // counting them would make every gmap instantly stale — a silent infinite
@@ -1021,12 +1028,15 @@ fn scan_for_newer(
     let mut gated = 0usize;
     let mut checked = 0usize;
     let mut stale = false;
-    let mut stack = vec![root];
-    'walk: while let Some(dir) = stack.pop() {
+    // Each entry owns its ancestors' matcher layers (a Vec of Arcs, so the
+    // per-directory clone is O(depth) pointer copies).
+    let mut stack = vec![(root, walk_gating::IgnoreStack::default())];
+    'walk: while let Some((dir, mut ignores)) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
+        ignores.push_dir(&dir);
         for entry in entries.flatten() {
             let path = entry.path();
             let ftype = match entry.file_type() {
@@ -1043,7 +1053,7 @@ fn scan_for_newer(
                     gated += 1;
                     continue;
                 }
-                if walk_gating::dir_is_gated(&path, &bn, &gitignore) {
+                if walk_gating::dir_is_gated(&path, &bn, &ignores) {
                     gated += 1;
                     // The builder turns a gated dir into ONE region node, so
                     // its existence is graph-visible even though its contents
@@ -1059,8 +1069,13 @@ fn scan_for_newer(
                     }
                     continue;
                 }
-                stack.push(path);
+                stack.push((path, ignores.clone()));
             } else if ftype.is_file() {
+                // The builder never reads a gitignored file, so its churn (a
+                // log, a local `.env`, a `*.min.js` rebuild) is not graph churn.
+                if ignores.is_ignored(&path, false) {
+                    continue;
+                }
                 checked += 1;
                 if let Ok(meta) = entry.metadata()
                     && let Ok(mtime) = meta.modified()
@@ -1579,6 +1594,40 @@ mod tests {
         assert!(
             is_gmap_stale(&gmap_dir, &repo_dir),
             "an ingested .ai doc must mark the gmap stale"
+        );
+    }
+
+    /// A8.2: the scan applies the builder's full `.gitignore` semantics — globs,
+    /// file-level patterns and nested files — and a nested rule stays scoped to
+    /// its own directory.
+    #[test]
+    fn stale_scan_honours_nested_and_glob_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let gmap_dir = dir.path().join("gmap");
+        let repo_dir = dir.path().join("repo");
+        write_file(&repo_dir.join("src/a.py"), "x = 1\n");
+        write_file(&repo_dir.join(".gitignore"), "*.log\ndist-*\n");
+        write_file(&repo_dir.join("pkg/.gitignore"), "generated/\n");
+        for d in ["dist-x/sub", "pkg/generated/sub", "src/generated/sub"] {
+            std::fs::create_dir_all(repo_dir.join(d)).unwrap();
+        }
+        write_sharded(&[("a", &empty_graph("test://gi-semantics"))], &[], &gmap_dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // Glob dir, nested-file dir, and a file-level pattern: none is read by
+        // the builder, so none is graph churn.
+        write_file(&repo_dir.join("dist-x/sub/bundle.js"), "//\n");
+        write_file(&repo_dir.join("pkg/generated/sub/out.py"), "y = 1\n");
+        write_file(&repo_dir.join("server.log"), "GET /\n");
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "churn the builder's .gitignore semantics hide must not mark stale"
+        );
+        // `pkg/.gitignore` does not reach `src/generated`: that is source.
+        write_file(&repo_dir.join("src/generated/sub/real.py"), "z = 1\n");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "a nested rule must not leak to a sibling tree"
         );
     }
 
