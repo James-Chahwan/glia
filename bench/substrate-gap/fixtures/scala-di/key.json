@@ -1,0 +1,18 @@
+{
+  "framework": "scala-di",
+  "language": "scala",
+  "dirs": ["."],
+  "cells": ["scala/injects"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserService", "note": "gated DI consumer (Service suffix) and an injected type"},
+    {"kind": "CLASS", "name": "UserRepo", "note": "injected dependency"}
+  ],
+  "expect_edges": [
+    {"from": "UserService", "to": "UserRepo", "category": "INJECTS", "note": "GAP: visit_type_def never reads class_parameters"},
+    {"from": "render", "to": "UserService", "category": "INJECTS", "note": "GAP: implicit parameter list; the parser reads no method parameters"},
+    {"from": "AppWiring", "to": "UserService", "category": "INJECTS", "note": "GAP: Macwire wire[T] (a generic_function node) is never read"}
+  ],
+  "forbid": [
+    {"from": "Money", "to": "Currency", "category": "INJECTS", "note": "a case class with no DI suffix and no implicit list is a value object, not a DI consumer"}
+  ]
+}

@@ -5,6 +5,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
 
 pub fn parse_file(
@@ -67,6 +68,8 @@ struct Acc {
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Client HTTP call sites emitted in this file (drives the fired_on marker).
     endpoint_hits: usize,
+    /// Dedups INJECTS refs per `(consumer, injected type)` within a file.
+    inject_seen: std::collections::HashSet<(NodeId, String)>,
 }
 
 fn visit_top(
@@ -94,7 +97,16 @@ fn visit_top(
                 visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::INTERFACE, acc);
             }
             "function_definition" | "val_definition" | "var_definition" => {
-                visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_function(
+                    child,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    module_id,
+                    repo,
+                    acc,
+                );
             }
             _ => {}
         }
@@ -135,6 +147,7 @@ fn visit_type_def(
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
     emit_heritage_refs(&node, src, id, module_id, acc);
+    emit_class_injects(node, src, name, id, module_id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         visit_body_members(body, src, file_rel, &qname, id, module_id, repo, acc);
@@ -191,7 +204,17 @@ fn visit_body_members(
     for child in body.named_children(&mut cursor) {
         match child.kind() {
             "function_definition" | "val_definition" | "var_definition" => {
-                visit_method(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                emit_macwire_injects(child, src, parent_id, module_id, acc);
+                visit_method(
+                    child,
+                    src,
+                    file_rel,
+                    parent_qname,
+                    parent_id,
+                    module_id,
+                    repo,
+                    acc,
+                );
             }
             "object_definition" | "class_definition" => {
                 visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
@@ -204,12 +227,14 @@ fn visit_body_members(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visit_function(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -234,6 +259,7 @@ fn visit_function(
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
+    emit_context_param_injects(node, src, id, module_id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         // Top-level `def` (parent is a MODULE): a bare `foo()` binds against the
@@ -244,12 +270,14 @@ fn visit_function(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visit_method(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -274,6 +302,7 @@ fn visit_method(
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+    emit_context_param_injects(node, src, id, module_id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         // Method inside a type body (parent is CLASS/INTERFACE): an unqualified
@@ -380,6 +409,209 @@ fn classify_call(func_node: TsNode, src: &[u8], in_type: bool) -> CallQualifier 
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
+}
+
+// ---------------------------------------------------------------------------
+// Dependency injection (A7.7) -> INJECTS refs
+// ---------------------------------------------------------------------------
+//
+// A DI-managed service, a case class and a value object all share the
+// `class Foo(bar: Baz)` shape, so class parameters are read only behind a gate.
+// Three shapes are read, all off the AST:
+//   * class parameters of a DI-named, non-case class, or of an `@Inject` class;
+//   * any `implicit` / `using` parameter list, on a class or a def: that is the
+//     language's own context-passing mechanism, so it needs no gate;
+//   * Macwire `val x = wire[Foo]` in a type body.
+// Each ref is `Bare(TypeName)`; `resolve_refs` binds a uniquely-named type
+// across the repo and leaves library types unresolved.
+
+/// Name suffixes that mark a DI-managed class. The grammar exposes no DI
+/// marker, so this is a name heuristic like C#'s and PHP's gates. It under-fires
+/// on ZIO / cats-effect code, which names almost nothing `…Service`.
+const SCALA_DI_SUFFIXES: &str =
+    "Service Controller Repository Handler Manager Module Component Dao Client";
+
+/// Never a DI target: value types, wrappers and collections, and the implicit
+/// evidence that fills most `implicit` lists without being a service.
+const SCALA_NON_INJECTABLE: &str = "Int Long Short Byte Double Float Boolean Char String Unit \
+    Any AnyRef AnyVal Nothing BigInt BigDecimal Option Seq List Map Set Vector Array Either Try \
+    Future ExecutionContext ClassTag TypeTag Ordering";
+
+/// INJECTS refs from a class / trait declaration's parameters.
+fn emit_class_injects(
+    node: TsNode,
+    src: &[u8],
+    name: &str,
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let skip = type_param_names(node.child_by_field_name("type_parameters"), src);
+    let mut cursor = node.walk();
+    let children: Vec<TsNode> = node.children(&mut cursor).collect();
+    let is_case = children.iter().any(|c| c.kind() == "case");
+    let mut injected = false;
+    for ann in children.iter().filter(|c| c.kind() == "annotation") {
+        let ann_name = ann
+            .child_by_field_name("name")
+            .map_or("", |n| text_of(n, src));
+        if ann_name.rsplit('.').next() != Some("Inject") {
+            continue;
+        }
+        injected = true;
+        // Play/Guice `class C @Inject() (a: A)`: tree-sitter-scala 0.25.1 has no
+        // constructor-annotation rule, so the parameter list parses as a second
+        // `arguments` of the annotation (`a: A` = `ascription_expression`) and
+        // `class_parameters` is absent.
+        let mut ac = ann.walk();
+        for args in ann.children_by_field_name("arguments", &mut ac) {
+            let mut pc = args.walk();
+            for p in args.named_children(&mut pc) {
+                let mut tc = p.walk();
+                if p.kind() == "ascription_expression"
+                    && let Some(ty) = p.named_children(&mut tc).last()
+                {
+                    push_inject(ty, src, &skip, from, module_id, acc);
+                }
+            }
+        }
+    }
+    let suffixed = SCALA_DI_SUFFIXES
+        .split_whitespace()
+        .any(|s| name.ends_with(s));
+    let gated = injected || (!is_case && suffixed);
+    let mut lc = node.walk();
+    for list in node.children_by_field_name("class_parameters", &mut lc) {
+        if gated || is_context_param_list(list) {
+            emit_param_list(list, src, &skip, from, module_id, acc);
+        }
+    }
+}
+
+/// INJECTS refs from a def's `implicit` / `using` parameter lists. `parameters`
+/// is a multiple field (one node per list) that also holds the `[T]` list.
+fn emit_context_param_injects(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let mut cursor = node.walk();
+    let lists: Vec<TsNode> = node
+        .children_by_field_name("parameters", &mut cursor)
+        .collect();
+    let skip: Vec<&str> = lists
+        .iter()
+        .filter(|l| l.kind() == "type_parameters")
+        .flat_map(|l| type_param_names(Some(*l), src))
+        .collect();
+    for list in lists {
+        if list.kind() == "parameters" && is_context_param_list(list) {
+            emit_param_list(list, src, &skip, from, module_id, acc);
+        }
+    }
+}
+
+/// `(implicit …)` / `(using …)`. The keyword is an anonymous token child of the
+/// list node in tree-sitter-scala 0.25.1, not a field.
+fn is_context_param_list(list: TsNode) -> bool {
+    let mut cursor = list.walk();
+    list.children(&mut cursor)
+        .any(|c| matches!(c.kind(), "implicit" | "using"))
+}
+
+/// One INJECTS ref per parameter of a `class_parameters` / `parameters` list.
+fn emit_param_list(
+    list: TsNode,
+    src: &[u8],
+    skip: &[&str],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let mut cursor = list.walk();
+    for p in list.named_children(&mut cursor) {
+        if matches!(p.kind(), "class_parameter" | "parameter")
+            && let Some(ty) = p.child_by_field_name("type")
+        {
+            push_inject(ty, src, skip, from, module_id, acc);
+        }
+    }
+}
+
+/// Macwire `val x = wire[Foo]`: the value is a `generic_function` whose
+/// `function` is the identifier `wire`. The ref comes from the enclosing type.
+fn emit_macwire_injects(def: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let Some(value) = def.child_by_field_name("value") else {
+        return;
+    };
+    let callee = value
+        .child_by_field_name("function")
+        .map(|f| text_of(f, src));
+    if value.kind() != "generic_function" || callee != Some("wire") {
+        return;
+    }
+    if let Some(args) = value.child_by_field_name("type_arguments") {
+        let mut cursor = args.walk();
+        if let Some(ty) = args.named_children(&mut cursor).next() {
+            push_inject(ty, src, &[], from, module_id, acc);
+        }
+    }
+}
+
+/// Names declared by a `[A, F[_]]` list, so `(implicit ev: A)` is not read as a
+/// dependency on a type called `A`.
+fn type_param_names<'a>(tp: Option<TsNode<'a>>, src: &'a [u8]) -> Vec<&'a str> {
+    let Some(tp) = tp else {
+        return Vec::new();
+    };
+    let mut cursor = tp.walk();
+    tp.children_by_field_name("name", &mut cursor)
+        .map(|n| text_of(n, src))
+        .collect()
+}
+
+fn push_inject(
+    ty: TsNode,
+    src: &[u8],
+    skip: &[&str],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let Some(name) = scala_injectable_type_name(ty, src) else {
+        return;
+    };
+    if skip.contains(&name.as_str()) || !acc.inject_seen.insert((from, name.clone())) {
+        return;
+    }
+    acc.refs.push(UnresolvedRef {
+        from,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(name),
+        category: edge_category::INJECTS,
+    });
+    di_stats::record(DiShape::ScalaCtor);
+}
+
+/// The bare type a parameter depends on: `Foo`, `Foo[F]` → `Foo`, `pkg.Foo` →
+/// `Foo`. Function, tuple, infix, compound and wildcard types are ambiguous and
+/// yield `None`, as do the [`SCALA_NON_INJECTABLE`] names.
+fn scala_injectable_type_name(ty: TsNode, src: &[u8]) -> Option<String> {
+    let name = match ty.kind() {
+        "type_identifier" => text_of(ty, src),
+        "stable_type_identifier" => text_of(ty, src).rsplit('.').next().unwrap_or(""),
+        "generic_type" => {
+            return ty
+                .child_by_field_name("type")
+                .and_then(|head| scala_injectable_type_name(head, src));
+        }
+        _ => return None,
+    };
+    let name = name.trim();
+    let denied = SCALA_NON_INJECTABLE.split_whitespace().any(|t| t == name);
+    (!name.is_empty() && !denied).then(|| name.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,5 +1401,135 @@ val service = HttpRoutes.of[IO] {
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users/:id")));
+    }
+
+    /// Sorted bare type names of the INJECTS refs from the node named `from`.
+    fn injects_from(fp: &FileParse, from: &str) -> Vec<String> {
+        let ids: Vec<NodeId> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(_, n)| *n == from)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected one node named {from}: {:?}",
+            fp.nav.name_by_id
+        );
+        let mut v: Vec<String> = fp
+            .refs
+            .iter()
+            .filter(|r| r.from == ids[0] && r.category == edge_category::INJECTS)
+            .map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => n.clone(),
+                other => panic!("INJECTS ref must be Bare: {other:?}"),
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn injects_count(fp: &FileParse) -> usize {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .count()
+    }
+
+    #[test]
+    fn scala_service_class_params_emit_injects_refs() {
+        // A DI-named class injects every class-typed parameter; value types and
+        // implicit evidence (`ExecutionContext`) are skipped, `pkg.Config` and
+        // `Cache[F]` reduce to their simple head. Play's `@Inject()` form parses
+        // its parameters into the annotation and must still be read.
+        let source = r#"
+class UserService[F[_]](repo: UserRepo, name: String, cfg: pkg.Config, cache: Cache[F])(implicit ec: ExecutionContext, ev: F[Int])
+
+@Singleton
+class HomeController @Inject() (cc: ControllerComponents, svc: UserService) extends AbstractController(cc)
+"#;
+        let fp = parse_file(source, "app/Svc.scala", "app::Svc", repo()).unwrap();
+        assert_eq!(
+            injects_from(&fp, "UserService"),
+            vec!["Cache", "Config", "UserRepo"]
+        );
+        assert_eq!(
+            injects_from(&fp, "HomeController"),
+            vec!["ControllerComponents", "UserService"]
+        );
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app::Svc");
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INJECTS)
+                .all(|r| r.from_module == module_id),
+            "INJECTS refs must carry the module node as from_module: {:?}",
+            fp.refs
+        );
+    }
+
+    #[test]
+    fn scala_case_class_emits_no_injects() {
+        // No DI suffix and no implicit list: a value object. A case class with a
+        // DI-shaped name is still a value object, and an ungated plain class
+        // with a class-typed parameter stays silent too.
+        let source = r#"
+class Currency
+case class Money(amount: Int, currency: Currency)
+case class OrderService(currency: Currency)
+class Wallet(currency: Currency)
+"#;
+        let fp = parse_file(source, "app/Money.scala", "app::Money", repo()).unwrap();
+        assert_eq!(
+            injects_count(&fp),
+            0,
+            "value objects emitted INJECTS: {:?}",
+            fp.refs
+        );
+    }
+
+    #[test]
+    fn scala_implicit_and_using_lists_emit_injects_refs() {
+        // The context list is found among several `parameters` lists, the `[T]`
+        // list's names are not dependencies, and an ungated class contributes
+        // only its `using` list.
+        let source = r#"
+object Handlers {
+  def render(id: Int)(implicit svc: UserService): String = svc.get(id)
+  def show[T](x: T)(using repo: UserRepo, ev: T, ord: Ordering[T]): String = ""
+  def plain(svc: UserService): String = ""
+}
+class Plain(x: Foo)(using db: Database)
+def top(id: Int)(implicit clock: Clock): Int = id
+"#;
+        let fp = parse_file(source, "app/Handlers.scala", "app::Handlers", repo()).unwrap();
+        assert_eq!(injects_from(&fp, "render"), vec!["UserService"]);
+        assert_eq!(injects_from(&fp, "show"), vec!["UserRepo"]);
+        assert!(injects_from(&fp, "plain").is_empty());
+        assert_eq!(injects_from(&fp, "Plain"), vec!["Database"]);
+        assert_eq!(injects_from(&fp, "top"), vec!["Clock"]);
+    }
+
+    #[test]
+    fn scala_macwire_wire_emits_injects_ref() {
+        // `wire[T]` injects into the enclosing object, once per type.
+        let source = r#"
+import com.softwaremill.macwire._
+
+object AppWiring {
+  lazy val users = wire[UserService]
+  lazy val again: UserService = wire[UserService]
+  val repo: UserRepo = wire[pkg.UserRepo]
+  val n = List[Int](1)
+}
+"#;
+        let fp = parse_file(source, "app/Wiring.scala", "app::Wiring", repo()).unwrap();
+        assert_eq!(
+            injects_from(&fp, "AppWiring"),
+            vec!["UserRepo", "UserService"]
+        );
+        assert_eq!(injects_count(&fp), 2);
     }
 }
