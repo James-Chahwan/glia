@@ -3,12 +3,22 @@
   "language": "proto+go",
   "dirs": ["client", "server"],
   "cells": ["go/grpc"],
-  "note": "Cell binding: go/grpc only. The server side is a .proto file and `proto` is not one of the 16 language rows, so the IDL side of this measurement has nowhere to be scored.",
+  "note": "Cell binding: go/grpc only. The server side is a .proto file and `proto` is not one of the 16 language rows, so the IDL side of this measurement has nowhere to be scored. A10.5: the proto's two `message` declarations are MESSAGE_TYPE nodes (qname message:proto:<pkg>.<Name>); MESSAGE_TYPE is not a grpc-mechanism kind, so those rows never move the go/grpc cell. `ListUsersRequest` is only REFERENCED by an rpc signature, never declared, so it must not become a node.",
   "expect_nodes": [
     {"kind": "GRPC_SERVICE", "name": "UserService", "note": "proto service node grpc:UserService"},
-    {"kind": "GRPC_CLIENT", "name": "UserService", "note": "Go client stub pb.NewUserServiceClient -> grpc_client:UserService"}
+    {"kind": "GRPC_CLIENT", "name": "UserService", "note": "Go client stub pb.NewUserServiceClient -> grpc_client:UserService"},
+    {"kind": "MESSAGE_TYPE", "name": "user.User", "note": "A10.5: proto message declaration -> message:proto:user.User (package-qualified so it cannot match GetUserRequest)"},
+    {"kind": "MESSAGE_TYPE", "name": "user.GetUserRequest", "note": "A10.5: proto message declaration -> message:proto:user.GetUserRequest"}
   ],
   "expect_edges": [
     {"from": "UserService", "to": "UserService", "category": "GRPC_CALLS", "note": "GrpcStackResolver pairs GRPC_CLIENT -> GRPC_SERVICE by service name"}
+  ],
+  "expect_cells": [
+    {"kind": "MESSAGE_TYPE", "node": "user.User", "cell": "POSITION", "contains": "\"file\":\"user.proto\",\"start_line\":13,\"end_line\":16", "note": "A10.5: 0-indexed `message User {` line through its closing brace"}
+  ],
+  "forbid": [
+    {"kind": "MESSAGE_TYPE", "name": "ListUsersRequest", "note": "A10.5: referenced by `rpc ListUsers`, declared nowhere -> no node"},
+    {"kind": "MESSAGE_TYPE", "name": "UserService", "note": "A10.5: a `service` block is not a message"},
+    {"kind": "MESSAGE_TYPE", "name": "User", "max_nodes": 1, "note": "A10.5: one declaration, one node"}
   ]
 }

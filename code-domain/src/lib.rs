@@ -148,7 +148,7 @@ pub mod node_kind {
     // that `name()` / pyo3 `kind_names()` decode correctly the moment the
     // first emitter lands; nothing emits them yet. Owning packet per id:
     //   45 PROJECT        — A8.4
-    //   46 MESSAGE_TYPE   — A10.5 / A12.1
+    //   46 MESSAGE_TYPE   — A10.5 / A12.1  (emitted since A10.5)
     //   47 GRPC_SERVER    — A5.3
     //   48 RPC_PROCEDURE  — A10.9
     //   49 RPC_CALL       — A10.9
@@ -159,9 +159,16 @@ pub mod node_kind {
     /// modules hang off when one repo holds several independent projects.
     pub const PROJECT: NodeKindId = NodeKindId(45);
 
-    /// RESERVED (A10.5 / A12.1) — a declared message / payload schema type
+    /// (A10.5 / A12.1) — a declared message / payload schema type
     /// (protobuf `message`, Avro record, Thrift struct) that RPC procedures
     /// and queue payloads reference by name.
+    ///
+    /// Emitted since A10.5 by `extractors::schemas` for every protobuf
+    /// `message` and `enum`. qname `message:<flavor>:<qualified name>`,
+    /// mirroring `DATA_ENTITY`'s flavor scheme: flavor `proto` today
+    /// (`avro` / `jsonschema` reserved), qualified name as protobuf writes it
+    /// (`message:proto:user.v1.Outer.Inner`). The nav name is the bare
+    /// declared name (`Inner`).
     pub const MESSAGE_TYPE: NodeKindId = NodeKindId(46);
 
     /// RESERVED (A5.3) — the server-side registration that binds a service

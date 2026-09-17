@@ -37,6 +37,9 @@ pub(crate) fn parse_repo_files(
     let mut proto_services = 0usize;
     let mut proto_rpcs = 0usize;
     let mut proto_packages = 0usize;
+    // A10.5 `[proto] files=` marker counters.
+    let mut proto_messages = 0usize;
+    let mut proto_enums = 0usize;
     // A10.1 `[contract]` marker counters. All four arms are declared now so
     // A10.3 (asyncapi) / A10.8 (pact) only ever increment.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
@@ -194,13 +197,22 @@ pub(crate) fn parse_repo_files(
             let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
                 source, path, module_id, repo,
             );
+            // A10.5: the file's `message` / `enum` declarations, as
+            // MESSAGE_TYPE nodes under the same MODULE.
+            let msgs = repo_graph_code_extractors::schemas::extract_proto_messages(
+                source, path, module_id, repo,
+            );
             proto_files += 1;
             proto_services += out.service_count;
             proto_rpcs += out.rpc_count;
+            proto_messages += msgs.message_count;
+            proto_enums += msgs.enum_count;
             if out.package.is_some() {
                 proto_packages += 1;
             }
-            if !out.nodes.is_empty() {
+            // A messages-only `.proto` (a shared `common.proto`) is still a
+            // parsed file, not a skipped one.
+            if !out.nodes.is_empty() || !msgs.nodes.is_empty() {
                 // Same synthetic path as yaml / Dockerfile / manifest / dotenv:
                 // the file itself becomes a MODULE (with a POSITION cell) that
                 // parents the GRPC_SERVICE, so `locate_node` / `docs-for` can
@@ -210,9 +222,9 @@ pub(crate) fn parse_repo_files(
                     path,
                     module_id,
                     repo,
-                    vec![out.nodes],
-                    vec![out.edges],
-                    vec![out.nav],
+                    vec![out.nodes, msgs.nodes],
+                    vec![out.edges, msgs.edges],
+                    vec![out.nav, msgs.nav],
                     out.module_cells,
                     &mut parses_by_lang,
                 );
@@ -306,6 +318,11 @@ pub(crate) fn parse_repo_files(
     if proto_files > 0 {
         eprintln!(
             "[proto] {proto_files} files -> {proto_services} services, {proto_rpcs} rpcs, {proto_packages} packages"
+        );
+        // A10.5 fired_on marker: the declared message / enum types. Its own
+        // line (`files=` shape) so A5.1's line above keeps its format.
+        eprintln!(
+            "[proto] files={proto_files} services={proto_services} messages={proto_messages} enums={proto_enums}"
         );
     }
 
