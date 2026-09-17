@@ -626,6 +626,9 @@ fn cell_label(c: CellTypeId) -> &'static str {
         12 => "env",
         13 => "conv",
         14 => "vector",
+        // A12.1 — cell_type::MESSAGE_TYPE, the payload type on a queue node.
+        // ORIGIN / IMPORTS (15 / 16) deliberately stay on the `cell` arm.
+        17 => "msgtype",
         _ => "cell",
     }
 }
@@ -1135,6 +1138,20 @@ mod tests {
             alias.starts_with("SC"),
             "should extend from initials: {alias}"
         );
+    }
+
+    #[test]
+    fn message_type_cell_renders_as_msgtype() {
+        // A12.1: without its own arm the queue payload type read `:cell`.
+        assert_eq!(cell_label(cell_type::MESSAGE_TYPE), "msgtype");
+        assert_eq!(cell_label(cell_type::ORIGIN), "cell");
+        let cell = Cell {
+            kind: cell_type::MESSAGE_TYPE,
+            payload: CellPayload::Json(r#"{"type":"OrderCreated"}"#.into()),
+        };
+        let mut out = String::new();
+        render_cell(&mut out, &cell, false);
+        assert!(out.starts_with(":msgtype "), "{out:?}");
     }
 }
 

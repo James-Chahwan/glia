@@ -550,6 +550,9 @@ struct Pending {
     confidence: Confidence,
     /// 0-indexed lines, first-seen order, deduped, capped at [`MAX_SITES`].
     lines: Vec<usize>,
+    /// A12.1: the needle's byte offset for each entry of `lines`, same order.
+    /// The MESSAGE_TYPE scan looks for the payload type around these.
+    offsets: Vec<usize>,
 }
 
 /// Queue-consumer nodes for one file — one node per DISTINCT (topic, framework).
@@ -642,16 +645,17 @@ fn emit_queue_nodes(
         // tree-sitter convention every other span in the graph uses.
         // A2.6: the literal's shape (url/arn/path) rides along for the
         // `[queues] cloud broker=` marker.
-        let sites: Vec<(String, usize, TopicForm)> = hits
+        // A12.1: the byte offset rides along too — it anchors the MESSAGE_TYPE scan.
+        let sites: Vec<(String, usize, usize, TopicForm)> = hits
             .iter()
             .filter_map(|h| {
                 h.topic
                     .clone()
-                    .map(|t| (t, queue_topic::line_of(source, h.offset), h.form))
+                    .map(|t| (t, queue_topic::line_of(source, h.offset), h.offset, h.form))
             })
             .collect();
         if debug_enabled() && !sites.is_empty() {
-            let topics: Vec<&str> = sites.iter().map(|(t, _, _)| t.as_str()).collect();
+            let topics: Vec<&str> = sites.iter().map(|(t, _, _, _)| t.as_str()).collect();
             eprintln!(
                 "[queues] scan needle='{pattern}' rule={rule:?} hits={} path={path} topics={}",
                 sites.len(),
@@ -662,13 +666,13 @@ fn emit_queue_nodes(
         // so it gets its own grep-able line:
         //   GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] taskq rule='
         if debug_enabled() && is_identity_rule(rule) {
-            for (sym, _, _) in &sites {
+            for (sym, _, _, _) in &sites {
                 eprintln!(
                     "[queues] taskq rule={rule:?} symbol={sym} framework={framework:?} file={path}"
                 );
             }
         }
-        for (topic, line, form) in &sites {
+        for (topic, line, offset, form) in &sites {
             if record_site(
                 &mut pending,
                 &mut seen,
@@ -678,7 +682,7 @@ fn emit_queue_nodes(
                 kind,
                 prefix,
                 Confidence::Medium,
-                *line,
+                (*line, *offset),
             ) {
                 fired_on(pattern, rule, framework, topic, path);
                 cloud_fired_on(framework, topic, *form, path);
@@ -697,9 +701,9 @@ fn emit_queue_nodes(
             let tag = framework_tag(framework);
             // The tag's site is the needle occurrence itself — the one thing
             // that WAS actually read off this file.
-            let line = hits
-                .first()
-                .map_or(0, |h| queue_topic::line_of(source, h.offset));
+            let site = hits.first().map_or((0, 0), |h| {
+                (queue_topic::line_of(source, h.offset), h.offset)
+            });
             if record_site(
                 &mut pending,
                 &mut seen,
@@ -709,14 +713,14 @@ fn emit_queue_nodes(
                 kind,
                 prefix,
                 Confidence::Weak,
-                line,
+                site,
             ) {
                 fired_on(pattern, rule, framework, &tag, path);
             }
         }
     }
 
-    finish(pending, path, module_id, repo, kind)
+    finish(pending, source, path, module_id, repo, kind)
 }
 
 /// Record one call site for a (topic, framework).
@@ -734,13 +738,14 @@ fn record_site(
     kind: repo_graph_core::NodeKindId,
     prefix: &str,
     confidence: Confidence,
-    line: usize,
+    (line, offset): (usize, usize),
 ) -> bool {
     let key = format!("{topic}:{framework:?}");
     if let Some(&idx) = seen.get(&key) {
-        let lines = &mut pending[idx].lines;
-        if lines.len() < MAX_SITES && !lines.contains(&line) {
-            lines.push(line);
+        let p = &mut pending[idx];
+        if p.lines.len() < MAX_SITES && !p.lines.contains(&line) {
+            p.lines.push(line);
+            p.offsets.push(offset);
         }
         return false;
     }
@@ -754,6 +759,7 @@ fn record_site(
         framework: framework.clone(),
         confidence,
         lines: vec![line],
+        offsets: vec![offset],
     });
     true
 }
@@ -762,8 +768,12 @@ fn record_site(
 ///
 /// fired_on marker (A2.8):
 ///   `GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] position sites='`
+///
+/// A12.1: `source` is the file text, read once more per node for the
+/// MESSAGE_TYPE cell (see [`message_type_cell`]).
 fn finish(
     pending: Vec<Pending>,
+    source: &str,
     path: &str,
     module_id: NodeId,
     repo: RepoId,
@@ -804,22 +814,26 @@ fn finish(
                 p.qname
             );
         }
+        let mut cells = vec![
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"{file}","start_line":{first},"end_line":{first}}}"#
+                )),
+            },
+            Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Json(code),
+            },
+        ];
+        // A12.1: appended AFTER the A2.8 pair, so every "first POSITION"
+        // reader is unaffected.
+        cells.extend(message_type_cell(source, &p.offsets));
         nodes.push(Node {
             id: p.id,
             repo,
             confidence: p.confidence,
-            cells: vec![
-                Cell {
-                    kind: cell_type::POSITION,
-                    payload: CellPayload::Json(format!(
-                        r#"{{"file":"{file}","start_line":{first},"end_line":{first}}}"#
-                    )),
-                },
-                Cell {
-                    kind: cell_type::CODE,
-                    payload: CellPayload::Json(code),
-                },
-            ],
+            cells,
         });
         nav.record(p.id, &p.topic, &p.qname, kind, Some(module_id));
         edges.push(Edge {
@@ -855,6 +869,315 @@ fn is_identity_rule(rule: &TopicRule) -> bool {
 /// silently merge two distinct coverage signals.
 fn framework_tag(f: &QueueFramework) -> String {
     format!("{UNRESOLVED_PREFIX}{}", format!("{f:?}").to_lowercase())
+}
+
+/// A12.1: is `topic` (the part of a queue qname after `queue_producer:` /
+/// `queue_consumer:`) a [`framework_tag`] rather than a real topic?
+///
+/// The packet spec asked for a hand-listed `FRAMEWORK_TAGS` table. Since A2.3
+/// every tag carries [`UNRESOLVED_PREFIX`], which no legal topic can
+/// (`unresolved_prefix_is_not_a_legal_topic_shape`), so the prefix IS the
+/// test — the same one `QueueStackResolver` uses — and there is no list that
+/// could drift from the enum. A12.2 calls this rather than re-deriving it.
+pub fn is_framework_tag(topic: &str) -> bool {
+    topic.starts_with(UNRESOLVED_PREFIX)
+}
+
+// ---- A12.1: MESSAGE_TYPE cell --------------------------------------------
+// A queue node pairs on its topic string and nothing else, so glia could not
+// tell a producer sending `OrderCreated` from a consumer parsing
+// `OrderPlaced`. Each node now carries the payload type read off the source
+// around its call sites, as a `cell_type::MESSAGE_TYPE` JSON cell, keys in
+// this fixed order:
+//
+//   {"type":"OrderCreated","raw":"pb.OrderCreated",
+//    "form":"generic|struct_literal","window":"near|file"}
+//
+// `type` is the normalised simple name, so Go `pb.OrderCreated`, C#
+// `Events.OrderCreated` and Java `OrderCreated` compare equal; `raw` is the
+// text as written. The cell names a TYPE; `node_kind::MESSAGE_TYPE` (A10.5) is
+// the separate node a `.proto` declares, and nothing here links the two.
+// ---------------------------------------------------------------------------
+
+/// Bytes scanned before / after a call site.
+const MSG_BACK: usize = 600;
+const MSG_FWD: usize = 400;
+/// A generic argument list longer than this is not a type (sanity cap).
+const MAX_TYPE_ARG: usize = 512;
+const MAX_TYPE_NAME: usize = 64;
+
+/// Broker envelope types whose LAST type argument is the payload (the Kafka
+/// `<Key, Value>` convention). The `<` is part of the needle so a bare
+/// `Message` identifier never matches, and [`scan_generic`] adds a left word
+/// boundary so `IMessage<` / `BrokeredMessage<` do not either.
+const GENERIC_WRAPPERS: &[&str] = &[
+    "Message<",
+    "ConsumerRecord<",
+    "ProducerRecord<",
+    "ConsumeResult<",
+    "KafkaTemplate<",
+    "KafkaProducer<",
+    "KafkaConsumer<",
+    "IProducer<",
+    "IConsumer<",
+    "ProducerBuilder<",
+    "ConsumerBuilder<",
+];
+
+/// Go packages whose struct literals are broker / stdlib plumbing, never a
+/// payload: `&kafka.Message{Topic: ...}` must not be read as the message type.
+/// Heuristic — extend as fixtures accumulate.
+const GO_PKG_DENY: &[&str] = &[
+    "nats", "jetstream", "kafka", "sarama", "amqp", "amqp091", "mqtt", "sqs", "sns", "pubsub",
+    "aws", "types", "redis", "bytes", "http", "sync", "time", "strings", "errors", "sql", "json",
+    "url", "os", "io", "fmt", "context", "tls", "log", "slog",
+];
+
+/// Envelope / client type names that are never the payload, whatever package.
+const GO_TYPE_DENY: &[&str] = &[
+    "Message", "Msg", "ProducerMessage", "ConsumerMessage", "Publishing", "Delivery", "Header",
+    "Reader", "Writer", "Config", "Client", "Conn", "Options", "Server", "Request", "Response",
+];
+
+/// The payload type found near a queue call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageType {
+    /// Normalised simple name — the cross-language join key.
+    pub simple: String,
+    /// The type text as written (`pb.OrderCreated`, `Map<String, Item>`).
+    pub raw: String,
+    /// `"generic"` or `"struct_literal"`.
+    pub form: &'static str,
+    /// `"near"` (within the call-site window) or `"file"` (whole-file
+    /// fallback, generic form only — consumers should weigh it lower).
+    pub window: &'static str,
+}
+
+/// A scanner hit: (byte position, raw text, simple name).
+type TypeHit = (usize, String, String);
+
+/// Payload type near the FIRST occurrence of `pattern` in `source` — the
+/// single-needle entry point; the emit loop uses every recorded site.
+pub fn extract_message_type_near(source: &str, pattern: &str) -> Option<MessageType> {
+    let at = source.find(pattern)?;
+    message_type_at(source, &[at])
+}
+
+/// Payload type for a node whose call sites sit at byte `anchors` (first-seen
+/// order). Each site's window is tried in turn, generic before struct literal;
+/// within a window the hit NEAREST the call site wins, so a file publishing
+/// two topics gives each its own type. Only then the whole file, generic form
+/// only: a Go struct literal anywhere in a file (`&cobra.Command{`) is far too
+/// weak a signal without a call site beside it.
+fn message_type_at(source: &str, anchors: &[usize]) -> Option<MessageType> {
+    let found = |hit: TypeHit, form: &'static str, window: &'static str| MessageType {
+        simple: hit.2,
+        raw: hit.1,
+        form,
+        window,
+    };
+    for &at in anchors {
+        let at = at.min(source.len());
+        let mut lo = at.saturating_sub(MSG_BACK);
+        while lo > 0 && !source.is_char_boundary(lo) {
+            lo -= 1;
+        }
+        let mut hi = at.saturating_add(MSG_FWD).min(source.len());
+        while hi < source.len() && !source.is_char_boundary(hi) {
+            hi += 1;
+        }
+        let Some(s) = source.get(lo..hi) else {
+            continue;
+        };
+        let rel = at - lo; // lo <= at by construction
+        if let Some(hit) = nearest(scan_generic(s), rel) {
+            return Some(found(hit, "generic", "near"));
+        }
+        if let Some(hit) = nearest(scan_go_struct(s), rel) {
+            return Some(found(hit, "struct_literal", "near"));
+        }
+    }
+    let at = anchors.first().copied().unwrap_or(0);
+    nearest(scan_generic(source), at).map(|hit| found(hit, "generic", "file"))
+}
+
+/// The hit closest to `anchor`; ties go to the earlier one, so the answer is a
+/// function of the text alone, never of scan order.
+fn nearest(hits: Vec<TypeHit>, anchor: usize) -> Option<TypeHit> {
+    hits.into_iter().min_by_key(|h| (h.0.abs_diff(anchor), h.0))
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Every `Wrapper<..., T>` in `s`, as (position, raw `T`, simple `T`).
+fn scan_generic(s: &str) -> Vec<TypeHit> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    for w in GENERIC_WRAPPERS {
+        for (i, _) in s.match_indices(w) {
+            let glued = i
+                .checked_sub(1)
+                .and_then(|j| bytes.get(j))
+                .is_some_and(|b| is_ident_byte(*b));
+            if glued {
+                continue;
+            }
+            let Some(raw) = s.get(i + w.len()..).and_then(last_type_arg) else {
+                continue;
+            };
+            if let Some(simple) = simple_type(&raw) {
+                out.push((i, raw, simple));
+            }
+        }
+    }
+    out
+}
+
+/// The last top-level argument of a generic list whose `<` was just consumed:
+/// `Null, Map<String, List<Item>>>` -> `Map<String, List<Item>>`. Never crosses
+/// a line or a statement. Every split point is an ASCII byte, so each
+/// `get(a..b)` lands on a char boundary — `get` rather than indexing anyway,
+/// because CODE_RULES forbids the panicking form.
+fn last_type_arg(s: &str) -> Option<String> {
+    let mut depth = 1usize;
+    let mut seg = 0usize;
+    for (i, b) in s.bytes().enumerate() {
+        if i > MAX_TYPE_ARG {
+            return None;
+        }
+        match b {
+            b'<' => depth += 1,
+            b'>' => {
+                // depth >= 1 here: it starts at 1 and we return on reaching 0.
+                depth -= 1;
+                if depth == 0 {
+                    return s.get(seg..i).map(|t| t.trim().to_string());
+                }
+            }
+            b',' if depth == 1 => seg = i + 1,
+            b'\n' | b';' | b'(' | b')' | b'{' | b'}' | b'"' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every Go `pkg.Type{` composite literal in `s`, outermost only: once one is
+/// accepted the scan resumes after its closing brace, so the `pb.Item{}` inside
+/// `&pb.OrderCreated{Items: []pb.Item{}}` never out-ranks its container.
+fn scan_go_struct(s: &str) -> Vec<TypeHit> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(off) = bytes
+        .get(i..)
+        .and_then(|rest| rest.iter().position(|b| *b == b'{'))
+    {
+        let open = i + off;
+        let mut start = open;
+        while start > 0
+            && bytes
+                .get(start - 1)
+                .is_some_and(|b| is_ident_byte(*b) || *b == b'.')
+        {
+            start -= 1;
+        }
+        match go_struct_type(s, start, open) {
+            Some((raw, simple)) => {
+                out.push((start, raw, simple));
+                i = matching_brace(bytes, open).map_or(bytes.len(), |close| close + 1);
+            }
+            None => i = open + 1,
+        }
+    }
+    out
+}
+
+/// `s[start..open]` as a payload `pkg.Type`, or None. Go shape only: exactly
+/// one dot, a lowercase package, an exported (uppercase) type, and a
+/// non-identifier byte before it (`&`, whitespace, `(`, `,`, `=`, or the
+/// window start) — which also rejects `[]pb.Item{` element literals.
+fn go_struct_type(s: &str, start: usize, open: usize) -> Option<(String, String)> {
+    let ident = s.get(start..open)?;
+    let before_ok = match start.checked_sub(1).and_then(|j| s.as_bytes().get(j)) {
+        None => true,
+        Some(b) => matches!(b, b'&' | b'(' | b',' | b'=') || b.is_ascii_whitespace(),
+    };
+    let (pkg, ty) = ident.split_once('.')?;
+    if !before_ok || ty.contains('.') {
+        return None;
+    }
+    let pkg_ok = pkg.as_bytes().first().is_some_and(u8::is_ascii_lowercase);
+    let ty_ok = ty.as_bytes().first().is_some_and(u8::is_ascii_uppercase);
+    if !pkg_ok || !ty_ok || GO_PKG_DENY.contains(&pkg) || GO_TYPE_DENY.contains(&ty) {
+        return None;
+    }
+    Some((ident.to_string(), simple_type(ty)?))
+}
+
+/// Index of the `}` closing the `{` at `open`, if it is inside `bytes`.
+fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, b) in bytes.iter().enumerate().skip(open) {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Normalise a written type to its simple name: drop generic arguments, a
+/// nullable `?` and array `[]`, then keep the segment after the last `.` or
+/// `::`. `Null` / `Ignore` / `string` are NOT rejected — by the Kafka
+/// convention the last argument IS the value type, and dropping them would
+/// silently lose `Message<Null, string>`; A12.2 can weigh them.
+fn simple_type(raw: &str) -> Option<String> {
+    let t = raw.split('<').next().unwrap_or(raw).trim();
+    let t = t.trim_end_matches(['?', '[', ']']).trim_end();
+    let t = t.rsplit(['.', ':']).next().unwrap_or(t);
+    let first_ok = t
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_');
+    let ok = first_ok && t.len() <= MAX_TYPE_NAME && t.bytes().all(is_ident_byte);
+    ok.then(|| t.to_string())
+}
+
+/// The MESSAGE_TYPE cell for a node whose call sites sit at `anchors`.
+fn message_type_cell(source: &str, anchors: &[usize]) -> Option<Cell> {
+    let mt = message_type_at(source, anchors)?;
+    if debug_enabled() {
+        eprintln!(
+            "[queues] msgtype type={} form={} window={} raw={}",
+            mt.simple, mt.form, mt.window, mt.raw
+        );
+    }
+    // Written by hand in a FIXED key order: the workspace unifies serde_json's
+    // `preserve_order` feature on for some builds and not others, and a
+    // `json!` map would serialise in whichever order that build chose — the
+    // `.gmap` bytes must not depend on it. Each value still goes through
+    // serde_json, which escapes control characters `escape_json` does not.
+    let q = |s: &str| serde_json::to_string(s).ok();
+    let payload = format!(
+        r#"{{"type":{},"raw":{},"form":{},"window":{}}}"#,
+        q(&mt.simple)?,
+        q(&mt.raw)?,
+        q(mt.form)?,
+        q(mt.window)?
+    );
+    Some(Cell {
+        kind: cell_type::MESSAGE_TYPE,
+        payload: CellPayload::Json(payload),
+    })
 }
 
 /// Grep-able proof that a needle passed its gate and produced a node.
@@ -2035,5 +2358,168 @@ public class AuditFunction
         }
         assert!(broker_signal_present("import paho.mqtt.client as mqtt"));
         assert!(!broker_signal_present("from celery import celery"));
+    }
+
+    // ---- A12.1: MESSAGE_TYPE ----------------------------------------------
+
+    fn msg_type(n: &Node) -> Option<serde_json::Value> {
+        n.cells
+            .iter()
+            .find(|c| c.kind == cell_type::MESSAGE_TYPE)
+            .and_then(|c| serde_json::from_str(payload(c)).ok())
+    }
+
+    #[test]
+    fn msgtype_go_struct_literal_near_publish() {
+        // (a) the Go marshal-then-publish shape.
+        let src = "import \"github.com/nats-io/nats.go\"\n\
+                   func P(nc *nats.Conn, id string) error {\n\
+                   \tdata, _ := proto.Marshal(&pb.OrderCreated{Id: id})\n\
+                   \treturn nc.Publish(\"orders\", data)\n}\n";
+        let mt = extract_message_type_near(src, "nc.Publish").expect("type found");
+        assert_eq!(
+            (mt.simple.as_str(), mt.raw.as_str(), mt.form, mt.window),
+            ("OrderCreated", "pb.OrderCreated", "struct_literal", "near")
+        );
+        // End to end: the cell rides on the node, after the A2.8 pair.
+        let r = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(r.nodes.len(), 1);
+        let kinds: Vec<_> = r.nodes[0].cells.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, vec![cell_type::POSITION, cell_type::CODE, cell_type::MESSAGE_TYPE]);
+        assert_eq!(
+            payload(cell_of(&r.nodes[0], cell_type::MESSAGE_TYPE)),
+            r#"{"type":"OrderCreated","raw":"pb.OrderCreated","form":"struct_literal","window":"near"}"#
+        );
+    }
+
+    #[test]
+    fn msgtype_go_envelope_is_denied() {
+        // (b) `kafka.Message{Topic: ...}` is the envelope, never the payload;
+        // a `*nats.Msg` handler parameter must not win over the real type.
+        let src = "w.WriteMessages(ctx, &kafka.Message{Topic: \"x\", Value: data})";
+        assert_eq!(extract_message_type_near(src, ".WriteMessages("), None);
+        let consumer = "import \"github.com/nats-io/nats.go\"\n\
+                        func S(nc *nats.Conn) {\n\
+                        \tnc.Subscribe(\"orders\", func(m *nats.Msg) {\n\
+                        \t\tevt := &pb.OrderCreated{}\n\
+                        \t\t_ = proto.Unmarshal(m.Data, evt)\n\t})\n}\n";
+        let r = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:orders".to_string()]);
+        assert_eq!(msg_type(&r.nodes[0]).expect("typed")["type"], "OrderCreated");
+        // Outermost literal only: the nested `pb.Item{}` never out-ranks it.
+        let nested = "x := &pb.OrderCreated{Item: pb.Item{}}\nnc.Publish(\"o\", x)";
+        let mt = extract_message_type_near(nested, "nc.Publish").expect("type found");
+        assert_eq!(mt.simple, "OrderCreated");
+    }
+
+    #[test]
+    fn msgtype_csharp_generic_producer() {
+        // (c) the Confluent generic form, canonical `<K, V>` spacing (A15.8).
+        let src = "using Confluent.Kafka;\n\
+                   class P {\n\
+                   \tprivate readonly IProducer<Null, OrderCreated> _producer;\n\
+                   \tasync Task Go(OrderCreated e) {\n\
+                   \t\tawait _producer.ProduceAsync(\"orders\", new Message<Null, OrderCreated> { Value = e });\n\
+                   \t}\n}\n";
+        let r = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_producer:orders".to_string()]);
+        let v = msg_type(&r.nodes[0]).expect("typed");
+        assert_eq!((v["type"].as_str(), v["form"].as_str()), (Some("OrderCreated"), Some("generic")));
+        // The Kafka convention keeps a primitive value type rather than dropping it.
+        let plain = "IProducer<string, string> p; p.Produce(\"orders\", m);";
+        assert_eq!(extract_message_type_near(plain, ".Produce(").map(|m| m.simple), Some("string".into()));
+    }
+
+    #[test]
+    fn msgtype_java_consumer_record() {
+        // (d) the Java path — unit-only: `@KafkaListener` reads the topic,
+        // the handler parameter carries the type.
+        let src = "@KafkaListener(topics = \"orders\")\n\
+                   public void on(ConsumerRecord<String, com.acme.OrderCreated> rec) {}";
+        let mt = extract_message_type_near(src, "@KafkaListener").expect("type found");
+        assert_eq!((mt.simple.as_str(), mt.raw.as_str()), ("OrderCreated", "com.acme.OrderCreated"));
+        // A diamond names nothing, and `IMessage<` is not `Message<`.
+        assert_eq!(extract_message_type_near("new ProducerRecord<>(\"o\", v)", "ProducerRecord"), None);
+        assert_eq!(extract_message_type_near("IMessage<Foo> m; bus.Send(m)", "bus.Send"), None);
+    }
+
+    #[test]
+    fn msgtype_nested_generics_and_char_boundaries() {
+        // (e) balanced `<>`: the LAST top-level argument, reduced to `Map`.
+        let src = "Message<Null, Map<String, List<Item>>> m; producer.Produce(\"o\", m);";
+        let mt = extract_message_type_near(src, "producer.Produce(").expect("type found");
+        assert_eq!((mt.simple.as_str(), mt.raw.as_str()), ("Map", "Map<String, List<Item>>"));
+        // Multi-byte text straddling both window edges must never panic.
+        let pad = "é".repeat(700);
+        let wide = format!("{pad}IProducer<Null, Évènement> p; p.Produce(\"o\", m);{pad}");
+        let mt = extract_message_type_near(&wide, ".Produce(");
+        assert_eq!(mt, None, "a non-ASCII type name is not an identifier");
+        let ok = format!("{pad}IProducer<Null, Ok> p; p.Produce(\"o\", m);{pad}");
+        assert_eq!(extract_message_type_near(&ok, ".Produce(").map(|m| m.simple), Some("Ok".into()));
+        // Unterminated / multi-line argument lists bail instead of reading on.
+        assert_eq!(extract_message_type_near("Message<Null,\n Foo> m; x.Produce(", "x.Produce("), None);
+    }
+
+    #[test]
+    fn msgtype_each_topic_gets_its_nearest_type_and_file_fallback() {
+        // Two topics, one file: each node reads the type beside ITS call.
+        let src = "using Confluent.Kafka;\n\
+                   await p.ProduceAsync(\"orders\", new Message<Null, OrderCreated> { Value = a });\n\
+                   await p.ProduceAsync(\"payments\", new Message<Null, PaymentTaken> { Value = b });\n";
+        let r = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        let mut got: Vec<(String, String)> = r
+            .nodes
+            .iter()
+            .map(|n| {
+                let v = msg_type(n).expect("typed");
+                (r.nav.qname_by_id[&n.id].clone(), v["type"].as_str().unwrap_or("").to_string())
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("queue_producer:orders".to_string(), "OrderCreated".to_string()),
+                ("queue_producer:payments".to_string(), "PaymentTaken".to_string()),
+            ]
+        );
+        // Beyond the window: a generic type elsewhere in the file is kept but
+        // marked `window: file`; a Go struct literal that far away is not.
+        let far = format!(
+            "using Confluent.Kafka;\nIProducer<Null, OrderCreated> p;\n{}\np.ProduceAsync(\"orders\", m);\n",
+            "// filler\n".repeat(80)
+        );
+        let v = msg_type(&extract_queue_producer_nodes(&far, PATH, module_id(), repo()).nodes[0])
+            .expect("file-window type");
+        assert_eq!((v["type"].as_str(), v["window"].as_str()), (Some("OrderCreated"), Some("file")));
+        let go_far = format!(
+            "import \"github.com/nats-io/nats.go\"\nvar x = &pb.OrderCreated{{}}\n{}\nnc.Publish(\"orders\", d)\n",
+            "// filler\n".repeat(80)
+        );
+        let r = extract_queue_producer_nodes(&go_far, PATH, module_id(), repo());
+        assert_eq!(r.nodes[0].cells.len(), 2, "no type => no MESSAGE_TYPE cell");
+    }
+
+    #[test]
+    fn every_framework_tag_is_a_framework_tag() {
+        // (f) `is_framework_tag` is derived from the same prefix `framework_tag`
+        // writes, so the two cannot drift. The match is exhaustive on purpose:
+        // a new variant fails to compile here until it is listed.
+        use QueueFramework::*;
+        let all = [
+            Celery, Dramatiq, BullMQ, Sidekiq, Oban, Nats, RabbitMQ, Kafka, RedisList, Sqs, Sns,
+            PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms,
+        ];
+        for f in &all {
+            match f {
+                Celery | Dramatiq | BullMQ | Sidekiq | Oban | Nats | RabbitMQ | Kafka
+                | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms => {}
+            }
+            assert!(is_framework_tag(&framework_tag(f)), "{f:?}");
+        }
+        // A bare framework word is a legal topic since A2.3, not a tag.
+        for topic in ["orders", "kafka", "nats"] {
+            assert!(!is_framework_tag(topic), "{topic}");
+        }
     }
 }

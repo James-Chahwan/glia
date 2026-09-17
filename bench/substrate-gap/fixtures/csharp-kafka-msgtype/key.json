@@ -1,0 +1,38 @@
+{
+  "framework": "csharp-kafka-msgtype",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "note": "A12.1. Proves the generic form (IProducer<K, V> / ProducerBuilder<K, V> / Message<K, V>) reaches a real graph node. Single dir on purpose: the point is the CELL, not a pairing. The packet spec keyed the node as the framework tag `queue_producer:kafka`; that predates A2.2 (`.ProduceAsync(` reads the literal) and A2.3 (the tag is now `queue_producer:unresolved:kafka`), so the node is `queue_producer:orders` and the tag is forbidden. The BootstrapServers literal is realistic but no longer load-bearing: since A2.2 the gate is case-insensitive and `using Confluent.Kafka;` passes it. Generics use canonical `<Null, OrderCreated>` spacing (A15.8 handoff).",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "_producer.ProduceAsync(\"orders\", ...)"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"OrderCreated\"",
+      "note": "last type argument of Message<Null, OrderCreated> in the ProduceAsync call"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"form\":\"generic\"",
+      "note": "read by the generic-wrapper scanner, not the Go struct-literal one"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "note": "the topic is a literal; the framework-tag sentinel must not appear beside it"
+    }
+  ]
+}

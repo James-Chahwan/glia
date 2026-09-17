@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::{
-    FileParse, GRAPH_TYPE, attach_imports_cell, di_stats, edge_category, node_kind,
+    FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, di_stats, edge_category, node_kind,
 };
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
 use repo_graph_core::{NodeId, RepoId};
@@ -426,8 +426,43 @@ fn build_graphs_for_repo(
 
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);
+    msgtype_marker(&graphs, repo_label);
 
     (graphs, parse_errors)
+}
+
+/// A12.1 fired_on marker, once per repo that holds a queue node:
+///   `[msgtype] queue_nodes=N typed=T tag_topics=K repo=<label>`
+/// `typed` counts nodes carrying a `cell_type::MESSAGE_TYPE` cell, `tag_topics`
+/// the identity-free framework tags that can never carry a contract. Counted
+/// off the built graphs, so cache-served files count too; silent otherwise.
+fn msgtype_marker(graphs: &[repo_graph_graph::RepoGraph], repo_label: &str) {
+    let (mut queue_nodes, mut typed, mut tags) = (0usize, 0usize, 0usize);
+    for g in graphs {
+        for n in &g.nodes {
+            let is_queue = g.nav.kind_by_id.get(&n.id).is_some_and(|k| {
+                *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER
+            });
+            if !is_queue {
+                continue;
+            }
+            queue_nodes += 1;
+            if n.cells.iter().any(|c| c.kind == cell_type::MESSAGE_TYPE) {
+                typed += 1;
+            }
+            if let Some(q) = g.nav.qname_by_id.get(&n.id)
+                && let Some((_, topic)) = q.split_once(':')
+                && repo_graph_code_extractors::queues::is_framework_tag(topic)
+            {
+                tags += 1;
+            }
+        }
+    }
+    if queue_nodes > 0 {
+        eprintln!(
+            "[msgtype] queue_nodes={queue_nodes} typed={typed} tag_topics={tags} repo={repo_label}"
+        );
+    }
 }
 
 /// RAII guard: replaces the global panic hook with a no-op for the lifetime

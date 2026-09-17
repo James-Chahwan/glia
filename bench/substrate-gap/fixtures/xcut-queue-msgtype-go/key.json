@@ -1,0 +1,71 @@
+{
+  "framework": "xcut-queue-msgtype",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "note": "A12.1. Mirrors xcut-queue-queue_flows (server/ + client/, no go.mod): NATS nc.Publish / nc.Subscribe already yield the literal topic 'orders' and pair, so the only thing this fixture adds is the MESSAGE_TYPE cell (cell_type 17) on both sides. The cell payload is JSON {type, raw, form, window}; the `\"type\":\"OrderCreated\"` row pins the NORMALISED simple name, not merely a substring of `raw`. The consumer's `func(m *nats.Msg)` is deliberate: `Msg` / package `nats` are on the Go deny lists and must never win over `pb.OrderCreated`. No `cells` field: this is a mechanism-depth probe, not a matrix cell.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "nc.Publish(\"orders\", data) in server/publisher.go"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "nc.Subscribe(\"orders\", ...) in client/consumer.go"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "paired on the literal topic today; must stay paired once the cell lands"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"OrderCreated\"",
+      "note": "&pb.OrderCreated{Id: id} marshalled two lines above nc.Publish"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"form\":\"struct_literal\"",
+      "note": "read by the Go struct-literal scanner, inside the near window"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"OrderCreated\"",
+      "note": "&pb.OrderCreated{} unmarshalled inside the nc.Subscribe handler; *nats.Msg must not win"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "POSITION",
+      "contains": "publisher.go",
+      "note": "regression guard: the A2.8 cells are kept alongside the new one"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:nats",
+      "note": "the topic is a literal on both sides; no framework-tag sentinel"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:nats",
+      "note": "the topic is a literal on both sides; no framework-tag sentinel"
+    }
+  ]
+}
