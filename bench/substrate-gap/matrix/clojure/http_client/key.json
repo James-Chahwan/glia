@@ -1,0 +1,84 @@
+{
+  "framework": "clojure-clj-http",
+  "language": "clojure",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "clojure/http_client"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /users",
+      "note": "(client/get \"http://api/users\" {:as :json}) -> GET, host stripped by url_to_path"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /users",
+      "note": "(client/post \"http://api/users\" {:form-params user ...}) -> POST"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "route:/users",
+      "note": "positive control: the Go chi server (GET and POST /users collapse into route:/users). Measured present, so a missing ENDPOINT is a client gap, not a broken fixture"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "list-users",
+      "to": "GET /users",
+      "category": "CALLS",
+      "note": "enclosing defn -> ENDPOINT (push_client_endpoint)"
+    },
+    {
+      "from": "create-user",
+      "to": "POST /users",
+      "category": "CALLS",
+      "note": "enclosing defn -> ENDPOINT"
+    },
+    {
+      "from": "GET /users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "routing proof: HttpStackResolver pairs the clj-http GET to chi r.Get(\"/users\")"
+    },
+    {
+      "from": "POST /users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "routing proof: the clj-http POST pairs to chi r.Post(\"/users\")"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ENDPOINT",
+      "node": "GET /users",
+      "cell": "ENDPOINT_HIT",
+      "contains": "api_client.clj",
+      "note": "ENDPOINTs carry no POSITION; the call-site file rides on ENDPOINT_HIT"
+    },
+    {
+      "kind": "ENDPOINT",
+      "node": "POST /users",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"method\":\"POST\"",
+      "note": "the verb from client/post survives into the hit payload"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "max_nodes": 2,
+      "note": "exactly GET and POST /users; the (str base \"/users\") call in user-count may join GET /users but must not mint a third"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "HEAD /users",
+      "note": "MEASURED VIOLATED: scan_clojure_routes' reitit branch sees `[r (client/get (str base \"/users\") {:headers ...})` as route data and `block.contains(\":head\")` matches `:headers`, minting a phantom client-side ROUTE. ROUTE is not an http_client kind, so this does not cap the cell; it is the precision record for the clojure route scanner"
+    }
+  ],
+  "note": "clj-http, the dominant Clojure HTTP client (hato shares its (client/get url opts) call shape). server/main.go is a Go chi server exposing GET and POST /users, so a failing cell isolates to the Clojure client. user-count is the idiomatic base-URL form with an auth header; it is not asserted as an ENDPOINT (a dynamic (str base ...) URL) but it is the source of the HEAD /users phantom above. BASELINE (0.4.18 wheel, HEAD 8155f47): the Clojure parser emits no ENDPOINT at all, so the cell is `none`. The route control and both HTTP_CALLS pairings were verified satisfiable against this exact server dir with a python requests client (2/2 HTTP_CALLS, 2/2 ENDPOINT_HIT)."
+}

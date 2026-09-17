@@ -1,0 +1,85 @@
+{
+  "framework": "c-libcurl",
+  "language": "c_cpp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "c_cpp/http_client"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /users",
+      "note": "curl_easy_setopt(curl, CURLOPT_URL, \"http://api/users\") then curl_easy_perform with no method option -> libcurl's default GET; host stripped by url_to_path"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /users",
+      "note": "the same CURLOPT_URL plus CURLOPT_POSTFIELDS on the same handle -> libcurl sends POST"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "route:/users",
+      "note": "positive control: the Go chi server (GET and POST /users collapse into route:/users). Measured present, so a missing ENDPOINT is a client gap, not a broken fixture"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "list_users",
+      "to": "GET /users",
+      "category": "CALLS",
+      "note": "enclosing function -> ENDPOINT (push_client_endpoint)"
+    },
+    {
+      "from": "create_user",
+      "to": "POST /users",
+      "category": "CALLS",
+      "note": "enclosing function -> ENDPOINT"
+    },
+    {
+      "from": "GET /users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "routing proof: HttpStackResolver pairs the libcurl GET to chi r.Get(\"/users\")"
+    },
+    {
+      "from": "POST /users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "routing proof: the libcurl POST pairs to chi r.Post(\"/users\")"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ENDPOINT",
+      "node": "GET /users",
+      "cell": "ENDPOINT_HIT",
+      "contains": "api_client.c",
+      "note": "ENDPOINTs carry no POSITION; the call-site file rides on ENDPOINT_HIT"
+    },
+    {
+      "kind": "ENDPOINT",
+      "node": "POST /users",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"method\":\"POST\"",
+      "note": "the verb inferred from CURLOPT_POSTFIELDS survives into the hit payload"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "max_nodes": 2,
+      "note": "exactly GET and POST /users; CURLOPT_POSTFIELDS' json argument must not be read as a URL"
+    },
+    {
+      "from": "create_user",
+      "to": "GET /users",
+      "category": "CALLS",
+      "note": "a CURLOPT_URL that shares its handle with CURLOPT_POSTFIELDS is a POST, not libcurl's default GET"
+    }
+  ],
+  "note": "libcurl easy interface, the dominant C HTTP client. client/api_client.c is C (the c_cpp row covers both). server/main.go is a Go chi server exposing GET and POST /users, so a failing cell isolates to the C client. BASELINE (0.4.18 wheel, HEAD 8155f47): the C parser emits no ENDPOINT at all, so the cell is `none`. The route control and both HTTP_CALLS pairings were verified satisfiable against this exact server dir with a python requests client (2/2 HTTP_CALLS, 2/2 ENDPOINT_HIT)."
+}

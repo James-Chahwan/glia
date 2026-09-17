@@ -13,5 +13,7 @@
   "forbid": [
     {"kind": "ROUTE", "max_nodes": 1, "note": "only the Go chi route; the rust client must not mint a phantom ROUTE"},
     {"kind": "ENDPOINT", "max_nodes": 2, "note": "cache.get(id) / cache.get(\"default\") must not become ENDPOINTs"}
-  ]
+  ],
+  "mechanism": "http_client",
+  "cells": ["rust/http_client"]
 }
