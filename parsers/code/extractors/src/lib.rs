@@ -1,6 +1,7 @@
 pub mod angular;
 pub mod cli;
 pub mod config;
+pub mod constants;
 pub mod contracts;
 pub mod cron;
 pub mod data_entities;

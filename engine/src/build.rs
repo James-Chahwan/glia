@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use repo_graph_code_domain::{
     FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, di_stats, edge_category, node_kind,
 };
+use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
 use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{
@@ -320,6 +321,28 @@ fn apply_rpc_client_needles(
     added
 }
 
+/// The repo-scope name -> literal table (A11.1), built from every walked file
+/// with a source language. It sits beside `read_go_module_prefix` as a
+/// cross-file fact the engine gathers, but unlike the go.mod prefix it is NOT
+/// handed to the per-file extractors: their output is cached by the file's own
+/// content hash, and a table lookup depends on other files. A consumer runs
+/// after the cache, as `apply_rpc_client_needles` does, so incremental == clean.
+///
+/// `files` is name-sorted by the walk and the table is first-wins, so the
+/// result does not depend on the process. `.env` / yaml / Dockerfile have no
+/// source language and never reach the scan (env values are A13.7's ENV cell).
+fn build_const_table(files: &[(String, String)], parse_errors: &mut Vec<String>) -> ConstTable {
+    let mut table = ConstTable::default();
+    for (path, source) in files {
+        let Some(lang) = detect_language(path) else { continue };
+        match catch_unwind(AssertUnwindSafe(|| ConstTable::scan_file(source, lang))) {
+            Ok(file_table) => table.merge_from(&file_table),
+            Err(_) => parse_errors.push(format!("{path}: PANIC (const table scan)")),
+        }
+    }
+    table
+}
+
 /// `repo_label` is the repo path as the caller was given it. It only prefixes
 /// the `[incremental]` marker, so a multi-repo build prints one attributable
 /// line per repo; it never reaches the graph. `rpc` is the build-wide proto
@@ -343,6 +366,19 @@ fn build_graphs_for_repo(
 
     let (mut parses_by_lang, mut parse_errors) =
         parse_repo_files(files, repo, go_module_prefix, cache, repo_label);
+
+    // A11.1 fired_on marker, once per repo. Post-cache passes that read the
+    // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
+    // and sit beside `apply_rpc_client_needles` below.
+    let const_table = build_const_table(files, &mut parse_errors);
+    if !const_table.is_empty() {
+        eprintln!(
+            "[const] repo table: {} bindings from {} files ({} conflicts) repo={repo_label}",
+            const_table.len(),
+            const_table.files(),
+            const_table.conflicts()
+        );
+    }
 
     let rpc_added =
         apply_rpc_client_needles(&mut parses_by_lang, files, repo, rpc, &mut parse_errors);
