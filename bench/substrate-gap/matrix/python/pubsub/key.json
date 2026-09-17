@@ -1,0 +1,46 @@
+{
+  "framework": "python-google-cloud-pubsub",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "pubsub",
+  "cells": [
+    "python/pubsub"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "publisher.topic_path('my-project', 'orders') then publisher.publish(topic_path, data) -- the topic is arg #1 of topic_path(, never of publish("
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders-worker",
+      "note": "subscriber.subscription_path('my-project', 'orders-worker') -- the subscriber names a SUBSCRIPTION, not the topic"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders-worker",
+      "category": "QUEUE_FLOWS",
+      "note": "the subscription-to-topic binding lives in IaC, not code (A2.6 caveat), so this edge is not provable from source alone today; it is kept as the intended graph so a real binding resolver has a gate, and so a name-equality pairing cannot score it"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:publish",
+      "note": "MEASURED VIOLATION: the generic `publish(` needle finds no literal in publisher.publish(topic_path, ...) and names the event after the METHOD -- an identity-free node any other `.publish(var)` call would share"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:subscribe",
+      "note": "MEASURED VIOLATION: the same for subscriber.subscribe(subscription_path, ...)"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: NONE via=eventbus -- no queue node; the only nodes are two method-named event phantoms. The subscription is deliberately NOT named after the topic: in production it rarely is. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

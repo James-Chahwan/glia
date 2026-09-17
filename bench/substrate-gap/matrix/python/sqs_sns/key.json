@@ -1,0 +1,35 @@
+{
+  "framework": "python-boto3-sqs",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "python/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "boto3 sqs.send_message(QueueUrl='https://sqs.../orders') -- no SQS row exists at HEAD; A2.6 adds `.send_message(` Keyed(queueurl) with URL folding"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "boto3 sqs.receive_message(QueueUrl='https://sqs.../orders')"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic (the queue URL folds to its last path segment)"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.7 baseline 2026-09-17: NONE -- zero queue or event nodes on either side. The URL is inline on purpose: a URL held in a constant or env var is A2.6's documented caveat, not a needle gap. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

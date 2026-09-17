@@ -1,0 +1,46 @@
+{
+  "framework": "python-celery-app-task",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "python/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "process_order",
+      "note": "`from tasks import process_order` + process_order.delay(order_id) -- the canonical caller (Celery docs, any Django view) never mentions `celery`, and the `.delay(` row is gated on ['celery', '@shared_task']"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "process_order",
+      "note": "@celery.task on `def process_order` -- DeclaredSymbol"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "process_order",
+      "to": "process_order",
+      "category": "QUEUE_FLOWS",
+      "note": "producer and consumer of one TASK, paired across two services on the task name"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:celery",
+      "note": "the task is named on both sides; a framework-tag sentinel would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:celery",
+      "note": "the task is named on both sides; a framework-tag sentinel would overstate the blind spot"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: NONE (extract 1/2) -- the worker side is found, the caller is gated out because the file that calls .delay( imports the task, not Celery. Complements fixtures/xcut-queue-py-celery (@shared_task, caller that imports celery), which reads full. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

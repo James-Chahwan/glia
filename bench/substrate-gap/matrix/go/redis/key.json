@@ -1,0 +1,46 @@
+{
+  "framework": "go-redis-list",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "redis",
+  "cells": [
+    "go/redis"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "go-redis rdb.LPush(ctx, \"orders\", payload) -- Capitalised; the needle is `.lpush(`"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "rdb.BLPop(ctx, 0, \"orders\") -- the topic is arg #2, after ctx and the timeout"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:redislist",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:redislist",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: NONE -- only the (correct) CACHE data_source:redis nodes. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

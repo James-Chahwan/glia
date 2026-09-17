@@ -1,0 +1,35 @@
+{
+  "framework": "python-azure-servicebus",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "azure_sb",
+  "cells": [
+    "python/azure_sb"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "azure-servicebus client.get_queue_sender(queue_name='orders') + sender.send_messages(...) -- A2.6's Azure rows are C#-only (`CreateSender(`, gate azure.messaging.servicebus)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "client.get_queue_receiver(queue_name='orders') + receiver.receive_messages(...)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.7 baseline 2026-09-17: NONE -- only the (correct) CONFIG_KEY nodes for the connection string. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

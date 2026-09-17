@@ -1,0 +1,52 @@
+{
+  "framework": "python-pika",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "amqp",
+  "cells": [
+    "python/amqp"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "pika channel.basic_publish(exchange='', routing_key='orders') -- the basic_publish( Keyed(routing_key) row"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "pika channel.basic_consume(queue='orders', ...)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "max_nodes": 1,
+      "note": "MEASURED VIOLATION: `queue_declare(` is a CONSUMER needle, so the producer's own queue_declare (the pika tutorial's send.py shape) mints a second queue_consumer:orders in the server repo, and QueueStackResolver pairs the producer with it -- a false self-flow. Declaring a queue is not consuming it."
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:rabbitmq",
+      "note": "MEASURED VIOLATION: the `channel.basic_publish` row is ArgLiteral over positional arg #0 (pika's exchange, passed as a kwarg here), finds nothing and falls back to the tag beside the real node the `basic_publish(` Keyed row already emitted for the same call"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:rabbitmq",
+      "note": "both sides name the queue literally"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: PARTIAL -- extraction and routing work, precision does not (two forbid violations). Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

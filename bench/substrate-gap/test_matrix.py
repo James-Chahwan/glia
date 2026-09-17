@@ -448,7 +448,14 @@ def test_anchor_go_nats_is_full():
 
 
 def test_anchor_python_kafka_is_partial():
-    _anchor("python/kafka", "partial")
+    # Was `partial` when this anchor was written: extract_topic_near took the
+    # FIRST occurrence of `KafkaConsumer`, which is the import line, so the
+    # consumer collapsed to the framework tag and never paired. A2.1 (b8b00aa)
+    # replaced that scanner with one that walks every occurrence, before any
+    # fixture for this cell existed. A15.7 authored matrix/python/kafka with the
+    # import line kept, and it measures `full via=queue`. The anchor moves with
+    # the fix; the name is kept so the history of the cell stays greppable.
+    _anchor("python/kafka", "full", "queue")
 
 
 def test_anchor_csharp_kafka_is_none():

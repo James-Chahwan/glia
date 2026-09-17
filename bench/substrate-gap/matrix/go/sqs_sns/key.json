@@ -1,0 +1,35 @@
+{
+  "framework": "go-aws-sdk-v2-sqs",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "go/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "aws-sdk-go-v2 client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(\"https://sqs.../orders\")}) -- A2.6 adds no Go SQS row"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: ...})"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic (the queue URL folds to its last path segment)"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A15.7 baseline 2026-09-17: NONE. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

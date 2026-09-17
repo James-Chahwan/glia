@@ -1,0 +1,41 @@
+{
+  "framework": "python-paho-mqtt",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "mqtt",
+  "cells": [
+    "python/mqtt"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "sensors/temp",
+      "note": "paho client.publish('sensors/temp', payload) -- no QueueFramework::Mqtt row at HEAD (A2.9 adds one)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "sensors/temp",
+      "note": "paho client.subscribe('sensors/temp')"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sensors/temp",
+      "to": "sensors/temp",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "client.subscribe",
+      "note": "MEASURED VIOLATION: graphql.rs OPERATION_PATTERNS has an ungated `client.subscribe(`, so a paho subscriber mints a phantom graphql_op:client.subscribe. NOTE: matrix.py scopes a forbid to a cell only by the mechanism's own kinds/categories, so this violation is graded by grade.py but does NOT reach the python/mqtt cell"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: NONE via=eventbus -- the only nodes are event_emit/event_handle:sensors/temp and their EVENT_FLOWS pair (the deliberate interim path eventbus.rs documents for MQTT), plus the phantom GraphQL operation. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

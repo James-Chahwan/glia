@@ -1,0 +1,46 @@
+{
+  "framework": "go-kafka-go-writer-struct",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "go/kafka"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "segmentio/kafka-go `&kafka.Writer{Topic: \"orders\"}` + writer.WriteMessages(ctx, kafka.Message{Value: p}) -- the topic lives on the Writer (kafka-go rejects Topic on both), and no row reads a `kafka.Writer{` literal"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "kafka.NewReader(kafka.ReaderConfig{Topic: \"orders\"})"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "note": "MEASURED VIOLATION: `writer.WriteMessages` / `.WriteMessages(` read only the call's own arguments, find no Topic and fall back to the tag"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "MEASURED VIOLATION: with the receiver named `reader`, the legacy ArgLiteral row `reader.ReadMessage` fires on reader.ReadMessage(ctx) and falls back to the tag beside the real queue_consumer:orders -- the NoIdentity `.ReadMessage(` row was added to prevent exactly this, but the old row still matches"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: PARTIAL -- producer literal lost, no QUEUE_FLOWS, two tag sentinels. Complements fixtures/xcut-queue-go-segmentio (topic on kafka.Message, receivers w/r), which reads full. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}

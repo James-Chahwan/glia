@@ -1,0 +1,56 @@
+{
+  "framework": "python-nats-py",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "nats",
+  "cells": [
+    "python/nats"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "nats-py `await nc.publish('orders', payload)`"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "nats-py `await nc.subscribe('orders', cb=handle)`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orders",
+      "note": "MEASURED VIOLATION: the generic `.subscribe(` handler needle double-emits the NATS subject as a Weak event. eventbus.rs QUEUE_OWNED_PUBLISH suppresses exactly this twin on the publish side and has no subscribe-side counterpart (A2.9's target)"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orders",
+      "note": "the publish-side twin, suppressed today by QUEUE_OWNED_PUBLISH -- kept as its regression gate"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:nats",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:nats",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.7 baseline 2026-09-17: PARTIAL -- queue path full, one forbid violation (the event twin of the subscription). Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+}
