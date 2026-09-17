@@ -24,6 +24,30 @@
       ],
       "via": "call"
     },
+    "c_cpp/http_client": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/c_cpp/http_client"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        2
+      ],
+      "via": null
+    },
     "c_cpp/imports": {
       "extract": [
         1,
@@ -73,6 +97,30 @@
         1
       ],
       "via": "call"
+    },
+    "clojure/http_client": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/clojure/http_client"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        2
+      ],
+      "via": null
     },
     "clojure/http_server": {
       "extract": [
@@ -971,6 +1019,30 @@
         1
       ],
       "via": "import"
+    },
+    "go/injects": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/go-wire-di"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "di"
     },
     "go/kafka": {
       "extract": [
@@ -2578,6 +2650,30 @@
       ],
       "via": "call"
     },
+    "rust/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/rust-http"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "http"
+    },
     "rust/http_server": {
       "extract": [
         1,
@@ -2801,6 +2897,30 @@
         1
       ],
       "via": "import"
+    },
+    "scala/injects": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/scala-di"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "di"
     },
     "solidity/calls": {
       "extract": [
@@ -3515,6 +3635,7 @@
     "fixtures/arch-monorepo-http",
     "fixtures/contract-openapi-yaml",
     "fixtures/csharp-aspnet-composed",
+    "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/elixir-xmodule-calls",
     "fixtures/http-dart-nav-precision",
@@ -3525,7 +3646,6 @@
     "fixtures/py-router-prefix",
     "fixtures/react-hook",
     "fixtures/ruby-rails-scope",
-    "fixtures/rust-http",
     "fixtures/solidity-state_var",
     "fixtures/swift-imports",
     "fixtures/terraform-depends_on",
@@ -3536,6 +3656,7 @@
     "fixtures/xcut-config-env-value",
     "fixtures/xcut-graphql-precision",
     "fixtures/xcut-queue-annot-listener",
+    "fixtures/xcut-queue-msgtype-go",
     "fixtures/xcut-queue-nest-processor",
     "fixtures/xcut-queue-same-topic-two-files",
     "fixtures/xcut-queue-tag-unpairable",
@@ -3547,13 +3668,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 141,
+    "covered": 146,
     "error": 0,
-    "full": 92,
+    "full": 95,
     "grid": 480,
-    "none": 19,
+    "none": 21,
     "partial": 30,
-    "unknown": 339
+    "unknown": 334
   },
   "vocabulary": {
     "digest": "a3672b018b49",

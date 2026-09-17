@@ -69,24 +69,24 @@ Columns, left to right (the review's own abbreviations):
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ◐       ·       ?       ●       ·       ●       ●       ·       ?       ◐       ·       ●       ●       ?       ●       ●       ?       ?
-go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ·       ◐       ●       ●       ●       ●       ?       ?       ◐       ?       ·
+go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ·       ◐       ●       ●       ●       ●       ●       ?       ◐       ?       ·
 typescript       ●       ◐       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
 java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ?       ●       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ·
 csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ·       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
 ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ?       ◐       ?       ?
 php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ◐       ?       ◐       ?       ?
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
-c_cpp            ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-scala            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ?       ?
-clojure          ?       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
+c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
+scala            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
+clojure          ·       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 dart             ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ◐       ●       ◐       ◐       ?       ?       ?
 elixir           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-rust             ?       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ◐       ◐       ?       ?
+rust             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ◐       ◐       ?       ?
 solidity         ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?
 
 PER-MECHANISM  across 16 languages:
-  http_client  ● 11  ◐ 0   · 0   ? 5   ! 0
+  http_client  ● 12  ◐ 0   · 2   ? 2   ! 0
   http_server  ● 8   ◐ 5   · 0   ? 3   ! 0
   kafka        ● 4   ◐ 1   · 0   ? 11  ! 0
   amqp         ● 1   ◐ 3   · 1   ? 11  ! 0
@@ -111,7 +111,7 @@ PER-MECHANISM  across 16 languages:
   cli_inv      ● 1   ◐ 0   · 1   ? 14  ! 0
   calls        ● 14  ◐ 1   · 0   ? 1   ! 0
   imports      ● 13  ◐ 0   · 0   ? 3   ! 0
-  injects      ● 3   ◐ 3   · 0   ? 10  ! 0
+  injects      ● 5   ◐ 3   · 0   ? 8   ! 0
   impl         ● 5   ◐ 3   · 0   ? 8   ! 0
   tests        ● 2   ◐ 6   · 0   ? 8   ! 0
   service      ● 0   ◐ 0   · 0   ? 16  ! 0
@@ -119,26 +119,26 @@ PER-MECHANISM  across 16 languages:
 
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 16  ◐ 4   · 5   ? 5   ! 0
-  go           ● 11  ◐ 3   · 5   ? 11  ! 0
+  go           ● 12  ◐ 3   · 5   ? 10  ! 0
   typescript   ● 13  ◐ 6   · 2   ? 9   ! 0
   java         ● 11  ◐ 2   · 4   ? 13  ! 0
   csharp       ● 9   ◐ 2   · 2   ? 17  ! 0
   ruby         ● 6   ◐ 2   · 1   ? 21  ! 0
   php          ● 3   ◐ 2   · 0   ? 25  ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  ! 0
-  c_cpp        ● 2   ◐ 0   · 0   ? 28  ! 0
-  scala        ● 4   ◐ 1   · 0   ? 25  ! 0
-  clojure      ● 2   ◐ 1   · 0   ? 27  ! 0
+  c_cpp        ● 2   ◐ 0   · 1   ? 27  ! 0
+  scala        ● 5   ◐ 1   · 0   ? 24  ! 0
+  clojure      ● 2   ◐ 1   · 1   ? 26  ! 0
   dart         ● 2   ◐ 4   · 0   ? 24  ! 0
   elixir       ● 4   ◐ 0   · 0   ? 26  ! 0
-  rust         ● 3   ◐ 2   · 0   ? 25  ! 0
+  rust         ● 4   ◐ 2   · 0   ? 24  ! 0
   solidity     ● 4   ◐ 0   · 0   ? 26  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 141/480 cells have a fixture (29.4%) — 92 full, 30 partial, 19 none, 339 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 146/480 cells have a fixture (30.4%) — 95 full, 30 partial, 21 none, 334 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 33
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 34
 
 ## Cells routed via an alternative mechanism
 
