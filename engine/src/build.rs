@@ -25,7 +25,7 @@ use crate::endpoint_fold;
 use crate::extract::{detect_language, merge_nav, path_to_qname};
 use crate::passes::post_passes;
 use crate::route::parse_repo_files;
-use crate::walk::{WalkResult, build_region_graph, walk_source_files};
+use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
 pub struct GenerateResult {
     pub merged: MergedGraph,
@@ -81,9 +81,9 @@ fn generate_one_inner(
     let canonical = format!("file://{repo_path}");
     let repo = RepoId::from_canonical(&canonical);
     let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
-    // Project roots are detected (A8.4) but not yet consumed: emission is A8.5,
-    // per-root go.mod prefixes A8.7.
-    let (files, regions, md, _roots) = walk_source_files(&root);
+    // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
+    // prefixes are A8.7.
+    let (files, regions, md, roots) = walk_source_files(&root);
     let go_prefix = read_go_module_prefix(&root);
     // Cached parses are only valid under the exact repo identity + go.mod
     // module they were built with — neither is visible to per-file hashes.
@@ -94,8 +94,13 @@ fn generate_one_inner(
     rpc.add_files(&files);
     let (mut graphs, mut parse_errors) =
         build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path, &rpc);
+    // Slot order is regions, then projects, then docs. It fixes the shard index,
+    // so generate_many_inner must use the same order.
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
+    }
+    if !roots.is_empty() {
+        graphs.push(build_project_graph(&roots, repo));
     }
     let mut doc_records = FileDocSource(md).collect();
     doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
@@ -163,7 +168,7 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
 
     // Phase 2 — build each repo against the union.
     for entry in walked {
-        let (path, root, (files, regions, md, _roots)) = match entry {
+        let (path, root, (files, regions, md, roots)) = match entry {
             Ok(w) => w,
             Err(e) => {
                 all_errors.push(e);
@@ -189,8 +194,12 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
             eprintln!("[incremental] {path}: warning: failed to save parse cache: {e}");
         }
         all_graphs.extend(graphs);
+        // Same slot order as generate_one_inner: regions, projects, docs.
         if !regions.is_empty() {
             all_graphs.push(build_region_graph(&regions, repo));
+        }
+        if !roots.is_empty() {
+            all_graphs.push(build_project_graph(&roots, repo));
         }
         let mut doc_records = FileDocSource(md).collect();
         doc_records.extend(SnapshotDocSource::for_repo(&root).collect());

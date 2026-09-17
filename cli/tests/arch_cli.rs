@@ -42,12 +42,13 @@ fn arch_json_lists_services_and_links() {
     let out = glia_arch("--json");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("[arch] 2 services, 2 links (keying=top_level_dir "),
+        stderr.contains("[arch] 2 services, 2 links (keying=project_roots "),
         "fired_on marker missing or wrong:\n{stderr}"
     );
 
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    assert_eq!(v["keying"], "top_level_dir");
+    // `web/` and `api/` each carry a manifest, so they are A8.5 project roots.
+    assert_eq!(v["keying"], "project_roots");
     let ids: Vec<&str> = v["services"]
         .as_array()
         .expect("services array")

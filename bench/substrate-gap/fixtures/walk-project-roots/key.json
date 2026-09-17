@@ -1,0 +1,24 @@
+{
+  "framework": "walk-project-roots",
+  "language": "typescript+go+rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "PROJECT",  "name": "shop-monorepo",         "note": "repo root package.json -> qname project:."},
+    {"kind": "PROJECT",  "name": "@shop/web",             "note": "nested npm workspace -> project:apps/web"},
+    {"kind": "PROJECT",  "name": "github.com/shop/api",   "note": "go.mod module line -> project:services/api"},
+    {"kind": "PROJECT",  "name": "shop-core",             "note": "Cargo.toml [package] name -> project:libs/core"},
+    {"kind": "FUNCTION", "name": "webEntry",              "note": "control: TS still parsed (1.00 before and after)"},
+    {"kind": "FUNCTION", "name": "main",                  "note": "control: Go still parsed"},
+    {"kind": "FUNCTION", "name": "core_fn",               "note": "control: Rust still parsed"}
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "PROJECT", "node": "project:.",            "cell": "ORIGIN", "contains": "\"manifest\":\"package.json\"", "note": "the repo root is `project:.`, never an empty tail"},
+    {"kind": "PROJECT", "node": "project:libs/core",    "cell": "ORIGIN", "contains": "\"provenance\":\"project_root\"", "note": "reuses cell_type::ORIGIN; no new cell type"},
+    {"kind": "PROJECT", "node": "project:services/api", "cell": "ORIGIN", "contains": "\"ecosystem\":\"go\"", "note": "ecosystem rides the ORIGIN payload"}
+  ],
+  "forbid": [
+    {"kind": "PROJECT", "max_nodes": 4, "note": "one PROJECT per manifest root: libs/core/src and apps/web are not double-counted"}
+  ],
+  "note": "A8.5 — A8.4's walk-time manifest roots become edge-less PROJECT (kind 45) anchors: nav name = manifest label, qname = project:<rel_path> (project:. for the repo root), ORIGIN = {provenance:project_root, ecosystem, manifest, label, path}. ONE RepoId (generate, not generate_many) holds four projects. The zero-edge guarantee is proved by the engine unit test, since grade.py cannot wildcard an edge forbid."
+}

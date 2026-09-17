@@ -10,7 +10,9 @@
 //! 2. [`ServiceKeying`] + [`service_of`] — *what is a service?* One repo per
 //!    service is wrong for a monorepo: `generate_one` on a stack renders as ONE
 //!    service with ZERO links even while cross-edges sit in the graph. When
-//!    there is a single repo the key is the top-level path segment instead.
+//!    there is a single repo, the key is the enclosing manifest project root
+//!    (A8.5's PROJECT anchors). A repo with no roots below its top level falls
+//!    back to the top-level path segment.
 //! 3. [`service_map`] — the rendered answer: services, the links between them
 //!    (via `repo_graph_graph::cross_links`), and the honest residuals
 //!    (`self_links`, `unlocated_nodes`).
@@ -99,6 +101,11 @@ fn file_index(merged: &MergedGraph) -> (HashMap<NodeId, String>, usize) {
     let mut all: HashSet<NodeId> = HashSet::new();
     for g in &merged.graphs {
         for n in &g.nodes {
+            // A PROJECT anchor (A8.5) is a service boundary, not a member of a
+            // service. It is never placed and never counted as unlocated.
+            if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT) {
+                continue;
+            }
             all.insert(n.id);
             if !idx.contains_key(&n.id) {
                 if let Some(f) = node_file(n) {
@@ -150,9 +157,9 @@ pub enum ServiceKeying {
     /// single-repo default: a `generate_one` monorepo otherwise renders as one
     /// service with zero links.
     TopLevelDir,
-    /// Explicit project roots, longest prefix wins. Fully implemented and
-    /// tested, but never selected by [`default_keying`] in v1 — A8's
-    /// manifest-root pre-pass is what will supply the roots.
+    /// Explicit project roots, longest prefix wins. [`default_keying`] selects
+    /// this for a single repo whose graph carries PROJECT anchors below its
+    /// root (A8.5).
     ProjectRoots(Vec<String>),
 }
 
@@ -166,14 +173,41 @@ impl ServiceKeying {
     }
 }
 
-/// `PerRepo` when ≥2 distinct repos are merged, else `TopLevelDir`.
+/// `PerRepo` when ≥2 distinct repos are merged. For a single repo,
+/// `ProjectRoots` when it has PROJECT anchors below its root, else
+/// `TopLevelDir`.
 pub fn default_keying(merged: &MergedGraph) -> ServiceKeying {
     let repos: BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
     if repos.len() >= 2 {
-        ServiceKeying::PerRepo
-    } else {
-        ServiceKeying::TopLevelDir
+        return ServiceKeying::PerRepo;
     }
+    let roots = project_root_paths(merged);
+    if roots.is_empty() {
+        ServiceKeying::TopLevelDir
+    } else {
+        ServiceKeying::ProjectRoots(roots)
+    }
+}
+
+/// The repo-relative dir of every PROJECT anchor (A8.5), sorted. The dirs come
+/// from the qname `project:<rel_path>`, which the nav carries on a fresh build
+/// and on a loaded `.gmap` alike. The repo root (`project:.`) is left out:
+/// every file is under it, so a repo whose only manifest is at the top keeps
+/// `TopLevelDir`.
+fn project_root_paths(merged: &MergedGraph) -> Vec<String> {
+    let mut roots = BTreeSet::new();
+    for g in &merged.graphs {
+        for (id, kind) in &g.nav.kind_by_id {
+            if *kind != node_kind::PROJECT {
+                continue;
+            }
+            let path = g.nav.qname_by_id.get(id).and_then(|q| q.strip_prefix("project:"));
+            if let Some(p) = path.filter(|p| !p.is_empty() && *p != ".") {
+                roots.insert(p.to_string());
+            }
+        }
+    }
+    roots.into_iter().collect()
 }
 
 /// The service id a `file` in `repo` belongs to under `keying`.
@@ -605,6 +639,37 @@ mod tests {
         // No declared root matches → TopLevelDir fallback, still placed.
         assert_eq!(service_of("tools/z.py", 0, &k, &l), "tools");
         assert_eq!(k.name(), "project_roots");
+    }
+
+    /// A8.5: only PROJECT anchors BELOW the repo root switch a single repo
+    /// to `ProjectRoots`. A second repo still wins with `PerRepo`.
+    #[test]
+    fn default_keying_reads_project_anchors() {
+        use repo_graph_code_domain::project_roots::ProjectRoot;
+
+        let root_only = [ProjectRoot::new(String::new(), "go", "go.mod", Some("m".into()))];
+        let nested = [
+            ProjectRoot::new(String::new(), "npm", "package.json", None),
+            ProjectRoot::new("services/web".into(), "npm", "package.json", None),
+            ProjectRoot::new("services/api".into(), "go", "go.mod", None),
+        ];
+        let graph = |roots: &[ProjectRoot], repo: u64| {
+            crate::walk::build_project_graph(roots, RepoId(repo))
+        };
+
+        let m = MergedGraph::new(vec![graph(&root_only, 1)]);
+        assert_eq!(default_keying(&m), ServiceKeying::TopLevelDir);
+
+        let m = MergedGraph::new(vec![graph(&nested, 1)]);
+        assert_eq!(
+            default_keying(&m),
+            ServiceKeying::ProjectRoots(vec!["services/api".into(), "services/web".into()])
+        );
+        let (idx, unlocated) = file_index(&m);
+        assert_eq!((idx.len(), unlocated), (0, 0), "anchors are neither placed nor unlocated");
+
+        let m = MergedGraph::new(vec![graph(&nested, 1), graph(&root_only, 2)]);
+        assert_eq!(default_keying(&m), ServiceKeying::PerRepo);
     }
 
     #[test]

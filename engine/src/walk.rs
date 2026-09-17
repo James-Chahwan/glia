@@ -222,6 +222,64 @@ pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> repo
     }
 }
 
+/// The qname of a detected project root: `project:<rel_path>`, with `.` for the
+/// repo root. An empty tail would be ambiguous. A walked relative path never
+/// contains `::`, so the locked separator never appears inside the qname. (A8.5)
+pub(crate) fn project_qname(rel_path: &str) -> String {
+    format!("project:{}", if rel_path.is_empty() { "." } else { rel_path })
+}
+
+/// Build one edge-less `PROJECT` node per detected [`ProjectRoot`] (A8.5). It
+/// follows the same pattern as [`build_region_graph`]. The nav NAME is the
+/// manifest label (`@shop/web`), which is what `--scope <label>` and service
+/// labelling look up. The qname is derived from the path, so it stays stable
+/// when a label changes. The single `ORIGIN` cell is
+/// `{provenance:"project_root", ecosystem, manifest, label, path}`. Because the
+/// nodes have ZERO edges, blast radius, trace and liveness cannot fan out
+/// through them.
+pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> repo_graph_graph::RepoGraph {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::{Cell, CellPayload};
+
+    let mut nodes = Vec::with_capacity(roots.len());
+    let mut nav = CodeNav::default();
+    for r in roots {
+        let qname = project_qname(&r.rel_path);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PROJECT, &qname);
+        // `json!` rather than a format string: a label is manifest text, and a
+        // quote in it must not produce malformed JSON.
+        let origin = serde_json::json!({
+            "provenance": "project_root",
+            "ecosystem": r.ecosystem,
+            "manifest": r.manifest,
+            "label": r.label,
+            "path": r.rel_path,
+        })
+        .to_string();
+        nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(origin),
+            }],
+        });
+        nav.record(id, &r.label, &qname, node_kind::PROJECT, None);
+    }
+    eprintln!("[roots] emitted {} PROJECT nodes", nodes.len());
+    repo_graph_graph::RepoGraph {
+        repo,
+        nodes,
+        edges: Vec::new(),
+        nav,
+        symbols: Default::default(),
+        unresolved_calls: Vec::new(),
+        unresolved_refs: Vec::new(),
+        properties: Default::default(),
+    }
+}
+
 fn is_bypass_path(path: &str) -> bool {
     let ext = std::path::Path::new(path)
         .extension()
@@ -476,6 +534,133 @@ mod walk_tests {
         );
         assert!(regions.iter().any(|r| r.rel_path == "node_modules"));
         assert_eq!(project_roots::marker(&roots), "3 project roots (go=1 npm=2)");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A8.5: each detected root is ONE PROJECT node, labelled by its manifest
+    /// and keyed by its path. No edge touches it, so blast radius never
+    /// returns it, and a function that shares its label still wins name
+    /// resolution. `generate_one` and `generate_many` put the project graph at
+    /// the same shard index.
+    #[test]
+    fn project_roots_become_edgeless_project_nodes() {
+        use std::collections::HashSet;
+
+        use crate::answers::blast_radius_by_qname;
+        use crate::build::{generate_many, generate_one};
+
+        let root = walk_tmp("projects");
+        for d in ["apps/web", "services/api", "libs/core/src", "node_modules/left-pad"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let files = [
+            ("package.json", r#"{"name":"shop-monorepo","private":true}"#),
+            ("README.md", "# Shop\n\nThe `shop-core` crate and the `apisvc` module.\n"),
+            ("apps/web/package.json", r#"{"name":"@shop/web"}"#),
+            ("apps/web/index.ts", "export function webEntry(): number { return 1; }\n"),
+            // The Go module label `apisvc` is also the name of a function.
+            ("services/api/go.mod", "module apisvc\n\ngo 1.22\n"),
+            ("services/api/main.go", "package main\n\nfunc main() { apisvc() }\n\nfunc apisvc() {}\n"),
+            ("libs/core/Cargo.toml", "[package]\nname = \"shop-core\"\n"),
+            ("libs/core/src/lib.rs", "pub fn core_fn() {}\n"),
+            ("node_modules/left-pad/package.json", r#"{"name":"left-pad"}"#),
+        ];
+        for (rel, body) in files {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let path = root.to_str().unwrap().to_string();
+        let r = generate_one(&path).unwrap();
+        let m = &r.merged;
+
+        let mut projects: Vec<(String, String, NodeId, String)> = m
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
+                    .map(move |n| {
+                        let origin = match &n.cells[..] {
+                            [c] if c.kind == repo_graph_code_domain::cell_type::ORIGIN => {
+                                match &c.payload {
+                                    repo_graph_core::CellPayload::Json(j) => j.clone(),
+                                    other => panic!("ORIGIN must be JSON, got {other:?}"),
+                                }
+                            }
+                            other => panic!("exactly one ORIGIN cell, got {other:?}"),
+                        };
+                        (g.nav.qname_by_id[&n.id].clone(), g.nav.name_by_id[&n.id].clone(), n.id, origin)
+                    })
+            })
+            .collect();
+        projects.sort_by(|a, b| a.0.cmp(&b.0));
+        let got: Vec<(&str, &str)> =
+            projects.iter().map(|(q, n, ..)| (q.as_str(), n.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("project:.", "shop-monorepo"),
+                ("project:apps/web", "@shop/web"),
+                ("project:libs/core", "shop-core"),
+                ("project:services/api", "apisvc"),
+            ],
+            "one PROJECT per root; the vendored node_modules manifest is not one"
+        );
+        assert!(projects.iter().all(|(q, ..)| !q.contains("::")), "{got:?}");
+        assert_eq!(project_qname(""), "project:.");
+
+        let origin: serde_json::Value = serde_json::from_str(&projects[0].3).unwrap();
+        assert_eq!(
+            origin,
+            serde_json::json!({
+                "provenance": "project_root",
+                "ecosystem": "npm",
+                "manifest": "package.json",
+                "label": "shop-monorepo",
+                "path": "",
+            })
+        );
+
+        // The literal substrings that walk-project-roots/key.json's
+        // expect_cells grade.
+        let origin_of = |q: &str| projects.iter().find(|p| p.0 == q).map(|p| p.3.as_str()).unwrap();
+        assert!(origin_of("project:.").contains(r#""manifest":"package.json""#));
+        assert!(origin_of("project:libs/core").contains(r#""provenance":"project_root""#));
+        assert!(origin_of("project:services/api").contains(r#""ecosystem":"go""#));
+
+        // No edge touches a PROJECT node, including the doc-linker's DOCUMENTS
+        // edges from a README that names two of the labels.
+        let ids: HashSet<NodeId> = projects.iter().map(|p| p.2).collect();
+        let touching: Vec<_> = m
+            .all_edges()
+            .filter(|e| ids.contains(&e.from) || ids.contains(&e.to))
+            .collect();
+        assert!(touching.is_empty(), "{touching:?}");
+
+        // Blast radius from a nearby function never includes a PROJECT node.
+        // The function `apisvc` shares a label with a project but has a CALLS
+        // edge, and PROJECT has degree 0, so name resolution picks the
+        // function.
+        let func = m.resolve_name("apisvc").unwrap();
+        assert!(!ids.contains(&func), "the degree-0 PROJECT must lose pick_primary");
+        for seed in ["apisvc", "main", "core_fn", "webEntry"] {
+            let hits = blast_radius_by_qname(m, seed, "both", 4, None, false, None).unwrap();
+            assert!(hits.iter().all(|h| h.kind != "PROJECT"), "{seed}: {:?}",
+                hits.iter().map(|h| &h.qname).collect::<Vec<_>>());
+        }
+        let apisvc = blast_radius_by_qname(m, "apisvc", "both", 4, None, false, None).unwrap();
+        assert!(!apisvc.is_empty(), "the control seed has a real neighbour (main)");
+
+        // Same shard slot from both entry points (regions, projects, docs).
+        let slot = |m: &repo_graph_graph::MergedGraph| {
+            m.graphs.iter().position(|g| {
+                g.nodes.first().is_some_and(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
+            })
+        };
+        let many = generate_many(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(slot(m), slot(&many.merged));
+        assert!(slot(m).is_some());
+        assert_eq!(m.graphs.len(), many.merged.graphs.len());
         let _ = std::fs::remove_dir_all(&root);
     }
 

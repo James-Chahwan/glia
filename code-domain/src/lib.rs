@@ -151,7 +151,7 @@ pub mod node_kind {
     // The constants below are RESERVATIONS. The id and its `ALL` row exist so
     // that `name()` / pyo3 `kind_names()` decode correctly the moment the
     // first emitter lands; nothing emits them yet. Owning packet per id:
-    //   45 PROJECT        — A8.4
+    //   45 PROJECT        — A8.4           (emitted since A8.5)
     //   46 MESSAGE_TYPE   — A10.5 / A12.1  (emitted since A10.5)
     //   47 GRPC_SERVER    — A5.3
     //   48 RPC_PROCEDURE  — A10.9
@@ -162,9 +162,12 @@ pub mod node_kind {
     /// a Gradle subproject, a Cargo workspace member. The anchor a repo's
     /// modules hang off when one repo holds several independent projects.
     ///
-    /// A8.4 DETECTS the roots during the walk ([`crate::project_roots`]); A8.5
-    /// emits them. The planned shape: qname `project:<rel_path>`, ecosystem +
-    /// manifest + label in the ORIGIN cell, an edge-less anchor like REGION.
+    /// A8.4 DETECTS the roots during the walk ([`crate::project_roots`]), and
+    /// since A8.5 `engine::walk::build_project_graph` emits one node per root.
+    /// Each node is an edge-less anchor like REGION. Its qname is
+    /// `project:<rel_path>`, or `project:.` for the repo root. Its nav name is
+    /// the manifest label. Its ORIGIN cell carries the `project_root` payload
+    /// (see [`crate::cell_type::ORIGIN`]).
     pub const PROJECT: NodeKindId = NodeKindId(45);
 
     /// (A10.5 / A12.1) — a declared message / payload schema type
@@ -446,6 +449,9 @@ pub mod cell_type {
     /// The last three are collapsed REGION anchors for a tree that belongs to
     /// ANOTHER repository (a `.git` dir, a submodule's or a linked worktree's
     /// `.git` file) — see `walk_gating::Collapse`. (A8.1)
+    /// A `PROJECT` anchor (A8.5) carries
+    /// `{"provenance":"project_root","ecosystem":"npm","manifest":"apps/web/package.json","label":"@shop/web","path":"apps/web"}`.
+    /// Its `path` is repo-relative and is `""` for the repo root.
     /// Lets consumers (engram, neuropil) filter by *coordinate* rather than by
     /// string-matching keys, and preserves the spatial map of a repo without
     /// emitting a node per file inside a collapsed region. (glia-v2 G10/G14)

@@ -4,19 +4,21 @@
 //! credibly, so these parse real sources from the workspace-level
 //! `tests/fixtures/` (never `bench/`, which is outside the cargo workspace):
 //!
-//! - `arch_monorepo/{web,api}` — TS client + Go chi server as TOP-LEVEL dirs.
-//! - `arch_nested/services/{web,api}` — the same bytes one level deeper. This is
-//!   the A8 hand-off lock: top-level-dir keying collapses it to ONE service
-//!   today, `ServiceKeying::ProjectRoots` already splits it. The manifests
-//!   (`package.json`, `go.mod`) are what A8.4's walk-time detection will find.
-//! - `arch_adjacency/{web,api}` — a Flask server, whose ROUTE nodes carry a
-//!   bare-text ROUTE_METHOD cell and can only be placed via HANDLED_BY.
+//! - `arch_monorepo/{web,api}` — TS client + Go chi server as TOP-LEVEL dirs,
+//!   each with a manifest, so they are project roots too.
+//! - `arch_nested/services/{web,api}` — the same bytes one level deeper. This
+//!   was the A8 hand-off lock. Top-level-dir keying collapses it to ONE
+//!   service. Since A8.5, `default_keying` reads the PROJECT anchors that
+//!   A8.4's walk found (`package.json`, `go.mod`) and splits it.
+//! - `arch_adjacency/{web,api}` — a Flask server with no manifests, whose ROUTE
+//!   nodes carry a bare-text ROUTE_METHOD cell and can only be placed via
+//!   HANDLED_BY.
 
 use std::path::PathBuf;
 
 use repo_graph_engine::{
-    GenerateResult, ServiceKeying, ServiceMap, generate_many, generate_one, service_map,
-    service_map_with,
+    GenerateResult, ServiceKeying, ServiceMap, default_keying, generate_many, generate_one,
+    service_map, service_map_with,
 };
 
 fn fixture(name: &str) -> String {
@@ -61,12 +63,15 @@ fn http_channels(map: &ServiceMap, from: &str, to: &str) -> Vec<String> {
 
 const USERS: [&str; 2] = ["GET /users", "POST /users"];
 
+/// Retargeted by A8.5: `web/` and `api/` each carry a manifest, so the keying
+/// is now `project_roots`. The ids are unchanged because each root is also a
+/// top-level dir.
 #[test]
-fn monorepo_keys_on_top_level_dir() {
+fn monorepo_keys_on_project_roots() {
     let r = build("arch_monorepo");
     let map = service_map(&r.merged, &r.repo_labels);
-    assert_eq!(map.keying, "top_level_dir", "one repo → key on the directory");
-    assert_eq!(ids(&map), ["api", "web"], "services are sorted top-level dirs");
+    assert_eq!(map.keying, "project_roots", "one repo with manifests → key on its roots");
+    assert_eq!(ids(&map), ["api", "web"], "services are the sorted project roots");
     assert_eq!(http_channels(&map, "web", "api"), USERS);
     assert_eq!(map.self_links, 0);
     assert_eq!(service(&map, "api").languages, ["go"]);
@@ -99,6 +104,7 @@ fn route_and_endpoint_are_located_via_cell_tier() {
 fn adjacency_tier_places_a_route_with_a_bare_method_cell() {
     let r = build("arch_adjacency");
     let map = service_map(&r.merged, &r.repo_labels);
+    assert_eq!(map.keying, "top_level_dir", "no manifests → key on the directory");
     assert_eq!(map.unlocated_nodes, 0, "every node placed");
     assert_eq!(ids(&map), ["api", "web"]);
     assert_eq!(service(&map, "api").routes, 2, "Flask: one ROUTE per method");
@@ -106,22 +112,31 @@ fn adjacency_tier_places_a_route_with_a_bare_method_cell() {
     assert_eq!(http_channels(&map, "web", "api"), USERS);
 }
 
-/// KNOWN v1 LIMITATION, pinned on purpose: `TopLevelDir` keys on the FIRST
-/// path segment, so `services/web` + `services/api` collapse into one service
-/// `services` and the HTTP link is dropped as a self-link. (The same rule lists
-/// `.ai`, `docs`, `scripts` and `(root)` as services on a real corpus.)
+/// Retargeted by A8.5. The default keying now reads the PROJECT anchors that
+/// A8.4's walk detected, so the nested monorepo splits with no explicit roots.
 ///
-/// A8.4 (project_roots pre-pass) is the fix: once `default_keying` returns
-/// `ProjectRoots` from the detected manifests, THIS test must be retargeted —
-/// the next test already asserts the destination.
+/// The v1 limitation stays pinned under an explicit `TopLevelDir`, which keys
+/// on the FIRST path segment. `services/web` and `services/api` collapse into
+/// one service `services`, and the HTTP link is dropped as a self-link. A repo
+/// with no manifests below its root still gets that keying.
 #[test]
-fn nested_monorepo_collapses_under_top_level_dir_until_a8_project_roots() {
+fn nested_monorepo_splits_on_detected_project_roots() {
     let r = build("arch_nested");
+    assert_eq!(
+        default_keying(&r.merged),
+        ServiceKeying::ProjectRoots(vec!["services/api".into(), "services/web".into()])
+    );
     let map = service_map(&r.merged, &r.repo_labels);
-    assert_eq!(map.keying, "top_level_dir");
-    assert_eq!(ids(&map), ["services"]);
-    assert!(map.links.is_empty(), "both ends in one service: {:?}", map.links);
-    assert_eq!(map.self_links, 2, "GET + POST /users both dropped as self-links");
+    assert_eq!(map.keying, "project_roots");
+    assert_eq!(ids(&map), ["services/api", "services/web"]);
+    assert_eq!(http_channels(&map, "services/web", "services/api"), USERS);
+    assert_eq!((map.self_links, map.unlocated_nodes), (0, 0));
+
+    let flat = service_map_with(&r.merged, &r.repo_labels, &ServiceKeying::TopLevelDir);
+    assert_eq!(flat.keying, "top_level_dir");
+    assert_eq!(ids(&flat), ["services"]);
+    assert!(flat.links.is_empty(), "both ends in one service: {:?}", flat.links);
+    assert_eq!(flat.self_links, 2, "GET + POST /users both dropped as self-links");
 }
 
 /// The A8 hand-off lock: same graph, explicit project roots → two services and
@@ -163,5 +178,5 @@ fn service_map_is_deterministic() {
     let first = render(&a);
     assert_eq!(first, render(&a), "same graph, two renders");
     assert_eq!(first, render(&b), "two builds of the same tree");
-    assert!(first.contains("\"keying\":\"top_level_dir\""), "{first}");
+    assert!(first.contains("\"keying\":\"project_roots\""), "{first}");
 }
