@@ -482,9 +482,24 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
 /// its own RepoId, so cross-graph resolvers (HttpStack, DbResolver, etc.) fire
 /// across the boundary. Used for substrate eval where one wants to validate
 /// that two unrelated services pair correctly under the resolver layer.
+///
+/// `incremental=True` (WP-D, A1.4) gives each path its own per-file parse cache
+/// at `<repo>/.ai/repo-graph/parse_cache.bin`, so unchanged files skip
+/// tree-sitter; the result is identical to a clean build. The default is
+/// False here — unlike `generate` — BECAUSE the substrate-gap eval grades
+/// every multi-dir fixture through this entry point and must stay hermetic
+/// (`GLIA_NO_PERSIST=1` does not gate the parse-cache sidecar). False never
+/// touches an existing sidecar: this function has never written one by
+/// default, so there is nothing to escape from.
 #[pyfunction]
-fn generate_many(repo_paths: Vec<String>) -> PyResult<PyGraph> {
-    let result = engine_generate_many(&repo_paths).map_err(PyValueError::new_err)?;
+#[pyo3(signature = (repo_paths, incremental=false))]
+fn generate_many(repo_paths: Vec<String>, incremental: bool) -> PyResult<PyGraph> {
+    let result = if incremental {
+        repo_graph_engine::generate_many_incremental(&repo_paths)
+    } else {
+        engine_generate_many(&repo_paths)
+    }
+    .map_err(PyValueError::new_err)?;
     if !result.parse_errors.is_empty() {
         eprintln!(
             "[parse] {} file(s) failed to parse (see PyGraph.parse_errors)",

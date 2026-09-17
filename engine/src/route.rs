@@ -22,11 +22,13 @@ use crate::walk::{is_dockerfile_path, is_dotenv_path};
 /// language tag and the per-file errors. `.proto` files are no longer a
 /// separate bucket — they stash under the `"proto"` lang tag like any other
 /// synthetic parse (A5.1), so they get a MODULE node and a file position.
+/// `repo_label` only prefixes the `[incremental]` marker (A1.4).
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
     go_module_prefix: &str,
     mut cache: Option<&mut ParseCache>,
+    repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut parse_errors = Vec::new();
@@ -283,9 +285,10 @@ pub(crate) fn parse_repo_files(
         c.stats.reparsed = reparsed;
         // `stamp=` makes the always-on line grep-proof of WHICH code produced
         // these parses — a rebuilt wheel that quietly kept the old .so shows the
-        // old stamp here (dev-notes memory: feedback_maturin_stale_wheel).
+        // old stamp here (dev-notes memory: feedback_maturin_stale_wheel). The
+        // repo prefix gives a multi-repo build one attributable line per repo.
         eprintln!(
-            "[incremental] reused {reused}, reparsed {reparsed}, evicted {} (parse cache, stamp={})",
+            "[incremental] {repo_label}: reused {reused}, reparsed {reparsed}, evicted {} (parse cache, stamp={})",
             c.stats.evicted,
             cache::CACHE_VERSION
         );

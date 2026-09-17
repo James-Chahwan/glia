@@ -56,7 +56,7 @@ pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, Strin
     let mut cache = ParseCache::load(repo_path);
     let result = generate_one_inner(repo_path, Some(&mut cache))?;
     if let Err(e) = cache.save(repo_path) {
-        eprintln!("[incremental] warning: failed to save parse cache: {e}");
+        eprintln!("[incremental] {repo_path}: warning: failed to save parse cache: {e}");
     }
     Ok(result)
 }
@@ -79,7 +79,8 @@ fn generate_one_inner(
     if let Some(c) = cache.as_deref_mut() {
         c.validate_context(&canonical, &go_prefix);
     }
-    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, cache);
+    let (mut graphs, mut parse_errors) =
+        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path);
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
     }
@@ -106,8 +107,24 @@ fn generate_one_inner(
 
 /// Generate a `MergedGraph` from N repo paths. Each path becomes its own
 /// RepoId so cross-graph resolvers fire across boundaries (the canonical
-/// substrate-eval entry).
+/// substrate-eval entry). Always a cold build that writes nothing into the
+/// repos: `bench/substrate-gap` grades every multi-dir fixture through here.
 pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
+    generate_many_inner(repo_paths, false)
+}
+
+/// Disk-backed incremental multi-repo build: each path gets its OWN
+/// `<repo>/.ai/repo-graph/parse_cache.bin`, loaded before and saved after that
+/// repo's parse (audit 2026-06-10 #14). Byte-identical to [`generate_many`].
+/// Opt-in, never the default: the substrate-gap eval grades through
+/// `generate_many` and must stay hermetic. Cache save failures are logged, not
+/// fatal. Backs pyo3 `generate_many(incremental=True)` and
+/// `glia merge --incremental`.
+pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult, String> {
+    generate_many_inner(repo_paths, true)
+}
+
+fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<GenerateResult, String> {
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
@@ -117,11 +134,25 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
             all_errors.push(format!("not a directory: {path}"));
             continue;
         }
-        let repo = RepoId::from_canonical(&format!("file://{path}"));
+        // One string feeds both the RepoId and the cache's context check: every
+        // cached FileParse has this RepoId baked into its NodeIds, so a sidecar
+        // written under another spelling of the path must be discarded (#2).
+        let canonical = format!("file://{path}");
+        let repo = RepoId::from_canonical(&canonical);
         label_inputs.push((repo.0, path.clone()));
         let (files, regions, md) = walk_source_files(&root);
         let go_prefix = read_go_module_prefix(&root);
-        let (graphs, parse_errors) = build_graphs_for_repo(&files, repo, &go_prefix, None);
+        let mut cache = incremental.then(|| ParseCache::load(path));
+        if let Some(c) = cache.as_mut() {
+            c.validate_context(&canonical, &go_prefix);
+        }
+        let (graphs, parse_errors) =
+            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path);
+        if let Some(c) = cache.as_ref()
+            && let Err(e) = c.save(path)
+        {
+            eprintln!("[incremental] {path}: warning: failed to save parse cache: {e}");
+        }
         all_graphs.extend(graphs);
         if !regions.is_empty() {
             all_graphs.push(build_region_graph(&regions, repo));
@@ -173,11 +204,15 @@ fn read_go_module_prefix(root: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// `repo_label` is the repo path as the caller was given it. It only prefixes
+/// the `[incremental]` marker, so a multi-repo build prints one attributable
+/// line per repo; it never reaches the graph.
 fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
     go_module_prefix: &str,
     cache: Option<&mut ParseCache>,
+    repo_label: &str,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     // Suppress the default panic-print-to-stderr while we run per-file parsers
     // — we catch panics below and report them as parse_errors. The default
@@ -187,7 +222,7 @@ fn build_graphs_for_repo(
     let _hook_guard = SuppressPanicHook::install();
 
     let (parses_by_lang, mut parse_errors) =
-        parse_repo_files(files, repo, go_module_prefix, cache);
+        parse_repo_files(files, repo, go_module_prefix, cache, repo_label);
 
     let mut graphs = Vec::new();
     // Deterministic per-language build order: HashMap iteration is seeded per

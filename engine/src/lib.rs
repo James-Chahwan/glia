@@ -38,8 +38,8 @@ pub use answers::{
     entrypoint_reachable, governing_docs, locate_node, node_in_scope, resolve_signal_located,
 };
 pub use build::{
-    GenerateResult, generate_many, generate_one, generate_one_incremental,
-    generate_one_with_cache,
+    GenerateResult, generate_many, generate_many_incremental, generate_one,
+    generate_one_incremental, generate_one_with_cache,
 };
 pub use coverage::{CoverageCaveat, CoverageNote, coverage_report};
 pub use extract::{parse_one, parse_one_with};

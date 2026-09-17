@@ -17,7 +17,10 @@ use std::path::Path;
 use clap::{Parser, Subcommand, ValueEnum};
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_many, generate_one, generate_one_incremental};
+use repo_graph_engine::{
+    GenerateResult, generate_many, generate_many_incremental, generate_one,
+    generate_one_incremental,
+};
 use repo_graph_graph::MergedGraph;
 
 #[derive(Parser, Debug)]
@@ -199,6 +202,11 @@ enum Cmd {
         /// Write a JSON dump to this path. Pass `-` for stdout.
         #[arg(long)]
         out: Option<String>,
+        /// Reuse the per-repo incremental parse caches (WP-D): each repo gets
+        /// its own `<repo>/.ai/repo-graph/parse_cache.bin`. Off by default for
+        /// merges, so a merge writes nothing into the repos it reads.
+        #[arg(long)]
+        incremental: bool,
     },
     /// Walk a repo and write one `.gmap` per per-language sub-graph to
     /// `<repo>/.glia/` (or a custom dir). Idempotent + atomic.
@@ -360,7 +368,9 @@ fn main() {
         Cmd::Resolve { repo, signal, with, kind, top_k, scope, json } => {
             cmd_resolve(&repo, &signal, &with, &kind, top_k, scope.as_deref(), json)
         }
-        Cmd::Merge { repos, out } => cmd_merge(&repos, out.as_deref()),
+        Cmd::Merge { repos, out, incremental } => {
+            cmd_merge(&repos, out.as_deref(), incremental)
+        }
         Cmd::Build { repo, out, no_incremental } => {
             cmd_build(&repo, out.as_deref(), !no_incremental)
         }
@@ -1033,12 +1043,17 @@ fn cmd_resolve(
     0
 }
 
-fn cmd_merge(repos: &[String], out: Option<&str>) -> i32 {
+fn cmd_merge(repos: &[String], out: Option<&str>, incremental: bool) -> i32 {
     if repos.is_empty() {
         eprintln!("error: at least one repo path required");
         return 1;
     }
-    let result = match generate_many(repos) {
+    let built = if incremental {
+        generate_many_incremental(repos)
+    } else {
+        generate_many(repos)
+    };
+    let result = match built {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
