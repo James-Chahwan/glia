@@ -1,0 +1,17 @@
+{
+  "framework": "xcut-graphql-precision",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:useQuery", "note": "un-named hook; op name falls back to the needle text"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:client.query", "note": "un-named client call; op name falls back to the needle text"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:Query", "note": "decorator-noun node; asserted so the forbids below cannot pass vacuously"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:getUsers", "note": "the one real field; present because @Query() sits on its own line above the method"}
+  ],
+  "expect_edges": [],
+  "forbid": [
+    {"from": "graphql_op:useQuery", "to": "graphql_resolver:Query", "category": "GRAPHQL_CALLS", "note": "substring fan-out ('usequery' contains 'query'): present at baseline, gone after A5.5"},
+    {"from": "graphql_op:client.query", "to": "graphql_resolver:Query", "category": "GRAPHQL_CALLS", "note": "substring fan-out ('client.query' contains 'query'): present at baseline, gone after A5.5"}
+  ],
+  "note": "A5.5 precision twin of xcut-graphql-graphql_calls. Operations whose name is only a fallback needle, and resolvers named after a root type, name no field, so neither side may pair. No cells binding: with no routing edge the typescript/graphql cell would cap at partial."
+}

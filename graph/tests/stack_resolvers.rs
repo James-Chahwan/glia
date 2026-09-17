@@ -427,25 +427,86 @@ fn queue_resolver_ignores_catchall() {
 // GraphQLStackResolver
 // ============================================================================
 
-#[test]
-fn graphql_resolver_links_operation_to_resolver() {
+/// Resolve one GraphQL operation against a set of resolver names in another
+/// repo; returns the GRAPHQL_CALLS edges plus the ids to check them against.
+fn graphql_pairs(op: &str, resolvers: &[&str]) -> (Vec<repo_graph_core::Edge>, NodeId, Vec<NodeId>) {
     let mut nav_a = CodeNav::default();
-    let (resolver_node, resolver_id) = make_node(repo_a(), node_kind::GRAPHQL_RESOLVER, "graphql_resolver:Mutation", Confidence::Strong);
-    record(&mut nav_a, resolver_id, "Mutation", "graphql_resolver:Mutation", node_kind::GRAPHQL_RESOLVER);
-    let ga = make_graph(repo_a(), vec![resolver_node], nav_a);
+    let mut resolver_nodes = Vec::new();
+    let mut resolver_ids = Vec::new();
+    for name in resolvers {
+        let qname = format!("graphql_resolver:{name}");
+        let (node, id) = make_node(repo_a(), node_kind::GRAPHQL_RESOLVER, &qname, Confidence::Strong);
+        record(&mut nav_a, id, name, &qname, node_kind::GRAPHQL_RESOLVER);
+        resolver_nodes.push(node);
+        resolver_ids.push(id);
+    }
+    let ga = make_graph(repo_a(), resolver_nodes, nav_a);
 
     let mut nav_b = CodeNav::default();
-    let (op_node, op_id) = make_node(repo_b(), node_kind::GRAPHQL_OPERATION, "graphql_op:CreateUserMutation", Confidence::Medium);
-    record(&mut nav_b, op_id, "CreateUserMutation", "graphql_op:CreateUserMutation", node_kind::GRAPHQL_OPERATION);
+    let op_qname = format!("graphql_op:{op}");
+    let (op_node, op_id) = make_node(repo_b(), node_kind::GRAPHQL_OPERATION, &op_qname, Confidence::Medium);
+    record(&mut nav_b, op_id, op, &op_qname, node_kind::GRAPHQL_OPERATION);
     let gb = make_graph(repo_b(), vec![op_node], nav_b);
 
     let mut merged = MergedGraph::new(vec![ga, gb]);
     GraphQLStackResolver.resolve(&mut merged);
+    let edges = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::GRAPHQL_CALLS)
+        .cloned()
+        .collect();
+    (edges, op_id, resolver_ids)
+}
 
-    let gql_edges: Vec<_> = merged.cross_edges.iter().filter(|e| e.category == edge_category::GRAPHQL_CALLS).collect();
-    assert_eq!(gql_edges.len(), 1);
-    assert_eq!(gql_edges[0].from, op_id);
-    assert_eq!(gql_edges[0].to, resolver_id);
+#[test]
+fn graphql_resolver_links_operation_to_resolver() {
+    // A5.5: a NestJS `@Mutation() async createUser()` yields the field-level
+    // resolver `createUser` beside the decorator noun `Mutation`. The client
+    // op `CreateUserMutation` pairs with the field, and only the field.
+    let (edges, op_id, ids) = graphql_pairs("CreateUserMutation", &["createUser", "Mutation"]);
+    assert_eq!(edges.len(), 1, "got {edges:?}");
+    assert_eq!(edges[0].from, op_id);
+    assert_eq!(edges[0].to, ids[0]);
+    assert_eq!(edges[0].confidence, Confidence::Medium);
+}
+
+#[test]
+fn graphql_resolver_ignores_type_level_nouns() {
+    // `usequery` contains `query`: under the old substring rule every un-named
+    // hook paired with the root `Query` node. Neither side names a field now.
+    let (edges, _, _) = graphql_pairs("useQuery", &["Query", "Resolver", "getUsers"]);
+    assert!(edges.is_empty(), "got {edges:?}");
+    // …and a named operation that merely CONTAINS a noun does not reach it.
+    let (edges, _, _) = graphql_pairs("GetUsersQuery", &["Query", "Mutation", "Resolver"]);
+    assert!(edges.is_empty(), "got {edges:?}");
+    // The non-hook fallback needles are unkeyable too.
+    for op in ["client.query", "client.mutate", "request", "useLazyQuery"] {
+        let (edges, _, _) = graphql_pairs(op, &["Query", "Mutation", "lazy", "request"]);
+        assert!(edges.is_empty(), "{op} got {edges:?}");
+    }
+}
+
+#[test]
+fn graphql_resolver_does_not_strip_use_from_plain_field() {
+    // `users` starts with `use` but is not a hook: the remainder `rs` is
+    // lowercase, so the name is kept whole and still pairs exactly.
+    let (edges, op_id, ids) = graphql_pairs("users", &["users"]);
+    assert_eq!(edges.len(), 1, "got {edges:?}");
+    assert_eq!((edges[0].from, edges[0].to), (op_id, ids[0]));
+    // Substring containment alone no longer pairs, in either direction.
+    let (edges, _, _) = graphql_pairs("users", &["user", "allUsers"]);
+    assert!(edges.is_empty(), "got {edges:?}");
+}
+
+#[test]
+fn graphql_resolver_pairs_generated_hook_and_short_root_field() {
+    // graphql-codegen hooks carry the operation name; `me` is a two-letter
+    // root field the key floor must keep.
+    let (edges, _, ids) = graphql_pairs("useGetUserQuery", &["getUser"]);
+    assert_eq!(edges.iter().map(|e| e.to).collect::<Vec<_>>(), vec![ids[0]]);
+    let (edges, _, ids) = graphql_pairs("MeQuery", &["me"]);
+    assert_eq!(edges.iter().map(|e| e.to).collect::<Vec<_>>(), vec![ids[0]]);
 }
 
 // ============================================================================
