@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 126,
+  "fixtures": 127,
   "recall": {
     "angular-http-calls": {
       "framework": "angular",
@@ -206,6 +206,13 @@
       "language": "go",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "http-absolute-url-client": {
+      "framework": "http-absolute-url-client",
+      "language": "typescript+dart+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "http-any-method": {

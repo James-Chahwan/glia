@@ -131,6 +131,10 @@ def main():
     if ge:
         gates.append(f"grader errors: {gel}")
 
+    sh("python3 run.py --no-log --emit >/dev/null 2>&1", cwd=SG)
+    _, lchk = sh("python3 run.py --no-log --check >/dev/null 2>&1", cwd=SG)
+    if lchk:
+        gates.append("run.py --check (legacy-latest.json)")
     mo, _ = sh("python3 matrix.py --emit 2>&1", cwd=SG)
     m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown", mo)
     _, chk = sh("python3 matrix.py --check >/dev/null 2>&1", cwd=SG)
@@ -138,7 +142,7 @@ def main():
     tg, _ = sh("python3 test_grade.py 2>&1 | tail -1", cwd=SG)
     full, part, none_, unk = map(int, m.groups()) if m else (0, 0, 0, 0)
     covered = 480 - unk
-    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/480 | check={chk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
+    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/480 | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
     if chk:
         gates.append("matrix --check")
     if " 0 failed" not in tm:
@@ -198,7 +202,7 @@ def main():
     msg = (f"bench+plan: wave {wave} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/480\n\n"
            + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\n")
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)
-    out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md "
+    out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md bench/substrate-gap/legacy-latest.json "
                  "dev-notes/packet-corrections.json dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
