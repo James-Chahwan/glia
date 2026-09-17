@@ -98,6 +98,56 @@
       ],
       "via": "import"
     },
+    "csharp/amqp": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/amqp"
+      ],
+      "forbid": [
+        2,
+        3
+      ],
+      "level": "partial",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "csharp/azure_sb": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/azure_sb"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
     "csharp/calls": {
       "extract": [
         3,
@@ -124,7 +174,7 @@
     },
     "csharp/grpc": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -134,16 +184,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "grpc"
@@ -273,11 +321,36 @@
     },
     "csharp/kafka": {
       "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/xcut-queue-csharp-kafka",
+        "matrix/csharp/kafka"
+      ],
+      "forbid": [
+        4,
+        4
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "queue"
+    },
+    "csharp/redis": {
+      "extract": [
         2,
         2
       ],
       "fixtures": [
-        "fixtures/xcut-queue-csharp-kafka"
+        "matrix/csharp/redis"
       ],
       "forbid": [
         2,
@@ -1042,6 +1115,32 @@
       ],
       "via": "websocket"
     },
+    "java/amqp": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/amqp"
+      ],
+      "forbid": [
+        2,
+        3
+      ],
+      "level": "partial",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
     "java/calls": {
       "extract": [
         2,
@@ -1240,25 +1339,28 @@
     },
     "java/kafka": {
       "extract": [
-        2,
-        2
+        4,
+        4
       ],
       "fixtures": [
-        "fixtures/xcut-queue-java-spring"
+        "fixtures/xcut-queue-java-spring",
+        "matrix/java/kafka"
       ],
       "forbid": [
-        1,
-        1
+        3,
+        4
       ],
-      "level": "full",
+      "level": "partial",
       "literal": [
+        4,
+        4
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
         2,
         2
-      ],
-      "reasons": [],
-      "route": [
-        1,
-        1
       ],
       "via": "queue"
     },
@@ -1285,6 +1387,58 @@
         1
       ],
       "via": null
+    },
+    "java/redis": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/redis"
+      ],
+      "forbid": [
+        2,
+        3
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "java/sqs_sns": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/sqs_sns"
+      ],
+      "forbid": [
+        1,
+        2
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "forbid violated",
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
     },
     "java/subproject": {
       "extract": [
@@ -2593,6 +2747,34 @@
       ],
       "via": "http"
     },
+    "typescript/amqp": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/amqp"
+      ],
+      "forbid": [
+        3,
+        4
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "forbid violated",
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
     "typescript/calls": {
       "extract": [
         2,
@@ -2826,25 +3008,78 @@
     },
     "typescript/kafka": {
       "extract": [
-        4,
-        4
+        6,
+        6
       ],
       "fixtures": [
-        "fixtures/xcut-queue-multi-topic"
+        "fixtures/xcut-queue-multi-topic",
+        "matrix/typescript/kafka"
       ],
       "forbid": [
-        4,
-        4
+        6,
+        7
       ],
-      "level": "full",
+      "level": "partial",
       "literal": [
-        4,
-        4
+        6,
+        6
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
+        3,
+        3
+      ],
+      "via": "queue"
+    },
+    "typescript/mqtt": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/mqtt"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
       ],
       "reasons": [],
       "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "typescript/nats": {
+      "extract": [
         2,
         2
+      ],
+      "fixtures": [
+        "matrix/typescript/nats"
+      ],
+      "forbid": [
+        3,
+        4
+      ],
+      "level": "partial",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
+        1,
+        1
       ],
       "via": "queue"
     },
@@ -2873,6 +3108,30 @@
         0
       ],
       "via": "eventbus"
+    },
+    "typescript/redis": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/redis"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
     },
     "typescript/secrets": {
       "extract": [
@@ -2921,6 +3180,32 @@
         1
       ],
       "via": "contain"
+    },
+    "typescript/taskq": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/taskq"
+      ],
+      "forbid": [
+        2,
+        3
+      ],
+      "level": "partial",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "forbid violated"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
     },
     "typescript/tests": {
       "extract": [
@@ -2984,6 +3269,7 @@
     "fixtures/elixir-xmodule-calls",
     "fixtures/http-dart-nav-precision",
     "fixtures/http-nav-route-precision",
+    "fixtures/http-placeholder-fold",
     "fixtures/k8s-multidoc-cron",
     "fixtures/php-laravel-prefix",
     "fixtures/py-router-prefix",
@@ -2998,6 +3284,9 @@
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-nested-submodule",
     "fixtures/xcut-config-env-value",
+    "fixtures/xcut-graphql-precision",
+    "fixtures/xcut-queue-annot-listener",
+    "fixtures/xcut-queue-nest-processor",
     "fixtures/xcut-queue-same-topic-two-files",
     "fixtures/xcut-queue-tag-unpairable",
     "fixtures/xcut-queue-wildcard",
@@ -3008,13 +3297,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 120,
+    "covered": 131,
     "error": 0,
-    "full": 81,
+    "full": 83,
     "grid": 480,
-    "none": 18,
-    "partial": 21,
-    "unknown": 360
+    "none": 19,
+    "partial": 29,
+    "unknown": 349
   },
   "vocabulary": {
     "digest": "a3672b018b49",

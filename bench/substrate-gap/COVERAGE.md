@@ -70,9 +70,9 @@ LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unkno
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ◐       ●       ◐       ●       ◐       ●       ·       ·       ?       ?       ?       ?       ●       ·       ●       ●       ·       ?       ◐       ·       ●       ●       ?       ●       ●       ?       ?
 go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ·       ?       ●       ?       ●       ?       ●       ?       ?       ?       ·       ◐       ●       ●       ●       ●       ?       ?       ◐       ?       ·
-typescript       ●       ●       ●       ?       ?       ◐       ?       ?       ?       ?       ?       ?       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
-java             ●       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ·
-csharp           ●       ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
+typescript       ●       ●       ◐       ◐       ?       ◐       ?       ◐       ●       ·       ◐       ?       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
+java             ●       ●       ◐       ◐       ◐       ?       ?       ?       ·       ?       ?       ?       ?       ?       ●       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ·
+csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ●       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
 ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ?       ◐       ?       ?
 php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ◐       ?       ◐       ?       ?
 swift            ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
@@ -88,16 +88,16 @@ terraform        ?       ?       ?       ?       ?       ?       ?       ?      
 PER-MECHANISM  across 16 languages:
   http_client  ● 11  ◐ 0   · 0   ? 5   ! 0
   http_server  ● 9   ◐ 0   · 0   ? 7   ! 0
-  kafka        ● 4   ◐ 1   · 0   ? 11  ! 0
-  amqp         ● 0   ◐ 1   · 1   ? 14  ! 0
-  sqs_sns      ● 1   ◐ 0   · 1   ? 14  ! 0
+  kafka        ● 2   ◐ 3   · 0   ? 11  ! 0
+  amqp         ● 0   ◐ 4   · 1   ? 11  ! 0
+  sqs_sns      ● 1   ◐ 1   · 1   ? 13  ! 0
   pubsub       ● 0   ◐ 2   · 0   ? 14  ! 0
-  azure_sb     ● 1   ◐ 0   · 0   ? 15  ! 0
-  nats         ● 1   ◐ 1   · 0   ? 14  ! 0
-  redis        ● 1   ◐ 0   · 1   ? 14  ! 0
-  mqtt         ● 0   ◐ 0   · 2   ? 14  ! 0
-  taskq        ● 1   ◐ 0   · 1   ? 14  ! 0
-  grpc         ● 1   ◐ 0   · 1   ? 14  ! 0
+  azure_sb     ● 2   ◐ 0   · 0   ? 14  ! 0
+  nats         ● 1   ◐ 2   · 0   ? 13  ! 0
+  redis        ● 3   ◐ 0   · 2   ? 11  ! 0
+  mqtt         ● 0   ◐ 0   · 3   ? 13  ! 0
+  taskq        ● 1   ◐ 1   · 1   ? 13  ! 0
+  grpc         ● 2   ◐ 0   · 0   ? 14  ! 0
   graphql      ● 1   ◐ 0   · 0   ? 15  ! 0
   ws           ● 1   ◐ 1   · 0   ? 14  ! 0
   eventbus     ● 3   ◐ 0   · 0   ? 13  ! 0
@@ -120,9 +120,9 @@ PER-MECHANISM  across 16 languages:
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 13  ◐ 4   · 5   ? 8   ! 0
   go           ● 10  ◐ 3   · 6   ? 11  ! 0
-  typescript   ● 10  ◐ 3   · 2   ? 15  ! 0
-  java         ● 9   ◐ 1   · 2   ? 18  ! 0
-  csharp       ● 7   ◐ 1   · 2   ? 20  ! 0
+  typescript   ● 10  ◐ 7   · 3   ? 10  ! 0
+  java         ● 8   ◐ 4   · 3   ? 15  ! 0
+  csharp       ● 10  ◐ 2   · 1   ? 17  ! 0
   ruby         ● 6   ◐ 2   · 1   ? 21  ! 0
   php          ● 3   ◐ 2   · 0   ? 25  ! 0
   swift        ● 2   ◐ 0   · 0   ? 28  ! 0
@@ -136,9 +136,9 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 120/480 cells have a fixture (25.0%) — 81 full, 21 partial, 18 none, 360 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 131/480 cells have a fixture (27.3%) — 83 full, 29 partial, 19 none, 349 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 29
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 33
 
 ## Cells routed via an alternative mechanism
 
@@ -146,9 +146,12 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 
 | cell | level | via | primary |
 |---|---|---|---|
+| `csharp/azure_sb` | ● full | `queue` | `eventbus` |
+| `csharp/redis` | ● full | `queue` | `eventbus` |
 | `python/azure_sb` | ● full | `queue` | `eventbus` |
 | `python/redis` | ● full | `queue` | `eventbus` |
 | `python/sqs_sns` | ● full | `queue` | `eventbus` |
+| `typescript/redis` | ● full | `queue` | `eventbus` |
 
 ## Cell errors
 
