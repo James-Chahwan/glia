@@ -1,0 +1,50 @@
+{
+  "framework": "xcut-queue-wildcard",
+  "language": "go",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "note": "A2.7. Baseline 2026-09-17 = 0.00 (installed wheel at 2cc066d): QueueStackResolver joined on the exact topic string, so the NATS wildcard subscription `orders.*` paired with nothing and the subscriber looked dead. The billing.* subscriber is the precision half: a wildcard must match by segment, never become a catch-all.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders.created",
+      "note": "concrete NATS subject (producer)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders.*",
+      "note": "NATS single-token wildcard subscription (consumer)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:billing.*",
+      "note": "second wildcard subscriber on a different prefix"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders.created",
+      "to": "queue_consumer:orders.*",
+      "category": "QUEUE_FLOWS",
+      "note": "orders.created is one token under orders. -> pairs (Weak: a pattern match is an inference)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "queue_producer:orders.created",
+      "to": "queue_consumer:billing.*",
+      "category": "QUEUE_FLOWS"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders.*",
+      "cell": "CODE",
+      "contains": "\"family\":\"nats\"",
+      "note": "the resolver picks the wildcard dialect from this family cell (A2.8)"
+    }
+  ]
+}

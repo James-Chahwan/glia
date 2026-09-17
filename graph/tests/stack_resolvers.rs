@@ -262,6 +262,167 @@ fn queue_resolver_unresolved_producer_cannot_reach_a_real_consumer() {
     assert_eq!(queue_edges[0].to, real_consumer_id);
 }
 
+// ---- A2.7: broker-family gating + wildcard subscriptions -------------------
+
+/// The A2.8 provenance cell, in the exact shape `queues::finish` writes.
+fn family_cell(family: &str) -> repo_graph_core::Cell {
+    repo_graph_core::Cell {
+        kind: repo_graph_code_domain::cell_type::CODE,
+        payload: repo_graph_core::CellPayload::Json(format!(
+            r#"{{"framework":"X","family":"{family}","sites":[{{"file":"src/a.go","line":3}}]}}"#
+        )),
+    }
+}
+
+/// One queue side: (topic, one family per CODE cell — empty = no cell at all).
+type QueueSide<'a> = (&'a str, &'a [&'a str]);
+
+fn queue_side(repo: RepoId, kind: repo_graph_core::NodeKindId, prefix: &str, sides: &[QueueSide]) -> RepoGraph {
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::new();
+    for (topic, families) in sides {
+        let qname = format!("{prefix}{topic}");
+        let (mut node, id) = make_node(repo, kind, &qname, Confidence::Strong);
+        node.cells = families.iter().map(|f| family_cell(f)).collect();
+        record(&mut nav, id, topic, &qname, kind);
+        nodes.push(node);
+    }
+    make_graph(repo, nodes, nav)
+}
+
+/// Run the resolver over producers (repo b) and consumers (repo a); return the
+/// QUEUE_FLOWS edges as (producer qname, consumer qname, confidence), sorted.
+fn queue_pairs(producers: &[QueueSide], consumers: &[QueueSide]) -> Vec<(String, String, Confidence)> {
+    let ga = queue_side(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:", consumers);
+    let gb = queue_side(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:", producers);
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    QueueStackResolver.resolve(&mut merged);
+    let qname = |id: NodeId| {
+        merged
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+            .unwrap_or_default()
+    };
+    let mut out: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+        .map(|e| (qname(e.from), qname(e.to), e.confidence))
+        .collect();
+    out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    out
+}
+
+#[test]
+fn queue_resolver_requires_matching_family() {
+    // The false cross-service edge: a Kafka topic and a Redis queue that
+    // happen to share the string `jobs` are different queues.
+    let pairs = queue_pairs(&[("jobs", &["kafka"])], &[("jobs", &["redis"])]);
+    assert!(pairs.is_empty(), "families differ, got {pairs:?}");
+}
+
+#[test]
+fn queue_resolver_pairs_when_family_absent() {
+    // Absent must pair — the three tests above build cell-less nodes.
+    let both_absent = queue_pairs(&[("jobs", &[])], &[("jobs", &[])]);
+    assert_eq!(both_absent.len(), 1, "got {both_absent:?}");
+    assert_eq!(both_absent[0].2, Confidence::Strong, "exact pairs keep weakest(), not Weak");
+    let one_absent = queue_pairs(&[("jobs", &["kafka"])], &[("jobs", &[])]);
+    assert_eq!(one_absent.len(), 1, "got {one_absent:?}");
+    let generic = queue_pairs(&[("jobs", &["kafka"])], &[("jobs", &["generic"])]);
+    assert_eq!(generic.len(), 1, "generic pairs with any family, got {generic:?}");
+}
+
+#[test]
+fn queue_resolver_reads_every_family_cell() {
+    // A topic consumed from two files via two frameworks carries two cells;
+    // the second one must count, not just the first.
+    let pairs = queue_pairs(&[("jobs", &["bullmq"])], &[("jobs", &["sidekiq", "bullmq"])]);
+    assert_eq!(pairs.len(), 1, "got {pairs:?}");
+}
+
+#[test]
+fn queue_resolver_nats_wildcard() {
+    let pairs = queue_pairs(
+        &[("orders.created", &["nats"])],
+        &[("orders.*", &["nats"]), ("billing.*", &["nats"]), ("orders.*.v1", &["nats"])],
+    );
+    assert_eq!(
+        pairs,
+        vec![(
+            "queue_producer:orders.created".to_string(),
+            "queue_consumer:orders.*".to_string(),
+            Confidence::Weak,
+        )],
+        "exactly one Weak edge, and billing.* / a longer pattern never match"
+    );
+}
+
+#[test]
+fn queue_resolver_wildcard_dialects() {
+    // (producer topic, family, consumer pattern, family, expect a pair?)
+    let cases: &[(&str, &str, &str, &str, bool)] = &[
+        // NATS `>` = one or more trailing tokens.
+        ("orders.eu.created", "nats", "orders.>", "nats", true),
+        ("orders", "nats", "orders.>", "nats", false),
+        // AMQP `#` = zero or more tokens, anywhere.
+        ("orders", "rabbitmq", "orders.#", "rabbitmq", true),
+        ("orders.eu.created", "rabbitmq", "orders.#", "rabbitmq", true),
+        ("a.x.y.error", "rabbitmq", "*.#.error", "rabbitmq", true),
+        ("a.x.y.info", "rabbitmq", "*.#.error", "rabbitmq", false),
+        // MQTT: '/' levels with `+` and `#`; '.' is an ordinary character.
+        ("sensors/kitchen/temp", "mqtt", "sensors/+/temp", "mqtt", true),
+        ("sensors/kitchen/humidity", "mqtt", "sensors/+/temp", "mqtt", false),
+        ("sensors", "mqtt", "sensors/#", "mqtt", true),
+        ("orders.created", "mqtt", "orders.*", "mqtt", false),
+        // Kafka: regex approximated by its literal prefix; `\.` is a literal dot.
+        ("orders.created", "kafka", r"^orders\..*", "kafka", true),
+        ("orders_legacy", "kafka", r"^orders\..*", "kafka", false),
+        ("orders", "kafka", "^orders$", "kafka", true),
+        ("orders2", "kafka", "^orders$", "kafka", false),
+        ("orders.created", "kafka", "orders.*", "kafka", true),
+        // An unexpanded template is not a regex: literal, so exact only.
+        ("orders_prod", "kafka", "orders_${env}", "kafka", false),
+        // A plain dotted Kafka topic is a literal, never a NATS-style pattern.
+        ("orders.created", "kafka", "orders.created", "kafka", true),
+        // No dialect: the pattern characters are literal, exact match only.
+        ("orders.created", "redis", "orders.*", "redis", false),
+        // A pattern match across families is still a family mismatch.
+        ("orders.created", "nats", "orders.*", "rabbitmq", false),
+        ("orders.created", "nats", r"^orders\..*", "kafka", false),
+        // Absent producer family pairs with a known-dialect pattern.
+        ("orders.created", "", "orders.*", "nats", true),
+    ];
+    for &(topic, pfam, pattern, cfam, want) in cases {
+        let pf: Vec<&str> = if pfam.is_empty() { vec![] } else { vec![pfam] };
+        let pairs = queue_pairs(&[(topic, &pf)], &[(pattern, &[cfam])]);
+        assert_eq!(
+            pairs.len(),
+            usize::from(want),
+            "{topic} ({pfam}) vs {pattern} ({cfam}): got {pairs:?}"
+        );
+        if want {
+            // A pattern match is an inference (Weak); literal equality is not.
+            let conf = if topic == pattern { Confidence::Strong } else { Confidence::Weak };
+            assert_eq!(pairs[0].2, conf, "{topic} vs {pattern}");
+        }
+    }
+}
+
+#[test]
+fn queue_resolver_ignores_catchall() {
+    // A subscription with no literal token is not an identity; pairing it
+    // would make every publisher a dependency of this one subscriber.
+    for (pattern, family) in [(">", "nats"), ("#", "rabbitmq"), ("*.*", "nats"), ("#", "mqtt"), ("^.*", "kafka")] {
+        let pairs = queue_pairs(&[("orders.created", &[family])], &[(pattern, &[family])]);
+        assert!(pairs.is_empty(), "{pattern} ({family}) must pair with nothing, got {pairs:?}");
+    }
+    // …but a literal publish of the same string still pairs exactly.
+    let literal = queue_pairs(&[(">", &["nats"])], &[(">", &["nats"])]);
+    assert_eq!(literal.len(), 1, "got {literal:?}");
+}
+
 // ============================================================================
 // GraphQLStackResolver
 // ============================================================================
