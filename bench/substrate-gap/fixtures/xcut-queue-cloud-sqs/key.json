@@ -1,0 +1,21 @@
+{
+  "framework": "xcut-queue-cloud-sqs",
+  "language": "python",
+  "dirs": ["api", "worker"],
+  "mechanism": "sqs_sns",
+  "cells": ["python/sqs_sns"],
+  "note": "Baseline 2026-09-17 (installed wheel = HEAD 2cc066d, before A2.6): nodes 0/2, QUEUE_FLOWS 0/1 (0.00), ZERO queue nodes: there was no SQS needle in either pattern table. A2.6 adds the boto3 send_message / receive_message rows and folds the queue URL to its last path segment, so both sides become `orders` and QueueStackResolver pairs them. Verified that wave through the working-tree CLI (`glia arch api --with worker` -> api->worker QUEUE_FLOWS channel=orders); grade.py sees it only after the end-of-wave wheel rebuild.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "boto3 send_message(QueueUrl=<sqs url>) — the URL folds to its last path segment"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "boto3 receive_message(QueueUrl=<same sqs url>)"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "both sides name the same queue URL, so both fold to `orders` and pair"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:https://sqs.us-east-1.amazonaws.com/123456789012/orders", "note": "the raw URL must never become the join key — it would only pair with a caller spelling the identical URL"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:https://sqs.us-east-1.amazonaws.com/123456789012/orders", "note": "same, consumer side"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:sqs", "note": "the queue IS named; no coverage sentinel may stand beside the real node"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:sqs", "note": "same, consumer side"}
+  ]
+}

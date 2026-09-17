@@ -40,6 +40,26 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "URLs built dynamically (string concat / variables / base-url config) may not pair to a route",
         verify: "grep the path literal or base URL",
     },
+    // A2.6: until these rows, no QUEUE_FLOWS caveat existed, so a silent queue
+    // blind spot was undeclared.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "QUEUE_FLOWS",
+        note: "topics built from variables, constants or env vars are extracted as an unresolved framework tag and never paired",
+        verify: "grep the topic constant or env var name",
+    },
+    CoverageCaveat {
+        language: "*",
+        edge_category: "QUEUE_FLOWS",
+        note: "GCP Pub/Sub subscriptions are named independently of their topic, so publisher and subscriber pair only when both name the topic",
+        verify: "check the subscription-to-topic binding in IaC",
+    },
+    CoverageCaveat {
+        language: "*",
+        edge_category: "QUEUE_FLOWS",
+        note: "SNS→SQS fan-out is declared in infrastructure, not code — a producer to an SNS topic will not pair with the SQS consumers it feeds",
+        verify: "grep the SNS subscription in terraform/CDK",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",
@@ -150,4 +170,33 @@ fn edge_category_counts(merged: &MergedGraph) -> std::collections::HashMap<&'sta
         *counts.entry(edge_category::name(e.category)).or_insert(0) += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_flows_caveats_are_universal() {
+        // A2.6: a repo with no recognisable language still gets the three
+        // QUEUE_FLOWS notes, and each names a category that really exists.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let queue: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "QUEUE_FLOWS")
+            .collect();
+        assert_eq!(queue.len(), 3);
+        assert!(
+            queue
+                .iter()
+                .all(|n| n.language == "*" && n.edges_found == 0)
+        );
+        assert!(queue.iter().any(|n| n.note.contains("Pub/Sub")));
+        assert!(queue.iter().any(|n| n.note.contains("SNS")));
+        assert_eq!(
+            edge_category::name(edge_category::QUEUE_FLOWS),
+            "QUEUE_FLOWS",
+            "edges_found is keyed by this spelling"
+        );
+    }
 }

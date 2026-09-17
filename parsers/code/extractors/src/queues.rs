@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
-use crate::queue_topic::{self, TopicRule};
+use crate::queue_topic::{self, TopicForm, TopicRule};
 
 pub struct QueueConsumer {
     pub from: NodeId,
@@ -43,8 +43,9 @@ pub enum QueueFramework {
     /// polyglot demos like dockersamples/example-voting-app and any "ad-hoc
     /// worker queue without a framework" pattern.
     RedisList,
-    // --- pre-allocated for the rest of batch A2; no table rows yet, so these
-    // --- are inert until A2.4 / A2.6 / A2.9 add needles for them.
+    // --- pre-allocated for the rest of batch A2. Sqs/Sns/PubSub/
+    // --- AzureServiceBus have rows since A2.6; Mqtt/RedisPubSub/Jms stay
+    // --- inert until A2.4 / A2.9 add needles for them.
     /// AWS SQS (`sqs.sendMessage`, `SendMessageRequest`, ...).
     Sqs,
     /// AWS SNS fan-out (`sns.publish`, `PublishRequest`, ...).
@@ -200,6 +201,37 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("basic_consume(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
     // C# — RabbitMQ.Client: `channel.QueueDeclare(queue: "orders", ...)`.
     (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    // ---- A2.6: cloud brokers ---------------------------------------------
+    // The identity arrives as a queue URL, an ARN or a GCP resource path, and
+    // `queue_topic::fold_topic` reduces each to the bare name — so both sides
+    // join on `orders` whichever spelling they used. `@SqsListener` and
+    // `[ServiceBusTrigger]` are A2.4's rows.
+    // Python — boto3: `sqs.receive_message(QueueUrl="https://sqs.../orders")`.
+    (".receive_message(", QueueFramework::Sqs, &["boto3", "botocore"], TopicRule::Keyed(&["queueurl"])),
+    // JS — AWS SDK v3: `new ReceiveMessageCommand({ QueueUrl: "..." })`.
+    ("ReceiveMessageCommand(", QueueFramework::Sqs, &["@aws-sdk/client-sqs"], TopicRule::Keyed(&["queueurl"])),
+    // JS — SDK v2 / v3 aggregated client `sqs.receiveMessage({ QueueUrl })`;
+    // Java — SDK v2 builder `.queueUrl("...")`, v1 `com.amazonaws`.
+    (".receiveMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs"], TopicRule::Keyed(&["queueurl"])),
+    // C# — AWSSDK.SQS: `ReceiveMessageAsync(new ReceiveMessageRequest { QueueUrl = "..." })`.
+    (".ReceiveMessageAsync(", QueueFramework::Sqs, &["amazon.sqs", "awssdk"], TopicRule::Keyed(&["queueurl"])),
+    // GCP — JS `pubsub.subscription('orders-worker')`, Python
+    // `subscriber.subscription_path("proj", "orders-worker")` (arg #0 is the
+    // project). A subscription is named independently of its topic, so these
+    // pair only when both are spelled alike — a declared COVERAGE_CAVEATS gap.
+    (".subscription(", QueueFramework::PubSub, &["@google-cloud/pubsub"], TopicRule::ArgLiteral),
+    (".subscription_path(", QueueFramework::PubSub, &["google.cloud"], TopicRule::ArgIndex(1)),
+    // Azure Service Bus — C# `client.CreateProcessor("orders", options)`: for a
+    // topic, arg #0 is the TOPIC and arg #1 the subscription, so arg #0 joins
+    // the sender either way.
+    ("CreateProcessor(", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::ArgLiteral),
+    ("CreateReceiver(", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::ArgLiteral),
+    // JS — @azure/service-bus: `sbClient.createReceiver("orders")`.
+    (".createReceiver(", QueueFramework::AzureServiceBus, &["@azure/service-bus"], TopicRule::ArgLiteral),
+    // Python — azure-servicebus: `get_queue_receiver(queue_name="orders")`. The
+    // subscription receiver reads its TOPIC so it joins `get_topic_sender`.
+    ("get_queue_receiver(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["queue_name"])),
+    ("get_subscription_receiver(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["topic_name"])),
 ];
 
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
@@ -289,6 +321,39 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Python — pika, receiver-free: `ch.basic_publish(routing_key="orders")`.
     // Positional arg #0 is deliberately NOT read: for pika it is the exchange.
     ("basic_publish(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::Keyed(&["routing_key", "queue"])),
+    // ---- A2.6: cloud brokers (see the CONSUMER_PATTERNS block) ------------
+    // Python — boto3: `sqs.send_message(QueueUrl="https://sqs.../orders")`.
+    (".send_message(", QueueFramework::Sqs, &["boto3", "botocore"], TopicRule::Keyed(&["queueurl", "queuename"])),
+    // JS — AWS SDK v3: `new SendMessageCommand({ QueueUrl: "..." })`.
+    ("SendMessageCommand(", QueueFramework::Sqs, &["@aws-sdk/client-sqs"], TopicRule::Keyed(&["queueurl"])),
+    // C# — AWSSDK.SQS: `SendMessageAsync(new SendMessageRequest { QueueUrl = "..." })`.
+    (".SendMessageAsync(", QueueFramework::Sqs, &["amazon.sqs", "awssdk"], TopicRule::Keyed(&["queueurl"])),
+    // JS — SDK v2 / v3 aggregated `sqs.sendMessage({ QueueUrl })`; Java — SDK v2
+    // builder `.queueUrl("...")`. The real Java package is
+    // `software.amazon.awssdk.services.sqs`, hence the `services.` gate.
+    (".sendMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs"], TopicRule::Keyed(&["queueurl"])),
+    // SNS — boto3 / JS / Java: `sns.publish(TopicArn="arn:aws:sns:...:orders")`.
+    // BROAD needle: until A2.9 lands, a gated file ALSO mints an eventbus
+    // EVENT_EMITTER here. C# spells it `PublishAsync`, so it never matches.
+    (".publish(", QueueFramework::Sns, &["boto3", "aws-sdk", "amazon.simplenotification", "awssdk.services.sns", "amazonaws.services.sns"], TopicRule::Keyed(&["topicarn"])),
+    // JS — AWS SDK v3: `new PublishCommand({ TopicArn: "..." })`.
+    ("PublishCommand(", QueueFramework::Sns, &["@aws-sdk/client-sns"], TopicRule::Keyed(&["topicarn"])),
+    // GCP — JS `pubsub.topic('orders').publishMessage(...)`; Python
+    // `publisher.topic_path("proj", "orders")` (arg #0 is the project).
+    // KNOWN IMPRECISION: `.topic(` is a reference, not a publish, so a
+    // subscriber written `pubsub.topic('orders').subscription(...)` also
+    // mints the producer node.
+    (".topic(", QueueFramework::PubSub, &["@google-cloud/pubsub"], TopicRule::ArgLiteral),
+    (".topic_path(", QueueFramework::PubSub, &["google.cloud"], TopicRule::ArgIndex(1)),
+    // Azure Service Bus — C# `client.CreateSender("orders")`, JS
+    // `sbClient.createSender("orders")`, Python
+    // `get_queue_sender(queue_name=...)` / `get_topic_sender(topic_name=...)`.
+    // No row for a bare `ServiceBusSender` type mention: it names no queue,
+    // and a NoIdentity row there would emit nothing at all.
+    ("CreateSender(", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::ArgLiteral),
+    (".createSender(", QueueFramework::AzureServiceBus, &["@azure/service-bus"], TopicRule::ArgLiteral),
+    ("get_queue_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["queue_name"])),
+    ("get_topic_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["topic_name"])),
 ];
 
 /// True when `signals` is empty (always pass) or any signal substring appears in
@@ -414,16 +479,18 @@ fn emit_queue_nodes(
         // 402 is a call SITE at line 11, and that is the only provenance a
         // queue node has ever been able to carry. `line_of` is 0-indexed, the
         // tree-sitter convention every other span in the graph uses.
-        let sites: Vec<(String, usize)> = hits
+        // A2.6: the literal's shape (url/arn/path) rides along for the
+        // `[queues] cloud broker=` marker.
+        let sites: Vec<(String, usize, TopicForm)> = hits
             .iter()
             .filter_map(|h| {
                 h.topic
                     .clone()
-                    .map(|t| (t, queue_topic::line_of(source, h.offset)))
+                    .map(|t| (t, queue_topic::line_of(source, h.offset), h.form))
             })
             .collect();
         if debug_enabled() && !sites.is_empty() {
-            let topics: Vec<&str> = sites.iter().map(|(t, _)| t.as_str()).collect();
+            let topics: Vec<&str> = sites.iter().map(|(t, _, _)| t.as_str()).collect();
             eprintln!(
                 "[queues] scan needle='{pattern}' rule={rule:?} hits={} path={path} topics={}",
                 sites.len(),
@@ -434,13 +501,13 @@ fn emit_queue_nodes(
         // so it gets its own grep-able line:
         //   GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] taskq rule='
         if debug_enabled() && is_identity_rule(rule) {
-            for (sym, _) in &sites {
+            for (sym, _, _) in &sites {
                 eprintln!(
                     "[queues] taskq rule={rule:?} symbol={sym} framework={framework:?} file={path}"
                 );
             }
         }
-        for (topic, line) in &sites {
+        for (topic, line, form) in &sites {
             if record_site(
                 &mut pending,
                 &mut seen,
@@ -453,6 +520,7 @@ fn emit_queue_nodes(
                 *line,
             ) {
                 fired_on(pattern, framework, topic, path);
+                cloud_fired_on(framework, topic, *form, path);
             }
         }
         // A needle whose rule is `NoIdentity` NEVER names a topic (it is a
@@ -637,6 +705,29 @@ fn fired_on(needle: &str, framework: &QueueFramework, topic: &str, path: &str) {
             "[queues] needle '{needle}' framework={framework:?} gate=ok topic={topic} file={path}"
         );
     }
+}
+
+/// A2.6 marker — one line per cloud-broker NODE, naming the literal shape
+/// (`arn|url|path|literal`) its topic was folded from:
+///   `GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] cloud broker='`
+fn cloud_fired_on(framework: &QueueFramework, topic: &str, form: TopicForm, path: &str) {
+    if debug_enabled() && is_cloud_broker(framework) {
+        eprintln!(
+            "[queues] cloud broker={framework:?} topic={topic} from={} file={path}",
+            form.as_str()
+        );
+    }
+}
+
+/// The brokers whose identity can arrive as a URL / ARN / resource path.
+fn is_cloud_broker(f: &QueueFramework) -> bool {
+    matches!(
+        f,
+        QueueFramework::Sqs
+            | QueueFramework::Sns
+            | QueueFramework::PubSub
+            | QueueFramework::AzureServiceBus
+    )
 }
 
 /// `GLIA_QUEUE_DEBUG=1` turns on the `[queues] scan needle=` marker, read once.
@@ -1303,5 +1394,143 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
             payload(cell_of(&r.nodes[0], cell_type::POSITION)),
             r#"{"file":"src\\a\"b.py","start_line":2,"end_line":2}"#
         );
+    }
+
+    // ---- A2.6: cloud brokers + URL/ARN/path folding -----------------------
+
+    fn framework_of(r: &QueueNodes) -> String {
+        payload(cell_of(&r.nodes[0], cell_type::CODE)).to_string()
+    }
+
+    #[test]
+    fn sqs_queue_url_folds_to_name() {
+        // THE packet's reason to exist: both sides name the queue by URL, and
+        // they only join if both fold to the same bare name.
+        let producer = "import boto3\nsqs = boto3.client(\"sqs\")\nsqs.send_message(\n    QueueUrl=\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\",\n    MessageBody=body,\n)\n";
+        let pr = extract_queue_producer_nodes(producer, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+        assert!(framework_of(&pr).contains(r#""framework":"Sqs","family":"sqs""#));
+
+        let consumer = "import boto3\nsqs.receive_message(QueueUrl=\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\", MaxNumberOfMessages=10)\n";
+        let cr = extract_queue_consumer_nodes(consumer, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:orders".to_string()]);
+
+        // JS v3 command objects and C# request initialisers read the same key.
+        let js = "import { SQSClient, SendMessageCommand } from \"@aws-sdk/client-sqs\";\nawait client.send(new SendMessageCommand({ QueueUrl: \"http://localhost:4566/000000000000/orders\", MessageBody: b }));\n";
+        let jr = extract_queue_producer_nodes(js, PATH, module_id(), repo());
+        assert_eq!(qnames(&jr), vec!["queue_producer:orders".to_string()]);
+        let cs = "using Amazon.SQS;\nawait _sqs.ReceiveMessageAsync(new ReceiveMessageRequest { QueueUrl = \"https://sqs.eu-west-1.amazonaws.com/1/orders\" });\n";
+        let csr = extract_queue_consumer_nodes(cs, PATH, module_id(), repo());
+        assert_eq!(qnames(&csr), vec!["queue_consumer:orders".to_string()]);
+    }
+
+    #[test]
+    fn java_sdk_v2_builder_reads_queue_url() {
+        // `.queueUrl("...")` is a builder METHOD, not `key = value`; the gate is
+        // the real v2 package, `software.amazon.awssdk.services.sqs`.
+        let source = r#"
+import software.amazon.awssdk.services.sqs.SqsClient;
+sqs.sendMessage(SendMessageRequest.builder()
+    .queueUrl("https://sqs.us-east-1.amazonaws.com/123456789012/orders")
+    .messageBody(body).build());
+"#;
+        let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn sns_arn_folds_to_topic() {
+        let py = "import boto3\nsns = boto3.client(\"sns\")\nsns.publish(TopicArn=\"arn:aws:sns:us-east-1:123456789012:orders\", Message=m)\n";
+        let pr = extract_queue_producer_nodes(py, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+        assert!(framework_of(&pr).contains(r#""framework":"Sns","family":"sns""#));
+
+        let js = "import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';\nawait sns.send(new PublishCommand({ TopicArn: 'arn:aws:sns:eu-west-1:1:orders', Message: m }));\n";
+        let jr = extract_queue_producer_nodes(js, PATH, module_id(), repo());
+        assert_eq!(qnames(&jr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn pubsub_topic_path_arg_index() {
+        // arg #0 is the PROJECT; reading it would mint `queue_producer:my-project`.
+        let py = "from google.cloud import pubsub_v1\npublisher = pubsub_v1.PublisherClient()\ntopic_path = publisher.topic_path(\"my-project\", \"orders\")\n";
+        let pr = extract_queue_producer_nodes(py, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+
+        let sub = "from google.cloud import pubsub_v1\npath = subscriber.subscription_path(\"my-project\", \"orders-worker\")\n";
+        let sr = extract_queue_consumer_nodes(sub, PATH, module_id(), repo());
+        assert_eq!(qnames(&sr), vec!["queue_consumer:orders-worker".to_string()]);
+
+        // JS: the topic and the subscription are distinct names by design.
+        let js_pub = "import { PubSub } from '@google-cloud/pubsub';\nawait pubsub.topic('orders').publishMessage({ data });\n";
+        let jp = extract_queue_producer_nodes(js_pub, PATH, module_id(), repo());
+        assert_eq!(qnames(&jp), vec!["queue_producer:orders".to_string()]);
+        let js_sub = "import { PubSub } from '@google-cloud/pubsub';\nconst sub = pubsub.subscription('orders-worker');\n";
+        assert!(extract_queue_producer_nodes(js_sub, PATH, module_id(), repo()).nodes.is_empty());
+        let js = extract_queue_consumer_nodes(js_sub, PATH, module_id(), repo());
+        assert_eq!(qnames(&js), vec!["queue_consumer:orders-worker".to_string()]);
+
+        // A fully-qualified resource path folds like a URL.
+        let fq = "import { PubSub } from '@google-cloud/pubsub';\npubsub.topic('projects/my-project/topics/orders');\n";
+        let fr = extract_queue_producer_nodes(fq, PATH, module_id(), repo());
+        assert_eq!(qnames(&fr), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn azure_create_sender_literal() {
+        let cs = "using Azure.Messaging.ServiceBus;\nServiceBusSender sender = client.CreateSender(\"orders\");\n";
+        let pr = extract_queue_producer_nodes(cs, PATH, module_id(), repo());
+        assert_eq!(qnames(&pr), vec!["queue_producer:orders".to_string()]);
+        assert!(framework_of(&pr).contains(r#""framework":"AzureServiceBus""#));
+
+        let proc_ = "using Azure.Messaging.ServiceBus;\nvar processor = client.CreateProcessor(\"orders\", \"worker\", new ServiceBusProcessorOptions());\n";
+        let cr = extract_queue_consumer_nodes(proc_, PATH, module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:orders".to_string()]);
+
+        // Python azure-servicebus: keyword form, and the subscription receiver
+        // joins on its TOPIC, not the subscription name.
+        let py = "from azure.servicebus import ServiceBusClient\nwith client.get_queue_sender(queue_name=\"orders\") as s:\n    pass\n";
+        let ps = extract_queue_producer_nodes(py, PATH, module_id(), repo());
+        assert_eq!(qnames(&ps), vec!["queue_producer:orders".to_string()]);
+        let py_sub = "from azure.servicebus import ServiceBusClient\nr = client.get_subscription_receiver(topic_name=\"orders\", subscription_name=\"worker\")\n";
+        let pc = extract_queue_consumer_nodes(py_sub, PATH, module_id(), repo());
+        assert_eq!(qnames(&pc), vec!["queue_consumer:orders".to_string()]);
+    }
+
+    #[test]
+    fn cloud_needles_without_their_sdk_emit_nothing() {
+        // PRECISION GUARD: `.sendMessage(` / `.send_message(` / `.topic(` /
+        // `.publish(` are everyday method names. The SDK gate is all that keeps
+        // a browser extension, a Telegram bot or an MQTT client out.
+        for (src, what) in [
+            ("chrome.runtime.sendMessage({ QueueUrl: 'x' });", "chrome sendMessage"),
+            ("bot.send_message(chat_id, \"hello\")", "telegram send_message"),
+            ("const t = mqttClient.topic('orders');", "non-GCP .topic("),
+            ("client.publish(\"sensors/temp\", payload)", "mqtt publish"),
+            ("var s = factory.CreateSender(\"orders\");", "non-Azure CreateSender"),
+        ] {
+            let pr = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+            let cr = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+            assert!(
+                pr.nodes.is_empty() && cr.nodes.is_empty(),
+                "{what} must not emit a cloud-broker node, got {:?} / {:?}",
+                qnames(&pr),
+                qnames(&cr)
+            );
+        }
+    }
+
+    #[test]
+    fn interpolated_queue_name_falls_back_to_the_sentinel() {
+        // The host/account may be interpolated — the NAME may not. A placeholder
+        // name is a variable, so it must read as the unresolved coverage signal
+        // rather than minting `queue_producer:{name}`.
+        let named = "import boto3\nsqs.send_message(QueueUrl=f\"https://sqs.{region}.amazonaws.com/{account}/orders\", MessageBody=b)\n";
+        let nr = extract_queue_producer_nodes(named, PATH, module_id(), repo());
+        assert_eq!(qnames(&nr), vec!["queue_producer:orders".to_string()]);
+
+        let unnamed = "import boto3\nsqs.send_message(QueueUrl=f\"https://sqs.{region}.amazonaws.com/{account}/{name}\", MessageBody=b)\n";
+        let ur = extract_queue_producer_nodes(unnamed, PATH, module_id(), repo());
+        assert_eq!(qnames(&ur), vec!["queue_producer:unresolved:sqs".to_string()]);
     }
 }

@@ -28,9 +28,42 @@
 pub struct TopicHit {
     /// The topic this occurrence names, if the rule could read one.
     pub topic: Option<String>,
+    /// A2.6: the literal shape `topic` was folded from. `Literal` when `topic`
+    /// is `None`, and always for the identity rules.
+    pub form: TopicForm,
     /// Byte index of the needle in the source (stable, for ordering/debug).
     pub offset: usize,
 }
+
+/// A2.6: the shape a topic literal had before [`fold_topic`] reduced it to a
+/// name. Cloud brokers name a queue by URL, ARN or resource path, and both
+/// sides of a flow only join if every one of those folds to the same name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopicForm {
+    /// Taken verbatim (every file-local broker, every identity rule).
+    Literal,
+    /// `arn:aws:sns:us-east-1:123456789012:orders` -> `orders`.
+    Arn,
+    /// `https://sqs.us-east-1.amazonaws.com/123456789012/orders` -> `orders`.
+    Url,
+    /// `projects/my-project/topics/orders` -> `orders`.
+    Path,
+}
+
+impl TopicForm {
+    /// The `from=` token of the `[queues] cloud broker=` marker.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TopicForm::Literal => "literal",
+            TopicForm::Arn => "arn",
+            TopicForm::Url => "url",
+            TopicForm::Path => "path",
+        }
+    }
+}
+
+/// A topic name plus the shape it was folded from.
+type Folded = (String, TopicForm);
 
 /// How a topic is spelled at a given needle.
 #[derive(Clone, Copy, Debug)]
@@ -128,31 +161,109 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
     }
     for (offset, _) in source.match_indices(needle).take(MAX_HITS_PER_NEEDLE) {
         let after = offset.saturating_add(needle.len());
-        let topic = match rule {
+        let read = match rule {
             TopicRule::NoIdentity => None,
             // A2.5: identity rules read the code AROUND the call, not its
-            // arguments, so they need the needle's own offset.
-            TopicRule::Receiver => receiver_before(source, offset),
-            TopicRule::ArgReceiver => arg_receiver(source, after, needle),
-            TopicRule::DeclaredSymbol => declared_symbol(source, after),
-            TopicRule::EnclosingSymbol => enclosing_symbol(source, offset),
+            // arguments, so they need the needle's own offset. A symbol is
+            // never a URL/ARN, so its form is always `Literal`.
+            TopicRule::Receiver => verbatim(receiver_before(source, offset)),
+            TopicRule::ArgReceiver => verbatim(arg_receiver(source, after, needle)),
+            TopicRule::DeclaredSymbol => verbatim(declared_symbol(source, after)),
+            TopicRule::EnclosingSymbol => verbatim(enclosing_symbol(source, offset)),
             _ => topic_at(source, after, needle, rule),
         };
-        hits.push(TopicHit { topic, offset });
+        let (topic, form) = match read {
+            Some((t, f)) => (Some(t), f),
+            None => (None, TopicForm::Literal),
+        };
+        hits.push(TopicHit {
+            topic,
+            form,
+            offset,
+        });
     }
     hits
 }
 
-/// Trim quoting/punctuation noise off a raw literal and reject non-identifiers.
+fn verbatim(symbol: Option<String>) -> Option<Folded> {
+    symbol.map(|s| (s, TopicForm::Literal))
+}
+
+/// Trim quoting/punctuation noise off a raw literal, fold a cloud identity to
+/// its name, and reject non-identifiers. See [`fold_topic`].
 pub fn normalise_topic(raw: &str) -> Option<String> {
-    let t = raw
-        .trim()
-        .trim_matches(|c: char| matches!(c, ',' | ')' | ']' | '}' | '\'' | '"' | '`'))
-        .trim();
+    fold_topic(raw).map(|(t, _)| t)
+}
+
+/// [`normalise_topic`], also reporting which shape the literal had.
+///
+/// A2.6 — the fold runs BEFORE the length/newline gates, so a 140-byte queue
+/// URL whose name is `orders` is accepted as `orders`. Branches, in order:
+///
+/// * ARN: `arn:aws:sqs:us-east-1:123456789012:orders` -> `orders`. An ARN has
+///   at least 6 colon-separated fields (`arn:partition:service:region:account:
+///   resource`) and the queue/topic name is the LAST one. Fewer fields is not
+///   an ARN and is kept verbatim.
+/// * URL: `https://sqs.us-east-1.amazonaws.com/123456789012/orders` -> `orders`
+///   (also `http://localhost:4566/000000000000/orders`, localstack). The last
+///   non-empty path segment, after dropping `?query` and `#fragment`. A URL
+///   with no path names no queue, so it is rejected, not kept.
+/// * GCP path: `projects/my-project/topics/orders` -> `orders`, and
+///   `projects/my-project/subscriptions/orders-worker` -> `orders-worker`.
+///   Exactly that 4-segment shape; any other `projects/...` string (an MQTT
+///   topic, say) is kept verbatim.
+///
+/// A folded segment that is still a placeholder (`.../${QUEUE}`,
+/// `f".../{name}"`) is rejected: it names a variable, not a queue, so the
+/// caller falls back to the unresolved sentinel instead of minting `${QUEUE}`.
+pub fn fold_topic(raw: &str) -> Option<Folded> {
+    // Trimmed ONCE: a `Literal` must come out byte-identical to the pre-A2.6
+    // `normalise_topic`, so it is never trimmed a second time.
+    let (t, form) = fold_cloud_identity(trim_noise(raw))?;
     if t.is_empty() || t.len() > MAX_TOPIC_LEN || t.contains('\n') || t.contains('\r') {
         return None;
     }
-    Some(t.to_string())
+    Some((t.to_string(), form))
+}
+
+fn trim_noise(raw: &str) -> &str {
+    raw.trim()
+        .trim_matches(|c: char| matches!(c, ',' | ')' | ']' | '}' | '\'' | '"' | '`'))
+        .trim()
+}
+
+/// The branch table of [`fold_topic`]. `None` = a recognised cloud shape that
+/// carries no usable name.
+fn fold_cloud_identity(t: &str) -> Option<(&str, TopicForm)> {
+    if t.starts_with("arn:") && t.split(':').count() >= 6 {
+        return folded_segment(t.rsplit(':').next()?, TopicForm::Arn);
+    }
+    if let Some(rest) = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))
+    {
+        let path = rest.split(['?', '#']).next()?;
+        let mut segs = path.split('/').filter(|s| !s.is_empty());
+        segs.next()?; // the host
+        return folded_segment(segs.next_back()?, TopicForm::Url);
+    }
+    // Only the exact GCP resource shape: an MQTT topic is also `/`-separated,
+    // and `projects/acme/sensors/temp` must not collapse to `temp`.
+    if let Some(rest) = t.strip_prefix("projects/") {
+        let segs: Vec<&str> = rest.split('/').collect();
+        if let [_project, "topics" | "subscriptions", name] = segs.as_slice() {
+            return folded_segment(name, TopicForm::Path);
+        }
+    }
+    Some((t, TopicForm::Literal))
+}
+
+fn folded_segment(seg: &str, form: TopicForm) -> Option<(&str, TopicForm)> {
+    let seg = seg.trim();
+    if seg.contains(['{', '}', '$']) {
+        return None;
+    }
+    Some((seg, form))
 }
 
 /// 0-indexed line number containing byte `offset`.
@@ -190,7 +301,7 @@ pub fn escape_json(s: &str) -> String {
 // internals
 // ---------------------------------------------------------------------------
 
-fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
+fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<Folded> {
     let region = arg_region(source, after, needle);
     match rule {
         TopicRule::ArgLiteral => arg_literal(region?, 0),
@@ -316,7 +427,7 @@ fn split_args(region: &str) -> Vec<&str> {
 }
 
 /// First quoted literal inside positional argument `n`.
-fn arg_literal(region: &str, n: usize) -> Option<String> {
+fn arg_literal(region: &str, n: usize) -> Option<Folded> {
     let arg = *split_args(region).get(n)?;
     let b = arg.as_bytes();
     let mut i = 0usize;
@@ -330,7 +441,12 @@ fn arg_literal(region: &str, n: usize) -> Option<String> {
 }
 
 /// `<key> <sep> <literal>` anywhere in the region, keys tried in table order.
-fn keyed_literal(region: &str, keys: &[&str]) -> Option<String> {
+///
+/// A2.6: a key written as a builder METHOD, `.queueUrl("x")` / `.topicArn("x")`
+/// (AWS SDK for Java v2), reads too — the `(` counts as the separator, but only
+/// when a `.` sits right before the key, so a bare call like `topic("x")` still
+/// does not.
+fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
     // ASCII-lowercasing is byte-length preserving, so indices map 1:1 back onto
     // `region` and we can read the ORIGINAL bytes at an index found in `lower`.
     let lower = region.to_ascii_lowercase();
@@ -358,7 +474,8 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<String> {
                 j += 1;
             }
             j = skip_ws(b, j);
-            let Some(sep) = separator_len(b, j) else {
+            let builder = b.get(j) == Some(&b'(') && start > 0 && b.get(start - 1) == Some(&b'.');
+            let Some(sep) = separator_len(b, j).or(builder.then_some(1)) else {
                 continue;
             };
             j = skip_ws(b, j + sep);
@@ -537,8 +654,21 @@ fn separator_len(b: &[u8], i: usize) -> Option<usize> {
 }
 
 /// Read a quoted literal (`'x'`, `"x"`, `` `x` ``) or a bare atom (`:x`) at `j`.
-fn read_literal(s: &str, mut j: usize) -> Option<String> {
+///
+/// A2.6: a one-byte string prefix is stepped over first — Python `f"..."`,
+/// `r"..."`, `b"..."`, `u"..."` and C# `$"..."` / `@"..."` — so a keyed value
+/// written as an interpolated queue URL still reaches [`fold_topic`], which
+/// keeps the name when only the host/account were interpolated and rejects a
+/// placeholder name.
+fn read_literal(s: &str, mut j: usize) -> Option<Folded> {
     let b = s.as_bytes();
+    if matches!(
+        b.get(j),
+        Some(b'f' | b'r' | b'b' | b'u' | b'F' | b'R' | b'B' | b'U' | b'$' | b'@')
+    ) && matches!(b.get(j + 1), Some(b'\'' | b'"'))
+    {
+        j += 1;
+    }
     match b.get(j) {
         Some(&q @ (b'\'' | b'"' | b'`')) => {
             j += 1;
@@ -549,7 +679,7 @@ fn read_literal(s: &str, mut j: usize) -> Option<String> {
                     continue;
                 }
                 if c == q {
-                    return normalise_topic(s.get(start..j)?);
+                    return fold_topic(s.get(start..j)?);
                 }
                 j += 1;
             }
@@ -567,7 +697,7 @@ fn read_literal(s: &str, mut j: usize) -> Option<String> {
             if j == start {
                 None
             } else {
-                normalise_topic(s.get(start..j)?)
+                fold_topic(s.get(start..j)?)
             }
         }
         _ => None,
@@ -861,5 +991,161 @@ mod tests {
     fn clip_never_splits_a_char() {
         assert_eq!(clip("日本語", 4), "日");
         assert_eq!(clip("abc", 99), "abc");
+    }
+
+    // ---- A2.6: URL / ARN / resource-path folding -----------------------
+
+    #[test]
+    fn normalise_topic_leaves_plain_names_alone() {
+        // Every file-local broker's topic must come through byte-identical —
+        // including the MQTT `/` form and a colon that is not an ARN.
+        for plain in [
+            "orders",
+            "user-events",
+            "orders.fifo",
+            "sensors/temp",
+            "sensors/+/temp",
+            "arn:not-enough:fields",
+            "http",
+            "projects",
+            "projects/acme/sensors/temp",
+            "projects/acme/topics/orders/extra",
+            "ünïcødé-tøpic",
+        ] {
+            assert_eq!(normalise_topic(plain), Some(plain.to_string()), "{plain}");
+            assert_eq!(
+                fold_topic(plain).map(|f| f.1),
+                Some(TopicForm::Literal),
+                "{plain}"
+            );
+        }
+        assert_eq!(normalise_topic("  'orders', "), Some("orders".to_string()));
+        // Trimmed exactly ONCE, as before A2.6: a second pass would strip the
+        // `)` that the first pass exposed and silently rename an existing node.
+        assert_eq!(normalise_topic("x) \""), Some("x)".to_string()));
+    }
+
+    #[test]
+    fn cloud_identities_fold_to_the_name() {
+        let cases = [
+            (
+                "https://sqs.us-east-1.amazonaws.com/123456789012/orders",
+                "orders",
+                TopicForm::Url,
+            ),
+            (
+                "http://localhost:4566/000000000000/orders",
+                "orders",
+                TopicForm::Url,
+            ),
+            (
+                "https://sqs.us-east-1.amazonaws.com/1/orders.fifo?x=1#f",
+                "orders.fifo",
+                TopicForm::Url,
+            ),
+            (
+                "https://sqs.us-east-1.amazonaws.com/1/orders/",
+                "orders",
+                TopicForm::Url,
+            ),
+            (
+                "arn:aws:sns:us-east-1:123456789012:orders",
+                "orders",
+                TopicForm::Arn,
+            ),
+            (
+                "arn:aws-cn:sqs:cn-north-1:123456789012:orders.fifo",
+                "orders.fifo",
+                TopicForm::Arn,
+            ),
+            (
+                "projects/my-project/topics/orders",
+                "orders",
+                TopicForm::Path,
+            ),
+            (
+                "projects/my-project/subscriptions/orders-worker",
+                "orders-worker",
+                TopicForm::Path,
+            ),
+        ];
+        for (raw, name, form) in cases {
+            assert_eq!(fold_topic(raw), Some((name.to_string(), form)), "{raw}");
+        }
+        // A URL and an ARN for the same queue share one join key.
+        assert_eq!(
+            normalise_topic("https://sqs.us-east-1.amazonaws.com/123456789012/orders"),
+            normalise_topic("arn:aws:sqs:us-east-1:123456789012:orders"),
+        );
+    }
+
+    #[test]
+    fn a_cloud_shape_without_a_name_is_rejected() {
+        for raw in [
+            "https://sqs.us-east-1.amazonaws.com",
+            "https://sqs.us-east-1.amazonaws.com/",
+            "arn:aws:sns:us-east-1:123456789012:",
+            "https://sqs.us-east-1.amazonaws.com/1/${QUEUE}",
+            "https://sqs.us-east-1.amazonaws.com/1/{queue}",
+            "projects/my-project/topics/{topic}",
+        ] {
+            assert_eq!(normalise_topic(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn the_fold_runs_before_the_length_gate() {
+        let host = "h".repeat(MAX_TOPIC_LEN);
+        let url = format!("https://{host}.example.com/123/orders");
+        assert!(url.len() > MAX_TOPIC_LEN);
+        assert_eq!(normalise_topic(&url), Some("orders".to_string()));
+    }
+
+    #[test]
+    fn scan_reports_the_form_it_folded() {
+        let src = r#"sqs.send_message(QueueUrl="https://sqs.us-east-1.amazonaws.com/1/orders")"#;
+        let hit = scan(src, ".send_message(", TopicRule::Keyed(&["queueurl"])).remove(0);
+        assert_eq!(hit.topic.as_deref(), Some("orders"));
+        assert_eq!(hit.form, TopicForm::Url);
+        let plain = scan(
+            r#"nc.Publish("orders", a)"#,
+            "nc.Publish",
+            TopicRule::ArgLiteral,
+        )
+        .remove(0);
+        assert_eq!(plain.form, TopicForm::Literal);
+    }
+
+    #[test]
+    fn keyed_reads_a_builder_method_only_after_a_dot() {
+        let src =
+            r#"sendMessage(SendMessageRequest.builder().queueUrl("https://sqs/1/orders").build())"#;
+        assert_eq!(
+            one(src, "sendMessage(", TopicRule::Keyed(&["queueurl"])),
+            Some("orders".into())
+        );
+        // A bare call is not a key/value pair.
+        let bare = r#"send(topic("orders"))"#;
+        assert_eq!(one(bare, "send(", TopicRule::Keyed(&["topic"])), None);
+    }
+
+    #[test]
+    fn keyed_steps_over_a_string_prefix() {
+        let py = r#"send_message(QueueUrl=f"https://sqs.{region}.amazonaws.com/{acct}/orders")"#;
+        assert_eq!(
+            one(py, "send_message(", TopicRule::Keyed(&["queueurl"])),
+            Some("orders".into())
+        );
+        let cs = r#"SendMessageAsync(new SendMessageRequest { QueueUrl = $"https://sqs/{acct}/orders" })"#;
+        assert_eq!(
+            one(cs, "SendMessageAsync(", TopicRule::Keyed(&["queueurl"])),
+            Some("orders".into())
+        );
+        // A bare identifier value is still not a literal.
+        let var = r#"send_message(QueueUrl=f, Body="x")"#;
+        assert_eq!(
+            one(var, "send_message(", TopicRule::Keyed(&["queueurl"])),
+            None
+        );
     }
 }

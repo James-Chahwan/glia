@@ -1,0 +1,19 @@
+{
+  "framework": "xcut-queue-cloud-pubsub",
+  "language": "typescript",
+  "dirs": ["publisher", "subscriber"],
+  "mechanism": "pubsub",
+  "cells": ["typescript/pubsub"],
+  "note": "Node-only by design: a Pub/Sub subscription name is not the topic name, so producer->consumer pairing needs the IaC binding, which is declared as a QUEUE_FLOWS COVERAGE_CAVEATS row (engine/src/coverage.rs) instead of being faked. The matrix therefore caps this cell at partial (no routing expected), the honest level. Baseline 2026-09-17 (installed wheel = HEAD 2cc066d, before A2.6): nodes 0/2, zero queue nodes.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "pubsub.topic('orders') names the TOPIC"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders-worker", "note": "pubsub.subscription('orders-worker') names a SUBSCRIPTION, not the topic"}
+  ],
+  "expect_edges": [],
+  "forbid": [
+    {"from": "queue_producer:orders", "to": "queue_consumer:orders-worker", "category": "QUEUE_FLOWS", "note": "the topic and the subscription are different names; pairing them would be a guess"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders-worker", "note": "the subscriber file never names a topic; `.subscription(` is a consumer needle only"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:pubsub", "note": "the topic IS named; no coverage sentinel may stand beside it"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:pubsub", "note": "the subscription IS named; no coverage sentinel may stand beside it"}
+  ]
+}
