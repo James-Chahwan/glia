@@ -1,0 +1,918 @@
+{
+  "engine": "0.4.18",
+  "fixtures": 126,
+  "recall": {
+    "angular-http-calls": {
+      "framework": "angular",
+      "language": "typescript+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "angular-imports": {
+      "framework": "angular",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "angular-injects": {
+      "framework": "angular",
+      "language": "typescript",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
+    "arch-monorepo-flows": {
+      "framework": "arch-monorepo-flows",
+      "language": "typescript+go+proto",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "GRAPHQL_CALLS": 1.0,
+        "GRPC_CALLS": 1.0,
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "arch-monorepo-http": {
+      "framework": "arch-monorepo-http",
+      "language": "typescript+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "c_cpp-calls": {
+      "framework": "c_cpp-calls",
+      "language": "c++",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "c_cpp-imports": {
+      "framework": "c_cpp-imports",
+      "language": "c++",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "clojure-calls": {
+      "framework": "clojure-calls",
+      "language": "clojure",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "clojure-imports": {
+      "framework": "clojure-imports",
+      "language": "clojure",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "contract-openapi-yaml": {
+      "framework": "contract-openapi-yaml",
+      "language": "yaml+python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "csharp-aspnet": {
+      "framework": "csharp-aspnet",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "IMPLEMENTS": 1.0,
+        "IMPORTS": 1.0,
+        "INJECTS": 1.0
+      }
+    },
+    "csharp-aspnet-composed": {
+      "framework": "csharp-aspnet-composed",
+      "language": "csharp",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-httpclient-http": {
+      "framework": "csharp-httpclient-http",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-kafka-msgtype": {
+      "framework": "csharp-kafka-msgtype",
+      "language": "csharp",
+      "per_category": {}
+    },
+    "csharp-minimal-api": {
+      "framework": "csharp-minimal-api",
+      "language": "csharp",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-refit-http": {
+      "framework": "csharp-refit-http",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "dart-http-dio": {
+      "framework": "dart-http-dio",
+      "language": "dart",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "dart-imports": {
+      "framework": "dart-imports",
+      "language": "dart",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "elixir-http": {
+      "framework": "elixir-http",
+      "language": "elixir",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "elixir-phoenix-calls": {
+      "framework": "elixir-phoenix",
+      "language": "elixir",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "elixir-phoenix-handled_by": {
+      "framework": "elixir-phoenix",
+      "language": "elixir",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "elixir-phoenix-imports": {
+      "framework": "elixir-phoenix",
+      "language": "elixir",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "elixir-xmodule-calls": {
+      "framework": "elixir-xmodule",
+      "language": "elixir",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "go-accesses-data": {
+      "framework": "go-accesses-data",
+      "language": "go",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-calls": {
+      "framework": "go-calls",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "go-handled-by": {
+      "framework": "go-handled-by",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "go-imports": {
+      "framework": "go-imports",
+      "language": "go",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "go-wire-di": {
+      "framework": "go-wire-di",
+      "language": "go",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
+    "http-any-method": {
+      "framework": "http-any-method",
+      "language": "typescript+ruby",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "http-base-prefix": {
+      "framework": "http-base-prefix",
+      "language": "typescript+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "http-dart-nav-precision": {
+      "framework": "http-dart-nav-precision",
+      "language": "dart",
+      "per_category": {}
+    },
+    "http-nav-route-precision": {
+      "framework": "http-nav-route-precision",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "http-placeholder-fold": {
+      "framework": "http-placeholder-fold",
+      "language": "typescript+python",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "java-spring-accessdata": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "java-spring-calls": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "java-spring-composed": {
+      "framework": "java-spring-composed",
+      "language": "java",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "java-spring-handled": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "java-spring-http": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "java-spring-imports": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "java-spring-inherits": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "java-spring-injects": {
+      "framework": "java-spring",
+      "language": "java",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
+    "k8s-multidoc-cron": {
+      "framework": "k8s-multidoc-cron",
+      "language": "yaml",
+      "per_category": {
+        "SCHEDULES": 1.0
+      }
+    },
+    "php-http": {
+      "framework": "php-http",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "php-laravel-calls": {
+      "framework": "php-laravel",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "php-laravel-handled_by": {
+      "framework": "php-laravel",
+      "language": "php",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "php-laravel-prefix": {
+      "framework": "php-laravel-prefix",
+      "language": "php",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "php-symfony-composed": {
+      "framework": "php-symfony-composed",
+      "language": "php",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "py-accesses-data": {
+      "framework": "py-accesses-data",
+      "language": "python",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "py-calls": {
+      "framework": "py-calls",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "py-flask-handled": {
+      "framework": "py-flask-handled",
+      "language": "python",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "py-http": {
+      "framework": "py-http",
+      "language": "python",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "py-imports": {
+      "framework": "py-imports",
+      "language": "python",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "py-inherits": {
+      "framework": "py-inherits",
+      "language": "python",
+      "per_category": {
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "py-router-prefix": {
+      "framework": "py-router-prefix",
+      "language": "python",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "py-tests": {
+      "framework": "py-tests",
+      "language": "python",
+      "per_category": {
+        "TESTS": 1.0
+      }
+    },
+    "react-hook": {
+      "framework": "react-hook",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "react-http_calls": {
+      "framework": "react-http_calls",
+      "language": "typescript+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "react-imports": {
+      "framework": "react-imports",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "ruby-http": {
+      "framework": "ruby-http",
+      "language": "ruby",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "ruby-rails-accesses_data": {
+      "framework": "ruby-rails",
+      "language": "ruby",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
+    "ruby-rails-calls": {
+      "framework": "ruby-rails",
+      "language": "ruby",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "ruby-rails-handled_by": {
+      "framework": "ruby-rails",
+      "language": "ruby",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "ruby-rails-imports": {
+      "framework": "ruby-rails",
+      "language": "ruby",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "ruby-rails-scope": {
+      "framework": "ruby-rails-scope",
+      "language": "ruby",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "rust-axum-calls": {
+      "framework": "rust-axum",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "rust-axum-handled_by": {
+      "framework": "rust-axum",
+      "language": "rust",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
+    "rust-axum-imports": {
+      "framework": "rust-axum",
+      "language": "rust",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "rust-http": {
+      "framework": "rust-http",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "scala-calls": {
+      "framework": "scala-calls",
+      "language": "scala",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "scala-di": {
+      "framework": "scala-di",
+      "language": "scala",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
+    "scala-http": {
+      "framework": "scala-http",
+      "language": "scala",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "scala-imports": {
+      "framework": "scala-imports",
+      "language": "scala",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "scala-inherits_from": {
+      "framework": "scala-inherits_from",
+      "language": "scala",
+      "per_category": {
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "solidity-calls": {
+      "framework": "solidity-calls",
+      "language": "solidity",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "solidity-event_flows": {
+      "framework": "solidity-event_flows",
+      "language": "solidity",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
+    "solidity-inherits_from": {
+      "framework": "solidity-inherits_from",
+      "language": "solidity",
+      "per_category": {
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "solidity-state_var": {
+      "framework": "solidity-state_var",
+      "language": "solidity",
+      "per_category": {}
+    },
+    "swift-calls": {
+      "framework": "swift-calls",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "swift-http": {
+      "framework": "swift-http",
+      "language": "swift",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "swift-imports": {
+      "framework": "swift-imports",
+      "language": "swift",
+      "per_category": {}
+    },
+    "terraform-depends_on": {
+      "framework": "terraform",
+      "language": "terraform",
+      "per_category": {
+        "DEPENDS_ON": 1.0
+      }
+    },
+    "terraform-infra_references": {
+      "framework": "terraform",
+      "language": "terraform",
+      "per_category": {
+        "INFRA_REFERENCES": 1.0
+      }
+    },
+    "ts-angular-di": {
+      "framework": "ts-angular-di",
+      "language": "typescript",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
+    "ts-calls": {
+      "framework": "ts-calls",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "ts-http-fetch": {
+      "framework": "ts-http-fetch",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "ts-imports": {
+      "framework": "ts-imports",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "ts-imports-rel": {
+      "framework": "ts-imports-rel",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "ts-tests": {
+      "framework": "ts-tests",
+      "language": "typescript",
+      "per_category": {
+        "TESTS": 1.0
+      }
+    },
+    "vue-http-calls": {
+      "framework": "vue-http-calls",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "vue-imports": {
+      "framework": "vue-imports",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "walk-dotnet-obj": {
+      "framework": "walk-dotnet-obj",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "walk-gitignore-semantics": {
+      "framework": "walk-gitignore-semantics",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "walk-nested-submodule": {
+      "framework": "walk-nested-submodule",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "xcut-config-env-value": {
+      "framework": "xcut-config-env-value",
+      "language": "yaml",
+      "per_category": {
+        "DEFINES_CONFIG": 1.0,
+        "READS_CONFIG": 1.0
+      }
+    },
+    "xcut-eventbus-event_flows": {
+      "framework": "xcut-eventbus",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
+    "xcut-eventbus-spring": {
+      "framework": "xcut-eventbus-spring",
+      "language": "java",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
+    "xcut-graphql-graphql_calls": {
+      "framework": "xcut-graphql",
+      "language": "typescript",
+      "per_category": {
+        "GRAPHQL_CALLS": 1.0
+      }
+    },
+    "xcut-graphql-precision": {
+      "framework": "xcut-graphql-precision",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "xcut-grpc-csharp": {
+      "framework": "xcut-grpc-csharp",
+      "language": "proto+csharp",
+      "per_category": {
+        "DEFINES": 1.0,
+        "GRPC_CALLS": 1.0,
+        "HANDLED_BY": 0.0,
+        "USES": 0.0
+      }
+    },
+    "xcut-grpc-grpc_calls": {
+      "framework": "xcut-grpc",
+      "language": "proto+go",
+      "per_category": {
+        "GRPC_CALLS": 1.0
+      }
+    },
+    "xcut-grpc-package-collision": {
+      "framework": "xcut-grpc-package-collision",
+      "language": "proto+go",
+      "per_category": {
+        "GRPC_CALLS": 1.0
+      }
+    },
+    "xcut-queue-annot-listener": {
+      "framework": "xcut-queue-annot-listener",
+      "language": "java",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-cloud-pubsub": {
+      "framework": "xcut-queue-cloud-pubsub",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "xcut-queue-cloud-sqs": {
+      "framework": "xcut-queue-cloud-sqs",
+      "language": "python",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-csharp-kafka": {
+      "framework": "xcut-queue-csharp-kafka",
+      "language": "csharp",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-go-segmentio": {
+      "framework": "xcut-queue-go-segmentio",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-java-spring": {
+      "framework": "xcut-queue-java-spring",
+      "language": "java",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-msgtype-go": {
+      "framework": "xcut-queue-msgtype",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-multi-topic": {
+      "framework": "xcut-queue-multi-topic",
+      "language": "typescript",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-nest-processor": {
+      "framework": "xcut-queue-nest-processor",
+      "language": "typescript",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-py-celery": {
+      "framework": "xcut-queue-py-celery",
+      "language": "python",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-queue_flows": {
+      "framework": "xcut-queue",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-queue_flows-probe": {
+      "framework": "xcut-queue-probe",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-rb-sidekiq": {
+      "framework": "xcut-queue-rb-sidekiq",
+      "language": "ruby",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-redis-pubsub": {
+      "framework": "xcut-queue-redis-pubsub",
+      "language": "python",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-same-topic-two-files": {
+      "framework": "xcut-queue-same-topic-two-files",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-tag-unpairable": {
+      "framework": "xcut-queue-tag-unpairable",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "xcut-queue-wildcard": {
+      "framework": "xcut-queue-wildcard",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-trpc": {
+      "framework": "xcut-trpc",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "xcut-websocket-precision": {
+      "framework": "xcut-websocket-precision",
+      "language": "typescript+go",
+      "per_category": {}
+    },
+    "xcut-websocket-ws_connects": {
+      "framework": "xcut-websocket",
+      "language": "typescript+go",
+      "per_category": {
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "xdata-source-shares": {
+      "framework": "xdata-source-shares",
+      "language": "python+typescript",
+      "per_category": {
+        "SHARES_DATA_SOURCE": 1.0
+      }
+    },
+    "xiac-terraform-k8s": {
+      "framework": "xiac-terraform-k8s",
+      "language": "terraform+yaml",
+      "per_category": {
+        "SHARES_INFRA_REF": 1.0
+      }
+    },
+    "xschema-csharp-namespace": {
+      "framework": "xschema-csharp-namespace",
+      "language": "csharp",
+      "per_category": {
+        "SHARES_SCHEMA": 1.0
+      }
+    },
+    "xstack-go-http": {
+      "framework": "xstack-go-http",
+      "language": "go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "xstack-ts-go-http": {
+      "framework": "xstack-ts-go-http",
+      "language": "typescript+go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    }
+  },
+  "schema": "substrate-gap-legacy/1",
+  "summary": {
+    "blind_spots": [
+      "xcut-grpc-csharp: HANDLED_BY",
+      "xcut-grpc-csharp: USES"
+    ],
+    "forbid_violations": [],
+    "grader_errors": [],
+    "missing_cells": [
+      "arch-monorepo-flows: POSITION on WS_CLIENT 'ws_client:/ws'",
+      "arch-monorepo-flows: POSITION on WS_HANDLER 'ws:ws'",
+      "arch-monorepo-flows: POSITION on GRAPHQL_OPERATION 'graphql_op:getUser'",
+      "arch-monorepo-flows: POSITION on GRAPHQL_RESOLVER 'graphql_resolver:getUser'",
+      "arch-monorepo-flows: POSITION on GRPC_CLIENT 'grpc_client:UserService'",
+      "arch-monorepo-flows: POSITION on EVENT_EMITTER 'event_emit:orderPlaced'",
+      "arch-monorepo-flows: POSITION on EVENT_HANDLER 'event_handle:orderPlaced'"
+    ],
+    "missing_nodes": [
+      "xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'"
+    ],
+    "partial_cells": []
+  },
+  "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
+}

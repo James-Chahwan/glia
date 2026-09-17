@@ -15,6 +15,8 @@ is a confirmed blind spot.
 ```bash
 cd bench/substrate-gap
 python3 run.py                    # grade every fixture, print the matrix, append results.jsonl
+python3 run.py --no-log --check   # exit 1, naming each change, if legacy-latest.json is stale
+python3 run.py --no-log --emit    # rewrite the committed legacy-latest.json (clean tree only)
 python3 grade.py fixtures/<name>  # grade one fixture (verbose)
 python3 grade.py fixtures/<name> --dump   # + dump ALL emitted nodes/edges (author keys against reality)
 python3 incremental_check.py      # regrade every fixture through the parse cache; exit 1 if warm != cold
@@ -161,6 +163,21 @@ Under the matrix, `run.py` prints five totals. Each is a gate:
 `results.jsonl` is the append-only history — one record per `run.py`, tagged with
 engine version, so the map is diffable across sessions and after each P1 fix.
 A fix is proven when its cell flips `0.00 → 1.00` here (the fired_on marker).
+
+`results.jsonl` is gitignored and never leaves this machine. **The proof of record
+is the committed `legacy-latest.json`**: this runner's view — every fixture's
+per-category recall (keyed by fixture directory, so a `0.50` is visible even though
+only `0.00` reaches BLIND SPOTS) plus the five summary sections, line for line as
+stdout prints them. It is deterministic (no timestamp or build stamp, `sort_keys`)
+and written **only** by `--emit`, never by a plain run, so grading for a baseline
+never dirties the tree. `run.py --no-log --check` re-grades and exits 1 on any
+difference, one line per change (`recall.<fixture>.per_category.<CAT>: <committed>
+-> <measured>`; summary lines as `- <line>` only in the committed file, `+ <line>`
+only in the fresh run). Markers go to stderr: `[substrate-gap] wrote legacy-latest.json
+— …` and `[substrate-gap] check: OK|DRIFT …`. Emit from a tree whose `fixtures/`
+matches HEAD — an uncommitted fixture is graded like any other. The 16x30 language x
+mechanism grid is a different view with a different schema: `results-latest.json` +
+`COVERAGE.md`, owned by `matrix.py --emit/--check`. `test_run.py` pins the drift gate.
 
 ## Incremental transparency guard (`incremental_check.py`, A1.7)
 

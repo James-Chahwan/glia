@@ -8,7 +8,9 @@ emitted but wrong granularity/target), **blind** (0.0, no edge).
 (The count read 69 until 2026-09-16; the commit that added this file carried 71
 `fixtures/*/key.json`. This is a v1 SNAPSHOT and the corpus has grown a lot
 since — for the live, measured picture read `COVERAGE.md`, which is regenerated
-by `matrix.py --emit` and committed, not hand-counted.)
+by `matrix.py --emit` and committed, not hand-counted. `run.py`'s own view — every
+fixture's per-category recall and the blind-spot / missing-node / missing-cell lists —
+is committed as `legacy-latest.json`; `python3 run.py --no-log --check` re-verifies it.)
 
 The gaps are not isolated cells — they cluster into **9 systemic patterns**.
 Independently re-verified: Go IMPORTS, Scala CALLS, Java IMPORTS all confirmed
@@ -111,7 +113,9 @@ just Angular.
 **Tier 3 — correctness/granularity:** Patterns F, G, H, I remainder.
 
 Each fix is proven when its eval cell flips 0→1 in `results.jsonl` (fired_on
-marker); the full matrix is the regression guard. Rebuild the wheel — `cargo clean -p
+marker); the full matrix is the regression guard. `results.jsonl` is machine-local;
+the committed proof of record is `legacy-latest.json` (`run.py --no-log --emit`
+writes it, `--check` fails naming any cell that moved since). Rebuild the wheel — `cargo clean -p
 repo-graph-engine -p repo-graph-py && maturin build && pip install --force-reinstall
 target/wheels/<wheel>`. There is no venv on this machine, so the `develop` flow does
 not apply, and the `clean` is load-bearing — see the stale-`.so` warning in the
