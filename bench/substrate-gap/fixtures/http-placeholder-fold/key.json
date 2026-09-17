@@ -1,0 +1,20 @@
+{
+  "framework": "http-placeholder-fold",
+  "language": "typescript+python",
+  "dirs": ["client", "server"],
+  "note": "A3.2: Flask typed converters (<int:uid>, <path:subpath>) must fold to {} exactly as :id and {id} already do, so a TS template client pairs with them. Isolated from py-http so the HTTP_CALLS cell has a clean 0.00 baseline.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users/${…}", "note": "fetch(`/users/${id}`) -> template path"},
+    {"kind": "ENDPOINT", "name": "GET /files/${…}", "note": "fetch(`/files/${p}`) -> template path"},
+    {"kind": "ROUTE", "name": "GET /users/<int:uid>", "note": "flask int converter"},
+    {"kind": "ROUTE", "name": "GET /files/<path:subpath>", "note": "flask path converter"}
+  ],
+  "expect_edges": [
+    {"from": "/users/${…}", "to": "/users/<int:uid>", "category": "HTTP_CALLS", "note": "<int:…> must fold to {} like :id and {id} already do"},
+    {"from": "/files/${…}", "to": "/files/<path:subpath>", "category": "HTTP_CALLS", "note": "<path:…> likewise"}
+  ],
+  "forbid": [
+    {"from": "GET /users/${…}", "to": "GET /files/<path:subpath>", "category": "HTTP_CALLS", "note": "folding erases the parameter, never the literal segment before it: /users/{} and /files/{} stay distinct keys"},
+    {"from": "GET /files/${…}", "to": "GET /users/<int:uid>", "category": "HTTP_CALLS", "note": "the mirror cross-pairing"}
+  ]
+}

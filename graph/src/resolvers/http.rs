@@ -52,6 +52,7 @@ impl CrossGraphResolver for HttpStackResolver {
                     continue;
                 }
                 stats.endpoints += 1;
+                stats.count_folds(raw_path);
                 let norm = normalise_http_path(raw_path);
                 for (target, tier) in
                     lookup_route(&index, &stripped, &method, &norm, &prefixes)
@@ -74,6 +75,7 @@ impl CrossGraphResolver for HttpStackResolver {
             }
         }
         stats.report();
+        stats.report_placeholder_folds();
     }
 }
 
@@ -145,9 +147,23 @@ struct HttpMatchStats {
     rprefix: usize,
     base: usize,
     suffix: usize,
+    /// A3.2: path SEGMENTS (route and endpoint side alike) folded to `{}` by a
+    /// shape `normalise_segment` did not recognise before A3.2.
+    folds_angle: usize,
+    folds_splat: usize,
+    folds_bracket: usize,
 }
 
 impl HttpMatchStats {
+    /// Count the A3.2 folds in one raw path, BEFORE normalisation — once the
+    /// path is normalised every placeholder reads `{}` and the shape is gone.
+    fn count_folds(&mut self, raw_path: &str) {
+        let (angle, splat, bracket) = new_fold_kinds(raw_path);
+        self.folds_angle += angle;
+        self.folds_splat += splat;
+        self.folds_bracket += bracket;
+    }
+
     fn record(&mut self, tier: MatchTier) {
         self.paired += 1;
         match tier {
@@ -188,6 +204,18 @@ impl HttpMatchStats {
             self.rprefix,
             self.base,
             self.suffix,
+        );
+    }
+
+    /// A3.2 fired_on marker. Printed only when a build folded at least one
+    /// `<…>` / `*name` / `[…]` segment, like the A3.4 line above.
+    fn report_placeholder_folds(&self) {
+        if self.folds_angle + self.folds_splat + self.folds_bracket == 0 {
+            return;
+        }
+        eprintln!(
+            "[http] placeholder folds: angle={} splat={} bracket={}",
+            self.folds_angle, self.folds_splat, self.folds_bracket,
         );
     }
 }
@@ -237,7 +265,11 @@ fn build_route_index(
                 route_id: n.id,
                 confidence: n.confidence,
             };
-            index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes);
+            if let Some(path) =
+                index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes)
+            {
+                stats.count_folds(path);
+            }
         }
     }
     (index, stripped)
@@ -332,14 +364,18 @@ fn is_nav_route(cells: &[Cell]) -> bool {
 /// Both shapes target the same downstream key space so HttpStackResolver sees
 /// all routes uniformly. Migrate the non-Go parsers to shape (1) when the
 /// other resolvers start needing per-path aggregation.
-fn index_route_node(
+///
+/// Returns the raw path the qname carried (once per node, however many
+/// methods it stacks), or `None` for a qname neither shape describes — the
+/// A3.2 fold counter reads it.
+fn index_route_node<'q>(
     index: &mut RouteIndex,
     stripped: &mut RouteIndex,
-    qname: &str,
+    qname: &'q str,
     cells: &[Cell],
     target: RouteTarget,
     prefixes: &[String],
-) {
+) -> Option<&'q str> {
     if let Some(path) = qname.strip_prefix("route:") {
         let norm = normalise_http_path(path);
         for cell in cells {
@@ -351,7 +387,7 @@ fn index_route_node(
             };
             push_route(index, stripped, &method, &norm, target, prefixes);
         }
-        return;
+        return Some(path);
     }
     // Legacy shape: "<METHOD> <path>". Split on the first space.
     if let Some((method, path)) = qname.split_once(' ')
@@ -359,7 +395,9 @@ fn index_route_node(
     {
         let norm = normalise_http_path(path);
         push_route(index, stripped, method, &norm, target, prefixes);
+        return Some(path);
     }
+    None
 }
 
 /// Register one (method, path) route into the exact index and, for each API
@@ -425,9 +463,14 @@ fn extract_method_field(json: &str) -> Option<&str> {
 /// Rules:
 /// - Leading slash normalised to exactly one.
 /// - Trailing slash stripped (except on the root).
-/// - Segment matching `:x`, `{x}`, `${…}` (tree-sitter substitution marker),
-///   or any segment containing `${` → `{}`.
+/// - A segment that is a parameter in any framework's syntax → `{}` (see
+///   `normalise_segment`): `:x`, `{x}`, any segment containing `${`, and since
+///   A3.2 `<x>` / `<int:x>`, a named splat `*x`, and `[x]` / `[...x]`.
 /// - Empty segments collapse (so `//foo` → `/foo`).
+///
+/// Route and endpoint paths both pass through here, so a fold applies
+/// identically on both sides of a match. It happens at index/lookup time only;
+/// no stored qname changes shape.
 pub fn normalise_http_path(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -445,15 +488,85 @@ pub fn normalise_http_path(raw: &str) -> String {
     format!("/{}", segs.join("/"))
 }
 
+/// Collapse one path segment to `{}` if it is a parameter in ANY framework's
+/// syntax. The three pre-A3.2 shapes are tested first and unchanged.
 fn normalise_segment(seg: &str) -> String {
-    if seg.starts_with(':')
-        || (seg.starts_with('{') && seg.ends_with('}'))
-        || seg.contains("${")
-    {
+    if is_classic_param(seg) || fold_kind(seg).is_some() {
         "{}".to_string()
     } else {
         seg.to_string()
     }
+}
+
+/// The pre-A3.2 parameter shapes: `:id` / `:id?` (Express, Rails, gin),
+/// `{id}` / `{id:int}` / `{path...}` (Spring, ASP.NET, chi, Go 1.22), and any
+/// segment holding a `${…}` template interpolation.
+fn is_classic_param(seg: &str) -> bool {
+    seg.starts_with(':') || (seg.starts_with('{') && seg.ends_with('}')) || seg.contains("${")
+}
+
+/// A parameter shape `normalise_segment` learned in A3.2. Kept apart from the
+/// classic shapes so the `[http] placeholder folds` marker counts only the
+/// folds A3.2 added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceholderFold {
+    /// `<uid>`, `<int:uid>`, `<path:sub>` — Flask/Werkzeug, Django, Rocket.
+    Angle,
+    /// `*path` — a NAMED splat (Rails, Express 5).
+    Splat,
+    /// `[id]`, `[...slug]`, `[[...slug]]` — Next.js, Nuxt, SvelteKit.
+    Bracket,
+}
+
+/// The sentinel the TS parser writes for a path it could not read. It is an
+/// unknown path, not a parameter: folding it would let an unreadable call pair
+/// with any single-segment `/{}` route. `resolve` skips it before normalising;
+/// this keeps `normalise_http_path` safe for a caller that does not.
+const UNRESOLVED_PATH: &str = "<unresolved>";
+
+/// Classify a segment as one of the A3.2 shapes, or `None`.
+///
+/// Deliberately conservative on `*`: a NAMED splat is a parameter, but a bare
+/// `*` or `**` is a catch-all (`app.get('*', h)` is everywhere in Express).
+/// Folding it to `{}` would pair every single-segment interpolated client call
+/// with that catch-all, so it stays literal and unpairable. The name must be an
+/// identifier, so a glob like `*.js` or `***` stays literal too.
+///
+/// The empty brackets `<>` and `[]` are literals, not parameters.
+fn fold_kind(seg: &str) -> Option<PlaceholderFold> {
+    if seg.len() > 2 && seg.starts_with('<') && seg.ends_with('>') && seg != UNRESOLVED_PATH {
+        return Some(PlaceholderFold::Angle);
+    }
+    if seg.len() > 2 && seg.starts_with('[') && seg.ends_with(']') {
+        return Some(PlaceholderFold::Bracket);
+    }
+    let name = seg.strip_prefix('*')?;
+    let mut chars = name.chars();
+    let starts_ident = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if starts_ident && chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Some(PlaceholderFold::Splat);
+    }
+    None
+}
+
+/// `(angle, splat, bracket)`: how many segments of `raw` fold to `{}` only
+/// because of A3.2. A segment a classic shape already folds is not counted.
+fn new_fold_kinds(raw: &str) -> (usize, usize, usize) {
+    let mut counts = (0, 0, 0);
+    // Same trim and split as `normalise_http_path`, so the counter sees exactly
+    // the segments the normaliser folds.
+    for seg in raw.trim().split('/').filter(|s| !s.is_empty()) {
+        if is_classic_param(seg) {
+            continue;
+        }
+        match fold_kind(seg) {
+            Some(PlaceholderFold::Angle) => counts.0 += 1,
+            Some(PlaceholderFold::Splat) => counts.1 += 1,
+            Some(PlaceholderFold::Bracket) => counts.2 += 1,
+            None => {}
+        }
+    }
+    counts
 }
 
 /// Default API mount prefixes stripped from either side of a path when
@@ -637,6 +750,110 @@ mod tests {
         assert_eq!(normalise_http_path("//double//slash"), "/double/slash");
         assert_eq!(normalise_http_path("/"), "/");
         assert_eq!(normalise_http_path(""), "/");
+
+        // A3.2 — Flask / Django / Rocket converters.
+        assert_eq!(normalise_http_path("/users/<int:uid>"), "/users/{}");
+        assert_eq!(normalise_http_path("/files/<path:sub>"), "/files/{}");
+        assert_eq!(normalise_http_path("/users/<uid>/posts"), "/users/{}/posts");
+        // A3.2 — Rails / Express 5 named splat.
+        assert_eq!(normalise_http_path("/files/*path"), "/files/{}");
+        assert_eq!(normalise_http_path("/files/*rest_of/edit"), "/files/{}/edit");
+        // A3.2 — Next.js / SvelteKit dynamic segments.
+        assert_eq!(normalise_http_path("/blog/[slug]"), "/blog/{}");
+        assert_eq!(normalise_http_path("/blog/[...slug]"), "/blog/{}");
+        assert_eq!(normalise_http_path("/docs/[[...slug]]"), "/docs/{}");
+        // Every spelling of one parameter lands on the same key.
+        for p in ["/u/:id", "/u/{id}", "/u/${…}", "/u/<int:id>", "/u/*id", "/u/[id]"] {
+            assert_eq!(normalise_http_path(p), "/u/{}", "{p}");
+        }
+    }
+
+    #[test]
+    fn normalise_http_path_keeps_catch_alls_and_non_params_literal() {
+        // A bare `*` / `**` is a catch-all, not a parameter: folding it would
+        // pair every single-segment interpolated call with it.
+        assert_eq!(normalise_http_path("/static/*"), "/static/*");
+        assert_eq!(normalise_http_path("/a/**"), "/a/**");
+        assert_eq!(normalise_http_path("*"), "/*");
+        // A splat's name must be an identifier: globs stay literal.
+        assert_eq!(normalise_http_path("/assets/*.js"), "/assets/*.js");
+        assert_eq!(normalise_http_path("/a/***"), "/a/***");
+        // Empty brackets are literals.
+        assert_eq!(normalise_http_path("/a/[]"), "/a/[]");
+        assert_eq!(normalise_http_path("/a/<>"), "/a/<>");
+        // A bracket that does not span the whole segment is not a parameter.
+        assert_eq!(normalise_http_path("/a/[id].json"), "/a/[id].json");
+        assert_eq!(normalise_http_path("/a/<id>.json"), "/a/<id>.json");
+        // The TS parser's unreadable-path sentinel is not a parameter.
+        assert_eq!(normalise_http_path("<unresolved>"), "/<unresolved>");
+    }
+
+    #[test]
+    fn new_fold_kinds_counts_only_the_a32_shapes() {
+        assert_eq!(new_fold_kinds("/users/<int:uid>"), (1, 0, 0));
+        assert_eq!(new_fold_kinds("/files/*path"), (0, 1, 0));
+        assert_eq!(new_fold_kinds("/blog/[...slug]/<id>"), (1, 0, 1));
+        // Classic shapes fold, but they are not A3.2's to count.
+        assert_eq!(new_fold_kinds("/u/:id/{pid}/${…}"), (0, 0, 0));
+        // Neither are the literals A3.2 deliberately leaves alone.
+        assert_eq!(new_fold_kinds("/static/*/**/[]/<unresolved>"), (0, 0, 0));
+        // The counter trims exactly as the normaliser does.
+        assert_eq!(new_fold_kinds("  /users/<uid>  "), (1, 0, 0));
+    }
+
+    /// A3.2 end to end through the resolver: a template client pairs with a
+    /// Flask converter route, a named splat and a Next.js segment, while a
+    /// bare Express catch-all stays unpaired.
+    #[test]
+    fn resolver_pairs_client_templates_with_folded_route_placeholders() {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_core::Node;
+
+        let r = crate::test_support::repo();
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        let mut add = |kind, qname: &str, cells: Vec<Cell>| {
+            let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
+            nav.record(id, qname, qname, kind, None);
+            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells });
+            id
+        };
+        let get = || vec![Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) }];
+        let flask = add(node_kind::ROUTE, "GET /users/<int:uid>", get());
+        let rails = add(node_kind::ROUTE, "GET /files/*path", get());
+        let next = add(node_kind::ROUTE, "GET /blog/[slug]", get());
+        let catch_all = add(node_kind::ROUTE, "GET /static/*", get());
+        let user_call = add(node_kind::ENDPOINT, "endpoint:GET:/users/${…}", vec![]);
+        let file_call = add(node_kind::ENDPOINT, "endpoint:GET:/files/${…}", vec![]);
+        let blog_call = add(node_kind::ENDPOINT, "endpoint:GET:/blog/${…}", vec![]);
+        let static_call = add(node_kind::ENDPOINT, "endpoint:GET:/static/${…}", vec![]);
+        let g = RepoGraph {
+            repo: r,
+            nodes,
+            edges: vec![],
+            symbols: Default::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let mut merged = MergedGraph::new(vec![g]);
+        HttpStackResolver.resolve(&mut merged);
+
+        let pairs: Vec<(NodeId, NodeId)> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| (e.from, e.to))
+            .collect();
+        let got: std::collections::HashSet<_> = pairs.iter().copied().collect();
+        let want: std::collections::HashSet<_> =
+            [(user_call, flask), (file_call, rails), (blog_call, next)].into_iter().collect();
+        // Exactly these three, once each: no cross-pairing between the folded
+        // keys, and nothing reaches the bare `*` catch-all.
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(got, want);
+        assert!(!pairs.iter().any(|(from, to)| *from == static_call || *to == catch_all));
     }
 
     #[test]

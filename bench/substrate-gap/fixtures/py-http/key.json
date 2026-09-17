@@ -12,6 +12,6 @@
     {"kind": "ROUTE", "name": "/users", "note": "flask route (server, control)"}
   ],
   "expect_edges": [
-    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: requests.post paired to flask POST /users (GET client hits /users/<int:uid>, a flask converter the resolver doesn't wildcard, so only POST pairs)"}
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "endpoint->route: requests.post paired to flask POST /users (the GET client's /users/<int:uid> pairing is proved by fixtures/http-placeholder-fold, A3.2)"}
   ]
 }
