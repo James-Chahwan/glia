@@ -34,8 +34,9 @@ pub use cache::{CacheStats, ParseCache};
 pub use repo_graph_stamp::{BUILD_STAMP, PARSER_STAMP, RELEASE, VERSION_LINE};
 
 pub use answers::{
-    BlastAnswer, LocatedNode, TraceHop, blast_radius_by_qname, cross_stack_trace,
-    entrypoint_reachable, governing_docs, locate_node, node_in_scope, resolve_signal_located,
+    BlastAnswer, LocatedNode, MessageContractRow, MessageContractSide, TraceHop,
+    blast_radius_by_qname, cross_stack_trace, entrypoint_reachable, governing_docs, locate_node,
+    message_contracts, node_in_scope, resolve_signal_located,
 };
 pub use build::{
     GenerateResult, generate_many, generate_many_incremental, generate_one,

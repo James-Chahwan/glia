@@ -3,10 +3,11 @@
 // so the CLI, pyo3/MCP, and future TUI/3d-viewer all share one implementation.
 // ============================================================================
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{CellPayload, Edge, NodeId};
+use repo_graph_code_domain::{cell_type, edge_category, node_kind};
+use repo_graph_code_extractors::queues::is_framework_tag;
+use repo_graph_core::{Cell, CellPayload, Edge, NodeId};
 use repo_graph_graph::{MergedGraph, Reach};
 
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
@@ -476,6 +477,386 @@ fn apply_scope<T>(
     out
 }
 
+// ============================================================================
+// A12.2 — `message_contracts`: every queue topic, both sides, located, with a
+// match / mismatch / unknown verdict on the payload type (A12.1's
+// MESSAGE_TYPE cell).
+//
+// Pairing is NOT re-derived here. A producer and a consumer are a pair exactly
+// when `QueueStackResolver` emitted a QUEUE_FLOWS edge between them, so the
+// report inherits every rule the resolver applies — the unpairable framework
+// tag (A2.3), the broker-family gate and the wildcard dialects (A2.7) — and
+// cannot disagree with what `trace` / `blast_radius` walk. Topics are the
+// queue qnames as the extractors minted them (A2.5 task identity, A2.6 folded
+// URL/ARN topics), stripped of their `queue_producer:` / `queue_consumer:`
+// prefix and nothing else.
+//
+// Every queue node the resolver left unpaired still gets ONE one-sided row.
+// That is the unpaired-topic signal, and it is what stops a framework-tag
+// topic fanning out into an N×M cross product: 3 tag producers + 4 tag
+// consumers are 7 rows, never 12.
+//
+// fired_on marker, one line per call that produced rows:
+//   `... 2>&1 | grep '^\[contracts\] topics='`
+// ============================================================================
+
+const PRODUCER_PREFIX: &str = "queue_producer:";
+const CONSUMER_PREFIX: &str = "queue_consumer:";
+
+const NOTE_TAG: &str = "topic is a framework tag, not a literal — no trustworthy pairing";
+const NOTE_NO_COUNTERPART: &str = "no counterpart for this topic";
+const NOTE_FAMILY_SPLIT: &str =
+    "a counterpart names this topic but the resolver did not pair them (broker family differs)";
+const NOTE_NO_PRODUCER_TYPE: &str = "producer side has no detectable message type";
+const NOTE_NO_CONSUMER_TYPE: &str = "consumer side has no detectable message type";
+const NOTE_NO_TYPES: &str = "neither side has a detectable message type";
+const NOTE_CONFLICT: &str =
+    "a side carries conflicting message types across its call sites — see types_seen";
+const NOTE_PRIMITIVE: &str =
+    "a side carries a primitive payload (a serialised body) — the types are not comparable";
+const NOTE_PRIMITIVE_MATCH: &str =
+    "both sides carry the same primitive payload — the real schema is serialised inside it";
+const NOTE_FILE_WINDOW: &str =
+    "a side's type was read from the whole file, not beside the call site";
+
+/// Payload type names that mean "serialised body", not "schema". A12.1 keeps
+/// them on purpose — by the Kafka `<Key, Value>` convention the last type
+/// argument IS the value type — so they are weighed here: a primitive never
+/// supports a `mismatch` (a `string` body is routinely decoded into a struct)
+/// and only ever a weak `match`. Heuristic; extend as fixtures accumulate.
+const PRIMITIVE_PAYLOADS: &[&str] = &[
+    "string", "String", "str", "Null", "Ignore", "byte", "bytes", "Bytes", "object", "Object",
+];
+
+fn is_primitive_payload(ty: &str) -> bool {
+    PRIMITIVE_PAYLOADS.contains(&ty)
+}
+
+/// One side of a message contract: the queue node, where it lives, and the
+/// payload type it says it carries.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MessageContractSide {
+    pub node_id: u64,
+    /// `RepoId.0`; `GenerateResult::repo_labels` maps it to a human label.
+    pub repo_id: u64,
+    pub qname: String,
+    /// The topic as THIS node names it. It differs from the row's `topic` only
+    /// for a wildcard subscriber (`orders.*`) the resolver matched by pattern.
+    pub topic: String,
+    /// Qualified name of the parent MODULE — the file the call site is in.
+    pub module: Option<String>,
+    /// The node's own POSITION (A2.8: first call site in the first file that
+    /// uses the topic), else the parent MODULE's.
+    pub file: Option<String>,
+    pub line: Option<i64>,
+    /// The best MESSAGE_TYPE `type`: beside-the-call-site before whole-file,
+    /// schema before primitive, then first-seen.
+    pub message_type: Option<String>,
+    /// The type as written (`pb.OrderCreated`).
+    pub message_type_raw: Option<String>,
+    /// `"generic"` | `"struct_literal"`.
+    pub form: Option<String>,
+    /// `"near"` | `"file"`.
+    pub window: Option<String>,
+    /// Every distinct `type` across the node's MESSAGE_TYPE cells, first-seen
+    /// order. A topic used from N files carries up to N cells.
+    pub types_seen: Vec<String>,
+    /// More than one distinct non-primitive type was read beside this node's
+    /// call sites (whole-file guesses count only when there is no near one).
+    pub conflicting: bool,
+}
+
+/// One row of the contract report.
+///
+/// `status` is `"match"`, `"mismatch"` or `"unknown"`. `confidence` is
+/// `"strong"` or `"weak"` for a verdict and `"none"` for `unknown`. `note` says
+/// why whenever the row is anything other than a strong verdict.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MessageContractRow {
+    pub topic: String,
+    pub topic_is_tag: bool,
+    /// The consumer subscribes by a wildcard pattern the resolver matched (A2.7).
+    pub pattern: bool,
+    pub producer: Option<MessageContractSide>,
+    pub consumer: Option<MessageContractSide>,
+    pub status: &'static str,
+    pub confidence: &'static str,
+    pub note: Option<&'static str>,
+}
+
+/// A queue node folded across every graph it appears in. One NodeId can sit in
+/// several per-language graphs of one repo — the id hashes repo + kind +
+/// qname, not language — and each copy carries its own files' cells.
+struct QueueNodeAcc<'a> {
+    producer: bool,
+    repo: u64,
+    qname: &'a str,
+    topic: &'a str,
+    parent: Option<NodeId>,
+    types: Vec<&'a Cell>,
+}
+
+/// One MESSAGE_TYPE cell, parsed. A cell that is not JSON or has no `type`
+/// parses to nothing — never a panic.
+struct ParsedType {
+    ty: String,
+    raw: Option<String>,
+    form: Option<String>,
+    window: Option<String>,
+}
+
+impl ParsedType {
+    fn near(&self) -> bool {
+        self.window.as_deref() == Some("near")
+    }
+}
+
+fn parse_message_type(c: &Cell) -> Option<ParsedType> {
+    let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+        return None;
+    };
+    let v = serde_json::from_str::<serde_json::Value>(s).ok()?;
+    let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(String::from);
+    Some(ParsedType {
+        ty: field("type").filter(|t| !t.is_empty())?,
+        raw: field("raw"),
+        form: field("form"),
+        window: field("window"),
+    })
+}
+
+fn collect_queue_nodes(merged: &MergedGraph) -> BTreeMap<u64, QueueNodeAcc<'_>> {
+    let mut out: BTreeMap<u64, QueueNodeAcc<'_>> = BTreeMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let (producer, prefix) = match g.nav.kind_by_id.get(&n.id) {
+                Some(k) if *k == node_kind::QUEUE_PRODUCER => (true, PRODUCER_PREFIX),
+                Some(k) if *k == node_kind::QUEUE_CONSUMER => (false, CONSUMER_PREFIX),
+                _ => continue,
+            };
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(topic) = qname.strip_prefix(prefix) else { continue };
+            let acc = out.entry(n.id.0).or_insert_with(|| QueueNodeAcc {
+                producer,
+                repo: n.repo.0,
+                qname,
+                topic,
+                parent: None,
+                types: Vec::new(),
+            });
+            if acc.parent.is_none() {
+                acc.parent = g.nav.parent_of.get(&n.id).copied();
+            }
+            acc.types
+                .extend(n.cells.iter().filter(|c| c.kind == cell_type::MESSAGE_TYPE));
+        }
+    }
+    out
+}
+
+fn contract_side(merged: &MergedGraph, id: u64, acc: &QueueNodeAcc<'_>) -> MessageContractSide {
+    let parsed: Vec<ParsedType> = acc.types.iter().filter_map(|c| parse_message_type(c)).collect();
+    // `min_by_key` keeps the FIRST of equal keys, so first-seen breaks ties.
+    let best = parsed
+        .iter()
+        .min_by_key(|t| (!t.near(), is_primitive_payload(&t.ty)));
+    let mut types_seen: Vec<String> = Vec::new();
+    for t in &parsed {
+        if !types_seen.contains(&t.ty) {
+            types_seen.push(t.ty.clone());
+        }
+    }
+    // Conflict is judged on the near reads when there are any: a whole-file
+    // guess is too weak to contradict a type read beside the call site.
+    let any_near = parsed.iter().any(ParsedType::near);
+    let mut schemas: Vec<&str> = Vec::new();
+    for t in parsed.iter().filter(|t| t.near() || !any_near) {
+        if !is_primitive_payload(&t.ty) && !schemas.contains(&t.ty.as_str()) {
+            schemas.push(&t.ty);
+        }
+    }
+
+    let (_, _, _, mut file, mut line) = locate_node(merged, NodeId(id));
+    if file.is_none()
+        && let Some(p) = acc.parent
+    {
+        (_, _, _, file, line) = locate_node(merged, p);
+    }
+    let module = acc
+        .parent
+        .and_then(|p| merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&p).cloned()));
+
+    MessageContractSide {
+        node_id: id,
+        repo_id: acc.repo,
+        qname: acc.qname.to_string(),
+        topic: acc.topic.to_string(),
+        module,
+        file,
+        line,
+        message_type: best.map(|t| t.ty.clone()),
+        message_type_raw: best.and_then(|t| t.raw.clone()),
+        form: best.and_then(|t| t.form.clone()),
+        window: best.and_then(|t| t.window.clone()),
+        types_seen,
+        conflicting: schemas.len() > 1,
+    }
+}
+
+/// `(status, confidence, note)` for one resolver-made pair.
+fn contract_verdict(
+    p: &MessageContractSide,
+    c: &MessageContractSide,
+) -> (&'static str, &'static str, Option<&'static str>) {
+    const UNKNOWN: (&str, &str) = ("unknown", "none");
+    let (pt, ct) = match (p.message_type.as_deref(), c.message_type.as_deref()) {
+        (Some(pt), Some(ct)) => (pt, ct),
+        (None, None) => return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_NO_TYPES)),
+        (None, Some(_)) => return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_NO_PRODUCER_TYPE)),
+        (Some(_), None) => return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_NO_CONSUMER_TYPE)),
+    };
+    if p.conflicting || c.conflicting {
+        return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_CONFLICT));
+    }
+    let primitive = is_primitive_payload(pt) || is_primitive_payload(ct);
+    let whole_file = p.window.as_deref() != Some("near") || c.window.as_deref() != Some("near");
+    if pt == ct {
+        let note = if primitive {
+            Some(NOTE_PRIMITIVE_MATCH)
+        } else {
+            whole_file.then_some(NOTE_FILE_WINDOW)
+        };
+        return ("match", if note.is_some() { "weak" } else { "strong" }, note);
+    }
+    if primitive {
+        return (UNKNOWN.0, UNKNOWN.1, Some(NOTE_PRIMITIVE));
+    }
+    let note = whole_file.then_some(NOTE_FILE_WINDOW);
+    ("mismatch", if whole_file { "weak" } else { "strong" }, note)
+}
+
+/// Every queue topic in `merged` as producer/consumer contract rows — one per
+/// resolver-made pair, plus one one-sided row per queue node the resolver left
+/// unpaired. Sorted by (topic, producer file/id, consumer file/id), so two
+/// calls over the same graph serialise byte-identically.
+///
+/// Read-only: no node, edge or cell is added or changed. A graph whose
+/// resolvers never ran has no QUEUE_FLOWS edges, so every row is one-sided.
+pub fn message_contracts(merged: &MergedGraph) -> Vec<MessageContractRow> {
+    let nodes = collect_queue_nodes(merged);
+    let is_tag_id = |id: &u64| nodes.get(id).is_some_and(|a| is_framework_tag(a.topic));
+    // A node folded from two graphs is walked twice by the resolver, so its
+    // edges can repeat: the set dedups them. Tags are refused even if some
+    // future resolver pairs them.
+    let pairs: BTreeSet<(u64, u64)> = merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+        .map(|e| (e.from.0, e.to.0))
+        .filter(|(f, t)| {
+            nodes.get(f).is_some_and(|a| a.producer)
+                && nodes.get(t).is_some_and(|a| !a.producer)
+                && !is_tag_id(f)
+                && !is_tag_id(t)
+        })
+        .collect();
+    let sides: BTreeMap<u64, MessageContractSide> = nodes
+        .iter()
+        .map(|(id, acc)| (*id, contract_side(merged, *id, acc)))
+        .collect();
+
+    let mut rows: Vec<MessageContractRow> = Vec::new();
+    let mut paired: BTreeSet<u64> = BTreeSet::new();
+    for (p, c) in &pairs {
+        let (Some(ps), Some(cs)) = (sides.get(p), sides.get(c)) else { continue };
+        paired.insert(*p);
+        paired.insert(*c);
+        let (status, confidence, note) = contract_verdict(ps, cs);
+        rows.push(MessageContractRow {
+            topic: ps.topic.clone(),
+            topic_is_tag: false,
+            pattern: ps.topic != cs.topic,
+            producer: Some(ps.clone()),
+            consumer: Some(cs.clone()),
+            status,
+            confidence,
+            note,
+        });
+    }
+
+    // Which directions name each topic, to tell "nobody on the other side"
+    // from "somebody the resolver refused" (the family gate).
+    let mut directions: HashMap<&str, (bool, bool)> = HashMap::new();
+    for acc in nodes.values() {
+        let d = directions.entry(acc.topic).or_default();
+        if acc.producer {
+            d.0 = true;
+        } else {
+            d.1 = true;
+        }
+    }
+    for (id, acc) in &nodes {
+        if paired.contains(id) {
+            continue;
+        }
+        let Some(side) = sides.get(id) else { continue };
+        let tag = is_framework_tag(acc.topic);
+        let note = if tag {
+            NOTE_TAG
+        } else {
+            let (has_p, has_c) = directions.get(acc.topic).copied().unwrap_or_default();
+            if (acc.producer && has_c) || (!acc.producer && has_p) {
+                NOTE_FAMILY_SPLIT
+            } else {
+                NOTE_NO_COUNTERPART
+            }
+        };
+        let (producer, consumer) = if acc.producer {
+            (Some(side.clone()), None)
+        } else {
+            (None, Some(side.clone()))
+        };
+        rows.push(MessageContractRow {
+            topic: acc.topic.to_string(),
+            topic_is_tag: tag,
+            pattern: false,
+            producer,
+            consumer,
+            status: "unknown",
+            confidence: "none",
+            note: Some(note),
+        });
+    }
+
+    fn side_key(s: &Option<MessageContractSide>) -> Option<(Option<&str>, u64)> {
+        s.as_ref().map(|s| (s.file.as_deref(), s.node_id))
+    }
+    rows.sort_by(|a, b| {
+        (a.topic.as_str(), side_key(&a.producer), side_key(&a.consumer)).cmp(&(
+            b.topic.as_str(),
+            side_key(&b.producer),
+            side_key(&b.consumer),
+        ))
+    });
+
+    if !rows.is_empty() {
+        let count = |s: &str| rows.iter().filter(|r| r.status == s).count();
+        let topics: BTreeSet<(&str, bool)> =
+            rows.iter().map(|r| (r.topic.as_str(), r.topic_is_tag)).collect();
+        let tag_topics = topics.iter().filter(|(_, tag)| *tag).count();
+        eprintln!(
+            "[contracts] topics={} match={} mismatch={} unknown={} literal={} tag={} rows={}",
+            topics.len(),
+            count("match"),
+            count("mismatch"),
+            count("unknown"),
+            topics.len() - tag_topics,
+            tag_topics,
+            rows.len()
+        );
+    }
+    rows
+}
+
 #[cfg(test)]
 mod locate_tests {
     use super::locate_node;
@@ -555,5 +936,192 @@ mod scope_tests {
         // An empty scope is "everything", not "nothing".
         assert!(in_scope("web/client.py", ""));
         assert!(in_scope("web/client.py", "/"));
+    }
+}
+
+#[cfg(test)]
+mod contracts_tests {
+    use super::{MessageContractSide, contract_side, contract_verdict, message_contracts};
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+
+    fn msg(ty: &str, window: &str) -> Cell {
+        Cell {
+            kind: cell_type::MESSAGE_TYPE,
+            payload: CellPayload::Json(format!(
+                r#"{{"type":"{ty}","raw":"pb.{ty}","form":"generic","window":"{window}"}}"#
+            )),
+        }
+    }
+
+    /// One queue node per `(kind, topic, cells)`, all in one repo, plus the
+    /// given producer→consumer QUEUE_FLOWS cross edges (by index).
+    fn graph(nodes: Vec<(bool, &str, Vec<Cell>)>, flows: &[(usize, usize)]) -> (MergedGraph, Vec<NodeId>) {
+        let repo = RepoId::from_canonical("test://contracts");
+        let mut nav = CodeNav::default();
+        let mut out = Vec::new();
+        let mut ids = Vec::new();
+        for (producer, topic, cells) in nodes {
+            let (kind, prefix) = if producer {
+                (node_kind::QUEUE_PRODUCER, "queue_producer:")
+            } else {
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:")
+            };
+            let qname = format!("{prefix}{topic}");
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
+            nav.record(id, topic, &qname, kind, None);
+            out.push(Node { id, repo, confidence: Confidence::Medium, cells });
+            ids.push(id);
+        }
+        let g = RepoGraph {
+            repo,
+            nodes: out,
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let mut merged = MergedGraph::new(vec![g]);
+        for (p, c) in flows {
+            merged.cross_edges.push(Edge {
+                from: ids[*p],
+                to: ids[*c],
+                category: edge_category::QUEUE_FLOWS,
+                confidence: Confidence::Medium,
+            });
+        }
+        (merged, ids)
+    }
+
+    fn side_of(merged: &MergedGraph, id: NodeId) -> MessageContractSide {
+        let nodes = super::collect_queue_nodes(merged);
+        contract_side(merged, id.0, &nodes[&id.0])
+    }
+
+    #[test]
+    fn whole_file_type_makes_the_verdict_weak() {
+        let (m, ids) = graph(
+            vec![
+                (true, "orders", vec![msg("OrderCreated", "file")]),
+                (false, "orders", vec![msg("OrderCreated", "near")]),
+            ],
+            &[(0, 1)],
+        );
+        let (p, c) = (side_of(&m, ids[0]), side_of(&m, ids[1]));
+        let (status, confidence, note) = contract_verdict(&p, &c);
+        assert_eq!((status, confidence), ("match", "weak"));
+        assert!(note.is_some_and(|n| n.contains("whole file")));
+    }
+
+    #[test]
+    fn near_type_beats_an_earlier_whole_file_and_primitive_read() {
+        let (m, ids) = graph(
+            vec![(
+                true,
+                "orders",
+                vec![msg("string", "near"), msg("Legacy", "file"), msg("OrderCreated", "near")],
+            )],
+            &[],
+        );
+        let s = side_of(&m, ids[0]);
+        assert_eq!(s.message_type.as_deref(), Some("OrderCreated"));
+        assert_eq!(s.types_seen, vec!["string", "Legacy", "OrderCreated"]);
+        // `Legacy` is a whole-file guess and `string` a primitive: neither
+        // contradicts the near schema read.
+        assert!(!s.conflicting);
+    }
+
+    #[test]
+    fn two_near_schema_types_are_a_conflict_not_a_verdict() {
+        let (m, _) = graph(
+            vec![
+                (true, "orders", vec![msg("OrderCreated", "near"), msg("OrderPlaced", "near")]),
+                (false, "orders", vec![msg("OrderCreated", "near")]),
+            ],
+            &[(0, 1)],
+        );
+        let rows = message_contracts(&m);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].producer.as_ref().unwrap().conflicting);
+        assert_eq!(rows[0].status, "unknown");
+        assert!(rows[0].note.is_some_and(|n| n.contains("conflicting")));
+    }
+
+    #[test]
+    fn malformed_payload_is_no_type_and_no_panic() {
+        let bad = Cell {
+            kind: cell_type::MESSAGE_TYPE,
+            payload: CellPayload::Json("{not json".into()),
+        };
+        let untyped = Cell {
+            kind: cell_type::MESSAGE_TYPE,
+            payload: CellPayload::Json(r#"{"raw":"x"}"#.into()),
+        };
+        let (m, ids) = graph(
+            vec![(true, "orders", vec![bad, untyped]), (false, "orders", vec![])],
+            &[(0, 1)],
+        );
+        let rows = message_contracts(&m);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].producer.as_ref().unwrap().message_type, None);
+        assert_eq!(rows[0].status, "unknown");
+        assert_eq!(rows[0].note, Some(super::NOTE_NO_TYPES));
+        assert_eq!(side_of(&m, ids[0]).types_seen, Vec::<String>::new());
+    }
+
+    /// Same topic, no QUEUE_FLOWS edge = the resolver refused the pair (the
+    /// family gate). The report must say so, not claim nobody is listening,
+    /// and must not pair them itself.
+    #[test]
+    fn unpaired_same_topic_is_named_as_a_family_split() {
+        let (m, _) = graph(
+            vec![
+                (true, "jobs", vec![msg("Job", "near")]),
+                (false, "jobs", vec![msg("Job", "near")]),
+            ],
+            &[],
+        );
+        let rows = message_contracts(&m);
+        assert_eq!(rows.len(), 2, "two one-sided rows, never a pair the resolver refused");
+        assert!(rows.iter().all(|r| r.status == "unknown"));
+        assert!(rows.iter().all(|r| r.note == Some(super::NOTE_FAMILY_SPLIT)));
+    }
+
+    /// A wildcard subscriber the resolver matched keeps its own pattern topic;
+    /// the row is keyed by the producer's concrete topic.
+    #[test]
+    fn pattern_pair_is_keyed_by_the_producer_topic() {
+        let (m, _) = graph(
+            vec![
+                (true, "orders.created", vec![msg("OrderCreated", "near")]),
+                (false, "orders.*", vec![msg("OrderCreated", "near")]),
+            ],
+            &[(0, 1)],
+        );
+        let rows = message_contracts(&m);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].topic, "orders.created");
+        assert!(rows[0].pattern);
+        assert_eq!(rows[0].consumer.as_ref().unwrap().topic, "orders.*");
+        assert_eq!((rows[0].status, rows[0].confidence), ("match", "strong"));
+    }
+
+    /// Belt and braces: even if an edge between two tags existed, the report
+    /// refuses to pair them.
+    #[test]
+    fn tag_edge_is_never_a_pair() {
+        let (m, _) = graph(
+            vec![
+                (true, "unresolved:kafka", vec![msg("A", "near")]),
+                (false, "unresolved:kafka", vec![msg("A", "near")]),
+            ],
+            &[(0, 1)],
+        );
+        let rows = message_contracts(&m);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.topic_is_tag && r.note == Some(super::NOTE_TAG)));
     }
 }
