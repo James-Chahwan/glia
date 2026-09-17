@@ -1,0 +1,46 @@
+{
+  "framework": "csharp-azure-servicebus",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "azure_sb",
+  "cells": [
+    "csharp/azure_sb"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "Azure.Messaging.ServiceBus `_client.CreateSender(\"orders\")` + `sender.SendMessageAsync(new ServiceBusMessage(payload))` -- the `CreateSender(` row (A2.6)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "Azure.Messaging.ServiceBus `_client.CreateProcessor(\"orders\", new ServiceBusProcessorOptions())` + `StartProcessingAsync()` -- the `CreateProcessor(` row"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:azureservicebus",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:azureservicebus",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: FULL via=queue (extract 2/2, literal 2/2, route 1/1, forbid 2/2). Unexpected against matrix_vocab.py's stale _GENERIC note ('no QueueFramework variant exists'); A2.6 (0bf34ba) added the AzureServiceBus rows. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

@@ -1,0 +1,41 @@
+{
+  "framework": "typescript-mqtt-js",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "mqtt",
+  "cells": [
+    "typescript/mqtt"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "sensors/temp",
+      "note": "mqtt.js `client.publish('sensors/temp', String(value))` -- no QueueFramework::Mqtt row at HEAD (the variant is pre-allocated; A2.9 adds the needle)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "sensors/temp",
+      "note": "mqtt.js `client.subscribe('sensors/temp')` inside `client.on('connect', ...)`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sensors/temp",
+      "to": "sensors/temp",
+      "category": "QUEUE_FLOWS",
+      "note": "publisher (server) -> subscriber (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "client.subscribe",
+      "note": "MEASURED VIOLATION: graphql.rs OPERATION_PATTERNS has an ungated `client.subscribe(`, so an mqtt.js subscriber mints a phantom graphql_op:client.subscribe. GRAPHQL_OPERATION is not one of this mechanism's kinds, so matrix.py does NOT charge this to the cell; grade.py still reports it"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: NONE via=eventbus (extract 0/2) -- the only messaging nodes are event_emit/event_handle:sensors/temp and their EVENT_FLOWS pair, plus the phantom GraphQL operation. `event_handle:connect` is NOT forbidden: the mqtt.js client is an EventEmitter and `connect` is its real lifecycle event. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

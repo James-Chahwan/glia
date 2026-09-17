@@ -1,0 +1,51 @@
+{
+  "framework": "java-spring-amqp",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "amqp",
+  "cells": [
+    "java/amqp"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "Spring AMQP `rabbitTemplate.convertAndSend(\"orders\", payload)` -- default exchange, routing key = queue name; the `Template.convertAndSend(` row (A2.2)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "Spring AMQP `@RabbitListener(queues = \"orders\")` -- no annotation row at HEAD (A2.4, wave 7, adds `@RabbitListener(`)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:publish",
+      "note": "MEASURED VIOLATION: eventbus.rs EMITTER_PATTERNS has an un-dotted, ungated `publish(` needle, so the method DECLARATION `public void publish(String payload)` matches; no quoted literal follows, so the event is named after the needle word. A method definition is not an emission. Scoped to this cell: every broker mechanism lists EVENT_* among its kinds"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:rabbitmq",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:rabbitmq",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: NONE (extract 1/2) -- the producer is found with its literal, the listener is not, so there is no flow. Also one forbid violation (event_emit:publish). This is A2.4's eval cell. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

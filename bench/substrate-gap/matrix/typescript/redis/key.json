@@ -1,0 +1,46 @@
+{
+  "framework": "typescript-ioredis-list",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "redis",
+  "cells": [
+    "typescript/redis"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "ioredis `redis.lpush('orders', payload)` -- RedisList, the list-as-queue shape (gate `redis` matches `ioredis`)"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "ioredis `redis.blpop('orders', 0)`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:redislist",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:redislist",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: FULL via=queue (extract 2/2, literal 2/2, route 1/1, forbid 2/2). Unexpected against the review's pessimism; the `.lpush(`/`.blpop(` rows are receiver-agnostic. This is the LIST shape; Redis PUBLISH/SUBSCRIBE is a different path (eventbus today, RedisPubSub after A2.9). The CACHE data_source:redis nodes are correct, not phantoms -- the unwritten scaffold already emitted them from the word `redis` in its banner. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

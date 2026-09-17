@@ -1,0 +1,46 @@
+{
+  "framework": "java-aws-sdk-v2-sqs",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "java/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "aws-sdk-java v2 `sqs.sendMessage(SendMessageRequest.builder().queueUrl(\"https://sqs...../orders\")...build())` -- the request is built INSIDE the call, so the `.sendMessage(` Keyed(queueurl) row reads it and the URL folds to `orders`"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "aws-sdk-java v2 `sqs.receiveMessage(request)` where `request` is a `ReceiveMessageRequest.builder().queueUrl(...)` built on the previous statement -- the AWS developer-guide shape"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:publish",
+      "note": "MEASURED VIOLATION: eventbus.rs EMITTER_PATTERNS has an un-dotted, ungated `publish(` needle, so the method DECLARATION `public void publish(String payload)` matches; no quoted literal follows, so the event is named after the needle word. A method definition is not an emission. Scoped to this cell: every broker mechanism lists EVENT_* among its kinds"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:sqs",
+      "note": "the producer names the queue URL inside its own call; a sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: PARTIAL -- extract 2/2, literal 1/2, route 0/1, forbid 1/2. The consumer is `queue_consumer:unresolved:sqs`: the Keyed rule reads only the call's own argument region, and the documented v2 receive idiom passes a request VARIABLE, so the URL a few lines above is never seen. The consumer sentinel is deliberately NOT forbidden -- it is the only consumer node and the literal assertion already charges the miss; forbidding it would count one defect twice. The cell reads via=eventbus only because sqs_sns resolves EVENT_* first and the phantom event_emit:publish is present; every node that satisfied an assertion is QUEUE_*. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

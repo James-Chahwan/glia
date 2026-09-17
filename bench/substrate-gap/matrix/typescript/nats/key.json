@@ -1,0 +1,56 @@
+{
+  "framework": "typescript-nats-js",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "nats",
+  "cells": [
+    "typescript/nats"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "nats.js `nc.publish('orders', sc.encode(payload))`"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "nats.js `const sub = nc.subscribe('orders')` + `for await (const m of sub)`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orders",
+      "note": "MEASURED VIOLATION: the generic `.subscribe(` handler needle double-emits the NATS subject as a Weak event. QUEUE_OWNED_PUBLISH suppresses the publish-side twin and has no subscribe-side counterpart (A2.9's target). Same violation as matrix/python/nats"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orders",
+      "note": "the publish-side twin, suppressed today by QUEUE_OWNED_PUBLISH -- kept as its regression gate"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:nats",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:nats",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: PARTIAL -- queue path full (extract 2/2, literal 2/2, route 1/1), forbid 3/4 (the event twin of the subscription). Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

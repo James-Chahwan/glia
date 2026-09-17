@@ -1,0 +1,56 @@
+{
+  "framework": "typescript-amqplib",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "amqp",
+  "cells": [
+    "typescript/amqp"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "amqplib `channel.publish('shop', 'orders', buf)` -- publish(exchange, routingKey, content). The `channel.publish` row is ArgLiteral over positional arg #0, which is the EXCHANGE, so the routing key is never read"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "amqplib `channel.consume('orders', cb)` -- the queue bound to exchange `shop` with routing key `orders`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:shop",
+      "note": "MEASURED VIOLATION: the exchange name read as the topic. An exchange is not a queue; this node pairs with nothing and the real flow is lost (C#'s `.BasicPublish(` row already reads ArgIndex(1), the routing key)"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:shop",
+      "note": "regression gate: `channel.publish(` is in eventbus.rs QUEUE_OWNED_PUBLISH, which is what suppresses the Weak event twin today"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:rabbitmq",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:rabbitmq",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: PARTIAL -- extract 2/2 (both kinds present), literal 1/2, route 0/1, forbid 3/4. The producer node exists but is named after the exchange. Default-exchange code (`channel.sendToQueue('orders', buf)`) has no needle at all and deserves its own variant fixture. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

@@ -1,0 +1,51 @@
+{
+  "framework": "typescript-bullmq",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "typescript/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "bullmq `new Queue('orders', ...)` -- for BullMQ the task identity that joins producer to worker is the QUEUE name; the job name passed to `queue.add` is dispatch metadata the worker receives as `job.name`"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "bullmq `new Worker('orders', processOrder, ...)` (gated on the `bullmq` import)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:process-order",
+      "note": "MEASURED VIOLATION: the `queue.add(` row is ArgLiteral, so the JOB name `queue.add('process-order', data)` is minted as a topic. No worker subscribes to a job name, so the node can never pair; the real identity is already carried by the `new Queue('orders')` node"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:bullmq",
+      "note": "the queue is named on both sides; a framework-tag sentinel would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:bullmq",
+      "note": "the queue is named on both sides; a framework-tag sentinel would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: PARTIAL -- queue path full (extract 2/2, literal 2/2, route 1/1), one forbid violation (the job name minted as a second producer topic). Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}

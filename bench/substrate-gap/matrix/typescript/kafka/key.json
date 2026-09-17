@@ -1,0 +1,51 @@
+{
+  "framework": "typescript-kafkajs",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "typescript/kafka"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders",
+      "note": "kafkajs `producer.send({ topic: 'orders', messages })` -- the OBJECT-argument form. Read by the `producer.send` KeyedOrArg(topic) row (A2.1); the spec's 'structurally unreadable by extract_first_string_literal' predates that scanner"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders",
+      "note": "kafkajs `consumer.subscribe({ topic: 'orders', fromBeginning: true })` -- the `consumer.subscribe` KeyedOrArg(topic) row"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired across the two repos by topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:subscribe",
+      "note": "MEASURED VIOLATION: eventbus.rs's ungated `.subscribe(` handler needle fires on the kafkajs call; the argument is an object, not a quoted literal, so the event is named after the METHOD. The NATS twin (event_handle:<subject>) is the same needle with a literal argument"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "both sides name the topic literally, so a topic-less framework-tag sentinel beside the real node would overstate the blind spot"
+    }
+  ],
+  "note": "A15.8 baseline 2026-09-17: PARTIAL -- queue path full (extract 2/2, literal 2/2, route 1/1), one forbid violation (the method-named event handler). Aggregates with fixtures/xcut-queue-multi-topic, which is full, so the cell drops full -> partial under the MIN rule. That drop is the finding, not a regression. Keyed on QUEUE_* + QUEUE_FLOWS like every A15.7 messaging cell, including the eventbus-first mechanisms (sqs_sns, azure_sb, redis, mqtt), so TypeScript/Java/C# read on the same scale as Python/Go and an EVENT_* key cannot flip to `none` when A2.9 moves broker pub/sub out of eventbus.rs. `via` still records the eventbus path when that is what fired. Measured against the installed wheel at HEAD bc42921."
+}
