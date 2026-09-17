@@ -7,7 +7,9 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{push_client_endpoint, ClientEndpoint};
+use repo_graph_code_domain::endpoint::{
+    normalise_client_path, push_client_endpoint_with_raw, ClientEndpoint,
+};
 
 pub fn parse_file(
     source: &str,
@@ -566,8 +568,11 @@ fn try_detect_dart_endpoint(
     let Some(sl) = first_descendant_of_kind(kids[2], "string_literal") else {
         return;
     };
-    let path = dart_string_path(sl, src);
-    if !path.starts_with('/') {
+    // A3.3: normalise BEFORE the guard, so `dio.post('https://api/users')`
+    // becomes `/users` instead of being dropped as "not a path".
+    let raw = dart_string_path(sl, src);
+    let (path, changed) = normalise_client_path(&raw);
+    if !is_dart_request_path(&path) {
         return; // not a request path (full-URL var, non-path first arg, etc.)
     }
     let pos = n.start_position();
@@ -579,15 +584,27 @@ fn try_detect_dart_endpoint(
         col: pos.column + 1,
         confidence: Confidence::Strong,
     };
-    push_client_endpoint(
+    push_client_endpoint_with_raw(
         repo,
         &ep,
+        changed.then_some(raw.as_str()),
         from,
         &mut acc.nodes,
         &mut acc.edges,
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
+}
+
+/// A normalised client path worth an ENDPOINT: absolute (`/users`), or an
+/// interpolated base followed by a path (`$baseUrl/users` → `${…}/users`),
+/// which the HTTP resolver's BaseFold tier pairs.
+///
+/// A path that is ONLY an interpolation (`'$url'` → `${…}`) is still rejected:
+/// it names a whole URL held in a variable, and it would normalise to `/{}`,
+/// which BaseFold folds to the root `/` — a guaranteed false pairing.
+fn is_dart_request_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with("${…}/")
 }
 
 fn is_http_client_receiver(name: &str) -> bool {
@@ -1038,5 +1055,81 @@ final app = Router()
         let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/things")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/things")));
+    }
+
+    fn endpoint_hit(fp: &FileParse, id: NodeId) -> Option<String> {
+        fp.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .find(|c| c.kind == cell_type::ENDPOINT_HIT)
+            .and_then(|c| match &c.payload {
+                CellPayload::Json(j) => Some(j.clone()),
+                _ => None,
+            })
+    }
+
+    /// A3.3 — an absolute-URL dio call used to be DROPPED (the path did not
+    /// start with `/`). It now normalises to its request path, keeps the
+    /// original literal as `raw`, and gets its CALLS edge; an interpolated base
+    /// survives for BaseFold, while a whole-URL variable is still rejected.
+    #[test]
+    fn absolute_url_dio_call_emits_endpoint() {
+        let source = r#"import 'package:dio/dio.dart';
+class ApiClient {
+  final Dio dio = Dio();
+  Future<void> createUser(Map body) async {
+    await dio.post('https://api.example.com/users', data: body);
+    await dio.get('$baseUrl/users/$id?expand=1');
+    await dio.get('$url');
+    await dio.delete('/users');
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/api_client.dart", "lib::api_client", repo()).unwrap();
+        let ep = |m: &str, p: &str| {
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, &format!("endpoint:{m}:{p}"))
+        };
+
+        let post = ep("POST", "/users");
+        let hit = endpoint_hit(&fp, post).expect("POST /users ENDPOINT from an absolute URL");
+        let v: serde_json::Value = serde_json::from_str(&hit).unwrap();
+        assert_eq!(v["path"], "/users");
+        assert_eq!(v["raw"], "https://api.example.com/users");
+        let method = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "lib::api_client::ApiClient::createUser",
+        );
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| e.from == method && e.to == post && e.category == edge_category::CALLS),
+            "expected CALLS createUser -> POST /users"
+        );
+        assert!(
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == ep("POST", "https://api.example.com/users")),
+            "the full URL must not become the endpoint qname"
+        );
+
+        // Interpolated base + query: base kept, query dropped, raw recorded.
+        let based = endpoint_hit(&fp, ep("GET", "${…}/users/${…}"))
+            .expect("interpolated-base endpoint must survive for BaseFold");
+        let v: serde_json::Value = serde_json::from_str(&based).unwrap();
+        assert_eq!(v["raw"], "${…}/users/${…}?expand=1");
+
+        // A whole-URL variable is not a request path.
+        assert!(!fp.nodes.iter().any(|n| n.id == ep("GET", "${…}")));
+
+        // An unchanged path carries no `raw`.
+        let plain = endpoint_hit(&fp, ep("DELETE", "/users")).expect("DELETE /users");
+        assert!(!plain.contains("\"raw\""), "unchanged path must not carry raw: {plain}");
+
+        // And no phantom server ROUTE for any of these client calls.
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users")));
     }
 }

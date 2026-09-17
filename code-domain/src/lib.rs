@@ -845,20 +845,27 @@ pub mod endpoint {
         out
     }
 
-    fn endpoint_hit_json(ep: &ClientEndpoint) -> String {
+    /// The ENDPOINT_HIT payload. `raw` is the call-site literal the path was
+    /// normalised from (A3.3), written LAST and only when present, so every
+    /// endpoint whose path was not rewritten keeps a byte-identical payload.
+    fn endpoint_hit_json(ep: &ClientEndpoint, raw: Option<&str>) -> String {
         let conf = match ep.confidence {
             Confidence::Strong => "strong",
             Confidence::Medium => "medium",
             Confidence::Weak => "weak",
         };
+        let raw = raw
+            .map(|r| format!(r#","raw":"{}""#, esc(r)))
+            .unwrap_or_default();
         format!(
-            r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"}}"#,
+            r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"{}}}"#,
             esc(&ep.method),
             esc(&ep.path),
             esc(&ep.file),
             ep.line,
             ep.col,
             conf,
+            raw,
         )
     }
 
@@ -982,6 +989,50 @@ pub mod endpoint {
         Some(after_host[..end].to_string())
     }
 
+    /// Request path for a CLIENT call literal, for parsers that reconstruct
+    /// interpolation themselves (TypeScript, Dart). Unlike [`url_to_path`] this
+    /// never returns None: it is a normaliser, not a filter, so no endpoint is
+    /// ever lost.
+    ///
+    /// ```text
+    /// https://api.x/users?a=1  -> /users        scheme+host+query dropped
+    /// /users?a=1#frag          -> /users        query+fragment dropped
+    /// ${…}/users               -> ${…}/users    interpolated base kept for the
+    ///                                           resolver's BaseFold tier
+    /// auth/login               -> auth/login    relative hint, untouched
+    /// <unresolved>             -> <unresolved>
+    /// ```
+    ///
+    /// Returns `(path, changed)` so the caller can record the original literal
+    /// as provenance (`"raw"` on ENDPOINT_HIT).
+    ///
+    /// The query is cut BEFORE the host is looked for, so a `://` that only
+    /// appears in a query value (`/login?next=https://x/y`) is never mistaken
+    /// for a scheme. A scheme also has to come before the first `/`, so a path
+    /// that embeds a URL (`/proxy/http://x/y`) is left alone. A literal that is
+    /// ONLY a query (`?page=2`) is returned unchanged rather than as `""`,
+    /// which `normalise_http_path` would read as the root route `/`.
+    pub fn normalise_client_path(raw: &str) -> (String, bool) {
+        if raw.is_empty() || raw == "<unresolved>" {
+            return (raw.to_string(), false);
+        }
+        let end = raw.find(['?', '#']).unwrap_or(raw.len());
+        let mut path = &raw[..end];
+        if let Some(i) = path.find("://")
+            && !path[..i].contains('/')
+        {
+            let rest = &path[i + 3..];
+            path = match rest.find('/') {
+                Some(j) => &rest[j..],
+                None => "/",
+            };
+        }
+        if path.is_empty() {
+            return (raw.to_string(), false);
+        }
+        (path.to_string(), path != raw)
+    }
+
     /// Stable ENDPOINT node id for a `(method, path)` — `endpoint:<METHOD>:<path>`,
     /// the qname convention `HttpStackResolver::parse_endpoint_qname` reads.
     pub fn endpoint_id(repo: RepoId, method: &str, path: &str) -> NodeId {
@@ -1002,6 +1053,29 @@ pub mod endpoint {
         nav: &mut CodeNav,
         seen: &mut HashSet<NodeId>,
     ) -> NodeId {
+        push_client_endpoint_with_raw(repo, ep, None, from, nodes, edges, nav, seen)
+    }
+
+    /// [`push_client_endpoint`] that also records `raw`, the call-site literal
+    /// `ep.path` was normalised from (see [`normalise_client_path`]), as a
+    /// `"raw"` field on the ENDPOINT_HIT payload. Pass `None` when the path was
+    /// not rewritten; the payload is then byte-identical to
+    /// `push_client_endpoint`'s.
+    ///
+    /// A separate entry point rather than a `ClientEndpoint` field so the
+    /// parsers that build `ClientEndpoint` literals do not all have to change
+    /// at once; a parser opts in by calling this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_client_endpoint_with_raw(
+        repo: RepoId,
+        ep: &ClientEndpoint,
+        raw: Option<&str>,
+        from: NodeId,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        nav: &mut CodeNav,
+        seen: &mut HashSet<NodeId>,
+    ) -> NodeId {
         let qname = format!("endpoint:{}:{}", ep.method, ep.path);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
         if seen.insert(id) {
@@ -1011,7 +1085,7 @@ pub mod endpoint {
                 confidence: ep.confidence,
                 cells: vec![Cell {
                     kind: cell_type::ENDPOINT_HIT,
-                    payload: CellPayload::Json(endpoint_hit_json(ep)),
+                    payload: CellPayload::Json(endpoint_hit_json(ep, raw)),
                 }],
             });
             let display = format!("{} {}", ep.method, ep.path);
@@ -1529,6 +1603,88 @@ mod tests {
         assert_eq!(endpoint::abs_path("api/"), "/api/");
         // Surrounding whitespace is trimmed.
         assert_eq!(endpoint::abs_path("  /api  "), "/api");
+    }
+
+    /// A3.3 — the client-path normaliser drops scheme+host and query+fragment
+    /// and NEVER deletes a path: everything it cannot improve comes back as-is.
+    #[test]
+    fn normalise_client_path_strips_host_and_query_only() {
+        let n = |s: &str| endpoint::normalise_client_path(s);
+        // Absolute URL: scheme + host + query all go.
+        assert_eq!(n("https://api.example.com/users?active=1"), ("/users".into(), true));
+        assert_eq!(n("http://api/users"), ("/users".into(), true));
+        // Bare host → the root path.
+        assert_eq!(n("https://api.example.com"), ("/".into(), true));
+        assert_eq!(n("https://api.example.com?x=1"), ("/".into(), true));
+        // Interpolated host / scheme is still a host.
+        assert_eq!(n("https://${…}/users/${…}"), ("/users/${…}".into(), true));
+        assert_eq!(n("${…}://${…}/users"), ("/users".into(), true));
+        // Query + fragment on a relative path.
+        assert_eq!(n("/users?a=1#frag"), ("/users".into(), true));
+        assert_eq!(n("/users#frag"), ("/users".into(), true));
+        assert_eq!(n("${…}/users?page=${…}"), ("${…}/users".into(), true));
+        // Untouched: already a path, an interpolated base, a relative hint.
+        assert_eq!(n("/users"), ("/users".into(), false));
+        assert_eq!(n("/users/${…}"), ("/users/${…}".into(), false));
+        assert_eq!(n("${…}/users"), ("${…}/users".into(), false));
+        assert_eq!(n("auth/login"), ("auth/login".into(), false));
+        assert_eq!(n("<unresolved>"), ("<unresolved>".into(), false));
+        assert_eq!(n(""), (String::new(), false));
+        // A `://` that is only in the query is not a scheme.
+        assert_eq!(
+            n("/login?next=https://x/y"),
+            ("/login".into(), true)
+        );
+        // A path that embeds a URL keeps it: the scheme must precede any `/`.
+        assert_eq!(n("/proxy/http://x/y"), ("/proxy/http://x/y".into(), false));
+        // A query-only literal is NOT turned into "" (which would read as `/`).
+        assert_eq!(n("?page=2"), ("?page=2".into(), false));
+        assert_eq!(n("#top"), ("#top".into(), false));
+    }
+
+    /// A3.3 — `raw` rides on ENDPOINT_HIT only when given; without it the
+    /// payload is byte-identical to the pre-A3.3 writer.
+    #[test]
+    fn endpoint_hit_carries_raw_only_when_given() {
+        use repo_graph_core::{Confidence, RepoId};
+        let ep = endpoint::ClientEndpoint {
+            method: "POST".into(),
+            path: "/users".into(),
+            file: "lib/api.dart".into(),
+            line: 3,
+            col: 5,
+            confidence: Confidence::Strong,
+        };
+        let from = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::METHOD, "m");
+        let payload = |raw: Option<&str>| {
+            let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+            let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+            endpoint::push_client_endpoint_with_raw(
+                RepoId(1), &ep, raw, from, &mut nodes, &mut edges, &mut nav, &mut seen,
+            );
+            match &nodes[0].cells[0].payload {
+                CellPayload::Json(j) => j.clone(),
+                _ => String::new(),
+            }
+        };
+        assert_eq!(
+            payload(None),
+            r#"{"method":"POST","path":"/users","file":"lib/api.dart","line":3,"col":5,"confidence":"strong"}"#
+        );
+        assert_eq!(
+            payload(Some("https://api.example.com/users")),
+            r#"{"method":"POST","path":"/users","file":"lib/api.dart","line":3,"col":5,"confidence":"strong","raw":"https://api.example.com/users"}"#
+        );
+        // The unchanged entry point is the `None` case exactly.
+        let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+        let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+        endpoint::push_client_endpoint(
+            RepoId(1), &ep, from, &mut nodes, &mut edges, &mut nav, &mut seen,
+        );
+        assert_eq!(
+            nodes[0].cells[0].payload,
+            CellPayload::Json(payload(None))
+        );
     }
 
     /// W0.3 — every reserved id decodes to its own name (the reservation is

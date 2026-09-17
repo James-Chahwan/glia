@@ -53,6 +53,7 @@ impl CrossGraphResolver for HttpStackResolver {
                 }
                 stats.endpoints += 1;
                 stats.count_folds(raw_path);
+                stats.count_client_normalised(&n.cells);
                 let norm = normalise_http_path(raw_path);
                 for (target, tier) in
                     lookup_route(&index, &stripped, &method, &norm, &prefixes)
@@ -76,6 +77,7 @@ impl CrossGraphResolver for HttpStackResolver {
         }
         stats.report();
         stats.report_placeholder_folds();
+        stats.report_client_normalised();
     }
 }
 
@@ -152,6 +154,11 @@ struct HttpMatchStats {
     folds_angle: usize,
     folds_splat: usize,
     folds_bracket: usize,
+    /// A3.3: ENDPOINT nodes whose path the client parser rewrote, split by
+    /// what the recorded `raw` literal held — a scheme+host, and/or a query or
+    /// fragment. One node can count in both.
+    normalised_host: usize,
+    normalised_query: usize,
 }
 
 impl HttpMatchStats {
@@ -162,6 +169,28 @@ impl HttpMatchStats {
         self.folds_angle += angle;
         self.folds_splat += splat;
         self.folds_bracket += bracket;
+    }
+
+    /// Count one ENDPOINT node toward the A3.3 marker. Graph build merges
+    /// repeated call sites into one node with stacked ENDPOINT_HIT cells, so a
+    /// node counts at most once per bucket however many of its cells carry a
+    /// `raw`.
+    fn count_client_normalised(&mut self, cells: &[Cell]) {
+        let (mut host, mut query) = (false, false);
+        for c in cells {
+            if c.kind != cell_type::ENDPOINT_HIT {
+                continue;
+            }
+            let CellPayload::Json(json) = &c.payload else {
+                continue;
+            };
+            if let Some(raw) = raw_field(json) {
+                host |= raw.contains("://");
+                query |= raw.contains(['?', '#']);
+            }
+        }
+        self.normalised_host += usize::from(host);
+        self.normalised_query += usize::from(query);
     }
 
     fn record(&mut self, tier: MatchTier) {
@@ -216,6 +245,19 @@ impl HttpMatchStats {
         eprintln!(
             "[http] placeholder folds: angle={} splat={} bracket={}",
             self.folds_angle, self.folds_splat, self.folds_bracket,
+        );
+    }
+
+    /// A3.3 fired_on marker. Printed only when a client parser actually
+    /// rewrote a request path (host and/or query stripped). The durable twin
+    /// of this line is the `"raw"` field on the ENDPOINT_HIT cell itself.
+    fn report_client_normalised(&self) {
+        if self.normalised_host + self.normalised_query == 0 {
+            return;
+        }
+        eprintln!(
+            "[http] client paths normalised: host={} query={}",
+            self.normalised_host, self.normalised_query,
         );
     }
 }
@@ -456,6 +498,27 @@ fn extract_method_field(json: &str) -> Option<&str> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(&rest[..end])
+}
+
+/// The still-escaped `raw` value of an ENDPOINT_HIT payload (A3.3), or None.
+///
+/// Both writers (`code_domain::endpoint` and the TS parser's serde_json) emit
+/// compact JSON, so the key is matched WITH its `:"` — inside any escaped
+/// value every `"` is preceded by `\`, so a path that is literally `raw`
+/// (`"path":"raw"`) cannot be mistaken for the key. The value ends at the first
+/// unescaped quote.
+fn raw_field(json: &str) -> Option<&str> {
+    const KEY: &str = "\"raw\":\"";
+    let rest = &json[json.find(KEY)? + KEY.len()..];
+    let mut escaped = false;
+    for (i, b) in rest.bytes().enumerate() {
+        match b {
+            b'\\' if !escaped => escaped = true,
+            b'"' if !escaped => return Some(&rest[..i]),
+            _ => escaped = false,
+        }
+    }
+    None
 }
 
 /// Collapse path param syntaxes into a stable form so a frontend endpoint's
@@ -1018,5 +1081,50 @@ mod tests {
         assert_eq!(extract_method_field(json), Some("POST"));
         let spaced = r#"{ "method" : "GET" , "line" : 0 }"#;
         assert_eq!(extract_method_field(spaced), Some("GET"));
+    }
+
+    /// A3.3 — `raw` is read only as a KEY, and to the first unescaped quote.
+    #[test]
+    fn raw_field_matches_the_key_not_a_value() {
+        let with = r#"{"method":"GET","path":"/users","confidence":"strong","raw":"https://a/users?x=1"}"#;
+        assert_eq!(raw_field(with), Some("https://a/users?x=1"));
+        let without = r#"{"method":"GET","path":"/users","file":"a.ts","line":1,"col":1,"confidence":"strong"}"#;
+        assert_eq!(raw_field(without), None);
+        // A path that is literally `raw` is a value, not the key.
+        let value = r#"{"method":"GET","path":"raw","file":"a.ts"}"#;
+        assert_eq!(raw_field(value), None);
+        // An escaped quote inside the value does not end it.
+        let esc = r##"{"path":"/q","raw":"/q?s=\"x\"#f"}"##;
+        assert_eq!(raw_field(esc), Some(r##"/q?s=\"x\"#f"##));
+        // Unterminated → None, never a panic.
+        assert_eq!(raw_field(r#"{"raw":"abc"#), None);
+    }
+
+    /// A3.3 — the marker counts NODES per bucket, not cells: a node with two
+    /// stacked query-bearing hits counts once, and a host+query raw counts in
+    /// both buckets.
+    #[test]
+    fn client_normalised_counts_nodes_per_bucket() {
+        let hit = |json: &str| Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(json.to_string()),
+        };
+        let mut stats = HttpMatchStats::default();
+        stats.count_client_normalised(&[
+            hit(r#"{"path":"/users","raw":"https://api/users?active=1"}"#),
+            hit(r#"{"path":"/users","raw":"https://api/users?page=2"}"#),
+        ]);
+        stats.count_client_normalised(&[hit(r#"{"path":"/users","raw":"https://api/users"}"#)]);
+        stats.count_client_normalised(&[hit(r#"{"path":"/users","raw":"/users#top"}"#)]);
+        // No raw, a non-JSON cell, and a raw on the wrong cell kind: ignored.
+        stats.count_client_normalised(&[
+            hit(r#"{"path":"/users"}"#),
+            Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("raw".into()) },
+            Cell {
+                kind: cell_type::ROUTE_METHOD,
+                payload: CellPayload::Json(r#"{"raw":"https://x/y?z"}"#.into()),
+            },
+        ]);
+        assert_eq!((stats.normalised_host, stats.normalised_query), (2, 2));
     }
 }

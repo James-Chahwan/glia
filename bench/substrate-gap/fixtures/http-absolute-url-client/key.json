@@ -1,0 +1,22 @@
+{
+  "framework": "http-absolute-url-client",
+  "language": "typescript+dart+go",
+  "dirs": ["client-ts", "client-dart", "server"],
+  "note": "A3.3 client request-path normalisation. A TS client (absolute URL + query string) and a Dart client (absolute URL) call the same Go chi server. Both ENDPOINTs must be keyed on the request PATH so HttpStackResolver can pair them. Deliberately legacy-only (no `cells`): typescript/http_client and dart/http_client are already measured by ts-http-fetch and dart-http-dio; this is their absolute-URL twin. Three dirs => generate_many => three RepoIds.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "TS fetch('https://api.example.com/users?active=1') after host+query strip; before A3.3 the node is named with the full URL and this row fails"},
+    {"kind": "ENDPOINT", "name": "POST /users", "note": "Dart dio.post with an absolute URL; before A3.3 the Dart parser dropped the node entirely"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi server (control)"}
+  ],
+  "expect_edges": [
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS", "note": "TS absolute URL + query must pair like Go/Java/Python/Swift already do"},
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS", "note": "Dart absolute URL must first EXIST, then pair"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "GET /users", "cell": "ENDPOINT_HIT", "contains": "\"raw\":\"https://api.example.com/users?active=1\"", "note": "provenance: the literal the path was normalised from survives on the cell"},
+    {"kind": "ENDPOINT", "node": "POST /users", "cell": "ENDPOINT_HIT", "contains": "\"raw\":\"https://api.example.com/users\"", "note": "same provenance field from the shared code-domain writer (Dart)"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:https://api.example.com/users?active=1", "note": "the pre-A3.3 unpairable qname: host and query must not survive into the node identity"}
+  ]
+}

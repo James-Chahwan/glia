@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::endpoint;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -111,6 +112,10 @@ struct EndpointCandidate {
     /// import alias (shape 2: `axios.get(url)`). None = always emit (shape 1
     /// `this.x.method()` and shape 3 `fetch()`).
     requires_import_alias: Option<String>,
+    /// A3.3: the call-site literal `path` was normalised from, set only when
+    /// `normalise_client_path` actually changed it. Serialised as `"raw"` on
+    /// ENDPOINT_HIT.
+    raw_path: Option<String>,
 }
 
 // ============================================================================
@@ -990,15 +995,21 @@ fn push_endpoint(
     acc: &mut Acc,
 ) {
     let start = call.start_position();
+    // A3.3: the single funnel for every client-call shape, so host + query
+    // stripping happens once. A normaliser, never a filter: relative hints
+    // (`auth/login`) and interpolated bases (`${…}/users`) come back as-is.
+    let (norm, changed) = endpoint::normalise_client_path(&path);
+    let raw_path = changed.then_some(path);
     acc.endpoints.push(EndpointCandidate {
         from,
         method,
-        path,
+        path: norm,
         confidence,
         file_rel: acc.file_rel.clone(),
         line: start.row + 1,
         col: start.column + 1,
         requires_import_alias,
+        raw_path,
     });
 }
 
@@ -1111,6 +1122,10 @@ fn downgrade(c: Confidence) -> Confidence {
     }
 }
 
+/// The TS-local ENDPOINT_HIT writer. Field order and the trailing optional
+/// `raw` mirror `repo_graph_code_domain::endpoint`'s writer, so a TS and a Dart
+/// endpoint carry the same payload shape; `raw` is skipped when `None`, which
+/// keeps every un-normalised payload byte-identical.
 fn endpoint_hit_cell(
     method: &str,
     path: &str,
@@ -1118,6 +1133,7 @@ fn endpoint_hit_cell(
     line: usize,
     col: usize,
     confidence: Confidence,
+    raw: Option<&str>,
 ) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
@@ -1127,6 +1143,8 @@ fn endpoint_hit_cell(
         line: usize,
         col: usize,
         confidence: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        raw: Option<&'a str>,
     }
     let conf_str = match confidence {
         Confidence::Strong => "strong",
@@ -1140,6 +1158,7 @@ fn endpoint_hit_cell(
         line,
         col,
         confidence: conf_str,
+        raw,
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -1230,6 +1249,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             cand.line,
             cand.col,
             cand.confidence,
+            cand.raw_path.as_deref(),
         );
         out.nodes.push(Node {
             id: endpoint_id,
@@ -1807,6 +1827,80 @@ export class AuthService {
         );
         let node = parse.nodes.iter().find(|n| n.id == ep).unwrap();
         assert_eq!(node.confidence, Confidence::Weak);
+    }
+
+    /// A3.3 — an absolute URL with a query string is keyed on its request path,
+    /// and the literal it came from rides on ENDPOINT_HIT as `raw`.
+    #[test]
+    fn absolute_url_endpoint_strips_host_and_query() {
+        let src = "\
+export const listUsers = () => fetch('https://api.example.com/users?active=1');
+";
+        let parse = parse_file(src, "src/api.ts", "src::api", repo()).unwrap();
+
+        let ep = endpoint_id(repo(), "GET", "/users");
+        assert!(
+            parse.nodes.iter().any(|n| n.id == ep),
+            "expected endpoint:GET:/users, got {:?}",
+            parse.nav.qname_by_id.values().collect::<Vec<_>>()
+        );
+        let stale = endpoint_id(repo(), "GET", "https://api.example.com/users?active=1");
+        assert!(
+            !parse.nodes.iter().any(|n| n.id == stale),
+            "host + query must not survive into the endpoint qname"
+        );
+        let payloads = endpoint_payloads(&parse, ep);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["path"], "/users");
+        assert_eq!(payloads[0]["raw"], "https://api.example.com/users?active=1");
+        // Normalising the path is not a confidence change.
+        assert_eq!(payloads[0]["confidence"], "strong");
+
+        // Same through the member-call shape and a template literal.
+        let src2 = "\
+export class UserService {
+    constructor(private readonly http: any) {}
+    show(id: string): void {
+        this.http.get(`https://api.example.com/users/${id}?expand=${id}`);
+    }
+}
+";
+        let parse2 = parse_file(src2, "src/user.service.ts", "src::user::service", repo()).unwrap();
+        let ep2 = endpoint_id(repo(), "GET", "/users/${…}");
+        let payloads2 = endpoint_payloads(&parse2, ep2);
+        assert_eq!(payloads2.len(), 1, "templated absolute URL must normalise too");
+        assert_eq!(
+            payloads2[0]["raw"],
+            "https://api.example.com/users/${…}?expand=${…}"
+        );
+    }
+
+    /// A3.3 regression guard — the normaliser must never touch a path it
+    /// cannot improve: a relative URL-builder hint, a plain path and an
+    /// interpolated base all keep their qname AND a payload with no `raw` key.
+    #[test]
+    fn relative_builder_hint_is_untouched() {
+        let src = "\
+export class AuthService {
+    constructor(private readonly http: any, private readonly api: any) {}
+    login(payload: any): void {
+        this.http.post(this.api.buildApiUrl('auth/login'), payload);
+        this.http.get('/api/users');
+        this.http.get(`${this.base}/users`);
+    }
+}
+";
+        let parse = parse_file(src, "src/auth.ts", "src::auth", repo()).unwrap();
+        for (method, path) in [("POST", "auth/login"), ("GET", "/api/users"), ("GET", "${…}/users")] {
+            let ep = endpoint_id(repo(), method, path);
+            let payloads = endpoint_payloads(&parse, ep);
+            assert_eq!(payloads.len(), 1, "missing endpoint:{method}:{path}");
+            assert!(
+                payloads[0].get("raw").is_none(),
+                "unchanged path {path} must not carry raw: {}",
+                payloads[0]
+            );
+        }
     }
 
     #[test]
