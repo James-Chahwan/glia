@@ -20,6 +20,10 @@ pub const GRAPH_TYPE: &str = "code";
 /// drift apart. (A8.1)
 pub mod walk_gating;
 
+/// Manifest-rooted sub-projects detected during that same walk: which manifest
+/// roots a directory, its ecosystem and its label. (A8.4)
+pub mod project_roots;
+
 // ============================================================================
 // Node kinds
 // ============================================================================
@@ -157,6 +161,10 @@ pub mod node_kind {
     /// RESERVED (A8.4) — a build/workspace project unit: an MSBuild `.csproj`,
     /// a Gradle subproject, a Cargo workspace member. The anchor a repo's
     /// modules hang off when one repo holds several independent projects.
+    ///
+    /// A8.4 DETECTS the roots during the walk ([`crate::project_roots`]); A8.5
+    /// emits them. The planned shape: qname `project:<rel_path>`, ecosystem +
+    /// manifest + label in the ORIGIN cell, an edge-less anchor like REGION.
     pub const PROJECT: NodeKindId = NodeKindId(45);
 
     /// (A10.5 / A12.1) — a declared message / payload schema type

@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use repo_graph_code_domain::project_roots::{self, ProjectRoot};
 use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
@@ -22,25 +23,56 @@ pub(crate) struct RegionAnchor {
 }
 
 /// Walk the repo, classifying each directory as source-to-parse or a collapsed
-/// region. Returns `(files_to_parse, region_anchors)`.
+/// region. Returns `(files_to_parse, region_anchors, markdown, project_roots)`.
 pub(crate) type WalkResult = (
     Vec<(String, String)>, // source files to parse
     Vec<RegionAnchor>,     // collapsed build/vendor regions
     Vec<(String, String)>, // markdown docs (rel_path, text) — G18
+    Vec<ProjectRoot>,      // manifest-rooted sub-projects, sorted by rel_path — A8.4
 );
+
+/// The engine's own output directory, `<root>/.ai/repo-graph` — where the store
+/// writes the gmap and `cache.rs` keeps `parse_cache.bin` (the literal mirrors
+/// `cache::gmap_dir` and `repo_graph_store::default_gmap_dir`). Skipped outright,
+/// like `store::scan_for_newer` skips it by prefix: otherwise a repo that
+/// gitignores it grows a `region:.ai/repo-graph` only after its FIRST persisted
+/// build, so the graph depends on build history. (A8.2 → A8.4 hand-off)
+/// Only the root's copy is ours; `.ai` itself is authored and still walked.
+fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
+    name == "repo-graph"
+        && parent.file_name().is_some_and(|n| n == ".ai")
+        && parent.parent() == Some(root)
+}
 
 pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     let mut files = Vec::new();
     let mut regions = Vec::new();
     let mut md = Vec::new();
+    let mut roots = Vec::new();
     let mut counts = GateCounts::default();
     // Per-directory `.gitignore` layers: pushed on the way down, popped on the
     // way back up, so each verdict sees exactly the files git would. (A8.2)
     let mut ignores = IgnoreStack::default();
     let pushed = ignores.push_dir(root);
-    walk_dir(root, root, &mut ignores, &mut files, &mut regions, &mut md, &mut counts);
+    walk_dir(
+        root,
+        root,
+        &mut ignores,
+        &mut files,
+        &mut regions,
+        &mut md,
+        &mut roots,
+        &mut counts,
+    );
     if pushed {
         ignores.pop();
+    }
+    // Explicit, although the name-sorted walk already discovers roots in a
+    // stable order: A8.5's node order (and so shard bytes) keys on this Vec,
+    // and implicit order always leaks (audit 2026-06-10).
+    roots.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    if !roots.is_empty() {
+        eprintln!("[roots] {}", project_roots::marker(&roots));
     }
     // Attributable collapse tally. Gated on non-zero so a region-free repo stays
     // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
@@ -50,7 +82,7 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     if ignores.files > 0 {
         eprintln!("[walk] {}", ignores.marker());
     }
-    (files, regions, md)
+    (files, regions, md, roots)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -61,6 +93,7 @@ fn walk_dir(
     files: &mut Vec<(String, String)>,
     regions: &mut Vec<RegionAnchor>,
     md: &mut Vec<(String, String)>,
+    roots: &mut Vec<ProjectRoot>,
     counts: &mut GateCounts,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -69,6 +102,20 @@ fn walk_dir(
     // not reproducible across machines or after file churn (audit 2026-06-10).
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_unstable_by_key(|e| e.file_name());
+    // Project-root detection rides the walk (A8.4): it scans the entry names
+    // already in hand, and a collapsed region (`node_modules/*/package.json`)
+    // is never visited, so it can never become a root.
+    let names: Vec<String> = entries
+        .iter()
+        .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    if let Some((ecosystem, manifest, label)) = project_roots::detect_root(&names, |base| {
+        std::fs::read_to_string(dir.join(base)).unwrap_or_default()
+    }) {
+        let rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string();
+        roots.push(ProjectRoot::new(rel, ecosystem, &manifest, label));
+    }
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -77,6 +124,11 @@ fn walk_dir(
             continue;
         }
         if path.is_dir() {
+            if is_self_output(root, dir, &name) {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                eprintln!("[walk] skipped engine output {}", rel.display());
+                continue;
+            }
             // Collapse vendored / build / gitignored / other-repo directories to
             // one anchor and do NOT descend — categorise the region instead of
             // dropping it or emitting a node per file inside. The rules live in
@@ -97,7 +149,7 @@ fn walk_dir(
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, files, regions, md, counts);
+            walk_dir(root, &path, ignores, files, regions, md, roots, counts);
             if pushed {
                 ignores.pop();
             }
@@ -237,7 +289,7 @@ mod walk_tests {
             std::fs::write(root.join(f), "x = 1\n").unwrap();
         }
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
         let parsed: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
 
@@ -285,7 +337,7 @@ mod walk_tests {
             std::fs::write(pub_dir.join(format!("{h}.js")), "var b=2").unwrap();
         }
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // Only the authored source file is queued for parsing.
         assert_eq!(files.len(), 1, "files: {files:?}");
@@ -335,7 +387,7 @@ mod walk_tests {
         std::fs::write(root.join("bin/Debug/Api.g.cs"), "internal sealed class PhantomBinClass {}")
             .unwrap();
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // PRECISION: the generated C# never reaches a parser. grade.py has no
         // expect_absent_nodes, so this half of the fix is provable only here.
@@ -360,7 +412,7 @@ mod walk_tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::write(root.join("bin/console_entry.py"), "x = 1\n").unwrap();
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // A Python repo's `bin/` of console scripts is authored source.
         assert!(files.iter().any(|(p, _)| p == "bin/console_entry.py"), "{files:?}");
@@ -378,7 +430,7 @@ mod walk_tests {
         std::fs::write(root.join("libs/sdk/vendor_client.py"), "class VendorClient:\n    pass\n")
             .unwrap();
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
 
         // The submodule's symbols must not be minted into the PARENT RepoId —
         // that is the duplicate-name pair `resolve_name` had to pick between.
@@ -392,6 +444,70 @@ mod walk_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A8.4 acceptance: detection rides the walk, so the vendored manifest under
+    /// the collapsed `node_modules` is never a root, and roots come back sorted.
+    #[test]
+    fn project_roots_ride_the_walk() {
+        let root = walk_tmp("roots");
+        for d in ["apps/web", "services/api", "node_modules/left-pad", "libs/plain"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("package.json"), r#"{"name":"@shop/monorepo"}"#).unwrap();
+        std::fs::write(root.join("apps/web/package.json"), r#"{"private":true}"#).unwrap();
+        std::fs::write(root.join("apps/web/index.ts"), "export const x = 1;\n").unwrap();
+        std::fs::write(root.join("services/api/go.mod"), "module github.com/shop/api\n\ngo 1.22\n").unwrap();
+        std::fs::write(root.join("services/api/main.go"), "package main\n").unwrap();
+        std::fs::write(root.join("node_modules/left-pad/package.json"), r#"{"name":"left-pad"}"#).unwrap();
+        std::fs::write(root.join("libs/plain/util.py"), "x = 1\n").unwrap();
+
+        let (_files, regions, _md, roots) = walk_source_files(&root);
+
+        let rels: Vec<&str> = roots.iter().map(|r| r.rel_path.as_str()).collect();
+        assert_eq!(rels, ["", "apps/web", "services/api"]);
+        let got: Vec<(&str, &str, &str)> =
+            roots.iter().map(|r| (r.ecosystem, r.label.as_str(), r.manifest.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("npm", "@shop/monorepo", "package.json"),
+                ("npm", "web", "apps/web/package.json"),
+                ("go", "github.com/shop/api", "services/api/go.mod"),
+            ]
+        );
+        assert!(regions.iter().any(|r| r.rel_path == "node_modules"));
+        assert_eq!(project_roots::marker(&roots), "3 project roots (go=1 npm=2)");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The A8.2 hand-off: the engine's own `<root>/.ai/repo-graph` is neither
+    /// walked nor a region, gitignored or not, while the rest of `.ai` is.
+    #[test]
+    fn engine_output_dir_is_skipped() {
+        let root = walk_tmp("selfout");
+        std::fs::create_dir_all(root.join(".ai/repo-graph")).unwrap();
+        std::fs::create_dir_all(root.join("pkg/.ai/repo-graph")).unwrap();
+        std::fs::write(root.join(".gitignore"), "**/.ai/repo-graph/\n").unwrap();
+        std::fs::write(root.join(".ai/repo-graph/leak.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join(".ai/notes.md"), "# Notes\n").unwrap();
+        std::fs::write(root.join("pkg/.ai/repo-graph/other.py"), "y = 2\n").unwrap();
+
+        let (files, regions, md, _roots) = walk_source_files(&root);
+
+        let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
+        assert!(!region_paths.contains(&".ai/repo-graph"), "{region_paths:?}");
+        assert!(files.iter().all(|(p, _)| !p.starts_with(".ai/")), "{files:?}");
+        assert!(md.iter().any(|(p, _)| p == ".ai/notes.md"), "authored .ai is still walked");
+        // Only the ROOT copy is ours; a nested one stays under the usual gates.
+        assert_eq!(region_paths, ["pkg/.ai/repo-graph"]);
+
+        // Without a gitignore it is still never parsed.
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        let (files, regions, _md, _roots) = walk_source_files(&root);
+        assert!(files.iter().all(|(p, _)| !p.starts_with(".ai/")), "{files:?}");
+        assert!(regions.is_empty(), "{}", regions.len());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn worktree_and_nested_clone_get_their_own_provenance() {
         let root = walk_tmp("worktree");
@@ -401,7 +517,7 @@ mod walk_tests {
         std::fs::write(root.join("wt/a.py"), "x = 1\n").unwrap();
         std::fs::write(root.join("clone/b.py"), "y = 2\n").unwrap();
 
-        let (files, regions, _md) = walk_source_files(&root);
+        let (files, regions, _md, _roots) = walk_source_files(&root);
 
         assert!(files.is_empty(), "no source outside the two other repos: {files:?}");
         let wt = regions.iter().find(|r| r.rel_path == "wt").unwrap();

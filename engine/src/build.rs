@@ -80,7 +80,9 @@ fn generate_one_inner(
     let canonical = format!("file://{repo_path}");
     let repo = RepoId::from_canonical(&canonical);
     let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
-    let (files, regions, md) = walk_source_files(&root);
+    // Project roots are detected (A8.4) but not yet consumed: emission is A8.5,
+    // per-root go.mod prefixes A8.7.
+    let (files, regions, md, _roots) = walk_source_files(&root);
     let go_prefix = read_go_module_prefix(&root);
     // Cached parses are only valid under the exact repo identity + go.mod
     // module they were built with — neither is visible to per-file hashes.
@@ -160,7 +162,7 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
 
     // Phase 2 — build each repo against the union.
     for entry in walked {
-        let (path, root, (files, regions, md)) = match entry {
+        let (path, root, (files, regions, md, _roots)) = match entry {
             Ok(w) => w,
             Err(e) => {
                 all_errors.push(e);
