@@ -2,10 +2,13 @@
 //! assembly (per-language `build_*` dispatch), and cross-graph resolver
 //! registration. The per-file routing that feeds it lives in [`crate::route`].
 
+use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::FileParse;
-use repo_graph_core::RepoId;
+use repo_graph_code_domain::{FileParse, GRAPH_TYPE, attach_imports_cell, node_kind};
+use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
+use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, DbResolver, EventBusResolver,
     GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver, MergedGraph,
@@ -14,9 +17,10 @@ use repo_graph_graph::{
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
+use crate::extract::{detect_language, merge_nav, path_to_qname};
 use crate::passes::post_passes;
 use crate::route::parse_repo_files;
-use crate::walk::{build_region_graph, walk_source_files};
+use crate::walk::{WalkResult, build_region_graph, walk_source_files};
 
 pub struct GenerateResult {
     pub merged: MergedGraph,
@@ -79,8 +83,10 @@ fn generate_one_inner(
     if let Some(c) = cache.as_deref_mut() {
         c.validate_context(&canonical, &go_prefix);
     }
+    let mut rpc = RpcContext::default();
+    rpc.add_files(&files);
     let (mut graphs, mut parse_errors) =
-        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path);
+        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path, &rpc);
     if !regions.is_empty() {
         graphs.push(build_region_graph(&regions, repo));
     }
@@ -128,26 +134,48 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
+
+    // Phase 1 — walk every repo before building any (A5.2), so the proto
+    // service set is the UNION across the build: in a client/server split the
+    // client repo ships no `.proto` of its own. The cost is holding every
+    // repo's sources at once, which the 2-5 repo `--with` merges absorb.
+    // A missing path keeps its slot so errors stay in argument order.
+    let mut rpc = RpcContext::default();
+    let mut walked: Vec<Result<(&String, PathBuf, WalkResult), String>> =
+        Vec::with_capacity(repo_paths.len());
     for path in repo_paths {
         let root = PathBuf::from(path);
         if !root.is_dir() {
-            all_errors.push(format!("not a directory: {path}"));
+            walked.push(Err(format!("not a directory: {path}")));
             continue;
         }
+        let walk = walk_source_files(&root);
+        rpc.add_files(&walk.0);
+        walked.push(Ok((path, root, walk)));
+    }
+
+    // Phase 2 — build each repo against the union.
+    for entry in walked {
+        let (path, root, (files, regions, md)) = match entry {
+            Ok(w) => w,
+            Err(e) => {
+                all_errors.push(e);
+                continue;
+            }
+        };
         // One string feeds both the RepoId and the cache's context check: every
         // cached FileParse has this RepoId baked into its NodeIds, so a sidecar
         // written under another spelling of the path must be discarded (#2).
         let canonical = format!("file://{path}");
         let repo = RepoId::from_canonical(&canonical);
         label_inputs.push((repo.0, path.clone()));
-        let (files, regions, md) = walk_source_files(&root);
         let go_prefix = read_go_module_prefix(&root);
         let mut cache = incremental.then(|| ParseCache::load(path));
         if let Some(c) = cache.as_mut() {
             c.validate_context(&canonical, &go_prefix);
         }
         let (graphs, parse_errors) =
-            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path);
+            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path, &rpc);
         if let Some(c) = cache.as_ref()
             && let Err(e) = c.save(path)
         {
@@ -204,15 +232,103 @@ fn read_go_module_prefix(root: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Every gRPC service a `.proto` declares anywhere in this build (A5.2). The
+/// client-needle pass keys on it, so a client repo with no `.proto` of its own
+/// still recognises stubs for the server repo's services.
+#[derive(Default)]
+struct RpcContext {
+    /// Sorted and deduplicated, so needle order (and therefore GRPC_CLIENT
+    /// emission order) does not depend on walk or repo order.
+    services: Vec<ProtoServiceRef>,
+}
+
+impl RpcContext {
+    /// Fold in every service the `.proto` files among `files` declare.
+    fn add_files(&mut self, files: &[(String, String)]) {
+        for (path, source) in files {
+            if detect_language(path) == Some("proto") {
+                self.services.extend(grpc::proto_service_refs(source));
+            }
+        }
+        self.services.sort_unstable();
+        self.services.dedup();
+    }
+}
+
+/// The data-driven gRPC client pass (A5.2). It runs here, on the router's
+/// output, not inside the per-file cross-cutting extractors: its input (the
+/// build's proto service set) is not a function of the file's own content, so a
+/// cached `FileParse` (WP-D) would otherwise replay clients minted against a
+/// stale service set. Running after the cache keeps incremental == clean.
+///
+/// Every code parser emits the file's MODULE node first, and that is how a
+/// parse is paired back to its source. Returns the GRPC_CLIENT nodes it added.
+fn apply_rpc_client_needles(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    repo: RepoId,
+    rpc: &RpcContext,
+    parse_errors: &mut Vec<String>,
+) -> usize {
+    if rpc.services.is_empty() {
+        return 0;
+    }
+    let mut added = 0;
+    for (path, source) in files {
+        if !grpc::file_has_grpc_context(source) {
+            continue;
+        }
+        let Some(lang) = detect_language(path) else { continue };
+        if lang == "proto" {
+            continue;
+        }
+        let Some(parses) = parses_by_lang.get_mut(lang) else { continue };
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+        // No match = the file failed to parse; there is no module to hang a client on.
+        let Some(fp) = parses
+            .iter_mut()
+            .find(|fp| fp.nodes.first().is_some_and(|n| n.id == module_id))
+        else {
+            continue;
+        };
+        let out = match catch_unwind(AssertUnwindSafe(|| {
+            grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
+        })) {
+            Ok(out) => out,
+            Err(_) => {
+                parse_errors.push(format!("{path}: PANIC (grpc client needles)"));
+                continue;
+            }
+        };
+        if out.nodes.is_empty() {
+            continue;
+        }
+        // The same G15 IMPORTS cell the router gave every other node in the file.
+        let mut extra = FileParse {
+            nodes: out.nodes,
+            imports: fp.imports.clone(),
+            ..Default::default()
+        };
+        attach_imports_cell(&mut extra, lang);
+        added += extra.nodes.len();
+        fp.nodes.extend(extra.nodes);
+        merge_nav(&mut fp.nav, out.nav);
+    }
+    added
+}
+
 /// `repo_label` is the repo path as the caller was given it. It only prefixes
 /// the `[incremental]` marker, so a multi-repo build prints one attributable
-/// line per repo; it never reaches the graph.
+/// line per repo; it never reaches the graph. `rpc` is the build-wide proto
+/// service set (A5.2).
 fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
     go_module_prefix: &str,
     cache: Option<&mut ParseCache>,
     repo_label: &str,
+    rpc: &RpcContext,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     // Suppress the default panic-print-to-stderr while we run per-file parsers
     // — we catch panics below and report them as parse_errors. The default
@@ -221,8 +337,25 @@ fn build_graphs_for_repo(
     // panic in non-loop code still gets the user-visible report.
     let _hook_guard = SuppressPanicHook::install();
 
-    let (parses_by_lang, mut parse_errors) =
+    let (mut parses_by_lang, mut parse_errors) =
         parse_repo_files(files, repo, go_module_prefix, cache, repo_label);
+
+    let rpc_added =
+        apply_rpc_client_needles(&mut parses_by_lang, files, repo, rpc, &mut parse_errors);
+    // A5.2 fired_on marker, once per repo. Printed whenever the build knows a
+    // proto service or this repo holds a client stub.
+    let grpc_clients = parses_by_lang
+        .values()
+        .flatten()
+        .flat_map(|fp| fp.nav.kind_by_id.values())
+        .filter(|k| **k == node_kind::GRPC_CLIENT)
+        .count();
+    if grpc_clients > 0 || !rpc.services.is_empty() {
+        eprintln!(
+            "[grpc-client] {grpc_clients} stubs from {} known services (proto-needle +{rpc_added}) repo={repo_label}",
+            rpc.services.len()
+        );
+    }
 
     let mut graphs = Vec::new();
     // Deterministic per-language build order: HashMap iteration is seeded per
@@ -520,5 +653,197 @@ mod cache_tests {
         ParseCache::purge(repo).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod rpc_needle_tests {
+    use super::*;
+    use repo_graph_code_domain::{cell_type, edge_category};
+    use repo_graph_core::{Cell, EdgeCategoryId as CategoryId};
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// `(qname, node id)` of every GRPC_CLIENT in `repo`, sorted by qname.
+    fn clients(m: &MergedGraph, repo: RepoId) -> Vec<(String, NodeId)> {
+        let mut out: Vec<(String, NodeId)> = m
+            .graphs
+            .iter()
+            .filter(|g| g.repo == repo)
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::GRPC_CLIENT))
+                    .map(move |n| (g.nav.qname_by_id[&n.id].clone(), n.id))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn node_id_by_qname(m: &MergedGraph, qname: &str) -> NodeId {
+        m.graphs
+            .iter()
+            .find_map(|g| {
+                g.nav
+                    .qname_by_id
+                    .iter()
+                    .find_map(|(id, q)| (q == qname).then_some(*id))
+            })
+            .unwrap_or_else(|| panic!("no node {qname}"))
+    }
+
+    fn cells_of(m: &MergedGraph, id: NodeId) -> Vec<Cell> {
+        m.graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter())
+            .find(|n| n.id == id)
+            .map(|n| n.cells.clone())
+            .unwrap_or_default()
+    }
+
+    fn incoming(m: &MergedGraph, id: NodeId) -> Vec<CategoryId> {
+        let mut cats: Vec<CategoryId> =
+            m.all_edges().filter(|e| e.to == id).map(|e| e.category).collect();
+        cats.sort_by_key(|c| c.0);
+        cats
+    }
+
+    fn has_edge(m: &MergedGraph, from: NodeId, to: NodeId, cat: CategoryId) -> bool {
+        m.all_edges()
+            .any(|e| e.from == from && e.to == to && e.category == cat)
+    }
+
+    const PROTO: &str = "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/shop/pb\";\n\nservice Greeter {\n  rpc SayHello (HelloRequest) returns (HelloReply);\n}\n\nservice OrderService {\n  rpc Place (PlaceRequest) returns (PlaceReply);\n}\n";
+
+    const GO_CLIENT: &str = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/shop/pb\"\n)\n\nfunc main() {\n\tconn, _ := grpc.Dial(\"server:50051\")\n\tgreeter := pb.NewGreeterClient(conn)\n\torders := pb.NewOrderServiceClient(conn)\n\t_, _ = greeter, orders\n}\n";
+
+    #[test]
+    fn generate_many_mints_clients_from_the_union_of_proto_services() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = tmp.path().join("server");
+        let client = tmp.path().join("client");
+        write(&server, "api.proto", PROTO);
+        write(&client, "main.go", GO_CLIENT);
+        let (server_s, client_s) = (
+            server.to_str().unwrap().to_string(),
+            client.to_str().unwrap().to_string(),
+        );
+        let client_repo = RepoId::from_canonical(&format!("file://{client_s}"));
+
+        // Alone, the client repo knows no proto: only the suffix fallback fires.
+        let alone = generate_one(&client_s).unwrap();
+        let names: Vec<String> = clients(&alone.merged, client_repo)
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect();
+        assert_eq!(names, vec!["grpc_client:OrderService".to_string()]);
+
+        // Merged, the server's .proto names `Greeter` for the client repo too.
+        let merged = generate_many(&[server_s.clone(), client_s.clone()]).unwrap().merged;
+        let found = clients(&merged, client_repo);
+        let names: Vec<&str> = found.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(names, vec!["grpc_client:Greeter", "grpc_client:OrderService"]);
+        let (greeter, orders) = (found[0].1, found[1].1);
+        assert!(has_edge(
+            &merged,
+            greeter,
+            node_id_by_qname(&merged, "grpc:shop.Greeter"),
+            edge_category::GRPC_CALLS
+        ));
+        assert!(has_edge(
+            &merged,
+            orders,
+            node_id_by_qname(&merged, "grpc:shop.OrderService"),
+            edge_category::GRPC_CALLS
+        ));
+
+        // A data-driven client is shaped exactly like a fallback one: same
+        // cells (the file's IMPORTS), same incoming structural edges.
+        let greeter_cells = cells_of(&merged, greeter);
+        assert!(greeter_cells.iter().any(|c| c.kind == cell_type::IMPORTS));
+        assert_eq!(greeter_cells, cells_of(&merged, orders));
+        let mut in_greeter = incoming(&merged, greeter);
+        let mut in_orders = incoming(&merged, orders);
+        in_greeter.retain(|c| *c != edge_category::GRPC_CALLS);
+        in_orders.retain(|c| *c != edge_category::GRPC_CALLS);
+        assert_eq!(in_greeter, in_orders);
+
+        // Repo order does not change what the client repo gets.
+        let reversed = generate_many(&[client_s, server_s]).unwrap().merged;
+        let rev_names: Vec<String> = clients(&reversed, client_repo)
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect();
+        assert_eq!(rev_names, names);
+    }
+
+    fn write_store(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
+        repo_graph_store::write_merged_sharded(m, dir).unwrap();
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| {
+                (
+                    e.file_name().to_string_lossy().to_string(),
+                    std::fs::read(e.path()).unwrap(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    const GREETER_PROTO: &str = "package hello;\nservice Greeter {\n  rpc Hi (A) returns (B);\n}\n";
+    const FAREWELL_PROTO: &str = "package hello;\nservice Farewell {\n  rpc Bye (A) returns (B);\n}\n";
+
+    #[test]
+    fn rpc_needles_follow_the_proto_under_a_warm_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write(
+            &repo,
+            "client.py",
+            "import grpc\nimport hello_pb2_grpc\n\n\ndef call(channel):\n    return hello_pb2_grpc.GreeterStub(channel)\n",
+        );
+        write(&repo, "api.proto", GREETER_PROTO);
+        let repo_s = repo.to_str().unwrap();
+        let rid = RepoId::from_canonical(&format!("file://{repo_s}"));
+        let names = |m: &MergedGraph| -> Vec<String> {
+            clients(m, rid).into_iter().map(|(q, _)| q).collect()
+        };
+
+        let mut cache = ParseCache::new();
+        let cold = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(names(&cold.merged), vec!["grpc_client:Greeter".to_string()]);
+
+        // Only the .proto changes: client.py is replayed from the cache, and
+        // must still lose the client its needle no longer names.
+        write(&repo, "api.proto", FAREWELL_PROTO);
+        let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 1, "client.py must come from the cache");
+        assert!(names(&warm.merged).is_empty(), "stale client replayed from cache");
+        let clean = generate_one(repo_s).unwrap();
+        assert_eq!(
+            write_store(&warm.merged, &tmp.path().join("warm")),
+            write_store(&clean.merged, &tmp.path().join("clean")),
+            "incremental vs clean after a proto-only edit"
+        );
+
+        // And back: the cached parse picks the client up again.
+        write(&repo, "api.proto", GREETER_PROTO);
+        let warm2 = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 1);
+        assert_eq!(names(&warm2.merged), vec!["grpc_client:Greeter".to_string()]);
+        let clean2 = generate_one(repo_s).unwrap();
+        assert_eq!(
+            write_store(&warm2.merged, &tmp.path().join("warm2")),
+            write_store(&clean2.merged, &tmp.path().join("clean2")),
+            "incremental vs clean with a data-driven client present"
+        );
     }
 }
