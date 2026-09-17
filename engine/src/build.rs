@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::{FileParse, GRAPH_TYPE, attach_imports_cell, node_kind};
+use repo_graph_code_domain::{
+    FileParse, GRAPH_TYPE, attach_imports_cell, di_stats, edge_category, node_kind,
+};
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
 use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{
@@ -336,6 +338,8 @@ fn build_graphs_for_repo(
     // even though we recover. Restored on scope exit via Drop guard so a
     // panic in non-loop code still gets the user-visible report.
     let _hook_guard = SuppressPanicHook::install();
+    // A7.0: shape counters describe only the detectors that run in THIS build.
+    di_stats::reset();
 
     let (mut parses_by_lang, mut parse_errors) =
         parse_repo_files(files, repo, go_module_prefix, cache, repo_label);
@@ -374,6 +378,25 @@ fn build_graphs_for_repo(
     // spaces that must not cross-resolve. ts_family accumulates in the sorted lang
     // order and is built last, so graph/shard order stays deterministic.
     const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
+    // A7.0 `[di]` marker input: INJECTS refs per language, counted off the
+    // parses themselves so cache-served files count too. The TS-family tags
+    // report as `typescript`, their matrix row.
+    let di_refs: Vec<(&str, usize)> = parses_by_lang
+        .iter()
+        .map(|(lang, parses)| {
+            let row = if TS_FAMILY.contains(lang) {
+                "typescript"
+            } else {
+                *lang
+            };
+            let n = parses
+                .iter()
+                .flat_map(|fp| &fp.refs)
+                .filter(|r| r.category == edge_category::INJECTS)
+                .count();
+            (row, n)
+        })
+        .collect();
     let mut ts_family: Vec<FileParse> = Vec::new();
     for (lang, parses) in parses_by_lang {
         if TS_FAMILY.contains(&lang) {
@@ -400,6 +423,9 @@ fn build_graphs_for_repo(
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
     }
+
+    // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
+    di_stats::flush_marker(&di_refs, repo_label);
 
     (graphs, parse_errors)
 }

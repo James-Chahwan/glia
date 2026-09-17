@@ -1097,6 +1097,207 @@ pub mod infra {
 }
 
 // ============================================================================
+// Dependency-injection fired-on counters (A7.0)
+// ============================================================================
+
+/// Grep-able fired-on marker for dependency-injection extraction: one stderr
+/// line per repo build, printed by the engine only when some count is non-zero.
+///
+/// ```text
+/// [di] injects refs: python=0 go=2 typescript=0 java=0 csharp=0 php=0 scala=0 (shapes: go-provider=2) repo=<label>
+/// ```
+///
+/// * **Language tokens** count the INJECTS `UnresolvedRef`s the repo's parses
+///   carry. The engine counts them off the `FileParse`s, so they stay right
+///   for cache-served files and for emitters that never call [`record`].
+///   Every [`LANGS`] entry is printed, zero or not, so ` go=[1-9]` is an
+///   unambiguous grep. Any other language appears only when non-zero. The
+///   spellings are the matrix row names (`bench/substrate-gap/matrix_vocab.py`),
+///   so `go=` lines up with the `go/injects` cell.
+/// * **Shape tokens** are what detectors reported through [`record`] while
+///   THIS build ran. A file served from the parse cache ran no detector, so
+///   shapes can undercount the language totals. A gap means "cached", not
+///   "broken".
+///
+/// A parser calls `di_stats::record(DiShape::X)` beside each INJECTS ref it
+/// pushes and adds nothing to this module. Other per-language fired-on lines
+/// (`[recv]`, `[heritage]`) should copy the shape `[tag] label: lang=N …`,
+/// with their whole fixed language set printed.
+///
+/// Diagnostics only: nothing here reaches the graph, the store, or any
+/// ordering decision. The counters are process-global, like the engine's
+/// `SuppressPanicHook`, so they assume one build at a time per process (true
+/// today). Concurrent builds (parallel test threads) can only smear counts
+/// between two stderr lines.
+pub mod di_stats {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One INJECTS extraction shape. Discriminants are dense and index the
+    /// counter bank. A new variant goes at the end of this enum AND of [`DiShape::ALL`].
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    #[repr(usize)]
+    pub enum DiShape {
+        TsCtor = 0,
+        TsInjectFn = 1,
+        TsNestCtor = 2,
+        JavaCtor = 3,
+        JavaField = 4,
+        JavaLombok = 5,
+        JavaJsr330 = 6,
+        CsCtor = 7,
+        CsPrimaryCtor = 8,
+        CsFromServices = 9,
+        PyFastapiDepends = 10,
+        PhpCtor = 11,
+        GoProvider = 12,
+        ScalaCtor = 13,
+    }
+
+    impl DiShape {
+        /// Every shape, in discriminant order (`ALL[i] as usize == i`).
+        pub const ALL: [DiShape; 14] = [
+            Self::TsCtor,
+            Self::TsInjectFn,
+            Self::TsNestCtor,
+            Self::JavaCtor,
+            Self::JavaField,
+            Self::JavaLombok,
+            Self::JavaJsr330,
+            Self::CsCtor,
+            Self::CsPrimaryCtor,
+            Self::CsFromServices,
+            Self::PyFastapiDepends,
+            Self::PhpCtor,
+            Self::GoProvider,
+            Self::ScalaCtor,
+        ];
+
+        /// Wire token printed in the `shapes:` group.
+        pub const fn token(self) -> &'static str {
+            match self {
+                Self::TsCtor => "ts-ctor",
+                Self::TsInjectFn => "ts-inject-fn",
+                Self::TsNestCtor => "ts-nest-ctor",
+                Self::JavaCtor => "java-ctor",
+                Self::JavaField => "java-field",
+                Self::JavaLombok => "java-lombok",
+                Self::JavaJsr330 => "java-jsr330",
+                Self::CsCtor => "csharp-ctor",
+                Self::CsPrimaryCtor => "csharp-primary-ctor",
+                Self::CsFromServices => "csharp-fromservices",
+                Self::PyFastapiDepends => "py-fastapi-depends",
+                Self::PhpCtor => "php-ctor",
+                Self::GoProvider => "go-provider",
+                Self::ScalaCtor => "scala-ctor",
+            }
+        }
+
+        /// The [`LANGS`] row this shape belongs to.
+        pub const fn lang(self) -> &'static str {
+            match self {
+                Self::TsCtor | Self::TsInjectFn | Self::TsNestCtor => "typescript",
+                Self::JavaCtor | Self::JavaField | Self::JavaLombok | Self::JavaJsr330 => "java",
+                Self::CsCtor | Self::CsPrimaryCtor | Self::CsFromServices => "csharp",
+                Self::PyFastapiDepends => "python",
+                Self::PhpCtor => "php",
+                Self::GoProvider => "go",
+                Self::ScalaCtor => "scala",
+            }
+        }
+    }
+
+    /// Languages always printed, in matrix row order.
+    pub const LANGS: [&str; 7] = [
+        "python",
+        "go",
+        "typescript",
+        "java",
+        "csharp",
+        "php",
+        "scala",
+    ];
+
+    static COUNTS: [AtomicUsize; DiShape::ALL.len()] =
+        [const { AtomicUsize::new(0) }; DiShape::ALL.len()];
+
+    /// Count one INJECTS ref pushed by `shape`'s detector.
+    pub fn record(shape: DiShape) {
+        if let Some(c) = COUNTS.get(shape as usize) {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Zero every shape counter. The engine calls this before a build parses,
+    /// so a stray `parse_one` outside a build cannot leak into its line.
+    pub fn reset() {
+        for c in &COUNTS {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// Print the `[di]` line for one repo build, then zero the shape counters.
+    /// `lang_refs` holds `(language, INJECTS refs)` pairs. Repeated languages
+    /// are summed. Zeroing matters: a long-lived process (neuropil) or a test
+    /// that builds twice (engine/tests/byte_identical.rs) must not accumulate.
+    pub fn flush_marker(lang_refs: &[(&str, usize)], repo: &str) {
+        let shapes = COUNTS.each_ref().map(|c| c.swap(0, Ordering::Relaxed));
+        if let Some(line) = render(lang_refs, &shapes, repo) {
+            eprintln!("{line}");
+        }
+    }
+
+    /// The marker text, or `None` when every count is zero. `shapes` is in
+    /// [`DiShape::ALL`] order.
+    pub(crate) fn render(
+        lang_refs: &[(&str, usize)],
+        shapes: &[usize; DiShape::ALL.len()],
+        repo: &str,
+    ) -> Option<String> {
+        let mut langs: Vec<(&str, usize)> = LANGS.iter().map(|l| (*l, 0)).collect();
+        for &(lang, n) in lang_refs {
+            match langs.iter_mut().find(|(l, _)| *l == lang) {
+                Some(slot) => slot.1 += n,
+                None => langs.push((lang, n)),
+            }
+        }
+        let total = langs.iter().map(|(_, n)| n).sum::<usize>() + shapes.iter().sum::<usize>();
+        if total == 0 {
+            return None;
+        }
+        let lang_part: Vec<String> = langs
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, n))| *i < LANGS.len() || *n > 0)
+            .map(|(_, (lang, n))| format!("{lang}={n}"))
+            .collect();
+        let shape_part: Vec<String> = DiShape::ALL
+            .iter()
+            .zip(shapes)
+            .filter(|(_, n)| **n > 0)
+            .map(|(s, n)| format!("{}={n}", s.token()))
+            .collect();
+        let shape_part = if shape_part.is_empty() {
+            "none".to_string()
+        } else {
+            shape_part.join(" ")
+        };
+        Some(format!(
+            "[di] injects refs: {} (shapes: {shape_part}) repo={repo}",
+            lang_part.join(" ")
+        ))
+    }
+
+    /// Read and zero one shape counter. Racy under parallel tests that record
+    /// the same shape, so parser tests should assert on `refs` instead.
+    #[doc(hidden)]
+    pub fn take_for_test(shape: DiShape) -> usize {
+        COUNTS
+            .get(shape as usize)
+            .map_or(0, |c| c.swap(0, Ordering::Relaxed))
+    }
+}
+
+// ============================================================================
 // Doc ingestion (Tier-4 seam)
 // ============================================================================
 //
@@ -1364,6 +1565,109 @@ mod tests {
             infra::qname("service", "api")
         );
         assert_eq!(infra::qname("service", "api"), "infra:service:api");
+    }
+
+    #[test]
+    fn di_stats_shape_table_is_dense_and_tokens_are_frozen() {
+        use di_stats::{DiShape, LANGS};
+        let tokens = [
+            "ts-ctor",
+            "ts-inject-fn",
+            "ts-nest-ctor",
+            "java-ctor",
+            "java-field",
+            "java-lombok",
+            "java-jsr330",
+            "csharp-ctor",
+            "csharp-primary-ctor",
+            "csharp-fromservices",
+            "py-fastapi-depends",
+            "php-ctor",
+            "go-provider",
+            "scala-ctor",
+        ];
+        assert_eq!(DiShape::ALL.len(), 14);
+        for (i, s) in DiShape::ALL.iter().enumerate() {
+            // Counter bank and render both rely on ALL[i] as usize == i.
+            assert_eq!(*s as usize, i);
+            assert_eq!(s.token(), tokens[i]);
+            assert!(LANGS.contains(&s.lang()), "{:?} -> {}", s, s.lang());
+            // A token must never read as a language token under a `lang=` grep.
+            assert!(!LANGS.contains(&s.token()));
+        }
+        // Matrix row spellings, not aliases: the consumers grep ` go=` / ` scala=`.
+        assert_eq!(
+            LANGS,
+            [
+                "python",
+                "go",
+                "typescript",
+                "java",
+                "csharp",
+                "php",
+                "scala"
+            ]
+        );
+    }
+
+    #[test]
+    fn di_stats_render_prints_every_lang_and_only_fired_shapes() {
+        use di_stats::{DiShape, render};
+        let none = [0usize; 14];
+        // Nothing counted: no line at all.
+        assert_eq!(render(&[], &none, "r"), None);
+        assert_eq!(render(&[("typescript", 0), ("dart", 0)], &none, "r"), None);
+
+        let mut shapes = [0usize; 14];
+        shapes[DiShape::GoProvider as usize] = 2;
+        // Repeated languages sum; a non-LANGS language appears only when non-zero.
+        let line = render(
+            &[
+                ("go", 1),
+                ("go", 1),
+                ("typescript", 3),
+                ("dart", 0),
+                ("kotlin", 4),
+            ],
+            &shapes,
+            "fixtures/go-wire-di",
+        );
+        assert_eq!(
+            line.as_deref(),
+            Some(
+                "[di] injects refs: python=0 go=2 typescript=3 java=0 csharp=0 php=0 scala=0 kotlin=4 \
+                 (shapes: go-provider=2) repo=fixtures/go-wire-di"
+            )
+        );
+        // Refs with no detector reporting (cache-served, or an emitter that
+        // does not record yet) still print, with an explicit empty shape group.
+        assert_eq!(
+            render(&[("typescript", 1)], &none, "a").as_deref(),
+            Some(
+                "[di] injects refs: python=0 go=0 typescript=1 java=0 csharp=0 php=0 scala=0 (shapes: none) repo=a"
+            )
+        );
+    }
+
+    #[test]
+    fn di_stats_record_take_and_flush_reset() {
+        // The ONLY test in this crate that touches the process-global bank.
+        use di_stats::{DiShape, flush_marker, record, reset, take_for_test};
+        record(DiShape::ScalaCtor);
+        assert_eq!(take_for_test(DiShape::ScalaCtor), 1);
+        assert_eq!(take_for_test(DiShape::ScalaCtor), 0);
+
+        record(DiShape::GoProvider);
+        record(DiShape::TsInjectFn);
+        flush_marker(&[("go", 1)], "test");
+        // flush zeroes every slot, so a second build in-process starts clean.
+        for s in DiShape::ALL {
+            assert_eq!(take_for_test(s), 0, "{s:?} survived flush");
+        }
+
+        record(DiShape::JavaLombok);
+        reset();
+        assert_eq!(take_for_test(DiShape::JavaLombok), 0);
     }
 
     #[test]
