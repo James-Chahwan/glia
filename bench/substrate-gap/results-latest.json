@@ -3631,6 +3631,7 @@
   },
   "engine": "0.4.18",
   "legacy_only": [
+    "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
     "fixtures/contract-openapi-yaml",
