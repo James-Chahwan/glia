@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 129,
+  "fixtures": 133,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -73,6 +73,13 @@
       "language": "clojure",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "contract-asyncapi-nats": {
+      "framework": "contract-asyncapi-nats",
+      "language": "yaml+go",
+      "per_category": {
+        "DOCUMENTS": 1.0
       }
     },
     "contract-openapi-yaml": {
@@ -310,6 +317,11 @@
       "per_category": {
         "INJECTS": 1.0
       }
+    },
+    "java-spring-kafka-msgtype": {
+      "framework": "java-spring-kafka-msgtype",
+      "language": "java",
+      "per_category": {}
     },
     "k8s-multidoc-cron": {
       "framework": "k8s-multidoc-cron",
@@ -680,6 +692,11 @@
         "CALLS": 1.0
       }
     },
+    "walk-project-roots": {
+      "framework": "walk-project-roots",
+      "language": "typescript+go+rust",
+      "per_category": {}
+    },
     "xcut-config-env-value": {
       "framework": "xcut-config-env-value",
       "language": "yaml",
@@ -785,6 +802,13 @@
     },
     "xcut-queue-msgtype-go": {
       "framework": "xcut-queue-msgtype",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-msgtype-go-mismatch": {
+      "framework": "xcut-queue-msgtype-mismatch",
       "language": "go",
       "per_category": {
         "QUEUE_FLOWS": 1.0
