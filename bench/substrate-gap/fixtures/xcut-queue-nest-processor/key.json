@@ -1,0 +1,18 @@
+{
+  "framework": "xcut-queue-nest-processor",
+  "language": "typescript",
+  "dirs": ["api", "worker"],
+  "note": "Baseline 2026-09-17 (installed wheel = HEAD bc42921, before A2.4): QUEUE_PRODUCER 1/1 (`new Queue(` + ArgLiteral), QUEUE_CONSUMER 0/1, QUEUE_FLOWS 0/1 (0.00, BLIND): the @Processor worker emitted no queue node at all (no `new Worker(` in a NestJS processor, and no decorator row). A2.4 adds the `@Processor(` row gated on the bull package. Verified that wave through the working-tree CLI (`glia arch api --with worker` -> api->worker QUEUE_FLOWS channel=emails; `[queues] resolver paired=1`); grade.py sees it only after the end-of-wave wheel rebuild.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:emails", "note": "bullmq `new Queue('emails')` — existing ArgLiteral row, keeps the BullMQ needles honest"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:emails", "note": "NestJS @Processor('emails') on a WorkerHost — the A2.4 row under test"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:emails", "to": "queue_consumer:emails", "category": "QUEUE_FLOWS", "note": "bullmq family on both sides"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:welcome", "note": "`add('welcome', ...)` names the JOB, not the queue"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:bullmq", "note": "the queue is named; no coverage sentinel beside it"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:bullmq", "note": "same, worker side"}
+  ]
+}

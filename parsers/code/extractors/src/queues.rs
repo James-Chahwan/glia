@@ -44,8 +44,9 @@ pub enum QueueFramework {
     /// worker queue without a framework" pattern.
     RedisList,
     // --- pre-allocated for the rest of batch A2. Sqs/Sns/PubSub/
-    // --- AzureServiceBus have rows since A2.6; Mqtt/RedisPubSub/Jms stay
-    // --- inert until A2.4 / A2.9 add needles for them.
+    // --- AzureServiceBus have rows since A2.6, Jms a consumer row since A2.4
+    // --- (`@JmsListener`, no producer row yet); Mqtt/RedisPubSub stay inert
+    // --- until A2.9 adds needles for them.
     /// AWS SQS (`sqs.sendMessage`, `SendMessageRequest`, ...).
     Sqs,
     /// AWS SNS fan-out (`sns.publish`, `PublishRequest`, ...).
@@ -184,7 +185,11 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // C# — Confluent.Kafka: `consumer.Subscribe("orders")`.
     (".Subscribe(", QueueFramework::Kafka, &["confluent.kafka"], TopicRule::ArgLiteral),
     // Java/Kotlin — Spring: `@KafkaListener(topics = "orders")`.
-    ("@KafkaListener", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::Keyed(&["topics", "topic"])),
+    // A2.4: `topicPattern = "orders.*"` is read too, and QueueStackResolver
+    // matches it as a Kafka-dialect wildcard (always Weak). `topic` stays for
+    // `topicPartitions = @TopicPartition(topic = "orders")`; word edges keep it
+    // from matching inside `topicPattern`.
+    ("@KafkaListener", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::Keyed(&["topics", "topic", "topicpattern"])),
     // Go — segmentio/kafka-go: the topic is a ReaderConfig struct field.
     ("kafka.NewReader(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
     ("kafka.ReaderConfig{", QueueFramework::Kafka, &["kafka-go"], TopicRule::Keyed(&["topic"])),
@@ -232,6 +237,41 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // subscription receiver reads its TOPIC so it joins `get_topic_sender`.
     ("get_queue_receiver(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["queue_name"])),
     ("get_subscription_receiver(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["topic_name"])),
+    // ---- A2.4: annotation-driven consumers --------------------------------
+    // The handler declares its queue in its own annotation / attribute, so
+    // each row reads that annotation's argument region. `@KafkaListener` is
+    // the A2.2 row above. Every gate names the LIBRARY PACKAGE, never a word
+    // the needle already holds: `@SqsListener(` lowercases to text containing
+    // "sqs", so an `["sqs"]` gate would pass on the needle alone
+    // (`annotation_gates_are_not_satisfied_by_their_own_needle` asserts it).
+    // Java/Kotlin — Spring AMQP: `@RabbitListener(queues = "orders")`. The
+    // `bindings = @QueueBinding(value = @Queue(value = "orders"))` form reads
+    // through `value`: the first `value =` holds `@Queue(`, not a literal, so
+    // the scan moves on to the queue's own.
+    ("@RabbitListener(", QueueFramework::RabbitMQ, &["springframework.amqp"], TopicRule::Keyed(&["queues", "value"])),
+    // Java/Kotlin — Spring JMS: `@JmsListener(destination = "orders")`.
+    ("@JmsListener(", QueueFramework::Jms, &["springframework.jms"], TopicRule::Keyed(&["destination"])),
+    // Java/Kotlin — Spring Cloud AWS 3.x (`io.awspring`) and 2.x
+    // (`org.springframework.cloud.aws`): `@SqsListener("orders")`,
+    // `@SqsListener(queueNames = "orders")`, or a queue URL, which folds.
+    // KNOWN IMPRECISION: an array value (`queueNames = {"a"}`) is unreadable
+    // to the keyed scan, so the fallback reads arg #0 — right when arg #0 IS
+    // that array, wrong if another string attribute (`id = "x"`) precedes it.
+    ("@SqsListener(", QueueFramework::Sqs, &["awspring", "springframework.cloud.aws"], TopicRule::KeyedOrArg(&["value", "queuenames"])),
+    // TS — NestJS: `@Processor('emails')` on a WorkerHost (`@nestjs/bullmq`)
+    // or a Bull consumer (`@nestjs/bull`). `Processor` is a common decorator
+    // name, so the gate is the bull package, never the decorator.
+    ("@Processor(", QueueFramework::BullMQ, &["@nestjs/bull", "bullmq"], TopicRule::ArgLiteral),
+    // TS — @golevelup/nestjs-rabbitmq:
+    // `@RabbitSubscribe({ exchange: 'orders', routingKey: 'order.created', queue: 'billing' })`.
+    // The queue joins a direct producer; the routing key is the fallback.
+    ("@RabbitSubscribe(", QueueFramework::RabbitMQ, &["golevelup", "rabbitmq"], TopicRule::Keyed(&["queue", "routingkey"])),
+    // C# — Azure Functions, in-process (`Microsoft.Azure.WebJobs`) and
+    // isolated worker (`Microsoft.Azure.Functions.Worker`):
+    // `[ServiceBusTrigger("orders", Connection = "Sb")]`. For a topic trigger
+    // arg #0 is the TOPIC and arg #1 the subscription, so arg #0 joins the
+    // sender either way — the `CreateProcessor(` precedent above.
+    ("[ServiceBusTrigger(", QueueFramework::AzureServiceBus, &["webjobs", "azure.functions.worker", "azure.messaging.servicebus"], TopicRule::ArgLiteral),
 ];
 
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
@@ -519,7 +559,7 @@ fn emit_queue_nodes(
                 Confidence::Medium,
                 *line,
             ) {
-                fired_on(pattern, framework, topic, path);
+                fired_on(pattern, rule, framework, topic, path);
                 cloud_fired_on(framework, topic, *form, path);
             }
         }
@@ -550,7 +590,7 @@ fn emit_queue_nodes(
                 Confidence::Weak,
                 line,
             ) {
-                fired_on(pattern, framework, &tag, path);
+                fired_on(pattern, rule, framework, &tag, path);
             }
         }
     }
@@ -699,12 +739,35 @@ fn framework_tag(f: &QueueFramework) -> String {
 /// Grep-able proof that a needle passed its gate and produced a node.
 /// `GLIA_QUEUE_DEBUG=1 cargo test -p repo-graph-code-extractors -- --nocapture
 ///  2>&1 | grep "\\[queues\\] needle '"`
-fn fired_on(needle: &str, framework: &QueueFramework, topic: &str, path: &str) {
-    if debug_enabled() {
+///
+/// A2.4: a node minted by an annotation / attribute row gets a second,
+/// dedicated line (the unresolved tag included, so a listener whose queue is a
+/// constant still shows up):
+///   `GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep "\\[queues\\] annotation '"`
+fn fired_on(
+    needle: &str,
+    rule: &TopicRule,
+    framework: &QueueFramework,
+    topic: &str,
+    path: &str,
+) {
+    if !debug_enabled() {
+        return;
+    }
+    eprintln!("[queues] needle '{needle}' framework={framework:?} gate=ok topic={topic} file={path}");
+    if is_annotation_row(needle, rule) {
         eprintln!(
-            "[queues] needle '{needle}' framework={framework:?} gate=ok topic={topic} file={path}"
+            "[queues] annotation '{needle}' topic={topic} framework={framework:?} file={path}"
         );
     }
+}
+
+/// True for a row whose needle is a JVM/TS annotation (`@SqsListener(`) or a
+/// C# attribute (`[ServiceBusTrigger(`). The A2.5 task decorators
+/// (`@shared_task`) are excluded: they read a SYMBOL, not a queue, and carry
+/// their own `[queues] taskq` marker.
+fn is_annotation_row(needle: &str, rule: &TopicRule) -> bool {
+    needle.starts_with(['@', '[']) && !is_identity_rule(rule)
 }
 
 /// A2.6 marker — one line per cloud-broker NODE, naming the literal shape
@@ -1532,5 +1595,199 @@ sqs.sendMessage(SendMessageRequest.builder()
         let unnamed = "import boto3\nsqs.send_message(QueueUrl=f\"https://sqs.{region}.amazonaws.com/{account}/{name}\", MessageBody=b)\n";
         let ur = extract_queue_producer_nodes(unnamed, PATH, module_id(), repo());
         assert_eq!(qnames(&ur), vec!["queue_producer:unresolved:sqs".to_string()]);
+    }
+
+    // ---- A2.4: annotation-driven consumers --------------------------------
+
+    fn consumers(src: &str) -> Vec<String> {
+        qnames(&extract_queue_consumer_nodes(src, PATH, module_id(), repo()))
+    }
+
+    #[test]
+    fn kafka_listener_topics_attr() {
+        // `groupId` is a consumer group — it must never become the topic, in
+        // either attribute order.
+        for src in [
+            "import org.springframework.kafka.annotation.KafkaListener;\n@KafkaListener(topics = \"orders\", groupId = \"billing\")\npublic void on(String p) {}\n",
+            "import org.springframework.kafka.annotation.KafkaListener;\n@KafkaListener(groupId = \"billing\", topics = \"orders\")\npublic void on(String p) {}\n",
+        ] {
+            assert_eq!(consumers(src), vec!["queue_consumer:orders".to_string()]);
+        }
+        // A pattern subscription is read verbatim; the resolver matches it in
+        // the Kafka dialect. Was `queue_consumer:unresolved:kafka`.
+        let pattern = "import org.springframework.kafka.annotation.KafkaListener;\n@KafkaListener(topicPattern = \"orders.*\", groupId = \"audit\")\n";
+        assert_eq!(consumers(pattern), vec!["queue_consumer:orders.*".to_string()]);
+        // A property placeholder is kept: services reading the same property
+        // share the join key. KNOWN QUIRK (pre-existing, `queue_topic.rs`):
+        // `trim_noise` strips the trailing `}`, so the key is `${app.topic` —
+        // stable on both sides, but mangled. Update when that trim is fixed.
+        let placeholder = "import org.springframework.kafka.annotation.KafkaListener;\n@KafkaListener(topics = \"${app.topic}\")\n";
+        assert_eq!(consumers(placeholder), vec!["queue_consumer:${app.topic".to_string()]);
+    }
+
+    #[test]
+    fn kafka_listener_array_topics_is_a_known_miss() {
+        // The packet spec assumed the keyed scan returns the first literal of
+        // `topics = {"a", "b"}`. It does not: `read_literal` stops at `{`, so the
+        // listener reads as the coverage sentinel. Flips when `queue_topic`
+        // learns array values; update this assertion then.
+        let src = "import org.springframework.kafka.annotation.KafkaListener;\n@KafkaListener(topics = {\"orders\", \"payments\"}, groupId = \"billing\")\n";
+        assert_eq!(consumers(src), vec!["queue_consumer:unresolved:kafka".to_string()]);
+    }
+
+    #[test]
+    fn rabbit_listener_queues_attr() {
+        let src = "import org.springframework.amqp.rabbit.annotation.RabbitListener;\n@RabbitListener(queues = \"orders\")\npublic void on(String p) {}\n";
+        let r = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:orders".to_string()]);
+        assert!(framework_of(&r).contains(r#""framework":"RabbitMQ","family":"rabbitmq""#));
+
+        // Declarative binding: the first `value =` holds `@Queue(`, the queue's
+        // own `value` holds the name; the exchange must not win.
+        let bindings = r#"import org.springframework.amqp.rabbit.annotation.*;
+@RabbitListener(bindings = @QueueBinding(
+    value = @Queue(value = "orders", durable = "true"),
+    exchange = @Exchange(value = "shop"),
+    key = "order.created"))
+public void on(String p) {}
+"#;
+        assert_eq!(consumers(bindings), vec!["queue_consumer:orders".to_string()]);
+    }
+
+    #[test]
+    fn jms_listener_destination_attr() {
+        let src = "import org.springframework.jms.annotation.JmsListener;\n@JmsListener(destination = \"orders\", containerFactory = \"factory\")\npublic void on(String p) {}\n";
+        let r = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:orders".to_string()]);
+        assert!(framework_of(&r).contains(r#""framework":"Jms","family":"jms""#));
+    }
+
+    #[test]
+    fn sqs_listener_positional() {
+        for src in [
+            // Spring Cloud AWS 3.x, positional.
+            "import io.awspring.cloud.sqs.annotation.SqsListener;\n@SqsListener(\"orders\")\npublic void on(String p) {}\n",
+            // 3.x, named attribute.
+            "import io.awspring.cloud.sqs.annotation.SqsListener;\n@SqsListener(queueNames = \"orders\", maxConcurrentMessages = \"10\")\n",
+            // 2.x package, `value =` with a queue URL that folds.
+            "import org.springframework.cloud.aws.messaging.listener.annotation.SqsListener;\n@SqsListener(value = \"https://sqs.us-east-1.amazonaws.com/123456789012/orders\")\n",
+        ] {
+            let r = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+            assert_eq!(qnames(&r), vec!["queue_consumer:orders".to_string()], "{src}");
+            assert!(framework_of(&r).contains(r#""framework":"Sqs","family":"sqs""#));
+        }
+    }
+
+    #[test]
+    fn nest_processor_queue_name() {
+        let bullmq = "import { Processor, WorkerHost } from '@nestjs/bullmq';\n\n@Processor('emails')\nexport class EmailsProcessor extends WorkerHost {\n  async process(job) {}\n}\n";
+        let r = extract_queue_consumer_nodes(bullmq, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:emails".to_string()]);
+        assert!(framework_of(&r).contains(r#""framework":"BullMQ","family":"bullmq""#));
+
+        // Legacy @nestjs/bull; `@Process('welcome')` names a JOB and must not
+        // become a queue.
+        let bull = "import { Processor, Process } from '@nestjs/bull';\n\n@Processor('emails')\nexport class EmailsConsumer {\n  @Process('welcome')\n  async welcome(job) {}\n}\n";
+        assert_eq!(consumers(bull), vec!["queue_consumer:emails".to_string()]);
+    }
+
+    #[test]
+    fn rabbit_subscribe_queue_option() {
+        let src = "import { RabbitSubscribe } from '@golevelup/nestjs-rabbitmq';\n\n@RabbitSubscribe({ exchange: 'shop', routingKey: 'order.created', queue: 'billing-orders' })\npublic async onOrder(msg: {}) {}\n";
+        assert_eq!(consumers(src), vec!["queue_consumer:billing-orders".to_string()]);
+    }
+
+    #[test]
+    fn servicebus_trigger_attr() {
+        // In-process model.
+        let inproc = r#"using Microsoft.Azure.WebJobs;
+
+public static class OrderFunction
+{
+    [FunctionName("OrderFunction")]
+    public static void Run([ServiceBusTrigger("orders", Connection = "ServiceBus")] string body) { }
+}"#;
+        let r = extract_queue_consumer_nodes(inproc, PATH, module_id(), repo());
+        assert_eq!(qnames(&r), vec!["queue_consumer:orders".to_string()]);
+        assert!(framework_of(&r).contains(r#""framework":"AzureServiceBus""#));
+
+        // Isolated worker, topic trigger: arg #0 is the TOPIC, arg #1 the
+        // subscription — the topic is the join key.
+        let isolated = r#"using Microsoft.Azure.Functions.Worker;
+
+public class AuditFunction
+{
+    [Function("Audit")]
+    public void Run([ServiceBusTrigger("orders", "audit", Connection = "ServiceBus")] string body) { }
+}"#;
+        assert_eq!(consumers(isolated), vec!["queue_consumer:orders".to_string()]);
+
+        // A constant queue name reads as the unpairable sentinel, never as the
+        // `Connection` setting that follows it.
+        let constant = "using Microsoft.Azure.WebJobs;\npublic static void Run([ServiceBusTrigger(Queues.Orders, Connection = \"ServiceBus\")] string body) { }\n";
+        assert_eq!(
+            consumers(constant),
+            vec!["queue_consumer:unresolved:azureservicebus".to_string()]
+        );
+    }
+
+    #[test]
+    fn annotation_without_gate_is_ignored() {
+        // PRECISION GUARD: each annotation name also exists outside its
+        // messaging library, and the package gate is the only thing keeping
+        // those out.
+        for (src, what) in [
+            (
+                "import { Processor } from '@acme/pipeline';\n@Processor('emails')\nexport class Step {}\n",
+                "non-bull @Processor",
+            ),
+            (
+                "import com.acme.messaging.SqsListener;\n@SqsListener(\"orders\")\npublic void on(String p) {}\n",
+                "home-grown @SqsListener",
+            ),
+            (
+                "import com.acme.RabbitListener;\n@RabbitListener(queues = \"orders\")\n",
+                "home-grown @RabbitListener",
+            ),
+            (
+                "import com.acme.JmsListener;\n@JmsListener(destination = \"orders\")\n",
+                "home-grown @JmsListener",
+            ),
+            (
+                "using Acme.Triggers;\npublic void Run([ServiceBusTrigger(\"orders\")] string body) { }\n",
+                "home-grown [ServiceBusTrigger]",
+            ),
+        ] {
+            let cr = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+            let pr = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+            assert!(
+                cr.nodes.is_empty() && pr.nodes.is_empty(),
+                "{what} must not emit a queue node, got {:?} / {:?}",
+                qnames(&cr),
+                qnames(&pr)
+            );
+        }
+    }
+
+    #[test]
+    fn annotation_gates_are_not_satisfied_by_their_own_needle() {
+        // `@SqsListener(` lowercases to `@sqslistener(`, which already contains
+        // "sqs" — a gate spelled that way passes on the needle alone and gates
+        // nothing. Asserted for every annotation row, not commented.
+        let rows: Vec<_> = CONSUMER_PATTERNS
+            .iter()
+            .filter(|(needle, _, _, rule)| is_annotation_row(needle, rule))
+            .collect();
+        assert!(rows.len() >= 7, "annotation rows missing: {}", rows.len());
+        for (needle, _, signals, _) in rows {
+            assert!(!signals.is_empty(), "annotation row {needle:?} must be gated");
+            let lower = needle.to_ascii_lowercase();
+            for s in *signals {
+                assert!(
+                    !lower.contains(s),
+                    "signal {s:?} is a substring of its own needle {needle:?}"
+                );
+            }
+        }
     }
 }

@@ -1,0 +1,23 @@
+{
+  "framework": "xcut-queue-annot-listener",
+  "language": "java",
+  "dirs": ["producer", "consumer"],
+  "note": "Baseline 2026-09-17 (installed wheel = HEAD bc42921, before A2.4): nodes 3/4, QUEUE_FLOWS 1/2 (0.50, PARTIAL). The packet spec expected a fully blind Kafka pair, but A2.2 (wave 4) already added the `@KafkaListener` row, so the kafkajs -> @KafkaListener half is green at baseline and stays here as a POSITIVE CONTROL. The half under test is Spring Cloud AWS `@SqsListener(\"refunds\")`: CONSUMER_PATTERNS had no annotation row for it, so `queue_consumer:refunds` was XX and the SQS pair 0/1. A2.4 adds the annotation rows; the producer's queue URL and the listener's bare name both resolve to `refunds` (sqs family on both sides). Verified that wave through the working-tree CLI (`glia arch producer --with consumer` -> 2 QUEUE_FLOWS rows, channels orders + refunds; `[queues] resolver paired=2`); grade.py sees it only after the end-of-wave wheel rebuild.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "kafkajs producer.send({ topic: 'orders' }) — green since A2.1"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders", "note": "Spring @KafkaListener(topics = \"orders\") — POSITIVE CONTROL, green since A2.2's @KafkaListener row"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:refunds", "note": "AWS SDK v3 SendMessageCommand({ QueueUrl }) — the URL folds to its last path segment (A2.6)"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:refunds", "note": "Spring Cloud AWS @SqsListener(\"refunds\") — the A2.4 row under test"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:orders", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS", "note": "kafka family on both sides"},
+    {"from": "queue_producer:refunds", "to": "queue_consumer:refunds", "category": "QUEUE_FLOWS", "note": "sqs family on both sides; the producer spells a URL, the listener a bare name"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:billing", "note": "groupId is a consumer group, never the topic"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:sqs", "note": "the listener names its queue; no coverage sentinel may stand beside it"},
+    {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:unresolved:kafka", "note": "same, kafka side"},
+    {"from": "queue_producer:orders", "to": "queue_consumer:refunds", "category": "QUEUE_FLOWS"},
+    {"from": "queue_producer:refunds", "to": "queue_consumer:orders", "category": "QUEUE_FLOWS"}
+  ]
+}
