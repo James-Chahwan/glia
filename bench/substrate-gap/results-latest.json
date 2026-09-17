@@ -3666,7 +3666,8 @@
     "fixtures/xcut-trpc",
     "fixtures/xdata-source-shares",
     "fixtures/xiac-terraform-k8s",
-    "fixtures/xschema-csharp-namespace"
+    "fixtures/xschema-csharp-namespace",
+    "fixtures/xstack-host-pairing"
   ],
   "schema": 1,
   "totals": {

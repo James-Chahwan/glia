@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 128,
+  "fixtures": 129,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -692,7 +692,9 @@
       "framework": "xcut-eventbus",
       "language": "typescript",
       "per_category": {
-        "EVENT_FLOWS": 1.0
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-eventbus-spring": {
@@ -706,7 +708,9 @@
       "framework": "xcut-graphql",
       "language": "typescript",
       "per_category": {
-        "GRAPHQL_CALLS": 1.0
+        "GRAPHQL_CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-graphql-precision": {
@@ -721,14 +725,15 @@
         "DEFINES": 1.0,
         "GRPC_CALLS": 1.0,
         "HANDLED_BY": 0.0,
-        "USES": 0.0
+        "USES": 1.0
       }
     },
     "xcut-grpc-grpc_calls": {
       "framework": "xcut-grpc",
       "language": "proto+go",
       "per_category": {
-        "GRPC_CALLS": 1.0
+        "GRPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-grpc-package-collision": {
@@ -867,6 +872,8 @@
       "framework": "xcut-websocket",
       "language": "typescript+go",
       "per_category": {
+        "CONTAINS": 1.0,
+        "USES": 1.0,
         "WS_CONNECTS": 1.0
       }
     },
@@ -898,6 +905,14 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "xstack-host-pairing": {
+      "framework": "xstack-host-pairing",
+      "language": "typescript+go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "xstack-ts-go-http": {
       "framework": "xstack-ts-go-http",
       "language": "typescript+go",
@@ -909,20 +924,11 @@
   "schema": "substrate-gap-legacy/1",
   "summary": {
     "blind_spots": [
-      "xcut-grpc-csharp: HANDLED_BY",
-      "xcut-grpc-csharp: USES"
+      "xcut-grpc-csharp: HANDLED_BY"
     ],
     "forbid_violations": [],
     "grader_errors": [],
-    "missing_cells": [
-      "arch-monorepo-flows: POSITION on WS_CLIENT 'ws_client:/ws'",
-      "arch-monorepo-flows: POSITION on WS_HANDLER 'ws:ws'",
-      "arch-monorepo-flows: POSITION on GRAPHQL_OPERATION 'graphql_op:getUser'",
-      "arch-monorepo-flows: POSITION on GRAPHQL_RESOLVER 'graphql_resolver:getUser'",
-      "arch-monorepo-flows: POSITION on GRPC_CLIENT 'grpc_client:UserService'",
-      "arch-monorepo-flows: POSITION on EVENT_EMITTER 'event_emit:orderPlaced'",
-      "arch-monorepo-flows: POSITION on EVENT_HANDLER 'event_handle:orderPlaced'"
-    ],
+    "missing_cells": [],
     "missing_nodes": [
       "xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'"
     ],
