@@ -128,6 +128,11 @@ fn link_doc_sections(merged: &mut MergedGraph) {
 ///
 /// Neither is ever above the ROUTE node's own confidence.
 ///
+/// A10.3: an AsyncAPI channel op (`action` + `channel`, no `method`) pairs the
+/// same way with the queue node named for its channel — see
+/// [`channel_edges`]. It prints its own `[contract-link] channels=` line so
+/// neither half ever rewrites the other's marker.
+///
 /// Runs after the resolvers and before the cross-edge sort in `post_passes`, so
 /// the new edges are covered by that sort and the written bytes stay stable.
 fn link_contract_routes(merged: &mut MergedGraph) {
@@ -139,21 +144,43 @@ fn link_contract_routes(merged: &mut MergedGraph) {
             stats.exact,
             stats.prefix,
             stats.unmatched,
-            edges.len()
+            edges.len() - stats.channel_edges
+        );
+    }
+    // A10.3 fired_on marker: `... 2>&1 | grep '^\[contract-link\] channels='`
+    if stats.channels > 0 {
+        eprintln!(
+            "[contract-link] channels={} paired={} crossed={} unmatched={} edges={}",
+            stats.channels,
+            stats.paired,
+            stats.crossed,
+            stats.channel_unmatched,
+            stats.channel_edges
         );
     }
     merged.cross_edges.extend(edges);
 }
 
-/// Counters behind the `[contract-link]` marker. `exact` + `prefix` +
-/// `unmatched` == `ops`: each op is counted once, by the tier that paired it
-/// (`prefix` = every non-exact pairing, see `link_contract_routes`).
+/// Counters behind the `[contract-link]` markers.
+///
+/// HTTP half: `exact` + `prefix` + `unmatched` == `ops`: each op is counted
+/// once, by the tier that paired it (`prefix` = every non-exact pairing, see
+/// `link_contract_routes`).
+///
+/// Channel half (A10.3): `paired` + `channel_unmatched` == `channels`;
+/// `crossed` ⊆ `paired` counts the ops that only paired with the OTHER side's
+/// queue node; `channel_edges` is how many of the returned edges are theirs.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ContractLinkStats {
     ops: usize,
     exact: usize,
     prefix: usize,
     unmatched: usize,
+    channels: usize,
+    paired: usize,
+    crossed: usize,
+    channel_unmatched: usize,
+    channel_edges: usize,
 }
 
 /// The HTTP half of a contract operation, read off its ORIGIN cell.
@@ -164,6 +191,15 @@ struct ContractOp {
     raw_path: Option<String>,
 }
 
+/// A10.3: the message half of a contract operation, read off its ORIGIN cell.
+#[derive(Debug, PartialEq, Eq)]
+struct ChannelOp {
+    /// `true` for `publish` (pairs with producers first), `false` for
+    /// `subscribe` (consumers first).
+    publish: bool,
+    channel: String,
+}
+
 /// The edges `link_contract_routes` adds, without touching the graph. Split out
 /// so the unit tests can assert edges and counters on a hand-built merge.
 fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) {
@@ -171,29 +207,38 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
 
     let mut stats = ContractLinkStats::default();
     // Collect the ops first: almost no build has a contract file, and those
-    // builds must not pay for a second ROUTE index.
+    // builds must not pay for a ROUTE or queue index.
     let mut ops: Vec<(NodeId, ContractOp)> = Vec::new();
+    let mut channels: Vec<(NodeId, ChannelOp)> = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
                 continue;
             }
-            if let Some(op) = contract_op(&n.cells) {
+            let Some(origin) = contract_origin(&n.cells) else {
+                continue;
+            };
+            if let Some(op) = http_op(&origin) {
                 ops.push((n.id, op));
+            } else if let Some(op) = channel_op(&origin) {
+                channels.push((n.id, op));
             }
         }
     }
+    let mut edges: Vec<Edge> = Vec::new();
+    if !channels.is_empty() {
+        channel_edges(merged, &channels, &mut stats, &mut edges);
+    }
     if ops.is_empty() {
-        return (Vec::new(), stats);
+        return (edges, stats);
     }
     stats.ops = ops.len();
 
     let matcher = HttpRouteMatcher::new(&merged.graphs);
     if matcher.is_empty() {
         stats.unmatched = ops.len();
-        return (Vec::new(), stats);
+        return (edges, stats);
     }
-    let mut edges: Vec<Edge> = Vec::new();
     for (op_id, op) in &ops {
         let mut hits = matcher.lookup(&op.method, &op.path);
         // Every hit comes from one tier, so the first speaks for all of them.
@@ -238,10 +283,120 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
     (edges, stats)
 }
 
-/// The contract operation a DOC_SECTION's ORIGIN cell declares, or `None` when
-/// the node is not a contract op (markdown sections have no ORIGIN here) or the
-/// op is not an HTTP one (an AsyncAPI channel op is A10.3's to pair).
-fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
+/// A10.3: queue nodes keyed by their normalised topic, one map per side. Only
+/// ever LOOKED UP, never iterated (CODE_RULES §3).
+#[derive(Default)]
+struct QueueSides<'a> {
+    producers: HashMap<&'a str, Vec<(NodeId, Confidence)>>,
+    consumers: HashMap<&'a str, Vec<(NodeId, Confidence)>>,
+}
+
+/// The one normalisation channel matching allows: surrounding `/` trimmed.
+/// Deliberately NOT case-folded — queue topics are case-sensitive.
+fn norm_channel(s: &str) -> &str {
+    s.trim_matches('/')
+}
+
+impl<'a> QueueSides<'a> {
+    /// Index every QUEUE_PRODUCER / QUEUE_CONSUMER by the topic in its qname.
+    /// A framework-tag node (`queue_producer:unresolved:kafka`) names no topic
+    /// and is left out, so a channel literally called `kafka` cannot pair
+    /// with every Kafka file whose topic failed to parse.
+    fn build(merged: &'a MergedGraph) -> Self {
+        use repo_graph_code_extractors::queues::UNRESOLVED_PREFIX;
+
+        let mut ix = QueueSides::default();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                let (map, prefix) = match g.nav.kind_by_id.get(&n.id).copied() {
+                    Some(node_kind::QUEUE_PRODUCER) => (&mut ix.producers, "queue_producer:"),
+                    Some(node_kind::QUEUE_CONSUMER) => (&mut ix.consumers, "queue_consumer:"),
+                    _ => continue,
+                };
+                let Some(topic) = g
+                    .nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .and_then(|q| q.strip_prefix(prefix))
+                else {
+                    continue;
+                };
+                if topic.starts_with(UNRESOLVED_PREFIX) {
+                    continue;
+                }
+                let key = norm_channel(topic);
+                if key.is_empty() {
+                    continue;
+                }
+                map.entry(key).or_default().push((n.id, n.confidence));
+            }
+        }
+        ix
+    }
+}
+
+/// A10.3: pair each AsyncAPI channel op with the queue node(s) named for its
+/// channel, as DOCUMENTS cross-edges **contract → queue node**.
+/// - `Strong` — the same side (`publish` → QUEUE_PRODUCER, `subscribe` →
+///   QUEUE_CONSUMER) has a node with exactly that topic;
+/// - `Medium` — only the other side does. AsyncAPI v2 documents a channel from
+///   the publisher's viewpoint (and v2's `publish` famously means "others
+///   publish to me"), so a repo holding only the opposite half still has this
+///   contract as its documentation — but that reading is an inference;
+/// - nothing — neither side names the channel. Never a fan-out.
+///
+/// Matching is exact on the channel string after [`norm_channel`]. Neither
+/// tier is ever above the queue node's own confidence.
+fn channel_edges(
+    merged: &MergedGraph,
+    channels: &[(NodeId, ChannelOp)],
+    stats: &mut ContractLinkStats,
+    edges: &mut Vec<Edge>,
+) {
+    stats.channels = channels.len();
+    let sides = QueueSides::build(merged);
+    for (op_id, op) in channels {
+        let key = norm_channel(&op.channel);
+        let (same, other) = if op.publish {
+            (&sides.producers, &sides.consumers)
+        } else {
+            (&sides.consumers, &sides.producers)
+        };
+        let (hits, tier) = match same.get(key) {
+            Some(h) => (h, Confidence::Strong),
+            None => match other.get(key) {
+                Some(h) => {
+                    stats.crossed += 1;
+                    (h, Confidence::Medium)
+                }
+                None => {
+                    stats.channel_unmatched += 1;
+                    continue;
+                }
+            },
+        };
+        stats.paired += 1;
+        for &(to, node_conf) in hits {
+            edges.push(Edge {
+                from: *op_id,
+                to,
+                category: edge_category::DOCUMENTS,
+                confidence: weaker(tier, node_conf),
+            });
+            stats.channel_edges += 1;
+        }
+    }
+}
+
+fn weaker(a: Confidence, b: Confidence) -> Confidence {
+    // Declaration order is Strong < Medium < Weak.
+    if (a as u8) >= (b as u8) { a } else { b }
+}
+
+/// The parsed ORIGIN payload of a contract op, or `None` when the node is not
+/// one (markdown sections have no ORIGIN here; other ORIGIN payloads say a
+/// different provenance).
+fn contract_origin(cells: &[repo_graph_core::Cell]) -> Option<serde_json::Value> {
     use repo_graph_code_domain::cell_type;
     use repo_graph_core::CellPayload;
 
@@ -258,6 +413,12 @@ fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
     if v.get("provenance")?.as_str()? != "contract" {
         return None;
     }
+    Some(v)
+}
+
+/// The HTTP operation a contract ORIGIN declares, or `None` when it is not an
+/// HTTP one (an AsyncAPI channel op has no HTTP `method`).
+fn http_op(v: &serde_json::Value) -> Option<ContractOp> {
     let method = v.get("method")?.as_str()?.to_ascii_uppercase();
     if !is_http_verb(&method) {
         return None;
@@ -265,6 +426,31 @@ fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
     let path = v.get("path")?.as_str()?.to_string();
     let raw_path = v.get("raw_path").and_then(|p| p.as_str()).map(str::to_string);
     Some(ContractOp { method, path, raw_path })
+}
+
+/// A10.3: the channel operation a contract ORIGIN declares. An ORIGIN with a
+/// `method` is an HTTP op (or malformed) and is never read as a channel.
+fn channel_op(v: &serde_json::Value) -> Option<ChannelOp> {
+    if v.get("method").is_some() {
+        return None;
+    }
+    let publish = match v.get("action")?.as_str()? {
+        "publish" => true,
+        "subscribe" => false,
+        _ => return None,
+    };
+    let channel = v.get("channel")?.as_str()?;
+    if norm_channel(channel).is_empty() {
+        return None;
+    }
+    Some(ChannelOp { publish, channel: channel.to_string() })
+}
+
+/// The HTTP contract operation a DOC_SECTION's cells declare (test seam for
+/// [`contract_origin`] + [`http_op`]).
+#[cfg(test)]
+fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
+    http_op(&contract_origin(cells)?)
 }
 
 /// One of the verbs an OpenAPI path item may declare — literally the allow-list
@@ -831,7 +1017,7 @@ mod passes_tests {
         assert_eq!(documents(&edges, prefixed), vec![(get_users, Confidence::Medium)]);
         assert!(documents(&edges, prose).is_empty());
         assert_eq!(edges.len(), 2);
-        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 1, prefix: 1, unmatched: 0 });
+        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 1, prefix: 1, unmatched: 0, ..Default::default() });
     }
 
     #[test]
@@ -856,7 +1042,7 @@ mod passes_tests {
         assert_eq!(documents(&edges, op), vec![(get_orders, Confidence::Medium)]);
         assert!(documents(&edges, miss).is_empty());
         assert_eq!(edges.len(), 1);
-        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 0, prefix: 1, unmatched: 1 });
+        assert_eq!(stats, ContractLinkStats { ops: 2, exact: 0, prefix: 1, unmatched: 1, ..Default::default() });
     }
 
     #[test]
@@ -887,7 +1073,7 @@ mod passes_tests {
         h.doc("contract::api::GET:/users", &op_origin("GET", "/users", "/users"));
         let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
         assert!(edges.is_empty());
-        assert_eq!(stats, ContractLinkStats { ops: 1, exact: 0, prefix: 0, unmatched: 1 });
+        assert_eq!(stats, ContractLinkStats { ops: 1, exact: 0, prefix: 0, unmatched: 1, ..Default::default() });
     }
 
     #[test]
@@ -924,6 +1110,161 @@ mod passes_tests {
             payload: CellPayload::Text(op_origin("GET", "/users", "/users")),
         }];
         assert_eq!(contract_op(&text), None);
+    }
+
+    // ------------------------------------------------------------------
+    // A10.3 — AsyncAPI channel ops → queue nodes
+    // ------------------------------------------------------------------
+
+    /// The exact ORIGIN payload A10.3's extractor writes (see contracts.rs
+    /// `asyncapi_v2_channels_yield_one_op_per_publish_subscribe`).
+    fn chan_origin(action: &str, channel: &str) -> String {
+        format!(
+            r#"{{"provenance":"contract","source":"asyncapi","action":"{action}","channel":"{channel}","operation_id":"op"}}"#
+        )
+    }
+
+    impl Hand {
+        fn producer(&mut self, topic: &str) -> NodeId {
+            let q = format!("queue_producer:{topic}");
+            self.add(node_kind::QUEUE_PRODUCER, topic, &q, vec![])
+        }
+        fn consumer(&mut self, topic: &str) -> NodeId {
+            let q = format!("queue_consumer:{topic}");
+            self.add(node_kind::QUEUE_CONSUMER, topic, &q, vec![])
+        }
+    }
+
+    #[test]
+    fn channel_link_same_side_strong_other_side_medium_miss_none() {
+        let mut h = Hand::new("test://contract-link/chan");
+        let prod_orders = h.producer("orders");
+        let cons_orders = h.consumer("orders");
+        let cons_audit = h.consumer("audit/events");
+        // Same side exists: Strong to it, and NOT to the other side.
+        let pub_orders = h.doc("contract::asyncapi::publish:orders", &chan_origin("publish", "orders"));
+        let sub_orders = h.doc("contract::asyncapi::subscribe:orders", &chan_origin("subscribe", "orders"));
+        // Only the other side exists: Medium; `/`-trimmed on both sides.
+        let pub_audit = h.doc("contract::asyncapi::publish:/audit/events/", &chan_origin("publish", "/audit/events/"));
+        // Neither side: no edge, never a fan-out.
+        let miss = h.doc("contract::asyncapi::publish:payments", &chan_origin("publish", "payments"));
+        // Case-sensitive: `Orders` is not `orders`.
+        let cased = h.doc("contract::asyncapi::subscribe:Orders", &chan_origin("subscribe", "Orders"));
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = contract_route_edges(&merged);
+        assert_eq!(documents(&edges, pub_orders), vec![(prod_orders, Confidence::Strong)]);
+        assert_eq!(documents(&edges, sub_orders), vec![(cons_orders, Confidence::Strong)]);
+        assert_eq!(documents(&edges, pub_audit), vec![(cons_audit, Confidence::Medium)]);
+        assert!(documents(&edges, miss).is_empty());
+        assert!(documents(&edges, cased).is_empty());
+        assert_eq!(edges.len(), 3);
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                channels: 5,
+                paired: 3,
+                crossed: 1,
+                channel_unmatched: 2,
+                channel_edges: 3,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn channel_link_skips_framework_tag_nodes_and_pairs_across_repos() {
+        // A tag-fallback node names no topic: a channel literally called
+        // `unresolved:kafka` (or `kafka`) must not pair with it.
+        let mut svc = Hand::new("test://contract-link/chan-svc");
+        svc.add(node_kind::QUEUE_PRODUCER, "kafka", "queue_producer:unresolved:kafka", vec![]);
+        let weak_cons = {
+            let id = svc.consumer("orders");
+            if let Some(n) = svc.nodes.iter_mut().find(|n| n.id == id) {
+                n.confidence = Confidence::Weak;
+            }
+            id
+        };
+        let mut spec = Hand::new("test://contract-link/chan-spec");
+        let tag = spec.doc("contract::api::publish:unresolved:kafka", &chan_origin("publish", "unresolved:kafka"));
+        let bare = spec.doc("contract::api::publish:kafka", &chan_origin("publish", "kafka"));
+        let sub = spec.doc("contract::api::subscribe:orders", &chan_origin("subscribe", "orders"));
+        let mut merged = MergedGraph::new(vec![spec.graph(), svc.graph()]);
+
+        link_contract_routes(&mut merged);
+        assert!(documents(&merged.cross_edges, tag).is_empty());
+        assert!(documents(&merged.cross_edges, bare).is_empty());
+        // Cross-repo, and never above the queue node's own confidence.
+        assert_eq!(documents(&merged.cross_edges, sub), vec![(weak_cons, Confidence::Weak)]);
+    }
+
+    #[test]
+    fn channel_and_http_halves_count_separately() {
+        let mut h = Hand::new("test://contract-link/both");
+        let get_users = h.route("GET", "/users");
+        let prod = h.producer("orders");
+        let http = h.doc("contract::openapi::GET:/users", &op_origin("GET", "/users", "/users"));
+        let chan = h.doc("contract::asyncapi::publish:orders", &chan_origin("publish", "orders"));
+        // An ORIGIN carrying BOTH an HTTP method and a channel is an HTTP op
+        // (or malformed) — never read as a channel.
+        let hybrid = h.doc(
+            "contract::x::hybrid",
+            r#"{"provenance":"contract","method":"PATCH","path":"/nope","action":"publish","channel":"orders"}"#,
+        );
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = contract_route_edges(&merged);
+        assert_eq!(documents(&edges, http), vec![(get_users, Confidence::Strong)]);
+        assert_eq!(documents(&edges, chan), vec![(prod, Confidence::Strong)]);
+        assert!(documents(&edges, hybrid).is_empty());
+        assert_eq!(
+            stats,
+            ContractLinkStats {
+                ops: 2,
+                exact: 1,
+                unmatched: 1,
+                channels: 1,
+                paired: 1,
+                channel_edges: 1,
+                ..Default::default()
+            }
+        );
+        // The HTTP line's `edges=` is edges.len() - channel_edges.
+        assert_eq!(edges.len() - stats.channel_edges, 1);
+
+        // Channel ops with no queue nodes and no HTTP ops: all unmatched, and
+        // the HTTP half stays silent (ops == 0).
+        let mut h = Hand::new("test://contract-link/no-queues");
+        h.doc("contract::asyncapi::subscribe:orders", &chan_origin("subscribe", "orders"));
+        let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
+        assert!(edges.is_empty());
+        assert_eq!(
+            stats,
+            ContractLinkStats { channels: 1, channel_unmatched: 1, ..Default::default() }
+        );
+    }
+
+    #[test]
+    fn channel_op_reads_only_asyncapi_shaped_origins() {
+        let parse = |j: &str| {
+            let cells = vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+            contract_origin(&cells).and_then(|v| channel_op(&v))
+        };
+        assert_eq!(
+            parse(&chan_origin("subscribe", "user/signedup")),
+            Some(ChannelOp { publish: false, channel: "user/signedup".into() })
+        );
+        // v3 verbs are mapped by the extractor; raw ones are not accepted here.
+        assert_eq!(parse(&chan_origin("send", "orders")), None);
+        // An empty / all-slash channel names nothing.
+        assert_eq!(parse(&chan_origin("publish", "/")), None);
+        // Not a contract provenance.
+        assert_eq!(
+            parse(r#"{"provenance":"documentation","source":"contract","action":"publish","channel":"orders"}"#),
+            None
+        );
+        // An OpenAPI op is not a channel op.
+        assert_eq!(parse(&op_origin("GET", "/users", "/users")), None);
     }
 
     #[test]

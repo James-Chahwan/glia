@@ -1,0 +1,25 @@
+asyncapi: 2.6.0
+info:
+  title: Orders service
+  version: 1.0.0
+  description: The order events this service publishes and consumes.
+channels:
+  orders:
+    description: Order lifecycle events.
+    publish:
+      operationId: publishOrder
+      summary: A new order was placed.
+      message:
+        $ref: '#/components/messages/Order'
+    subscribe:
+      operationId: onOrder
+      message:
+        $ref: '#/components/messages/Order'
+components:
+  messages:
+    Order:
+      payload:
+        type: object
+        properties:
+          id:
+            type: string

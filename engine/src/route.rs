@@ -80,10 +80,9 @@ pub(crate) fn parse_repo_files(
             let contract_out = repo_graph_code_extractors::contracts::extract_yaml_contracts(
                 source, path, module_id, repo,
             );
-            if !contract_out.nodes.is_empty() {
-                contracts.files += 1;
-                contracts.openapi += contract_out.nodes.len();
-            }
+            // A10.3: the same call also covers `asyncapi.yaml`; `record`
+            // routes the count to the format the file sniffed as.
+            contracts.record(&contract_out);
             if !cron_out.nodes.is_empty()
                 || !cfg_out.nodes.is_empty()
                 || !iac_out.nodes.is_empty()

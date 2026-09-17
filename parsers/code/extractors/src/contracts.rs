@@ -10,6 +10,10 @@
 //! This is the NODE half: one node per OpenAPI operation. A10.2 adds the edge
 //! that pairs an operation with the ROUTE that implements it.
 //!
+//! A10.3: an `asyncapi.yaml` is the message-side twin — one node per channel
+//! operation (`publish orders`), which the engine's contract post-pass pairs
+//! with the QUEUE_PRODUCER / QUEUE_CONSUMER named for that channel.
+//!
 //! Zero-dependency on purpose: an indentation scanner, not a YAML crate. Every
 //! `.yaml` in every repo hits the sniff, so the miss path must stay cheap, and
 //! the engine must not grow a yaml dependency for a line-shaped read.
@@ -28,6 +32,16 @@ pub struct ContractNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+    /// Which contract format the file sniffed as; `None` for a non-contract
+    /// yaml. Drives the per-format `[contract]` counters.
+    pub source: Option<ContractSource>,
+}
+
+/// The contract formats `extract_yaml_contracts` recognises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractSource {
+    OpenApi,
+    AsyncApi,
 }
 
 /// Per-build counters behind the `[contract]` marker. All four fields exist now
@@ -39,6 +53,23 @@ pub struct ContractCounts {
     pub openapi: usize,
     pub asyncapi: usize,
     pub pact: usize,
+}
+
+impl ContractCounts {
+    /// Fold one file's extraction into the build counters. A file that sniffed
+    /// as a contract but declared nothing counts nowhere.
+    pub fn record(&mut self, out: &ContractNodes) {
+        if out.nodes.is_empty() {
+            return;
+        }
+        let n = out.nodes.len();
+        match out.source {
+            Some(ContractSource::OpenApi) => self.openapi += n,
+            Some(ContractSource::AsyncApi) => self.asyncapi += n,
+            None => return,
+        }
+        self.files += 1;
+    }
 }
 
 /// One declared operation: `<method> <path>` plus where it was declared.
@@ -162,20 +193,30 @@ fn join_path(base: &str, path: &str) -> String {
     s
 }
 
-/// Cheap sniff: is this an OpenAPI/Swagger document at all? Scans at most the
-/// first [`SNIFF_LINES`] lines for an indent-0 `openapi:` / `swagger:` key, and
-/// allocates nothing.
-fn is_openapi(source: &str) -> bool {
+/// What a yaml's indent-0 format marker says it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sniffed {
+    OpenApi,
+    AsyncApi,
+}
+
+/// Cheap sniff: is this an API contract at all, and which kind? Scans at most
+/// the first [`SNIFF_LINES`] lines for an indent-0 `openapi:` / `swagger:` /
+/// `asyncapi:` key, and allocates nothing.
+fn sniff(source: &str) -> Option<Sniffed> {
     for line in source.lines().take(SNIFF_LINES) {
         if is_skippable(line) || indent_of(line) != 0 {
             continue;
         }
         let t = line.trim_end();
         if t.starts_with("openapi:") || t.starts_with("swagger:") {
-            return true;
+            return Some(Sniffed::OpenApi);
+        }
+        if t.starts_with("asyncapi:") {
+            return Some(Sniffed::AsyncApi);
         }
     }
-    false
+    None
 }
 
 /// Indentation scan of the `paths:` block. Returns operations in declaration
@@ -306,6 +347,402 @@ fn scan_base(lines: &[&str]) -> String {
     String::new()
 }
 
+/// One declared AsyncAPI channel operation: `<action> <channel>`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChannelOp {
+    /// `publish` or `subscribe`. AsyncAPI v3's `send` / `receive` are mapped
+    /// onto these, so the pairing pass sees one vocabulary.
+    pub action: &'static str,
+    /// The channel string exactly as declared (v2: the `channels:` key; v3:
+    /// the referenced channel's `address`, else its id).
+    pub channel: String,
+    pub operation_id: Option<String>,
+    /// 0-indexed line of the operation key (`publish:` in v2, the operation id
+    /// in v3).
+    pub line: u32,
+}
+
+/// Split a block-mapping line into `(key, raw value)`, for keys that may carry
+/// `:` or `/` themselves — an AsyncAPI channel name (`'urn:orders'`,
+/// `user/{id}/signedup`). A quoted key ends at its closing quote; a plain key
+/// ends at the first `": "` or a trailing `:`. A list element (`- x`) is never
+/// a key.
+fn split_key(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim();
+    if t.starts_with('-') {
+        return None;
+    }
+    for q in ['"', '\''] {
+        if let Some(body) = t.strip_prefix(q) {
+            let end = body.find(q)?;
+            let rest = body[end + 1..].trim_start().strip_prefix(':')?;
+            return Some((&body[..end], rest.trim()));
+        }
+    }
+    match t.find(": ") {
+        Some(i) => Some((t[..i].trim(), t[i + 2..].trim())),
+        None => Some((t.strip_suffix(':')?.trim(), "")),
+    }
+}
+
+/// The line index of an indent-0 `<name>:` block opener.
+fn top_level_block(lines: &[&str], name: &str) -> Option<usize> {
+    lines.iter().position(|l| {
+        !is_skippable(l)
+            && indent_of(l) == 0
+            && split_key(l).is_some_and(|(k, v)| k == name && v.is_empty())
+    })
+}
+
+/// Indent of the first non-skippable line after `start`, when it is a child
+/// (indent > 0) rather than the next top-level key.
+fn first_child_indent(lines: &[&str], start: usize) -> Option<usize> {
+    lines[start + 1..]
+        .iter()
+        .find(|l| !is_skippable(l))
+        .map(|l| indent_of(l))
+        .filter(|i| *i > 0)
+}
+
+/// The `asyncapi:` version's major component (`"2.6.0"` → `"2"`).
+fn asyncapi_major<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    lines.iter().take(SNIFF_LINES).find_map(|l| {
+        if is_skippable(l) || indent_of(l) != 0 {
+            return None;
+        }
+        let (k, _) = split_key(l)?;
+        (k == "asyncapi").then(|| value_of(l).split('.').next().unwrap_or(""))
+    })
+}
+
+/// Indentation scan of an AsyncAPI document's channel operations, in
+/// declaration order. v3 (`asyncapi: 3.x`) reads the top-level `operations:`
+/// block; every other version reads v2's `channels.<name>.publish|subscribe`.
+/// A shape the scanner does not recognise yields nothing — a wrong channel is
+/// worse than a missing one.
+pub fn scan_asyncapi(source: &str) -> Vec<ChannelOp> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut ops = if asyncapi_major(&lines) == Some("3") {
+        scan_asyncapi_v3(&lines)
+    } else {
+        scan_asyncapi_v2(&lines)
+    };
+    // One node per (action, channel): a v3 doc may declare two `send`
+    // operations on one channel, and the qname would collide. First wins.
+    let mut seen: Vec<(&'static str, String)> = Vec::new();
+    ops.retain(|op| {
+        let key = (op.action, op.channel.clone());
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+        true
+    });
+    ops.truncate(MAX_OPS);
+    ops
+}
+
+/// v2: each child of `channels:` is a channel name; its direct `publish:` /
+/// `subscribe:` children are the operations, and an `operationId:` directly
+/// beneath one names it.
+fn scan_asyncapi_v2(lines: &[&str]) -> Vec<ChannelOp> {
+    let mut ops: Vec<ChannelOp> = Vec::new();
+    let Some(start) = top_level_block(lines, "channels") else {
+        return ops;
+    };
+    let Some(chan_indent) = first_child_indent(lines, start) else {
+        return ops;
+    };
+
+    let mut cur_chan: Option<&str> = None;
+    // Indent of the current channel item's direct children.
+    let mut body_indent: Option<usize> = None;
+    // (indent of the op key, index into `ops`, indent of the op's children)
+    let mut cur_op: Option<(usize, usize, Option<usize>)> = None;
+
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        if is_skippable(line) {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break; // a new top-level key ends the channels block
+        }
+        if let Some((op_indent, _, _)) = cur_op
+            && ind <= op_indent
+        {
+            cur_op = None;
+        }
+        if ind < chan_indent {
+            continue;
+        }
+        if ind == chan_indent {
+            cur_chan = split_key(line).map(|(k, _)| k);
+            body_indent = None;
+            continue;
+        }
+
+        // Inside an operation body: only its own `operationId` is wanted.
+        if let Some((_, idx, ref mut op_body)) = cur_op {
+            let child = *op_body.get_or_insert(ind);
+            if ind == child
+                && split_key(line).is_some_and(|(k, _)| k == "operationId")
+                && let Some(op) = ops.get_mut(idx)
+                && op.operation_id.is_none()
+            {
+                let v = value_of(line);
+                if !v.is_empty() {
+                    op.operation_id = Some(v.to_string());
+                }
+            }
+            continue;
+        }
+
+        let Some(chan) = cur_chan.filter(|c| !c.is_empty()) else {
+            continue;
+        };
+        if ind != *body_indent.get_or_insert(ind) {
+            continue; // deeper than the channel item's own keys
+        }
+        let action = match split_key(line) {
+            Some(("publish", "")) => "publish",
+            Some(("subscribe", "")) => "subscribe",
+            _ => continue,
+        };
+        if ops.len() >= MAX_OPS {
+            break;
+        }
+        ops.push(ChannelOp {
+            action,
+            channel: chan.to_string(),
+            operation_id: None,
+            line: i as u32,
+        });
+        cur_op = Some((ind, ops.len() - 1, None));
+    }
+    ops
+}
+
+/// What a v3 `channels.<id>.address` says about the channel's real name.
+enum Address<'a> {
+    Declared(&'a str),
+    /// `address: null` — the spec's "unknown / dynamic channel".
+    Null,
+}
+
+/// v3 `channels:` → `(id, address)` for each channel item that declares one.
+fn v3_addresses<'a>(lines: &[&'a str]) -> Vec<(&'a str, Address<'a>)> {
+    let mut out = Vec::new();
+    let Some(start) = top_level_block(lines, "channels") else {
+        return out;
+    };
+    let Some(chan_indent) = first_child_indent(lines, start) else {
+        return out;
+    };
+    let mut cur: Option<&str> = None;
+    let mut body_indent: Option<usize> = None;
+    for line in lines.iter().skip(start + 1) {
+        if is_skippable(line) {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break;
+        }
+        if ind < chan_indent {
+            continue;
+        }
+        if ind == chan_indent {
+            cur = split_key(line).map(|(k, _)| k);
+            body_indent = None;
+            continue;
+        }
+        let Some(id) = cur else { continue };
+        if ind != *body_indent.get_or_insert(ind) {
+            continue;
+        }
+        if split_key(line).is_some_and(|(k, _)| k == "address") {
+            let v = value_of(line);
+            let addr = if v.is_empty() || v == "null" || v == "~" {
+                Address::Null
+            } else {
+                Address::Declared(v)
+            };
+            out.push((id, addr));
+        }
+    }
+    out
+}
+
+/// A same-document channel pointer `#/channels/<id>` → `<id>` (RFC 6901
+/// unescaped). Anything deeper, or pointing into another file, is `None`.
+fn v3_channel_ref(raw: &str) -> Option<String> {
+    let rest = unquote(raw).strip_prefix("#/channels/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest.replace("~1", "/").replace("~0", "~"))
+}
+
+/// The `$ref` inside a flow mapping `{ $ref: '#/channels/x' }`.
+fn flow_ref(v: &str) -> Option<&str> {
+    let inner = v.strip_prefix('{')?.strip_suffix('}')?;
+    let (k, val) = inner.split_once(':')?;
+    (unquote(k.trim()) == "$ref").then(|| val.trim())
+}
+
+/// v3: each child of `operations:` is an operation id carrying
+/// `action: send|receive` and `channel: {$ref: '#/channels/<id>'}`. The
+/// channel string is that channel's `address` when it declares one, nothing
+/// when it declares `address: null` (dynamic), and the id otherwise.
+fn scan_asyncapi_v3(lines: &[&str]) -> Vec<ChannelOp> {
+    struct Pending<'a> {
+        id: &'a str,
+        line: u32,
+        action: Option<&'static str>,
+        channel_ref: Option<String>,
+    }
+
+    let mut ops: Vec<ChannelOp> = Vec::new();
+    let Some(start) = top_level_block(lines, "operations") else {
+        return ops;
+    };
+    let Some(op_indent) = first_child_indent(lines, start) else {
+        return ops;
+    };
+    let addresses = v3_addresses(lines);
+    let finish = |p: Pending<'_>, ops: &mut Vec<ChannelOp>| {
+        let (Some(action), Some(id)) = (p.action, p.channel_ref) else {
+            return;
+        };
+        let channel = match addresses.iter().find(|(k, _)| *k == id) {
+            Some((_, Address::Declared(a))) => (*a).to_string(),
+            Some((_, Address::Null)) => return,
+            None => id,
+        };
+        if ops.len() < MAX_OPS {
+            ops.push(ChannelOp {
+                action,
+                channel,
+                operation_id: Some(p.id.to_string()),
+                line: p.line,
+            });
+        }
+    };
+
+    let mut cur: Option<Pending<'_>> = None;
+    let mut body_indent: Option<usize> = None;
+    // Indent of a block-style `channel:` key whose `$ref` is on a later line.
+    let mut channel_block: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        if is_skippable(line) {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break;
+        }
+        if channel_block.is_some_and(|c| ind <= c) {
+            channel_block = None;
+        }
+        if ind < op_indent {
+            continue;
+        }
+        if ind == op_indent {
+            if let Some(p) = cur.take() {
+                finish(p, &mut ops);
+            }
+            cur = split_key(line).map(|(k, _)| Pending {
+                id: k,
+                line: i as u32,
+                action: None,
+                channel_ref: None,
+            });
+            body_indent = None;
+            channel_block = None;
+            continue;
+        }
+        let Some(p) = cur.as_mut() else { continue };
+        let Some((key, raw)) = split_key(line) else { continue };
+
+        if let Some(c) = channel_block {
+            // Only the `$ref` that is a direct child of `channel:`.
+            if ind > c && key == "$ref" && p.channel_ref.is_none() {
+                p.channel_ref = v3_channel_ref(raw);
+            }
+            continue;
+        }
+        if ind != *body_indent.get_or_insert(ind) {
+            continue;
+        }
+        match key {
+            "action" => {
+                p.action = match value_of(line) {
+                    "send" => Some("publish"),
+                    "receive" => Some("subscribe"),
+                    _ => None,
+                };
+            }
+            "channel" if raw.is_empty() => channel_block = Some(ind),
+            "channel" => p.channel_ref = flow_ref(raw).and_then(v3_channel_ref),
+            _ => {}
+        }
+    }
+    if let Some(p) = cur.take() {
+        finish(p, &mut ops);
+    }
+    ops
+}
+
+/// Push one contract-operation node. Every contract format shares this shape:
+/// DOC_SECTION + CODE / POSITION / ORIGIN cells, parented to the module.
+#[allow(clippy::too_many_arguments)]
+fn push_op(
+    out: &mut ContractNodes,
+    qname: &str,
+    name: &str,
+    operation_id: Option<&str>,
+    path: &str,
+    line: u32,
+    origin: String,
+    module_id: NodeId,
+    repo: RepoId,
+) {
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, qname);
+    let code = match operation_id {
+        Some(oid) => format!("{name} — {oid}"),
+        None => name.to_string(),
+    };
+    let pos = format!(
+        r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
+        esc(path),
+        line,
+        line
+    );
+    out.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: vec![
+            Cell { kind: cell_type::CODE, payload: CellPayload::Text(code) },
+            Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
+            Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) },
+        ],
+    });
+    out.nav
+        .record(id, name, qname, node_kind::DOC_SECTION, Some(module_id));
+}
+
+/// `,"operation_id":"<id>"`, or nothing when the spec names none (the field is
+/// OMITTED, never null).
+fn operation_id_field(oid: Option<&str>) -> String {
+    match oid {
+        Some(oid) => format!(r#","operation_id":"{}""#, esc(oid)),
+        None => String::new(),
+    }
+}
+
 /// Sniff a `.yaml`/`.yml` and, when it is an API contract, emit one node per
 /// declared operation. A non-contract yaml — the overwhelming majority — takes
 /// the allocation-free miss path and returns empty.
@@ -314,7 +751,9 @@ fn scan_base(lines: &[&str]) -> String {
 /// kind: `governing_docs` / `glia docs-for` then answer with contract ops for
 /// free, engram-export already maps DOC_SECTION → `Content::Proposition`, and
 /// pyo3 decodes it today. The `ORIGIN` cell (`provenance=contract`) is the
-/// discriminator every downstream pass keys on.
+/// discriminator every downstream pass keys on: an OpenAPI op carries
+/// `method` + `path`, an AsyncAPI op carries `action` + `channel` and neither
+/// of the HTTP keys — that absence is how the pairing pass tells them apart.
 pub fn extract_yaml_contracts(
     source: &str,
     path: &str,
@@ -322,52 +761,46 @@ pub fn extract_yaml_contracts(
     repo: RepoId,
 ) -> ContractNodes {
     let mut out = ContractNodes::default();
-    if !is_openapi(source) {
+    let Some(kind) = sniff(source) else {
         return out;
-    }
+    };
     let stem = std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("spec");
 
-    for op in scan_openapi(source) {
-        let qname = format!("contract::{stem}::{}:{}", op.method, op.path);
-        let name = format!("{} {}", op.method, op.path);
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, &qname);
-
-        let code = match &op.operation_id {
-            Some(oid) => format!("{name} — {oid}"),
-            None => name.clone(),
-        };
-        let pos = format!(
-            r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
-            esc(path),
-            op.line,
-            op.line
-        );
-        let oid = match &op.operation_id {
-            Some(oid) => format!(r#","operation_id":"{}""#, esc(oid)),
-            None => String::new(),
-        };
-        let origin = format!(
-            r#"{{"provenance":"contract","source":"openapi","method":"{}","path":"{}","raw_path":"{}"{}}}"#,
-            esc(&op.method),
-            esc(&op.path),
-            esc(&op.raw_path),
-            oid
-        );
-        out.nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Strong,
-            cells: vec![
-                Cell { kind: cell_type::CODE, payload: CellPayload::Text(code) },
-                Cell { kind: cell_type::POSITION, payload: CellPayload::Json(pos) },
-                Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin) },
-            ],
-        });
-        out.nav
-            .record(id, &name, &qname, node_kind::DOC_SECTION, Some(module_id));
+    match kind {
+        Sniffed::OpenApi => {
+            out.source = Some(ContractSource::OpenApi);
+            for op in scan_openapi(source) {
+                let qname = format!("contract::{stem}::{}:{}", op.method, op.path);
+                let name = format!("{} {}", op.method, op.path);
+                let origin = format!(
+                    r#"{{"provenance":"contract","source":"openapi","method":"{}","path":"{}","raw_path":"{}"{}}}"#,
+                    esc(&op.method),
+                    esc(&op.path),
+                    esc(&op.raw_path),
+                    operation_id_field(op.operation_id.as_deref())
+                );
+                let oid = op.operation_id.as_deref();
+                push_op(&mut out, &qname, &name, oid, path, op.line, origin, module_id, repo);
+            }
+        }
+        Sniffed::AsyncApi => {
+            out.source = Some(ContractSource::AsyncApi);
+            for op in scan_asyncapi(source) {
+                let qname = format!("contract::{stem}::{}:{}", op.action, op.channel);
+                let name = format!("{} {}", op.action, op.channel);
+                let origin = format!(
+                    r#"{{"provenance":"contract","source":"asyncapi","action":"{}","channel":"{}"{}}}"#,
+                    op.action,
+                    esc(&op.channel),
+                    operation_id_field(op.operation_id.as_deref())
+                );
+                let oid = op.operation_id.as_deref();
+                push_op(&mut out, &qname, &name, oid, path, op.line, origin, module_id, repo);
+            }
+        }
     }
     out
 }
@@ -525,5 +958,220 @@ paths:
         );
         assert_eq!(ops[0].method, "GET");
         assert_eq!(ops[0].path, "/v2/pets/{id}");
+    }
+    // ------------------------------------------------------------------
+    // A10.3 — AsyncAPI channel operations
+    // ------------------------------------------------------------------
+
+    fn origin_json(node: &Node) -> &str {
+        match &node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ORIGIN)
+            .expect("contract ops carry an ORIGIN discriminator")
+            .payload
+        {
+            CellPayload::Json(j) => j.as_str(),
+            other => panic!("ORIGIN must be Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asyncapi_v2_channels_yield_one_op_per_publish_subscribe() {
+        // Two channels; `orders` declares both directions, `user/signedup`
+        // only subscribes. Channel-level `description:` / `parameters:` and the
+        // nested `message:` bodies must open nothing.
+        let source = r#"asyncapi: 2.6.0
+info:
+  title: Orders
+  version: 1.0.0
+channels:
+  orders:
+    description: order events
+    publish:
+      operationId: publishOrder
+      message:
+        $ref: '#/components/messages/Order'
+    subscribe:
+      operationId: onOrder
+      message:
+        payload:
+          type: object
+          properties:
+            publish:
+              type: string
+  'user/signedup':
+    parameters:
+      userId:
+        description: who
+    subscribe:
+      message:
+        name: UserSignedUp
+components:
+  messages:
+    Order:
+      payload:
+        type: object
+"#;
+        let out = extract_yaml_contracts(source, "specs/asyncapi.yaml", module_id(), repo());
+        assert_eq!(out.source, Some(ContractSource::AsyncApi));
+        let qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.qname_by_id[&n.id].as_str())
+            .collect();
+        assert_eq!(
+            qnames,
+            vec![
+                "contract::asyncapi::publish:orders",
+                "contract::asyncapi::subscribe:orders",
+                "contract::asyncapi::subscribe:user/signedup",
+            ]
+        );
+        let first = &out.nodes[0];
+        assert_eq!(out.nav.name_by_id[&first.id], "publish orders");
+        assert_eq!(out.nav.kind_by_id[&first.id], node_kind::DOC_SECTION);
+        assert_eq!(out.nav.parent_of[&first.id], module_id());
+
+        let j = origin_json(first);
+        assert_eq!(
+            j,
+            r#"{"provenance":"contract","source":"asyncapi","action":"publish","channel":"orders","operation_id":"publishOrder"}"#
+        );
+        // No HTTP keys: that absence is the pairing pass's discriminator.
+        assert!(!j.contains("\"method\"") && !j.contains("\"path\""), "got {j}");
+        // No operationId declared → the field is omitted, not null.
+        assert!(!origin_json(&out.nodes[2]).contains("operation_id"));
+
+        let ops = scan_asyncapi(source);
+        assert_eq!(ops[0].line, 7, "`publish:` is the 8th line => 0-indexed 7");
+        assert_eq!(ops[1].operation_id.as_deref(), Some("onOrder"));
+        assert_eq!(ops[2].operation_id, None);
+    }
+
+    #[test]
+    fn openapi_doc_never_enters_the_asyncapi_arm() {
+        // The OpenAPI doc has a `channels:`-looking nothing and a `publish`
+        // path; it must still come out as HTTP ops only.
+        let source = r#"openapi: 3.0.3
+paths:
+  /publish:
+    post:
+      operationId: publish
+      responses:
+        '200':
+          description: ok
+"#;
+        let out = extract_yaml_contracts(source, "openapi.yaml", module_id(), repo());
+        assert_eq!(out.source, Some(ContractSource::OpenApi));
+        assert_eq!(out.nodes.len(), 1);
+        let j = origin_json(&out.nodes[0]);
+        assert!(j.contains(r#""source":"openapi""#), "got {j}");
+        assert!(!j.contains("\"action\"") && !j.contains("\"channel\""), "got {j}");
+        assert!(scan_asyncapi(source).is_empty());
+
+        // And an AsyncAPI doc yields no HTTP ops.
+        let async_src = "asyncapi: 2.0.0\nchannels:\n  orders:\n    publish:\n      message: {}\n";
+        assert!(scan_openapi(async_src).is_empty());
+        let out = extract_yaml_contracts(async_src, "events.yml", module_id(), repo());
+        assert_eq!(out.source, Some(ContractSource::AsyncApi));
+        assert_eq!(out.nav.qname_by_id[&out.nodes[0].id], "contract::events::publish:orders");
+    }
+
+    #[test]
+    fn asyncapi_v3_operations_map_send_receive_onto_publish_subscribe() {
+        let source = r#"asyncapi: 3.0.0
+info:
+  title: Accounts
+  version: 1.0.0
+channels:
+  userSignedup:
+    address: 'user/signedup'
+    messages:
+      UserSignedUp:
+        $ref: '#/components/messages/UserSignedUp'
+  orders:
+    messages: {}
+  dynamic:
+    address: null
+operations:
+  sendUserSignedup:
+    action: send
+    channel:
+      $ref: '#/channels/userSignedup'
+    messages:
+      - $ref: '#/channels/orders/messages/Nope'
+  onOrders:
+    action: receive
+    channel: { $ref: '#/channels/orders' }
+  sendDynamic:
+    action: send
+    channel:
+      $ref: '#/channels/dynamic'
+  sendElsewhere:
+    action: send
+    channel:
+      $ref: './other.yaml#/channels/orders'
+  duplicateSend:
+    action: send
+    channel:
+      $ref: '#/channels/userSignedup'
+  weird:
+    action: publish
+    channel:
+      $ref: '#/channels/orders'
+"#;
+        let ops = scan_asyncapi(source);
+        let got: Vec<(&str, &str, Option<&str>)> = ops
+            .iter()
+            .map(|o| (o.action, o.channel.as_str(), o.operation_id.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // send → publish; the channel is its declared ADDRESS, not its id.
+                ("publish", "user/signedup", Some("sendUserSignedup")),
+                // receive → subscribe; flow-style ref; no address → the id.
+                ("subscribe", "orders", Some("onOrders")),
+                // `address: null` (dynamic), a cross-file ref, a duplicate
+                // (action, channel), and a v2 verb under v3 all emit nothing.
+            ]
+        );
+        assert_eq!(ops[0].line, 15, "the operation id key's 0-indexed line");
+
+        let out = extract_yaml_contracts(source, "asyncapi.yaml", module_id(), repo());
+        assert_eq!(
+            out.nav.qname_by_id[&out.nodes[0].id],
+            "contract::asyncapi::publish:user/signedup"
+        );
+        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "publish user/signedup");
+    }
+
+    #[test]
+    fn asyncapi_v3_json_pointer_is_unescaped() {
+        let source = r##"asyncapi: 3.1.0
+operations:
+  send:
+    action: send
+    channel:
+      $ref: "#/channels/user~1signedup"
+"##;
+        let ops = scan_asyncapi(source);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].channel, "user/signedup");
+    }
+
+    #[test]
+    fn contract_counts_record_by_source() {
+        let mut c = ContractCounts::default();
+        let openapi = "openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n    put:\n      summary: y\n";
+        let asyncapi = "asyncapi: 2.6.0\nchannels:\n  orders:\n    subscribe:\n      summary: x\n";
+        let empty_async = "asyncapi: 2.6.0\ninfo:\n  title: nothing declared\n";
+        let k8s = "apiVersion: v1\nkind: Service\n";
+        for src in [openapi, asyncapi, empty_async, k8s] {
+            c.record(&extract_yaml_contracts(src, "x.yaml", module_id(), repo()));
+        }
+        assert_eq!((c.files, c.openapi, c.asyncapi, c.pact), (2, 2, 1, 0));
+        assert_eq!(extract_yaml_contracts(k8s, "x.yaml", module_id(), repo()).source, None);
     }
 }

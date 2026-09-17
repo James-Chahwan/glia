@@ -1,0 +1,22 @@
+{
+  "framework": "contract-asyncapi-nats",
+  "language": "yaml+go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "publish orders", "note": "A10.3: AsyncAPI v2 channel op (channels.orders.publish)"},
+    {"kind": "DOC_SECTION", "name": "subscribe orders", "note": "A10.3: AsyncAPI v2 channel op (channels.orders.subscribe)"},
+    {"kind": "QUEUE_PRODUCER", "name": "orders", "note": "positive control: nc.Publish(\"orders\", ...) in publisher.go"},
+    {"kind": "QUEUE_CONSUMER", "name": "orders", "note": "positive control: nc.Subscribe(\"orders\", ...) in consumer.go"}
+  ],
+  "expect_edges": [
+    {"from": "contract::asyncapi::publish:orders", "to": "queue_producer:orders", "category": "DOCUMENTS", "note": "A10.3: publish op -> QUEUE_PRODUCER orders (same side, exact channel, Strong)"},
+    {"from": "contract::asyncapi::subscribe:orders", "to": "queue_consumer:orders", "category": "DOCUMENTS", "note": "A10.3: subscribe op -> QUEUE_CONSUMER orders (same side, exact channel, Strong)"}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "publish orders", "max_nodes": 1, "note": "one node per (action, channel)"},
+    {"kind": "DOC_SECTION", "name": "publish description", "note": "precision: a channel-level key that is not publish/subscribe opens no op"},
+    {"from": "contract::asyncapi::publish:orders", "to": "queue_consumer:orders", "category": "DOCUMENTS", "note": "A10.3 precision: the other side is only a fallback when the same side has no node named for the channel"},
+    {"from": "contract::asyncapi::subscribe:orders", "to": "queue_producer:orders", "category": "DOCUMENTS", "note": "A10.3 precision: as above, other direction"}
+  ],
+  "note": "A10.3: AsyncAPI is the message-side twin of the OpenAPI contract (A10.1/A10.2). extract_yaml_contracts gains an asyncapi arm emitting one DOC_SECTION per channel operation (ORIGIN provenance=contract, source=asyncapi, action + channel, no method/path), and the engine post-pass contract_route_edges pairs each op to the queue node named for its channel with a DOCUMENTS edge (contract -> queue node): publish -> QUEUE_PRODUCER and subscribe -> QUEUE_CONSUMER at Strong, the other side at Medium only when the same side misses. Two Go files because queue extraction is first-occurrence-per-file. The v3 operations: shape and the Medium fallback are gated by the extractor/engine unit tests."
+}
