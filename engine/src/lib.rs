@@ -16,6 +16,7 @@ mod answers;
 mod build;
 mod coverage;
 mod docs;
+mod endpoint_fold;
 mod extract;
 mod passes;
 mod route;

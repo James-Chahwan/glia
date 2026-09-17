@@ -116,6 +116,23 @@ struct EndpointCandidate {
     /// `normalise_client_path` actually changed it. Serialised as `"raw"` on
     /// ENDPOINT_HIT.
     raw_path: Option<String>,
+    /// A11.2: the template literal with every `${expr}` substitution kept
+    /// VERBATIM (`${environment.apiUrl}/users`), set only when the argument was
+    /// a template with at least one substitution. Serialised as `"template"`
+    /// on ENDPOINT_HIT. Not the same value as `raw_path`: that one is the
+    /// pre-normalisation path with `${…}` placeholders and exists only when
+    /// host/query stripping changed it; this one is the source the engine's
+    /// endpoint-fold pass resolves through the repo ConstTable.
+    template: Option<String>,
+}
+
+/// What `classify_path_arg` read off an HTTP call's first argument.
+struct PathArg {
+    /// Request path as written, `${…}` for every substitution.
+    path: String,
+    /// Substitution-preserving template source; see `EndpointCandidate::template`.
+    template: Option<String>,
+    confidence: Confidence,
 }
 
 // ============================================================================
@@ -915,16 +932,16 @@ fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             Some(n) => n,
             None => return,
         };
-        let (path, mut conf) = classify_path_arg(first, src);
+        let mut arg = classify_path_arg(first, src);
         let method = fetch_method_from_opts(args.named_child(1), src).unwrap_or_else(|| {
             // Method override is opaque (variable, spread, conditional) — drop
             // confidence one tier.
             if args.named_child(1).is_some() {
-                conf = downgrade(conf);
+                arg.confidence = downgrade(arg.confidence);
             }
             "GET".to_string()
         });
-        push_endpoint(call, from, method, path, conf, None, acc);
+        push_endpoint(call, from, method, arg, None, acc);
         return;
     }
 
@@ -973,13 +990,12 @@ fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
         Some(n) => n,
         None => return,
     };
-    let (path, conf) = classify_path_arg(first, src);
+    let arg = classify_path_arg(first, src);
     push_endpoint(
         call,
         from,
         method_lower.to_uppercase(),
-        path,
-        conf,
+        arg,
         requires_alias,
         acc,
     );
@@ -989,12 +1005,16 @@ fn push_endpoint(
     call: TsNode,
     from: NodeId,
     method: String,
-    path: String,
-    confidence: Confidence,
+    arg: PathArg,
     requires_import_alias: Option<String>,
     acc: &mut Acc,
 ) {
     let start = call.start_position();
+    let PathArg {
+        path,
+        template,
+        confidence,
+    } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
     // stripping happens once. A normaliser, never a filter: relative hints
     // (`auth/login`) and interpolated bases (`${…}/users`) come back as-is.
@@ -1010,32 +1030,45 @@ fn push_endpoint(
         col: start.column + 1,
         requires_import_alias,
         raw_path,
+        template,
     });
 }
 
-fn classify_path_arg(arg: TsNode, src: &[u8]) -> (String, Confidence) {
+fn classify_path_arg(arg: TsNode, src: &[u8]) -> PathArg {
+    let plain = |path: String, confidence| PathArg {
+        path,
+        template: None,
+        confidence,
+    };
     match arg.kind() {
         "string" => {
             let raw = text(arg, src);
-            (strip_string_quotes(raw), Confidence::Strong)
+            plain(strip_string_quotes(raw), Confidence::Strong)
         }
         "template_string" => classify_template(arg, src),
         "call_expression" => {
             // URL-builder wrapper like `this.api.buildUrl('auth/login')` —
             // pluck the innermost string literal as a hint, weak confidence.
-            (
+            plain(
                 find_first_string_literal(arg, src)
                     .map(|s| strip_string_quotes(&s))
                     .unwrap_or_else(|| "<unresolved>".to_string()),
                 Confidence::Weak,
             )
         }
-        _ => ("<unresolved>".to_string(), Confidence::Weak),
+        _ => plain("<unresolved>".to_string(), Confidence::Weak),
     }
 }
 
-fn classify_template(template: TsNode, src: &[u8]) -> (String, Confidence) {
+/// A template literal as two parallel strings built from the same children:
+/// `path` writes `${…}` for each substitution (the identity the node is minted
+/// from, unchanged since v0.4.4), `template` writes the substitution's source
+/// text (`${environment.apiUrl}`). Replacing every `${expr}` in `template`
+/// with `${…}` therefore gives back `path` exactly, which is what lets the
+/// engine's endpoint fold leave an unresolvable endpoint bit-identical.
+fn classify_template(template: TsNode, src: &[u8]) -> PathArg {
     let mut out = String::new();
+    let mut source = String::new();
     let mut has_subst = false;
     let mut cursor = template.walk();
     for child in template.named_children(&mut cursor) {
@@ -1043,23 +1076,24 @@ fn classify_template(template: TsNode, src: &[u8]) -> (String, Confidence) {
             "template_substitution" => {
                 has_subst = true;
                 out.push_str("${…}");
+                source.push_str(text(child, src));
             }
-            "string_fragment" => out.push_str(text(child, src)),
+            "string_fragment" => {
+                out.push_str(text(child, src));
+                source.push_str(text(child, src));
+            }
             _ => {}
         }
     }
-    if !has_subst && out.is_empty() {
-        // Empty backticks `` `` `` — treat as Strong empty path.
-        return (String::new(), Confidence::Strong);
-    }
-    (
-        out,
-        if has_subst {
+    PathArg {
+        path: out,
+        template: has_subst.then_some(source),
+        confidence: if has_subst {
             Confidence::Medium
         } else {
             Confidence::Strong
         },
-    )
+    }
 }
 
 fn find_first_string_literal(n: TsNode, src: &[u8]) -> Option<String> {
@@ -1126,15 +1160,11 @@ fn downgrade(c: Confidence) -> Confidence {
 /// `raw` mirror `repo_graph_code_domain::endpoint`'s writer, so a TS and a Dart
 /// endpoint carry the same payload shape; `raw` is skipped when `None`, which
 /// keeps every un-normalised payload byte-identical.
-fn endpoint_hit_cell(
-    method: &str,
-    path: &str,
-    file_rel: &str,
-    line: usize,
-    col: usize,
-    confidence: Confidence,
-    raw: Option<&str>,
-) -> Cell {
+///
+/// `template` (A11.2) follows `raw` and is skipped the same way, so only an
+/// endpoint whose argument was a template with a substitution gains a field.
+/// The two are different values — see `EndpointCandidate`.
+fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
         method: &'a str,
@@ -1145,20 +1175,23 @@ fn endpoint_hit_cell(
         confidence: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         raw: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        template: Option<&'a str>,
     }
-    let conf_str = match confidence {
+    let conf_str = match cand.confidence {
         Confidence::Strong => "strong",
         Confidence::Medium => "medium",
         Confidence::Weak => "weak",
     };
     let json = serde_json::to_string(&Payload {
-        method,
-        path,
-        file: file_rel,
-        line,
-        col,
+        method: &cand.method,
+        path: &cand.path,
+        file: &cand.file_rel,
+        line: cand.line,
+        col: cand.col,
         confidence: conf_str,
-        raw,
+        raw: cand.raw_path.as_deref(),
+        template: cand.template.as_deref(),
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -1242,15 +1275,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         }
         let qname = format!("endpoint:{}:{}", cand.method, cand.path);
         let endpoint_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
-        let cell = endpoint_hit_cell(
-            &cand.method,
-            &cand.path,
-            &cand.file_rel,
-            cand.line,
-            cand.col,
-            cand.confidence,
-            cand.raw_path.as_deref(),
-        );
+        let cell = endpoint_hit_cell(&cand);
         out.nodes.push(Node {
             id: endpoint_id,
             repo,
@@ -1901,6 +1926,50 @@ export class AuthService {
                 payloads[0]
             );
         }
+    }
+
+    /// A11.2 — a template argument keeps its substitution SOURCE on the cell as
+    /// `template` for the engine's endpoint fold, while the node identity keeps
+    /// the `${…}` placeholder. A plain literal gets no `template` key.
+    #[test]
+    fn template_endpoint_carries_substitution_source() {
+        let src = "\
+import { environment } from './environment';
+export class UserService {
+    constructor(private readonly http: any) {}
+    list(): void {
+        this.http.get(`${environment.apiUrl}/users`);
+        this.http.get(`/api/users/${id}?q=${ environment.flag }`);
+        this.http.get('/api/health');
+        fetch(`http://svc:8080/x/${ROOT}`);
+    }
+}
+";
+        let parse = parse_file(src, "src/user.service.ts", "src::user::service", repo()).unwrap();
+
+        let base = endpoint_id(repo(), "GET", "${…}/users");
+        let payloads = endpoint_payloads(&parse, base);
+        assert_eq!(payloads.len(), 1, "identity is still the placeholder path");
+        assert_eq!(payloads[0]["path"], "${…}/users");
+        assert_eq!(payloads[0]["template"], "${environment.apiUrl}/users");
+        assert!(payloads[0].get("raw").is_none(), "{}", payloads[0]);
+
+        let tail = endpoint_id(repo(), "GET", "/api/users/${…}");
+        let payloads = endpoint_payloads(&parse, tail);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["template"], "/api/users/${id}?q=${ environment.flag }");
+        assert_eq!(payloads[0]["raw"], "/api/users/${…}?q=${…}");
+
+        let plain = endpoint_id(repo(), "GET", "/api/health");
+        let payloads = endpoint_payloads(&parse, plain);
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].get("template").is_none(), "{}", payloads[0]);
+
+        let abs = endpoint_id(repo(), "GET", "/x/${…}");
+        let payloads = endpoint_payloads(&parse, abs);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0]["template"], "http://svc:8080/x/${ROOT}");
+        assert_eq!(payloads[0]["raw"], "http://svc:8080/x/${…}");
     }
 
     #[test]

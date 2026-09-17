@@ -20,6 +20,7 @@ use repo_graph_graph::{
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
+use crate::endpoint_fold;
 use crate::extract::{detect_language, merge_nav, path_to_qname};
 use crate::passes::post_passes;
 use crate::route::parse_repo_files;
@@ -379,6 +380,11 @@ fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
+    // A11.2: re-key client ENDPOINTs whose base the table resolves and record
+    // their authority. Post-cache, so cached parses are folded too and the
+    // cache keeps the pre-fold parse.
+    endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), &const_table, repo)
+        .report(repo_label);
 
     let rpc_added =
         apply_rpc_client_needles(&mut parses_by_lang, files, repo, rpc, &mut parse_errors);

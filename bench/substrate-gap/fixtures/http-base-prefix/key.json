@@ -7,7 +7,7 @@
     "go/http_server"
   ],
   "mechanism": "http_client",
-  "note": "A3.1 — the two prefix bugs, one fixture. (a) BaseFold: `fetch(`${environment.apiUrl}/users`)` is the single commonest Angular/React client shape and normalises to `/{}/users`; a leading interpolated segment is a base URL, not a resource, so it must be folded away before matching. (b) RoutePrefix: the old strip removed API prefixes from the ENDPOINT side only, so a client that calls `/orders` could never reach a server mounted at `/api/orders`. Both were dead cross-stack edges in every polyglot repo.",
+  "note": "A3.1 — the two prefix bugs, one fixture. (a) BaseFold: `fetch(`${process.env.API_URL}/users`)` normalises to `/{}/users`; a leading interpolated segment is a base URL, not a resource, so it must be folded away before matching. Since A11.2 this tier only sees bases the repo constant table cannot resolve (an env read never resolves); a resolvable base such as `${environment.apiUrl}` is folded to its path by the engine and pairs Exact (fixture angular-base-url). (b) RoutePrefix: the old strip removed API prefixes from the ENDPOINT side only, so a client that calls `/orders` could never reach a server mounted at `/api/orders`. Both were dead cross-stack edges in every polyglot repo.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/users", "note": "template-literal base URL -> normalises to /{}/users"},
     {"kind": "ENDPOINT", "name": "endpoint:GET:/orders", "note": "client is unaware of the server's /api mount"},

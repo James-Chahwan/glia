@@ -1,0 +1,20 @@
+{
+  "framework": "angular-base-url",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "note": "A11.2 endpoint fold. The default Angular client shape: the base URL lives in an object-valued exported const in ANOTHER file and is interpolated into the request path. Before the fold the ENDPOINT is `endpoint:GET:${…}/users` and pairs with the Go route only through the resolver's BaseFold tier (Medium). After the fold, the ConstTable resolves `environment.apiUrl`, url_split takes `users-service:8080` off as the host and the ENDPOINT becomes `endpoint:GET:/users`, an exact pairing. Deliberately not bound to a matrix cell: typescript/http_client is already scored by angular-http-calls.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "folded name; the unfolded node is named `GET ${…}/users`, which does not contain `get /users`"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi route, the known-good positive control copied from angular-http-calls"}
+  ],
+  "expect_edges": [
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS", "note": "from the FOLDED endpoint; a BaseFold pairing from `GET ${…}/users` does not match this row"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "GET /users", "cell": "ENDPOINT_HIT", "contains": "\"host\":\"users-service:8080\"", "note": "the authority the fold split off, which A11.4 reads"},
+    {"kind": "ENDPOINT", "node": "GET /users", "cell": "ENDPOINT_HIT", "contains": "\"template\":\"${environment.apiUrl}/users\"", "note": "the TS parser keeps the substitution source verbatim"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "GET ${…}/users", "note": "the unfolded placeholder node must not survive once the base resolves"}
+  ]
+}

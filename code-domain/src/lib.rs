@@ -964,6 +964,66 @@ pub mod endpoint {
         format!("/{body}")
     }
 
+    /// Drop a `?query` / `#fragment` and everything after it.
+    fn cut_query(s: &str) -> &str {
+        &s[..s.find(['?', '#']).unwrap_or(s.len())]
+    }
+
+    /// Split `scheme://authority` off a query-free URL. The SINGLE place that
+    /// decides what an authority is; [`url_split`], [`url_to_path`] and
+    /// [`normalise_client_path`] all go through it.
+    ///
+    /// A `://` only counts as a scheme separator when no `/` comes before it,
+    /// so a path that embeds a URL (`/proxy/http://x/y`) is not split. Callers
+    /// cut the query first (see [`cut_query`]), so a `://` inside a query value
+    /// (`/login?next=https://x/y`) is never seen here at all.
+    ///
+    /// Returns `(authority, rest)`: `rest` starts at the first `/` after the
+    /// authority, or is `"/"` when the URL has no path.
+    fn split_authority(s: &str) -> (Option<&str>, &str) {
+        let Some(i) = s.find("://") else {
+            return (None, s);
+        };
+        if s[..i].contains('/') {
+            return (None, s);
+        }
+        let rest = &s[i + 3..];
+        match rest.find('/') {
+            Some(j) => (Some(&rest[..j]), &rest[j..]),
+            None => (Some(rest), "/"),
+        }
+    }
+
+    /// Split a URL literal into `(authority, path)` (A11.2).
+    ///
+    /// - `authority` is `host[:port]`, with any `user[:pass]@` prefix dropped;
+    ///   None when the literal has no `scheme://` or the authority is empty
+    ///   (`file:///x`).
+    /// - `path` is the request path with the query and fragment dropped; None
+    ///   when what is left does not start with `/` (a bare word, a relative
+    ///   hint, a `${…}` base the caller could not resolve).
+    ///
+    /// ```text
+    /// http://h:8080/a?b      -> (Some("h:8080"), Some("/a"))
+    /// https://u:p@api.x      -> (Some("api.x"),  Some("/"))
+    /// /a#frag                -> (None,           Some("/a"))
+    /// /login?next=http://x/y -> (None,           Some("/login"))
+    /// auth/login             -> (None,           None)
+    /// ```
+    ///
+    /// Does not trim; [`url_to_path`] trims before calling. The engine's
+    /// endpoint-fold pass (`engine/src/endpoint_fold.rs`) is the consumer that
+    /// records the authority as `"host"` on ENDPOINT_HIT.
+    pub fn url_split(raw: &str) -> (Option<String>, Option<String>) {
+        let (authority, rest) = split_authority(cut_query(raw));
+        let host = authority
+            .map(|a| a.rsplit_once('@').map_or(a, |(_, h)| h))
+            .filter(|h| !h.is_empty())
+            .map(str::to_string);
+        let path = rest.starts_with('/').then(|| rest.to_string());
+        (host, path)
+    }
+
     /// Extract the request PATH from a URL literal. Absolute URLs
     /// (`http://host/x`, `https://…/x`) → the path (`/x`); already-relative
     /// paths (`/x`) pass through; a bare host, a non-path string, or a variable
@@ -971,22 +1031,13 @@ pub mod endpoint {
     /// `http://api/users` pair with route `/users` (addresses the host-prefix
     /// normalisation gap, handoff Pattern I). Interpolation reconstruction
     /// (`$id`/`${expr}`/f-string) stays per-parser — call this AFTER it.
+    ///
+    /// The path half of [`url_split`] on the trimmed literal. Since A11.2 the
+    /// query is cut BEFORE the scheme is looked for and a scheme must precede
+    /// the first `/`, so `/login?next=http://x/y` is `/login` (was `/y`) and
+    /// `/proxy/http://x/y` is itself (was `/y`).
     pub fn url_to_path(raw: &str) -> Option<String> {
-        let s = raw.trim();
-        let after_host = if let Some(i) = s.find("://") {
-            let rest = &s[i + 3..];
-            match rest.find('/') {
-                Some(j) => &rest[j..],
-                None => "/",
-            }
-        } else {
-            s
-        };
-        if !after_host.starts_with('/') {
-            return None;
-        }
-        let end = after_host.find(['?', '#']).unwrap_or(after_host.len());
-        Some(after_host[..end].to_string())
+        url_split(raw.trim()).1
     }
 
     /// Request path for a CLIENT call literal, for parsers that reconstruct
@@ -1016,17 +1067,7 @@ pub mod endpoint {
         if raw.is_empty() || raw == "<unresolved>" {
             return (raw.to_string(), false);
         }
-        let end = raw.find(['?', '#']).unwrap_or(raw.len());
-        let mut path = &raw[..end];
-        if let Some(i) = path.find("://")
-            && !path[..i].contains('/')
-        {
-            let rest = &path[i + 3..];
-            path = match rest.find('/') {
-                Some(j) => &rest[j..],
-                None => "/",
-            };
-        }
+        let (_, path) = split_authority(cut_query(raw));
         if path.is_empty() {
             return (raw.to_string(), false);
         }
@@ -1640,6 +1681,73 @@ mod tests {
         // A query-only literal is NOT turned into "" (which would read as `/`).
         assert_eq!(n("?page=2"), ("?page=2".into(), false));
         assert_eq!(n("#top"), ("#top".into(), false));
+    }
+
+    /// A11.2 — `url_split` returns the authority AND the path, and its path
+    /// half is exactly what `url_to_path` returns.
+    #[test]
+    fn url_split_separates_authority_from_path() {
+        let s = |x: &str| endpoint::url_split(x);
+        let some = |x: &str| Some(x.to_string());
+        assert_eq!(s("http://h:8080/a?b"), (some("h:8080"), some("/a")));
+        assert_eq!(s("/a"), (None, some("/a")));
+        assert_eq!(
+            s("https://api.example.com"),
+            (some("api.example.com"), some("/"))
+        );
+        assert_eq!(
+            s("https://api.example.com#x/y"),
+            (some("api.example.com"), some("/"))
+        );
+        assert_eq!(
+            s("http://u:p@users-service:8080/users"),
+            (some("users-service:8080"), some("/users"))
+        );
+        assert_eq!(
+            s("http://users-service:8080/users/${…}"),
+            (some("users-service:8080"), some("/users/${…}"))
+        );
+        // An empty authority is no authority.
+        assert_eq!(s("file:///etc/hosts"), (None, some("/etc/hosts")));
+        // Not a path: a relative hint, an unresolved base, a bare word.
+        assert_eq!(s("auth/login"), (None, None));
+        assert_eq!(s("${…}/users"), (None, None));
+        assert_eq!(s("users-service:8080"), (None, None));
+        // The same scheme rules as normalise_client_path.
+        assert_eq!(s("/login?next=https://x/y"), (None, some("/login")));
+        assert_eq!(s("/proxy/http://x/y"), (None, some("/proxy/http://x/y")));
+        assert_eq!(s("?page=2"), (None, None));
+
+        for raw in [
+            "http://h:8080/a?b",
+            "  https://api.example.com/users  ",
+            "/users#frag",
+            "auth/login",
+            "https://api",
+            "",
+        ] {
+            assert_eq!(endpoint::url_to_path(raw), s(raw.trim()).1, "{raw:?}");
+        }
+    }
+
+    /// A11.2 — the pre-A11.2 `url_to_path` results every parser relies on are
+    /// unchanged; only a `://` in a query or after a `/` is read differently.
+    #[test]
+    fn url_to_path_keeps_its_contract() {
+        let p = endpoint::url_to_path;
+        assert_eq!(p("http://api/users"), Some("/users".into()));
+        assert_eq!(
+            p("https://api.example.com/users?active=1"),
+            Some("/users".into())
+        );
+        assert_eq!(p("https://api.example.com"), Some("/".into()));
+        assert_eq!(p(" /users/${…} "), Some("/users/${…}".into()));
+        assert_eq!(p("users"), None);
+        assert_eq!(p("${…}/users"), None);
+        assert_eq!(p("SELECT * FROM t"), None);
+        // Changed by A11.2 (previously `/y` for both).
+        assert_eq!(p("/login?next=https://x/y"), Some("/login".into()));
+        assert_eq!(p("/proxy/http://x/y"), Some("/proxy/http://x/y".into()));
     }
 
     /// A3.3 — `raw` rides on ENDPOINT_HIT only when given; without it the

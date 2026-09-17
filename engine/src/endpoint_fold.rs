@@ -1,0 +1,755 @@
+//! Endpoint fold (A11.2): resolve a client call's base URL through the repo
+//! [`ConstTable`], split the authority off, and key the ENDPOINT on the path.
+//!
+//! `` this.http.get(`${environment.apiUrl}/users`) `` parses to
+//! `endpoint:GET:${…}/users`. The HTTP resolver can only pair that through its
+//! BaseFold tier: Medium confidence, and blind to which service the base
+//! names. With `environment.apiUrl = 'http://users-service:8080'` in the repo
+//! table, this pass re-keys the node to `endpoint:GET:/users`, which pairs at
+//! the Exact tier. It also records `"host":"users-service:8080"` on the
+//! ENDPOINT_HIT cell, the input A11.4's host narrowing reads.
+//!
+//! WHERE IT RUNS. After the parse cache, over every FileParse of the repo,
+//! whether it came from the cache or not (`build_graphs_for_repo`). The cache
+//! holds the PRE-fold parse (`route.rs` stores a clone before this runs), so it
+//! stays a pure per-file parser cache, and a constant changed in another file
+//! is re-folded on the next build (the cache rule in `constants.rs`).
+//!
+//! WHAT IT READS, per ENDPOINT node entry, from its single ENDPOINT_HIT cell:
+//! - `template` (TypeScript): the literal with each `${expr}` source kept. It
+//!   is folded through the table. Spans that do not resolve come back as `${…}`.
+//! - `raw` (A3.3, TypeScript + Dart): the literal before host/query stripping.
+//!   Only its authority is new information.
+//! - otherwise the qname's own path.
+//!
+//! [`url_split`] then gives `(host, path)`.
+//!
+//! OWNERSHIP. A3.1's BaseFold tier and this pass split the `${base}` shape:
+//! this pass owns bases the table CAN resolve. A base it cannot resolve leaves
+//! the node untouched, so BaseFold still pairs `/{}/users` at Medium. A3.3
+//! owns stripping. This pass never strips the path a second time; it only
+//! reads the authority back off `raw`. Both go through the one authority
+//! splitter in `code_domain::endpoint`.
+//!
+//! ZERO-CHANGE GUARANTEE. If a node's path does not move and it has no host to
+//! record, nothing about it changes: not its id, its edges, its nav entry, or
+//! its cell bytes.
+
+use std::collections::HashMap;
+use std::fmt;
+
+use repo_graph_code_domain::endpoint::url_split;
+use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
+use repo_graph_code_extractors::constants::{ConstTable, fold_interpolations};
+use repo_graph_core::{CellPayload, Node, NodeId, RepoId};
+use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// What the pass did to one repo, for the `[endpoint-fold]` marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FoldStats {
+    /// ENDPOINT node entries (TypeScript: call sites) whose path, and so
+    /// whose identity, changed.
+    pub folded: usize,
+    /// ENDPOINT node entries that gained a `host`.
+    pub hosts: usize,
+}
+
+impl FoldStats {
+    fn add(&mut self, other: FoldStats) {
+        self.folded += other.folded;
+        self.hosts += other.hosts;
+    }
+
+    /// A11.2 fired_on marker, once per repo, only when the pass changed
+    /// something.
+    pub(crate) fn report(&self, repo_label: &str) {
+        if self.folded + self.hosts == 0 {
+            return;
+        }
+        eprintln!(
+            "[endpoint-fold] folded {} endpoint paths, captured {} hosts repo={repo_label}",
+            self.folded, self.hosts
+        );
+    }
+}
+
+/// Fold every FileParse of one repo.
+pub(crate) fn fold_repo<'a>(
+    parses: impl IntoIterator<Item = &'a mut FileParse>,
+    consts: &ConstTable,
+    repo: RepoId,
+) -> FoldStats {
+    let mut stats = FoldStats::default();
+    for fp in parses {
+        stats.add(fold_endpoint_paths(fp, consts, repo));
+    }
+    stats
+}
+
+/// What one ENDPOINT node entry becomes.
+struct Plan {
+    /// Unchanged when only a host was captured.
+    id: NodeId,
+    name: String,
+    qname: String,
+    payload: String,
+    moved: bool,
+    host: bool,
+}
+
+/// Fold the ENDPOINT nodes of one file in place.
+pub(crate) fn fold_endpoint_paths(
+    fp: &mut FileParse,
+    consts: &ConstTable,
+    repo: RepoId,
+) -> FoldStats {
+    // Node entries grouped by their current id, in first-seen order. The
+    // TypeScript parser pushes one entry per call site, so an id can repeat.
+    let mut order: Vec<NodeId> = Vec::new();
+    let mut groups: HashMap<NodeId, Vec<(usize, Option<Plan>)>> = HashMap::new();
+    for (idx, node) in fp.nodes.iter().enumerate() {
+        if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::ENDPOINT) {
+            continue;
+        }
+        let plan = plan_entry(node, &fp.nav, consts, repo);
+        groups
+            .entry(node.id)
+            .or_insert_with(|| {
+                order.push(node.id);
+                Vec::new()
+            })
+            .push((idx, plan));
+    }
+
+    let mut stats = FoldStats::default();
+    for old in order {
+        let Some(entries) = groups.remove(&old) else {
+            continue;
+        };
+        if entries.iter().all(|(_, p)| p.is_none()) {
+            continue;
+        }
+        let targets: Vec<NodeId> = entries
+            .iter()
+            .map(|(_, p)| p.as_ref().map_or(old, |p| p.id))
+            .collect();
+        if !retarget_edges(fp, old, &targets) {
+            continue;
+        }
+        update_nav(&mut fp.nav, old, &targets, &entries);
+        for (idx, plan) in entries {
+            let Some(plan) = plan else { continue };
+            let Some(node) = fp.nodes.get_mut(idx) else {
+                continue;
+            };
+            node.id = plan.id;
+            for cell in node
+                .cells
+                .iter_mut()
+                .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+            {
+                cell.payload = CellPayload::Json(plan.payload.clone());
+            }
+            stats.folded += usize::from(plan.moved);
+            stats.hosts += usize::from(plan.host);
+        }
+    }
+    stats
+}
+
+/// Decide what one node entry becomes, or None to leave it alone.
+///
+/// An entry is only planned when it carries exactly one JSON ENDPOINT_HIT
+/// cell, which is what every client emitter writes. Anything else is left
+/// alone rather than guessed at.
+fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> Option<Plan> {
+    let qname = nav.qname_by_id.get(&node.id)?;
+    let (method, qpath) = qname.strip_prefix("endpoint:")?.split_once(':')?;
+    let mut hits = node
+        .cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ENDPOINT_HIT);
+    let (Some(cell), None) = (hits.next(), hits.next()) else {
+        return None;
+    };
+    let CellPayload::Json(json) = &cell.payload else {
+        return None;
+    };
+    let mut fields: Fields = serde_json::from_str(json).ok()?;
+
+    let folded = fields
+        .str("template")
+        .and_then(|t| fold_interpolations(t, consts));
+    let input = folded
+        .as_deref()
+        .or_else(|| fields.str("raw"))
+        .unwrap_or(qpath);
+    let (host, path) = url_split(input);
+    let path = path?;
+    // An interpolated authority (`https://${…}/x`) names no service.
+    let host = host.filter(|h| !h.contains("${"));
+    let moved = path != qpath;
+    if !moved && host.is_none() {
+        return None;
+    }
+
+    if moved {
+        fields.set("path", Value::from(path.as_str()));
+        fields.set("folded_from", Value::from(qpath));
+    }
+    if let Some(h) = &host {
+        fields.set("host", Value::from(h.as_str()));
+    }
+    let payload = serde_json::to_string(&fields).ok()?;
+    let new_qname = format!("endpoint:{method}:{path}");
+    let id = if moved {
+        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &new_qname)
+    } else {
+        node.id
+    };
+    Some(Plan {
+        id,
+        name: format!("{method} {path}"),
+        qname: new_qname,
+        payload,
+        moved,
+        host: host.is_some(),
+    })
+}
+
+/// Point this file's edges at the new ids. Returns false, changing nothing,
+/// when the entries of `old` split across several ids and the CALLS edges
+/// cannot be paired with them one-to-one.
+///
+/// All entries go to one id: every edge touching `old` follows it. They
+/// split, which only happens when two TypeScript call sites share a
+/// placeholder path and only one of their bases resolves: the parser pushed
+/// each call site's node and its CALLS edge in the same order, so the k-th
+/// edge into `old` belongs to the k-th entry.
+fn retarget_edges(fp: &mut FileParse, old: NodeId, targets: &[NodeId]) -> bool {
+    let Some(&first) = targets.first() else {
+        return false;
+    };
+    if targets.iter().all(|t| *t == first) {
+        if first != old {
+            for e in fp.edges.iter_mut() {
+                if e.to == old {
+                    e.to = first;
+                }
+                if e.from == old {
+                    e.from = first;
+                }
+            }
+        }
+        return true;
+    }
+    if fp.edges.iter().any(|e| e.from == old) {
+        return false;
+    }
+    let into: Vec<usize> = fp
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.to == old)
+        .map(|(i, _)| i)
+        .collect();
+    if into.len() != targets.len() {
+        return false;
+    }
+    for (i, t) in into.into_iter().zip(targets) {
+        if let Some(e) = fp.edges.get_mut(i) {
+            e.to = *t;
+        }
+    }
+    true
+}
+
+/// Give every new id a nav entry, and retire `old` when no entry is left on it.
+fn update_nav(
+    nav: &mut CodeNav,
+    old: NodeId,
+    targets: &[NodeId],
+    entries: &[(usize, Option<Plan>)],
+) {
+    let parent = nav.parent_of.get(&old).copied();
+    let moved: Vec<&Plan> = entries
+        .iter()
+        .filter_map(|(_, p)| p.as_ref())
+        .filter(|p| p.moved)
+        .collect();
+    let Some(first) = moved.first() else {
+        return;
+    };
+    if !targets.contains(&old) {
+        rewrite_node_id(nav, old, first.id);
+    }
+    for plan in moved {
+        nav.name_by_id.insert(plan.id, plan.name.clone());
+        nav.qname_by_id.insert(plan.id, plan.qname.clone());
+        nav.kind_by_id.insert(plan.id, node_kind::ENDPOINT);
+        if let Some(p) = parent
+            && !nav.parent_of.contains_key(&plan.id)
+        {
+            nav.parent_of.insert(plan.id, p);
+            nav.children_of.entry(p).or_default().push(plan.id);
+        }
+    }
+}
+
+/// Move `old`'s place in the nav to `new`: drop its name/qname/kind, hand
+/// over its parent slot (keeping its position among the siblings) and its
+/// children. If `new` is already in the nav (another call site in the file
+/// was already on that path), `new` keeps its own parent and `old` is only
+/// removed from its parent's list. Re-keying a node inside a FileParse
+/// happens only here, so the `children_of` bookkeeping has to be exact:
+/// a nav-derived traversal that loses a child does so silently.
+fn rewrite_node_id(nav: &mut CodeNav, old: NodeId, new: NodeId) {
+    nav.name_by_id.remove(&old);
+    nav.qname_by_id.remove(&old);
+    nav.kind_by_id.remove(&old);
+    if let Some(p) = nav.parent_of.remove(&old) {
+        let adopt = !nav.parent_of.contains_key(&new);
+        if adopt {
+            nav.parent_of.insert(new, p);
+        }
+        if let Some(kids) = nav.children_of.get_mut(&p) {
+            let at = kids.iter().position(|k| *k == old);
+            kids.retain(|k| *k != old);
+            if adopt && !kids.contains(&new) {
+                // `at` is at most the new length: only `old` entries were
+                // removed, and none of them came before it.
+                let at = at.unwrap_or(kids.len()).min(kids.len());
+                kids.insert(at, new);
+            }
+        }
+    }
+    if let Some(kids) = nav.children_of.remove(&old) {
+        for k in &kids {
+            if let Some(p) = nav.parent_of.get_mut(k)
+                && *p == old
+            {
+                *p = new;
+            }
+        }
+        let slot = nav.children_of.entry(new).or_default();
+        for k in kids {
+            if !slot.contains(&k) {
+                slot.push(k);
+            }
+        }
+    }
+}
+
+/// A JSON object that keeps its key order through a rewrite. The workspace
+/// builds serde_json without `preserve_order`, so a `serde_json::Value`
+/// round trip would sort the keys of every folded payload. Unknown fields
+/// survive either way.
+struct Fields(Vec<(String, Value)>);
+
+impl Fields {
+    fn str(&self, key: &str) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.as_str())
+    }
+
+    /// Replace `key` in place, or append it.
+    fn set(&mut self, key: &str, value: Value) {
+        match self.0.iter_mut().find(|(k, _)| k == key) {
+            Some((_, slot)) => *slot = value,
+            None => self.0.push((key.to_string(), value)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Fields {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor;
+        impl<'de> Visitor<'de> for ObjectVisitor {
+            type Value = Fields;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fields, A::Error> {
+                let mut out = Vec::new();
+                while let Some(entry) = map.next_entry::<String, Value>()? {
+                    out.push(entry);
+                }
+                Ok(Fields(out))
+            }
+        }
+        d.deserialize_map(ObjectVisitor)
+    }
+}
+
+impl Serialize for Fields {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use repo_graph_code_domain::edge_category;
+    use repo_graph_core::{Cell, Confidence, Edge};
+
+    fn repo() -> RepoId {
+        RepoId(7)
+    }
+
+    fn ep_id(method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        )
+    }
+
+    fn table() -> ConstTable {
+        ConstTable::scan_file(
+            "export const environment = {\n  apiUrl: 'http://users-service:8080',\n};\n",
+            "typescript",
+        )
+    }
+
+    fn func() -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "src::svc::Svc::list")
+    }
+
+    /// One call site the way the TypeScript parser emits it: an ENDPOINT
+    /// entry with one ENDPOINT_HIT cell, then a CALLS edge into it. The nav
+    /// entry is recorded once per id, under `func()`, so the parent/children
+    /// bookkeeping is exercised too.
+    fn push_call(fp: &mut FileParse, path: &str, payload: &str) -> NodeId {
+        let id = ep_id("GET", path);
+        fp.nodes.push(Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Medium,
+            cells: vec![Cell {
+                kind: cell_type::ENDPOINT_HIT,
+                payload: CellPayload::Json(payload.to_string()),
+            }],
+        });
+        fp.edges.push(Edge {
+            from: func(),
+            to: id,
+            category: edge_category::CALLS,
+            confidence: Confidence::Medium,
+        });
+        if !fp.nav.kind_by_id.contains_key(&id) {
+            fp.nav.record(
+                id,
+                &format!("GET {path}"),
+                &format!("endpoint:GET:{path}"),
+                node_kind::ENDPOINT,
+                Some(func()),
+            );
+        }
+        id
+    }
+
+    fn file() -> FileParse {
+        let mut fp = FileParse::default();
+        fp.nodes.push(Node {
+            id: func(),
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        fp.nav.record(
+            func(),
+            "list",
+            "src::svc::Svc::list",
+            node_kind::METHOD,
+            None,
+        );
+        fp
+    }
+
+    fn payload(fp: &FileParse, idx: usize) -> &str {
+        match &fp.nodes[idx].cells[0].payload {
+            CellPayload::Json(s) => s,
+            other => panic!("not json: {other:?}"),
+        }
+    }
+
+    fn same(a: &FileParse, b: &FileParse) -> bool {
+        a.nodes == b.nodes
+            && a.edges == b.edges
+            && a.nav.name_by_id == b.nav.name_by_id
+            && a.nav.qname_by_id == b.nav.qname_by_id
+            && a.nav.kind_by_id == b.nav.kind_by_id
+            && a.nav.parent_of == b.nav.parent_of
+            && a.nav.children_of == b.nav.children_of
+    }
+
+    /// The zero-change guarantee: a relative path, an unresolvable base and a
+    /// relative hint are all left exactly as parsed.
+    #[test]
+    fn unfoldable_endpoints_are_left_byte_identical() {
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "/users",
+            r#"{"method":"GET","path":"/users","file":"a.ts","line":1,"col":1,"confidence":"strong"}"#,
+        );
+        push_call(
+            &mut fp,
+            "/users/${…}",
+            r#"{"method":"GET","path":"/users/${…}","file":"a.ts","line":2,"col":1,"confidence":"medium","template":"/users/${id}"}"#,
+        );
+        push_call(
+            &mut fp,
+            "${…}/orders",
+            r#"{"method":"GET","path":"${…}/orders","file":"a.ts","line":3,"col":1,"confidence":"medium","template":"${this.base}/orders"}"#,
+        );
+        push_call(
+            &mut fp,
+            "auth/login",
+            r#"{"method":"GET","path":"auth/login","file":"a.ts","line":4,"col":1,"confidence":"weak"}"#,
+        );
+        // The query A3.3 already stripped is not a reason to touch the node.
+        push_call(
+            &mut fp,
+            "/search",
+            r#"{"method":"GET","path":"/search","file":"a.ts","line":5,"col":1,"confidence":"strong","raw":"/search?q=1"}"#,
+        );
+        let before = fp.clone();
+        let stats = fold_endpoint_paths(&mut fp, &table(), repo());
+        assert_eq!(stats, FoldStats::default());
+        assert!(same(&fp, &before), "unfoldable endpoints must not change");
+    }
+
+    #[test]
+    fn resolvable_base_is_folded_and_its_host_recorded() {
+        let mut fp = file();
+        let old = push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${environment.apiUrl}/users"}"#,
+        );
+        let stats = fold_endpoint_paths(&mut fp, &table(), repo());
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 1,
+                hosts: 1
+            }
+        );
+
+        let new = ep_id("GET", "/users");
+        assert_eq!(fp.nodes[1].id, new);
+        assert_eq!(
+            payload(&fp, 1),
+            r#"{"method":"GET","path":"/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${environment.apiUrl}/users","folded_from":"${…}/users","host":"users-service:8080"}"#,
+            "key order kept, new fields appended"
+        );
+        assert_eq!(fp.edges[0].to, new);
+        assert!(fp.edges.iter().all(|e| e.to != old));
+
+        assert_eq!(
+            fp.nav.qname_by_id.get(&new).map(String::as_str),
+            Some("endpoint:GET:/users")
+        );
+        assert_eq!(
+            fp.nav.name_by_id.get(&new).map(String::as_str),
+            Some("GET /users")
+        );
+        assert_eq!(fp.nav.kind_by_id.get(&new), Some(&node_kind::ENDPOINT));
+        assert_eq!(fp.nav.parent_of.get(&new), Some(&func()));
+        assert_eq!(fp.nav.children_of.get(&func()), Some(&vec![new]));
+        for gone in [
+            fp.nav.name_by_id.contains_key(&old),
+            fp.nav.qname_by_id.contains_key(&old),
+            fp.nav.kind_by_id.contains_key(&old),
+            fp.nav.parent_of.contains_key(&old),
+        ] {
+            assert!(!gone, "old id must leave the nav");
+        }
+    }
+
+    /// A3.3 already took the host out of the path; the fold only reads it back
+    /// off `raw`, so the id is untouched and the cell gains `host`.
+    #[test]
+    fn absolute_literal_keeps_its_id_and_gains_a_host() {
+        let mut fp = file();
+        let id = push_call(
+            &mut fp,
+            "/users",
+            r#"{"method":"GET","path":"/users","file":"a.ts","line":1,"col":1,"confidence":"strong","raw":"https://u:p@api.example.com/users?x=1"}"#,
+        );
+        // An interpolated authority is not a host.
+        push_call(
+            &mut fp,
+            "/orders",
+            r#"{"method":"GET","path":"/orders","file":"a.ts","line":2,"col":1,"confidence":"medium","raw":"https://${…}/orders","template":"https://${host}/orders"}"#,
+        );
+        let edges = fp.edges.clone();
+        let stats = fold_endpoint_paths(&mut fp, &ConstTable::default(), repo());
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 0,
+                hosts: 1
+            }
+        );
+        assert_eq!(fp.nodes[1].id, id);
+        assert!(payload(&fp, 1).ends_with(
+            r#""raw":"https://u:p@api.example.com/users?x=1","host":"api.example.com"}"#
+        ));
+        assert!(!payload(&fp, 1).contains("folded_from"));
+        assert!(
+            !payload(&fp, 2).contains(r#""host":"#),
+            "{}",
+            payload(&fp, 2)
+        );
+        assert_eq!(fp.edges, edges);
+    }
+
+    /// Two call sites on one placeholder path, only one of whose bases
+    /// resolves: each keeps its own CALLS edge.
+    #[test]
+    fn split_call_sites_keep_their_own_edges() {
+        let mut fp = file();
+        let old = push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":1,"col":1,"confidence":"medium","template":"${other.base}/users"}"#,
+        );
+        push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":2,"col":1,"confidence":"medium","template":"${environment.apiUrl}/users"}"#,
+        );
+        let stats = fold_endpoint_paths(&mut fp, &table(), repo());
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 1,
+                hosts: 1
+            }
+        );
+        let new = ep_id("GET", "/users");
+        assert_eq!((fp.nodes[1].id, fp.nodes[2].id), (old, new));
+        assert_eq!((fp.edges[0].to, fp.edges[1].to), (old, new));
+        // Both ids are navigable, both under the same parent.
+        assert!(fp.nav.qname_by_id.contains_key(&old));
+        assert_eq!(fp.nav.parent_of.get(&new), Some(&func()));
+        assert_eq!(fp.nav.children_of.get(&func()), Some(&vec![old, new]));
+    }
+
+    /// Two call sites already on `/users` and on the placeholder: the fold
+    /// lands the second on the first's id without duplicating its nav entry.
+    #[test]
+    fn fold_onto_an_existing_id_merges_cleanly() {
+        let mut fp = file();
+        let existing = push_call(
+            &mut fp,
+            "/users",
+            r#"{"method":"GET","path":"/users","file":"a.ts","line":1,"col":1,"confidence":"strong"}"#,
+        );
+        let old = push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":2,"col":1,"confidence":"medium","template":"${environment.apiUrl}/users"}"#,
+        );
+        fold_endpoint_paths(&mut fp, &table(), repo());
+        assert_eq!((fp.nodes[1].id, fp.nodes[2].id), (existing, existing));
+        assert!(fp.edges.iter().all(|e| e.to == existing));
+        assert_eq!(fp.nav.children_of.get(&func()), Some(&vec![existing]));
+        assert!(!fp.nav.qname_by_id.contains_key(&old));
+    }
+
+    /// End to end on the `angular-base-url` fixture, through `generate_many`,
+    /// the path grade.py takes. The base URL is bound in ANOTHER file, and the
+    /// folded endpoint pairs with the Go route across the repo boundary.
+    #[test]
+    fn angular_base_url_fixture_folds_and_pairs_across_repos() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bench/substrate-gap/fixtures/angular-base-url"
+        );
+        let r = crate::generate_many(&[format!("{root}/client"), format!("{root}/server")])
+            .expect("fixture builds");
+        let m = &r.merged;
+        let ep = m
+            .node_id_by_qname("endpoint:GET:/users")
+            .expect("folded endpoint");
+        assert!(m.node_id_by_qname("endpoint:GET:${…}/users").is_none());
+        let route = m.node_id_by_qname("route:/users").expect("go route");
+        assert!(
+            m.cross_edges.iter().any(|e| e.from == ep
+                && e.to == route
+                && e.category == repo_graph_code_domain::edge_category::HTTP_CALLS),
+            "HTTP_CALLS endpoint:GET:/users -> route:/users"
+        );
+        let payloads: Vec<&str> = m
+            .graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .filter(|n| n.id == ep)
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads.len(), 1, "{payloads:?}");
+        let p = payloads[0];
+        for want in [
+            r#""path":"/users""#,
+            r#""template":"${environment.apiUrl}/users""#,
+            r#""folded_from":"${…}/users""#,
+            r#""host":"users-service:8080""#,
+        ] {
+            assert!(p.contains(want), "{want} missing from {p}");
+        }
+    }
+
+    /// A parse served from the cache is folded too, and the cache keeps the
+    /// PRE-fold parse, so an edit to the constant's file re-folds on the next
+    /// build instead of replaying a fold made against the old value.
+    #[test]
+    fn cached_parses_are_folded_and_the_cache_stays_pre_fold() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bench/substrate-gap/fixtures/angular-base-url/client"
+        );
+        let mut cache = crate::ParseCache::new();
+        let cold = crate::generate_one_with_cache(root, &mut cache).expect("cold build");
+        let warm = crate::generate_one_with_cache(root, &mut cache).expect("warm build");
+        assert_eq!(cache.stats.reparsed, 0, "{:?}", cache.stats);
+        assert!(cache.stats.reused > 0, "{:?}", cache.stats);
+        for r in [&cold, &warm] {
+            assert!(r.merged.node_id_by_qname("endpoint:GET:/users").is_some());
+            assert!(
+                r.merged
+                    .node_id_by_qname("endpoint:GET:${…}/users")
+                    .is_none()
+            );
+        }
+
+        let src = std::fs::read_to_string(format!("{root}/users.service.ts")).expect("source");
+        let cached = cache
+            .get(
+                "users.service.ts",
+                crate::cache::content_hash(&src),
+                "typescript",
+            )
+            .expect("users.service.ts is cached");
+        let qnames: Vec<&String> = cached.nav.qname_by_id.values().collect();
+        assert!(
+            qnames.iter().any(|q| *q == "endpoint:GET:${…}/users"),
+            "cache must hold the parser's own identity: {qnames:?}"
+        );
+        assert!(!qnames.iter().any(|q| *q == "endpoint:GET:/users"));
+    }
+}
