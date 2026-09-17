@@ -1,0 +1,32 @@
+{
+  "framework": "arch-monorepo-flows",
+  "language": "typescript+go+proto",
+  "dirs": ["."],
+  "note": "A9 FAILING GATE (deliberate baseline, flipped by A5.8). ONE repo, four top-level services (web, api, gateway, worker) joined by the four non-HTTP flow mechanisms. Every pairing edge below exists today, yet `glia arch` on this tree prints `[arch] 4 services, 0 links`: engine::arch::node_file finds a file only on POSITION (or, for HTTP nodes only, ENDPOINT_HIT / ROUTE_METHOD), and WS / GraphQL / gRPC-client / event marker nodes carry no POSITION and no structural edge, so cross_links drops every link as unplaced. The expect_cells rows ask for exactly the cell arch reads, pinned to the service directory. GRPC_SERVICE is the passing control (the .proto route already writes POSITION). No `cells` binding: this grades glia arch's substrate, not a language x mechanism extraction cell.",
+  "expect_nodes": [
+    {"kind": "WS_CLIENT", "name": "/ws", "note": "web/chat.ts new WebSocket(ws://.../ws)"},
+    {"kind": "WS_HANDLER", "name": "ws:ws", "note": "api/hub.go gorilla Upgrader"},
+    {"kind": "GRAPHQL_OPERATION", "name": "getUser", "note": "web/query.ts apollo gql"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "getUser", "note": "api/resolver.ts nestjs @Query"},
+    {"kind": "GRPC_CLIENT", "name": "UserService", "note": "gateway/main.go pb.NewUserServiceClient"},
+    {"kind": "GRPC_SERVICE", "name": "UserService", "note": "api/user.proto service UserService"},
+    {"kind": "EVENT_EMITTER", "name": "orderPlaced", "note": "api/orders.ts bus.emit"},
+    {"kind": "EVENT_HANDLER", "name": "orderPlaced", "note": "worker/notify.ts bus.on"}
+  ],
+  "expect_edges": [
+    {"from": "ws_client:/ws", "to": "ws:ws", "category": "WS_CONNECTS", "note": "CONTROL: web -> api pairing exists under a single-repo build"},
+    {"from": "graphql_op:getUser", "to": "graphql_resolver:getUser", "category": "GRAPHQL_CALLS", "note": "CONTROL: web -> api"},
+    {"from": "grpc_client:UserService", "to": "UserService", "category": "GRPC_CALLS", "note": "CONTROL: gateway -> api"},
+    {"from": "event_emit:orderPlaced", "to": "event_handle:orderPlaced", "category": "EVENT_FLOWS", "note": "CONTROL: api -> worker"}
+  ],
+  "expect_cells": [
+    {"kind": "WS_CLIENT", "node": "ws_client:/ws", "cell": "POSITION", "contains": "\"file\":\"web/", "note": "GATE (A5.8): place the ws client in service web"},
+    {"kind": "WS_HANDLER", "node": "ws:ws", "cell": "POSITION", "contains": "\"file\":\"api/", "note": "GATE (A5.8): place the ws handler in service api"},
+    {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:getUser", "cell": "POSITION", "contains": "\"file\":\"web/", "note": "GATE (A5.8)"},
+    {"kind": "GRAPHQL_RESOLVER", "node": "graphql_resolver:getUser", "cell": "POSITION", "contains": "\"file\":\"api/", "note": "GATE (A5.8)"},
+    {"kind": "GRPC_CLIENT", "node": "grpc_client:UserService", "cell": "POSITION", "contains": "\"file\":\"gateway/", "note": "GATE (A5.8)"},
+    {"kind": "GRPC_SERVICE", "node": "UserService", "cell": "POSITION", "contains": "\"file\":\"api/", "note": "CONTROL: already located - proves the gate is satisfiable"},
+    {"kind": "EVENT_EMITTER", "node": "event_emit:orderPlaced", "cell": "POSITION", "contains": "\"file\":\"api/", "note": "GATE (A5.8)"},
+    {"kind": "EVENT_HANDLER", "node": "event_handle:orderPlaced", "cell": "POSITION", "contains": "\"file\":\"worker/", "note": "GATE (A5.8)"}
+  ]
+}

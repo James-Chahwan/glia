@@ -1,0 +1,19 @@
+{
+  "framework": "arch-monorepo-http",
+  "language": "typescript+go",
+  "dirs": ["."],
+  "note": "POSITIVE CONTROL, not a blind spot: reads 1.00 on unmodified main. ONE repo whose top-level dirs web/ and api/ are the services `glia arch` keys on (ServiceKeying::TopLevelDir). HttpStackResolver does not gate on RepoId, so a single-repo monorepo still pairs ENDPOINT -> ROUTE; if a same-repo guard is ever added, `glia arch` goes blind on every monorepo and this row is what catches it. The expect_cells rows pin the tier-2 files engine::arch::node_file reads for nodes that carry no POSITION. The A9 gate that FAILS today is arch-monorepo-flows.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/users", "note": "TS fetch endpoint in web/"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/users", "note": "TS fetch endpoint in web/"},
+    {"kind": "ROUTE", "name": "/users", "note": "Go chi route in api/"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/users", "to": "route:/users", "category": "HTTP_CALLS", "note": "CONTROL (not a blind spot): single-repo monorepo pairing - the substrate `glia arch` keys on"},
+    {"from": "endpoint:POST:/users", "to": "route:/users", "category": "HTTP_CALLS", "note": "CONTROL: second method on the same route"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/users", "cell": "ENDPOINT_HIT", "contains": "\"file\":\"web/api.ts\"", "note": "CONTROL: node_file tier 2 places the endpoint in service web"},
+    {"kind": "ROUTE", "node": "route:/users", "cell": "ROUTE_METHOD", "contains": "\"file\":\"api/main.go\"", "note": "CONTROL: node_file tier 2 places the Go route in service api"}
+  ]
+}
