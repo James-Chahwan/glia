@@ -1,0 +1,71 @@
+{
+  "framework": "xcut-queue-msgtype-mismatch",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "note": "A12.4. The divergent twin of xcut-queue-msgtype-go (same server/ + client/ NATS shape, no go.mod), so the MISMATCH case is a graded, diffable row in results.jsonl and not only a bench/message-contracts/check.sh assertion. The pair still links on the literal topic 'shipments' (QUEUE_FLOWS is topic-exact and ignores payload types, by design), and each side carries its OWN MESSAGE_TYPE: ShipmentCreated on the producer, ShipmentDispatched on the consumer. `message_contracts` turns exactly this pair into status=mismatch confidence=strong. Baseline 2026-09-17 at HEAD fdc80db (installed wheel, A12.1 already landed): nodes 2/2, QUEUE_FLOWS 1/1, cells 4/4 — the packet spec's '0.00 before A12.1' predates A12.1 landing in wave 10, so there was no 0.00 left to record; sensitivity was proved instead on a scratch copy whose consumer unmarshals pb.ShipmentCreated: both consumer rows (`type`, `raw`) miss and MESSAGE_TYPE reads 2/4. The `\"type\":\"...\"` rows pin the NORMALISED simple name with its closing quote, so a longer name that merely starts with it cannot pass. No `cells` field: a mechanism-depth probe, like its twin, not a matrix cell.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:shipments",
+      "note": "nc.Publish(\"shipments\", data) in server/publisher.go"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:shipments",
+      "note": "nc.Subscribe(\"shipments\", ...) in client/consumer.go"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:shipments",
+      "to": "queue_consumer:shipments",
+      "category": "QUEUE_FLOWS",
+      "note": "paired on the literal topic; a payload-type disagreement is a contract finding, never a reason to drop the flow"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:shipments",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"ShipmentCreated\"",
+      "note": "&pb.ShipmentCreated{OrderId: orderID} marshalled two lines above nc.Publish"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:shipments",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"ShipmentDispatched\"",
+      "note": "&pb.ShipmentDispatched{} unmarshalled inside the handler — the divergent side"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:shipments",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"raw\":\"pb.ShipmentDispatched\"",
+      "note": "the consumer's type is its OWN read, not the producer's copied across the pair"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:shipments",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"form\":\"struct_literal\"",
+      "note": "read by the Go struct-literal scanner inside the near window"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:nats",
+      "note": "the topic is a literal on both sides; no framework-tag sentinel"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:nats",
+      "note": "the topic is a literal on both sides; no framework-tag sentinel"
+    }
+  ]
+}

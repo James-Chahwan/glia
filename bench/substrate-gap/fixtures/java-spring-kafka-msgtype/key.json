@@ -1,0 +1,43 @@
+{
+  "framework": "java-spring-kafka-msgtype",
+  "language": "java",
+  "dirs": [
+    "."
+  ],
+  "note": "A12.4. Recorded at its MEASURED level, not as debt. The packet spec booked this as A2-gated (0 QUEUE_* nodes, '@KafkaListener matches no needle'); that probe predates A2.2 (wave 4), which added the @KafkaListener consumer row. Measured 2026-09-17 at HEAD fdc80db (installed wheel): queue_consumer:orders 1/1, MESSAGE_TYPE {\"type\":\"OrderCreated\",\"raw\":\"OrderCreated\",\"form\":\"generic\",\"window\":\"near\"} 2/2 — the last type argument of the handler's ConsumerRecord<String, OrderCreated>, so extract_message_type_near's generic branch IS reachable end-to-end from a Spring listener. Sensitivity, on scratch copies: deleting the @KafkaListener line reproduces the spec's recorded 0.00 exactly (node XX, MESSAGE_TYPE 0/2); ConsumerRecord<String, String> gives MESSAGE_TYPE 1/2. Generics use canonical `<String, OrderCreated>` spacing. Single dir on purpose: the point is the consumer-side CELL. With no producer in the build, `contracts()` gives ONE row for 'orders': status=unknown, confidence=none, note='no counterpart for this topic' — a one-sided row, not a failure. (A12.2 handoff: a Spring KafkaTemplate<String, String> producer would read `String`, a primitive, so against this OrderCreated consumer the row would stay `unknown`, and String vs String is a WEAK match.) No `cells` field: a mechanism-depth probe, not a matrix cell.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "@KafkaListener(topics = \"orders\") on handle(...) — A2.2's annotation row"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"type\":\"OrderCreated\"",
+      "note": "last type argument of ConsumerRecord<String, OrderCreated> in the listener signature; String (the key) must not win"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "node": "queue_consumer:orders",
+      "cell": "MESSAGE_TYPE",
+      "contains": "\"form\":\"generic\"",
+      "note": "read by the generic-wrapper scanner, not the Go struct-literal one"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "the listener names its topic; no framework-tag sentinel beside it"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:String",
+      "note": "a generic type argument is never a topic"
+    }
+  ]
+}
