@@ -1,0 +1,83 @@
+{
+  "framework": "csharp-aspnet-composed",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "csharp/http_server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/api/users/{id}",
+      "note": "INTENDED shape: [Route(\"api/[controller]\")] + [HttpGet(\"{id}\")] composed, leading slash, [controller] -> users"
+    },
+    {
+      "kind": "METHOD",
+      "name": "UsersController::GetUser",
+      "note": "control: the action method (not an http_server kind)"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ROUTE",
+      "node": "/api/users/{id}",
+      "cell": "ROUTE_METHOD",
+      "contains": "GET",
+      "note": "method on the cell, not in a combined name"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/api/users/{id}",
+      "to": "UsersController::GetUser",
+      "category": "HANDLED_BY",
+      "note": "composed route handled by the action METHOD (qualified: the TS client also has a getUser)"
+    },
+    {
+      "from": "GET /api/users",
+      "to": "/api/users/{id}",
+      "category": "HTTP_CALLS",
+      "note": "TS fetch `/api/users/${id}` pairs once the route has a leading slash"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET {id}",
+      "note": "pre-A4.1 shape: the action template emitted uncomposed, no leading slash"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /{id}",
+      "note": "action template made absolute without the controller prefix"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/[controller]/{id}",
+      "note": "[controller] token left unsubstituted"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/users/{id}",
+      "max_nodes": 1,
+      "note": "one composed route node. The spec's `max_cells_of_type: {ROUTE_METHOD: 1}` is not in the frozen vocabulary; the duplicate-cell case is locked by csharp unit test aspnet_class_scan_does_not_duplicate_action_routes"
+    },
+    {
+      "from": "GET /api/users/{id}",
+      "to": "UsersController::UsersController",
+      "category": "HANDLED_BY",
+      "note": "the old whole-class text scan gave the action route a SECOND HANDLED_BY to the controller CLASS"
+    },
+    {
+      "from": "endpoint:GET:/api/users/${…}",
+      "to": "ANY /api/users",
+      "category": "HTTP_CALLS",
+      "note": "the controller's own class-level `ANY /api/users` route (deliberate, A4.1 unit test) serves no action here; the id call must not prefix-pair to it"
+    }
+  ],
+  "note": "Merged-plan rank 4 gate (ASP.NET route composition). Authored against the INTENDED composed route `/api/users/{id}`. The spec expected `none` today; MEASURED on the 0.4.18 wheel it is already composed (A4.1 landed in wave 2): `GET /api/users/{id}` with one ROUTE_METHOD cell and one HANDLED_BY to GetUser, plus the deliberate class-level `ANY /api/users`. client/api.ts fetches `/api/users/${id}` (template form, not the spec's literal `http://api/api/users/1`). A second consumer of the C# ROUTE qname shape beside fixtures/csharp-aspnet/key.json."
+}

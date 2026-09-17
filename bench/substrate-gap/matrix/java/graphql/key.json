@@ -1,0 +1,42 @@
+{
+  "framework": "java-spring-graphql",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "java/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:user",
+      "note": "Spring for GraphQL `@QueryMapping public User user(@Argument String id)`, declared in schema.graphqls as `type Query { user(id: ID!): User }`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "graphql_op:User",
+      "to": "graphql_resolver:user",
+      "category": "GRAPHQL_CALLS",
+      "note": "Apollo `query User { user }` pairs to the `user` field resolver by field key"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "graphql_op:User",
+      "to": "graphql_resolver:currentUser",
+      "category": "GRAPHQL_CALLS",
+      "note": "decoy: `@QueryMapping public User currentUser()` / SDL `currentUser: User`"
+    },
+    {
+      "from": "graphql_op:User",
+      "to": "graphql_resolver:Query",
+      "category": "GRAPHQL_CALLS",
+      "note": "the SDL `type Query {` block mints a type-level `Query` resolver once .graphqls is scanned; it names no field and must never pair (A5.5 regression guard)"
+    }
+  ],
+  "note": "Spring for GraphQL server: an annotated @Controller plus the schema file every Spring GraphQL app ships (flattened from src/main/resources/graphql/). BASELINE (0.4.18 wheel): NO GRAPHQL_RESOLVER at all. `@QueryMapping` is in neither RESOLVER_PATTERNS nor RESOLVER_FIELD_DECORATORS, and no engine route sends .graphqls/.graphql files to the extractor, so the SDL block that would otherwise yield `user`/`currentUser` is never read. `[graphql-resolve] 0 pairs; dropped: no-match=1`. Cell reads none. Both forbids are vacuous until a resolver is extracted. DECOY: `currentUser` is a sibling root field whose key CONTAINS the op key `user`, so the pre-A5.5 bidirectional-substring rule would pair User -> currentUser. It is named `currentUser` rather than the spec's `userSettings` because the RECALL matcher is a substring match: `graphql_resolver:user` would be satisfied by `graphql_resolver:userSettings` alone and the literal would pass on the decoy. client/user.ts is Apollo Client, `client.query({ query: USER })` with gql`query User($id: ID!) { user(id: $id) { name } }` -> graphql_op:User (key `user`). It is the counterparty only: no GRAPHQL_OPERATION row is scoped here, so this cell measures the server's resolver extraction and the pairing, not TypeScript's op extraction (typescript/graphql owns that)."
+}

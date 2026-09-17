@@ -1,0 +1,75 @@
+{
+  "framework": "swift-vapor",
+  "language": "swift",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "swift/http_server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/users/:id",
+      "note": "literal: the parameterised path template survives into the ROUTE name/qname; Vapor writes the parameter as the component \":id\" and glia's convention for colon frameworks keeps it (Compojure, http4s, Express all read /users/:id)"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ROUTE",
+      "node": "/users/:id",
+      "cell": "ROUTE_METHOD",
+      "contains": "GET",
+      "note": "method asserted on the cell, never as a combined 'GET /path' name (AUTHORING gotcha 1)"
+    },
+    {
+      "kind": "ROUTE",
+      "node": "/users",
+      "cell": "ROUTE_METHOD",
+      "contains": "POST",
+      "note": "the POST /users route carries its method"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/users/:id",
+      "to": "routes::getUser",
+      "category": "HANDLED_BY",
+      "note": "route -> named server handler (module-qualified so the client's same-named function cannot satisfy it); scan_vapor_routes emits no handler edge today"
+    },
+    {
+      "from": "/users",
+      "to": "routes::createUser",
+      "category": "HANDLED_BY",
+      "note": "POST route -> named server handler; scan_vapor_routes emits no handler edge today"
+    },
+    {
+      "from": "GET /users",
+      "to": "/users/:id",
+      "category": "HTTP_CALLS",
+      "note": "TS fetch GET /users/${id} pairs to the parameterised route"
+    },
+    {
+      "from": "POST /users",
+      "to": "/users",
+      "category": "HTTP_CALLS",
+      "note": "TS fetch POST /users pairs to the POST route"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "endpoint:POST:/users",
+      "to": "GET /users/:id",
+      "category": "HTTP_CALLS",
+      "note": "method-mismatch pairing: the POST call must not reach the GET-only route"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /id",
+      "note": "MEASURED PHANTOM: `req.parameters.get(\"id\")` in the handler body matches the `.get(` route needle"
+    }
+  ],
+  "note": "Vapor, the dominant Swift server framework: `app.get(\"users\", \":id\", use: getUser)` with the canonical `req.parameters.get(\"id\")` in the handler. BASELINE (0.4.18 wheel): scan_vapor_routes drops the ':' so the route reads `GET /users/id` (a literal segment, which is why the GET call does not pair), mints a phantom `GET /id` from `req.parameters.get(\"id\")`, and emits no HANDLED_BY. client/api.ts is a byte-copy of fixtures/ts-http-fetch/client/api.ts (fetch GET /users/${id}, POST /users) so HTTP_CALLS has a counterparty; ENDPOINT is not an http_server kind, so the client never moves this cell."
+}

@@ -1,0 +1,67 @@
+{
+  "framework": "ts-grpc-js",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "grpc",
+  "cells": [
+    "typescript/grpc"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRPC_SERVICE",
+      "name": "demo.Greeter",
+      "note": "literal: package-qualified proto service. The service is named Greeter, deliberately NOT suffixed Service/Svc (the old grpc.rs suffix needle)"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "Greeter",
+      "note": "`new GreeterClient(address, credentials.createInsecure())` from grpc-tools static codegen with @grpc/grpc-js. Asserted leniently so A5.4's package-qualified client qname (grpc_client:demo.Greeter) still matches"
+    },
+    {
+      "kind": "METHOD",
+      "name": "demo.Greeter::SayHello",
+      "note": "control (not a grpc kind): one METHOD per rpc, qualified so the language-side SayHello implementation cannot satisfy it (merged-plan rank 6 / A5.1)"
+    },
+    {
+      "kind": "GRPC_SERVER",
+      "name": "Greeter",
+      "note": "A5.3 baseline (not a grpc-mechanism kind, so cell-neutral): `server.addService(GreeterService, { sayHello })`, where GreeterService is the generated service definition."
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Greeter",
+      "to": "grpc:demo.Greeter",
+      "category": "GRPC_CALLS",
+      "note": "GrpcStackResolver pairs the client stub to the proto service across repos"
+    },
+    {
+      "from": "grpc:demo.Greeter",
+      "to": "demo.Greeter::SayHello",
+      "category": "DEFINES",
+      "note": "control: the proto service DEFINES its rpc METHOD"
+    },
+    {
+      "from": "grpc:demo.Greeter",
+      "to": "grpc_server",
+      "category": "HANDLED_BY",
+      "note": "A5.3 baseline (not a grpc category, cell-neutral): the service is handled by its server-impl marker"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "GRPC_CLIENT",
+      "max_nodes": 1,
+      "note": "one client stub in the build: the server repo (proto + impl) must not mint a client of its own. Nameless so it survives A5.4 renaming the client"
+    },
+    {
+      "kind": "GRPC_SERVICE",
+      "max_nodes": 1,
+      "note": "the proto declares exactly one service; the implementation side must not mint a second"
+    }
+  ],
+  "note": "@grpc/grpc-js server + client with grpc-tools static codegen, service `Greeter` in server/greeter.proto (package demo). BASELINE (0.4.18 wheel): GRPC_SERVICE, GRPC_CLIENT (A5.2's `Client(` needle) and GRPC_CALLS all emitted, so the cell reads full. The proto-loader dynamic shape (`new demoProto.Greeter(address, creds)`) is not covered here. Only the A5.3 server-marker rows read XX."
+}

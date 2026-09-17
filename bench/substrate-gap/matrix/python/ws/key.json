@@ -1,0 +1,47 @@
+{
+  "framework": "py-fastapi-websocket",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "python/ws"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/ws/chat",
+      "note": "FastAPI `@app.websocket(\"/ws/chat\")` -> handler keyed by its mount path"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/ws/admin",
+      "note": "the DECOY is a real handler too: both endpoints in one module must be extracted (extract_ws_name reads only the FIRST occurrence of a needle today)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/ws/chat",
+      "to": "ws:/ws/chat",
+      "category": "WS_CONNECTS",
+      "note": "the browser client connects to the chat endpoint"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/ws/chat",
+      "to": "ws:/ws/admin",
+      "category": "WS_CONNECTS",
+      "note": "DECOY: the chat client must not pair to the admin socket mounted beside it (segment-aware ws_pair: /ws/chat vs /ws/admin share only the /ws prefix)"
+    },
+    {
+      "from": "ws_client:/ws/chat",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "the pre-A5.6 wildcard: a handler whose path was not read falls back to the generic name `ws` and must not pair with a client on a real path"
+    }
+  ],
+  "note": "FastAPI server with two websocket endpoints, and a browser `new WebSocket(\"ws://api.example.com/ws/chat\")` client as the counterparty (WS_CLIENT is not scoped by a row here, so the cell measures the Python handler side and the pairing; typescript/ws owns the client). BASELINE (0.4.18 wheel): WS_CLIENT ws_client:/ws/chat is extracted but NO WS_HANDLER: websocket.rs HANDLER_PATTERNS has no Python needle (no `.websocket(`, no `websockets.serve(`, no Django Channels routing), so there is nothing to pair and no `[ws-resolve]` line. Cell reads none. Both forbids are vacuous until a Python handler is extracted; they are the precision half of the cell for that fix."
+}

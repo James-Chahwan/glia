@@ -1,0 +1,70 @@
+{
+  "framework": "ts-express-named",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "typescript/http_server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/users/:id",
+      "note": "literal: the parameterised path template survives into the ROUTE name/qname"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ROUTE",
+      "node": "/users/:id",
+      "cell": "ROUTE_METHOD",
+      "contains": "GET",
+      "note": "method asserted on the cell, never as a combined 'GET /path' name (AUTHORING gotcha 1)"
+    },
+    {
+      "kind": "ROUTE",
+      "node": "/users",
+      "cell": "ROUTE_METHOD",
+      "contains": "POST",
+      "note": "the POST /users route carries its method"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/users/:id",
+      "to": "app::getUser",
+      "category": "HANDLED_BY",
+      "note": "route -> named server handler (module-qualified so the client's same-named function cannot satisfy it); the Express ROUTE_METHOD cell records handler \"\" today"
+    },
+    {
+      "from": "/users",
+      "to": "app::createUser",
+      "category": "HANDLED_BY",
+      "note": "POST route -> named server handler; the Express ROUTE_METHOD cell records handler \"\" today"
+    },
+    {
+      "from": "GET /users",
+      "to": "/users/:id",
+      "category": "HTTP_CALLS",
+      "note": "TS fetch GET /users/${id} pairs to the parameterised route"
+    },
+    {
+      "from": "POST /users",
+      "to": "/users",
+      "category": "HTTP_CALLS",
+      "note": "TS fetch POST /users pairs to the POST route"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "endpoint:POST:/users",
+      "to": "route:/users/:id",
+      "category": "HTTP_CALLS",
+      "note": "method-mismatch pairing: the POST call must not reach the GET-only route"
+    }
+  ],
+  "note": "Express with NAMED handlers, `app.get(\"/users/:id\", getUser)` — the second typescript/http_server fixture beside fixtures/ts-http-fetch (inline arrows, no HANDLED_BY row). BASELINE (0.4.18 wheel): routes are `route:/users/:id` / `route:/users` (method only in the ROUTE_METHOD JSON), both pairings hold, but the ROUTE_METHOD payload carries `\"handler\":\"\"` and no HANDLED_BY edge is emitted for a named handler. client/api.ts is a byte-copy of fixtures/ts-http-fetch/client/api.ts (fetch GET /users/${id}, POST /users) so HTTP_CALLS has a counterparty; ENDPOINT is not an http_server kind, so the client never moves this cell."
+}
