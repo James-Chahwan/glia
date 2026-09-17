@@ -1,10 +1,10 @@
 //! HTTP stack resolver — frontend Endpoint → backend Route by
 //! (method, normalised path).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
+use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
 use crate::merged::MergedGraph;
@@ -25,7 +25,9 @@ use crate::types::RepoGraph;
 ///   Routes are always Strong at v0.4.4 — i.e. the endpoint's confidence wins.
 ///
 /// Collisions (multiple Routes with the same method+path across repos) emit
-/// one edge per target. Rare in real corpora but cheap to handle.
+/// one edge per target, UNLESS the endpoint's recorded host names a service
+/// that some of those repos declare: then only their routes are kept (A11.4,
+/// [`narrow_by_host`], which falls back to every target on any doubt).
 pub struct HttpStackResolver;
 
 impl CrossGraphResolver for HttpStackResolver {
@@ -37,6 +39,9 @@ impl CrossGraphResolver for HttpStackResolver {
         let mut stats = HttpMatchStats::default();
         let (index, stripped) = build_route_index(&merged.graphs, &prefixes, &mut stats);
         stats.report_nav_excluded();
+        // A11.4: built from nodes, never from cross-edges, so where this
+        // resolver sits in `run_all_resolvers` does not matter.
+        let aliases = build_service_alias_index(&merged.graphs);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
@@ -55,9 +60,12 @@ impl CrossGraphResolver for HttpStackResolver {
                 stats.count_folds(raw_path);
                 stats.count_client_normalised(&n.cells);
                 let norm = normalise_http_path(raw_path);
-                for (target, tier) in
-                    lookup_route(&index, &stripped, &method, &norm, &prefixes)
-                {
+                let mut hits = lookup_route(&index, &stripped, &method, &norm, &prefixes);
+                let hosts = endpoint_hosts(&n.cells);
+                if narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
+                    stats.host_narrowed += 1;
+                }
+                for (target, tier) in hits {
                     stats.record(tier);
                     merged.cross_edges.push(Edge {
                         from: n.id,
@@ -78,6 +86,7 @@ impl CrossGraphResolver for HttpStackResolver {
         stats.report();
         stats.report_placeholder_folds();
         stats.report_client_normalised();
+        stats.report_host_narrowed(aliases.len());
     }
 }
 
@@ -159,6 +168,8 @@ struct HttpMatchStats {
     /// fragment. One node can count in both.
     normalised_host: usize,
     normalised_query: usize,
+    /// A11.4: ENDPOINT nodes whose target list host narrowing actually cut.
+    host_narrowed: usize,
 }
 
 impl HttpMatchStats {
@@ -260,12 +271,27 @@ impl HttpMatchStats {
             self.normalised_host, self.normalised_query,
         );
     }
+
+    /// A11.4 fired_on marker. Printed only when narrowing removed at least one
+    /// pairing, so every build without a known service host stays silent.
+    fn report_host_narrowed(&self, aliases: usize) {
+        if self.host_narrowed == 0 {
+            return;
+        }
+        eprintln!(
+            "[http-host] narrowed {} endpoint pairings by service host ({aliases} aliases)",
+            self.host_narrowed,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 struct RouteTarget {
     route_id: NodeId,
     confidence: Confidence,
+    /// The repo the ROUTE lives in, which is what host narrowing (A11.4) keys
+    /// on.
+    repo: RepoId,
 }
 
 /// Build `(METHOD, normalised_path) → Vec<RouteTarget>` across every graph in
@@ -306,6 +332,7 @@ fn build_route_index(
             let target = RouteTarget {
                 route_id: n.id,
                 confidence: n.confidence,
+                repo: g.repo,
             };
             if let Some(path) =
                 index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes)
@@ -501,15 +528,27 @@ fn extract_method_field(json: &str) -> Option<&str> {
 }
 
 /// The still-escaped `raw` value of an ENDPOINT_HIT payload (A3.3), or None.
-///
-/// Both writers (`code_domain::endpoint` and the TS parser's serde_json) emit
-/// compact JSON, so the key is matched WITH its `:"` — inside any escaped
-/// value every `"` is preceded by `\`, so a path that is literally `raw`
-/// (`"path":"raw"`) cannot be mistaken for the key. The value ends at the first
-/// unescaped quote.
 fn raw_field(json: &str) -> Option<&str> {
-    const KEY: &str = "\"raw\":\"";
-    let rest = &json[json.find(KEY)? + KEY.len()..];
+    str_field(json, "raw")
+}
+
+/// The still-escaped value of the string field `key` in an ENDPOINT_HIT
+/// payload, or None.
+///
+/// All three writers (`code_domain::endpoint`, the TS parser's serde_json and
+/// the engine's endpoint fold) emit compact JSON, so the key is matched WITH
+/// its `:"`. Inside any escaped value every `"` is preceded by `\`, so a path
+/// that is literally `raw` (`"path":"raw"`) cannot be mistaken for the key, and
+/// `"host":"` cannot match inside `"hosts":[`.
+fn str_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("\"{key}\":\"");
+    let rest = &json[json.find(&pat)? + pat.len()..];
+    quoted_body(rest)
+}
+
+/// `rest` starts just after an opening quote: everything up to the first
+/// unescaped quote, or None when it is unterminated.
+fn quoted_body(rest: &str) -> Option<&str> {
     let mut escaped = false;
     for (i, b) in rest.bytes().enumerate() {
         match b {
@@ -519,6 +558,200 @@ fn raw_field(json: &str) -> Option<&str> {
         }
     }
     None
+}
+
+// ============================================================================
+// A11.4 — host narrowing
+// ============================================================================
+
+/// `normalise_alias(name) -> every repo that declares a service by that name`.
+type AliasIndex = HashMap<String, HashSet<RepoId>>;
+
+/// The INFRA_RESOURCE kinds that NAME a service (`infra:<kind>:<name>`, see
+/// `parsers/code/extractors/src/iac.rs`). ConfigMaps, secrets, jobs and
+/// ingresses are not addressable as an HTTP host, so they stay out.
+const ALIAS_KINDS: &[&str] = &["service", "deployment", "statefulset", "image"];
+
+/// What `dockerfile_image_name` returns for a Dockerfile at a repo's root. It
+/// names nothing, and every such repo would share it.
+const DEGENERATE_IMAGE: &str = "image";
+
+/// Name endings that do not tell two services apart: `users-service`,
+/// `users-svc` and `users-api` are the same service. `_` is folded to `-`
+/// before these are tried, so `users_service` is covered too.
+const SERVICE_SUFFIXES: &[&str] = &["-service", "-svc", "-api", "-server"];
+
+/// Cluster-internal DNS tails. Only a name ending in one of these is cut back
+/// to its first label (`users.default.svc.cluster.local` -> `users`). A dotted
+/// PUBLIC hostname is left whole: cutting `api.example.com` to `api` would
+/// alias it onto any compose service that happens to be called `api`.
+/// (`.svc.cluster.local` ends in `.local`.)
+const CLUSTER_DNS_TAILS: &[&str] = &[".svc", ".local"];
+
+/// Every service alias in the merge, keyed by [`normalise_alias`]. A name
+/// declared in several repos maps to all of them. That is a real ambiguity,
+/// and narrowing then keeps the targets in every one of them.
+///
+/// The IacResolver builds its index the same way, and this one stays separate
+/// on purpose: that one pairs verbatim qnames, this one keys on a normalised
+/// NAME and only for the service-naming kinds.
+fn build_service_alias_index(graphs: &[RepoGraph]) -> AliasIndex {
+    let mut index = AliasIndex::new();
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::INFRA_RESOURCE) {
+                continue;
+            }
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some((kind, name)) = qname
+                .strip_prefix("infra:")
+                .and_then(|rest| rest.split_once(':'))
+            else {
+                continue;
+            };
+            if !ALIAS_KINDS.contains(&kind) || (kind == "image" && name == DEGENERATE_IMAGE) {
+                continue;
+            }
+            let alias = normalise_alias(name);
+            if !alias.is_empty() {
+                index.entry(alias).or_default().insert(g.repo);
+            }
+        }
+    }
+    index
+}
+
+/// One spelling for a service name, applied identically to the alias and to
+/// the host so `users-service` (compose) and `users-svc` (a client's base URL)
+/// meet at `users`:
+/// lowercase, `_` -> `-`, a cluster DNS name cut to its first label, then
+/// [`SERVICE_SUFFIXES`] stripped for as long as one matches and leaves a
+/// non-empty stem (so `users-api-service` and `users-api` also meet).
+fn normalise_alias(name: &str) -> String {
+    let mut s = name.trim().to_ascii_lowercase().replace('_', "-");
+    if CLUSTER_DNS_TAILS.iter().any(|t| s.ends_with(t))
+        && let Some((first, _)) = s.split_once('.')
+    {
+        s = first.to_string();
+    }
+    while let Some(stem) = SERVICE_SUFFIXES
+        .iter()
+        .find_map(|suf| s.strip_suffix(suf).filter(|stem| !stem.is_empty()))
+    {
+        s = stem.to_string();
+    }
+    s
+}
+
+/// `host[:port]` -> `host`. A bracketed IPv6 literal keeps its brackets and
+/// never matches an alias, which is the right answer for it.
+fn host_name(authority: &str) -> &str {
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    }
+}
+
+const HOSTS_KEY: &str = "\"hosts\":[";
+
+/// The `hosts` array of an ENDPOINT_HIT payload: every authority the client's
+/// base URL can take, one per deployment binding, `""` for a binding with
+/// none. None when the array is malformed.
+fn hosts_list(json: &str) -> Option<Vec<&str>> {
+    let mut rest = &json[json.find(HOSTS_KEY)? + HOSTS_KEY.len()..];
+    let mut out = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if rest.starts_with(']') {
+            return Some(out);
+        }
+        rest = rest.strip_prefix('"')?;
+        let value = quoted_body(rest)?;
+        out.push(value);
+        rest = rest[value.len() + 1..].trim_start();
+        rest = rest.strip_prefix(',').unwrap_or(rest);
+    }
+}
+
+/// Every host an ENDPOINT's calls may go to, or None when any call site gives
+/// no evidence.
+///
+/// Graph build stacks one ENDPOINT_HIT cell per call site on the node, and two
+/// call sites on one path can name different services, so the answer is the
+/// union over the cells. A cell with a `hosts` array (A11.4's engine side:
+/// the base URL is bound differently per deployment) contributes the whole
+/// array; otherwise its `host` (A11.2). A cell with neither means one call site
+/// goes somewhere unknown, and then nothing may be narrowed.
+fn endpoint_hosts(cells: &[Cell]) -> Option<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen_hit = false;
+    for c in cells {
+        if c.kind != cell_type::ENDPOINT_HIT {
+            continue;
+        }
+        let CellPayload::Json(json) = &c.payload else {
+            return None;
+        };
+        seen_hit = true;
+        let hosts = if json.contains(HOSTS_KEY) {
+            hosts_list(json)?
+        } else {
+            vec![str_field(json, "host")?]
+        };
+        for h in hosts {
+            if !out.iter().any(|o| o == h) {
+                out.push(h.to_string());
+            }
+        }
+    }
+    (seen_hit && !out.is_empty()).then_some(out)
+}
+
+/// Drop the targets that live outside the service the client named. Returns
+/// true only when it removed at least one.
+///
+/// It acts only on positive evidence and otherwise leaves `hits` alone:
+/// - no host, or any host (deployment) that is not a known alias: the client
+///   may call something the map does not know;
+/// - no target in an owning repo: the map is incomplete, and losing an edge
+///   to it would be worse than keeping a collision.
+///
+/// With several hosts the owners are their union, so a client whose dev and
+/// prod bases name different services keeps both services' routes.
+///
+/// MONOREPO IS OUT OF SCOPE, deliberately. This keys on the ROUTE's RepoId. Two
+/// services in ONE repo serving the same path collapse into a single
+/// `route:<path>` node with two HANDLED_BY edges, so there is nothing here to
+/// choose between. Closing that case needs an owner segment in ROUTE qnames, a
+/// route-identity change for the route workstream. Do not bolt a path-prefix
+/// variant onto this index to get it.
+fn narrow_by_host(
+    aliases: &AliasIndex,
+    hosts: Option<&[String]>,
+    hits: &mut Vec<(RouteTarget, MatchTier)>,
+) -> bool {
+    let Some(hosts) = hosts else {
+        return false;
+    };
+    if hits.len() < 2 {
+        return false;
+    }
+    let mut owners: HashSet<RepoId> = HashSet::new();
+    for h in hosts {
+        let Some(repos) = aliases.get(&normalise_alias(host_name(h))) else {
+            return false;
+        };
+        owners.extend(repos.iter().copied());
+    }
+    let kept = hits.iter().filter(|(t, _)| owners.contains(&t.repo)).count();
+    if kept == 0 || kept == hits.len() {
+        return false;
+    }
+    hits.retain(|(t, _)| owners.contains(&t.repo));
+    true
 }
 
 /// Collapse path param syntaxes into a stable form so a frontend endpoint's
@@ -1098,6 +1331,253 @@ mod tests {
         assert_eq!(raw_field(esc), Some(r##"/q?s=\"x\"#f"##));
         // Unterminated → None, never a panic.
         assert_eq!(raw_field(r#"{"raw":"abc"#), None);
+    }
+
+    // ---- A11.4 host narrowing ------------------------------------------
+
+    /// One repo holding `(kind, qname, cells)` nodes, and their ids in order.
+    fn repo_graph(
+        repo: RepoId,
+        specs: Vec<(repo_graph_core::NodeKindId, &str, Vec<Cell>)>,
+    ) -> (RepoGraph, Vec<NodeId>) {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_core::Node;
+
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        let mut ids = Vec::new();
+        for (kind, qname, cells) in specs {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
+            nav.record(id, qname, qname, kind, None);
+            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+            ids.push(id);
+        }
+        let g = RepoGraph {
+            repo,
+            nodes,
+            edges: vec![],
+            symbols: Default::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        (g, ids)
+    }
+
+    fn get_route() -> Vec<Cell> {
+        vec![Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Json(r#"{"method":"GET","handler":"h"}"#.into()),
+        }]
+    }
+
+    fn hit(json: &str) -> Cell {
+        Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.into()) }
+    }
+
+    /// web (one ENDPOINT carrying `hits`), users (`route:/users` + the
+    /// `infra:service:users-service` alias) and orders (`route:/users`, no
+    /// alias). Returns the HTTP_CALLS targets and the two route ids.
+    fn pair_web_users_orders(hits: Vec<Cell>, orders_infra: &[&str]) -> (Vec<NodeId>, NodeId, NodeId) {
+        let (web, _) = repo_graph(
+            RepoId(401),
+            vec![(node_kind::ENDPOINT, "endpoint:GET:/users", hits)],
+        );
+        let (users, u) = repo_graph(
+            RepoId(402),
+            vec![
+                (node_kind::ROUTE, "route:/users", get_route()),
+                (node_kind::INFRA_RESOURCE, "infra:service:users-service", vec![]),
+            ],
+        );
+        let mut orders_specs = vec![(node_kind::ROUTE, "route:/users", get_route())];
+        orders_specs.extend(orders_infra.iter().map(|q| (node_kind::INFRA_RESOURCE, *q, vec![])));
+        let (orders, o) = repo_graph(RepoId(403), orders_specs);
+        let mut merged = MergedGraph::new(vec![web, users, orders]);
+        HttpStackResolver.resolve(&mut merged);
+        let mut to: Vec<NodeId> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| e.to)
+            .collect();
+        to.sort_by_key(|id| id.0);
+        (to, u[0], o[0])
+    }
+
+    #[test]
+    fn host_naming_a_service_keeps_only_that_services_route() {
+        let (to, users, orders) = pair_web_users_orders(
+            vec![hit(r#"{"method":"GET","path":"/users","host":"users-service:8080"}"#)],
+            &[],
+        );
+        assert_ne!(users, orders, "RepoId is part of the route id");
+        assert_eq!(to, vec![users]);
+    }
+
+    #[test]
+    fn no_host_keeps_every_colliding_route() {
+        let (to, users, orders) =
+            pair_web_users_orders(vec![hit(r#"{"method":"GET","path":"/users"}"#)], &[]);
+        let mut want = vec![users, orders];
+        want.sort_by_key(|id| id.0);
+        assert_eq!(to, want, "today's behaviour, bit for bit");
+    }
+
+    /// Every way the evidence can fall short leaves both edges in place.
+    #[test]
+    fn narrowing_falls_back_to_all_targets_without_positive_evidence() {
+        let both = |hits: Vec<Cell>, orders_infra: &[&str]| {
+            let (to, _, _) = pair_web_users_orders(hits, orders_infra);
+            to.len()
+        };
+        // A host no repo declares.
+        assert_eq!(both(vec![hit(r#"{"host":"billing:9000"}"#)], &[]), 2);
+        // A public dotted host is never cut down to its first label.
+        assert_eq!(both(vec![hit(r#"{"host":"users.example.com"}"#)], &[]), 2);
+        // The alias is declared by both repos: a genuine ambiguity.
+        assert_eq!(both(vec![hit(r#"{"host":"users-service"}"#)], &["infra:image:users"]), 2);
+        // One call site names users, a second names nothing.
+        assert_eq!(
+            both(vec![hit(r#"{"host":"users-service"}"#), hit(r#"{"path":"/users"}"#)], &[]),
+            2
+        );
+        // One deployment names users, another has a relative base.
+        assert_eq!(both(vec![hit(r#"{"host":"users-service","hosts":["users-service",""]}"#)], &[]), 2);
+        // A non-JSON hit is no evidence.
+        assert_eq!(
+            both(
+                vec![Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("users-service".into()) }],
+                &[]
+            ),
+            2
+        );
+    }
+
+    /// Owners are the union over hosts: two call sites (or two deployments)
+    /// naming the two services keep both, one naming users twice keeps one.
+    #[test]
+    fn several_hosts_narrow_to_the_union_of_their_owners() {
+        let (to, _, _) = pair_web_users_orders(
+            vec![hit(r#"{"host":"users-service"}"#), hit(r#"{"host":"orders"}"#)],
+            &["infra:deployment:orders-svc"],
+        );
+        assert_eq!(to.len(), 2);
+        let (to, _, _) = pair_web_users_orders(
+            vec![hit(r#"{"host":"users-svc","hosts":["users-svc","users.default.svc.cluster.local:80"]}"#)],
+            &["infra:deployment:orders-svc"],
+        );
+        assert_eq!(to.len(), 1);
+    }
+
+    /// Straight at the function: an alias whose repo holds none of the
+    /// targets, and a single target, both leave `hits` untouched.
+    #[test]
+    fn narrow_by_host_never_empties_or_touches_a_single_hit() {
+        let t = |n: u64, repo: u64| {
+            (
+                RouteTarget {
+                    route_id: NodeId(n),
+                    confidence: Confidence::Strong,
+                    repo: RepoId(repo),
+                },
+                MatchTier::Exact,
+            )
+        };
+        let aliases: AliasIndex = [
+            ("payments".to_string(), HashSet::from([RepoId(9)])),
+            ("users".to_string(), HashSet::from([RepoId(1)])),
+        ]
+        .into_iter()
+        .collect();
+        let host = |h: &str| vec![h.to_string()];
+
+        let mut hits = vec![t(1, 1), t(2, 2)];
+        assert!(!narrow_by_host(&aliases, Some(&host("payments:80")), &mut hits));
+        assert_eq!(hits.len(), 2);
+
+        let mut hits = vec![t(2, 2)];
+        assert!(!narrow_by_host(&aliases, Some(&host("users")), &mut hits));
+        assert_eq!(hits.len(), 1, "a lone hit in another repo is kept");
+
+        let mut hits = vec![t(1, 1), t(2, 2), t(3, 1)];
+        assert!(narrow_by_host(&aliases, Some(&host("users-svc:80")), &mut hits));
+        let kept: Vec<u64> = hits.iter().map(|(x, _)| x.route_id.0).collect();
+        assert_eq!(kept, vec![1, 3], "order is kept");
+        assert!(hits.iter().all(|(_, tier)| *tier == MatchTier::Exact));
+    }
+
+    /// The degenerate root-Dockerfile image name aliases nothing.
+    #[test]
+    fn root_dockerfile_image_is_not_an_alias() {
+        let (g, _) = repo_graph(
+            RepoId(1),
+            vec![
+                (node_kind::INFRA_RESOURCE, "infra:image:image", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:configmap:users", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:statefulset:Users_DB", vec![]),
+            ],
+        );
+        let idx = build_service_alias_index(std::slice::from_ref(&g));
+        assert_eq!(idx.keys().collect::<Vec<_>>(), vec!["users-db"]);
+    }
+
+    #[test]
+    fn normalise_alias_meets_compose_k8s_and_client_spellings() {
+        for s in [
+            "users",
+            "Users",
+            "users-service",
+            "users_service",
+            "users-svc",
+            "users_svc",
+            "users-api",
+            "users-server",
+            "users-api-service",
+            "users-service.default.svc.cluster.local",
+            "users.default.svc",
+            "users.local",
+        ] {
+            assert_eq!(normalise_alias(s), "users", "{s}");
+        }
+        // A public hostname stays whole, so it cannot alias onto `api`.
+        assert_eq!(normalise_alias("api.example.com"), "api.example.com");
+        assert_eq!(normalise_alias("api"), "api");
+        // A bare suffix is a name, not an empty stem.
+        assert_eq!(normalise_alias("service"), "service");
+        assert_eq!(normalise_alias("-svc"), "-svc");
+        assert_eq!(normalise_alias(""), "");
+    }
+
+    #[test]
+    fn host_name_drops_port_and_userinfo_only() {
+        assert_eq!(host_name("users-service:8080"), "users-service");
+        assert_eq!(host_name("users-service"), "users-service");
+        assert_eq!(host_name("u:p@users:80"), "users");
+        assert_eq!(host_name("[::1]:8080"), "[::1]");
+        assert_eq!(host_name("[::1]"), "[::1]");
+        assert_eq!(host_name(""), "");
+    }
+
+    #[test]
+    fn endpoint_hit_host_fields_are_read_as_keys() {
+        let h = |json: &str| endpoint_hosts(&[hit(json)]);
+        assert_eq!(h(r#"{"path":"/u","host":"a:1"}"#), Some(vec!["a:1".to_string()]));
+        // `hosts` wins and is the whole set; `host` is its first entry.
+        assert_eq!(
+            h(r#"{"host":"a","hosts":["a", "b" ,"a"]}"#),
+            Some(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(h(r#"{"hosts":[]}"#), None);
+        // A value that is literally `host` is not the key.
+        assert_eq!(h(r#"{"path":"host","raw":"\"host\":\"x\""}"#), None);
+        // Malformed arrays are no evidence, never a panic.
+        assert_eq!(h(r#"{"host":"a","hosts":["a""#), None);
+        assert_eq!(h(r#"{"host":"a","hosts":[1]}"#), None);
+        assert_eq!(endpoint_hosts(&[]), None);
+        assert_eq!(str_field(r#"{"host":"a"}"#, "host"), Some("a"));
+        assert_eq!(str_field(r#"{"hosts":["a"]}"#, "host"), None);
     }
 
     /// A3.3 — the marker counts NODES per bucket, not cells: a node with two

@@ -7,7 +7,10 @@
 //! names. With `environment.apiUrl = 'http://users-service:8080'` in the repo
 //! table, this pass re-keys the node to `endpoint:GET:/users`, which pairs at
 //! the Exact tier. It also records `"host":"users-service:8080"` on the
-//! ENDPOINT_HIT cell, the input A11.4's host narrowing reads.
+//! ENDPOINT_HIT cell, the input A11.4's host narrowing reads. When the base is
+//! bound differently per deployment (`environment.ts` vs
+//! `environment.prod.ts`), it also records every binding's authority as
+//! `"hosts":[…]`, first binding first (A11.4, see [`deployment_hosts`]).
 //!
 //! WHERE IT RUNS. After the parse cache, over every FileParse of the repo,
 //! whether it came from the cache or not (`build_graphs_for_repo`). The cache
@@ -195,6 +198,11 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
     if !moved && host.is_none() {
         return None;
     }
+    // Only a folded base can have deployment alternatives.
+    let hosts = match (&folded, fields.str("template")) {
+        (Some(_), Some(t)) => deployment_hosts(t, consts, host.as_deref()),
+        _ => Vec::new(),
+    };
 
     if moved {
         fields.set("path", Value::from(path.as_str()));
@@ -202,6 +210,9 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
     }
     if let Some(h) = &host {
         fields.set("host", Value::from(h.as_str()));
+    }
+    if !hosts.is_empty() {
+        fields.set("hosts", Value::from(hosts));
     }
     let payload = serde_json::to_string(&fields).ok()?;
     let new_qname = format!("endpoint:{method}:{path}");
@@ -218,6 +229,43 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         moved,
         host: host.is_some(),
     })
+}
+
+/// A11.4: the authority of EVERY binding of the template's leading base, for
+/// the `"hosts"` field. `environment.ts` and `environment.prod.ts` routinely
+/// bind `environment.apiUrl` to different hosts, and the fold above used only
+/// the first, so HTTP host narrowing has to see the whole set.
+///
+/// A binding with no authority (a relative `/api` base: same origin, service
+/// unknown) contributes `""`, which the resolver reads as "do not narrow".
+///
+/// Empty, so no field is written, unless the bindings disagree. That keeps
+/// every single-binding payload byte-identical. Also empty when the set would
+/// not start with the `host` the fold recorded (the lenient last-segment
+/// lookup resolved a different key), so `hosts[0]` is always `host`.
+fn deployment_hosts(template: &str, consts: &ConstTable, host: Option<&str>) -> Vec<String> {
+    let Some(expr) = template
+        .strip_prefix("${")
+        .and_then(|inner| inner.split_once('}'))
+        .map(|(expr, _)| expr)
+    else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for value in consts.candidates(expr) {
+        let h = url_split(value)
+            .0
+            .filter(|h| !h.contains("${"))
+            .unwrap_or_default();
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    let consistent = out.first().map(String::as_str) == Some(host.unwrap_or(""));
+    if out.len() < 2 || !consistent {
+        return Vec::new();
+    }
+    out
 }
 
 /// Point this file's edges at the new ids. Returns false, changing nothing,
@@ -611,6 +659,106 @@ mod tests {
             payload(&fp, 2)
         );
         assert_eq!(fp.edges, edges);
+    }
+
+    /// A11.4: a base bound differently per deployment records every binding's
+    /// authority, first binding first and `""` for a relative one. A base
+    /// bound once, or twice to the same host, records no `hosts` at all.
+    #[test]
+    fn per_deployment_bindings_record_the_host_set() {
+        let mut consts = ConstTable::scan_file(
+            "export const environment = { apiUrl: 'http://users-svc.prod.svc.cluster.local' };\n",
+            "typescript",
+        );
+        for src in [
+            "export const environment = { apiUrl: 'http://users-service:8080' };\n",
+            "export const environment = { apiUrl: 'http://users-service:8080/v1' };\n",
+            "export const environment = { apiUrl: '/api' };\n",
+        ] {
+            consts.merge_from(&ConstTable::scan_file(src, "typescript"));
+        }
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","template":"${environment.apiUrl}/users"}"#,
+        );
+        let stats = fold_endpoint_paths(&mut fp, &consts, repo());
+        assert_eq!(stats, FoldStats { folded: 1, hosts: 1 });
+        assert_eq!(
+            payload(&fp, 1),
+            r#"{"method":"GET","path":"/users","template":"${environment.apiUrl}/users","folded_from":"${…}/users","host":"users-svc.prod.svc.cluster.local","hosts":["users-svc.prod.svc.cluster.local","users-service:8080",""]}"#
+        );
+
+        // One distinct host across two bindings: nothing new is written.
+        let mut same = ConstTable::scan_file(
+            "export const environment = { apiUrl: 'http://users-service:8080' };\n",
+            "typescript",
+        );
+        same.merge_from(&ConstTable::scan_file(
+            "export const environment = { apiUrl: 'http://users-service:8080/v2' };\n",
+            "typescript",
+        ));
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","template":"${environment.apiUrl}/users"}"#,
+        );
+        fold_endpoint_paths(&mut fp, &same, repo());
+        assert!(!payload(&fp, 1).contains("hosts"), "{}", payload(&fp, 1));
+
+        // A literal authority has no alternatives.
+        assert!(deployment_hosts("https://a/x", &consts, Some("a")).is_empty());
+        // The set must start with the host the fold recorded.
+        assert!(deployment_hosts("${environment.apiUrl}/x", &consts, Some("other")).is_empty());
+    }
+
+    /// A11.4 end to end on the `xstack-host-pairing` fixture, through
+    /// `generate_many`: two Go services serve the same paths, the client's
+    /// base names `users-service`, and only the users repo declares it.
+    #[test]
+    fn xstack_host_pairing_fixture_pairs_only_with_the_named_service() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bench/substrate-gap/fixtures/xstack-host-pairing"
+        );
+        let r = crate::generate_many(&[
+            format!("{root}/web"),
+            format!("{root}/users"),
+            format!("{root}/orders"),
+        ])
+        .expect("fixture builds");
+        let m = &r.merged;
+        let alias = m
+            .node_id_by_qname("infra:service:users-service")
+            .expect("compose alias");
+        let users_repo = m
+            .graphs
+            .iter()
+            .find(|g| g.nodes.iter().any(|n| n.id == alias))
+            .map(|g| g.repo)
+            .expect("alias has a repo");
+        let route_repo: HashMap<NodeId, RepoId> = m
+            .graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter().map(move |n| (n.id, g.repo)))
+            .collect();
+        let calls: Vec<_> = m
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == repo_graph_code_domain::edge_category::HTTP_CALLS)
+            .collect();
+        // Before A11.4: 4 (each endpoint paired with both services).
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(
+            calls.iter().all(|e| route_repo.get(&e.to) == Some(&users_repo)),
+            "every HTTP_CALLS target must be a users-service route"
+        );
+        for q in ["endpoint:GET:/users", "endpoint:GET:/users/${…}"] {
+            let ep = m.node_id_by_qname(q).expect(q);
+            assert!(calls.iter().any(|e| e.from == ep), "{q} lost its pairing");
+        }
     }
 
     /// Two call sites on one placeholder path, only one of whose bases
