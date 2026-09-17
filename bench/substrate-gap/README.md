@@ -17,6 +17,7 @@ cd bench/substrate-gap
 python3 run.py                    # grade every fixture, print the matrix, append results.jsonl
 python3 grade.py fixtures/<name>  # grade one fixture (verbose)
 python3 grade.py fixtures/<name> --dump   # + dump ALL emitted nodes/edges (author keys against reality)
+python3 incremental_check.py      # regrade every fixture through the parse cache; exit 1 if warm != cold
 ```
 
 Requires the `repo_graph_py` wheel importable. **`grade.py` imports the INSTALLED
@@ -160,6 +161,70 @@ Under the matrix, `run.py` prints five totals. Each is a gate:
 `results.jsonl` is the append-only history — one record per `run.py`, tagged with
 engine version, so the map is diffable across sessions and after each P1 fix.
 A fix is proven when its cell flips `0.00 → 1.00` here (the fired_on marker).
+
+## Incremental transparency guard (`incremental_check.py`, A1.7)
+
+Grading builds cold, so a stale parse cache can never move the matrix, and so the
+matrix can never catch one either. `engine/tests/byte_identical.rs` proves
+"incremental == clean" for one hand-written repo. This script proves it for
+**every** fixture: `fixtures/` plus the `matrix/` probes, using `matrix.py`'s
+`discover`. It closes no blind spot and flips no cell. It is a regression guard
+for parser and extractor changes, and it passes on a healthy tree.
+
+For each fixture it copies the directory into a temp dir and grades the copy
+three times:
+
+1. **cold**: grade.py's `build_graph`, untouched.
+2. **fill**: through the parse cache (`generate(dir, True)`, or
+   `generate_many(dirs, incremental=True)` for multi-dir fixtures).
+3. **read**: the same again.
+
+Pass 3 is compared against pass 1 on everything grade.py scores (node/edge
+counts, per-category / per-kind / per-cell recall, forbid hits) and on a digest
+of every node, edge and cell.
+
+- **`DIVERGENT`**: the warm graph differs from the cold one.
+- **`NOT-WARM`**: pass 3 reparsed a file, or printed no `[incremental]` marker.
+  The comparison then proved nothing.
+
+Either one, a grader error, or a `parse_cache.bin` left anywhere under this
+directory exits 1.
+
+```
+[incremental-check] fixtures/py-calls: cold=3n/3e graph=… warm=3n/3e graph=… reused=1 reparsed=0 OK
+[incremental-check] 180 fixtures, 0 divergent (cold vs warm)
+```
+
+- **Copies, never the fixture dirs.** `GLIA_NO_PERSIST=1` gates only the
+  `.gmap` write, not `<repo>/.ai/repo-graph/parse_cache.bin`. A sidecar left in
+  a fixture would make later cold grades depend on the previous run. A copy
+  grades the same as the in-tree fixture: all 180 fixtures matched at A1.7.
+- **grade.py is not modified.** `grade_fixture` runs as-is, with its module
+  global `build_graph` swapped for one call. This is the same seam `matrix.py`
+  uses, so grade.py's hermetic path has no mode switch that could be set wrong.
+- A wheel older than A1.4 has no `generate_many(incremental=)`. On such a wheel,
+  multi-dir fixtures print `SKIP` and do not fail the run.
+- A fixture made only of files that bypass the cache (yaml, Dockerfile,
+  manifests) reads `reused=0 reparsed=0 OK`. It has no cached parse to go stale.
+- `--only NAME` (repeatable) checks one fixture. `-v` echoes the engine's
+  captured stderr.
+
+**`--selftest [NAME]`** proves the guard can fail. It uses one single-dir
+fixture (default `py-calls`):
+
+1. Warm the cache.
+2. Edit the file in the sidecar's first entry without changing its length or
+   mtime, so the graph changes (one identifier's last letter).
+3. **Honest cache:** pass 3 must reparse exactly that file and read `OK`. The
+   cache keys on content, not size or mtime.
+4. **Forged cache:** write back the pre-edit sidecar with the edited file's
+   `content_hash` in that entry. The cache then serves the old parse for the new
+   content, which must read `DIVERGENT`. The hash is copied from the honest
+   sidecar written in step 3. The offset comes from bincode 1's layout: three
+   length-prefixed strings, the entry count, the key, then the u64.
+
+It ends with `[incremental-check] selftest PASS (honest miss OK, forged hit
+DIVERGENT; …)`.
 
 ## Precision gates match exactly (wave 2 correction)
 
