@@ -230,6 +230,7 @@ cargo build --release -p glia-cli  # release CLI
 # Basic smoke
 ./target/release/glia analyze ~/Code/<some-repo>
 ./target/release/glia analyze ~/Code/<some-repo> --format mermaid > /tmp/graph.mmd
+# ^ the service map, the same view as `glia arch <repo> --mermaid`
 ./target/release/glia impact ~/Code/<some-repo> 'pkg::Class::method' --direction both --depth 3
 ./target/release/glia merge ~/Code/svc-a ~/Code/svc-b ~/Code/svc-c --out /tmp/org.gmap
 
@@ -263,7 +264,7 @@ cd scratch/lens
 **First-day tour** (afternoon, no code changes):
 
 1. `glia analyze ~/Code/<a-repo-you-know>` — read the Markdown summary. Get a feel for what counts as a Node and an Edge.
-2. Same repo, `--format mermaid` — paste into a Mermaid renderer. Compare visually to your mental model of the codebase.
+2. Same repo, `--format mermaid` — paste into a Mermaid renderer. It draws the service map, the same view as `glia arch <repo> --mermaid`. A single repo gets one node per top-level directory, plus one labelled arrow per cross-service flow (mechanism, count, channels). Compare it to your mental model of how the parts of the codebase talk to each other. `glia arch <repo>` prints the same map as tables.
 3. `glia impact <repo> '<a-function-qname-you-care-about>'` — both directions, depth 3. This is the "what calls X" / "what does X reach" answer.
 4. `glia merge` across 2-3 sibling services you have lying around. Look for cross-edges in the output JSON. If you don't have siblings, clone `microservices-demo` + `bank-of-anthos` — the README numbers come from those.
 5. Open `parsers/code/extractors/grpc.rs` and one of the simpler extractors (`extractors/cron.rs` or `extractors/cli.rs`). Get a feel for the extract-don't-resolve discipline.
