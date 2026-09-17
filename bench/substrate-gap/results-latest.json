@@ -74,6 +74,32 @@
       ],
       "via": "call"
     },
+    "clojure/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/clojure/http_server"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        2,
+        4
+      ],
+      "via": "http"
+    },
     "clojure/imports": {
       "extract": [
         2,
@@ -174,25 +200,28 @@
     },
     "csharp/grpc": {
       "extract": [
-        2,
-        2
+        3,
+        4
       ],
       "fixtures": [
-        "fixtures/xcut-grpc-csharp"
+        "fixtures/xcut-grpc-csharp",
+        "matrix/csharp/grpc"
       ],
       "forbid": [
-        0,
-        0
-      ],
-      "level": "full",
-      "literal": [
         2,
         2
       ],
-      "reasons": [],
+      "level": "none",
+      "literal": [
+        3,
+        4
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
       "route": [
         1,
-        1
+        2
       ],
       "via": "grpc"
     },
@@ -223,25 +252,26 @@
     },
     "csharp/http_server": {
       "extract": [
-        1,
-        1
+        2,
+        2
       ],
       "fixtures": [
-        "fixtures/csharp-aspnet"
+        "fixtures/csharp-aspnet",
+        "matrix/csharp/http_server_composed"
       ],
       "forbid": [
-        0,
-        0
+        6,
+        6
       ],
       "level": "full",
       "literal": [
-        1,
-        1
+        2,
+        2
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        3,
+        3
       ],
       "via": "http"
     },
@@ -465,6 +495,32 @@
       "route": [
         2,
         2
+      ],
+      "via": "http"
+    },
+    "dart/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/dart/http_server"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        2,
+        4
       ],
       "via": "http"
     },
@@ -813,25 +869,26 @@
     },
     "go/grpc": {
       "extract": [
-        2,
-        2
+        5,
+        5
       ],
       "fixtures": [
-        "fixtures/xcut-grpc-grpc_calls"
+        "fixtures/xcut-grpc-grpc_calls",
+        "fixtures/xcut-grpc-package-collision"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "grpc"
     },
@@ -946,7 +1003,7 @@
     },
     "go/mqtt": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -956,17 +1013,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/nats": {
       "extract": [
@@ -1124,17 +1181,15 @@
         "matrix/java/amqp"
       ],
       "forbid": [
-        2,
+        3,
         3
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -1212,6 +1267,54 @@
         1
       ],
       "via": "eventbus"
+    },
+    "java/graphql": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/java/graphql"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "graphql"
+    },
+    "java/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/grpc"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
     },
     "java/http_client": {
       "extract": [
@@ -1347,17 +1450,15 @@
         "matrix/java/kafka"
       ],
       "forbid": [
-        3,
+        4,
         4
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         4,
         4
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         2,
         2
@@ -1397,7 +1498,7 @@
         "matrix/java/redis"
       ],
       "forbid": [
-        2,
+        3,
         3
       ],
       "level": "none",
@@ -1410,7 +1511,7 @@
         0,
         1
       ],
-      "via": "eventbus"
+      "via": null
     },
     "java/sqs_sns": {
       "extract": [
@@ -1421,7 +1522,7 @@
         "matrix/java/sqs_sns"
       ],
       "forbid": [
-        1,
+        2,
         2
       ],
       "level": "partial",
@@ -1430,7 +1531,6 @@
         2
       ],
       "reasons": [
-        "forbid violated",
         "literal lost",
         "routing edge missing"
       ],
@@ -1438,7 +1538,7 @@
         0,
         1
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "java/subproject": {
       "extract": [
@@ -1812,6 +1912,57 @@
       ],
       "via": null
     },
+    "python/graphql": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/graphql"
+      ],
+      "forbid": [
+        3,
+        3
+      ],
+      "level": "partial",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "graphql"
+    },
+    "python/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/python/grpc"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
+    },
     "python/http_client": {
       "extract": [
         2,
@@ -1959,7 +2110,7 @@
     },
     "python/mqtt": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1969,17 +2120,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "python/nats": {
       "extract": [
@@ -1990,17 +2141,15 @@
         "matrix/python/nats"
       ],
       "forbid": [
-        3,
+        4,
         4
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -2016,7 +2165,7 @@
         "matrix/python/pubsub"
       ],
       "forbid": [
-        0,
+        2,
         2
       ],
       "level": "partial",
@@ -2025,36 +2174,36 @@
         2
       ],
       "reasons": [
-        "forbid violated",
         "routing edge missing"
       ],
       "route": [
         0,
         1
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "python/redis": {
       "extract": [
-        2,
-        2
+        4,
+        4
       ],
       "fixtures": [
+        "fixtures/xcut-queue-redis-pubsub",
         "matrix/python/redis"
       ],
       "forbid": [
-        2,
-        2
+        7,
+        7
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        4,
+        4
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "queue"
     },
@@ -2157,6 +2306,30 @@
         1
       ],
       "via": "test"
+    },
+    "python/ws": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/python/ws"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "websocket"
     },
     "ruby/calls": {
       "extract": [
@@ -2553,6 +2726,32 @@
       ],
       "via": "http"
     },
+    "scala/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/scala/http_server"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        2,
+        4
+      ],
+      "via": "http"
+    },
     "scala/impl": {
       "extract": [
         2,
@@ -2747,6 +2946,34 @@
       ],
       "via": "http"
     },
+    "swift/http_server": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/swift/http_server"
+      ],
+      "forbid": [
+        1,
+        2
+      ],
+      "level": "partial",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [
+        "forbid violated",
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        4
+      ],
+      "via": "http"
+    },
     "typescript/amqp": {
       "extract": [
         2,
@@ -2871,6 +3098,30 @@
       ],
       "via": "graphql"
     },
+    "typescript/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/typescript/grpc"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
+    },
     "typescript/http_client": {
       "extract": [
         9,
@@ -2903,25 +3154,28 @@
     },
     "typescript/http_server": {
       "extract": [
-        1,
-        1
+        2,
+        2
       ],
       "fixtures": [
-        "fixtures/ts-http-fetch"
+        "fixtures/ts-http-fetch",
+        "matrix/typescript/http_server"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
-      "level": "full",
+      "level": "partial",
       "literal": [
-        1,
-        1
+        2,
+        2
       ],
-      "reasons": [],
+      "reasons": [
+        "routing edge missing"
+      ],
       "route": [
-        1,
-        1
+        3,
+        5
       ],
       "via": "http"
     },
@@ -3016,17 +3270,15 @@
         "matrix/typescript/kafka"
       ],
       "forbid": [
-        6,
+        7,
         7
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         6,
         6
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         3,
         3
@@ -3035,7 +3287,7 @@
     },
     "typescript/mqtt": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -3045,17 +3297,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "typescript/nats": {
       "extract": [
@@ -3066,17 +3318,15 @@
         "matrix/typescript/nats"
       ],
       "forbid": [
-        3,
+        4,
         4
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -3107,7 +3357,7 @@
         0,
         0
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "typescript/redis": {
       "extract": [
@@ -3297,13 +3547,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 131,
+    "covered": 141,
     "error": 0,
-    "full": 83,
+    "full": 92,
     "grid": 480,
     "none": 19,
-    "partial": 29,
-    "unknown": 349
+    "partial": 30,
+    "unknown": 339
   },
   "vocabulary": {
     "digest": "a3672b018b49",
