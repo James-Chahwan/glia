@@ -24,6 +24,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, join_path, push_client_endpoint, url_to_path,
 };
@@ -60,6 +61,7 @@ pub fn parse_file(
 
     // Module node (one per file — collapses at graph build via NodeId dedup).
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, package_qname);
+    acc.module_id = Some(module_id);
     acc.nodes.push(Node {
         id: module_id,
         repo,
@@ -178,6 +180,16 @@ struct Acc {
     /// Dedup for ACCESSES_DATA edges — one edge per (enclosing fn, DATA_ENTITY)
     /// even if the same table is queried repeatedly inside the same function.
     data_access_seen: std::collections::HashSet<(NodeId, NodeId)>,
+    /// This file's MODULE id, so the DI detector can stamp `from_module`
+    /// without threading it through `collect_calls_in` (the TypeScript
+    /// parser's `Acc.file_rel` precedent). Set at the top of `parse_file`.
+    module_id: Option<NodeId>,
+    /// Local package name → DI container, from this file's imports. An import
+    /// alias is followed. Go requires imports before every other declaration,
+    /// so this is filled before any function or var is visited.
+    di_containers: HashMap<String, DiContainer>,
+    /// One INJECTS ref per (registering node, provider) per file.
+    di_seen: std::collections::HashSet<(NodeId, String)>,
 }
 
 // ============================================================================
@@ -314,7 +326,16 @@ fn emit_state_var_spec(
         return;
     }
 
-    for name in names {
+    // Initialisers, paired with names by position (`var a, b = x, y`).
+    let values: Vec<TsNode> = match spec.child_by_field_name("value") {
+        Some(v) => {
+            let mut vc = v.walk();
+            v.named_children(&mut vc).collect()
+        }
+        None => Vec::new(),
+    };
+
+    for (i, name) in names.into_iter().enumerate() {
         let qname = format!("{package_qname}::{name}");
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
         acc.nodes.push(Node {
@@ -331,6 +352,11 @@ fn emit_state_var_spec(
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
         });
+        // A7.6: `var ProviderSet = wire.NewSet(NewA, NewB)` registers its
+        // providers from the var, which a `wire.Build(ProviderSet)` then names.
+        if let Some(value) = values.get(i) {
+            collect_provider_sets_in(*value, src, id, acc);
+        }
     }
 }
 
@@ -568,6 +594,15 @@ fn record_import(
     let raw = text_of(path_node, src);
     let path_str = raw.trim_matches('"').to_string();
 
+    // A7.6: remember which local name binds a DI container package. Blank and
+    // dot imports bind no selector base, so they are skipped.
+    if let Some((container, pkg_name)) = DiContainer::from_import_path(&path_str) {
+        let local = alias.as_deref().unwrap_or(pkg_name);
+        if local != "_" && local != "." {
+            acc.di_containers.insert(local.to_string(), container);
+        }
+    }
+
     // If the import lies within the go.mod module, convert to repo-local qname.
     let qname = if !module_import_prefix.is_empty() && path_str.starts_with(module_import_prefix) {
         let rel = path_str.trim_start_matches(module_import_prefix).trim_start_matches('/');
@@ -624,6 +659,9 @@ fn collect_calls_in(
             // cross-cutting data-entities extractor; this adds the fine-grained
             // fn→table attribution the DbResolver / call-site queries want.
             try_detect_go_data_access(child, src, from, repo, acc);
+            // DI container registration: `wire.Build(NewA, NewB)` → INJECTS
+            // from the injector (`from`) to each provider (A7.6).
+            try_detect_go_provider_set(child, src, from, acc);
         }
         if child.kind() != "func_literal" {
             collect_calls_in(child, src, from, receiver_var, repo, file_rel, acc);
@@ -655,6 +693,174 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
             }
         }
         _ => None,
+    }
+}
+
+// ============================================================================
+// DI container registration (A7.6) — google/wire, uber-go/fx, uber-go/dig
+// ============================================================================
+
+/// A dependency-injection container package a Go file imports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiContainer {
+    Wire,
+    Fx,
+    Dig,
+}
+
+impl DiContainer {
+    /// The container behind an import path, plus the package's own name (the
+    /// local binding when the import carries no alias).
+    fn from_import_path(path: &str) -> Option<(Self, &'static str)> {
+        match path {
+            "github.com/google/wire" => Some((Self::Wire, "wire")),
+            "go.uber.org/fx" => Some((Self::Fx, "fx")),
+            "go.uber.org/dig" => Some((Self::Dig, "dig")),
+            _ => None,
+        }
+    }
+}
+
+/// Explicit DI-container registration, the only AST-visible dependency-
+/// injection signal in Go. Providers are named as function identifiers, which
+/// are call ARGUMENTS, so `classify_call` never sees them. Emits one INJECTS
+/// ref from `from` (the injector function, or a package-level provider-set
+/// var) to each provider. Gated on the file importing the container; an import
+/// alias is followed. Recognised:
+///
+/// - `wire.Build(NewA, pkg.NewB)` / `wire.NewSet(...)`.
+/// - `fx.Provide(...)` / `fx.Invoke(...)` / `fx.Decorate(...)`, including the
+///   provider wrapped by `fx.Annotate(NewA, ...)`.
+/// - `c.Provide(...)` / `c.Invoke(...)` / `c.Decorate(...)` in a file that
+///   imports dig. dig has no package-level `Provide`; it registers through
+///   `*dig.Container` methods.
+///
+/// Skipped: `wire.Bind(new(I), new(*T))`, `wire.Struct`, `wire.Value`, and
+/// `fx.Supply` / `fx.Populate`, whose arguments are types, values or pointers,
+/// not providers. Any argument that is not `Name` or `pkg.Name` is skipped.
+///
+/// Honest scope: these edges read "registers a provider", not "consumer
+/// receives a service". Go's idiomatic `func NewX(dep *Dep) *X` constructor
+/// cannot be recognised without return-type inference (area A6).
+fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(from_module) = acc.module_id else {
+        return;
+    };
+    if acc.di_containers.is_empty() {
+        return;
+    }
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "selector_expression" {
+        return;
+    }
+    let (Some(operand), Some(field)) = (
+        func.child_by_field_name("operand"),
+        func.child_by_field_name("field"),
+    ) else {
+        return;
+    };
+    if operand.kind() != "identifier" {
+        return;
+    }
+    let method = text_of(field, src);
+    let registers = match acc.di_containers.get(text_of(operand, src)) {
+        Some(DiContainer::Wire) => matches!(method, "Build" | "NewSet"),
+        Some(DiContainer::Fx) => matches!(method, "Provide" | "Invoke" | "Decorate"),
+        // `dig.New()` / `dig.Name(...)` register nothing themselves.
+        Some(DiContainer::Dig) => false,
+        None => {
+            acc.di_containers.values().any(|c| *c == DiContainer::Dig)
+                && matches!(method, "Provide" | "Invoke" | "Decorate")
+        }
+    };
+    if !registers {
+        return;
+    }
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        let Some(qualifier) = provider_qualifier(arg, src, &acc.di_containers) else {
+            continue;
+        };
+        if !acc.di_seen.insert((from, format!("{qualifier:?}"))) {
+            continue;
+        }
+        acc.refs.push(UnresolvedRef {
+            from,
+            from_module,
+            qualifier,
+            category: edge_category::INJECTS,
+        });
+        di_stats::record(DiShape::GoProvider);
+    }
+}
+
+/// The provider one registration argument names. `NewA` gives `Bare`;
+/// `pkg.NewA` gives `Attribute`, which binds through the file's import table
+/// the way a `pkg.NewA()` call does, so an external package's `NewClient`
+/// never binds to an unrelated local `NewClient`. `fx.Annotate(NewA, ...)`
+/// gives its first argument.
+fn provider_qualifier(
+    arg: TsNode,
+    src: &[u8],
+    containers: &HashMap<String, DiContainer>,
+) -> Option<CallQualifier> {
+    match arg.kind() {
+        "identifier" => Some(CallQualifier::Bare(text_of(arg, src).to_string())),
+        "selector_expression" => {
+            let operand = arg.child_by_field_name("operand")?;
+            let field = arg.child_by_field_name("field")?;
+            if operand.kind() != "identifier" {
+                return None;
+            }
+            Some(CallQualifier::Attribute {
+                base: text_of(operand, src).to_string(),
+                name: text_of(field, src).to_string(),
+            })
+        }
+        "call_expression" => {
+            let func = arg.child_by_field_name("function")?;
+            if func.kind() != "selector_expression" {
+                return None;
+            }
+            let base = text_of(func.child_by_field_name("operand")?, src);
+            let name = text_of(func.child_by_field_name("field")?, src);
+            if containers.get(base) != Some(&DiContainer::Fx) || name != "Annotate" {
+                return None;
+            }
+            let inner = arg.child_by_field_name("arguments")?;
+            let mut cursor = inner.walk();
+            let first = inner.named_children(&mut cursor).next()?;
+            // One level only: `fx.Annotate(fx.Annotate(...))` is not a shape.
+            if first.kind() == "call_expression" {
+                return None;
+            }
+            provider_qualifier(first, src, containers)
+        }
+        _ => None,
+    }
+}
+
+/// Walk a package-level initialiser for registrations, e.g.
+/// `var Set = wire.NewSet(...)` or `var Module = fx.Module("m", fx.Provide(...))`.
+/// Function bodies do not come through here; `collect_calls_in` covers them.
+fn collect_provider_sets_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    if acc.di_containers.is_empty() {
+        return;
+    }
+    if node.kind() == "call_expression" {
+        try_detect_go_provider_set(node, src, from, acc);
+    }
+    if node.kind() == "func_literal" {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_provider_sets_in(child, src, from, acc);
     }
 }
 
@@ -2362,6 +2568,132 @@ func hit(client *http.Client) {
         assert_eq!(
             route_methods(&parse, route_id(repo(), "/legacy")),
             vec!["ANY".to_string()],
+        );
+    }
+
+    // ---- A7.6: DI container registration → INJECTS ----
+
+    /// INJECTS refs as (from, qualifier) pairs, in emission order.
+    fn injects_refs(parse: &FileParse) -> Vec<(NodeId, CallQualifier)> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .map(|r| (r.from, r.qualifier.clone()))
+            .collect()
+    }
+
+    fn func_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    #[test]
+    fn wire_build_emits_injects_refs_for_each_provider() {
+        let source = r#"package app
+
+import (
+    "github.com/google/wire"
+    "github.com/foo/bar/repo"
+)
+
+func InitializeUserService() *UserService {
+    wire.Build(NewUserService, repo.NewUserRepo, NewUserService, wire.Bind(new(Store), new(*Repo)))
+    return nil
+}
+"#;
+        let parse = parse_file(source, "app/wire.go", "app", "github.com/foo/bar", repo()).unwrap();
+        let injector = func_id("app::InitializeUserService");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app");
+
+        // Duplicate provider collapses; wire.Bind's `new(...)` type args emit nothing.
+        assert_eq!(
+            injects_refs(&parse),
+            vec![
+                (injector, bare("NewUserService")),
+                (
+                    injector,
+                    CallQualifier::Attribute {
+                        base: "repo".to_string(),
+                        name: "NewUserRepo".to_string(),
+                    }
+                ),
+            ]
+        );
+        assert!(
+            parse
+                .refs
+                .iter()
+                .filter(|r| r.category == edge_category::INJECTS)
+                .all(|r| r.from_module == module_id)
+        );
+    }
+
+    #[test]
+    fn non_container_selector_call_emits_no_injects() {
+        // `log.Printf(NewThing)` is not a container. `wire.Build` without the
+        // wire import is not one either: the gate follows imports, not names.
+        let source = r#"package app
+
+import "log"
+
+func Run() {
+    log.Printf(NewThing)
+    wire.Build(NewThing)
+    fx.Provide(NewThing)
+    c.Provide(NewThing)
+}
+"#;
+        let parse = parse_file(source, "app/run.go", "app", "", repo()).unwrap();
+        assert!(injects_refs(&parse).is_empty(), "{:?}", injects_refs(&parse));
+    }
+
+    #[test]
+    fn fx_alias_annotate_and_dig_container_methods_emit_injects() {
+        let source = r#"package main
+
+import (
+    uberfx "go.uber.org/fx"
+    "go.uber.org/dig"
+)
+
+func main() {
+    uberfx.New(uberfx.Provide(NewA, uberfx.Annotate(NewB, uberfx.As(new(I)))), uberfx.Invoke(Run), uberfx.Supply(cfg))
+    c := dig.New()
+    c.Provide(NewC)
+}
+"#;
+        let parse = parse_file(source, "cmd/main.go", "main", "", repo()).unwrap();
+        let main_fn = func_id("main::main");
+        // `uberfx.New` registers nothing; `Supply` takes values, not providers.
+        assert_eq!(
+            injects_refs(&parse),
+            vec![
+                (main_fn, bare("NewA")),
+                (main_fn, bare("NewB")),
+                (main_fn, bare("Run")),
+                (main_fn, bare("NewC")),
+            ]
+        );
+    }
+
+    #[test]
+    fn wire_newset_var_emits_injects_from_state_var() {
+        let source = r#"package app
+
+import "github.com/google/wire"
+
+var ProviderSet = wire.NewSet(NewA, NewB)
+"#;
+        let parse = parse_file(source, "app/set.go", "app", "", repo()).unwrap();
+        let set = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "app::ProviderSet");
+        assert!(parse.nodes.iter().any(|n| n.id == set), "expected STATE_VAR");
+        assert_eq!(
+            injects_refs(&parse),
+            vec![(set, bare("NewA")), (set, bare("NewB"))]
         );
     }
 }

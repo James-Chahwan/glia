@@ -1,0 +1,20 @@
+{
+  "framework": "go-wire-di",
+  "language": "go",
+  "dirs": ["."],
+  "cells": ["go/injects"],
+  "note": "google/wire injector. Go has no annotation or type-directed DI signal; explicit container registration (wire.Build / wire.NewSet, fx.Provide / fx.Invoke, dig.Provide / dig.Invoke) is the only AST-visible shape. SEMANTICS DIFFER FROM OTHER LANGUAGES: Go INJECTS reads 'injector FUNCTION registers provider FUNCTION', not 'consumer class receives service'. UserStore is the injected interface type; it is the node that anchors the matrix's injects kind set (SERVICE/CLASS/INTERFACE), which has no FUNCTION entry.",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "InitializeUserService", "note": "wire injector"},
+    {"kind": "FUNCTION", "name": "NewUserService", "note": "provider"},
+    {"kind": "INTERFACE", "name": "UserStore", "note": "the injected type NewUserService depends on, bound by wire.Bind"}
+  ],
+  "expect_edges": [
+    {"from": "InitializeUserService", "to": "NewUserService", "category": "INJECTS", "note": "GAP: wire.Build arguments are identifiers, not calls; classify_call reads only the function field"},
+    {"from": "InitializeUserService", "to": "NewUserRepo", "category": "INJECTS", "note": "second provider in the same wire.Build"}
+  ],
+  "forbid": [
+    {"from": "InitializeUserService", "to": "UserRepo", "category": "INJECTS", "note": "wire.Bind(new(UserStore), new(*UserRepo)) names TYPES inside new(...) calls; they are not providers"},
+    {"from": "InitializeUserService", "to": "UserStore", "category": "INJECTS", "note": "same wire.Bind type argument"}
+  ]
+}
