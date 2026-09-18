@@ -3,11 +3,20 @@
   "language": "java",
   "dirs": ["."],
   "cells": ["java/injects"],
+  "note": "LB.3a edit: the services.rs SERVICE overlays fold into their CLASS, carried as a ROLE cell. Baseline at HEAD 94ac6c5: SERVICE twins `Injects::UserService` (@Service) and `Injects::UserController` (@RestController) exist (both forbid rows violated), the INJECTS edge lands on the SERVICE twin `Injects::UserService`, both ROLE rows miss.",
   "expect_nodes": [
-    {"kind": "SERVICE", "name": "UserService", "note": "@Service bean"},
+    {"kind": "CLASS", "name": "UserService", "note": "@Service bean, one node after the fold"},
     {"kind": "CLASS", "name": "UserController", "note": "consumer"}
   ],
   "expect_edges": [
     {"from": "UserController", "to": "UserService", "category": "INJECTS", "note": "constructor DI of @Service"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "UserService", "cell": "ROLE", "contains": "SERVICE"},
+    {"kind": "CLASS", "node": "UserController", "cell": "ROLE", "contains": "SERVICE"}
+  ],
+  "forbid": [
+    {"kind": "SERVICE", "name": "UserService", "note": "overlay twin folds into the CLASS"},
+    {"kind": "SERVICE", "name": "UserController", "note": "overlay twin folds into the CLASS"}
   ]
 }

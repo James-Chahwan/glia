@@ -3,10 +3,17 @@
   "language": "typescript",
   "dirs": ["."],
   "cells": ["typescript/imports"],
+  "note": "LB.3a edit: the @Injectable overlay folds into its CLASS, carried as a ROLE cell. Baseline at HEAD 94ac6c5: CLASS + SERVICE twins share `user.service::UserService` (forbid violated), the ROLE row misses.",
   "expect_nodes": [
-    {"kind": "SERVICE", "name": "UserService", "note": "@Injectable service"}
+    {"kind": "CLASS", "name": "UserService", "note": "@Injectable service, one node after the fold"}
   ],
   "expect_edges": [
     {"from": "app.module", "to": "user.service", "category": "IMPORTS", "note": "app.module imports ./user.service (TS IMPORTS stubbed -> blind)"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "UserService", "cell": "ROLE", "contains": "SERVICE"}
+  ],
+  "forbid": [
+    {"kind": "SERVICE", "name": "UserService", "note": "overlay twin folds into the CLASS"}
   ]
 }

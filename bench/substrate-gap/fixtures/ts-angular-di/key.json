@@ -3,11 +3,20 @@
   "language": "typescript",
   "dirs": ["."],
   "cells": ["typescript/injects"],
+  "note": "LB.3a edit: the overlays fold into their CLASS, carried as a ROLE cell. Baseline at HEAD 94ac6c5 as angular-injects: SERVICE `api.service::ApiService` and COMPONENT `app.component::AppComponent` twins exist (both forbid rows violated), INJECTS lands on the SERVICE twin, both ROLE rows miss.",
   "expect_nodes": [
-    {"kind": "SERVICE", "name": "ApiService", "note": "@Injectable service"},
-    {"kind": "COMPONENT", "name": "AppComponent", "note": "@Component"}
+    {"kind": "CLASS", "name": "ApiService", "note": "@Injectable service, one node after the fold"},
+    {"kind": "CLASS", "name": "AppComponent", "note": "@Component, one node after the fold"}
   ],
   "expect_edges": [
-    {"from": "AppComponent", "to": "ApiService", "category": "INJECTS", "note": "GAP: constructor DI -> INJECTS (cat 8 defined, never emitted)"}
+    {"from": "AppComponent", "to": "ApiService", "category": "INJECTS", "note": "constructor DI -> INJECTS (cat 8)"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "ApiService", "cell": "ROLE", "contains": "SERVICE"},
+    {"kind": "CLASS", "node": "AppComponent", "cell": "ROLE", "contains": "COMPONENT"}
+  ],
+  "forbid": [
+    {"kind": "SERVICE", "name": "ApiService", "note": "overlay twin folds into the CLASS"},
+    {"kind": "COMPONENT", "name": "AppComponent", "note": "overlay twin folds into the CLASS"}
   ]
 }

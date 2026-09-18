@@ -3,11 +3,20 @@
   "language": "typescript",
   "dirs": ["."],
   "cells": ["typescript/injects"],
+  "note": "LB.3a: the @Injectable / @Component overlays fold into their CLASS, carried as a ROLE cell (cell_type 20). Baseline at HEAD 94ac6c5 (debug CLI + installed wheel): SERVICE `user.service::UserService` and COMPONENT `users.component::UsersComponent` twins exist (both forbid rows violated), INJECTS lands on the SERVICE twin, both ROLE rows miss (ROLE not in the wheel's cell table), and `glia blast-radius . users.component::UsersComponent` returns one unlocatable SERVICE hit (file null, line null).",
   "expect_nodes": [
-    {"kind": "SERVICE", "name": "UserService", "note": "@Injectable service"},
-    {"kind": "COMPONENT", "name": "UsersComponent", "note": "@Component"}
+    {"kind": "CLASS", "name": "UserService", "note": "@Injectable service, one node after the fold"},
+    {"kind": "CLASS", "name": "UsersComponent", "note": "@Component, one node after the fold"}
   ],
   "expect_edges": [
     {"from": "UsersComponent", "to": "UserService", "category": "INJECTS", "note": "constructor DI -> INJECTS (cat 8)"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "UserService", "cell": "ROLE", "contains": "SERVICE"},
+    {"kind": "CLASS", "node": "UsersComponent", "cell": "ROLE", "contains": "COMPONENT"}
+  ],
+  "forbid": [
+    {"kind": "SERVICE", "name": "UserService", "note": "overlay twin folds into the CLASS"},
+    {"kind": "COMPONENT", "name": "UsersComponent", "note": "overlay twin folds into the CLASS"}
   ]
 }

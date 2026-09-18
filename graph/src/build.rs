@@ -129,6 +129,15 @@ fn merge_parses(
         g.properties.extend(p.properties);
     }
 
+    // LB.3a: fold framework role overlays (SERVICE / COMPONENT / HOOK / ...)
+    // into their same-qname declaration BEFORE any builder builds its symbol
+    // table, so module symbols, INJECTS and CALLS bind to the declaration and
+    // never to an edgeless marker. Every `build_*` goes through here.
+    let stats = crate::roles::fold_role_overlays(&mut g, &mut all_calls, &mut all_refs);
+    if stats.saw_role_nodes() {
+        eprintln!("{}", stats.marker());
+    }
+
     (g, all_imports, all_calls, all_refs)
 }
 

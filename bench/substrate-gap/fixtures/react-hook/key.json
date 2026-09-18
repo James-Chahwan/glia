@@ -2,12 +2,20 @@
   "framework": "react-hook",
   "language": "typescript",
   "dirs": ["."],
-  "note": "Deliberately legacy-only (no `cells`): HOOK/COMPONENT extraction has no column in the 30-mechanism vocabulary. Its CALLS edge would score typescript/calls, but ts-calls already measures that directly and this fixture is not about call resolution.",
+  "note": "Deliberately legacy-only (no `cells`): HOOK/COMPONENT extraction has no column in the 30-mechanism vocabulary. Its CALLS edge would score typescript/calls, but ts-calls already measures that directly and this fixture is not about call resolution. LB.3a edit: the hook and the component are the FUNCTION declarations, carrying their roles in a ROLE cell. Baseline at HEAD 94ac6c5: FUNCTION + HOOK + COMPOSABLE share `useCounter::useCounter` and FUNCTION + COMPONENT share `useCounter::Counter` (both forbid rows violated), both ROLE rows miss.",
   "expect_nodes": [
-    {"kind": "HOOK", "name": "useCounter", "note": "custom React hook"},
-    {"kind": "COMPONENT", "name": "Counter", "note": "component consuming the hook"}
+    {"kind": "FUNCTION", "name": "useCounter", "note": "custom React hook"},
+    {"kind": "FUNCTION", "name": "Counter", "note": "component consuming the hook"}
   ],
   "expect_edges": [
     {"from": "Counter", "to": "useCounter", "category": "CALLS", "note": "component calls custom hook"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "useCounter", "cell": "ROLE", "contains": "HOOK"},
+    {"kind": "FUNCTION", "node": "Counter", "cell": "ROLE", "contains": "COMPONENT"}
+  ],
+  "forbid": [
+    {"kind": "HOOK", "name": "useCounter", "note": "overlay twin folds into the FUNCTION"},
+    {"kind": "COMPONENT", "name": "Counter", "note": "overlay twin folds into the FUNCTION"}
   ]
 }

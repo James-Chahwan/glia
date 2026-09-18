@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::{CodeNav, edge_category};
+use repo_graph_code_domain::{CodeNav, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
 use crate::resolvers::{CrossGraphResolver, parse_endpoint_qname, weakest};
@@ -88,41 +88,64 @@ impl MergedGraph {
     }
 
     /// Total degree (incoming + outgoing) of `id` across both intra- and
-    /// cross-repo edges. Used purely as the determinism tiebreak in
-    /// [`Self::pick_primary`].
+    /// cross-repo edges. The second key of [`Self::pick_primary`].
     fn degree(&self, id: NodeId) -> usize {
         self.all_edges()
             .filter(|e| e.from == id || e.to == id)
             .count()
     }
 
+    /// Is `id` a declaration rather than a container or anchor? False for
+    /// MODULE, PACKAGE, PROJECT, REGION and DOC_SPACE (and for an id no graph's
+    /// nav knows); true for every other kind. The kind is read from the first
+    /// graph whose nav has the id. The first key of [`Self::pick_primary`].
+    fn is_declaration(&self, id: NodeId) -> bool {
+        const CONTAINERS: &[NodeKindId] = &[
+            node_kind::MODULE,
+            node_kind::PACKAGE,
+            node_kind::PROJECT,
+            node_kind::REGION,
+            node_kind::DOC_SPACE,
+        ];
+        self.graphs
+            .iter()
+            .find_map(|g| g.nav.kind_by_id.get(&id).copied())
+            .is_some_and(|k| !CONTAINERS.contains(&k))
+    }
+
     /// Deterministically choose the "primary" node among identically-keyed
-    /// candidates (nodes sharing a simple name or a qname). Two real cases hit
-    /// this: framework parsers stack a `COMPONENT`/route marker on top of the
-    /// underlying `CLASS`, sharing name *and* qname; and suffix matches collide
-    /// across repos.
+    /// candidates (nodes sharing a simple name or a qname). Framework role
+    /// overlays no longer reach here: the build-time fold (`roles`, LB.3a)
+    /// merges each one into its declaration. The cases that remain are
+    /// bare-name collisions (two `User`s in different modules), suffix matches
+    /// across repos, and a declaration sharing its file module's qname.
     ///
-    /// Rule: highest total degree wins — the node that actually participates in
-    /// the graph is what traversal, `impact`, and span resolution want, not an
-    /// edgeless marker. Ties break on the lowest `NodeId`. Both keys are stable
-    /// across processes, so the choice no longer rides on `HashMap` iteration
-    /// order — that randomness was the root of the intermittent-empty
-    /// `impact`/`trace` results (an Angular `GroupsComponent` resolving to the
-    /// edgeless `COMPONENT` marker instead of the 80-downstream `CLASS`).
+    /// Rule, as one key `(is_declaration, degree, Reverse(id))`:
+    /// 1. a declaration beats a MODULE / PACKAGE / PROJECT / REGION / DOC_SPACE
+    ///    container — `blast-radius Foo` means the symbol, not the file that
+    ///    happens to share its key, however many IMPORTS the file carries;
+    /// 2. then the highest total degree — the node that participates in the
+    ///    graph is what traversal, `impact` and span resolution want, not an
+    ///    edgeless marker;
+    /// 3. ties break on the lowest `NodeId`.
+    ///
+    /// Every key is stable across processes, so the choice never rides on
+    /// `HashMap` iteration order — that randomness was the root of the
+    /// intermittent-empty `impact` / `trace` results.
     pub fn pick_primary(&self, candidates: &[NodeId]) -> Option<NodeId> {
         match candidates {
             [] => None,
             [only] => Some(*only),
-            many => many
-                .iter()
-                .copied()
-                .max_by_key(|&id| (self.degree(id), std::cmp::Reverse(id.0))),
+            many => many.iter().copied().max_by_key(|&id| {
+                (self.is_declaration(id), self.degree(id), std::cmp::Reverse(id.0))
+            }),
         }
     }
 
     /// Resolve a simple name (`"GroupsComponent"`) to a single `NodeId`,
-    /// deterministically. When several nodes share the name, the highest-degree
-    /// one wins (see [`Self::pick_primary`]). `None` if no node carries it.
+    /// deterministically. When several nodes share the name, a declaration
+    /// beats a container, then the highest-degree one wins (see
+    /// [`Self::pick_primary`]). `None` if no node carries it.
     pub fn resolve_name(&self, name: &str) -> Option<NodeId> {
         let mut matches = Vec::new();
         for g in &self.graphs {
@@ -140,8 +163,9 @@ impl MergedGraph {
     /// stable across rebuilds; qnames are, so this is the canonical re-keying
     /// path for view-state persistence (e.g. `.neuropil/view_state.json`).
     ///
-    /// When more than one node shares the qname (a framework marker stacked on
-    /// its class), the pick is deterministic — see [`Self::pick_primary`].
+    /// When more than one node shares the qname (a declaration and its file
+    /// module, or two repos in a merge), the pick is deterministic — see
+    /// [`Self::pick_primary`].
     pub fn node_id_by_qname(&self, qname: &str) -> Option<NodeId> {
         self.pick_primary(&self.qnames_exact(qname))
     }
@@ -254,8 +278,8 @@ impl MergedGraph {
     /// converting `.` to `::`); then a suffix match so spans rooted at a
     /// package the parser doesn't see still bind to the method node.
     /// When several nodes share the qname suffix, the pick is deterministic
-    /// (highest-degree, see [`Self::pick_primary`]) — consumers that need a
-    /// specific repo should still disambiguate by repo.
+    /// (declaration first, then highest-degree, see [`Self::pick_primary`]) —
+    /// consumers that need a specific repo should still disambiguate by repo.
     pub fn resolve_span(&self, span_name: &str) -> Option<NodeId> {
         let normalised = span_name.replace('.', "::");
         if let Some(id) = self.node_id_by_qname(&normalised) {
@@ -520,7 +544,10 @@ mod tests {
     /// Reproduces the `impact`/`trace` non-determinism: a framework component
     /// where the `CLASS` carries the edges and a `COMPONENT` marker shares its
     /// name *and* qname but has none. Resolution must always land on the
-    /// connected `CLASS`, regardless of `HashMap` iteration order.
+    /// connected `CLASS`, regardless of `HashMap` iteration order. Hand-built,
+    /// so it bypasses the build-time role fold (LB.3a) that removes such twins
+    /// from real builds; `pick_primary` must stay deterministic for any
+    /// same-key set, and both nodes here are declarations, so degree decides.
     fn dupe_name_graph() -> MergedGraph {
         let r = repo();
         let class = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "pkg::Dup");
@@ -573,6 +600,53 @@ mod tests {
         assert_eq!(m.pick_primary(&[class, comp]), Some(class));
         assert_eq!(m.pick_primary(&[comp, class]), Some(class));
         assert_eq!(m.pick_primary(&[]), None);
+    }
+
+    /// LB.3a: a declaration beats a same-key container even when the container
+    /// has the higher degree. A MODULE `pkg::Dup` with three IMPORTS edges and
+    /// a CLASS `pkg::Dup` with one DEFINES edge: degree alone picked the MODULE.
+    #[test]
+    fn pick_primary_prefers_a_declaration_over_its_file_module() {
+        let r = repo();
+        let module = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "pkg::Dup");
+        let class = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "pkg::Dup");
+        let run = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "pkg::Dup::run");
+        let deps: Vec<NodeId> = ["a", "b", "c"]
+            .iter()
+            .map(|q| NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, q))
+            .collect();
+        let mut nav = CodeNav::default();
+        nav.record(module, "Dup", "pkg::Dup", node_kind::MODULE, None);
+        nav.record(class, "Dup", "pkg::Dup", node_kind::CLASS, None);
+        nav.record(run, "run", "pkg::Dup::run", node_kind::METHOD, Some(class));
+        for (d, q) in deps.iter().zip(["a", "b", "c"]) {
+            nav.record(*d, q, q, node_kind::MODULE, None);
+        }
+        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let edge = |from, to, category| Edge { from, to, category, confidence: Confidence::Strong };
+        let mut nodes = vec![node(module), node(class), node(run)];
+        nodes.extend(deps.iter().map(|d| node(*d)));
+        let mut edges: Vec<Edge> =
+            deps.iter().map(|d| edge(module, *d, edge_category::IMPORTS)).collect();
+        edges.push(edge(class, run, edge_category::DEFINES));
+        let m = MergedGraph::new(vec![RepoGraph {
+            repo: r,
+            nodes,
+            edges,
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        }]);
+        assert!(m.degree(module) > m.degree(class), "precondition: the MODULE has more edges");
+        assert_eq!(m.pick_primary(&[module, class]), Some(class));
+        assert_eq!(m.pick_primary(&[class, module]), Some(class));
+        assert_eq!(m.node_id_by_qname("pkg::Dup"), Some(class));
+        assert_eq!(m.resolve_name("Dup"), Some(class));
+        // An id no nav knows is not a declaration: a known CLASS still wins.
+        let ghost = NodeId(0);
+        assert_eq!(m.pick_primary(&[ghost, class]), Some(class));
     }
 
     #[test]
