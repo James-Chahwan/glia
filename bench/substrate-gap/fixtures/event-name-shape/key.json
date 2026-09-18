@@ -1,0 +1,55 @@
+{
+  "framework": "event-name-shape",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.41. extract_event_name (parsers/code/extractors/src/eventbus.rs) takes whatever sits between the first quote after an event needle and the next same quote, across lines and punctuation, so a needle table (scripts/effect_needles.py) mints event_handle:`, ` and event_handle:`,\\n    `, and an unterminated literal falls back to the verb (event_emit:Subject.next). The glia self-build mints event_emit / event_handle:`, true, false),\\n    (` from eventbus.rs's own pattern table. An event name must close on its line and read like a name; a malformed literal skips that occurrence. svc/orders.listener.ts (@OnEvent / @EventPattern) is the control. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:order.shipped",
+      "note": "@OnEvent(\"order.shipped\") - the control"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:order.refunded",
+      "note": "@EventPattern(\"order.refunded\") - the control"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "svc::orders.listener",
+      "to": "event_handle:order.shipped",
+      "category": "CONTAINS",
+      "note": "control stays anchored"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:, ",
+      "note": "\"@OnEvent(\", \"@EventPattern(\" - the text between two table strings"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:,\n    ",
+      "note": "\"@EventPattern(\",<newline> - a literal spanning a line break"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:Subject.next",
+      "note": "\"Subject.next(\",<newline>] - an unterminated literal is not a missing literal"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "max_nodes": 2,
+      "note": "only the two controls"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "max_nodes": 0,
+      "note": "nothing in the fixture emits"
+    }
+  ]
+}

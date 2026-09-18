@@ -52,7 +52,7 @@ const HANDLER_PATTERNS: &[(&str, bool, bool)] = &[
 ];
 
 /// Buses keyed by MESSAGE TYPE rather than by a string topic. The captured
-/// token is the type name, not a literal, so `extract_event_name`'s
+/// token is the type name, not a literal, so [`literal_after`]'s
 /// quoted-literal rule can never see them: `publisher.publishEvent(new
 /// OrderPlacedEvent(id))` matches no string needle at all (`publish(` wants
 /// `(` straight after `publish`), and neither does `_mediator.Publish(new
@@ -226,10 +226,9 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
 
     let mut ctx = VerbCtx::default();
     for &(pattern, extract_name, ambiguous) in EMITTER_PATTERNS {
-        let Some(idx) = find_gated(source, pattern, &mut ctx) else {
+        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, &mut ctx) else {
             continue;
         };
-        let event_name = event_name_at(source, pattern, idx, extract_name);
         if ambiguous && ctx.broker_present(source) {
             suppressed("emitter", pattern, &event_name);
             continue;
@@ -277,10 +276,9 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
 
     let mut ctx = VerbCtx::default();
     for &(pattern, extract_name, ambiguous) in HANDLER_PATTERNS {
-        let Some(idx) = find_gated(source, pattern, &mut ctx) else {
+        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, &mut ctx) else {
             continue;
         };
-        let event_name = event_name_at(source, pattern, idx, extract_name);
         if ambiguous && ctx.broker_present(source) {
             suppressed("handler", pattern, &event_name);
             continue;
@@ -305,15 +303,25 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
     EventNodes { nodes, nav, anchors }
 }
 
-/// The event a string-keyed needle names: the quoted literal after it, else
-/// the needle word itself (`publish`, `subscribe`).
-fn event_name_at(source: &str, pattern: &str, idx: usize, extract_name: bool) -> String {
-    if extract_name {
-        extract_event_name(source, idx + pattern.len())
-    } else {
-        None
+/// The event the occurrence of a string-keyed needle at `idx` names (LA.41):
+/// the quoted literal after it when that literal is a name, else — when there
+/// is no quoted literal at all — the needle word itself (`publish`,
+/// `subscribe`). `None` when a quoted literal is there but malformed: that
+/// occurrence is not an event site, and [`find_gated`] walks on.
+fn event_name_at(source: &str, pattern: &str, idx: usize, extract_name: bool) -> Option<String> {
+    if !extract_name {
+        return Some(verb_name(pattern));
     }
-    .unwrap_or_else(|| pattern.trim_matches('.').trim_end_matches('(').to_string())
+    match literal_after(source, idx + pattern.len()) {
+        LiteralAt::Name(name) => Some(name),
+        LiteralAt::Absent => Some(verb_name(pattern)),
+        LiteralAt::Malformed => None,
+    }
+}
+
+/// The fallback event name: the needle's verb (`.subscribe(` -> `subscribe`).
+fn verb_name(pattern: &str) -> String {
+    pattern.trim_matches('.').trim_end_matches('(').to_string()
 }
 
 /// Per-extract-call file facts the verb gate (LA.29) and the broker gate
@@ -386,10 +394,11 @@ fn suppressed(side: &str, needle: &str, name: &str) {
     }
 }
 
-/// fired_on marker for the verb gate (LA.29), the queues.rs `debug_enabled`
-/// pattern under its own switch:
+/// fired_on marker for the verb gate (LA.29) and the event-name shape rule
+/// (LA.41), the queues.rs `debug_enabled` pattern under its own switch:
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] verb-gate'`
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] aws-sdk command skipped'`
+///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] bad-name'`
 fn event_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG.get_or_init(|| {
@@ -420,15 +429,26 @@ struct GateTally {
     type_site: usize,
 }
 
-/// The occurrence of `pattern` that names the event. For the two gated verbs
-/// ([`GATED_VERBS`]) that is the FIRST occurrence that is not queue-owned and
-/// that [`judge_verb`] keeps — so a file whose first `publish(` is a
-/// declaration and a later one a bus call anchors at the bus call. Every other
-/// needle keeps the first occurrence that is not queue-owned, as before.
-/// Broker suppression (A2.9) is the caller's, after this gate.
-fn find_gated(source: &str, pattern: &str, ctx: &mut VerbCtx) -> Option<usize> {
+/// The occurrence of `pattern` that names the event, with the event it names.
+/// Occurrences are walked in order; one is the site when it is not
+/// queue-owned, when — for the two gated verbs ([`GATED_VERBS`]) —
+/// [`judge_verb`] keeps it, and when [`event_name_at`] reads a name there
+/// (LA.41): a quoted literal that is not name-shaped skips that occurrence
+/// and the walk goes on, so a needle table's `"@OnEvent(", "x"` never decides
+/// the file's node and a later `@OnEvent('order.shipped')` does, anchored
+/// there. A file whose first `publish(` is a declaration and a later one a
+/// bus call anchors at the bus call (LA.29). Needles that extract no name
+/// (`handle_event`, `EventBridge.putEvents`) keep their first ungated
+/// occurrence. Broker suppression (A2.9) is the caller's, after this walk.
+fn find_gated(
+    source: &str,
+    pattern: &str,
+    extract_name: bool,
+    ctx: &mut VerbCtx,
+) -> Option<(usize, String)> {
     let gated = GATED_VERBS.contains(&pattern);
     let mut tally = GateTally::default();
+    let mut bad_name = 0usize;
     let mut found = None;
     let mut from = 0usize;
     while let Some(rel) = source[from..].find(pattern) {
@@ -437,26 +457,48 @@ fn find_gated(source: &str, pattern: &str, ctx: &mut VerbCtx) -> Option<usize> {
         if pattern == "publish(" && queue_owned_publish(source, at) {
             continue;
         }
-        if !gated {
-            found = Some(at);
-            break;
-        }
-        match judge_verb(source, pattern, at, ctx) {
-            Verdict::Keep => {
-                tally.kept = 1;
-                found = Some(at);
-                break;
+        if gated {
+            match judge_verb(source, pattern, at, ctx) {
+                Verdict::Keep => {}
+                Verdict::TypeSite => {
+                    tally.type_site += 1;
+                    continue;
+                }
+                Verdict::Declaration => {
+                    tally.decl += 1;
+                    continue;
+                }
+                Verdict::NoBus => {
+                    tally.no_bus += 1;
+                    continue;
+                }
             }
-            Verdict::TypeSite => tally.type_site += 1,
-            Verdict::Declaration => tally.decl += 1,
-            Verdict::NoBus => tally.no_bus += 1,
         }
+        let Some(name) = event_name_at(source, pattern, at, extract_name) else {
+            bad_name += 1;
+            continue;
+        };
+        if gated {
+            tally.kept = 1;
+        }
+        found = Some((at, name));
+        break;
     }
-    if gated && event_debug() && tally.kept + tally.decl + tally.no_bus + tally.type_site > 0 {
-        eprintln!(
-            "[eventbus] verb-gate needle='{pattern}' kept={} rejected decl={} no_bus={} type_site={}",
-            tally.kept, tally.decl, tally.no_bus, tally.type_site
-        );
+    if event_debug() {
+        // A gated occurrence the gate kept but whose literal was malformed is
+        // counted by the bad-name line, not the verb-gate one.
+        if gated && tally.kept + tally.decl + tally.no_bus + tally.type_site + bad_name > 0 {
+            eprintln!(
+                "[eventbus] verb-gate needle='{pattern}' kept={} rejected decl={} no_bus={} type_site={}",
+                tally.kept, tally.decl, tally.no_bus, tally.type_site
+            );
+        }
+        if bad_name > 0 {
+            eprintln!(
+                "[eventbus] bad-name needle='{pattern}' skipped={bad_name} kept={}",
+                usize::from(found.is_some())
+            );
+        }
     }
     found
 }
@@ -746,23 +788,85 @@ fn extract_listener_param_type(after: &str) -> Option<String> {
     extract_type_token(first.split_whitespace().next()?, None)
 }
 
-/// `at` is the byte offset just past the matched needle.
-fn extract_event_name(source: &str, at: usize) -> Option<String> {
-    let after = source.get(at..)?;
-    let trimmed = after.trim_start();
-    let (quote, rest) = if let Some(rest) = trimmed.strip_prefix('\'') {
-        ('\'', rest)
-    } else if let Some(rest) = trimmed.strip_prefix('"') {
-        ('"', rest)
-    } else {
-        return None;
+/// What follows a string-keyed needle (LA.41).
+#[derive(Debug, PartialEq, Eq)]
+enum LiteralAt {
+    /// A quoted literal that closes on its own line and reads like an event
+    /// name ([`is_event_name`]).
+    Name(String),
+    /// A quoted literal that spans a line break, never closes, or is not
+    /// name-shaped (`", "` between two strings of a needle table). The
+    /// occurrence is not an event site.
+    Malformed,
+    /// No quoted literal: a variable, a backtick template, an object. The
+    /// caller falls back to the needle's verb.
+    Absent,
+}
+
+/// The quoted literal after a needle; `at` is the byte offset just past the
+/// matched needle. Whitespace and line breaks BEFORE the literal are skipped
+/// (`@OnEvent(\n  'order.shipped'\n)`); the literal itself must close on its
+/// line. The quote scan walks bytes and slices only at ASCII quote bytes, so
+/// every slice is on a char boundary.
+fn literal_after(source: &str, at: usize) -> LiteralAt {
+    let Some(after) = source.get(at..) else {
+        return LiteralAt::Absent;
     };
-    let end = rest.find(quote)?;
-    let lit = &rest[..end];
-    if lit.is_empty() || lit.len() > 128 {
-        return None;
+    let trimmed = after.trim_start();
+    let quote = match trimmed.as_bytes().first() {
+        Some(&q @ (b'\'' | b'"')) => q,
+        _ => return LiteralAt::Absent,
+    };
+    let body = &trimmed[1..];
+    match body
+        .bytes()
+        .position(|b| b == quote || b == b'\n' || b == b'\r')
+    {
+        Some(end) if body.as_bytes()[end] == quote => {
+            let lit = &body[..end];
+            if is_event_name(lit) {
+                LiteralAt::Name(lit.to_string())
+            } else {
+                LiteralAt::Malformed
+            }
+        }
+        // A line break before the closing quote, or no closing quote at all.
+        _ => LiteralAt::Malformed,
     }
-    Some(lit.to_string())
+}
+
+/// Does a closed literal read like an event name? 1..=128 bytes; the first
+/// char alphanumeric (any script) or one of `_ $ @ #`; every other char
+/// alphanumeric, one of `_ . : / - @ $ * # +`, or a single space between two
+/// non-spaces; at least one alphanumeric. So `user.created`, `user:login`,
+/// `sensors/temp`, `update:modelValue`, `order.*`, `MY TOPIC` pass, and the
+/// text between two strings of a table (`, `), anything with a control char,
+/// parens, braces or doubled / edge spaces, `--help` and `*` do not. This is
+/// the one place the accepted alphabet lives.
+fn is_event_name(lit: &str) -> bool {
+    if lit.is_empty() || lit.len() > 128 {
+        return false;
+    }
+    let mut alnum = false;
+    let mut prev: Option<char> = None;
+    let mut chars = lit.chars().peekable();
+    while let Some(c) = chars.next() {
+        let ok = if c.is_alphanumeric() {
+            alnum = true;
+            true
+        } else if prev.is_none() {
+            matches!(c, '_' | '$' | '@' | '#')
+        } else if c == ' ' {
+            prev != Some(' ') && chars.peek().is_some_and(|&n| n != ' ')
+        } else {
+            matches!(c, '_' | '.' | ':' | '/' | '-' | '@' | '$' | '*' | '#' | '+')
+        };
+        if !ok {
+            return false;
+        }
+        prev = Some(c);
+    }
+    alnum
 }
 
 #[cfg(test)]
@@ -1172,5 +1276,119 @@ mod tests {
         assert_eq!(emitted(java), Vec::<String>::new());
         let dart = "import PubSub from 'pubsub-js';\nFuture<void> publish(String m) async {\n  print(m);\n}";
         assert_eq!(emitted(dart), Vec::<String>::new());
+    }
+
+    // ---- LA.41: event names are name-shaped -------------------------------
+    // Needles in this test data are split with `concat!` so glia's own build
+    // does not read them as event sites in this file.
+
+    #[test]
+    fn malformed_literal_occurrence_is_skipped() {
+        // A Python needle table. HEAD minted event_handle:`, `,
+        // event_handle:`,\n    ` and (the literal never closes on its line)
+        // the verb fallback event_emit:Subject.next.
+        let table = concat!(
+            "EVENT_NEEDLES = [\n    \"@On",
+            "Event(\", \"@Event",
+            "Pattern(\",\n    \"Subject",
+            ".next(\",\n]"
+        );
+        assert_eq!(handled(table), Vec::<String>::new());
+        assert_eq!(emitted(table), Vec::<String>::new());
+    }
+
+    #[test]
+    fn later_valid_occurrence_wins() {
+        // HEAD took the first occurrence and minted event_handle:`, ` on line 0.
+        let src = concat!(
+            "const table = [\"@On",
+            "Event(\", \"x\"];\n@On",
+            "Event('order.shipped')\nonShipped() {}"
+        );
+        assert_eq!(handled(src), vec!["event_handle:order.shipped"]);
+        let out = extract_event_handler_nodes(src, module_id(), repo());
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+    }
+
+    #[test]
+    fn literal_must_close_on_its_line() {
+        // HEAD: event_handle:`order.\nshipped`.
+        assert_eq!(
+            handled(concat!("@On", "Event('order.\nshipped')")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            handled(concat!("@On", "Event('order.\r\nshipped')")),
+            Vec::<String>::new()
+        );
+        // Line breaks BEFORE the literal are fine.
+        assert_eq!(
+            handled(concat!("@On", "Event(\n  'order.shipped'\n)")),
+            vec!["event_handle:order.shipped"]
+        );
+        // The three outcomes, at the byte just past a needle's `(`.
+        assert_eq!(
+            literal_after("('order.shipped')", 1),
+            LiteralAt::Name("order.shipped".into())
+        );
+        assert_eq!(
+            literal_after("(\"pedido.criado\", x)", 1),
+            LiteralAt::Name("pedido.criado".into())
+        );
+        assert_eq!(literal_after("('order.shipped", 1), LiteralAt::Malformed);
+        assert_eq!(literal_after("('', x)", 1), LiteralAt::Malformed);
+        assert_eq!(literal_after("(`order.shipped`)", 1), LiteralAt::Absent);
+        assert_eq!(literal_after("(name, x)", 1), LiteralAt::Absent);
+        assert_eq!(literal_after("x", 5), LiteralAt::Absent);
+        // Multi-byte text before and inside the literal slices cleanly.
+        assert_eq!(
+            literal_after("(  'événement.créé')", 1),
+            LiteralAt::Name("événement.créé".into())
+        );
+    }
+
+    #[test]
+    fn event_name_shape() {
+        for ok in [
+            "user.created",
+            "order.placed",
+            "user:login",
+            "POST_ADDED",
+            "sensors/temp",
+            "cache.flushed",
+            "update:modelValue",
+            "order.*",
+            "MY TOPIC",
+            "some event",
+            "_internal",
+            "$destroy",
+            "@app/ready",
+            "#channel",
+            "a+b",
+            "注文.確定",
+        ] {
+            assert!(is_event_name(ok), "{ok:?} should be a name");
+        }
+        let too_long = "e".repeat(129);
+        for bad in [
+            "",
+            ", ",
+            ", true, false),\n    (",
+            ",\n    ",
+            ") {",
+            " x",
+            "x ",
+            "x  y",
+            "--help",
+            "*",
+            "{0}.done",
+            "${id}",
+            "a\tb",
+            "user created!",
+            too_long.as_str(),
+        ] {
+            assert!(!is_event_name(bad), "{bad:?} should not be a name");
+        }
+        assert!(is_event_name(&"e".repeat(128)));
     }
 }
