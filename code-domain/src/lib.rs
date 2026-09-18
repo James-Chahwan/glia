@@ -862,20 +862,47 @@ pub mod endpoint {
         out
     }
 
-    /// The ENDPOINT_HIT payload. `raw` is the call-site literal the path was
-    /// normalised from (A3.3), written LAST and only when present, so every
-    /// endpoint whose path was not rewritten keeps a byte-identical payload.
-    fn endpoint_hit_json(ep: &ClientEndpoint, raw: Option<&str>) -> String {
+    /// Optional trailing fields of an ENDPOINT_HIT payload, beyond the
+    /// [`ClientEndpoint`] core. Every field defaults to absent, and an absent
+    /// field writes nothing, so `HitExtras::default()` is the pre-A3.3 payload
+    /// byte for byte.
+    ///
+    /// Carried beside the endpoint rather than as `ClientEndpoint` fields so
+    /// the parsers that build `ClientEndpoint` literals (eleven of them) do not
+    /// all have to change when one opts in.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct HitExtras<'a> {
+        /// A3.3: the call-site literal `ep.path` was normalised from (see
+        /// [`normalise_client_path`]). Only when the path was rewritten.
+        pub raw: Option<&'a str>,
+        /// A11.5: the request authority, `host[:port]`, from an absolute URL
+        /// literal (see [`client_url_split`]). The field A11.4's host
+        /// narrowing reads.
+        pub host: Option<&'a str>,
+    }
+
+    /// The ENDPOINT_HIT payload. The [`HitExtras`] are written LAST, `raw`
+    /// then `host`, and only when present, so every endpoint without them
+    /// keeps a byte-identical payload. `host` goes after `raw` because that is
+    /// where the engine's endpoint fold appends it (`Fields::set` on a payload
+    /// that has no `host` yet), so a parser that pre-sets it produces the
+    /// same folded bytes as one that leaves it to the fold.
+    fn endpoint_hit_json(ep: &ClientEndpoint, extras: HitExtras<'_>) -> String {
         let conf = match ep.confidence {
             Confidence::Strong => "strong",
             Confidence::Medium => "medium",
             Confidence::Weak => "weak",
         };
-        let raw = raw
+        let raw = extras
+            .raw
             .map(|r| format!(r#","raw":"{}""#, esc(r)))
             .unwrap_or_default();
+        let host = extras
+            .host
+            .map(|h| format!(r#","host":"{}""#, esc(h)))
+            .unwrap_or_default();
         format!(
-            r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"{}}}"#,
+            r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"{}{}}}"#,
             esc(&ep.method),
             esc(&ep.path),
             esc(&ep.file),
@@ -883,6 +910,7 @@ pub mod endpoint {
             ep.col,
             conf,
             raw,
+            host,
         )
     }
 
@@ -1029,8 +1057,10 @@ pub mod endpoint {
     /// ```
     ///
     /// Does not trim; [`url_to_path`] trims before calling. The engine's
-    /// endpoint-fold pass (`engine/src/endpoint_fold.rs`) is the consumer that
-    /// records the authority as `"host"` on ENDPOINT_HIT.
+    /// endpoint-fold pass (`engine/src/endpoint_fold.rs`) records the
+    /// authority as `"host"` on ENDPOINT_HIT for the parsers that hand it a
+    /// `raw`/`template` (TS, Dart); the other clients record it at extraction
+    /// through [`client_url_split`] (A11.5).
     pub fn url_split(raw: &str) -> (Option<String>, Option<String>) {
         let (authority, rest) = split_authority(cut_query(raw));
         let host = authority
@@ -1055,6 +1085,48 @@ pub mod endpoint {
     /// `/proxy/http://x/y` is itself (was `/y`).
     pub fn url_to_path(raw: &str) -> Option<String> {
         url_split(raw.trim()).1
+    }
+
+    /// [`url_split`] for a CLIENT call literal a parser has reconstructed
+    /// (A11.5): `(host, path)` where `path` is EXACTLY [`url_to_path`]`(raw)`,
+    /// so a parser that swaps `url_to_path` for this keeps every ENDPOINT
+    /// qname, and `host` is the authority to record as `"host"` on
+    /// ENDPOINT_HIT.
+    ///
+    /// The host is kept only when it is a literal authority. Parsers turn
+    /// every interpolation into `${…}`, so a reconstructed literal can put a
+    /// placeholder in either half of `scheme://authority`, and both mean the
+    /// service is not named in the source:
+    ///
+    /// ```text
+    /// http://api.example.com/users  -> (Some("api.example.com"), Some("/users"))
+    /// http://svc:8080/x?y=1         -> (Some("svc:8080"),        Some("/x"))
+    /// https://${…}/users            -> (None,                    Some("/users"))
+    /// http://localhost:${…}/users   -> (None,                    Some("/users"))
+    /// ${…}://api/users              -> (None,                    Some("/users"))
+    /// /users/${…}                   -> (None,                    Some("/users/${…}"))
+    /// ```
+    ///
+    /// A literal authority is `host[:port]` (a bracketed IPv6 literal
+    /// included) spelled from ASCII letters, digits and `.-_~:[]`. That
+    /// rejects `${…}`, a Python `{name}`, a Swift `\(x)` and a `%s` format
+    /// verb alike, without a list of every language's placeholder syntax.
+    pub fn client_url_split(raw: &str) -> (Option<String>, Option<String>) {
+        let raw = raw.trim();
+        let (host, path) = url_split(raw);
+        let scheme_ok = raw.split_once("://").is_some_and(|(scheme, _)| {
+            let mut cs = scheme.chars();
+            cs.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+        let host = host.filter(|h| {
+            scheme_ok
+                && h.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '.' | '-' | '_' | '~' | ':' | '[' | ']')
+                })
+        });
+        (host, path)
     }
 
     /// Request path for a CLIENT call literal, for parsers that reconstruct
@@ -1134,6 +1206,26 @@ pub mod endpoint {
         nav: &mut CodeNav,
         seen: &mut HashSet<NodeId>,
     ) -> NodeId {
+        let extras = HitExtras { raw, host: None };
+        push_client_endpoint_with(repo, ep, extras, from, nodes, edges, nav, seen)
+    }
+
+    /// [`push_client_endpoint`] with every optional ENDPOINT_HIT field (see
+    /// [`HitExtras`]). The general entry point: the other two are this with
+    /// fewer extras. The extras are written on the node's single cell, so
+    /// the call site that first emits a `(method, path)` in a file decides
+    /// them, the same as `file`/`line`/`col`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_client_endpoint_with(
+        repo: RepoId,
+        ep: &ClientEndpoint,
+        extras: HitExtras<'_>,
+        from: NodeId,
+        nodes: &mut Vec<Node>,
+        edges: &mut Vec<Edge>,
+        nav: &mut CodeNav,
+        seen: &mut HashSet<NodeId>,
+    ) -> NodeId {
         let qname = format!("endpoint:{}:{}", ep.method, ep.path);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
         if seen.insert(id) {
@@ -1143,7 +1235,7 @@ pub mod endpoint {
                 confidence: ep.confidence,
                 cells: vec![Cell {
                     kind: cell_type::ENDPOINT_HIT,
-                    payload: CellPayload::Json(endpoint_hit_json(ep, raw)),
+                    payload: CellPayload::Json(endpoint_hit_json(ep, extras)),
                 }],
             });
             let display = format!("{} {}", ep.method, ep.path);
@@ -1810,6 +1902,120 @@ mod tests {
             nodes[0].cells[0].payload,
             CellPayload::Json(payload(None))
         );
+    }
+
+    /// A11.5 — `host` rides on ENDPOINT_HIT only when given, after `raw`; the
+    /// default extras are the plain payload byte for byte.
+    #[test]
+    fn endpoint_hit_carries_host_after_raw_only_when_given() {
+        use endpoint::HitExtras;
+        use repo_graph_core::{Confidence, RepoId};
+        let ep = endpoint::ClientEndpoint {
+            method: "GET".into(),
+            path: "/users".into(),
+            file: "client.go".into(),
+            line: 9,
+            col: 15,
+            confidence: Confidence::Strong,
+        };
+        let from = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::METHOD, "m");
+        let payload = |extras: HitExtras<'_>| {
+            let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+            let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+            endpoint::push_client_endpoint_with(
+                RepoId(1),
+                &ep,
+                extras,
+                from,
+                &mut nodes,
+                &mut edges,
+                &mut nav,
+                &mut seen,
+            );
+            match &nodes[0].cells[0].payload {
+                CellPayload::Json(j) => j.clone(),
+                _ => String::new(),
+            }
+        };
+        let base = r#"{"method":"GET","path":"/users","file":"client.go","line":9,"col":15,"confidence":"strong""#;
+        assert_eq!(payload(HitExtras::default()), format!("{base}}}"));
+        assert_eq!(
+            payload(HitExtras {
+                raw: None,
+                host: Some("api.example.com")
+            }),
+            format!(r#"{base},"host":"api.example.com"}}"#)
+        );
+        assert_eq!(
+            payload(HitExtras {
+                raw: Some("http://api:80/users"),
+                host: Some("api:80")
+            }),
+            format!(r#"{base},"raw":"http://api:80/users","host":"api:80"}}"#)
+        );
+        // The older entry points are the default extras exactly.
+        let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+        let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+        endpoint::push_client_endpoint(
+            RepoId(1),
+            &ep,
+            from,
+            &mut nodes,
+            &mut edges,
+            &mut nav,
+            &mut seen,
+        );
+        assert_eq!(
+            nodes[0].cells[0].payload,
+            CellPayload::Json(payload(HitExtras::default()))
+        );
+    }
+
+    /// A11.5 — `client_url_split`'s path half IS `url_to_path`, and its host
+    /// half is kept only when the scheme and authority are both literal.
+    #[test]
+    fn client_url_split_keeps_only_literal_authorities() {
+        let s = endpoint::client_url_split;
+        let some = |x: &str| Some(x.to_string());
+        assert_eq!(
+            s("http://api.example.com/users"),
+            (some("api.example.com"), some("/users"))
+        );
+        assert_eq!(s("http://api/users"), (some("api"), some("/users")));
+        assert_eq!(s("http://svc:8080/x?y=1"), (some("svc:8080"), some("/x")));
+        assert_eq!(
+            s("  https://u:p@api.x/users  "),
+            (some("api.x"), some("/users"))
+        );
+        assert_eq!(s("http://[::1]:8080/x"), (some("[::1]:8080"), some("/x")));
+        assert_eq!(
+            s("https://api.example.com/users/${…}"),
+            (some("api.example.com"), some("/users/${…}"))
+        );
+        // Placeholders in the authority or the scheme: no host, path kept.
+        assert_eq!(s("https://${…}/users"), (None, some("/users")));
+        assert_eq!(s("http://localhost:${…}/users"), (None, some("/users")));
+        assert_eq!(s("${…}://api/users"), (None, some("/users")));
+        assert_eq!(s("http://{host}/users"), (None, some("/users")));
+        assert_eq!(s("http://%s/users"), (None, some("/users")));
+        // No authority at all.
+        assert_eq!(s("/users/${…}"), (None, some("/users/${…}")));
+        assert_eq!(s("${…}/users"), (None, None));
+        assert_eq!(s("file:///etc/hosts"), (None, some("/etc/hosts")));
+        assert_eq!(s("/login?next=https://x/y"), (None, some("/login")));
+
+        for raw in [
+            "http://api.example.com/users",
+            "https://${…}/users",
+            "${…}://api/users",
+            " /users/${…} ",
+            "users",
+            "SELECT * FROM t",
+            "/proxy/http://x/y",
+            "",
+        ] {
+            assert_eq!(s(raw).1, endpoint::url_to_path(raw), "{raw:?}");
+        }
     }
 
     /// W0.3 — every reserved id decodes to its own name (the reservation is

@@ -6,7 +6,9 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
+use repo_graph_code_domain::endpoint::{
+    self, ClientEndpoint, HitExtras, push_client_endpoint_with,
+};
 
 pub fn parse_file(
     source: &str,
@@ -1180,7 +1182,11 @@ fn try_detect_java_endpoint(
     let Some((raw, strong)) = url_string_from_arg(url_arg, src) else {
         return;
     };
-    let Some(path) = endpoint::url_to_path(&raw) else {
+    // Path is the ENDPOINT's identity; the authority rides on ENDPOINT_HIT as
+    // `host` (A11.5), and only when it is literal (`"http://" + h + "/x"` has
+    // none).
+    let (host, path) = endpoint::client_url_split(&raw);
+    let Some(path) = path else {
         return;
     };
 
@@ -1197,9 +1203,14 @@ fn try_detect_java_endpoint(
             Confidence::Medium
         },
     };
-    push_client_endpoint(
+    let extras = HitExtras {
+        host: host.as_deref(),
+        ..HitExtras::default()
+    };
+    push_client_endpoint_with(
         repo,
         &ep,
+        extras,
         from,
         &mut acc.nodes,
         &mut acc.edges,
@@ -1869,6 +1880,40 @@ public class ApiClient {
             fp.edges.iter().any(|e| e.to == ep_post && e.category == edge_category::CALLS),
             "expected CALLS edge into the POST endpoint"
         );
+    }
+
+    /// A11.5 — a RestTemplate call against an absolute URL puts its authority
+    /// on the ENDPOINT_HIT cell as `host`; a URI-template authority
+    /// (`"http://{host}/orders"`, filled from uriVariables) names no service,
+    /// so no `host`.
+    #[test]
+    fn rest_template_endpoint_carries_the_url_authority_as_host() {
+        let source = r#"
+public class ApiClient {
+    public String fetch() {
+        return rest.getForObject("http://svc:8080/x", String.class);
+    }
+    public String orders(String host) {
+        return rest.getForObject("http://{host}/orders", String.class, host);
+    }
+}
+"#;
+        let fp = parse_file(source, "ApiClient.java", "com::example", repo()).unwrap();
+        let hit = |qname: &str| -> String {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, qname);
+            let node = fp.nodes.iter().find(|n| n.id == id).expect("ENDPOINT node");
+            match &node.cells[0].payload {
+                CellPayload::Json(j) if node.cells[0].kind == cell_type::ENDPOINT_HIT => j.clone(),
+                other => panic!("not an ENDPOINT_HIT json cell: {other:?}"),
+            }
+        };
+        let x = hit("endpoint:GET:/x");
+        assert!(
+            x.ends_with(r#","confidence":"strong","host":"svc:8080"}"#),
+            "{x}"
+        );
+        let orders = hit("endpoint:GET:/orders");
+        assert!(!orders.contains("host"), "{orders}");
     }
 
     #[test]

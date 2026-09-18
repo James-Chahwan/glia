@@ -26,7 +26,7 @@ pub use repo_graph_code_domain::{
 };
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
-    ClientEndpoint, join_path, push_client_endpoint, url_to_path,
+    ClientEndpoint, HitExtras, client_url_split, join_path, push_client_endpoint_with,
 };
 
 // ============================================================================
@@ -879,8 +879,10 @@ fn collect_provider_sets_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Ac
 //   `http.NewRequestWithContext(ctx, "POST", url, body)` — verb is the string
 //        method arg, url is the following string arg.
 //
-// The URL literal is usually absolute (`http://host/users`); `url_to_path`
-// strips the host to `/users`. A non-literal / non-path URL is skipped.
+// The URL literal is usually absolute (`http://host/users`); `client_url_split`
+// splits it into the path `/users` (the ENDPOINT's identity) and the host
+// (recorded as `"host"` on ENDPOINT_HIT, A11.5). A non-literal / non-path URL
+// is skipped.
 
 /// Map a Go client method name (verb form) to its canonical upper-case verb.
 fn client_http_verb(name: &str) -> Option<&'static str> {
@@ -989,8 +991,9 @@ fn detect_new_request(
     emit_go_endpoint(canonical, &strings[1], call, from, repo, file_rel, acc);
 }
 
-/// Build a `ClientEndpoint` from a URL literal and push it via the shared helper.
-/// Skips the call when `url_to_path` yields no request path (bare host / non-path).
+/// Build a `ClientEndpoint` from a URL literal and push it via the shared helper,
+/// with the literal's authority as its `host`. Skips the call when the literal
+/// yields no request path (bare host / non-path).
 fn emit_go_endpoint(
     verb: &str,
     raw_url: &str,
@@ -1000,7 +1003,8 @@ fn emit_go_endpoint(
     file_rel: &str,
     acc: &mut Acc,
 ) {
-    let Some(path) = url_to_path(raw_url) else {
+    let (host, path) = client_url_split(raw_url);
+    let Some(path) = path else {
         return;
     };
     let pos = call.start_position();
@@ -1012,9 +1016,14 @@ fn emit_go_endpoint(
         col: pos.column + 1,
         confidence: Confidence::Strong,
     };
-    push_client_endpoint(
+    let extras = HitExtras {
+        host: host.as_deref(),
+        ..HitExtras::default()
+    };
+    push_client_endpoint_with(
         repo,
         &ep,
+        extras,
         from,
         &mut acc.nodes,
         &mut acc.edges,
@@ -2530,6 +2539,41 @@ func GetOne(ctx context.Context) {
                 .any(|n| n.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD)),
             "client HTTP calls must not become server ROUTE nodes"
         );
+    }
+
+    /// A11.5 — the absolute URL's authority lands on the ENDPOINT_HIT cell as
+    /// `host`; a relative path writes no `host` at all.
+    #[test]
+    fn client_endpoint_carries_the_url_authority_as_host() {
+        let source = r#"package client
+
+func FetchUsers() {
+    http.Get("http://api.example.com/users")
+}
+
+func Local(client *http.Client) {
+    client.Get("/orders")
+}
+"#;
+        let parse = parse_file(source, "client/client.go", "client", "", repo()).unwrap();
+        let hit = |id: NodeId| -> String {
+            let node = parse
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .expect("ENDPOINT node");
+            match &node.cells[0].payload {
+                CellPayload::Json(j) if node.cells[0].kind == cell_type::ENDPOINT_HIT => j.clone(),
+                other => panic!("not an ENDPOINT_HIT json cell: {other:?}"),
+            }
+        };
+        let users = hit(endpoint_id(repo(), "GET", "/users"));
+        assert!(
+            users.ends_with(r#","confidence":"strong","host":"api.example.com"}"#),
+            "{users}"
+        );
+        let orders = hit(endpoint_id(repo(), "GET", "/orders"));
+        assert!(!orders.contains("host"), "{orders}");
     }
 
     #[test]

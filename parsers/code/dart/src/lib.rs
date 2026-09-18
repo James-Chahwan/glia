@@ -8,7 +8,7 @@ pub use repo_graph_code_domain::{
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
 use repo_graph_code_domain::endpoint::{
-    normalise_client_path, push_client_endpoint_with_raw, ClientEndpoint,
+    ClientEndpoint, HitExtras, client_url_split, normalise_client_path, push_client_endpoint_with,
 };
 
 pub fn parse_file(
@@ -575,6 +575,11 @@ fn try_detect_dart_endpoint(
     if !is_dart_request_path(&path) {
         return; // not a request path (full-URL var, non-path first arg, etc.)
     }
+    // A11.5: the authority of the pre-normalisation literal, as `host`. Only
+    // the host half is read: the path stays A3.3's normaliser's, so no qname
+    // moves. `$base/users` has no authority; `https://$host/x` has a
+    // placeholder one, which names no service.
+    let (host, _) = client_url_split(&raw);
     let pos = n.start_position();
     let ep = ClientEndpoint {
         method: method_l.to_ascii_uppercase(),
@@ -584,10 +589,14 @@ fn try_detect_dart_endpoint(
         col: pos.column + 1,
         confidence: Confidence::Strong,
     };
-    push_client_endpoint_with_raw(
+    let extras = HitExtras {
+        raw: changed.then_some(raw.as_str()),
+        host: host.as_deref(),
+    };
+    push_client_endpoint_with(
         repo,
         &ep,
-        changed.then_some(raw.as_str()),
+        extras,
         from,
         &mut acc.nodes,
         &mut acc.edges,
@@ -1096,6 +1105,7 @@ class ApiClient {
         let v: serde_json::Value = serde_json::from_str(&hit).unwrap();
         assert_eq!(v["path"], "/users");
         assert_eq!(v["raw"], "https://api.example.com/users");
+        assert_eq!(v["host"], "api.example.com");
         let method = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -1127,9 +1137,55 @@ class ApiClient {
         // An unchanged path carries no `raw`.
         let plain = endpoint_hit(&fp, ep("DELETE", "/users")).expect("DELETE /users");
         assert!(!plain.contains("\"raw\""), "unchanged path must not carry raw: {plain}");
+        // A11.5: nor a `host`; the interpolated base has none either.
+        assert!(
+            !plain.contains("\"host\""),
+            "relative path must not carry host: {plain}"
+        );
+        assert!(
+            !based.contains("\"host\""),
+            "interpolated base has no host: {based}"
+        );
 
         // And no phantom server ROUTE for any of these client calls.
         assert!(!fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
         assert!(!fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users")));
+    }
+
+    /// A11.5 — the dio literal's authority lands on ENDPOINT_HIT as `host`,
+    /// AFTER `raw` (where the engine fold used to append it, so the folded
+    /// bytes do not move); an interpolated authority (`https://$host/x`)
+    /// names no service, so it writes `raw` but no `host`.
+    #[test]
+    fn dio_endpoint_carries_the_url_authority_as_host() {
+        let source = r#"import 'package:dio/dio.dart';
+class ApiClient {
+  final Dio dio = Dio();
+  Future<void> run() async {
+    await dio.get('http://svc:8080/users?page=2');
+    await dio.get('https://$host/orders');
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/api_client.dart", "lib::api_client", repo()).unwrap();
+        let ep = |m: &str, p: &str| {
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::ENDPOINT,
+                &format!("endpoint:{m}:{p}"),
+            )
+        };
+        let users = endpoint_hit(&fp, ep("GET", "/users")).expect("GET /users");
+        assert!(
+            users.ends_with(r#","raw":"http://svc:8080/users?page=2","host":"svc:8080"}"#),
+            "{users}"
+        );
+        let orders = endpoint_hit(&fp, ep("GET", "/orders")).expect("GET /orders");
+        assert!(
+            orders.contains(r#""raw":"https://${…}/orders""#),
+            "{orders}"
+        );
+        assert!(!orders.contains("\"host\""), "{orders}");
     }
 }

@@ -37,6 +37,12 @@
 //! ZERO-CHANGE GUARANTEE. If a node's path does not move and it has no host to
 //! record, nothing about it changes: not its id, its edges, its nav entry, or
 //! its cell bytes.
+//!
+//! PRE-SET HOSTS (A11.5). Go, Python, Java, Swift and Dart clients write
+//! `"host"` themselves at extraction, from the literal they saw. That host
+//! stands: the pass never replaces it, only counts it, so an entry whose path
+//! does not move is left byte-identical. Both kinds of host feed the one
+//! `[endpoint-host]` line.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -50,32 +56,47 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// What the pass did to one repo, for the `[endpoint-fold]` marker.
+/// What the pass did to one repo, for the `[endpoint-fold]` and
+/// `[endpoint-host]` markers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FoldStats {
     /// ENDPOINT node entries (TypeScript: call sites) whose path, and so
     /// whose identity, changed.
     pub folded: usize,
-    /// ENDPOINT node entries that gained a `host`.
+    /// ENDPOINT node entries that gained a `host` from this pass.
     pub hosts: usize,
+    /// A11.5: ENDPOINT node entries whose ENDPOINT_HIT already carried a
+    /// `host` when they reached the pass (written by the parser). Disjoint
+    /// from `hosts`: the pass never re-records a pre-set host.
+    pub preset: usize,
 }
 
 impl FoldStats {
     fn add(&mut self, other: FoldStats) {
         self.folded += other.folded;
         self.hosts += other.hosts;
+        self.preset += other.preset;
     }
 
-    /// A11.2 fired_on marker, once per repo, only when the pass changed
-    /// something.
+    /// The fired_on markers, once per repo, each only when non-zero:
+    /// A11.2's `[endpoint-fold]` when the pass changed something, and
+    /// A11.5's `[endpoint-host]` when any client endpoint carries an
+    /// authority, whichever side recorded it.
     pub(crate) fn report(&self, repo_label: &str) {
-        if self.folded + self.hosts == 0 {
-            return;
+        if self.folded + self.hosts > 0 {
+            eprintln!(
+                "[endpoint-fold] folded {} endpoint paths, captured {} hosts repo={repo_label}",
+                self.folded, self.hosts
+            );
         }
-        eprintln!(
-            "[endpoint-fold] folded {} endpoint paths, captured {} hosts repo={repo_label}",
-            self.folded, self.hosts
-        );
+        let carried = self.hosts + self.preset;
+        if carried > 0 {
+            eprintln!(
+                "[endpoint-host] {carried} client endpoints carry an authority \
+                 (preset={}, captured={}) repo={repo_label}",
+                self.preset, self.hosts
+            );
+        }
     }
 }
 
@@ -113,10 +134,12 @@ pub(crate) fn fold_endpoint_paths(
     // TypeScript parser pushes one entry per call site, so an id can repeat.
     let mut order: Vec<NodeId> = Vec::new();
     let mut groups: HashMap<NodeId, Vec<(usize, Option<Plan>)>> = HashMap::new();
+    let mut stats = FoldStats::default();
     for (idx, node) in fp.nodes.iter().enumerate() {
         if fp.nav.kind_by_id.get(&node.id) != Some(&node_kind::ENDPOINT) {
             continue;
         }
+        stats.preset += usize::from(arrived_with_host(node));
         let plan = plan_entry(node, &fp.nav, consts, repo);
         groups
             .entry(node.id)
@@ -127,7 +150,6 @@ pub(crate) fn fold_endpoint_paths(
             .push((idx, plan));
     }
 
-    let mut stats = FoldStats::default();
     for old in order {
         let Some(entries) = groups.remove(&old) else {
             continue;
@@ -192,8 +214,9 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         .unwrap_or(qpath);
     let (host, path) = url_split(input);
     let path = path?;
-    // An interpolated authority (`https://${…}/x`) names no service.
-    let host = host.filter(|h| !h.contains("${"));
+    // An interpolated authority (`https://${…}/x`) names no service, and a
+    // host the parser already wrote (A11.5) is not re-recorded.
+    let host = host.filter(|h| !h.contains("${") && fields.str("host").is_none());
     let moved = path != qpath;
     if !moved && host.is_none() {
         return None;
@@ -229,6 +252,20 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         moved,
         host: host.is_some(),
     })
+}
+
+/// A11.5: the entry's ENDPOINT_HIT already names a `host`, written at
+/// extraction by a parser that saw a literal authority.
+fn arrived_with_host(node: &Node) -> bool {
+    node.cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+        .any(|c| match &c.payload {
+            CellPayload::Json(json) => {
+                serde_json::from_str::<Fields>(json).is_ok_and(|f| f.str("host").is_some())
+            }
+            _ => false,
+        })
 }
 
 /// A11.4: the authority of EVERY binding of the template's leading base, for
@@ -588,7 +625,8 @@ mod tests {
             stats,
             FoldStats {
                 folded: 1,
-                hosts: 1
+                hosts: 1,
+                preset: 0
             }
         );
 
@@ -645,7 +683,8 @@ mod tests {
             stats,
             FoldStats {
                 folded: 0,
-                hosts: 1
+                hosts: 1,
+                preset: 0
             }
         );
         assert_eq!(fp.nodes[1].id, id);
@@ -659,6 +698,42 @@ mod tests {
             payload(&fp, 2)
         );
         assert_eq!(fp.edges, edges);
+    }
+
+    /// A11.5: a host the parser already wrote is counted as `preset` and left
+    /// alone. A Go-shaped entry (no `raw`) and a Dart-shaped one (`raw` whose
+    /// authority the pass would otherwise capture) both come out
+    /// byte-identical, and neither is counted as captured.
+    #[test]
+    fn preset_hosts_are_counted_and_left_byte_identical() {
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "/users",
+            r#"{"method":"GET","path":"/users","file":"client.go","line":9,"col":15,"confidence":"strong","host":"api.example.com"}"#,
+        );
+        push_call(
+            &mut fp,
+            "/orders",
+            r#"{"method":"POST","path":"/orders","file":"lib/api.dart","line":3,"col":5,"confidence":"strong","raw":"http://svc:8080/orders?x=1","host":"svc:8080"}"#,
+        );
+        // No host anywhere: neither counter moves.
+        push_call(
+            &mut fp,
+            "/health",
+            r#"{"method":"GET","path":"/health","file":"client.go","line":12,"col":3,"confidence":"strong"}"#,
+        );
+        let before = fp.clone();
+        let stats = fold_endpoint_paths(&mut fp, &ConstTable::default(), repo());
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 0,
+                hosts: 0,
+                preset: 2
+            }
+        );
+        assert!(same(&fp, &before), "a pre-set host must not be re-recorded");
     }
 
     /// A11.4: a base bound differently per deployment records every binding's
@@ -684,7 +759,14 @@ mod tests {
             r#"{"method":"GET","path":"${…}/users","template":"${environment.apiUrl}/users"}"#,
         );
         let stats = fold_endpoint_paths(&mut fp, &consts, repo());
-        assert_eq!(stats, FoldStats { folded: 1, hosts: 1 });
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 1,
+                hosts: 1,
+                preset: 0
+            }
+        );
         assert_eq!(
             payload(&fp, 1),
             r#"{"method":"GET","path":"/users","template":"${environment.apiUrl}/users","folded_from":"${…}/users","host":"users-svc.prod.svc.cluster.local","hosts":["users-svc.prod.svc.cluster.local","users-service:8080",""]}"#
@@ -781,7 +863,8 @@ mod tests {
             stats,
             FoldStats {
                 folded: 1,
-                hosts: 1
+                hosts: 1,
+                preset: 0
             }
         );
         let new = ep_id("GET", "/users");

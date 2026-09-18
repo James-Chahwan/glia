@@ -7,7 +7,9 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
+use repo_graph_code_domain::endpoint::{
+    ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with,
+};
 
 pub fn parse_file(
     source: &str,
@@ -329,8 +331,10 @@ fn collect_client_endpoints_in(
 
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
+        // The literal's path is the ENDPOINT's identity; its authority rides on
+        // ENDPOINT_HIT as `host` (A11.5).
         if let Some((raw_path, interpolated)) = url_string_literal_path(n, src)
-            && let Some(path) = url_to_path(&raw_path)
+            && let (host, Some(path)) = client_url_split(&raw_path)
         {
             let pos = n.start_position();
             // Plain literal + default verb → Strong; interpolated path or a verb
@@ -348,9 +352,14 @@ fn collect_client_endpoints_in(
                 col: pos.column + 1,
                 confidence,
             };
-            push_client_endpoint(
+            let extras = HitExtras {
+                host: host.as_deref(),
+                ..HitExtras::default()
+            };
+            push_client_endpoint_with(
                 repo,
                 &ep,
+                extras,
                 from,
                 &mut acc.nodes,
                 &mut acc.edges,
@@ -721,5 +730,40 @@ func createUser(body: Data) {
                 .any(|e| e.to == ep_post && e.category == edge_category::CALLS),
             "expected CALLS edge into the POST endpoint"
         );
+    }
+
+    /// A11.5 — `URL(string:)`'s authority lands on the ENDPOINT_HIT cell as
+    /// `host`; an interpolated authority (`\(base)`) names no service.
+    #[test]
+    fn urlsession_endpoint_carries_the_url_authority_as_host() {
+        let source = r#"
+import Foundation
+
+func listUsers() {
+    let url = URL(string: "https://api.example.com/users")!
+    URLSession.shared.dataTask(with: url) { data, response, error in }.resume()
+}
+
+func listOrders(base: String) {
+    let url = URL(string: "https://\(base)/orders")!
+    URLSession.shared.dataTask(with: url) { data, response, error in }.resume()
+}
+"#;
+        let fp = parse_file(source, "Sources/Api.swift", "Sources::Api", repo()).unwrap();
+        let hit = |qname: &str| -> String {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, qname);
+            let node = fp.nodes.iter().find(|n| n.id == id).expect("ENDPOINT node");
+            match &node.cells[0].payload {
+                CellPayload::Json(j) if node.cells[0].kind == cell_type::ENDPOINT_HIT => j.clone(),
+                other => panic!("not an ENDPOINT_HIT json cell: {other:?}"),
+            }
+        };
+        let users = hit("endpoint:GET:/users");
+        assert!(
+            users.ends_with(r#","confidence":"strong","host":"api.example.com"}"#),
+            "{users}"
+        );
+        let orders = hit("endpoint:GET:/orders");
+        assert!(!orders.contains("host"), "{orders}");
     }
 }

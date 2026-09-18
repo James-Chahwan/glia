@@ -19,7 +19,9 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
+use repo_graph_code_domain::endpoint::{
+    self, ClientEndpoint, HitExtras, push_client_endpoint_with,
+};
 
 /// Parse one Python source file.
 ///
@@ -1203,13 +1205,15 @@ fn try_detect_py_endpoint(
         return;
     };
 
-    // Path must be a string literal; reconstruct interpolations, then reduce a
-    // full URL to its path. Bail on a bare variable / non-path first arg.
+    // Path must be a string literal; reconstruct interpolations, then split a
+    // full URL into its path (the ENDPOINT's identity) and its authority (the
+    // `host` on ENDPOINT_HIT, A11.5). Bail on a bare variable / non-path arg.
     let (raw_path, interpolated) = py_string_path(url_node, src);
     if raw_path.is_empty() {
         return;
     }
-    let Some(path) = endpoint::url_to_path(&raw_path) else {
+    let (host, path) = endpoint::client_url_split(&raw_path);
+    let Some(path) = path else {
         return;
     };
     let confidence = if interpolated {
@@ -1226,9 +1230,14 @@ fn try_detect_py_endpoint(
         col: pos.column + 1,
         confidence,
     };
-    push_client_endpoint(
+    let extras = HitExtras {
+        host: host.as_deref(),
+        ..HitExtras::default()
+    };
+    push_client_endpoint_with(
         repo,
         &ep,
+        extras,
         from,
         &mut acc.nodes,
         &mut acc.edges,
@@ -2761,6 +2770,32 @@ class Field:
             .iter()
             .any(|n| parse.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::ROUTE));
         assert!(!has_route, "client requests.* must not emit server ROUTEs");
+    }
+
+    /// A11.5 — an absolute URL's authority lands on the ENDPOINT_HIT cell as
+    /// `host`; an f-string authority (`{base}`) names no service, so no `host`.
+    #[test]
+    fn requests_client_endpoint_carries_the_url_authority_as_host() {
+        let src = "import requests\n\n\ndef make_user(body):\n    requests.post(\"http://api/users\", json=body)\n\n\ndef list_orders(base):\n    requests.get(f\"http://{base}/orders\")\n";
+        let parse = parse_file(src, "client.py", "client", repo()).unwrap();
+        let hit = |id: NodeId| -> String {
+            let node = parse
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .expect("ENDPOINT node");
+            match &node.cells[0].payload {
+                CellPayload::Json(j) if node.cells[0].kind == cell_type::ENDPOINT_HIT => j.clone(),
+                other => panic!("not an ENDPOINT_HIT json cell: {other:?}"),
+            }
+        };
+        let users = hit(endpoint_id("POST", "/users"));
+        assert!(
+            users.ends_with(r#","confidence":"strong","host":"api"}"#),
+            "{users}"
+        );
+        let orders = hit(endpoint_id("GET", "/orders"));
+        assert!(!orders.contains("host"), "{orders}");
     }
 
     #[test]
