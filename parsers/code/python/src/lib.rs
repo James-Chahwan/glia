@@ -19,6 +19,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
@@ -59,7 +60,8 @@ pub fn parse_file(
     // substrate-gap py-accesses-data — pre-pass: harvest `__tablename__` from
     // every model class so `session.query(User)` sites (which may appear before
     // *or* after the class in file order) can resolve `User` → its table.
-    scan_model_tables(root, src, repo, &mut acc);
+    // A13.17: the same pass mints each Django model's entity + table cell.
+    scan_model_tables(root, src, module_qname, repo, &mut acc);
 
     // substrate-gap py-router-prefix — pre-pass: harvest APIRouter/Blueprint
     // prefixes so a decorator whose receiver carries one composes the real
@@ -111,6 +113,12 @@ pub fn parse_file(
             acc.routes_composed,
             acc.router_prefixes.len(),
             file_rel_path
+        );
+    }
+    if acc.django_models > 0 || acc.django_queries > 0 {
+        eprintln!(
+            "[orm-django] models={} implicit={} queries={} in {}",
+            acc.django_models, acc.django_implicit, acc.django_queries, file_rel_path
         );
     }
 
@@ -200,10 +208,21 @@ struct Acc {
     /// `ACCESSES_DATA` edge to that data-entity node (function-anchored, not
     /// module-anchored — the data_entities extractor already emits the coarse
     /// module→entity edge, but not the accessor→entity one the graph needs).
+    /// SQLAlchemy only: Django models are model-keyed (A13.17) and need no map.
     model_tables: HashMap<String, NodeId>,
     /// Dedup for function-anchored `ACCESSES_DATA` edges: one edge per
     /// (accessor fn, data-entity) even when a fn issues the query repeatedly.
     accesses_data_seen: std::collections::HashSet<(NodeId, NodeId)>,
+    /// A13.17 — model-keyed Django `data_entity:sql:<Model>` ids already pushed
+    /// in this file, so a model declared and queried in one file is one node.
+    django_entities: std::collections::HashSet<NodeId>,
+    /// Django model declarations minted in this file (`[orm-django] models=`).
+    django_models: usize,
+    /// Of those, the ones whose table came from Django's naming convention
+    /// rather than an explicit `Meta.db_table` (`[orm-django] implicit=`).
+    django_implicit: usize,
+    /// `<Model>.objects.<method>(…)` query sites seen (`[orm-django] queries=`).
+    django_queries: usize,
     /// substrate-gap py-router-prefix — module-level router/blueprint receiver
     /// name → its path prefix (`router` → `/api/v1/users`), harvested by
     /// `scan_router_prefixes`. A receiver reassigned mid-file takes the last
@@ -871,6 +890,9 @@ fn collect_calls_in(
             // function/method → ACCESSES_DATA edge anchored on `from` (the
             // enclosing accessor), not the module.
             try_detect_data_access(node, src, from, acc);
+            // A13.17 — Django `Order.objects.filter(…)` → ACCESSES_DATA to the
+            // model-keyed entity, resolvable in any file.
+            try_detect_django_access(node, src, from, repo, acc);
             if let Some(q) = extract_call_qualifier(node, src) {
                 acc.unresolved.push(UnresolvedCall {
                     from,
@@ -944,7 +966,12 @@ fn is_super_call(call_node: TsNode, src: &[u8]) -> bool {
 /// one's `__tablename__ = "<table>"`, and record `class_name → data_entity node
 /// id`. The node id matches the one the `data_entities` extractor mints, so the
 /// edge we emit points at the shared entity node.
-fn scan_model_tables(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
+///
+/// A13.17: a class with no `__tablename__` that subclasses Django's
+/// `models.Model` mints its model-keyed entity here instead
+/// ([`emit_django_model`]); the SQLAlchemy path above it is unchanged.
+fn scan_model_tables(root: TsNode, src: &[u8], module_qname: &str, repo: RepoId, acc: &mut Acc) {
+    let django_file = imports_django(root, src);
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         let class_node = match child.kind() {
@@ -959,6 +986,9 @@ fn scan_model_tables(root: TsNode, src: &[u8], repo: RepoId, acc: &mut Acc) {
             continue;
         };
         let Some(table) = find_tablename(class_node, src) else {
+            if is_django_model(class_node, src, django_file) {
+                emit_django_model(class_node, class_name, src, module_qname, repo, acc);
+            }
             continue;
         };
         if table.is_empty() {
@@ -1036,6 +1066,283 @@ fn try_detect_data_access(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc)
         category: edge_category::ACCESSES_DATA,
         confidence: Confidence::Medium,
     });
+}
+
+// ============================================================================
+// Django ORM (A13.17)
+// ============================================================================
+//
+// A Django model rarely declares its table: Django names it
+// `<app_label>_<lowercased model>` (`shop.Order` → `shop_order`, and
+// `OrderItem` → `shop_orderitem`, lowercased WITHOUT snake-casing). Identity
+// follows A13.1's ORM rule (`code_domain::data_entity`): the entity is keyed on
+// the MODEL, `data_entity:sql:<Model>`, the one token a query site in any file
+// names (`Order.objects.filter(…)`), so no cross-file map is needed. The table
+// rides a CODE cell written only at the declaration: Django's derived name is
+// not a plural of the model, so `DbResolver`'s fold could not recover it.
+//
+// The table is a convention, not a declaration: a model inheriting from an
+// abstract base, or a third-party app with its own label, gets a
+// wrong-but-consistent key. Entities stay `Confidence::Medium`.
+
+/// True for a dotted module path inside the `django` package.
+fn is_django_path(path: &str) -> bool {
+    path == "django" || path.starts_with("django.")
+}
+
+/// True when a top-level import names the `django` package
+/// (`from django.db import models`, `import django.db.models`). Gates the
+/// short `models.Model` base, which Tortoise ORM spells identically.
+fn imports_django(root: TsNode, src: &[u8]) -> bool {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor).any(|stmt| match stmt.kind() {
+        "import_from_statement" => {
+            child_text(stmt, "module_name", src).is_some_and(is_django_path)
+        }
+        "import_statement" => {
+            let mut inner = stmt.walk();
+            stmt.named_children(&mut inner).any(|name| {
+                let path = match name.kind() {
+                    "aliased_import" => child_text(name, "name", src),
+                    _ => Some(text(name, src)),
+                };
+                path.is_some_and(is_django_path)
+            })
+        }
+        _ => false,
+    })
+}
+
+/// True when `class_node` directly subclasses Django's model base:
+/// `django.db.models.Model` anywhere, or `models.Model` in a file that imports
+/// from `django`. A bare `Model` base is not taken (peewee and Tortoise use it).
+fn is_django_model(class_node: TsNode, src: &[u8], django_file: bool) -> bool {
+    let Some(bases) = class_node.child_by_field_name("superclasses") else {
+        return false;
+    };
+    let mut cursor = bases.walk();
+    bases.named_children(&mut cursor).any(|base| {
+        if base.kind() != "attribute" {
+            return false;
+        }
+        let (Some(object), Some(attr)) = (
+            base.child_by_field_name("object"),
+            base.child_by_field_name("attribute"),
+        ) else {
+            return false;
+        };
+        let head = text(object, src);
+        text(attr, src) == "Model" && (is_django_path(head) || (django_file && head == "models"))
+    })
+}
+
+/// What a Django model's inner `class Meta:` says about its table.
+#[derive(Default)]
+struct DjangoMeta {
+    /// `db_table = "…"`: the explicit table, which wins over every convention.
+    db_table: Option<String>,
+    /// `app_label = "…"`: overrides the app the module path implies.
+    app_label: Option<String>,
+    /// `abstract = True`: a base with no table of its own.
+    is_abstract: bool,
+}
+
+/// Read `db_table`, `app_label` and `abstract` from the class's direct
+/// `class Meta:` child. A later assignment overrides an earlier one, as in
+/// Python; a value that is not a plain string literal reads as absent.
+fn django_meta(class_node: TsNode, src: &[u8]) -> DjangoMeta {
+    let mut meta = DjangoMeta::default();
+    let Some(body) = class_node.child_by_field_name("body") else {
+        return meta;
+    };
+    let mut cursor = body.walk();
+    let Some(meta_class) = body.named_children(&mut cursor).find(|m| {
+        m.kind() == "class_definition" && child_text(*m, "name", src) == Some("Meta")
+    }) else {
+        return meta;
+    };
+    let Some(meta_body) = meta_class.child_by_field_name("body") else {
+        return meta;
+    };
+    let mut stmts = meta_body.walk();
+    for stmt in meta_body.named_children(&mut stmts) {
+        if stmt.kind() != "expression_statement" {
+            continue;
+        }
+        let mut inner = stmt.walk();
+        for assign in stmt.named_children(&mut inner) {
+            if assign.kind() != "assignment" {
+                continue;
+            }
+            let (Some(lhs), Some(rhs)) = (
+                assign.child_by_field_name("left"),
+                assign.child_by_field_name("right"),
+            ) else {
+                continue;
+            };
+            if lhs.kind() != "identifier" {
+                continue;
+            }
+            match text(lhs, src) {
+                "db_table" => meta.db_table = plain_string_literal(rhs, src),
+                "app_label" => meta.app_label = plain_string_literal(rhs, src),
+                "abstract" => meta.is_abstract = rhs.kind() == "true",
+                _ => {}
+            }
+        }
+    }
+    meta
+}
+
+/// The contents of a `string` node with no `{…}` interpolation, or `None` for
+/// any other node, an f-string with a placeholder, or a blank literal.
+fn plain_string_literal(n: TsNode, src: &[u8]) -> Option<String> {
+    if n.kind() != "string" {
+        return None;
+    }
+    let mut cursor = n.walk();
+    if n.named_children(&mut cursor).any(|c| c.kind() == "interpolation") {
+        return None;
+    }
+    let value = strip_string_quotes(text(n, src));
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// The Django app a model module belongs to: the segment before the LAST
+/// `models` segment of the module qname (`shop::models` and
+/// `shop::models::order` → `shop`). `None` for a root-level `models.py` or a
+/// module outside any `models` module or package.
+fn django_app_segment(module_qname: &str) -> Option<&str> {
+    let segments: Vec<&str> = module_qname.split("::").collect();
+    let at = segments.iter().rposition(|s| *s == "models")?;
+    let app = *segments.get(at.checked_sub(1)?)?;
+    (!app.is_empty()).then_some(app)
+}
+
+/// The table Django gives `class_name`, and whether it came from the naming
+/// convention (`true`) rather than an explicit `Meta.db_table`. Precedence:
+/// `Meta.db_table` > `Meta.app_label` > the module's app segment > the
+/// lowercased model alone.
+fn django_table(class_name: &str, meta: DjangoMeta, module_qname: &str) -> (String, bool) {
+    if let Some(table) = meta.db_table {
+        return (table, false);
+    }
+    let model = class_name.to_lowercase();
+    let app = meta.app_label.as_deref().or_else(|| django_app_segment(module_qname));
+    match app {
+        Some(app) => (format!("{app}_{model}"), true),
+        None => (model, true),
+    }
+}
+
+/// The model-keyed DATA_ENTITY qname and id for a Django model. The one
+/// construction site, shared by the declaration and every query site.
+fn django_entity(model: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{model}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+/// Mint a Django model's `data_entity:sql:<Model>` node carrying its table
+/// cell (built by `code_domain::data_entity::table_cell`), owned by the model
+/// CLASS, plus a DEFINES edge from that class. An abstract model owns no table
+/// and mints nothing; a class name redefined later in the file is one model.
+fn emit_django_model(
+    class_node: TsNode,
+    class_name: &str,
+    src: &[u8],
+    module_qname: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let meta = django_meta(class_node, src);
+    if meta.is_abstract {
+        return;
+    }
+    let (qname, entity_id) = django_entity(class_name, repo);
+    if !acc.django_entities.insert(entity_id) {
+        return;
+    }
+    let (table, implicit) = django_table(class_name, meta, module_qname);
+    acc.django_models += 1;
+    if implicit {
+        acc.django_implicit += 1;
+    }
+    let class_qname = format!("{module_qname}::{class_name}");
+    let class_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &class_qname);
+    acc.nodes.push(Node {
+        id: entity_id,
+        repo,
+        confidence: Confidence::Medium,
+        cells: vec![data_entity::table_cell(&table, data_entity::orm::DJANGO)],
+    });
+    acc.nav
+        .record(entity_id, class_name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.edges.push(Edge {
+        from: class_id,
+        to: entity_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+}
+
+/// Detect Django's `<Model>.objects.<method>(…)` query shape — a capitalised
+/// receiver and the default `objects` manager — and emit an ACCESSES_DATA edge
+/// from `from` (the enclosing accessor) to the model-keyed entity, pushing the
+/// node when this file has not. A chained `…filter(…).order_by(…)` counts once:
+/// only the innermost call has the `<Model>.objects` receiver.
+///
+/// The query-site node records no nav parent, so the model CLASS the
+/// declaration names stays the entity's only owner whatever the file order,
+/// and a module-level query never puts the model name in that module's
+/// symbol table.
+fn try_detect_django_access(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc: &mut Acc) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "attribute" {
+        return;
+    }
+    let Some(manager) = func.child_by_field_name("object") else {
+        return;
+    };
+    if manager.kind() != "attribute" {
+        return;
+    }
+    let (Some(receiver), Some(manager_name)) = (
+        manager.child_by_field_name("object"),
+        manager.child_by_field_name("attribute"),
+    ) else {
+        return;
+    };
+    if receiver.kind() != "identifier" || text(manager_name, src) != "objects" {
+        return;
+    }
+    let model = text(receiver, src);
+    if !model.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return;
+    }
+    acc.django_queries += 1;
+    let (qname, entity_id) = django_entity(model, repo);
+    if acc.django_entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Medium,
+            cells: vec![],
+        });
+        acc.nav
+            .record(entity_id, model, &qname, node_kind::DATA_ENTITY, None);
+    }
+    if acc.accesses_data_seen.insert((from, entity_id)) {
+        acc.edges.push(Edge {
+            from,
+            to: entity_id,
+            category: edge_category::ACCESSES_DATA,
+            confidence: Confidence::Medium,
+        });
+    }
 }
 
 // ============================================================================
@@ -3120,6 +3427,148 @@ class Field:
             .iter()
             .any(|e| e.category == edge_category::ACCESSES_DATA);
         assert!(!has_ad, "query on an unknown model must not emit ACCESSES_DATA");
+    }
+
+    // ---- A13.17 Django ORM ------------------------------------------------
+
+    fn django_entity_id(model: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            &format!("data_entity:sql:{model}"),
+        )
+    }
+
+    /// The table cell on the model-keyed entity, or `None` when the node is
+    /// absent or carries no table.
+    fn django_table_cell(parse: &FileParse, model: &str) -> Option<String> {
+        let id = django_entity_id(model);
+        parse
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| repo_graph_code_domain::data_entity::table_of(&n.cells))
+    }
+
+    fn data_entity_count(parse: &FileParse) -> usize {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
+            .count()
+    }
+
+    const DJANGO_MODEL: &str = "from django.db import models\n\n\nclass OrderItem(models.Model):\n    qty = models.IntegerField()\n\n    class Meta:\n        ordering = [\"-qty\"]\n";
+
+    #[test]
+    fn django_model_implicit_table_from_module_app() {
+        // No db_table, no app_label: the app is the segment before `models`,
+        // and the model is lowercased WITHOUT snake-casing (Django's rule).
+        let parse = parse_file(DJANGO_MODEL, "shop/models.py", "shop::models", repo()).unwrap();
+        assert_eq!(django_table_cell(&parse, "OrderItem").as_deref(), Some("shop_orderitem"));
+
+        let entity = django_entity_id("OrderItem");
+        let class_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "shop::models::OrderItem");
+        assert!(has_edge(&parse, class_id, entity, edge_category::DEFINES));
+        assert_eq!(parse.nav.name_by_id.get(&entity).map(String::as_str), Some("OrderItem"));
+        assert_eq!(parse.nav.parent_of.get(&entity), Some(&class_id), "the model class owns it");
+        let entity_node = parse.nodes.iter().find(|n| n.id == entity).unwrap();
+        assert_eq!(entity_node.confidence, Confidence::Medium, "a convention, not a declaration");
+
+        // A `models/` package keys on the segment before `models`, too.
+        let pkg = parse_file(DJANGO_MODEL, "shop/models/item.py", "shop::models::item", repo())
+            .unwrap();
+        assert_eq!(django_table_cell(&pkg, "OrderItem").as_deref(), Some("shop_orderitem"));
+
+        // No app segment at all: the lowercased model alone.
+        let bare = parse_file(DJANGO_MODEL, "models.py", "models", repo()).unwrap();
+        assert_eq!(django_table_cell(&bare, "OrderItem").as_deref(), Some("orderitem"));
+    }
+
+    #[test]
+    fn django_meta_db_table_wins() {
+        let src = "import django.db.models\n\n\nclass Order(django.db.models.Model):\n    class Meta:\n        app_label = \"billing\"\n        db_table = \"legacy_orders\"\n";
+        let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
+        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("legacy_orders"));
+        assert_eq!(data_entity_count(&parse), 1, "one model-keyed node, never table-keyed");
+        assert_eq!(parse.nav.name_by_id.get(&django_entity_id("Order")).map(String::as_str), Some("Order"));
+    }
+
+    #[test]
+    fn django_meta_app_label_used() {
+        let src = "from django.db import models\n\n\nclass Order(models.Model):\n    class Meta:\n        app_label = \"billing\"\n        db_table = f\"{PREFIX}_orders\"\n";
+        let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
+        // The interpolated db_table is not a literal, so it reads as absent and
+        // the app label beats the module's `shop` segment.
+        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("billing_order"));
+    }
+
+    #[test]
+    fn django_objects_query_emits_accesses_data_in_any_file() {
+        // The view lives in another file from the model: the receiver alone
+        // names the model-keyed entity, with no same-file map.
+        let src = "from .models import Order\n\n\ndef recent_orders():\n    return Order.objects.filter(total__gt=0).order_by(\"-total\")\n\n\ndef other(qs):\n    return qs.objects.all()\n";
+        let parse = parse_file(src, "shop/views.py", "shop::views", repo()).unwrap();
+        let entity = django_entity_id("Order");
+        let accessor =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::views::recent_orders");
+        assert!(has_edge(&parse, accessor, entity, edge_category::ACCESSES_DATA));
+        let access_edges = parse
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::ACCESSES_DATA)
+            .count();
+        assert_eq!(access_edges, 1, "a chain counts once; a lowercase receiver is no model");
+        assert_eq!(data_entity_count(&parse), 1);
+        assert_eq!(django_table_cell(&parse, "Order"), None, "the table rides the declaration only");
+        assert!(!parse.nav.parent_of.contains_key(&entity), "the query site owns nothing");
+    }
+
+    #[test]
+    fn django_model_declared_and_queried_in_one_file_is_one_node() {
+        let src = "from django.db import models\n\n\ndef newest():\n    return Order.objects.latest(\"id\")\n\n\nclass Order(models.Model):\n    pass\n";
+        let parse = parse_file(src, "shop/models.py", "shop::models", repo()).unwrap();
+        let entity = django_entity_id("Order");
+        assert_eq!(data_entity_count(&parse), 1);
+        assert_eq!(django_table_cell(&parse, "Order").as_deref(), Some("shop_order"));
+        let newest =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::models::newest");
+        assert!(has_edge(&parse, newest, entity, edge_category::ACCESSES_DATA));
+    }
+
+    #[test]
+    fn non_django_or_abstract_model_mints_no_entity() {
+        // Tortoise spells its base `models.Model` too; without a django import
+        // it is not taken. A bare `Model` base is never taken.
+        let tortoise = "from tortoise import models\n\n\nclass Event(models.Model):\n    pass\n\n\nclass Tag(Model):\n    pass\n";
+        let parse = parse_file(tortoise, "app/models.py", "app::models", repo()).unwrap();
+        assert_eq!(data_entity_count(&parse), 0);
+
+        let abstract_base = "from django.db import models\n\n\nclass Stamped(models.Model):\n    class Meta:\n        abstract = True\n";
+        let parse = parse_file(abstract_base, "core/models.py", "core::models", repo()).unwrap();
+        assert_eq!(data_entity_count(&parse), 0, "an abstract model owns no table");
+    }
+
+    #[test]
+    fn sqlalchemy_tablename_still_wins() {
+        // A class with `__tablename__` takes the SQLAlchemy path even in a file
+        // that imports django: no model-keyed node, and `session.query(User)`
+        // still lands on the table-keyed id the data_entities extractor mints.
+        let src = "from django.db import models\n\n\nclass User(models.Model):\n    __tablename__ = \"users\"\n\n\ndef find_users(session):\n    return session.query(User).all()\n";
+        let parse = parse_file(src, "store.py", "store", repo()).unwrap();
+        assert_eq!(data_entity_count(&parse), 0, "the SQLAlchemy path pushes no node");
+        let find_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::find_users");
+        let table_keyed = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:users",
+        );
+        assert!(has_edge(&parse, find_id, table_keyed, edge_category::ACCESSES_DATA));
+        assert!(!parse.edges.iter().any(|e| e.to == django_entity_id("User")));
     }
 
     #[test]

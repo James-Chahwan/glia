@@ -1,0 +1,21 @@
+{
+  "framework": "py-django-orm",
+  "language": "python",
+  "dirs": ["."],
+  "cells": ["python/db"],
+  "note": "A13.17: a Django models.Model with no Meta.db_table and no Meta.app_label (its Meta sets only ordering). Django's implicit table is <app_label>_<lowercased model>; the app label comes from the module path (shop/models.py -> shop), the part no string scanner can derive. Identity follows A13.1: the entity is keyed on the MODEL (data_entity:sql:Order) at the declaration and at the query site in another file, and the derived table rides a CODE table cell {table, orm: django} at the declaration only.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "Order", "note": "model-keyed data_entity:sql:Order"},
+    {"kind": "FUNCTION", "name": "recent_orders", "note": "accessor"}
+  ],
+  "expect_edges": [
+    {"from": "recent_orders", "to": "Order", "category": "ACCESSES_DATA", "note": "Order.objects.filter in views.py, a different file from the model"},
+    {"from": "Order", "to": "data_entity:sql:Order", "category": "DEFINES", "note": "the model CLASS defines its entity at the declaration site"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "Order", "cell": "CODE", "contains": "shop_order", "note": "implicit <app_label>_<model>, app label from the module path"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "max_nodes": 1, "note": "declaration and query site are ONE model-keyed node; a table-keyed second id would orphan the query"}
+  ]
+}
