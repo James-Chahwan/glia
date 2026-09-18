@@ -1,0 +1,46 @@
+{
+  "framework": "csharp-system-commandline-cli",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "csharp/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "reconcile",
+      "note": "new Command(\"reconcile\", ...)"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "sync",
+      "note": "Spectre.Console.Cli AddCommand<SyncCommand>(\"sync\")"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:billing",
+      "to": "cli:reconcile",
+      "category": "CLI_INVOKES",
+      "note": "no cli:billing exists (RootCommand carries a description), so A13.4's subcommand path binds `reconcile`"
+    },
+    {
+      "from": "cli:sync",
+      "to": "SyncCommand",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "billing tool",
+      "max_nodes": 0,
+      "note": "RootCommand's description is not a name"
+    }
+  ],
+  "note": "LA.20a. System.CommandLine + Spectre.Console.Cli. Baseline HEAD: 0 CLI_COMMAND."
+}

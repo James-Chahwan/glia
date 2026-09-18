@@ -198,7 +198,19 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_with_edges!(queues::extract_queue_producer_nodes(
         source, path, module_id, repo
     ));
-    run!(cli::extract_cli_command_nodes(source, module_id, repo));
+    // LA.20a: not `run!` — declarations are dispatched by language and carry
+    // `cli:<name> --HANDLED_BY--> <implementation>` refs (bound by the graph
+    // builder's `resolve_refs`). Per-file marker, printed only when the file
+    // declared a command.
+    {
+        let decl = cli::extract_cli_command_nodes(source, lang, module_id, repo);
+        if let Some(marker) = cli::decl_marker(lang, &decl, path) {
+            eprintln!("{marker}");
+        }
+        fp.refs.extend(decl.refs);
+        fp.nodes.extend(decl.nodes);
+        merge_nav(&mut fp.nav, decl.nav);
+    }
     run!(cli::extract_cli_invocation_nodes(source, module_id, repo));
     run_marked!(websocket::extract_ws_handler_nodes(
         source, path, module_id, repo

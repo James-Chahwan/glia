@@ -1,0 +1,36 @@
+{
+  "framework": "java-picocli-cli",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "java/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "invctl"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "export"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:invctl",
+      "to": "cli:invctl",
+      "category": "CLI_INVOKES"
+    },
+    {
+      "from": "cli:invctl",
+      "to": "Tool",
+      "category": "HANDLED_BY",
+      "note": "the class declared after @Command"
+    }
+  ],
+  "note": "LA.20a. picocli @Command(name = \"invctl\", subcommands = {Export.class}) + @Command(name = \"export\"). Baseline HEAD: 0 CLI_COMMAND."
+}

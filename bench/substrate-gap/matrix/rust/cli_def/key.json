@@ -1,0 +1,46 @@
+{
+  "framework": "rust-clap-derive-cli",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "rust/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "shopctl",
+      "note": "multi-line #[command(name = \"shopctl\", ...)] on the Parser struct"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "sync-users",
+      "note": "#[derive(Subcommand)] variant SyncUsers -> clap's default kebab-case"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "gc",
+      "note": "#[command(name = \"gc\")] variant override (single-line form already works on HEAD)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:shopctl",
+      "to": "cli:shopctl",
+      "category": "CLI_INVOKES",
+      "note": "argv0 join (A13.4 captures the list-form invocation)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "command",
+      "max_nodes": 0,
+      "note": "the #[command(subcommand)] field attribute is not a command name"
+    }
+  ],
+  "note": "LA.20a. server/src/main.rs is clap derive with a multi-line #[command(...)] and a Subcommand enum. Baseline HEAD: only cli:gc of the three."
+}
