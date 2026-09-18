@@ -1,0 +1,110 @@
+{
+  "framework": "event-verb-receivers",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.39. The string-keyed event needles `.on(` / `.addEventListener(` / `.addListener(` and `.emit(` / `.dispatch(` / `.trigger(` / `dispatchEvent(` (parsers/code/extractors/src/eventbus.rs EMITTER_PATTERNS / HANDLER_PATTERNS) mint an EVENT_* node for the first call in any file whatever the receiver: Leaflet `map.on('zoomend')`, DOM `addEventListener('click' | 'scroll')`, jQuery `.on('change')` / `.trigger('submit')`, a Redux store `dispatch({type})`, `window.dispatchEvent(...)`, an Angular @Output `this.picked.emit(url)` and a Python `debouncer.trigger()` all read as in-process events (quokka-stack mints event_handle:zoomend / click / scroll / change / load and event_emit:dispatch / emit; repo-graph event_emit:trigger). They now count only on a bus-shaped receiver (bus/orders.ts, bus/notify.ts), an emitter constructed in the same file from an emitter library (worker/jobs.ts), or `this` inside an emitter subclass (lib/uploader.ts) - the controls. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orderPlaced",
+      "note": "bus.emit - bus-shaped receiver"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orderPlaced",
+      "note": "bus.on - bus-shaped receiver"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:drained",
+      "note": "jobs.emit - `const jobs = new EventEmitter()` from node:events"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:drained",
+      "note": "jobs.on - same bound emitter"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:uploaded",
+      "note": "this.emit inside `class Uploader extends EventEmitter`"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "event_emit:orderPlaced",
+      "to": "event_handle:orderPlaced",
+      "category": "EVENT_FLOWS",
+      "note": "the in-process pair still resolves"
+    },
+    {
+      "from": "event_emit:drained",
+      "to": "event_handle:drained",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "bus::orders::placeOrder",
+      "to": "event_emit:orderPlaced",
+      "category": "USES"
+    },
+    {
+      "from": "event_handle:drained",
+      "to": "worker::jobs::watchJobs",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "lib::uploader::Uploader::finish",
+      "to": "event_emit:uploaded",
+      "category": "USES"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:zoomend",
+      "note": "Leaflet this.map.on('zoomend')"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:click",
+      "note": "DOM el.addEventListener('click')"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:change",
+      "note": "jQuery $(form).on('change')"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:scroll",
+      "note": "DOM container.addEventListener('scroll')"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:dispatch",
+      "note": "Redux-style this.store.dispatch({ type })"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:submit",
+      "note": "jQuery $(form).trigger('submit')"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:dispatchEvent",
+      "note": "DOM window.dispatchEvent(new Event('resize'))"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:emit",
+      "note": "Angular @Output this.picked.emit(url) (EventEmitter from @angular/core)"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:trigger",
+      "note": "Python debouncer.trigger()"
+    }
+  ]
+}

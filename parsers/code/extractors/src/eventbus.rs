@@ -14,7 +14,7 @@ pub struct EventNodes {
     pub anchors: Vec<Anchor>,
 }
 
-/// (needle, extract_name, broker_ambiguous).
+/// (needle, extract_name, broker_ambiguous, gate).
 ///
 /// `broker_ambiguous` (A2.9) marks the verbs a message-broker client shares with
 /// an in-process bus: `publish(`, `.subscribe(`, `.on(`. In a file that imports
@@ -26,30 +26,86 @@ pub struct EventNodes {
 /// `.dispatch(`, `dispatchEvent(`, `@OnEvent(` ...) are never flagged, and a
 /// file with no broker signal behaves exactly as before.
 ///
-/// `publish(` and `.subscribe(` are additionally verb-gated (LA.29,
-/// [`GATED_VERBS`]): they name a channel only on a bus, so an occurrence counts
-/// only when it is a call on a bus-shaped receiver or in a file importing an
-/// in-process pub/sub library — never a declaration, never a typed site.
-const EMITTER_PATTERNS: &[(&str, bool, bool)] = &[
-    (".emit(", true, false),
-    (".dispatch(", true, false),
-    ("Subject.next(", true, false),
-    ("EventBridge.putEvents", false, false),
-    ("eventBridge.putEvents", false, false),
-    ("publish(", true, true),
-    (".trigger(", true, false),
-    ("dispatchEvent(", true, false),
+/// `gate` says how [`find_gated`] judges each occurrence ([`VerbGate`]):
+/// `publish(` / `.subscribe(` need a bus or a pub/sub import (LA.29), the
+/// DOM / jQuery / store / Node event verbs need an in-process bus as their
+/// receiver (LA.39), and the rest count wherever they occur.
+const EMITTER_PATTERNS: &[(&str, bool, bool, VerbGate)] = &[
+    (".emit(", true, false, VerbGate::Receiver),
+    (".dispatch(", true, false, VerbGate::Receiver),
+    ("Subject.next(", true, false, VerbGate::Open),
+    ("EventBridge.putEvents", false, false, VerbGate::Open),
+    ("eventBridge.putEvents", false, false, VerbGate::Open),
+    ("publish(", true, true, VerbGate::Bus),
+    (".trigger(", true, false, VerbGate::Receiver),
+    ("dispatchEvent(", true, false, VerbGate::Receiver),
 ];
 
-const HANDLER_PATTERNS: &[(&str, bool, bool)] = &[
-    (".on(", true, true),
-    (".addEventListener(", true, false),
-    (".subscribe(", true, true),
-    ("@EventPattern(", true, false),
-    ("@OnEvent(", true, false),
-    ("handle_event", false, false),
-    (".addListener(", true, false),
+const HANDLER_PATTERNS: &[(&str, bool, bool, VerbGate)] = &[
+    (".on(", true, true, VerbGate::Receiver),
+    (".addEventListener(", true, false, VerbGate::Receiver),
+    (".subscribe(", true, true, VerbGate::Bus),
+    ("@EventPattern(", true, false, VerbGate::Open),
+    ("@OnEvent(", true, false, VerbGate::Open),
+    ("handle_event", false, false, VerbGate::Open),
+    (".addListener(", true, false, VerbGate::Receiver),
 ];
+
+/// How [`find_gated`] judges one occurrence of a string-keyed needle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerbGate {
+    /// Every occurrence is a site: the decorator needles, `Subject.next`,
+    /// `handle_event`, `EventBridge.putEvents`.
+    Open,
+    /// LA.29: `publish(` and `.subscribe(`, the two broker-ambiguous verbs that
+    /// name a pub/sub channel. A function named `publish`, an RxJS
+    /// `obs.subscribe(...)` and a tokio `tx.subscribe()` all share them with a
+    /// real bus; [`judge_verb`] keeps a call on a bus-shaped receiver or in a
+    /// file importing an in-process pub/sub library — never a declaration,
+    /// never a typed site.
+    Bus,
+    /// LA.39: `.on(` / `.addListener(` / `.addEventListener(` and their
+    /// conjugates `.emit(` / `.dispatch(` / `.trigger(` / `dispatchEvent(`.
+    /// DOM elements, jQuery, Leaflet, `process`, streams, sockets, Redux
+    /// stores and Angular `@Output` emitters all speak them, so an occurrence
+    /// counts only when [`receiver_admits`] finds an in-process bus as its
+    /// receiver. No import-only admission: importing `events` does not make
+    /// `req.on('data')` a bus.
+    Receiver,
+}
+
+/// Why a gated occurrence was kept — the `via=` of the `[eventbus] verb-gate`
+/// marker line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// The receiver's name is bus-shaped ([`BUS_RECEIVER_SUFFIXES`]).
+    Receiver,
+    /// LA.29: the file imports an in-process pub/sub library
+    /// ([`PUBSUB_IMPORTS`]); `publish(` / `.subscribe(` only.
+    Import,
+    /// LA.39: the receiver is bound in this file to an emitter constructed
+    /// from an emitter library, or to a `new EventTarget()`
+    /// ([`emitter_bindings`]).
+    Bound,
+    /// LA.39: `this` / `self` in a file declaring an emitter subclass
+    /// ([`emitter_subclass`]).
+    Subclass,
+    /// LA.39: `.emit(` in a file importing `@nestjs/microservices` — the
+    /// `ClientProxy.emit` conjugate of the `@EventPattern` handler.
+    Microservices,
+}
+
+impl Via {
+    fn label(self) -> &'static str {
+        match self {
+            Via::Receiver => "receiver",
+            Via::Import => "import",
+            Via::Bound => "bound",
+            Via::Subclass => "subclass",
+            Via::Microservices => "microservices",
+        }
+    }
+}
 
 /// Buses keyed by MESSAGE TYPE rather than by a string topic. The captured
 /// token is the type name, not a literal, so [`literal_after`]'s
@@ -73,17 +129,14 @@ const TYPE_EMITTER_NEEDLES: &[&str] = &[
 /// MediatR's `.Send(new ` is a different needle and unaffected.
 const AWS_V3_SEND: &str = ".send(new ";
 
-/// LA.29: the two broker-ambiguous verbs that name a pub/sub channel, and the
-/// only needles [`find_gated`] judges per occurrence. A function named
-/// `publish`, an RxJS `obs.subscribe(...)` and a tokio `tx.subscribe()` all
-/// share them with a real bus; the conjugate kinds take the same gate.
-const GATED_VERBS: &[&str] = &["publish(", ".subscribe("];
-
 /// A receiver reads as an in-process bus when its name (lowercased, leading
-/// `_` / `$` stripped) ends with one of these: `eventBus`, `this.bus`,
-/// `PubSub`, `ActiveSupport::Notifications`, `this.events`, `_mediator`. The
-/// only recall knob besides [`PUBSUB_IMPORTS`]. `router.events.subscribe`
-/// passes it (accepted: the Ionic `Events` bus shares the name).
+/// `_` / `$` / `@` stripped) ends with one of these: `eventBus`, `this.bus`,
+/// `PubSub`, `ActiveSupport::Notifications`, `this.events`, `_mediator`,
+/// `eventEmitter`, `eventDispatcher` (LA.39). ONE list for both gates
+/// ([`VerbGate::Bus`] and [`VerbGate::Receiver`]), so `dispatcher` admits an
+/// `eventDispatcher` receiver for `publish(` as well as for `.dispatch(`.
+/// `router.events.subscribe` passes it (accepted: the Ionic `Events` bus
+/// shares the name).
 const BUS_RECEIVER_SUFFIXES: &[&str] = &[
     "bus",
     "pubsub",
@@ -92,7 +145,53 @@ const BUS_RECEIVER_SUFFIXES: &[&str] = &[
     "mediator",
     "publisher",
     "notifications",
+    "dispatcher",
 ];
+
+/// LA.39: the in-process emitter constructors [`emitter_bindings`] reads
+/// (`new` optional, a `pkg.` qualifier allowed, `(` or `<` after the name):
+/// Node `new EventEmitter()` / `new EventEmitter<E>()`, eventemitter2
+/// `new EventEmitter2()`, DOM `new EventTarget()`, tiny-emitter
+/// `new Emitter()`, `mitt()`, nanoevents `createNanoEvents()`, pyee
+/// `EventEmitter()` / `AsyncIOEventEmitter()`. A binding counts only in a
+/// file importing an emitter library ([`EMITTER_LIBS`]) — Angular's
+/// `new EventEmitter<T>()` from `@angular/core` is a component output — except
+/// `new EventTarget()`, which is the platform's own emitter.
+const EMITTER_CONSTRUCTORS: &[&str] = &[
+    "EventEmitter",
+    "EventEmitter2",
+    "EventTarget",
+    "Emitter",
+    "mitt",
+    "createNanoEvents",
+    "AsyncIOEventEmitter",
+];
+
+/// LA.39: the in-process emitter libraries, matched as a whole quoted module
+/// string in import position ([`imports_emitter_lib`]); pyee is matched by its
+/// Python import line.
+const EMITTER_LIBS: &[&str] = &[
+    "events",
+    "node:events",
+    "eventemitter2",
+    "eventemitter3",
+    "mitt",
+    "nanoevents",
+    "tiny-emitter",
+    "@nestjs/event-emitter",
+];
+
+/// LA.39: the base classes that make `this` / `self` an in-process bus
+/// receiver in a file importing an emitter library: JS
+/// `extends EventEmitter` / `EventEmitter2` / `Emitter`, pyee
+/// `class X(EventEmitter)` / `(AsyncIOEventEmitter)`. `extends EventTarget`
+/// needs no import.
+const EMITTER_BASES: &[&str] = &["EventEmitter", "EventEmitter2", "Emitter"];
+const PYEE_BASES: &[&str] = &["EventEmitter", "AsyncIOEventEmitter"];
+
+/// LA.39: the module whose `ClientProxy` emit is the emitter side of NestJS
+/// microservices' `@EventPattern` handler.
+const NEST_MICROSERVICES: &str = "@nestjs/microservices";
 
 /// The plural collection nouns among [`BUS_RECEIVER_SUFFIXES`]. They name a bus
 /// only as a named receiver (`this.events`, `ActiveSupport::Notifications`);
@@ -225,8 +324,9 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     let mut ctx = VerbCtx::default();
-    for &(pattern, extract_name, ambiguous) in EMITTER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, &mut ctx) else {
+    for &(pattern, extract_name, ambiguous, gate) in EMITTER_PATTERNS {
+        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, gate, &mut ctx)
+        else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
@@ -275,8 +375,9 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     let mut ctx = VerbCtx::default();
-    for &(pattern, extract_name, ambiguous) in HANDLER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, &mut ctx) else {
+    for &(pattern, extract_name, ambiguous, gate) in HANDLER_PATTERNS {
+        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, gate, &mut ctx)
+        else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
@@ -324,21 +425,76 @@ fn verb_name(pattern: &str) -> String {
     pattern.trim_matches('.').trim_end_matches('(').to_string()
 }
 
-/// Per-extract-call file facts the verb gate (LA.29) and the broker gate
-/// (A2.9) read. All lazy: the lowercase copy is built at most once per call,
-/// and only when a gated verb or a broker-ambiguous needle actually matched —
-/// a file with no `publish(` / `.subscribe(` / `.on(` never pays for it. The
-/// copy is only ever substring-tested, never used to slice `source`.
+/// Per-extract-call file facts the verb gates (LA.29, LA.39) and the broker
+/// gate (A2.9) read. All lazy: the lowercase copy is built at most once per
+/// call, and only when a gated verb or a broker-ambiguous needle actually
+/// matched — a file with no `publish(` / `.subscribe(` / `.on(` never pays for
+/// it. The copy is only ever substring-tested, never used to slice `source`.
+/// The LA.39 facts are computed only when a [`VerbGate::Receiver`] occurrence
+/// is on a receiver that is not bus-shaped.
 #[derive(Default)]
 struct VerbCtx {
     lower: Option<String>,
     bus_import: Option<bool>,
     broker: Option<bool>,
+    /// LA.39: the identifiers bound to a constructed emitter
+    /// ([`emitter_bindings`]).
+    bound: Option<Vec<EmitterBinding>>,
+    /// LA.39: does the file import an emitter library
+    /// ([`imports_emitter_lib`])?
+    emitter_lib: Option<bool>,
+    /// LA.39: does the file declare an emitter subclass whose evidence holds
+    /// ([`emitter_subclass`])?
+    subclass: Option<bool>,
+    /// LA.39: does the file name the quoted module [`NEST_MICROSERVICES`]?
+    ms_client: Option<bool>,
 }
 
 impl VerbCtx {
     fn lower(&mut self, source: &str) -> &str {
         self.lower.get_or_insert_with(|| source.to_ascii_lowercase())
+    }
+
+    fn emitter_lib(&mut self, source: &str) -> bool {
+        *self
+            .emitter_lib
+            .get_or_insert_with(|| imports_emitter_lib(source))
+    }
+
+    /// Is `receiver` bound in this file to an in-process emitter: any
+    /// constructor from an emitter-library file, or a `new EventTarget()`?
+    fn bound(&mut self, source: &str, receiver: &str) -> bool {
+        let bindings = self.bound.get_or_insert_with(|| emitter_bindings(source));
+        let mut platform = false;
+        let mut library = false;
+        for b in bindings.iter().filter(|b| b.name == receiver) {
+            if b.event_target {
+                platform = true;
+            } else {
+                library = true;
+            }
+        }
+        platform || (library && self.emitter_lib(source))
+    }
+
+    /// Does the file declare an emitter subclass (`this` / `self` is a bus)?
+    fn subclass(&mut self, source: &str) -> bool {
+        if let Some(v) = self.subclass {
+            return v;
+        }
+        let v = match emitter_subclass(source) {
+            SubclassEvidence::None => false,
+            SubclassEvidence::EventTarget => true,
+            SubclassEvidence::Library => self.emitter_lib(source),
+        };
+        self.subclass = Some(v);
+        v
+    }
+
+    fn ms_client(&mut self, source: &str) -> bool {
+        *self
+            .ms_client
+            .get_or_insert_with(|| names_quoted_module(source, NEST_MICROSERVICES))
     }
 
     /// Does the file name an in-process pub/sub library ([`PUBSUB_IMPORTS`])?
@@ -406,17 +562,19 @@ fn event_debug() -> bool {
     })
 }
 
-/// Why [`judge_verb`] kept or rejected one occurrence of a gated verb.
+/// Why a gate kept or rejected one occurrence of a gated verb.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// A call with bus evidence: this occurrence names the event.
-    Keep,
+    Keep(Via),
     /// A typed publish (`new` is the first argument token): the type pass
     /// already minted the event under its type name.
     TypeSite,
     /// `def publish(self, m):`, `void publish(String p);`, `publish(m): void {`.
     Declaration,
-    /// A call with neither a bus-shaped receiver nor a pub/sub import.
+    /// A call with neither a bus-shaped receiver nor a pub/sub import
+    /// ([`VerbGate::Bus`]); an occurrence [`receiver_admits`] finds no bus for
+    /// ([`VerbGate::Receiver`]).
     NoBus,
 }
 
@@ -431,23 +589,28 @@ struct GateTally {
 
 /// The occurrence of `pattern` that names the event, with the event it names.
 /// Occurrences are walked in order; one is the site when it is not
-/// queue-owned, when — for the two gated verbs ([`GATED_VERBS`]) —
-/// [`judge_verb`] keeps it, and when [`event_name_at`] reads a name there
-/// (LA.41): a quoted literal that is not name-shaped skips that occurrence
-/// and the walk goes on, so a needle table's `"@OnEvent(", "x"` never decides
-/// the file's node and a later `@OnEvent('order.shipped')` does, anchored
-/// there. A file whose first `publish(` is a declaration and a later one a
-/// bus call anchors at the bus call (LA.29). Needles that extract no name
-/// (`handle_event`, `EventBridge.putEvents`) keep their first ungated
-/// occurrence. Broker suppression (A2.9) is the caller's, after this walk.
+/// queue-owned, when its `gate` keeps it — [`judge_verb`] for
+/// [`VerbGate::Bus`], [`receiver_admits`] for [`VerbGate::Receiver`] — and
+/// when [`event_name_at`] reads a name there (LA.41): a quoted literal that
+/// is not name-shaped skips that occurrence and the walk goes on, so a needle
+/// table's `"@OnEvent(", "x"` never decides the file's node and a later
+/// `@OnEvent('order.shipped')` does, anchored there. A file whose first
+/// `publish(` is a declaration and a later one a bus call anchors at the bus
+/// call (LA.29); a file whose first `.addEventListener(` is on a DOM element
+/// and a later one on a bus anchors at the bus call (LA.39). Needles that
+/// extract no name (`handle_event`, `EventBridge.putEvents`) keep their first
+/// ungated occurrence. Broker suppression (A2.9) is the caller's, after this
+/// walk.
 fn find_gated(
     source: &str,
     pattern: &str,
     extract_name: bool,
+    gate: VerbGate,
     ctx: &mut VerbCtx,
 ) -> Option<(usize, String)> {
-    let gated = GATED_VERBS.contains(&pattern);
+    let gated = gate != VerbGate::Open;
     let mut tally = GateTally::default();
+    let mut via: Option<Via> = None;
     let mut bad_name = 0usize;
     let mut found = None;
     let mut from = 0usize;
@@ -457,9 +620,17 @@ fn find_gated(
         if pattern == "publish(" && queue_owned_publish(source, at) {
             continue;
         }
-        if gated {
-            match judge_verb(source, pattern, at, ctx) {
-                Verdict::Keep => {}
+        let verdict = match gate {
+            VerbGate::Open => None,
+            VerbGate::Bus => Some(judge_verb(source, pattern, at, ctx)),
+            VerbGate::Receiver => Some(
+                receiver_admits(source, at, pattern, ctx).map_or(Verdict::NoBus, Verdict::Keep),
+            ),
+        };
+        let mut kept_via = None;
+        if let Some(verdict) = verdict {
+            match verdict {
+                Verdict::Keep(v) => kept_via = Some(v),
                 Verdict::TypeSite => {
                     tally.type_site += 1;
                     continue;
@@ -480,6 +651,7 @@ fn find_gated(
         };
         if gated {
             tally.kept = 1;
+            via = kept_via;
         }
         found = Some((at, name));
         break;
@@ -489,8 +661,12 @@ fn find_gated(
         // counted by the bad-name line, not the verb-gate one.
         if gated && tally.kept + tally.decl + tally.no_bus + tally.type_site + bad_name > 0 {
             eprintln!(
-                "[eventbus] verb-gate needle='{pattern}' kept={} rejected decl={} no_bus={} type_site={}",
-                tally.kept, tally.decl, tally.no_bus, tally.type_site
+                "[eventbus] verb-gate needle='{pattern}' kept={} rejected decl={} no_bus={} type_site={} via={}",
+                tally.kept,
+                tally.decl,
+                tally.no_bus,
+                tally.type_site,
+                via.map_or("-", Via::label)
             );
         }
         if bad_name > 0 {
@@ -534,14 +710,316 @@ fn judge_verb(source: &str, pattern: &str, at: usize, ctx: &mut VerbCtx) -> Verd
             }
         }
     };
-    let bus = match dot_at {
-        Some(dot) => {
-            let (receiver, called) = receiver_segment(source, dot);
-            is_bus_receiver(receiver, called) || ctx.bus_import(source)
-        }
-        None => ctx.bus_import(source),
+    let bus_receiver = dot_at.is_some_and(|dot| {
+        let (receiver, called) = receiver_segment(source, dot);
+        is_bus_receiver(receiver, called)
+    });
+    if bus_receiver {
+        Verdict::Keep(Via::Receiver)
+    } else if ctx.bus_import(source) {
+        Verdict::Keep(Via::Import)
+    } else {
+        Verdict::NoBus
+    }
+}
+
+/// LA.39: is the occurrence of a [`VerbGate::Receiver`] needle at byte `at` a
+/// call on an in-process bus? First match wins:
+///  R1 [`Via::Receiver`] — the receiver's name is bus-shaped
+///     ([`is_bus_receiver`]): `bus.on`, `this.eventBus.addListener`,
+///     `@emitter.on` (pyee), `this.eventEmitter.emit` (NestJS EventEmitter2),
+///     `eventDispatcher.dispatch`;
+///  R2 [`Via::Bound`] — the receiver is bound in this file to a constructed
+///     emitter ([`VerbCtx::bound`]): `const jobs = new EventEmitter()` beside
+///     `import ... from 'node:events'`;
+///  R3 [`Via::Subclass`] — the receiver is `this` / `self` and the file
+///     declares an emitter subclass ([`VerbCtx::subclass`]);
+///  R4 [`Via::Microservices`] — `.emit(` in a file importing
+///     `@nestjs/microservices`.
+///
+/// The receiver of a dotted needle is [`receiver_segment`] at the needle's
+/// `.`; `dispatchEvent(` has a receiver only when the byte before it is `.`,
+/// so a bare `dispatchEvent(..)` — a global call, a method declaration — is
+/// rejected. A call result (`$(form).on`, `this.getStore().dispatch`) is
+/// admitted only by R1 or R4. A verb on an emitter CLASS
+/// ([`is_emitter_class`]: `EventEmitter.emit(value)` in prose) is admitted
+/// only by R2, when the capitalised name is itself a bound instance.
+fn receiver_admits(source: &str, at: usize, pattern: &str, ctx: &mut VerbCtx) -> Option<Via> {
+    let b = source.as_bytes();
+    let dot_at = if pattern.starts_with('.') {
+        at
+    } else if at > 0 && b[at - 1] == b'.' {
+        at - 1
+    } else {
+        return None;
     };
-    if bus { Verdict::Keep } else { Verdict::NoBus }
+    let (receiver, called) = receiver_segment(source, dot_at);
+    if receiver.is_empty() {
+        // `'.emit('` in a needle table, `` `.on(` `` in prose, `arr[0].emit(`:
+        // no identifier names a receiver, so nothing is evidence of a bus.
+        return None;
+    }
+    let class = is_emitter_class(receiver);
+    if !class && is_bus_receiver(receiver, called) {
+        return Some(Via::Receiver);
+    }
+    if !called {
+        if matches!(receiver, "this" | "self") {
+            if ctx.subclass(source) {
+                return Some(Via::Subclass);
+            }
+        } else if ctx.bound(source, receiver) {
+            return Some(Via::Bound);
+        }
+    }
+    if !class && pattern == ".emit(" && ctx.ms_client(source) {
+        return Some(Via::Microservices);
+    }
+    None
+}
+
+/// Is `receiver` an emitter CLASS ([`EMITTER_CONSTRUCTORS`], the capitalised
+/// ones) rather than an instance? A verb on the class itself —
+/// `EventEmitter.emit(value)` in a doc comment, Node's static
+/// `EventEmitter.on(emitter, name)` — is no bus call, though the name ends
+/// with `emitter`. A capitalised INSTANCE bound in the file
+/// (`const Emitter = new EventEmitter()`) is still admitted by R2.
+fn is_emitter_class(receiver: &str) -> bool {
+    receiver.starts_with(|c: char| c.is_ascii_uppercase()) && EMITTER_CONSTRUCTORS.contains(&receiver)
+}
+
+/// One identifier [`emitter_bindings`] found bound to an emitter constructor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmitterBinding {
+    name: String,
+    /// `new EventTarget(..)`: the platform emitter, admitted without an
+    /// emitter-library import.
+    event_target: bool,
+}
+
+/// LA.39: every identifier this file assigns an emitter constructor
+/// ([`EMITTER_CONSTRUCTORS`]) to, in source order. For each constructor name
+/// (identifier-bounded on the left, `(` or `<` after it) the walk goes back
+/// over a `pkg.` qualifier chain, whitespace and an optional `new`, then needs
+/// a plain `=` (not `==`, `!=`, `<=`, `>=`, `=>`, `+=` ...), and reads the
+/// assigned name with [`assigned_name`]: `const jobs = new EventEmitter()`,
+/// `private hub: EventEmitter = new EventEmitter()`, `this.hub = mitt()`,
+/// `ee = pyee.EventEmitter()`. Byte walks around ASCII anchors only.
+fn emitter_bindings(source: &str) -> Vec<EmitterBinding> {
+    let b = source.as_bytes();
+    let mut out: Vec<EmitterBinding> = Vec::new();
+    for &ctor in EMITTER_CONSTRUCTORS {
+        let mut from = 0usize;
+        while let Some(rel) = source[from..].find(ctor) {
+            let site = from + rel;
+            let after = site + ctor.len();
+            from = after;
+            if (site > 0 && is_ident_byte(b[site - 1]))
+                || !matches!(b.get(after), Some(b'(' | b'<'))
+            {
+                continue;
+            }
+            let mut i = site;
+            // `pyee.EventEmitter(` / `new events.EventEmitter(`.
+            while i > 1 && b[i - 1] == b'.' && is_ident_byte(b[i - 2]) {
+                i = ident_start(b, i - 1);
+            }
+            i = skip_ws_back(b, i);
+            let had_new =
+                i >= 3 && b[i - 3..i] == b"new"[..] && (i == 3 || !is_ident_byte(b[i - 4]));
+            if had_new {
+                i = skip_ws_back(b, i - 3);
+            }
+            if i == 0 || b[i - 1] != b'=' {
+                continue;
+            }
+            let eq = i - 1;
+            if eq > 0
+                && matches!(
+                    b[eq - 1],
+                    b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|'
+                        | b'^' | b'?'
+                )
+            {
+                continue;
+            }
+            let Some(name) = assigned_name(source, eq) else {
+                continue;
+            };
+            let binding = EmitterBinding {
+                name: name.to_string(),
+                event_target: had_new && ctor == "EventTarget",
+            };
+            if !out.contains(&binding) {
+                out.push(binding);
+            }
+        }
+    }
+    out
+}
+
+/// Index of the first byte of the whitespace run ending at `i`.
+fn skip_ws_back(b: &[u8], mut i: usize) -> usize {
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// The identifier assigned by the `=` at byte `eq`. When a `: Type`
+/// annotation sits between the name and the `=` (a `:` at angle-bracket depth
+/// 0 before any `, ( ) ; { } =`, quote or line break), the name is the
+/// identifier before that `:` (a TS `!` / `?` marker skipped); otherwise it is
+/// the identifier right before the `=`. A `this.` / `self.` prefix falls away
+/// because the identifier stops at the `.`. `None` when no identifier is
+/// there (`{ a, b } = ..`, `[x] = ..`).
+fn assigned_name(source: &str, eq: usize) -> Option<&str> {
+    let b = source.as_bytes();
+    let mut depth = 0usize;
+    let mut colon = None;
+    let mut i = eq;
+    while i > 0 {
+        let c = b[i - 1];
+        match c {
+            b'>' => depth += 1,
+            b'<' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            b':' if depth == 0 => {
+                colon = Some(i - 1);
+                break;
+            }
+            b',' | b'(' | b')' | b';' | b'{' | b'}' | b'=' | b'"' | b'\'' | b'`' | b'\n'
+                if depth == 0 =>
+            {
+                break;
+            }
+            _ => {}
+        }
+        i -= 1;
+    }
+    let mut end = colon.unwrap_or(eq);
+    while end > 0 && matches!(b[end - 1], b' ' | b'\t' | b'!' | b'?') {
+        end -= 1;
+    }
+    let start = ident_start(b, end);
+    (start < end).then(|| &source[start..end])
+}
+
+/// LA.39: does the file import an in-process emitter library? A quoted module
+/// string exactly one of [`EMITTER_LIBS`] in import position — the bytes
+/// before its opening quote, whitespace skipped, end with `from`, `require(`,
+/// `import(` or a bare `import` keyword (identifier-bounded) — or a Python
+/// line starting `from pyee` / `import pyee`. A bare quoted word is not
+/// enough: `db.collection('events')` or `router.navigate(['events'])` never
+/// make a file an emitter-library file.
+fn imports_emitter_lib(source: &str) -> bool {
+    EMITTER_LIBS.iter().any(|lib| {
+        quoted_module_sites(source, lib).any(|quote| import_position(source.as_bytes(), quote))
+    }) || source.lines().any(|line| {
+        let t = line.trim_start();
+        ["from pyee", "import pyee"].iter().any(|p| {
+            t.strip_prefix(p)
+                .is_some_and(|rest| !rest.bytes().next().is_some_and(is_ident_byte))
+        })
+    })
+}
+
+/// Byte offsets of the opening quote of every `'module'` / `"module"` in
+/// `source`.
+fn quoted_module_sites<'a>(source: &'a str, module: &'a str) -> impl Iterator<Item = usize> + 'a {
+    [b'\'', b'"'].into_iter().flat_map(move |q| {
+        let b = source.as_bytes();
+        let mut from = 0usize;
+        std::iter::from_fn(move || {
+            while let Some(rel) = source[from..].find(module) {
+                let at = from + rel;
+                from = at + module.len();
+                let end = at + module.len();
+                if at > 0 && b[at - 1] == q && b.get(end) == Some(&q) {
+                    return Some(at - 1);
+                }
+            }
+            None
+        })
+    })
+}
+
+/// Is the quote at byte `quote` the module argument of an import?
+fn import_position(b: &[u8], quote: usize) -> bool {
+    let before = &b[..skip_ws_back(b, quote)];
+    let word = |w: &[u8]| {
+        before.ends_with(w)
+            && (before.len() == w.len() || !is_ident_byte(before[before.len() - w.len() - 1]))
+    };
+    before.ends_with(b"require(") || before.ends_with(b"import(") || word(b"from") || word(b"import")
+}
+
+/// Does the file name `module` as a quoted string anywhere? For a scoped
+/// package name (`@nestjs/microservices`) that is evidence enough.
+fn names_quoted_module(source: &str, module: &str) -> bool {
+    quoted_module_sites(source, module).next().is_some()
+}
+
+/// What [`emitter_subclass`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubclassEvidence {
+    None,
+    /// `extends EventTarget`: no import needed.
+    EventTarget,
+    /// `extends EventEmitter` / `EventEmitter2` / `Emitter`, or a pyee base
+    /// class: holds only with [`imports_emitter_lib`].
+    Library,
+}
+
+/// LA.39: does the file declare a class whose `this` / `self` is an emitter?
+/// JS / TS `extends <Base>` (a `pkg.` qualifier and generic arguments
+/// dropped) with a base in [`EMITTER_BASES`] or `EventTarget`; a Python
+/// `class X(<bases>):` line with a base in [`PYEE_BASES`].
+fn emitter_subclass(source: &str) -> SubclassEvidence {
+    let b = source.as_bytes();
+    let mut found = SubclassEvidence::None;
+    let mut from = 0usize;
+    while let Some(rel) = source[from..].find("extends") {
+        let at = from + rel;
+        from = at + "extends".len();
+        if (at > 0 && is_ident_byte(b[at - 1])) || !b.get(from).is_some_and(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let rest = source[from..].trim_start();
+        let end = rest
+            .bytes()
+            .position(|c| !(is_ident_byte(c) || c == b'.'))
+            .unwrap_or(rest.len());
+        let base = rest[..end].rsplit('.').next().unwrap_or("");
+        if base == "EventTarget" {
+            return SubclassEvidence::EventTarget;
+        }
+        if EMITTER_BASES.contains(&base) {
+            found = SubclassEvidence::Library;
+        }
+    }
+    let pyee_base = source.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix("class ") else {
+            return false;
+        };
+        let Some(open) = rest.find('(') else {
+            return false;
+        };
+        let Some(len) = rest[open + 1..].find(')') else {
+            return false;
+        };
+        rest[open + 1..open + 1 + len]
+            .split(',')
+            .any(|base| PYEE_BASES.contains(&base.trim().rsplit('.').next().unwrap_or("")))
+    });
+    if pyee_base {
+        found = SubclassEvidence::Library;
+    }
+    found
 }
 
 fn is_ident_byte(c: u8) -> bool {
@@ -1126,10 +1604,17 @@ mod tests {
             ),
             vec!["event_emit:POST_ADDED"]
         );
-        // A task-queue library is not a broker: BullMQ workers are EventEmitters.
+        // A task-queue library is not a broker signal: a bus in a BullMQ file
+        // keeps its handler.
+        assert_eq!(
+            handled("import { Worker } from 'bullmq';\nbus.on('completed', done);"),
+            vec!["event_handle:completed"]
+        );
+        // LA.39: a queue worker's own lifecycle event is not a bus event (like
+        // mqtt's `client.on('connect')`, which A2.9 already drops).
         assert_eq!(
             handled("import { Worker } from 'bullmq';\nworker.on('completed', done);"),
-            vec!["event_handle:completed"]
+            Vec::<String>::new()
         );
         // Type-keyed buses (NestJS CQRS) stay, broker import or not.
         assert_eq!(
@@ -1390,5 +1875,169 @@ mod tests {
             assert!(!is_event_name(bad), "{bad:?} should not be a name");
         }
         assert!(is_event_name(&"e".repeat(128)));
+    }
+
+    // ---- LA.39: DOM / store / Node event verbs need an in-process bus -----
+
+    #[test]
+    fn dom_and_library_listeners_are_not_bus_handlers() {
+        // HEAD minted each: zoomend, click, scroll, change, SIGINT, data,
+        // message, addListener.
+        for src in [
+            "this.map.on('zoomend', f);",
+            "el.addEventListener('click', h);",
+            "window.addEventListener('scroll', h);",
+            "$(form).on('change', v);",
+            "process.on('SIGINT', h);",
+            "req.on('data', h);",
+            "socket.on('message', h);",
+            "_controller.addListener(cb);",
+        ] {
+            assert_eq!(handled(src), Vec::<String>::new(), "{src}");
+        }
+    }
+
+    #[test]
+    fn dom_and_store_emits_are_not_bus_emits() {
+        // HEAD: dispatch, submit, dispatchEvent, trigger, chat, emit.
+        for src in [
+            "this.store.dispatch({ type: 'X' });",
+            "$(form).trigger('submit');",
+            "window.dispatchEvent(new Event('resize'));",
+            "debouncer.trigger();",
+            "socket.emit('chat', m);",
+            "import { Component, EventEmitter, Output } from '@angular/core';\nexport class A {\n  @Output() picked = new EventEmitter<string>();\n  pick(u: string) { this.picked.emit(u); }\n}",
+            // A verb on the emitter CLASS names no bus instance (HEAD: emit).
+            "// Angular @Output: EventEmitter.emit(value) pushes a component output.",
+        ] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
+    }
+
+    #[test]
+    fn bus_receivers_keep_every_verb() {
+        assert_eq!(handled("bus.on('a', h);"), vec!["event_handle:a"]);
+        assert_eq!(
+            handled("this.eventBus.addListener('a', h);"),
+            vec!["event_handle:a"]
+        );
+        assert_eq!(emitted("emitter.emit('a');"), vec!["event_emit:a"]);
+        assert_eq!(emitted("this.events.trigger('a');"), vec!["event_emit:a"]);
+        assert_eq!(
+            emitted("eventDispatcher.dispatch('a', e);"),
+            vec!["event_emit:a"]
+        );
+        assert_eq!(
+            handled("bus.addEventListener('a', h);"),
+            vec!["event_handle:a"]
+        );
+        assert_eq!(
+            handled("@emitter.on(\"user_created\")"),
+            vec!["event_handle:user_created"]
+        );
+    }
+
+    #[test]
+    fn bound_emitters_count() {
+        let node = "import { EventEmitter } from 'node:events';\nconst jobs = new EventEmitter();\njobs.on('drained', r);\njobs.emit('drained');";
+        assert_eq!(handled(node), vec!["event_handle:drained"]);
+        assert_eq!(emitted(node), vec!["event_emit:drained"]);
+        assert_eq!(
+            handled("import mitt from 'mitt';\nconst m = mitt();\nm.on('x', f);"),
+            vec!["event_handle:x"]
+        );
+        // The platform emitter needs no import.
+        assert_eq!(
+            handled("const target = new EventTarget();\ntarget.addEventListener('ready', f);"),
+            vec!["event_handle:ready"]
+        );
+        // A typed class field, reached through `this.`.
+        assert_eq!(
+            emitted(
+                "import { EventEmitter } from 'events';\nclass S { private hub: EventEmitter = new EventEmitter(); go() { this.hub.emit('go'); } }"
+            ),
+            vec!["event_emit:go"]
+        );
+        assert_eq!(
+            emitted("from pyee import EventEmitter\nee = EventEmitter()\nee.emit('started')"),
+            vec!["event_emit:started"]
+        );
+        // A capitalised instance is bound, not the class.
+        assert_eq!(
+            emitted(
+                "import { EventEmitter } from 'events';\nexport const Emitter = new EventEmitter();\nEmitter.emit('ready');"
+            ),
+            vec!["event_emit:ready"]
+        );
+        // HEAD: event_handle:drained. No emitter-library import.
+        assert_eq!(
+            handled("const jobs = new EventEmitter();\njobs.on('drained', r);"),
+            Vec::<String>::new()
+        );
+        // A quoted `events` that is not an import does not make one.
+        assert_eq!(
+            handled(
+                "const jobs = new EventEmitter();\njobs.on('drained', r);\nconst c = db.collection('events');"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn emitter_subclass_this() {
+        assert_eq!(
+            emitted(
+                "import { EventEmitter } from 'events';\nexport class Uploader extends EventEmitter {\n  finish() { this.emit('uploaded'); }\n}"
+            ),
+            vec!["event_emit:uploaded"]
+        );
+        // HEAD: event_emit:x.
+        assert_eq!(
+            emitted("class A { go() { this.emit('x'); } }"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn nest_microservice_client_emit() {
+        assert_eq!(
+            emitted(
+                "import { ClientProxy } from '@nestjs/microservices';\nthis.client.emit('user_created', u);"
+            ),
+            vec!["event_emit:user_created"]
+        );
+        // HEAD: event_emit:user_created.
+        assert_eq!(
+            emitted("this.client.emit('user_created', u);"),
+            Vec::<String>::new()
+        );
+        // A verb on the emitter class is no client call either, and a needle
+        // with no receiver identifier (a string table) is no call at all.
+        for src in [
+            "import { ClientProxy } from '@nestjs/microservices';\n// EventEmitter.emit('x') is not this",
+            "import { ClientProxy } from '@nestjs/microservices';\nconst verbs = ['.emit(', 'x'];",
+        ] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
+    }
+
+    #[test]
+    fn first_bus_site_wins() {
+        // HEAD took the first `.addEventListener(` and minted event_handle:click.
+        let src = "el.addEventListener('click', h);\nbus.addEventListener('user.created', h2);";
+        assert_eq!(handled(src), vec!["event_handle:user.created"]);
+        let out = extract_event_handler_nodes(src, module_id(), repo());
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+    }
+
+    #[test]
+    fn bare_dispatch_event_has_no_receiver() {
+        // HEAD: event_emit:dispatchEvent for both.
+        for src in [
+            "dispatchEvent(new CustomEvent('x'));",
+            "dispatchEvent(event: Event): boolean { return true; }",
+        ] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
     }
 }
