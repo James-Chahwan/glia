@@ -49,15 +49,27 @@ pub fn parse_file(
         None,
     );
 
+    // LB.7b: a top-level type outside a braced namespace hangs off the file's
+    // DIRECTORY, not the file module (the MODULE node above keeps
+    // `module_qname`: imports, TESTS pairing and the local-module index read
+    // file-module qnames). Functions and `use` keep the file scope.
+    let scope = type_scope(module_qname);
     visit_children(
         root,
         src,
         file_rel_path,
         module_qname,
+        scope,
         module_id,
         repo,
         &mut acc,
     );
+    if acc.dir_scoped_types > 0 && qname_debug() {
+        eprintln!(
+            "[qname] php: {} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}",
+            acc.dir_scoped_types
+        );
+    }
 
     scan_laravel_routes(source, file_rel_path, module_id, repo, &mut acc);
     scan_slim_routes(source, module_id, repo, &mut acc);
@@ -86,6 +98,45 @@ pub fn parse_file(
     })
 }
 
+/// LB.7b: a PHP top-level type outside a braced `namespace X { }` belongs to
+/// its directory (LB.2's rule), not its file, so drop the file-stem segment the
+/// engine's `path_to_qname` puts last: `src::Billing::Invoice` ->
+/// `src::Billing`, and a file at the repo root (`index`) -> `""`. The directory,
+/// not the declared namespace, is the scope on purpose: Laravel and Symfony put
+/// every application under `App`, so two apps of one monorepo would otherwise
+/// share every controller NodeId; PSR-4 makes the directory mirror the
+/// namespace anyway, and PHP forbids two same-named classes in one namespace.
+///
+/// The braced form keeps `<Ns>::<Type>`: it exists to hold SEVERAL namespaces
+/// in one file, and directory scope would merge their same-named classes.
+///
+/// The class `Invoice` of `Invoice.php` therefore shares its qname with the file
+/// MODULE (different kind, different NodeId); `MergedGraph::pick_primary` ranks
+/// the declaration over the container, so qname lookups land on the type.
+fn type_scope(module_qname: &str) -> &str {
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
+}
+
+/// `scope::name`, or the bare `name` for the empty (repo-root) scope.
+fn scoped(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// `GLIA_QNAME_DEBUG=1` turns on the per-file `[qname] php:` marker, read once.
+/// Off by default: it would print for every PHP file of a build.
+///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] php:'`
+fn qname_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
 #[derive(Default)]
 struct Acc {
     nodes: Vec<Node>,
@@ -94,6 +145,9 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// LB.7b: top-level types minted under the directory scope (outside a
+    /// braced namespace) — the `[qname] php:` marker's count.
+    dir_scoped_types: usize,
     /// ENDPOINT ids already minted in THIS file — `push_client_endpoint` dedups
     /// the node through it while still pushing one CALLS edge per call site.
     endpoint_seen: std::collections::HashSet<NodeId>,
@@ -101,35 +155,50 @@ struct Acc {
     eloquent: Eloquent,
 }
 
+/// `parent_qname` scopes functions and `use` statements; `type_scope` scopes
+/// classes / interfaces / enums. At the file root they differ (the file module
+/// vs its directory, LB.7b); inside a braced namespace body both are the
+/// namespace.
+#[allow(clippy::too_many_arguments)]
 fn visit_children(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
+    type_scope: &str,
     parent_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    let dir_scoped = parent_qname != type_scope;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        match child.kind() {
+        let minted = match child.kind() {
             "namespace_definition" => {
                 visit_namespace(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                false
             }
             "class_declaration" => {
-                visit_class(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_class(child, src, file_rel, type_scope, parent_id, repo, acc)
             }
             "interface_declaration" => {
-                visit_interface(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_interface(child, src, file_rel, type_scope, parent_id, repo, acc)
             }
             "enum_declaration" => {
-                visit_enum(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_enum(child, src, file_rel, type_scope, parent_id, repo, acc)
             }
             "function_definition" => {
                 visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                false
             }
-            "namespace_use_declaration" => collect_use(child, src, parent_qname, acc),
-            _ => {}
+            "namespace_use_declaration" => {
+                collect_use(child, src, parent_qname, acc);
+                false
+            }
+            _ => false,
+        };
+        if minted && dir_scoped {
+            acc.dir_scoped_types += 1;
         }
     }
 }
@@ -166,25 +235,29 @@ fn visit_namespace(
     acc.nav
         .record(ns_id, simple, &qname, node_kind::PACKAGE, Some(parent_id));
 
+    // Braced form: the body's types stay namespace-scoped (`<Ns>::<Type>`),
+    // so the namespace is both the member and the type scope.
     if let Some(body) = node.child_by_field_name("body") {
-        visit_children(body, src, file_rel, &qname, ns_id, repo, acc);
+        visit_children(body, src, file_rel, &qname, &qname, ns_id, repo, acc);
     }
 }
 
+/// `scope` is the type scope (the file's directory, or a braced namespace —
+/// LB.7b). Returns whether a node was minted (a nameless declaration is not).
 fn visit_class(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &qname);
 
     acc.nodes.push(Node {
@@ -235,22 +308,25 @@ fn visit_class(
             "[php-routes] composed {composed} attribute routes under '{class_prefix}' in {file_rel}"
         );
     }
+    true
 }
 
+/// `scope` is the type scope (the file's directory, or a braced namespace —
+/// LB.7b). Returns whether a node was minted (a nameless declaration is not).
 fn visit_interface(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &qname);
 
     acc.nodes.push(Node {
@@ -267,22 +343,25 @@ fn visit_interface(
     });
     acc.nav
         .record(id, name, &qname, node_kind::INTERFACE, Some(parent_id));
+    true
 }
 
+/// `scope` is the type scope (the file's directory, or a braced namespace —
+/// LB.7b). Returns whether a node was minted (a nameless declaration is not).
 fn visit_enum(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENUM, &qname);
 
     acc.nodes.push(Node {
@@ -299,6 +378,7 @@ fn visit_enum(
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
+    true
 }
 
 fn visit_function(
@@ -2248,7 +2328,7 @@ class UserService {
         let fp = parse_file(
             source,
             "src/Services/UserService.php",
-            "App::Services",
+            "App::Services::UserService",
             repo(),
         )
         .unwrap();
@@ -2256,6 +2336,168 @@ class UserService {
         assert!(names.contains(&"UserService"));
         assert!(names.contains(&"getUser"));
         assert!(names.contains(&"validate"));
+    }
+
+    /// Every qname of one node kind in a parse, sorted.
+    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// LB.7b, over the `php-dir-qnames` fixture's three sources: a top-level
+    /// type under the statement-form `namespace X;` or in a namespace-less file
+    /// is directory-scoped (no doubled file stem); the braced `namespace X { }`
+    /// form keeps its namespace scope; top-level functions keep the file scope.
+    #[test]
+    fn types_are_dir_scoped_outside_braced_namespaces() {
+        // Statement form: the declarations are root siblings of the
+        // `namespace_definition`, so they hang off the file MODULE.
+        let invoice = r#"<?php
+
+namespace App\Billing;
+
+class Invoice
+{
+    public function total()
+    {
+        return $this->round();
+    }
+
+    private function round()
+    {
+        return 1;
+    }
+}
+
+interface Payable
+{
+    public function pay();
+}
+"#;
+        let module = "src::Billing::Invoice";
+        let fp = parse_file(invoice, "src/Billing/Invoice.php", module, repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["src::Billing::Invoice"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::INTERFACE),
+            vec!["src::Billing::Payable"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec![
+                "src::Billing::Invoice::round",
+                "src::Billing::Invoice::total"
+            ]
+        );
+        assert!(
+            !fp.nav
+                .qname_by_id
+                .values()
+                .any(|q| q.contains("Invoice::Invoice") || q.contains("Invoice::Payable")),
+            "no qname doubles the file stem: {:?}",
+            fp.nav.qname_by_id.values().collect::<Vec<_>>()
+        );
+        // The MODULE keeps the full file qname, so the public class shares it
+        // under a different kind and NodeId, and the module still DEFINES it.
+        assert_eq!(qnames_of(&fp, node_kind::MODULE), vec![module]);
+        assert_eq!(qnames_of(&fp, node_kind::PACKAGE), vec!["App::Billing"]);
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, module);
+        assert_ne!(module_id, class_id);
+        assert_eq!(fp.nav.parent_of.get(&class_id), Some(&module_id));
+        assert!(fp.edges.iter().any(|e| e.from == module_id
+            && e.to == class_id
+            && e.category == edge_category::DEFINES));
+
+        // Namespace-less file: the class is directory-scoped, the top-level
+        // function keeps the file scope.
+        let legacy = r#"<?php
+
+class LegacyThing
+{
+    public function go()
+    {
+        return legacy_helper();
+    }
+}
+
+function legacy_helper()
+{
+    return 1;
+}
+"#;
+        let module = "src::Legacy::LegacyThing";
+        let fp = parse_file(legacy, "src/Legacy/LegacyThing.php", module, repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["src::Legacy::LegacyThing"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["src::Legacy::LegacyThing::go"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::FUNCTION),
+            vec!["src::Legacy::LegacyThing::legacy_helper"]
+        );
+
+        // Braced form: unchanged, the namespace scopes the type and is its
+        // nav parent.
+        let report = r#"<?php
+
+namespace App\Braced {
+    class Report
+    {
+        public function build()
+        {
+            return $this->sum();
+        }
+
+        private function sum()
+        {
+            return 2;
+        }
+    }
+}
+"#;
+        let fp = parse_file(
+            report,
+            "src/Braced/Report.php",
+            "src::Braced::Report",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["App::Braced::Report"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["App::Braced::Report::build", "App::Braced::Report::sum"]
+        );
+        let class_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "App::Braced::Report");
+        let pkg_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Braced");
+        assert_eq!(fp.nav.parent_of.get(&class_id), Some(&pkg_id));
+
+        // A file at the repo root has an empty directory scope: the bare name.
+        let fp = parse_file(
+            "<?php\nenum Kernel { case Boot; }\n",
+            "Kernel.php",
+            "Kernel",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::ENUM), vec!["Kernel"]);
     }
 
     #[test]
@@ -2272,7 +2514,7 @@ enum Color {
     case Green;
 }
 "#;
-        let fp = parse_file(source, "src/Types.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Types.php", "App::Types", repo()).unwrap();
         assert_eq!(
             fp.nav
                 .kind_by_id
@@ -2297,7 +2539,7 @@ enum Color {
 use App\Models\User;
 use Illuminate\Http\Request;
 "#;
-        let fp = parse_file(source, "src/Controller.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Controller.php", "App::Controller", repo()).unwrap();
         assert_eq!(fp.imports.len(), 2);
     }
 
@@ -2314,7 +2556,13 @@ class UserController {
     public function update() {}
 }
 "#;
-        let fp = parse_file(source, "src/UserController.php", "App::Controller", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/UserController.php",
+            "App::Controller::UserController",
+            repo(),
+        )
+        .unwrap();
         let route_names: Vec<&str> = fp
             .nav
             .name_by_id
@@ -2336,7 +2584,7 @@ class C {
     public function health() {}
 }
 "#;
-        let fp = parse_file(source, "src/C.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/C.php", "App::C", repo()).unwrap();
         let route_names: Vec<&str> = fp
             .nav
             .name_by_id
@@ -2363,7 +2611,13 @@ class UserController {
     public function create() {}
 }
 "#;
-        let fp = parse_file(source, "src/UserController.php", "App::Controller", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/UserController.php",
+            "App::Controller::UserController",
+            repo(),
+        )
+        .unwrap();
         let route_names: Vec<&str> = fp
             .nav
             .name_by_id
@@ -2398,7 +2652,13 @@ class UserController {
     public function show(int $id) {}
 }
 "#;
-        let fp = parse_file(source, "src/UserController.php", "App", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/UserController.php",
+            "App::UserController",
+            repo(),
+        )
+        .unwrap();
         let class_id =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "App::UserController");
         let handled: Vec<NodeId> = fp
@@ -2658,7 +2918,7 @@ class Svc {
     }
 }
 "#;
-        let fp = parse_file(source, "src/Svc.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Svc.php", "App::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "non-`/` first arg must not emit a Slim route");
     }
@@ -2674,7 +2934,7 @@ class Svc {
     }
 }
 "#;
-        let fp = parse_file(source, "src/Svc.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Svc.php", "App::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "method-name suffix must not match `->get(`");
     }
@@ -2690,7 +2950,7 @@ class Service {
     private function validate(): void {}
 }
 "#;
-        let fp = parse_file(source, "src/Service.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Service.php", "App::Service", repo()).unwrap();
         let self_calls: Vec<_> = fp
             .calls
             .iter()
@@ -2724,7 +2984,13 @@ class HomeController {
     }
 }
 "#;
-        let fp = parse_file(source, "src/HomeController.php", "App::Http", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "src/HomeController.php",
+            "App::Http::HomeController",
+            repo(),
+        )
+        .unwrap();
         let bases = attr_bases(&fp);
         assert_eq!(
             bases,
@@ -2742,7 +3008,7 @@ function f(\App\Services\Greeter $g, string $name) {
     return $g->greet($name);
 }
 "#;
-        let fp = parse_file(source, "src/f.php", "App::Http", repo()).unwrap();
+        let fp = parse_file(source, "src/f.php", "App::Http::f", repo()).unwrap();
         let bases = attr_bases(&fp);
         assert_eq!(
             bases,
@@ -2760,7 +3026,7 @@ class Service {
     }
 }
 "#;
-        let fp = parse_file(source, "src/Service.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Service.php", "App::Service", repo()).unwrap();
         let bases = attr_bases(&fp);
         assert_eq!(
             bases,
@@ -2796,7 +3062,7 @@ class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/ApiClient.php", "App::ApiClient", repo()).unwrap();
         assert_eq!(
             endpoint_names(&fp),
             vec!["GET /api/users/${…}".to_string()],
@@ -2826,7 +3092,7 @@ class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/ApiClient.php", "App::ApiClient", repo()).unwrap();
         assert_eq!(
             endpoint_names(&fp),
             vec![
@@ -2852,7 +3118,7 @@ class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "src/ApiClient.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/ApiClient.php", "App::ApiClient", repo()).unwrap();
         let routes: Vec<&String> = fp
             .nav
             .name_by_id
@@ -2882,7 +3148,7 @@ class Cache {
     }
 }
 "#;
-        let fp = parse_file(source, "src/Cache.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/Cache.php", "App::Cache", repo()).unwrap();
         assert!(
             endpoint_names(&fp).is_empty(),
             "a non-path string argument must not become an ENDPOINT"
@@ -2903,7 +3169,7 @@ function fetch() {
     return $client->get('/api/users');
 }
 "#;
-        let fp = parse_file(source, "src/boot.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/boot.php", "App::boot", repo()).unwrap();
         assert_eq!(
             endpoint_names(&fp),
             vec!["GET /api/users".to_string()],
@@ -2921,7 +3187,7 @@ function push($id) {
     return curl_exec($ch);
 }
 "#;
-        let fp = parse_file(source, "src/push.php", "App", repo()).unwrap();
+        let fp = parse_file(source, "src/push.php", "App::push", repo()).unwrap();
         assert_eq!(
             endpoint_names(&fp),
             vec!["PUT /api/users".to_string()],
@@ -2977,8 +3243,10 @@ class UserController
             vec!["LoggerInterface", "UserRepository"]
         );
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
-        let class_qname = format!("{module}::UserController");
-        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &class_qname);
+        // LB.7b: the class is directory-scoped, so it shares the file
+        // MODULE's qname (no doubled `UserController::UserController`).
+        let class_qname = "src::Controller::UserController";
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, class_qname);
         for r in fp
             .refs
             .iter()
@@ -3013,7 +3281,13 @@ namespace App\Jobs {
     }
 }
 "#;
-        let fp = parse_file(source, "app/Jobs/SendInvoiceJob.php", "app::Jobs", repo()).unwrap();
+        let fp = parse_file(
+            source,
+            "app/Jobs/SendInvoiceJob.php",
+            "app::Jobs::SendInvoiceJob",
+            repo(),
+        )
+        .unwrap();
         assert_eq!(injects_targets(&fp), vec!["Mailer"]);
         let pkg_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Jobs");
         assert!(
@@ -3147,7 +3421,7 @@ class User extends Model
             GRAPH_TYPE,
             repo(),
             node_kind::CLASS,
-            "app::Models::User::User",
+            "app::Models::User",
         );
         assert!(has_edge(&fp, class_id, entity_id("User"), edge_category::DEFINES.0));
         assert!(
@@ -3258,7 +3532,7 @@ class ReportController
                 "data_entity:sql:User",
             ]
         );
-        let m = |name: &str| method_id(&format!("app::Http::ReportController::ReportController::{name}"));
+        let m = |name: &str| method_id(&format!("app::Http::ReportController::{name}"));
         let ad = edge_category::ACCESSES_DATA.0;
         assert!(has_edge(&fp, m("active"), entity_id("User"), ad));
         assert!(has_edge(&fp, m("billing"), entity_id("Invoice"), ad));
@@ -3339,7 +3613,7 @@ class Flight extends Model
         assert_eq!(data_entity::table_of(&nodes[0].cells), Some("flights_v2".to_string()));
         assert!(has_edge(
             &fp,
-            method_id("app::Reports::Reports::recent"),
+            method_id("app::Reports::recent"),
             entity_id("Flight"),
             edge_category::ACCESSES_DATA.0
         ));
@@ -3366,7 +3640,7 @@ class AuditService
         assert_eq!(entity_names(&fp), vec!["data_entity:sql:audit_log"]);
         assert!(has_edge(
             &fp,
-            method_id("app::Services::AuditService::AuditService::log"),
+            method_id("app::Services::AuditService::log"),
             entity_id("audit_log"),
             edge_category::ACCESSES_DATA.0
         ));

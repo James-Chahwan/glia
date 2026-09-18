@@ -1,0 +1,66 @@
+{
+  "framework": "php-dir-qnames",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.7b identity fixture (legacy-only, no matrix cell). A PHP top-level type in a namespace-less file or under the statement form `namespace X;` is directory-scoped (the LB.2 rule): HEAD doubles the file stem there (src::Billing::Invoice::Invoice::total, src::Legacy::LegacyThing::LegacyThing::go). The braced `namespace X { }` form does not double and keeps its namespace scope (App::Braced::Report): a braced file may hold several namespaces, and directory scope would merge their same-named classes. Top-level functions keep the file scope (control).",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "src::Billing::Invoice::total"
+    },
+    {
+      "kind": "INTERFACE",
+      "name": "src::Billing::Payable",
+      "note": "a secondary top-level type is directory-scoped too"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::Legacy::LegacyThing::go"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Legacy::LegacyThing::legacy_helper",
+      "note": "control: a top-level function keeps the file scope"
+    },
+    {
+      "kind": "METHOD",
+      "name": "App::Braced::Report::build",
+      "note": "control: the braced namespace form is unchanged"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Invoice::total",
+      "to": "Invoice::round",
+      "category": "CALLS",
+      "note": "control: $this-> call unchanged"
+    },
+    {
+      "from": "LegacyThing::go",
+      "to": "legacy_helper",
+      "category": "CALLS",
+      "note": "control: bare call to a top-level function"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "src::Billing::Invoice::Invoice"
+    },
+    {
+      "kind": "INTERFACE",
+      "name": "src::Billing::Invoice::Payable"
+    },
+    {
+      "kind": "CLASS",
+      "name": "src::Legacy::LegacyThing::LegacyThing"
+    },
+    {
+      "kind": "CLASS",
+      "name": "src::Braced::Report",
+      "note": "the braced form must not move to directory scope"
+    }
+  ]
+}
