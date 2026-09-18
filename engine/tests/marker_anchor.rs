@@ -134,7 +134,8 @@ fn csharp_data_driven_client_is_anchored_post_cache() {
 
 #[test]
 fn ws_eventbus_and_graphql_markers_are_owned_or_module_contained() {
-    // websocket: client inside connectChat, handler at package level.
+    // websocket: client inside connectChat; LA.18a: the gorilla handler is the
+    // `upgrader.Upgrade(` call inside ServeWs, not the package-level Upgrader.
     let m = build(&[
         "xcut-websocket-ws_connects/client",
         "xcut-websocket-ws_connects/server",
@@ -142,21 +143,16 @@ fn ws_eventbus_and_graphql_markers_are_owned_or_module_contained() {
     let ws_client = node_id(&m, node_kind::WS_CLIENT, "ws_client:/ws");
     let ws_handler = node_id(&m, node_kind::WS_HANDLER, "ws:ws");
     let connect = node_id(&m, node_kind::FUNCTION, "chat::connectChat");
-    let hub = node_id(&m, node_kind::MODULE, "hub");
+    let serve = node_id(&m, node_kind::FUNCTION, "hub::ServeWs");
     assert!(has_edge(&m, connect, ws_client, edge_category::USES));
-    assert!(has_edge(&m, hub, ws_handler, edge_category::CONTAINS));
-    assert!(
-        !m.all_edges()
-            .any(|e| e.from == ws_handler && e.category == edge_category::HANDLED_BY),
-        "the Upgrader needle is outside every function"
-    );
+    assert!(has_edge(&m, ws_handler, serve, edge_category::HANDLED_BY));
     assert_eq!(
         positions(&m, ws_client),
         vec![r#"{"file":"chat.ts","start_line":2,"end_line":2}"#.to_string()]
     );
     assert_eq!(
         positions(&m, ws_handler),
-        vec![r#"{"file":"hub.go","start_line":8,"end_line":8}"#.to_string()]
+        vec![r#"{"file":"hub.go","start_line":15,"end_line":15}"#.to_string()]
     );
 
     // eventbus: emitter USES, handler HANDLED_BY the enclosing function.

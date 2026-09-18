@@ -1,0 +1,54 @@
+{
+  "framework": "xcut-websocket-client-forms",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "expect_nodes": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/ws/chat",
+      "note": "static tail of the concatenation"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/ws/admin",
+      "note": "template literal after its ${base} head"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/ws/chat",
+      "to": "ws:/ws/chat",
+      "category": "WS_CONNECTS",
+      "note": "exact"
+    },
+    {
+      "from": "ws_client:/ws/admin",
+      "to": "ws:/ws/admin",
+      "category": "WS_CONNECTS",
+      "note": "exact"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:ws://",
+      "note": "PRECISION: a scheme fragment is never a path"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:url",
+      "note": "a variable name is never a path"
+    },
+    {
+      "from": "ws_client:/ws/chat",
+      "to": "ws:/ws/admin",
+      "category": "WS_CONNECTS",
+      "note": "segment-aware pairing keeps siblings apart"
+    }
+  ],
+  "note": "LA.18 (programme A5.9) client-side forms: a string concatenation whose static tail is the path, a template literal whose dynamic head is the host, and a bare variable (unreadable). Server is FastAPI with both endpoints. Baseline 2026-09-18 (HEAD 7a4883b): only the FIRST `new WebSocket(` is read and it mints the garbage `ws_client:ws://`; there is no Python handler."
+}

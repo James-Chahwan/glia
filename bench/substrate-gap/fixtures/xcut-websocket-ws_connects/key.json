@@ -9,16 +9,16 @@
   "note": "Cell binding: WS_CLIENT is the TypeScript client and WS_HANDLER the Go server. `ws` scopes both kinds, so both rows grade off the same pair — which is the honest reading: one fixture proves the same connect for both.",
   "expect_nodes": [
     {"kind": "WS_CLIENT", "name": "/ws", "note": "TS new WebSocket(ws://.../ws)"},
-    {"kind": "WS_HANDLER", "name": "ws", "note": "Go gorilla websocket.Upgrader handler"}
+    {"kind": "WS_HANDLER", "name": "ws", "note": "Go gorilla `upgrader.Upgrade(` handler (generic name: the path lives on the HTTP route)"}
   ],
   "expect_edges": [
     {"from": "/ws", "to": "ws:ws", "category": "WS_CONNECTS", "note": "WS_CLIENT -> WS_HANDLER cross-graph pairing"},
     {"from": "chat::connectChat", "to": "ws_client:/ws", "category": "USES", "note": "A5.8: `new WebSocket(` sits inside connectChat, which USES the client"},
-    {"from": "hub", "to": "ws:ws", "category": "CONTAINS", "note": "A5.8: the needle is the package-level `var upgrader = websocket.Upgrader{`; no function encloses it, so the marker falls back to a structural edge from its module"}
+    {"from": "ws:ws", "to": "hub::ServeWs", "category": "HANDLED_BY", "note": "LA.18a: the gorilla needle is the `upgrader.Upgrade(` call inside ServeWs (no longer the package-level `var upgrader = websocket.Upgrader{`), so the handler is HANDLED_BY the upgrading function"}
   ],
   "expect_cells": [
     {"kind": "WS_CLIENT", "node": "ws_client:/ws", "cell": "POSITION", "contains": "\"file\":\"chat.ts\",\"start_line\":2,\"end_line\":2", "note": "A5.8: 0-indexed `new WebSocket(` line"},
-    {"kind": "WS_HANDLER", "node": "ws:ws", "cell": "POSITION", "contains": "\"file\":\"hub.go\",\"start_line\":8,\"end_line\":8", "note": "A5.8: 0-indexed `websocket.Upgrader{` line"}
+    {"kind": "WS_HANDLER", "node": "ws:ws", "cell": "POSITION", "contains": "\"file\":\"hub.go\",\"start_line\":15,\"end_line\":15", "note": "LA.18a: 0-indexed `upgrader.Upgrade(` line"}
   ],
   "forbid": [
     {"from": "hub::ServeWs", "to": "ws:ws", "category": "CONTAINS", "note": "A5.8: the module-fallback edge comes from the MODULE, never from a neighbouring function"}

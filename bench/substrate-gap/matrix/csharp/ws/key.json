@@ -1,0 +1,40 @@
+{
+  "framework": "csharp-signalr",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "csharp/ws"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/hubs/chat",
+      "note": "MapHub<ChatHub>(\"/hubs/chat\")"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/hubs/chat",
+      "note": "HubConnectionBuilder().withUrl(\"/hubs/chat\")"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/hubs/chat",
+      "to": "ws:/hubs/chat",
+      "category": "WS_CONNECTS",
+      "note": "exact hub path"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:ws",
+      "note": "the hub path is readable; no generic fallback node"
+    }
+  ],
+  "note": "LA.18 (programme A5.9). ASP.NET Core SignalR: `app.MapHub<ChatHub>(\"/hubs/chat\")` mounts the hub; the browser client connects with `new signalR.HubConnectionBuilder().withUrl(\"/hubs/chat\")`. The hub path is the join key. Baseline 2026-09-18 (HEAD 7a4883b): websocket.rs has no SignalR needle on either side, so no WS_* node and no pairing; cell reads none."
+}

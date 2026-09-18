@@ -200,8 +200,12 @@ pub(crate) fn apply_cross_cutting_extractors(
     ));
     run!(cli::extract_cli_command_nodes(source, module_id, repo));
     run!(cli::extract_cli_invocation_nodes(source, module_id, repo));
-    run_marked!(websocket::extract_ws_handler_nodes(source, module_id, repo));
-    run_marked!(websocket::extract_ws_client_nodes(source, module_id, repo));
+    run_marked!(websocket::extract_ws_handler_nodes(
+        source, path, module_id, repo
+    ));
+    run_marked!(websocket::extract_ws_client_nodes(
+        source, path, module_id, repo
+    ));
     run_marked!(eventbus::extract_event_emitter_nodes(source, module_id, repo));
     run_marked!(eventbus::extract_event_handler_nodes(source, module_id, repo));
     run_marked!(graphql::extract_graphql_operation_nodes(source, module_id, repo));

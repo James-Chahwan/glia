@@ -1,0 +1,57 @@
+{
+  "framework": "java-spring-websocket",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "java/ws"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/notifications",
+      "note": "@ServerEndpoint value"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/echo",
+      "note": "addHandler(handler, \"/echo\") — argument #1"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/notifications",
+      "note": "second `new WebSocket(` in the file, template literal"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/echo",
+      "to": "ws:/echo",
+      "category": "WS_CONNECTS",
+      "note": "exact path"
+    },
+    {
+      "from": "ws_client:/notifications",
+      "to": "ws:/notifications",
+      "category": "WS_CONNECTS",
+      "note": "exact path"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/echo",
+      "to": "ws:/notifications",
+      "category": "WS_CONNECTS",
+      "note": "paths stay apart"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:*",
+      "note": "setAllowedOrigins(\"*\") is not a path"
+    }
+  ],
+  "note": "LA.18 (programme A5.9). Two Java server shapes: JSR-356 `@ServerEndpoint(\"/notifications\")` and Spring `registry.addHandler(new EchoHandler(), \"/echo\")` (the path is argument #1). The browser client opens both, the second through a template literal, which the old first-occurrence scan never reached. Baseline 2026-09-18 (HEAD 7a4883b): no Java needle exists; only the first `new WebSocket(` of the client file is read; cell reads none."
+}
