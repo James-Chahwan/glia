@@ -114,6 +114,12 @@ pub fn parse_file(
             acc.client_endpoints, file_rel_path
         );
     }
+    if acc.window_snaps > 0 {
+        eprintln!(
+            "[rust-routes] verb windows snapped to a char boundary: {} in {}",
+            acc.window_snaps, file_rel_path
+        );
+    }
     if acc.macro_calls > 0 && rust_debug_enabled() {
         eprintln!(
             "[rust-macro-calls] {file_rel_path}: {} call site(s) in {} macro invocation(s)",
@@ -148,6 +154,9 @@ struct Acc {
     macro_calls: usize,
     /// Macro invocations whose token tree was scanned, nested ones included.
     macro_invocations: usize,
+    /// Verb-chain windows whose end fell inside a multibyte char and was
+    /// snapped down to a char boundary (LA.25b `[rust-routes]` marker).
+    window_snaps: usize,
 }
 
 /// `GLIA_RUST_DEBUG=1` turns on the `[rust-macro-calls]` marker, read once. Off
@@ -680,7 +689,13 @@ fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Ac
         // `.at("/p", get(h).post(h2))`) or chained after (Tide / Salvo:
         // `.at("/p").get(h).post(h2)`). One combined window catches both.
         let in_args_start = j + 1;
-        let win_end = (after + VERB_CHAIN_WINDOW).min(source.len());
+        // The window end is a raw byte offset: snap it down so a multibyte
+        // char straddling the cut can't panic the slice (and drop the file).
+        let raw_end = (after + VERB_CHAIN_WINDOW).min(source.len());
+        let win_end = source.floor_char_boundary(raw_end);
+        if win_end != raw_end {
+            acc.window_snaps += 1;
+        }
         let window = &source[in_args_start..win_end];
 
         for verb in HTTP_VERBS {
@@ -1581,6 +1596,44 @@ fn run(items: &[&str]) {
         let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
         let names = route_names(&fp);
         assert!(names.is_empty(), "non-`/` `.at(...)` args must not emit routes");
+    }
+
+    /// LA.25b — the verb window after a Tide / Poem `.at("/p")` or a Salvo
+    /// `Router::with_path("/p")` ends `VERB_CHAIN_WINDOW` bytes past the
+    /// anchor's `)`. A 4-byte char starting at `after + 255` straddles that
+    /// cut; before the snap the slice panicked and per-file isolation dropped
+    /// the whole file.
+    #[test]
+    fn at_chain_window_cut_inside_a_multibyte_char() {
+        const WIDE: char = '\u{1F600}';
+        let cases = [
+            ("app.at(\"/health\")", ".get(health)", "GET /health"),
+            ("Router::with_path(\"/users\")", ".get(list)", "GET /users"),
+        ];
+        for (anchor, chain, route) in cases {
+            let head = format!("fn app() {{\n    {anchor}");
+            let after = head.len();
+            assert_eq!(head.as_bytes()[after - 1], b')');
+            let body = format!("{head}{chain};\n    // ");
+            let pad = "x".repeat(after + VERB_CHAIN_WINDOW - 1 - body.len());
+            let source = format!("{body}{pad}{WIDE}\n}}\n");
+            assert_eq!(source.find(WIDE), Some(after + 255), "{anchor}");
+            assert!(!source.is_char_boundary(after + VERB_CHAIN_WINDOW));
+
+            let fp = parse_file(&source, "src/main.rs", "myapp", repo());
+            assert!(fp.is_ok(), "{anchor}: parse failed");
+            let fp = fp.unwrap();
+            assert!(
+                route_names(&fp).contains(&route),
+                "{anchor}: {route} missing, got {:?}",
+                route_names(&fp)
+            );
+
+            let mut acc = Acc::default();
+            scan_at_path_chains(&source, repo(), &mut acc);
+            scan_salvo_routes(&source, repo(), &mut acc);
+            assert_eq!(acc.window_snaps, 1, "{anchor}: one window snapped");
+        }
     }
 
     fn endpoint_names(fp: &FileParse) -> Vec<&str> {

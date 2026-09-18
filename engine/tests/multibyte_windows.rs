@@ -12,6 +12,10 @@
 //! LA.22c adds a `.clj` arm: every needle is also written as Clojure, plus
 //! [`CLJ_NEEDLES`] for the Clojure parser's own text scan, whose reitit
 //! look-back sliced `&source[i - 32..i]` before every `"`.
+//!
+//! LA.25b adds a `.rs` arm: every needle is also written as Rust, plus
+//! [`RS_NEEDLES`] for the Rust parser's Tide / Poem / Salvo path-anchor scan,
+//! whose verb window sliced `&source[..after + 256]` past the anchor's `)`.
 
 use std::path::Path;
 
@@ -85,8 +89,17 @@ const CLJ_NEEDLES: &[&str] = &[
     "(client/get \"http://api/users\" {:headers {}})",
 ];
 
+/// The Rust parser's path-anchor needles (LA.25b), written as `.rs` only. Each
+/// ends on the anchor call's `)`, where the verb window opens, so the
+/// needle-end pads of [`cut_pads`] land a char on the window's cut.
+const RS_NEEDLES: &[&str] = &[
+    "app.at(\"/health\")",
+    "Route::new().at(\"/api/users\", get(list_users))",
+    "Router::with_path(\"/users\")",
+];
+
 const WIDTHS: [usize; 5] = [32, 64, 128, 256, 512];
-const EXTS: [&str; 3] = ["ts", "py", "clj"];
+const EXTS: [&str; 4] = ["ts", "py", "clj", "rs"];
 const WIDE: char = '\u{1F600}';
 
 /// Pads `k` for which a `W`-wide window anchored at the needle's start or end
@@ -109,8 +122,11 @@ fn cut_pads(needle_len: usize) -> Vec<usize> {
 
 /// Writes the sweep tree under `root`; returns the file count.
 fn write_sweep(root: &Path) -> usize {
-    let arms: [(&str, &[&str], &[&str]); 2] =
-        [("n", NEEDLES, &EXTS), ("c", CLJ_NEEDLES, &["clj"])];
+    let arms: [(&str, &[&str], &[&str]); 3] = [
+        ("n", NEEDLES, &EXTS),
+        ("c", CLJ_NEEDLES, &["clj"]),
+        ("r", RS_NEEDLES, &["rs"]),
+    ];
     let mut files = 0;
     for (tag, needles, exts) in arms {
         files += write_arm(root, tag, needles, exts);
@@ -153,11 +169,12 @@ fn extractor_windows_never_cut_a_multibyte_char() {
 
     let r = generate_one(repo.to_str().unwrap()).unwrap();
     eprintln!(
-        "[multibyte-sweep] files={files} needles={} widths=32,64,128,256,512 parse_errors={} clj_needles={} exts={}",
+        "[multibyte-sweep] files={files} needles={} widths=32,64,128,256,512 parse_errors={} clj_needles={} exts={} rs_needles={}",
         NEEDLES.len(),
         r.parse_errors.len(),
         CLJ_NEEDLES.len(),
         EXTS.join(","),
+        RS_NEEDLES.len(),
     );
     assert!(
         r.parse_errors.is_empty(),
