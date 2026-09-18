@@ -3644,6 +3644,7 @@
     "fixtures/http-dart-nav-precision",
     "fixtures/http-nav-route-precision",
     "fixtures/http-placeholder-fold",
+    "fixtures/imports-local-filter",
     "fixtures/java-spring-kafka-msgtype",
     "fixtures/k8s-multidoc-cron",
     "fixtures/php-laravel-prefix",
