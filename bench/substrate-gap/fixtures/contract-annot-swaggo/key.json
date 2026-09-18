@@ -1,0 +1,20 @@
+{
+  "framework": "contract-annot-swaggo",
+  "language": "go",
+  "dirs": ["."],
+  "note": "LA.15 (programme A10.11). swaggo doc-comment annotations: `// @Router /users/{id} [get]` declares method + path outright; @ID, @Summary, @Success/@Failure fill the ORIGIN. Health has an ordinary comment. Baseline 2026-09-18 (HEAD 7a4883b): ROUTE route:/users/:id exists, no DOC_SECTION, no DOCUMENTS.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "contract::users::GET:/users/{id}", "note": "@Router path + method"}
+  ],
+  "expect_edges": [
+    {"from": "contract::users::GET:/users/{id}", "to": "route:/users/:id", "category": "DOCUMENTS", "note": "placeholder-folded pairing through the contract-link matcher"}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "contract::users::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"source\":\"swaggo\"", "note": "framework discriminator"},
+    {"kind": "DOC_SECTION", "node": "contract::users::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "@Success and @Failure codes"},
+    {"kind": "DOC_SECTION", "node": "contract::users::GET:/users/{id}", "cell": "POSITION", "contains": "\"start_line\":10", "note": "0-indexed @Router line"}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "contract::users::GET:/health", "note": "PRECISION: an ordinary comment is not a swaggo block"}
+  ]
+}

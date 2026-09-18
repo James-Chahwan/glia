@@ -1,4 +1,4 @@
-//! LA.15a acceptance: OpenAPI annotations on a handler become contract ops on a
+//! LA.15a / LA.15b acceptance: OpenAPI annotations on a handler become contract ops on a
 //! REAL build of the committed substrate-gap fixtures.
 //!
 //! `grade.py` reads the installed wheel, so it cannot see this change until the
@@ -142,5 +142,62 @@ fn annotation_ops_document_their_routes() {
             "contract::users.controller::POST:/users"
         )
         .is_none()
+    );
+}
+
+/// LA.15b: swaggo and rswag DECLARE method + path themselves, so the op keys
+/// on no route and no owner; `link_contract_routes` pairs it with the gin /
+/// Rails ROUTE by placeholder folding (`{id}` against `:id`).
+#[test]
+fn path_declaring_annotations_document_routes() {
+    // swaggo: a `// @Router /users/{id} [get]` godoc block above a gin handler.
+    let m = build("contract-annot-swaggo");
+    let op = node(
+        &m,
+        node_kind::DOC_SECTION,
+        "contract::users::GET:/users/{id}",
+    );
+    let route = node(&m, node_kind::ROUTE, "route:/users/:id");
+    assert_eq!(documents(&m, op), vec![route]);
+    let origin = cell(&m, op, cell_type::ORIGIN);
+    for want in [
+        r#""provenance":"contract","source":"swaggo","method":"GET","path":"/users/{id}""#,
+        r#""operation_id":"getUser""#,
+        r#""responses":["200","404"]"#,
+    ] {
+        assert!(origin.contains(want), "{want} not in {origin}");
+    }
+    assert!(
+        cell(&m, op, cell_type::POSITION).contains(r#""start_line":10,"#),
+        "0-indexed @Router line"
+    );
+    assert!(
+        find(&m, node_kind::DOC_SECTION, "contract::users::GET:/health").is_none(),
+        "an ordinary comment is not a swaggo block"
+    );
+
+    // rswag: `path '/users/{id}' do` + `get '...' do` in a request spec under
+    // spec/. The ORIGIN is set at extraction, so the test-dir provenance pass
+    // leaves it `contract`.
+    let m = build("contract-annot-rswag");
+    let op = node(
+        &m,
+        node_kind::DOC_SECTION,
+        "contract::users_spec::GET:/users/{id}",
+    );
+    let route = node(&m, node_kind::ROUTE, "GET /users/:id");
+    assert_eq!(documents(&m, op), vec![route]);
+    let origin = cell(&m, op, cell_type::ORIGIN);
+    for want in [
+        r#""provenance":"contract","source":"rswag""#,
+        r#""operation_id":"getUser""#,
+        r#""responses":["200","404"]"#,
+    ] {
+        assert!(origin.contains(want), "{want} not in {origin}");
+    }
+    assert!(
+        find(&m, node_kind::ROUTE, "GET Retrieves a user").is_none()
+            && find(&m, node_kind::ROUTE, "route:Retrieves a user").is_none(),
+        "the spec's verb block is not a route"
     );
 }

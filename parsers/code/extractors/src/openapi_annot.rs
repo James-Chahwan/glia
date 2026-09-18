@@ -16,13 +16,22 @@
 //! them with ts_routes' own decorator helpers, because its routes carry no
 //! handler edge. A block with no key emits nothing and counts `unkeyed`.
 //!
+//! LA.15b, the path-declaring half: swaggo (`// @Router /users/{id} [get]` in a
+//! Go doc comment) and rswag (`path '/users/{id}' do` + `get '...' do` in an
+//! RSpec request spec) DECLARE method + path themselves, so they need no route
+//! and no owner — they are contract files written as comments / RSpec DSL. A
+//! swaggo `@BasePath` in the same file is joined onto every path, with the
+//! un-prefixed router path kept as `raw_path` for the pairing pass's retry.
+//!
 //! Parsers EXTRACT: this reads one file's text plus its own `FileParse`.
 
 use repo_graph_code_domain::{FileParse, cell_type, edge_category, node_kind};
 use repo_graph_core::{CellPayload, NodeId, RepoId};
 
 use crate::anchor;
-use crate::contracts::{ContractNodes, METHODS, esc, file_stem, operation_id_field, push_op};
+use crate::contracts::{
+    ContractNodes, METHODS, esc, file_stem, fold_server_base, operation_id_field, push_op,
+};
 use crate::ts_routes::{combine_nest_paths, extract_decorator_string};
 
 const SPRINGDOC: &str = "springdoc";
@@ -30,6 +39,11 @@ const SPRINGFOX: &str = "springfox";
 const SWASHBUCKLE: &str = "swashbuckle";
 const APIEXPLORER: &str = "aspnet-apiexplorer";
 const NESTJS: &str = "nestjs";
+const SWAGGO: &str = "swaggo";
+const RSWAG: &str = "rswag";
+
+/// What an rswag spec requires: rswag's own helper, or the generic names.
+const RSWAG_HELPERS: &[&str] = &["swagger_helper", "openapi_helper", "rswag"];
 
 /// `@nestjs/swagger` status shorthands.
 const NEST_SHORTHANDS: &[(&str, &str)] = &[
@@ -77,6 +91,8 @@ enum Syntax {
     Java,
     CSharp,
     Ts,
+    Go,
+    Ruby,
 }
 
 /// Which framework imports the file carries. An annotation name alone never
@@ -88,6 +104,8 @@ struct Gates {
     swashbuckle: bool,
     mvc: bool,
     nest: bool,
+    swaggo: bool,
+    rswag: bool,
 }
 
 /// What one block (or several merged blocks) declares about an operation.
@@ -130,9 +148,28 @@ impl Decl {
     }
 }
 
+/// One (method, path) an op is keyed on, and the line its POSITION names.
+/// `raw_path` differs from `path` only for a swaggo `@BasePath` join.
+struct Key {
+    method: String,
+    path: String,
+    raw_path: String,
+    line: u32,
+}
+
+/// One annotation block and, for the path-declaring frameworks, the keys it
+/// declares itself. `declared: None` keys the block off its owner's ROUTE
+/// (Java / C#) or its NestJS verb decorators, at the block's first `line`.
+struct Unit<'a> {
+    line: u32,
+    annots: Vec<Annot<'a>>,
+    declared: Option<Vec<Key>>,
+}
+
 struct Pending {
     method: String,
     path: String,
+    raw_path: String,
     line: u32,
     source: &'static str,
     decl: Decl,
@@ -149,7 +186,8 @@ struct FwStat {
 
 /// Emit one contract op per (method, path) an annotated handler declares.
 /// Empty unless `lang` is java / csharp / a TypeScript flavour AND the file
-/// imports a supported OpenAPI annotation package.
+/// imports a supported OpenAPI annotation package, or `lang` is go / ruby AND
+/// the file carries a swaggo `@Router` / an rswag spec's helper and `path`.
 pub fn extract_annotated_ops(
     source: &str,
     path: &str,
@@ -182,40 +220,69 @@ fn scan(
         "java" => Syntax::Java,
         "csharp" => Syntax::CSharp,
         "typescript" | "js" | "react" | "angular" => Syntax::Ts,
+        "go" => Syntax::Go,
+        "ruby" => Syntax::Ruby,
         _ => return (out, Vec::new()),
     };
-    let gates = Gates {
+    let g = Gates {
         springdoc: syn == Syntax::Java && source.contains("io.swagger.v3.oas.annotations"),
         springfox: syn == Syntax::Java && source.contains("io.swagger.annotations"),
         swashbuckle: syn == Syntax::CSharp && source.contains("Swashbuckle.AspNetCore.Annotations"),
         mvc: syn == Syntax::CSharp && source.contains("Microsoft.AspNetCore.Mvc"),
         nest: syn == Syntax::Ts && source.contains("@nestjs/swagger"),
+        swaggo: syn == Syntax::Go && (source.contains("@Router") || source.contains("@router")),
+        rswag: syn == Syntax::Ruby
+            && (source.contains("path '") || source.contains("path \""))
+            && RSWAG_HELPERS.iter().any(|h| source.contains(h)),
     };
-    if !(gates.springdoc || gates.springfox || gates.swashbuckle || gates.mvc || gates.nest) {
+    if !(g.springdoc || g.springfox || g.swashbuckle || g.mvc || g.nest || g.swaggo || g.rswag) {
         return (out, Vec::new());
     }
 
-    let owners = (syn != Syntax::Ts).then(|| anchor::build_owner_index(&fp.nodes, &fp.nav));
+    let units = match syn {
+        Syntax::Go => swaggo_units(source),
+        Syntax::Ruby => rswag_units(source),
+        _ => blocks(source, syn)
+            .into_iter()
+            .map(|b| Unit {
+                line: b.line,
+                annots: annotations(source.get(b.start..b.end).unwrap_or(""), syn, false),
+                declared: None,
+            })
+            .collect(),
+    };
+    let owners = matches!(syn, Syntax::Java | Syntax::CSharp)
+        .then(|| anchor::build_owner_index(&fp.nodes, &fp.nav));
     let mut stats: Vec<FwStat> = Vec::new();
     let mut pending: Vec<Pending> = Vec::new();
     let mut nest_prefix = String::new();
-    for b in blocks(source, syn) {
-        let text = source.get(b.start..b.end).unwrap_or("");
-        let annots = annotations(text, syn, false);
+    for u in units {
+        let annots = u.annots;
         if let Some(c) = annots.iter().find(|a| a.name == "Controller") {
             nest_prefix = extract_decorator_string(c.whole).unwrap_or_default();
         }
-        let Some((framework, decl)) = read_block(&annots, syn, gates) else {
+        let Some((framework, decl)) = read_block(&annots, syn, g) else {
             continue;
         };
         if decl.hidden {
             continue;
         }
-        let keys = match &owners {
-            Some(idx) => anchor::owner_of_line(idx, b.line)
-                .map(|owner| handled_routes(fp, owner))
-                .unwrap_or_default(),
-            None => nest_keys(&annots, &nest_prefix),
+        let keys = match u.declared {
+            Some(keys) => keys,
+            None => match &owners {
+                Some(idx) => anchor::owner_of_line(idx, u.line)
+                    .map(|owner| handled_routes(fp, owner))
+                    .unwrap_or_default(),
+                None => nest_keys(&annots, &nest_prefix),
+            }
+            .into_iter()
+            .map(|(method, path)| Key {
+                raw_path: path.clone(),
+                method,
+                path,
+                line: u.line,
+            })
+            .collect(),
         };
         let stat = match stats.iter().position(|s| s.framework == framework) {
             Some(i) => &mut stats[i],
@@ -233,18 +300,19 @@ fn scan(
             stat.unkeyed += 1;
             continue;
         }
-        for (method, route_path) in keys {
+        for k in keys {
             match pending
                 .iter_mut()
-                .find(|p| p.method == method && p.path == route_path)
+                .find(|p| p.method == k.method && p.path == k.path)
             {
                 Some(p) => p.decl.absorb(&decl),
                 None => {
                     stat.ops += 1;
                     pending.push(Pending {
-                        method,
-                        path: route_path,
-                        line: b.line,
+                        method: k.method,
+                        path: k.path,
+                        raw_path: k.raw_path,
+                        line: k.line,
                         source: framework,
                         decl: decl.clone(),
                     });
@@ -269,9 +337,9 @@ fn scan(
 /// The ORIGIN payload, keys in the documented order; optional keys are
 /// omitted when empty, never null.
 fn origin_json(p: &Pending) -> String {
-    let (m, path) = (esc(&p.method), esc(&p.path));
+    let (m, path, raw) = (esc(&p.method), esc(&p.path), esc(&p.raw_path));
     let mut o = format!(
-        r#"{{"provenance":"contract","source":"{}","method":"{m}","path":"{path}","raw_path":"{path}"{}"#,
+        r#"{{"provenance":"contract","source":"{}","method":"{m}","path":"{path}","raw_path":"{raw}"{}"#,
         p.source,
         operation_id_field(p.decl.operation_id.as_deref())
     );
@@ -445,6 +513,107 @@ fn read_block(annots: &[Annot<'_>], syn: Syntax, g: Gates) -> Option<(&'static s
             }
             Some((NESTJS, d))
         }
+        Syntax::Go => {
+            if !(g.swaggo && annots.iter().any(|a| a.name.eq_ignore_ascii_case("Router"))) {
+                return None;
+            }
+            for a in annots {
+                swag_attr(a, &mut d);
+            }
+            Some((SWAGGO, d))
+        }
+        Syntax::Ruby => {
+            // An rswag unit always opens with its verb call.
+            if !(g.rswag && annots.first().is_some_and(|a| METHODS.contains(&a.name))) {
+                return None;
+            }
+            for a in annots {
+                rswag_call(a, &mut d);
+            }
+            Some((RSWAG, d))
+        }
+    }
+}
+
+/// swaggo: `@Summary <text>`, `@ID <id>`, and `@Success` / `@Failure` /
+/// `@Response <code>[,<code>...] {<kind>} <Type>`. Attribute names are
+/// case-insensitive, as swag reads them; `@Router` is read into the unit's
+/// keys by [`swaggo_units`].
+fn swag_attr(a: &Annot<'_>, d: &mut Decl) {
+    let is = |n: &str| a.name.eq_ignore_ascii_case(n);
+    if is("Summary") {
+        let text = a.args.trim();
+        d.summary = d
+            .summary
+            .take()
+            .or_else(|| (!text.is_empty()).then(|| comment_text(text)));
+    } else if is("ID") {
+        d.operation_id = d
+            .operation_id
+            .take()
+            .or_else(|| a.args.split_whitespace().next().map(comment_text));
+    } else if is("Success") || is("Failure") || is("Response") {
+        let t = tokens(a.args);
+        let mut codes: Vec<String> = Vec::new();
+        let mut i = 0;
+        while let Some((0, tk)) = t.get(i) {
+            match tk {
+                Tok::Word("default") => codes.push("default".to_string()),
+                Tok::Word(_) => codes.extend(status_of(tk)),
+                Tok::P(b',') => {}
+                _ => break,
+            }
+            i += 1;
+        }
+        // `{object} User` / `{array} User` / `{string} string`
+        let ty = match (t.get(i), t.get(i + 1), t.get(i + 2), t.get(i + 3)) {
+            (
+                Some((_, Tok::P(b'{'))),
+                Some((_, Tok::Word(kind))),
+                Some((_, Tok::P(b'}'))),
+                Some((_, Tok::Word(ty))),
+            ) => Some(if *kind == "array" {
+                format!("{ty}[]")
+            } else {
+                ty.to_string()
+            }),
+            _ => None,
+        };
+        for code in codes {
+            d.response(Some(code), ty.clone());
+        }
+    }
+}
+
+/// Comment text as written, control characters blanked so `esc` can put it in
+/// a JSON string. Unlike [`unescape`], a backslash in a comment is literal.
+fn comment_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// rswag: the verb call's literal is the summary; `operationId '<id>'` and
+/// every `response '<code>'` inside the verb's scope fill the rest.
+fn rswag_call(a: &Annot<'_>, d: &mut Decl) {
+    let t = tokens(a.args);
+    let lit = || {
+        t.iter().find_map(|(_, tk)| match tk {
+            Tok::Str(s) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        })
+    };
+    match a.name {
+        "operationId" => d.operation_id = d.operation_id.take().or_else(lit),
+        "response" => {
+            let status = t
+                .iter()
+                .find(|(_, tk)| !matches!(tk, Tok::P(_)))
+                .and_then(|(_, tk)| status_of(tk));
+            d.response(status, None);
+        }
+        verb if METHODS.contains(&verb) => d.summary = d.summary.take().or_else(lit),
+        _ => {}
     }
 }
 
@@ -614,6 +783,181 @@ fn typeof_arg(args: &str) -> Option<&str> {
     args.get(open + 1..close)
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+// ----------------------------------------------------------------------
+// Path-declaring units: swaggo comment blocks, rswag spec scopes
+// ----------------------------------------------------------------------
+
+/// swaggo: one unit per run of consecutive `//` lines, its annotations being
+/// the lines that read `// @<Name> <args>`. Each `@Router <path> [<verb>]` is
+/// a declared key positioned on its own line; a same-file `@BasePath` is
+/// joined onto every path. A run with no `@Router` (the general-info block in
+/// main.go) is dropped by `read_block`.
+fn swaggo_units(source: &str) -> Vec<Unit<'_>> {
+    let base = source
+        .lines()
+        .filter_map(swag_line)
+        .find(|a| a.name.eq_ignore_ascii_case("BasePath"))
+        .map(|a| fold_server_base(a.args))
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    let mut cur: Option<Unit<'_>> = None;
+    for (n, raw) in source.lines().enumerate() {
+        if !raw.trim_start().starts_with("//") {
+            out.extend(cur.take().filter(|u| !u.annots.is_empty()));
+            continue;
+        }
+        let u = cur.get_or_insert_with(|| Unit {
+            line: n as u32,
+            annots: Vec::new(),
+            declared: Some(Vec::new()),
+        });
+        let Some(a) = swag_line(raw) else {
+            continue;
+        };
+        if a.name.eq_ignore_ascii_case("Router")
+            && let Some(key) = router_key(a.args, &base, n as u32)
+        {
+            u.declared.get_or_insert_default().push(key);
+        }
+        u.annots.push(a);
+    }
+    out.extend(cur.filter(|u| !u.annots.is_empty()));
+    out
+}
+
+/// `// @Name args` as an annotation (`args` trimmed), or `None` for any other
+/// line — an ordinary comment included.
+fn swag_line(line: &str) -> Option<Annot<'_>> {
+    let body = line.trim().strip_prefix("//")?.trim_start();
+    let rest = body.strip_prefix('@')?;
+    let k = rest
+        .bytes()
+        .position(|c| !(c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-')))
+        .unwrap_or(rest.len());
+    let name = rest.get(..k).filter(|n| !n.is_empty())?;
+    Some(Annot {
+        name,
+        args: rest.get(k..)?.trim(),
+        generic: "",
+        whole: body,
+    })
+}
+
+/// `@Router /users/{id} [get]`: the path must be absolute and the verb an
+/// OpenAPI one (case-insensitive); anything else keys nothing.
+fn router_key(args: &str, base: &str, line: u32) -> Option<Key> {
+    let mut words = args.split_whitespace();
+    let raw = words.next().filter(|p| p.starts_with('/'))?;
+    let verb = words
+        .next()?
+        .strip_prefix('[')?
+        .strip_suffix(']')?
+        .to_ascii_lowercase();
+    if !METHODS.contains(&verb.as_str()) {
+        return None;
+    }
+    let mut path = match base.trim_end_matches('/') {
+        "" => raw.to_string(),
+        b => format!("{b}/{}", raw.trim_start_matches('/')),
+    };
+    if !path.starts_with('/') {
+        path.insert(0, '/');
+    }
+    Some(Key {
+        method: verb.to_ascii_uppercase(),
+        path,
+        raw_path: raw.to_string(),
+        line,
+    })
+}
+
+/// rswag: an indentation-scoped scan. `path '<p>' do` opens a path scope;
+/// inside it `<verb> '<summary>' do` opens an op scope, which
+/// collects its `operationId` / `response` calls at any depth. A scope closes
+/// at the first later non-blank, non-comment line indented no deeper than its
+/// opener, so an op never bleeds into the next verb or path block.
+fn rswag_units(source: &str) -> Vec<Unit<'_>> {
+    let mut out = Vec::new();
+    let mut path: Option<(usize, String)> = None;
+    let mut op: Option<(usize, Unit<'_>)> = None;
+    for (n, raw) in source.lines().enumerate() {
+        let t = raw.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let ind = raw.len() - raw.trim_start().len();
+        if op.as_ref().is_some_and(|(i, _)| ind <= *i) {
+            out.extend(op.take().map(|(_, u)| u));
+        }
+        if path.as_ref().is_some_and(|(i, _)| ind <= *i) {
+            path = None;
+        }
+        let Some(call) = ruby_call(t) else {
+            continue;
+        };
+        if let Some((_, u)) = op.as_mut() {
+            if matches!(call.name, "operationId" | "response") {
+                u.annots.push(call);
+            }
+            continue;
+        }
+        let toks = tokens(call.args);
+        if !toks
+            .iter()
+            .any(|(dp, tk)| *dp == 0 && matches!(tk, Tok::Word("do")))
+        {
+            continue;
+        }
+        if call.name == "path" {
+            let lit = toks.iter().find(|(_, tk)| !matches!(tk, Tok::P(b'(')));
+            if let Some((_, Tok::Str(p))) = lit
+                && p.starts_with('/')
+            {
+                path = Some((ind, p.clone()));
+            }
+        } else if let Some((_, p)) = &path
+            && METHODS.contains(&call.name)
+        {
+            let key = Key {
+                method: call.name.to_ascii_uppercase(),
+                path: p.clone(),
+                raw_path: p.clone(),
+                line: n as u32,
+            };
+            op = Some((
+                ind,
+                Unit {
+                    line: n as u32,
+                    annots: vec![call],
+                    declared: Some(vec![key]),
+                },
+            ));
+        }
+    }
+    out.extend(op.map(|(_, u)| u));
+    out
+}
+
+/// A Ruby line that opens with a bare call, `name args` or `name(args)`, as an
+/// annotation; `None` for `obj.call`, `@ivar`, `:sym` and friends. Callers
+/// select on the name, so `x = y` or `end` parse but never match.
+fn ruby_call(t: &str) -> Option<Annot<'_>> {
+    let b = t.as_bytes();
+    let k = b
+        .iter()
+        .position(|&c| !(c.is_ascii_alphanumeric() || c == b'_'))
+        .unwrap_or(b.len());
+    if k == 0 || b[0].is_ascii_digit() || !matches!(b.get(k), None | Some(b' ' | b'\t' | b'(')) {
+        return None;
+    }
+    Some(Annot {
+        name: t.get(..k)?,
+        args: t.get(k..)?,
+        generic: "",
+        whole: t,
+    })
 }
 
 // ----------------------------------------------------------------------
@@ -1357,5 +1701,340 @@ export class UsersController {
             panic!("no ORIGIN")
         };
         assert!(j.contains(r#""responses":["200","404","500"]"#), "{j}");
+    }
+
+    /// The POSITION payload of the op whose qname is `qname`.
+    fn position_of(out: &ContractNodes, qname: &str) -> Option<String> {
+        let id = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)?;
+        out.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .find_map(|c| match &c.payload {
+                CellPayload::Json(j) if c.kind == cell_type::POSITION => Some(j.clone()),
+                _ => None,
+            })
+    }
+
+    const SWAGGO: &str = r#"package main
+
+import "github.com/gin-gonic/gin"
+
+// GetUser godoc
+// @Summary      Get a user
+// @ID           getUser
+// @Produce      json
+// @Success      200  {object}  User
+// @Failure      404  {object}  ErrorBody
+// @Router       /users/{id} [get]
+func GetUser(c *gin.Context) {
+	c.JSON(200, User{})
+}
+
+// Health is a plain handler with an ordinary comment.
+func Health(c *gin.Context) {
+	c.JSON(200, gin.H{"ok": true})
+}
+"#;
+
+    #[test]
+    fn swaggo_router_block_is_an_op() {
+        let (ops, stats) = run(SWAGGO, "users.go", "go", &FileParse::default());
+        assert_eq!(
+            ops,
+            vec![(
+                "contract::users::GET:/users/{id}".to_string(),
+                r#"{"provenance":"contract","source":"swaggo","method":"GET","path":"/users/{id}","raw_path":"/users/{id}","operation_id":"getUser","summary":"Get a user","responses":["200","404"],"response_types":{"200":"User","404":"ErrorBody"}}"#
+                    .to_string()
+            )]
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "swaggo",
+                ops: 1,
+                unkeyed: 0
+            }]
+        );
+        let (out, _) = scan(
+            SWAGGO,
+            "users.go",
+            "go",
+            &FileParse::default(),
+            module(),
+            REPO,
+        );
+        assert_eq!(
+            position_of(&out, "contract::users::GET:/users/{id}").as_deref(),
+            Some(r#"{"file":"users.go","start_line":10,"end_line":10}"#),
+            "POSITION is the 0-indexed @Router line"
+        );
+    }
+
+    #[test]
+    fn swaggo_multiple_router_lines() {
+        // One block, two @Router lines (one lower-case, swag reads attributes
+        // case-insensitively): two ops sharing the block's @ID and responses,
+        // each positioned on its own @Router line.
+        let src = SWAGGO.replace(
+            "// @Router       /users/{id} [get]\n",
+            "// @Router       /users/{id} [get]\n// @router       /members/{id} [HEAD]\n",
+        );
+        let (out, stats) = scan(
+            &src,
+            "users.go",
+            "go",
+            &FileParse::default(),
+            module(),
+            REPO,
+        );
+        let (ops, _) = run(&src, "users.go", "go", &FileParse::default());
+        let qnames: Vec<&str> = ops.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            vec![
+                "contract::users::GET:/users/{id}",
+                "contract::users::HEAD:/members/{id}"
+            ]
+        );
+        assert!(
+            ops[1].1.contains(r#""operation_id":"getUser""#),
+            "{}",
+            ops[1].1
+        );
+        assert!(
+            ops[1].1.contains(r#""responses":["200","404"]"#),
+            "{}",
+            ops[1].1
+        );
+        assert!(
+            position_of(&out, "contract::users::HEAD:/members/{id}")
+                .is_some_and(|p| p.contains(r#""start_line":11,"#))
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "swaggo",
+                ops: 2,
+                unkeyed: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn swaggo_basepath_same_file_joins_with_raw_path() {
+        // The general-info block sets @BasePath and has no @Router: it is not
+        // an op itself, and its base is joined onto the handler's path, with
+        // the router path kept as raw_path for the pairing pass's retry.
+        let src = SWAGGO.replace(
+            "import \"github.com/gin-gonic/gin\"\n",
+            "import \"github.com/gin-gonic/gin\"\n\n// @title    Users API\n// @BasePath /api/v1/\n",
+        );
+        let (ops, stats) = run(&src, "main.go", "go", &FileParse::default());
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0].0, "contract::main::GET:/api/v1/users/{id}");
+        assert!(
+            ops[0]
+                .1
+                .contains(r#""path":"/api/v1/users/{id}","raw_path":"/users/{id}""#),
+            "{}",
+            ops[0].1
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "swaggo",
+                ops: 1,
+                unkeyed: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn ordinary_go_comment_is_not_a_block() {
+        // `@Router` outside a comment passes the cheap gate but is no block;
+        // an ordinary comment is no annotation.
+        let src = "package main\n\nconst doc = \"@Router /x [get]\"\n\n// Health is a plain handler.\nfunc Health() {}\n";
+        let (ops, stats) = run(src, "health.go", "go", &FileParse::default());
+        assert!(ops.is_empty(), "{ops:?}");
+        assert!(stats.is_empty(), "{stats:?}");
+        // A @Router with no verb (or a non-OpenAPI one) keys nothing: counted
+        // unkeyed, never guessed.
+        let src = SWAGGO.replace("/users/{id} [get]", "/users/{id} [fetch]");
+        let (ops, stats) = run(&src, "users.go", "go", &FileParse::default());
+        assert!(ops.is_empty(), "{ops:?}");
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "swaggo",
+                ops: 0,
+                unkeyed: 1
+            }]
+        );
+        // Not Go: the same text in another language is not swaggo.
+        assert!(
+            run(SWAGGO, "users.ts", "typescript", &FileParse::default())
+                .1
+                .is_empty()
+        );
+    }
+
+    const RSWAG: &str = r#"require 'swagger_helper'
+
+RSpec.describe 'users', type: :request do
+  path '/users/{id}' do
+    get 'Retrieves a user' do
+      operationId 'getUser'
+      produces 'application/json'
+      parameter name: :id, in: :path, type: :string
+
+      response '200', 'user found' do
+        let(:id) { '1' }
+        run_test!
+      end
+
+      response '404', 'not found' do
+        let(:id) { 'missing' }
+        run_test!
+      end
+    end
+  end
+end
+"#;
+
+    #[test]
+    fn rswag_path_and_verb_scopes() {
+        let (ops, stats) = run(
+            RSWAG,
+            "spec/requests/users_spec.rb",
+            "ruby",
+            &FileParse::default(),
+        );
+        assert_eq!(
+            ops,
+            vec![(
+                "contract::users_spec::GET:/users/{id}".to_string(),
+                r#"{"provenance":"contract","source":"rswag","method":"GET","path":"/users/{id}","raw_path":"/users/{id}","operation_id":"getUser","summary":"Retrieves a user","responses":["200","404"]}"#
+                    .to_string()
+            )]
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "rswag",
+                ops: 1,
+                unkeyed: 0
+            }]
+        );
+        let (out, _) = scan(
+            RSWAG,
+            "spec/requests/users_spec.rb",
+            "ruby",
+            &FileParse::default(),
+            module(),
+            REPO,
+        );
+        assert!(
+            position_of(&out, "contract::users_spec::GET:/users/{id}")
+                .is_some_and(|p| p.contains(r#""start_line":4,"#)),
+            "POSITION is the 0-indexed verb line"
+        );
+    }
+
+    #[test]
+    fn rswag_scope_closes_on_dedent() {
+        // Two path blocks and two verbs under the first: each op keeps only
+        // its own operationId / responses, and the second path's verb never
+        // takes the first path.
+        let src = r#"require "swagger_helper"
+
+describe "Users API" do
+  path "/users/{id}" do
+    get "Retrieves a user" do
+      operationId "getUser"
+      response "200", "found" do
+        run_test!
+      end
+    end
+
+    delete "Deletes a user" do
+      response("204", "gone") do
+        run_test!
+      end
+    end
+  end
+
+  path "/users" do
+    post "Creates a user" do
+      operationId "createUser"
+      response "201", "created" do
+        run_test!
+      end
+    end
+  end
+end
+"#;
+        let (ops, stats) = run(src, "spec/users_spec.rb", "ruby", &FileParse::default());
+        let got: Vec<(&str, &str)> = ops.iter().map(|(q, o)| (q.as_str(), o.as_str())).collect();
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(got[0].0, "contract::users_spec::GET:/users/{id}");
+        assert!(
+            got[0].1.contains(
+                r#""operation_id":"getUser","summary":"Retrieves a user","responses":["200"]}"#
+            ),
+            "{}",
+            got[0].1
+        );
+        assert_eq!(got[1].0, "contract::users_spec::DELETE:/users/{id}");
+        assert!(
+            got[1]
+                .1
+                .ends_with(r#""summary":"Deletes a user","responses":["204"]}"#),
+            "{}",
+            got[1].1
+        );
+        assert!(!got[1].1.contains("operation_id"), "{}", got[1].1);
+        assert_eq!(got[2].0, "contract::users_spec::POST:/users");
+        assert!(
+            got[2].1.contains(
+                r#""operation_id":"createUser","summary":"Creates a user","responses":["201"]}"#
+            ),
+            "{}",
+            got[2].1
+        );
+        assert_eq!(
+            stats,
+            vec![FwStat {
+                framework: "rswag",
+                ops: 3,
+                unkeyed: 0
+            }]
+        );
+        // A verb block outside any path scope is a plain request spec, not an op.
+        let bare =
+            "require 'rswag'\ndescribe 'x' do\n  get 'list' do\n  end\nend\npath '/x' do\nend\n";
+        assert!(
+            run(bare, "spec/x_spec.rb", "ruby", &FileParse::default())
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rswag_without_gate_emits_nothing() {
+        let src = RSWAG.replace("require 'swagger_helper'", "require 'rails_helper'");
+        let (ops, stats) = run(
+            &src,
+            "spec/requests/users_spec.rb",
+            "ruby",
+            &FileParse::default(),
+        );
+        assert!(ops.is_empty(), "{ops:?}");
+        assert!(stats.is_empty(), "{stats:?}");
     }
 }
