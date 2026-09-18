@@ -288,7 +288,7 @@ into `leap-packets.json` with dependencies wired from the verifiers' notes; the 
   LA.31 tRPC POSITION; LA.32a gin ROUTE method + POSITION; LA.33 kafkajs-style callback consumers; LA.34 Dart bare
   self-calls; LA.35a/b Rust typed receivers (the LA.1b caveat row is narrowed to what stays blind, not deleted).
 
-### 7.4 Open after run 2 — decisions (recommendation first)
+### 7.3 Open after run 2 — decisions (recommendation first)
 
 1. Solidity keeps `contracts::Token::Token::transfer`: a source unit is Solidity's namespace (solc names it
    `contracts/Token.sol:Token`, and two files may both declare `contract Token`). **Keep.**
@@ -310,7 +310,7 @@ into `leap-packets.json` with dependencies wired from the verifiers' notes; the 
 9. LA.35b narrows LA.1b's Rust caveat row to what stays blind instead of deleting it. **Keep narrowed.**
 10. LA.33 keeps HANDLED_BY on the subscribing setup function and adds the edge to the bound callback. **Keep both.**
 
-### 7.5 Found by run 2, no packet yet
+### 7.4 Found by run 2, no packet yet
 
 Identity-shaped (B, if done): contract-op DOC_SECTION qnames `contract::<stem>::<op>` drop the directory, so two
 services' `openapi.yaml` ops collide; same-group same-stem files (`Widget.h` + `Widget.cpp`, `util.js` + `util.ts`,
@@ -329,7 +329,7 @@ Coverage: `.graphqls` files (Spring for GraphQL / gqlgen default) are never rout
 (`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is HTTP
 only).
 
-### 7.3 Spec-run hygiene
+### 7.5 Spec-run hygiene
 
 The spec agents were read-only on every repo, but three of them called the wheel's `generate()` on other repos, which
 wrote untracked, regenerable `.ai/repo-graph/` caches into quokka-stack (rewrote existing shards) and neuropil (a new
