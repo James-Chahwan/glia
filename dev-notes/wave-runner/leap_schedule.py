@@ -33,7 +33,9 @@ PROGRAMME = ROOT / "dev-notes" / "wave-packets.json"
 
 # Waves that have landed, by number. Empty until the leap starts; --verify
 # then guards that re-running the scheduler reproduces history.
-LANDED = {}
+LANDED = {
+    0: "L0.1 L0.3 L0.2 L0.6 L0.4 L0.5",
+}
 
 ITEM_RE = re.compile(r"^(L[A-G]\.\d+)$")
 
