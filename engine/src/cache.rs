@@ -97,12 +97,17 @@ pub struct ParseCache {
     /// Build identity this cache was written under (`CACHE_VERSION`). First
     /// serialized field, so it is the leading bincode string on disk.
     stamp: String,
-    /// Repo identity the cached parses were built under (`file://<repo_path>`,
-    /// the exact string fed to `RepoId::from_canonical`). Every cached
-    /// `FileParse` has that RepoId baked into its NodeIds, but the per-file
-    /// content hash can't see it — so a path-spelling change (`.` vs absolute)
-    /// or a moved repo must discard the cache, or reused nodes silently carry
-    /// the old identity (audit 2026-06-10 #2).
+    /// Repo identity key the cached parses were built under — the exact string
+    /// fed to `RepoId::from_canonical`: `git:<remote>[/<rel>]`,
+    /// `gitdir:<name>[/<rel>]` or `dir:<basename>`
+    /// (`repo_graph_code_domain::walk_gating::repo_identity`, LB.1). Every
+    /// cached `FileParse` has that RepoId baked into its NodeIds, but the
+    /// per-file content hash can't see it — so a cache pointed at another
+    /// identity must discard, or reused nodes silently carry the old one
+    /// (audit 2026-06-10 #2). The key is path-independent, so a re-spelled
+    /// path (`.` vs absolute), a moved checkout or a second clone of one remote
+    /// keeps its cache. (Until LB.1 this held `file://<repo_path>`, and any
+    /// respelling discarded a valid sidecar.)
     repo_canonical: String,
     /// `go.mod` module path the cached parses were built under. It changes how
     /// every `.go` file parses (internal-vs-library imports, WP-G) without
@@ -131,15 +136,17 @@ impl ParseCache {
     }
 
     /// Discard every entry if the build context differs from the one the cache
-    /// was written under, then adopt the new context. Per-file content hashes
-    /// can't see either value, so a mismatch means every entry is suspect.
-    /// Called at the top of each build — covers the disk sidecar AND a
-    /// long-lived in-memory cache (neuropil) being pointed at a different repo.
+    /// was written under, then adopt the new context. The context is the repo
+    /// identity KEY (not its path — see `repo_canonical`) plus the go.mod
+    /// module. Per-file content hashes can't see either value, so a mismatch
+    /// means every entry is suspect. Called at the top of each build — covers
+    /// the disk sidecar AND a long-lived in-memory cache (neuropil) being
+    /// pointed at a different repo.
     pub fn validate_context(&mut self, repo_canonical: &str, go_prefix: &str) {
         if self.repo_canonical != repo_canonical || self.go_prefix != go_prefix {
             if !self.entries.is_empty() {
                 eprintln!(
-                    "[incremental] build context changed (repo path or go.mod module), discarding {} cached parses",
+                    "[incremental] build context changed (repo identity or go.mod module), discarding {} cached parses",
                     self.entries.len()
                 );
             }
@@ -242,7 +249,7 @@ mod tests {
     /// thing that can vary between two of these is the order `entries` walks.
     fn filled(n: usize) -> ParseCache {
         let mut c = ParseCache::new();
-        c.validate_context("file:///repo/a13", "example.com/a13");
+        c.validate_context("dir:a13", "example.com/a13");
         for i in 0..n {
             c.put(format!("src/f{i:02}.rs"), i as u64, "rust", FileParse::default());
         }

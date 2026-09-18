@@ -18,6 +18,12 @@
 //! verdict from an [`IgnoreStack`], so the matcher and the precedence rules stay
 //! independent. Both consumers push/pop the same per-directory layers, so they
 //! agree on nested `.gitignore` files, negation, anchoring and globs too (A8.2).
+//!
+//! The same `.git` reading also answers "which repository is this?" for the
+//! build: [`repo_identity`] turns a checkout into a path-independent key (its
+//! normalised git remote, its git dir, or its directory name) that the engine
+//! hashes into the `RepoId`, so every NodeId survives a re-spelled path, a
+//! second clone, a linked worktree or a moved checkout (LB.1).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -331,6 +337,306 @@ pub fn nested_repo(dir: &Path) -> Option<Collapse> {
     }
 }
 
+/// Which rule produced a [`RepoIdentity`]. The string form is the `source=`
+/// field of the engine's `[repo-id]` marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentitySource {
+    /// `git:<normalised remote url>[/<path within the checkout>]`.
+    GitRemote,
+    /// A git checkout with no usable remote:
+    /// `gitdir:<main checkout dir name>[/<path within the checkout>]`.
+    GitLocal,
+    /// No `.git` anywhere up the ancestor chain: `dir:<basename>`.
+    Directory,
+}
+
+impl IdentitySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IdentitySource::GitRemote => "git-remote",
+            IdentitySource::GitLocal => "git-local",
+            IdentitySource::Directory => "dir",
+        }
+    }
+}
+
+/// A repo's path-independent identity: `key` is what the engine feeds to
+/// `RepoId::from_canonical`, `source` the rule that produced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoIdentity {
+    pub key: String,
+    pub source: IdentitySource,
+}
+
+/// Ancestor levels [`repo_identity`] climbs looking for a `.git` entry.
+const MAX_GIT_ANCESTORS: usize = 64;
+
+/// What a checkout IS, not where it sits. First rule that applies wins:
+///
+/// 1. **git remote** — the nearest `.git` up from `root` names a common git dir
+///    whose `config` has a remote: `origin`, else the first `[remote "…"]` in
+///    file order. Key `git:<normalise_remote_url>` plus `/<rel>` when `root` is
+///    a subdirectory of the checkout (`rel` is `/`-separated). Two clones of one
+///    remote, and every linked worktree of one clone, agree.
+/// 2. **git local** — a checkout with no remote: `gitdir:<name>` (+ `/<rel>`),
+///    where `name` is the main checkout's directory name (the common dir is
+///    shared by every worktree, so they agree), or the common dir's own name,
+///    minus `.git`, when it is not literally `.git` (a bare repo's worktree, a
+///    submodule's `.git/modules/<name>`).
+/// 3. **directory** — no `.git` anywhere up the chain: `dir:<basename>`.
+///
+/// A `.git` DIRECTORY is the common git dir. A `.git` FILE is followed through
+/// its `gitdir:` line (relative to the file's directory unless absolute); a
+/// linked worktree's gitdir holds a `commondir` pointing at the shared dir, a
+/// submodule's does not and keeps its own `config`.
+///
+/// Consequences to know: a home directory that is itself a git repo (dotfiles)
+/// gives every non-git project under it a `git:<dotfiles remote>/<rel>` key —
+/// stable, but path-shaped. Mirror clones with different remotes (GitHub vs
+/// GitLab) get different keys. Two unrelated non-git directories with the same
+/// basename share a key when built separately; inside one multi-repo build the
+/// engine disambiguates them.
+///
+/// Best-effort and side-effect free: no git binary, no network, and any IO
+/// error falls through to the next rule. Userinfo in a remote URL (tokens,
+/// passwords) never reaches the key.
+pub fn repo_identity(root: &Path) -> RepoIdentity {
+    let abs = std::fs::canonicalize(root)
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf());
+    let Some((toplevel, common)) = find_git_checkout(&abs) else {
+        return RepoIdentity {
+            key: format!("dir:{}", path_name(&abs)),
+            source: IdentitySource::Directory,
+        };
+    };
+    let rel = rel_slash_path(&abs, &toplevel);
+    let with_rel = |base: String| {
+        if rel.is_empty() { base } else { format!("{base}/{rel}") }
+    };
+    if let Some(url) = common.as_deref().and_then(|c| remote_url(&c.join("config")))
+        && let Some(norm) = normalise_remote_url(&url)
+    {
+        return RepoIdentity {
+            key: with_rel(format!("git:{norm}")),
+            source: IdentitySource::GitRemote,
+        };
+    }
+    let name = match common.as_deref() {
+        Some(c) if c.file_name().is_some_and(|n| n == ".git") => {
+            c.parent().map(path_name).unwrap_or_else(|| path_name(&toplevel))
+        }
+        Some(c) => {
+            let own = path_name(c);
+            own.strip_suffix(".git").filter(|s| !s.is_empty()).map(str::to_string).unwrap_or(own)
+        }
+        None => path_name(&toplevel),
+    };
+    RepoIdentity {
+        key: with_rel(format!("gitdir:{name}")),
+        source: IdentitySource::GitLocal,
+    }
+}
+
+/// The nearest ancestor of `abs` (itself included) holding a `.git` entry, and
+/// the common git dir that entry leads to (`None` when a `.git` file cannot be
+/// resolved — the checkout is still a git checkout, just an unreadable one).
+fn find_git_checkout(abs: &Path) -> Option<(PathBuf, Option<PathBuf>)> {
+    for dir in abs.ancestors().take(MAX_GIT_ANCESTORS) {
+        let g = dir.join(".git");
+        let Ok(md) = std::fs::metadata(&g) else { continue };
+        if md.is_dir() {
+            return Some((dir.to_path_buf(), Some(normalise_dir(&g))));
+        }
+        if md.is_file() {
+            return Some((dir.to_path_buf(), common_dir_of_git_file(&g, dir)));
+        }
+    }
+    None
+}
+
+/// Follow a `.git` FILE: its `gitdir:` target, then that dir's `commondir`
+/// when present (linked worktrees), else the gitdir itself (submodules).
+fn common_dir_of_git_file(git_file: &Path, holder: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(git_file).ok()?;
+    let target = text.lines().find_map(|l| l.trim().strip_prefix("gitdir:"))?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let gitdir = holder.join(target);
+    let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(c) if !c.trim().is_empty() => gitdir.join(c.trim()),
+        _ => gitdir,
+    };
+    Some(normalise_dir(&common))
+}
+
+/// `canonicalize`, or a lexical `..` / `.` fold when the dir does not exist, so
+/// `<main>/.git/worktrees/wt2/../..` names `<main>/.git` either way.
+fn normalise_dir(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Last path component, or the whole path when it has none (`/`).
+fn path_name(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string_lossy().into_owned())
+}
+
+/// `abs` below `top`, `/`-separated, `""` at the top itself.
+fn rel_slash_path(abs: &Path, top: &Path) -> String {
+    let Ok(rel) = abs.strip_prefix(top) else {
+        return String::new();
+    };
+    rel.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The `url` of `[remote "origin"]` in a git config file, else of the first
+/// remote in file order. A minimal reader: section headers (`[remote "x"]` and
+/// the legacy `[remote.x]`), `key = value` lines, `#` / `;` comments, quoted
+/// values. `include` directives are not followed.
+fn remote_url(config: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config).ok()?;
+    let mut remotes: Vec<(String, String)> = Vec::new();
+    let mut section: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('[') {
+            let header = rest.split(']').next().unwrap_or("").trim();
+            section = remote_section_name(header);
+            continue;
+        }
+        let Some(remote) = section.as_ref() else { continue };
+        let Some((k, v)) = line.split_once('=') else { continue };
+        if !k.trim().eq_ignore_ascii_case("url") {
+            continue;
+        }
+        let value = config_value(v);
+        if !value.is_empty() && !remotes.iter().any(|(r, _)| r == remote) {
+            remotes.push((remote.clone(), value));
+        }
+    }
+    remotes
+        .iter()
+        .find(|(r, _)| r == "origin")
+        .or_else(|| remotes.first())
+        .map(|(_, u)| u.clone())
+}
+
+/// `remote "name"` / `remote.name` → `name`; any other section → `None`.
+fn remote_section_name(header: &str) -> Option<String> {
+    let (sect, sub) = match header.split_once(char::is_whitespace) {
+        Some((s, sub)) => (s, sub.trim().trim_matches('"').to_string()),
+        None => match header.split_once('.') {
+            Some((s, sub)) => (s, sub.to_string()),
+            None => (header, String::new()),
+        },
+    };
+    (sect.eq_ignore_ascii_case("remote") && !sub.is_empty()).then_some(sub)
+}
+
+/// A config value: quotes removed, backslash escapes kept literal, cut at the
+/// first unquoted `#` / `;`, trimmed.
+fn config_value(v: &str) -> String {
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut chars = v.trim().chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '#' | ';' if !quoted => break,
+            c => out.push(c),
+        }
+    }
+    out.trim().to_string()
+}
+
+/// A git remote URL reduced to `host/owner/repo` (or the bare path for a local
+/// remote), so every spelling of one remote agrees:
+/// `git@github.com:Example/Shop.git`, `https://user:tok@github.com/example/shop`
+/// and `ssh://git@github.com:22/Example/Shop.git/` all give
+/// `github.com/example/shop`.
+///
+/// Strips the scheme (`https://`, `ssh://`, `git://`, `git+ssh://`, `file://`,
+/// any `<scheme>://`), everything up to the LAST `@` of the authority
+/// (userinfo, including tokens — never emitted), a numeric `:port`, a query or
+/// fragment, trailing `/` and `.git`; rewrites the scp form `host:path` to
+/// `host/path`; lowercases. `None` when nothing is left.
+pub fn normalise_remote_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => match rest.split_once('/') {
+            Some((auth, path)) => (auth, path),
+            None => (rest, ""),
+        },
+        None => match scp_split(url) {
+            Some((auth, path)) => (auth, path),
+            None => ("", url),
+        },
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        Some((h, "")) => h,
+        _ => host,
+    };
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    let mut path = path.trim_matches('/');
+    while let Some(p) = path.strip_suffix(".git") {
+        path = p.trim_end_matches('/');
+    }
+    let joined = match (host.is_empty(), path.is_empty()) {
+        (true, true) => return None,
+        (true, false) => path.to_string(),
+        (false, true) => host.to_string(),
+        (false, false) => format!("{host}/{path}"),
+    };
+    Some(joined.to_ascii_lowercase())
+}
+
+/// The scp-like `[user@]host:path` form: a `:` before any `/`, and not a
+/// one-letter Windows drive (`C:\repo`).
+fn scp_split(url: &str) -> Option<(&str, &str)> {
+    let colon = url.find(':')?;
+    if url[..colon].contains('/') {
+        return None;
+    }
+    let (auth, path) = (&url[..colon], &url[colon + 1..]);
+    let host_part = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    if host_part.len() == 1 && host_part.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((auth, path))
+}
+
 /// One decision for a CHILD directory. Precedence, first match wins:
 /// hard-skip -> nested repo -> always-region -> `ignored` -> dotnet -> bundle
 /// -> descend.
@@ -609,5 +915,148 @@ mod tests {
             c.marker(),
             "collapsed 2 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0)"
         );
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    const SHOP_CONFIG: &str = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Example/Shop.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n";
+
+    #[test]
+    fn remote_urls_normalise_to_one_spelling() {
+        let shop = Some("github.com/example/shop".to_string());
+        for url in [
+            "git@github.com:Example/Shop.git",
+            "https://user:tok@github.com/example/shop",
+            "ssh://git@github.com:22/Example/Shop.git/",
+            "https://github.com/Example/Shop",
+            "git+ssh://git@github.com/Example/Shop.git",
+            "git://github.com/example/shop.git",
+            "  https://github.com/example/shop/  ",
+            "https://x-access-token:tok@github.com/example/shop.git?tok=1#tok",
+        ] {
+            let got = normalise_remote_url(url);
+            assert_eq!(got, shop, "{url}");
+            assert!(!got.unwrap_or_default().contains("tok"), "userinfo leaked from {url}");
+        }
+        assert_eq!(
+            normalise_remote_url("file:///srv/git/Shop.git").as_deref(),
+            Some("srv/git/shop")
+        );
+        assert_eq!(normalise_remote_url("/srv/git/shop.git/").as_deref(), Some("srv/git/shop"));
+        assert_eq!(
+            normalise_remote_url("git@gitlab.example.com:group/sub/proj.git").as_deref(),
+            Some("gitlab.example.com/group/sub/proj")
+        );
+        assert_eq!(normalise_remote_url(""), None);
+        assert_eq!(normalise_remote_url("   "), None);
+    }
+
+    #[test]
+    fn no_git_dir_is_its_basename() {
+        let root = tmp("ident_dir");
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("x")).unwrap();
+        let id = repo_identity(&app);
+        assert_eq!(id, RepoIdentity { key: "dir:app".into(), source: IdentitySource::Directory });
+        assert_eq!(id.source.as_str(), "dir");
+        // Spelling does not matter: `.` and `x/..` resolve to the same dir.
+        assert_eq!(repo_identity(&app.join(".")), id);
+        assert_eq!(repo_identity(&app.join("x").join("..")), id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_and_main_checkout_share_a_key() {
+        let root = tmp("ident_wt");
+        let main = root.join("main");
+        let wt2 = root.join("wt2");
+        write(&main, ".git/config", SHOP_CONFIG);
+        write(&main, ".git/worktrees/wt2/commondir", "../..\n");
+        write(
+            &wt2,
+            ".git",
+            &format!("gitdir: {}\n", main.join(".git/worktrees/wt2").display()),
+        );
+        let want = RepoIdentity {
+            key: "git:github.com/example/shop".into(),
+            source: IdentitySource::GitRemote,
+        };
+        assert_eq!(repo_identity(&main), want);
+        assert_eq!(repo_identity(&wt2), want);
+        assert_eq!(want.source.as_str(), "git-remote");
+        // A relative gitdir resolves against the `.git` file's own directory.
+        write(&wt2, ".git", "gitdir: ../main/.git/worktrees/wt2\n");
+        assert_eq!(repo_identity(&wt2), want);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn subdir_of_a_checkout_keeps_its_path_within() {
+        let root = tmp("ident_sub");
+        let top = root.join("shop");
+        write(&top, ".git/config", SHOP_CONFIG);
+        std::fs::create_dir_all(top.join("services/api")).unwrap();
+        assert_eq!(
+            repo_identity(&top.join("services/api")).key,
+            "git:github.com/example/shop/services/api"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn submodule_git_file_reads_its_own_config() {
+        let root = tmp("ident_submod");
+        let sup = root.join("super");
+        write(&sup, ".git/config", SHOP_CONFIG);
+        write(
+            &sup,
+            ".git/modules/sdk/config",
+            "[remote \"origin\"]\n\turl = https://github.com/Example/SDK.git\n",
+        );
+        let sdk = sup.join("vendor/sdk");
+        write(&sdk, ".git", "gitdir: ../../.git/modules/sdk\n");
+        assert_eq!(repo_identity(&sdk).key, "git:github.com/example/sdk");
+        // No remote in the submodule's config: its own git dir names it, not
+        // the `modules` directory that holds every submodule.
+        write(&sup, ".git/modules/sdk/config", "[core]\n\tbare = false\n");
+        assert_eq!(
+            repo_identity(&sdk),
+            RepoIdentity { key: "gitdir:sdk".into(), source: IdentitySource::GitLocal }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn remote_choice_and_the_git_local_fallback() {
+        let root = tmp("ident_local");
+        let repo = root.join("tool");
+        // origin wins over an earlier remote; `pushurl` is not `url`.
+        write(
+            &repo,
+            ".git/config",
+            "[remote \"upstream\"]\n\turl = https://github.com/up/tool\n[remote \"origin\"]\n\tpushurl = https://github.com/push/tool\n\turl = \"https://github.com/me/tool.git\" # mine\n",
+        );
+        assert_eq!(repo_identity(&repo).key, "git:github.com/me/tool");
+        // No origin: the first remote in file order.
+        write(
+            &repo,
+            ".git/config",
+            "[remote.upstream]\n\turl = https://github.com/up/tool\n[remote \"fork\"]\n\turl = https://github.com/fork/tool\n",
+        );
+        assert_eq!(repo_identity(&repo).key, "git:github.com/up/tool");
+        // No remote at all: the checkout's directory name, from the common dir.
+        write(&repo, ".git/config", "[core]\n\tbare = false\n");
+        std::fs::create_dir_all(repo.join("pkg")).unwrap();
+        assert_eq!(
+            repo_identity(&repo),
+            RepoIdentity { key: "gitdir:tool".into(), source: IdentitySource::GitLocal }
+        );
+        assert_eq!(repo_identity(&repo.join("pkg")).key, "gitdir:tool/pkg");
+        assert_eq!(IdentitySource::GitLocal.as_str(), "git-local");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

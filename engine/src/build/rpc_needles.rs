@@ -152,6 +152,7 @@ mod rpc_needle_tests {
     use super::*;
     use std::path::Path;
 
+    use repo_graph_code_domain::walk_gating::repo_identity;
     use repo_graph_code_domain::{cell_type, edge_category};
     use repo_graph_core::{Cell, EdgeCategoryId as CategoryId};
     use repo_graph_graph::MergedGraph;
@@ -230,7 +231,7 @@ mod rpc_needle_tests {
             server.to_str().unwrap().to_string(),
             client.to_str().unwrap().to_string(),
         );
-        let client_repo = RepoId::from_canonical(&format!("file://{client_s}"));
+        let client_repo = RepoId::from_canonical(&repo_identity(&client).key);
 
         // Alone, the client repo knows no proto: only the suffix fallback fires.
         let alone = generate_one(&client_s).unwrap();
@@ -437,7 +438,7 @@ mod rpc_needle_tests {
         );
         write(&repo, "api.proto", GREETER_PROTO);
         let repo_s = repo.to_str().unwrap();
-        let rid = RepoId::from_canonical(&format!("file://{repo_s}"));
+        let rid = RepoId::from_canonical(&repo_identity(&repo).key);
         let names = |m: &MergedGraph| -> Vec<String> {
             clients(m, rid).into_iter().map(|(q, _)| q).collect()
         };

@@ -19,6 +19,7 @@ mod rpc_needles;
 
 use std::path::{Path, PathBuf};
 
+use repo_graph_code_domain::walk_gating::{RepoIdentity, repo_identity};
 use repo_graph_core::RepoId;
 use repo_graph_graph::MergedGraph;
 
@@ -36,17 +37,22 @@ pub struct GenerateResult {
     pub total_nodes: usize,
     pub total_edges: usize,
     pub parse_errors: Vec<String>,
-    /// `RepoId.0` → human repo label (A9.2). `RepoId::from_canonical` xxhashes
-    /// the path away, so this is the ONLY place the human name survives — it is
-    /// captured here, where the path and the id still coexist, and deliberately
-    /// NOT on `MergedGraph`, which would change the `.gmap` bytes. Present only
-    /// on a freshly generated result; a `.gmap` load has none.
+    /// `RepoId.0` → human repo label (A9.2). The RepoId is an xxhash of the
+    /// repo identity key (git remote / git dir / dir name, LB.1), so the human
+    /// label — the path the caller gave — survives only here: it is captured
+    /// where the path and the id still coexist, and deliberately NOT on
+    /// `MergedGraph`, which would change the `.gmap` bytes. Present only on a
+    /// freshly generated result; a `.gmap` load has none.
     pub repo_labels: std::collections::BTreeMap<u64, String>,
 }
 
-/// Generate a `MergedGraph` from a single repo path. The repo gets one RepoId
-/// derived from `file://<path>`; cross-graph resolvers run but only emit
-/// edges within this single repo (rare in practice).
+/// Generate a `MergedGraph` from a single repo path. The repo gets one RepoId,
+/// an xxhash of its path-independent identity key ([`repo_identity`]):
+/// `git:<normalised origin url>[/<path within the checkout>]` for a git
+/// checkout with a remote, `gitdir:<main checkout dir name>[/<rel>]` for one
+/// without, `dir:<basename>` outside git. So every NodeId survives a re-spelled
+/// path, a second clone, a linked worktree and a moved checkout. Cross-graph
+/// resolvers run but only emit edges within this single repo (rare in practice).
 pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
     generate_one_inner(repo_path, None)
 }
@@ -82,8 +88,9 @@ fn generate_one_inner(
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
     }
-    let canonical = format!("file://{repo_path}");
-    let repo = RepoId::from_canonical(&canonical);
+    let ident = repo_identity(&root);
+    let repo = RepoId::from_canonical(&ident.key);
+    repo_id_marker(&ident, repo_path);
     let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
     // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
     // prefixes are A8.7.
@@ -92,7 +99,7 @@ fn generate_one_inner(
     // Cached parses are only valid under the exact repo identity + go.mod
     // module they were built with — neither is visible to per-file hashes.
     if let Some(c) = cache.as_deref_mut() {
-        c.validate_context(&canonical, &go_prefix);
+        c.validate_context(&ident.key, &go_prefix);
     }
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
@@ -146,6 +153,10 @@ pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult
     generate_many_inner(repo_paths, true)
 }
 
+/// One walked input of a multi-repo build: the path as given, its root, its
+/// walk, and its identity (disambiguated before phase 2 mints any RepoId).
+type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity);
+
 fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<GenerateResult, String> {
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
@@ -156,9 +167,10 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
     // client repo ships no `.proto` of its own. The cost is holding every
     // repo's sources at once, which the 2-5 repo `--with` merges absorb.
     // A missing path keeps its slot so errors stay in argument order.
+    // Each input's identity (LB.1) is computed here too, so inputs that share
+    // a key are disambiguated against each other BEFORE any RepoId is minted.
     let mut rpc = RpcContext::default();
-    let mut walked: Vec<Result<(&String, PathBuf, WalkResult), String>> =
-        Vec::with_capacity(repo_paths.len());
+    let mut walked: Vec<Result<Walked<'_>, String>> = Vec::with_capacity(repo_paths.len());
     for path in repo_paths {
         let root = PathBuf::from(path);
         if !root.is_dir() {
@@ -167,28 +179,38 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
         }
         let walk = walk_source_files(&root);
         rpc.add_files(&walk.0);
-        walked.push(Ok((path, root, walk)));
+        let ident = repo_identity(&root);
+        walked.push(Ok((path, root, walk, ident)));
+    }
+    let mut idents: Vec<RepoIdentity> = walked.iter().flatten().map(|w| w.3.clone()).collect();
+    let abs_paths: Vec<String> = walked.iter().flatten().map(|w| canonical_display(&w.1)).collect();
+    for line in disambiguate(&mut idents, &abs_paths) {
+        eprintln!("{line}");
+    }
+    for (w, ident) in walked.iter_mut().flatten().zip(idents) {
+        w.3 = ident;
     }
 
     // Phase 2 — build each repo against the union.
     for entry in walked {
-        let (path, root, (files, regions, md, roots)) = match entry {
+        let (path, root, (files, regions, md, roots), ident) = match entry {
             Ok(w) => w,
             Err(e) => {
                 all_errors.push(e);
                 continue;
             }
         };
-        // One string feeds both the RepoId and the cache's context check: every
+        // One key feeds both the RepoId and the cache's context check: every
         // cached FileParse has this RepoId baked into its NodeIds, so a sidecar
-        // written under another spelling of the path must be discarded (#2).
-        let canonical = format!("file://{path}");
-        let repo = RepoId::from_canonical(&canonical);
+        // written under another identity must be discarded (#2). A re-spelled
+        // or moved path keeps the key, so its sidecar is reused.
+        let repo = RepoId::from_canonical(&ident.key);
+        repo_id_marker(&ident, path);
         label_inputs.push((repo.0, path.clone()));
         let go_prefix = read_go_module_prefix(&root);
         let mut cache = incremental.then(|| ParseCache::load(path));
         if let Some(c) = cache.as_mut() {
-            c.validate_context(&canonical, &go_prefix);
+            c.validate_context(&ident.key, &go_prefix);
         }
         let (graphs, parse_errors) =
             build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path, &rpc);
@@ -232,6 +254,59 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
         parse_errors: all_errors,
         repo_labels: crate::arch::repo_label_map(&label_inputs),
     })
+}
+
+/// LB.1 fired_on marker, one line per repo per build:
+///   `[repo-id] source=<git-remote|git-local|dir> key=<identity key> repo=<path as given>`
+/// The key never carries remote-URL userinfo (`normalise_remote_url` drops it).
+fn repo_id_marker(ident: &RepoIdentity, repo_path: &str) {
+    eprintln!("[repo-id] source={} key={} repo={repo_path}", ident.source.as_str(), ident.key);
+}
+
+/// The canonical absolute spelling of `root`, or `root` as given when it
+/// cannot be resolved. Only [`disambiguate`] suffixes it onto a key.
+fn canonical_display(root: &Path) -> String {
+    std::fs::canonicalize(root)
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Inputs of ONE multi-repo build that share an identity key (two non-git
+/// `app/` dirs, two worktrees of one clone) must still be distinct repos, or
+/// every same-qname node collides. Every member of a colliding group becomes
+/// `<key>@<canonical abs path>` — every member, never "first wins", so the
+/// result does not depend on argument order. Groups are found in argument
+/// order by linear scan (no HashMap iteration reaches the output). Returns one
+/// `[repo-id]` collision line per group, for the caller to print.
+fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String> {
+    let original: Vec<String> = idents.iter().map(|i| i.key.clone()).collect();
+    let mut grouped = vec![false; original.len()];
+    let mut lines = Vec::new();
+    for i in 0..original.len() {
+        if grouped[i] {
+            continue;
+        }
+        let members: Vec<usize> =
+            (i..original.len()).filter(|&j| original[j] == original[i]).collect();
+        for &j in &members {
+            grouped[j] = true;
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        for &j in &members {
+            if let (Some(id), Some(abs)) = (idents.get_mut(j), abs_paths.get(j)) {
+                id.key = format!("{}@{abs}", original[j]);
+            }
+        }
+        lines.push(format!(
+            "[repo-id] {} inputs share key {}; disambiguated by path",
+            members.len(),
+            original[i]
+        ));
+    }
+    lines
 }
 
 /// Read the `module` path from a repo's `go.mod` (e.g. `github.com/foo/bar`),
@@ -332,17 +407,29 @@ mod cache_tests {
         std::fs::write(dir.join("a.py"), "def foo():\n    return 1\n").unwrap();
         let repo = dir.to_str().unwrap();
 
-        // Same dir, different path spelling → different RepoId baked into
-        // cached NodeIds → every entry must be discarded, not reused.
+        // Same dir, different path spelling → same identity key (LB.1), so the
+        // same RepoId is baked into cached NodeIds → reuse.
         let mut cache = ParseCache::new();
         generate_one_with_cache(repo, &mut cache).unwrap();
         assert_eq!(cache.stats.reparsed, 1);
         let alt = format!("{repo}/.");
         generate_one_with_cache(&alt, &mut cache).unwrap();
-        assert_eq!(cache.stats.reused, 0, "path-spelling change must not reuse");
-        assert_eq!(cache.stats.reparsed, 1);
+        assert_eq!(cache.stats.reused, 1, "a path-spelling change must reuse");
+        assert_eq!(cache.stats.reparsed, 0);
 
-        // Same spelling again → reuse works.
+        // A different identity (another basename, no git) → another RepoId →
+        // every entry discarded, even though a.py's path and bytes match.
+        let other = unique_tmp("ctx_other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("a.py"), "def foo():\n    return 1\n").unwrap();
+        generate_one_with_cache(other.to_str().unwrap(), &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 0, "another repo identity must not reuse");
+        assert_eq!(cache.stats.reparsed, 1);
+        std::fs::remove_dir_all(&other).ok();
+
+        // Back to the first repo: discarded again, then reuse works.
+        generate_one_with_cache(&alt, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 0);
         generate_one_with_cache(&alt, &mut cache).unwrap();
         assert_eq!(cache.stats.reused, 1);
 
@@ -355,6 +442,39 @@ mod cache_tests {
         assert_eq!(cache.stats.reused, 0, "go.mod module change must not reuse");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn ident(key: &str) -> RepoIdentity {
+        RepoIdentity {
+            key: key.to_string(),
+            source: repo_graph_code_domain::walk_gating::IdentitySource::Directory,
+        }
+    }
+
+    /// Every member of a colliding group is suffixed (never "first wins"), a
+    /// unique key is left alone, and one collision line is emitted per group.
+    #[test]
+    fn disambiguate_suffixes_every_member_of_a_shared_key() {
+        let mut ids = vec![ident("dir:app"), ident("dir:lib"), ident("dir:app"), ident("dir:app")];
+        let abs: Vec<String> = ["/t/a/app", "/t/lib", "/t/b/app", "/t/c/app"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let lines = disambiguate(&mut ids, &abs);
+        let keys: Vec<&str> = ids.iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(keys, ["dir:app@/t/a/app", "dir:lib", "dir:app@/t/b/app", "dir:app@/t/c/app"]);
+        assert_eq!(lines, ["[repo-id] 3 inputs share key dir:app; disambiguated by path"]);
+
+        // Argument order changes the order of the inputs, never their keys.
+        let mut rev = vec![ident("dir:app"), ident("dir:app")];
+        let rev_abs = vec!["/t/b/app".to_string(), "/t/a/app".to_string()];
+        disambiguate(&mut rev, &rev_abs);
+        assert_eq!(rev[0].key, "dir:app@/t/b/app");
+        assert_eq!(rev[1].key, "dir:app@/t/a/app");
+
+        let mut solo = vec![ident("dir:app"), ident("git:github.com/x/y")];
+        assert!(disambiguate(&mut solo, &abs[..2]).is_empty());
+        assert_eq!(solo[0].key, "dir:app");
     }
 
     #[test]

@@ -10,8 +10,9 @@
 
 use std::path::{Path, PathBuf};
 
+use repo_graph_code_domain::walk_gating::repo_identity;
 use repo_graph_engine::cache::content_hash;
-use repo_graph_engine::{ParseCache, generate_many, generate_many_incremental};
+use repo_graph_engine::{GenerateResult, ParseCache, generate_many, generate_many_incremental};
 use repo_graph_store::write_merged_sharded;
 
 /// `<repo>/.ai/repo-graph/parse_cache.bin` — mirrors the engine's private
@@ -162,8 +163,12 @@ fn sidecars_are_per_repo() {
     // The sidecar is keyed to the repo identity it was built under: a cache
     // pointed at the other repo's identity discards everything (audit #2).
     let mut cross = ParseCache::load(a_s);
-    cross.validate_context(&format!("file://{b_s}"), "example.com/svcb");
+    cross.validate_context(&repo_identity(&b).key, "example.com/svcb");
     assert!(cross.is_empty(), "svc-a's cache must not be reusable as svc-b's");
+    // …while its own identity, however the path is spelled, keeps it.
+    let mut own = ParseCache::load(a_s);
+    own.validate_context(&repo_identity(Path::new(&format!("{a_s}/."))).key, "");
+    assert_eq!(own.len(), 3, "svc-a's cache must survive a respelling of its own path");
 }
 
 /// Proof the multi-repo path READS the sidecar rather than reparsing and
@@ -196,24 +201,53 @@ fn the_sidecar_is_actually_consulted() {
     );
 }
 
-/// Audit #2 on the multi-repo path: the same directory under another spelling
-/// is another RepoId, and every cached parse has the old one baked into its
-/// NodeIds. The build must discard the sidecar, not serve stale identities.
+/// Sorted NodeIds of every node in the build.
+fn node_ids(r: &GenerateResult) -> Vec<u64> {
+    let mut ids: Vec<u64> =
+        r.merged.graphs.iter().flat_map(|g| g.nodes.iter().map(|n| n.id.0)).collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Audit #2 on the multi-repo path, after LB.1: the same directory under
+/// another spelling is the SAME repo identity, so the same RepoId, so the
+/// sidecar written under the first spelling is valid and is reused — and the
+/// graph is the one the first spelling built, id for id and byte for byte.
 #[test]
-fn a_respelled_repo_path_discards_the_sidecar() {
+fn a_respelled_repo_path_reuses_the_sidecar() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_a, _b, paths) = two_repos(tmp.path());
-    generate_many_incremental(&paths).unwrap();
+    let (a, _b, paths) = two_repos(tmp.path());
+    let original = generate_many_incremental(&paths).unwrap();
 
     // Same directories, trailing-slash spelling: same sidecar file on disk,
-    // different `file://` canonical, so a different RepoId.
+    // same identity key, so the same RepoId.
     let respelled: Vec<String> = paths.iter().map(|p| format!("{p}/")).collect();
     let incr = generate_many_incremental(&respelled).unwrap();
     let clean = generate_many(&respelled).unwrap();
 
+    let out_orig = tmp.path().join("out_orig");
     let out_incr = tmp.path().join("out_incr");
     let out_clean = tmp.path().join("out_clean");
+    write_merged_sharded(&original.merged, &out_orig).unwrap();
     write_merged_sharded(&incr.merged, &out_incr).unwrap();
     write_merged_sharded(&clean.merged, &out_clean).unwrap();
     assert_dirs_byte_identical(&out_incr, &out_clean, "respelled incremental vs clean");
+    assert_dirs_byte_identical(&out_incr, &out_orig, "respelled vs original spelling");
+    assert_eq!(node_ids(&incr), node_ids(&original), "NodeIds moved with the spelling");
+
+    // Proof the respelled build READ the sidecar rather than discarding it:
+    // plant a.py's parse under b.py's key; a reusing build serves it, so
+    // `Widget` (only in b.py) vanishes.
+    let a_s = a.to_str().unwrap();
+    let mut cache = ParseCache::load(a_s);
+    let a_parse = cache
+        .get("a.py", content_hash(A_PY), "python")
+        .expect("warm build must have cached a.py");
+    cache.put("b.py".to_string(), content_hash(B_PY), "python", a_parse);
+    cache.save(a_s).unwrap();
+    let planted = generate_many_incremental(&respelled).unwrap();
+    assert!(
+        planted.merged.qnames_containing("Widget").is_empty(),
+        "the respelled build discarded svc-a's sidecar instead of reusing it"
+    );
 }
