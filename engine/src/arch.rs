@@ -13,7 +13,9 @@
 //!    there is a single repo, the key is the enclosing manifest project root
 //!    (A8.5's PROJECT anchors), and every file under no root shares ONE
 //!    `(outside projects)` bucket (A8.6). A repo with no roots below its top
-//!    level falls back to the top-level path segment.
+//!    level falls back to the top-level path segment. The native shells a
+//!    Flutter / React Native app generates (`android/`, `ios/`, …) are never
+//!    keyed: they fold into the app that owns them (LA.5).
 //! 3. [`service_map`] — the rendered answer: services, the links between them
 //!    (via `repo_graph_graph::cross_links`), and the honest residuals
 //!    (`self_links`, `unlocated_nodes`).
@@ -194,8 +196,10 @@ pub fn default_keying(merged: &MergedGraph) -> ServiceKeying {
 /// from the qname `project:<rel_path>`, which the nav carries on a fresh build
 /// and on a loaded `.gmap` alike. The repo root (`project:.`) is left out:
 /// every file is under it, so a repo whose only manifest is at the top keeps
-/// `TopLevelDir`.
+/// `TopLevelDir`. Platform-host shells ([`platform_host_roots`]) are left out
+/// too (LA.5), so their files fall to the owning app by longest prefix.
 fn project_root_paths(merged: &MergedGraph) -> Vec<String> {
+    let hosts = platform_host_roots(merged);
     let mut roots = BTreeSet::new();
     for g in &merged.graphs {
         for (id, kind) in &g.nav.kind_by_id {
@@ -203,12 +207,98 @@ fn project_root_paths(merged: &MergedGraph) -> Vec<String> {
                 continue;
             }
             let path = g.nav.qname_by_id.get(id).and_then(|q| q.strip_prefix("project:"));
-            if let Some(p) = path.filter(|p| !p.is_empty() && *p != ".") {
+            if let Some(p) = path.filter(|p| !p.is_empty() && *p != "." && !hosts.contains_key(*p)) {
                 roots.insert(p.to_string());
             }
         }
     }
     roots.into_iter().collect()
+}
+
+// ----------------------------------------------------------------------------
+// 2a. platform-host shells (LA.5)
+//
+// A cross-platform app framework generates native shells INSIDE the app —
+// Flutter's `android/` `ios/` `macos/` `linux/` `windows/`, React Native's
+// `android/` `ios/` — and each shell carries its own build manifest, so A8.5
+// rightly emits a PROJECT anchor for it (`glia projects` and `--scope` name a
+// Gradle build legitimately). As a SERVICE it is wrong: `quokka_android/
+// android/app` listed as a one-file service holding Flutter's generated
+// MainActivity.kt. The fold is structural, never a size threshold — a shell
+// with real code is still not a service, and a one-file lambda still is.
+// ----------------------------------------------------------------------------
+
+/// Native shells a cross-platform app framework generates inside the app
+/// (Flutter: all five; React Native / Capacitor: `android`, `ios`).
+const PLATFORM_HOST_DIRS: &[&str] = &["android", "ios", "macos", "linux", "windows"];
+/// Ecosystems whose project owns such shells (Flutter's `pubspec.yaml`, React
+/// Native's / Capacitor's `package.json`).
+const HOST_OWNER_ECOSYSTEMS: &[&str] = &["dart", "npm"];
+/// Ecosystems a shell's own build manifest uses (`build.gradle[.kts]`, a
+/// `CMakeLists.txt` with `project(`, `Package.swift`, `pom.xml`).
+const HOST_SHELL_ECOSYSTEMS: &[&str] = &["gradle", "cmake", "swift", "maven"];
+
+/// `path` relative to `dir` when `dir` is a PROPER ancestor directory of it;
+/// `.` is the repo root and an ancestor of every other path. Segment-bounded:
+/// `mobilex/android` is not under `mobile`.
+fn rel_under<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
+    if dir == "." {
+        return (path != ".").then_some(path);
+    }
+    path.strip_prefix(dir)?
+        .strip_prefix('/')
+        .filter(|rest| !rest.is_empty())
+}
+
+/// Platform-host shell root → the app root that owns it, sorted by host path.
+///
+/// A root `R` whose ecosystem is in [`HOST_SHELL_ECOSYSTEMS`] is a host of app
+/// `A` iff `A` is the NEAREST root with an ecosystem in
+/// [`HOST_OWNER_ECOSYSTEMS`] that is a proper ancestor of `R` (`A` may be the
+/// repo root `.`), the first component of `R` below `A` is in
+/// [`PLATFORM_HOST_DIRS`], and every root strictly between the two is itself a
+/// host — so once the hosts leave the keyed root list, `service_of`'s longest
+/// prefix really does land a host file in `A`. Nested shells therefore fold
+/// straight to the app (`mobile/android/app → mobile`), and a Gradle plugin in
+/// an npm `tools/plugin` dir stays a service.
+///
+/// Reads only PROJECT nodes and their ORIGIN cells (via
+/// [`crate::answers::project_roots`], sorted by path — an ancestor is decided
+/// before its descendants), so a fresh build and a loaded `.gmap` agree.
+fn platform_host_roots(merged: &MergedGraph) -> BTreeMap<String, String> {
+    let roots = crate::answers::project_roots(merged);
+    let owners: Vec<&str> = roots
+        .iter()
+        .filter(|r| HOST_OWNER_ECOSYSTEMS.contains(&r.ecosystem.as_str()))
+        .map(|r| r.path.as_str())
+        .collect();
+    let mut hosts: BTreeMap<String, String> = BTreeMap::new();
+    for r in &roots {
+        if !HOST_SHELL_ECOSYSTEMS.contains(&r.ecosystem.as_str()) {
+            continue;
+        }
+        // Nearest owner = the deepest ancestor; the root `.` is the shallowest.
+        let nearest = owners
+            .iter()
+            .filter_map(|o| rel_under(&r.path, o).map(|rest| (*o, rest)))
+            .max_by_key(|(o, _)| if *o == "." { 0 } else { o.len() });
+        let Some((owner, rest)) = nearest else { continue };
+        let first = rest.split('/').next().unwrap_or(rest);
+        if !PLATFORM_HOST_DIRS.contains(&first) {
+            continue;
+        }
+        let between_all_hosts = roots.iter().all(|m| {
+            m.path == r.path
+                || m.path == owner
+                || rel_under(&r.path, &m.path).is_none()
+                || rel_under(&m.path, owner).is_none()
+                || hosts.contains_key(&m.path)
+        });
+        if between_all_hosts {
+            hosts.insert(r.path.clone(), owner.to_string());
+        }
+    }
+    hosts
 }
 
 /// The one service id, under `ProjectRoots` keying, for every file under no
@@ -528,6 +618,25 @@ pub fn service_map_with(
         })
         .collect();
 
+    // LA.5 fired_on marker: every platform-host shell that is NOT a keyed root
+    // under `ProjectRoots`, so its files were counted under the owning app.
+    // Silent when nothing folded, and under `PerRepo` / `TopLevelDir` (no
+    // PROJECT root keys a service there, so there is nothing to fold).
+    if let ServiceKeying::ProjectRoots(keyed) = keying {
+        let folded: Vec<String> = platform_host_roots(merged)
+            .into_iter()
+            .filter(|(host, _)| !keyed.contains(host))
+            .map(|(host, app)| format!("{host}->{app}"))
+            .collect();
+        if !folded.is_empty() {
+            eprintln!(
+                "[arch] platform hosts folded: {} ({})",
+                folded.len(),
+                folded.join(", ")
+            );
+        }
+    }
+
     // fired_on marker. Carries A9.1's `buckets` / `unplaced` too — `cross_links`
     // has no marker of its own, and without them a dead `cross_links` would
     // still print a plausible `[arch] 2 services, 0 links`.
@@ -684,6 +793,68 @@ mod tests {
 
         let m = MergedGraph::new(vec![graph(&nested, 1), graph(&root_only, 2)]);
         assert_eq!(default_keying(&m), ServiceKeying::PerRepo);
+    }
+
+    /// LA.5: a Flutter app's native shells (Gradle `android`, `android/app`,
+    /// CMake `linux`) fold into the app; a Gradle plugin under an npm dir
+    /// that is not a platform dir stays its own root.
+    #[test]
+    fn platform_hosts_fold_into_their_app() {
+        use repo_graph_code_domain::project_roots::ProjectRoot;
+
+        let graph = |roots: &[ProjectRoot]| {
+            MergedGraph::new(vec![crate::walk::build_project_graph(roots, RepoId(1))])
+        };
+        let stack = [
+            ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", Some("mobile_app".into())),
+            ProjectRoot::new("mobile/android".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new("mobile/linux".into(), "cmake", "CMakeLists.txt", Some("runner".into())),
+            ProjectRoot::new("tools".into(), "npm", "package.json", Some("tools".into())),
+            ProjectRoot::new("tools/plugin".into(), "gradle", "build.gradle", None),
+            ProjectRoot::new("server".into(), "go", "go.mod", Some("example.com/server".into())),
+        ];
+        let m = graph(&stack);
+        let hosts: Vec<(String, String)> = platform_host_roots(&m).into_iter().collect();
+        assert_eq!(
+            hosts,
+            [
+                ("mobile/android".to_string(), "mobile".to_string()),
+                ("mobile/android/app".to_string(), "mobile".to_string()),
+                ("mobile/linux".to_string(), "mobile".to_string()),
+            ]
+        );
+        assert_eq!(
+            default_keying(&m),
+            ServiceKeying::ProjectRoots(vec![
+                "mobile".into(),
+                "server".into(),
+                "tools".into(),
+                "tools/plugin".into(),
+            ])
+        );
+
+        // A root-level Flutter app whose only sub-roots are its shells has no
+        // keyed root left, so it gets the same keying as any single-root repo.
+        let root_app = [
+            ProjectRoot::new(String::new(), "dart", "pubspec.yaml", Some("app".into())),
+            ProjectRoot::new("android".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new("android/app".into(), "gradle", "build.gradle.kts", None),
+        ];
+        let m = graph(&root_app);
+        assert_eq!(platform_host_roots(&m).len(), 2);
+        assert_eq!(platform_host_roots(&m).get("android/app").map(String::as_str), Some("."));
+        assert_eq!(default_keying(&m), ServiceKeying::TopLevelDir);
+
+        // A non-shell root between the app and a shell keeps the shell keyed:
+        // folding it would claim `mobile` while longest prefix lands the file
+        // in `mobile/android`.
+        let blocked = [
+            ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", None),
+            ProjectRoot::new("mobile/android".into(), "go", "go.mod", None),
+            ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle", None),
+        ];
+        assert!(platform_host_roots(&graph(&blocked)).is_empty());
     }
 
     #[test]
