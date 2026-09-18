@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use repo_graph_code_domain::{
-    CallQualifier, CallSite, CodeNav, UnresolvedRef, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, UnresolvedRef, cell_type, edge_category, node_kind,
 };
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
@@ -24,6 +24,7 @@ where
     H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,
 {
     let mut pkg_base_bound = 0usize;
+    let mut enum_hits = EnumHits::default();
     for site in calls {
         let Some(from_module) = enclosing_module(&g.nav, site.from) else {
             g.unresolved_calls.push(site.clone());
@@ -52,20 +53,33 @@ where
             }
             CallQualifier::Attribute { base, name } => {
                 let hit = resolve_attribute_target(g, bindings, base, name);
-                if hit.is_some()
-                    && attribute_base_kind(g, bindings, base) == Some(node_kind::PACKAGE)
-                {
-                    pkg_base_bound += 1;
+                if hit.is_some() {
+                    match attribute_base(g, bindings, base) {
+                        Some((_, k)) if k == node_kind::PACKAGE => pkg_base_bound += 1,
+                        Some((base_id, k)) if k == node_kind::ENUM => {
+                            enum_hits.attribute += 1;
+                            enum_hits.enums.push(base_id);
+                        }
+                        _ => {}
+                    }
                 }
                 hit
             }
             CallQualifier::SelfMethod(name) => {
-                enclosing_class_or_struct(&g.nav, site.from).and_then(|parent_id| {
+                let owner = enclosing_class_or_struct(&g.nav, site.from);
+                let hit = owner.and_then(|parent_id| {
                     g.symbols
                         .class_methods
                         .get(&parent_id)
                         .and_then(|m| m.get(name).copied())
-                })
+                });
+                if let (Some(owner_id), Some(_)) = (owner, hit)
+                    && g.nav.kind_by_id.get(&owner_id) == Some(&node_kind::ENUM)
+                {
+                    enum_hits.self_method += 1;
+                    enum_hits.enums.push(owner_id);
+                }
+                hit
             }
             // Python `super().m()` — intra-file super calls are resolved by
             // the Python parser before emitting the CallSite. Anything that
@@ -87,6 +101,64 @@ where
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
+    if enum_hits.self_method + enum_hits.attribute > 0 {
+        eprintln!(
+            "[resolve] enum-owned calls bound: self_method={} attribute={} ext={}",
+            enum_hits.self_method,
+            enum_hits.attribute,
+            enum_hits.ext(g)
+        );
+    }
+}
+
+/// Per-build tally of resolutions that only bind because an ENUM owns methods
+/// and members (LA.30a). `enums` holds every ENUM that received a hit; the
+/// marker's `ext` discriminator is read from the lowest-qname one, since the
+/// generic pass does not know which language it is building.
+#[derive(Default)]
+struct EnumHits {
+    self_method: usize,
+    attribute: usize,
+    uses: usize,
+    enums: Vec<NodeId>,
+}
+
+impl EnumHits {
+    /// File extension of the POSITION cell of the lowest-qname ENUM hit, or `?`
+    /// when that ENUM carries no POSITION (or its file has no extension).
+    fn ext(&self, g: &RepoGraph) -> String {
+        // NodeId is Hash, not Ord: order by qname alone. Two hits with the same
+        // ENUM qname are the same node (the id derives from kind + qname).
+        let lowest = self
+            .enums
+            .iter()
+            .filter_map(|id| g.nav.qname_by_id.get(id).map(|q| (q.as_str(), *id)))
+            .min_by(|a, b| a.0.cmp(b.0));
+        lowest
+            .and_then(|(_, id)| g.nodes.iter().find(|n| n.id == id))
+            .and_then(position_file)
+            .and_then(|file| {
+                let base = file.rsplit('/').next().unwrap_or(&file);
+                base.rsplit_once('.').map(|(_, ext)| ext.to_string())
+            })
+            .unwrap_or_else(|| "?".to_string())
+    }
+}
+
+/// The `file` field of a node's POSITION cell (JSON `{"file":"…",…}`).
+fn position_file(node: &repo_graph_core::Node) -> Option<String> {
+    node.cells.iter().find_map(|c| {
+        if c.kind != cell_type::POSITION {
+            return None;
+        }
+        let repo_graph_core::CellPayload::Json(j) = &c.payload else {
+            return None;
+        };
+        let marker = "\"file\":\"";
+        let start = j.find(marker)? + marker.len();
+        let end = j[start..].find('"')? + start;
+        Some(j[start..end].to_string())
+    })
 }
 
 /// Resolve `UnresolvedRef`s the same way `resolve_calls` resolves `CallSite`s,
@@ -99,6 +171,7 @@ where
 /// same-package fn) or `Attribute { base, name }` (handler is `pkg.Name`).
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     let mut pkg_base_bound = 0usize;
+    let mut enum_hits = EnumHits::default();
     for r in refs {
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
         let resolved: Option<NodeId> = match &r.qualifier {
@@ -139,12 +212,27 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                     }
                 }),
             CallQualifier::Attribute { base, name } => {
+                let bound_base = attribute_base(g, bindings, base);
                 let hit = resolve_attribute_target(g, bindings, base, name);
-                if hit.is_some()
-                    && attribute_base_kind(g, bindings, base) == Some(node_kind::PACKAGE)
-                {
+                if hit.is_some() && bound_base.map(|(_, k)| k) == Some(node_kind::PACKAGE) {
                     pkg_base_bound += 1;
                 }
+                // `Enum.MEMBER` / `Enum::Variant` read as a USES ref: bind the
+                // ENUM's own ATTRIBUTE child. USES-only, so a call site
+                // `Color.RED()` (CALLS) can never land on a member.
+                let hit = hit.or_else(|| match bound_base {
+                    Some((base_id, k))
+                        if k == node_kind::ENUM && r.category == edge_category::USES =>
+                    {
+                        let member = enum_member(g, base_id, name);
+                        if member.is_some() {
+                            enum_hits.uses += 1;
+                            enum_hits.enums.push(base_id);
+                        }
+                        member
+                    }
+                    _ => None,
+                });
                 // Global fallback for HANDLED_BY: in Go, route handlers
                 // are usually written `h.GetProfile` where `h` is a local
                 // struct-receiver variable (`h *Handlers`), not an import
@@ -172,13 +260,17 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     if pkg_base_bound > 0 {
         eprintln!("[resolve] package-base attribute calls bound: {pkg_base_bound}");
     }
+    if enum_hits.uses > 0 {
+        eprintln!("[resolve] enum member uses bound: {} ext={}", enum_hits.uses, enum_hits.ext(g));
+    }
 }
 
 /// Resolve `base.name()` where `base` is a plain identifier already bound in
 /// this module's import table. MODULE and PACKAGE bases both scope top-level
 /// defs (`build_symbol_table` indexes both into `module_symbols`), so an Elixir
 /// `alias MyApp.Accounts` + `Accounts.get_user(id)` resolves through the
-/// `defmodule` PACKAGE node; CLASS and STRUCT bases scope methods.
+/// `defmodule` PACKAGE node; CLASS, STRUCT and ENUM bases scope methods (an
+/// ENUM owns its methods exactly like a class — `Color.pick()`).
 fn resolve_attribute_target(
     g: &RepoGraph,
     bindings: Option<&HashMap<String, NodeId>>,
@@ -190,30 +282,57 @@ fn resolve_attribute_target(
         Some(k) if k == node_kind::MODULE || k == node_kind::PACKAGE => {
             g.symbols.module_symbols.get(&base_id).and_then(|s| s.get(name).copied())
         }
-        Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT => {
+        Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT || k == node_kind::ENUM => {
             g.symbols.class_methods.get(&base_id).and_then(|m| m.get(name).copied())
         }
         _ => None,
     }
 }
 
-/// Kind of the node `base` is bound to in this module's import table — used
-/// only to attribute the `[resolve] package-base` counter.
-fn attribute_base_kind(
+/// The node `base` is bound to in this module's import table, with its kind —
+/// attributes the `[resolve]` counters and gates the ENUM-member lookup.
+fn attribute_base(
     g: &RepoGraph,
     bindings: Option<&HashMap<String, NodeId>>,
     base: &str,
-) -> Option<repo_graph_core::NodeKindId> {
-    let base_id = bindings?.get(base)?;
-    g.nav.kind_by_id.get(base_id).copied()
+) -> Option<(NodeId, repo_graph_core::NodeKindId)> {
+    let base_id = *bindings?.get(base)?;
+    g.nav.kind_by_id.get(&base_id).map(|k| (base_id, *k))
+}
+
+/// `Enum.MEMBER` / `Enum::Variant`: the ATTRIBUTE child of `enum_id` named
+/// `name`. Children are a Vec in record order (repeated across merged files);
+/// the same id twice is one member, two distinct same-named ATTRIBUTE children
+/// (never emitted by one parser) is ambiguous → None, never first-wins.
+fn enum_member(g: &RepoGraph, enum_id: NodeId, name: &str) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for &child in g.nav.children_of.get(&enum_id)? {
+        if g.nav.kind_by_id.get(&child) != Some(&node_kind::ATTRIBUTE)
+            || g.nav.name_by_id.get(&child).map(String::as_str) != Some(name)
+        {
+            continue;
+        }
+        match hit {
+            Some(existing) if existing == child => {}
+            Some(_) => return None,
+            None => hit = Some(child),
+        }
+    }
+    hit
 }
 
 /// Search every class/struct's method map for a method named `name`.
 /// Returns the NodeId iff exactly one class has it (avoids fabricating
-/// edges when the same method name lives on multiple types).
+/// edges when the same method name lives on multiple types). ENUM owners are
+/// skipped: `class_methods` indexes them since LA.30a, and a route handler
+/// binding must not turn ambiguous (or change target) because an enum happens
+/// to own a same-named method — this pool stays CLASS / STRUCT only.
 fn unique_global_method(g: &RepoGraph, name: &str) -> Option<NodeId> {
     let mut hit: Option<NodeId> = None;
-    for methods in g.symbols.class_methods.values() {
+    for (owner, methods) in &g.symbols.class_methods {
+        if g.nav.kind_by_id.get(owner) == Some(&node_kind::ENUM) {
+            continue;
+        }
         if let Some(&id) = methods.get(name) {
             if hit.is_some() {
                 return None; // ambiguous
@@ -283,15 +402,19 @@ fn enclosing_package(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
     }
 }
 
-/// Walk parents to find the enclosing CLASS or STRUCT. Used to resolve
-/// self-method calls (Go `u.Save()`, TS `this.save()`, etc.) to a sibling
-/// method on the same type.
+/// Walk parents to find the enclosing CLASS, STRUCT or ENUM — a type that owns
+/// methods. Used to resolve self-method calls (Go `u.Save()`, TS `this.save()`,
+/// Rust `self.weight()` inside `impl Tier`) to a sibling method on the same
+/// type. The walk passes through intermediate parents, so a METHOD under an
+/// ATTRIBUTE under an ENUM (a Java constant body) reaches the ENUM. The name
+/// predates ENUM and is kept: other passes call it by this name.
 fn enclosing_class_or_struct(nav: &CodeNav, start: NodeId) -> Option<NodeId> {
     let mut cur = start;
     loop {
         let parent = *nav.parent_of.get(&cur)?;
         let k = nav.kind_by_id.get(&parent).copied();
-        if k == Some(node_kind::CLASS) || k == Some(node_kind::STRUCT) {
+        if k == Some(node_kind::CLASS) || k == Some(node_kind::STRUCT) || k == Some(node_kind::ENUM)
+        {
             return Some(parent);
         }
         cur = parent;
@@ -383,5 +506,215 @@ mod tests {
         assert_eq!(calls[0].from, caller);
         assert_eq!(calls[0].to, callee);
         assert!(g.unresolved_calls.is_empty(), "call should not land in unresolved_calls");
+    }
+
+    // ---- LA.30a: an ENUM owns its methods and members ----------------------
+
+    /// One node per `(kind, qname, parent)`: the id, its nav record and its Node.
+    struct Shape {
+        nav: CodeNav,
+        nodes: Vec<Node>,
+    }
+
+    impl Shape {
+        fn new() -> Self {
+            Shape { nav: CodeNav::default(), nodes: vec![] }
+        }
+
+        fn add(
+            &mut self,
+            kind: repo_graph_core::NodeKindId,
+            qname: &str,
+            parent: Option<NodeId>,
+        ) -> NodeId {
+            let r = repo();
+            let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            self.nav.record(id, name, qname, kind, parent);
+            self.nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            id
+        }
+
+        fn file(
+            self,
+            imports: Vec<ImportStmt>,
+            calls: Vec<CallSite>,
+            refs: Vec<UnresolvedRef>,
+        ) -> FileParse {
+            FileParse {
+                nodes: self.nodes,
+                edges: vec![],
+                imports,
+                calls,
+                refs,
+                nav: self.nav,
+                properties: HashSet::new(),
+            }
+        }
+    }
+
+    fn import_symbol(from: &str, module: &str, name: &str) -> ImportStmt {
+        ImportStmt {
+            from_module: from.to_string(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: name.to_string(),
+                alias: None,
+                level: 0,
+            },
+        }
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+    }
+
+    fn edges_of(g: &RepoGraph, category: EdgeCategoryId) -> Vec<(NodeId, NodeId)> {
+        g.edges.iter().filter(|e| e.category == category).map(|e| (e.from, e.to)).collect()
+    }
+
+    /// `m2`: `enum E { RED; fn pick() }` — the imported-enum side of the
+    /// attribute / USES tests.
+    fn enum_module() -> (FileParse, NodeId, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m2 = s.add(node_kind::MODULE, "m2", None);
+        let e = s.add(node_kind::ENUM, "m2::E", Some(m2));
+        let red = s.add(node_kind::ATTRIBUTE, "m2::E::RED", Some(e));
+        let pick = s.add(node_kind::METHOD, "m2::E::pick", Some(e));
+        (s.file(vec![], vec![], vec![]), e, red, pick)
+    }
+
+    /// Rust `impl Tier { fn rank(&self) { self.weight() } }`: SelfMethod walks
+    /// to the ENUM and binds its own method.
+    #[test]
+    fn enum_self_method_resolves_against_the_enum() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "m", None);
+        let e = s.add(node_kind::ENUM, "m::E", Some(m));
+        let a = s.add(node_kind::METHOD, "m::E::a", Some(e));
+        let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
+        let site = CallSite { from: a, qualifier: CallQualifier::SelfMethod("b".to_string()) };
+        let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(a, b)]);
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// Java constant body: a METHOD under an ATTRIBUTE under the ENUM. The walk
+    /// passes through the ATTRIBUTE parent and stops at the ENUM.
+    #[test]
+    fn self_method_through_an_attribute_parent_reaches_the_enum() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "m", None);
+        let e = s.add(node_kind::ENUM, "m::E", Some(m));
+        let x = s.add(node_kind::ATTRIBUTE, "m::E::X", Some(e));
+        let inner = s.add(node_kind::METHOD, "m::E::X::m", Some(x));
+        let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
+        let site = CallSite { from: inner, qualifier: CallQualifier::SelfMethod("b".to_string()) };
+        let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(inner, b)]);
+    }
+
+    /// `import m2.E` + `E.pick()`: the bound base is an ENUM, which scopes
+    /// methods through `class_methods` exactly like a CLASS.
+    #[test]
+    fn attribute_call_binds_enum_base() {
+        let (enum_file, _, _, pick) = enum_module();
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let caller = s.file(
+            vec![import_symbol("m1", "m2", "E")],
+            vec![CallSite { from: f, qualifier: attr("E", "pick") }],
+            vec![],
+        );
+        let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(f, pick)]);
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// `E.RED` read as a USES ref binds the ENUM's ATTRIBUTE member.
+    #[test]
+    fn uses_ref_binds_enum_member() {
+        let (enum_file, _, red, _) = enum_module();
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let uses = UnresolvedRef {
+            from: f,
+            from_module: m1,
+            qualifier: attr("E", "RED"),
+            category: edge_category::USES,
+        };
+        let caller = s.file(vec![import_symbol("m1", "m2", "E")], vec![], vec![uses]);
+        let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::USES), vec![(f, red)]);
+        assert!(g.unresolved_refs.is_empty(), "the member ref must bind");
+    }
+
+    /// The member lookup is ENUM-only: a CLASS base keeps HEAD's behaviour
+    /// (methods only), so `C.X` against a class attribute stays unresolved.
+    #[test]
+    fn uses_ref_on_a_class_base_stays_unresolved() {
+        let mut s2 = Shape::new();
+        let m2 = s2.add(node_kind::MODULE, "m2", None);
+        let c = s2.add(node_kind::CLASS, "m2::C", Some(m2));
+        s2.add(node_kind::ATTRIBUTE, "m2::C::X", Some(c));
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let uses = UnresolvedRef {
+            from: f,
+            from_module: m1,
+            qualifier: attr("C", "X"),
+            category: edge_category::USES,
+        };
+        let caller = s.file(vec![import_symbol("m1", "m2", "C")], vec![], vec![uses]);
+        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+        assert!(edges_of(&g, edge_category::USES).is_empty());
+        assert_eq!(g.unresolved_refs.len(), 1);
+    }
+
+    /// A call site `E.RED()` never binds a member: the member lookup is
+    /// USES-only and `class_methods` indexes an ENUM's METHOD children only.
+    #[test]
+    fn calls_ref_never_binds_an_enum_member() {
+        let (enum_file, _, _, _) = enum_module();
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let caller = s.file(
+            vec![import_symbol("m1", "m2", "E")],
+            vec![CallSite { from: f, qualifier: attr("E", "RED") }],
+            vec![],
+        );
+        let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// HANDLED_BY's global fallback keeps HEAD's CLASS / STRUCT pool: an ENUM
+    /// owning a same-named `run` must not make the handler ambiguous.
+    #[test]
+    fn enum_methods_stay_out_of_the_handled_by_global_pool() {
+        let mut s2 = Shape::new();
+        let m2 = s2.add(node_kind::MODULE, "m2", None);
+        let handlers = s2.add(node_kind::CLASS, "m2::Handlers", Some(m2));
+        let class_run = s2.add(node_kind::METHOD, "m2::Handlers::run", Some(handlers));
+        let mode = s2.add(node_kind::ENUM, "m2::Mode", Some(m2));
+        let enum_run = s2.add(node_kind::METHOD, "m2::Mode::run", Some(mode));
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let route = s.add(node_kind::FUNCTION, "m1::routes", Some(m1));
+        let handled = UnresolvedRef {
+            from: route,
+            from_module: m1,
+            qualifier: attr("h", "run"),
+            category: edge_category::HANDLED_BY,
+        };
+        let caller = s.file(vec![], vec![], vec![handled]);
+        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+        // The ENUM's method is indexed (it owns it) but stays out of this pool.
+        assert_eq!(g.symbols.class_methods[&mode].get("run").copied(), Some(enum_run));
+        assert_eq!(edges_of(&g, edge_category::HANDLED_BY), vec![(route, class_run)]);
     }
 }

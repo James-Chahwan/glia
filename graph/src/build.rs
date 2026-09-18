@@ -187,7 +187,13 @@ fn build_symbol_table(g: &mut RepoGraph) {
                     entry.insert(name.clone(), *child);
                 }
             }
-        } else if parent_kind == Some(node_kind::CLASS) || parent_kind == Some(node_kind::STRUCT) {
+        } else if parent_kind == Some(node_kind::CLASS)
+            || parent_kind == Some(node_kind::STRUCT)
+            || parent_kind == Some(node_kind::ENUM)
+        {
+            // An ENUM owns its METHOD children exactly like a CLASS / STRUCT
+            // (LA.30a: Rust `impl Enum`, Swift, Java / TS enum bodies). Its
+            // ATTRIBUTE members are NOT indexed here — methods only.
             let entry = g.symbols.class_methods.entry(*parent).or_default();
             for child in children {
                 if let Some(name) = g.nav.name_by_id.get(child)

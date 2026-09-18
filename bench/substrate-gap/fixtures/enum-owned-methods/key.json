@@ -1,0 +1,19 @@
+{
+  "framework": "enum-owned-methods",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "LA.30a: an ENUM owns its methods in the generic resolver (graph/src/calls.rs + build_symbol_table), exactly like a CLASS / STRUCT. Rust impl-on-enum methods are already METHOD children of the ENUM node, but enclosing_class_or_struct accepted only CLASS / STRUCT and class_methods indexed only CLASS / STRUCT children, so `self.weight()` inside `impl Tier` resolved nowhere. The Ledger pair is the control that resolves on HEAD.",
+  "expect_nodes": [
+    {"kind": "ENUM", "name": "src/lib/Tier"},
+    {"kind": "METHOD", "name": "src/lib/Tier/rank"},
+    {"kind": "METHOD", "name": "src/lib/Tier/weight"}
+  ],
+  "expect_edges": [
+    {"from": "src/lib/Tier/rank", "to": "src/lib/Tier/weight", "category": "CALLS", "note": "self.weight() inside an enum impl: SelfMethod walks to the ENUM"},
+    {"from": "src/lib/Ledger/total", "to": "src/lib/Ledger/weight", "category": "CALLS", "note": "control: the same shape on a struct resolves on HEAD"}
+  ],
+  "forbid": [
+    {"from": "src/lib/Tier/rank", "to": "src/lib/Ledger/weight", "category": "CALLS", "note": "the enum's own weight(), never the same-named method of another type"},
+    {"from": "src/lib/Ledger/total", "to": "src/lib/Tier/weight", "category": "CALLS", "note": "indexing ENUM methods must not leak them into a struct's self-calls"}
+  ]
+}
