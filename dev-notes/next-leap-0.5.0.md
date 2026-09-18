@@ -236,7 +236,7 @@ qname_shape 10, node_id 10, out_of_repo 20 (96 packets break nothing).
 
 **Schedule** (`python3 dev-notes/wave-runner/leap_schedule.py`): W0 runs the six splits one at a time
 (L0.1 → L0.3 → L0.2 → L0.6 → L0.4 → L0.5; graph before engine, then py and cli), then W1–W41 file-disjoint. Dependency
-depth 30. Without the wave-0 splits the same packets need 63 waves. The critical path is the store/format spine
+depth 30. Without the wave-0 splits the first 207 packets needed 63 waves. The critical path is the store/format spine
 (LC.2 → LC.3a → LC.3d → LC.3b → LD.13 → LD.14a → LD.15 → LD.6 → LD.4 → LG.3 → LD.11 rename) followed by the Engram
 tail (LG.7 → LG.10 → LG.8 → LG.9 → LG.12 → LG.8a → LG.11 → LG.14), which edits the same two engram-export files and can
 run as one serial workflow. LC.2 (core::Edge) and LC.3b run alone in their waves.
