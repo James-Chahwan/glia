@@ -1,0 +1,31 @@
+{
+  "framework": "php-symfony-di",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "php/injects"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "UserController",
+      "note": "autowired consumer (Controller suffix gate)"
+    },
+    {
+      "kind": "CLASS",
+      "name": "UserRepository",
+      "note": "injected service, declared in another namespace and file"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "UserController",
+      "to": "UserRepository",
+      "category": "INJECTS",
+      "note": "A7.5: PHP 8 promoted `private readonly UserRepository $users` in __construct, resolved across namespaces by unique class name. Baseline at HEAD f6f007e (installed wheel): absent, recall 0/1 - the php parser pushed no INJECTS ref anywhere. MEASURED PRESENT 2026-09-19 via the cargo-built CLI, recall 1/1. `private int $pageSize` is the scalar filter; it shows in the marker count (php-ctor=1, not 2)."
+    }
+  ],
+  "note": "A7.5 cross-namespace Symfony case (App\\Controller -> App\\Repository, semicolon namespaces, one class per file). The canonical cell is matrix/php/injects (Laravel, same shape)."
+}

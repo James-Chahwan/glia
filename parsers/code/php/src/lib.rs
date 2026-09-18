@@ -1,8 +1,9 @@
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
+use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
@@ -190,6 +191,7 @@ fn visit_class(
     // Symfony composes a controller's class-level `#[Route('/prefix')]` onto
     // every action template, so the prefix must be known before the body walk.
     let class_prefix = class_route_prefix(node, src);
+    let is_di = is_php_di_class(name, node, src);
     let mut composed = 0usize;
     if let Some(body) = node.child_by_field_name("body") {
         let mut cursor = body.walk();
@@ -197,6 +199,12 @@ fn visit_class(
             if child.kind() == "method_declaration" {
                 composed +=
                     visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
+                if is_di && is_constructor(child, src) {
+                    // `parent_id` is the file MODULE (semicolon namespace, the
+                    // PSR-4 norm) or the namespace PACKAGE (brace form); the
+                    // symbol table indexes both, so either scopes the lookup.
+                    emit_ctor_injects(child, src, id, parent_id, acc);
+                }
             }
         }
     }
@@ -355,6 +363,91 @@ fn visit_method(
     }
 
     check_route_attrs(node, src, id, repo, class_prefix, acc)
+}
+
+/// Is this class a container-managed service whose constructor type-hints are
+/// dependencies? PHP has no DI annotation on the constructor itself (Symfony
+/// autowiring and Laravel's container both resolve every type-hint), so the
+/// class-level gate is the whole precision story: a conventional service-role
+/// name suffix, or a Symfony autoconfiguration attribute declared ON the class.
+/// A value object (`Money`, `Email`) matches neither and emits nothing.
+fn is_php_di_class(name: &str, class_node: TsNode, src: &[u8]) -> bool {
+    const DI_SUFFIXES: [&str; 12] = [
+        "Controller",
+        "Service",
+        "Repository",
+        "Handler",
+        "Manager",
+        "Provider",
+        "Factory",
+        "Middleware",
+        "Command",
+        "Subscriber",
+        "Listener",
+        "Job",
+    ];
+    const DI_ATTRIBUTE_PREFIXES: [&str; 6] = [
+        "AsController",
+        "AsCommand",
+        "AsEventListener",
+        "AsMessageHandler",
+        "Autoconfigure",
+        "AsService",
+    ];
+    if DI_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    // The class's own `attributes` field, never the body: a method-level
+    // `#[AsEventListener]` does not make its class a service.
+    own_attributes(class_node, src)
+        .iter()
+        .any(|(attr, _)| DI_ATTRIBUTE_PREFIXES.iter().any(|p| attr.starts_with(p)))
+}
+
+/// `__construct`, compared case-insensitively (PHP method names are).
+fn is_constructor(method: TsNode, src: &[u8]) -> bool {
+    method
+        .child_by_field_name("name")
+        .is_some_and(|n| text_of(n, src).eq_ignore_ascii_case("__construct"))
+}
+
+/// One INJECTS `UnresolvedRef` per distinct class-typed constructor parameter,
+/// from the consumer class to the dependency's bare type name. Covers plain
+/// type-hinted parameters (Laravel) and PHP 8 promoted properties
+/// (`private readonly UserRepository $users`, Symfony). Scalars, builtins and
+/// union / intersection types go through [`class_type_name`] and emit nothing;
+/// `variadic_parameter` is excluded — a variadic is a list, not one service.
+/// The graph crate binds the bare name to the uniquely-named class/interface.
+fn emit_ctor_injects(ctor: TsNode, src: &[u8], class_id: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let Some(params) = ctor.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        if !matches!(
+            p.kind(),
+            "simple_parameter" | "property_promotion_parameter"
+        ) {
+            continue;
+        }
+        let Some(ty) = p.child_by_field_name("type") else {
+            continue;
+        };
+        let Some(name) = class_type_name(text_of(ty, src)) else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        acc.refs.push(UnresolvedRef {
+            from: class_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(name),
+            category: edge_category::INJECTS,
+        });
+        di_stats::record(DiShape::PhpCtor);
+    }
 }
 
 /// The PHP attributes declared directly ON `node` — its `attributes` field,
@@ -2339,5 +2432,153 @@ function push($id) {
             vec!["PUT /api/users".to_string()],
             "host stripped by url_to_path; verb upgraded by the sibling CUSTOMREQUEST"
         );
+    }
+
+    // ========================================================================
+    // Constructor injection (A7.5)
+    // ========================================================================
+
+    /// Every INJECTS ref's bare target name, sorted.
+    fn injects_targets(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn symfony_promoted_ctor_property_emits_injects_ref() {
+        // Semicolon namespace (the PSR-4 norm): the class hangs off the file
+        // MODULE, so that is the ref's scope. `int` and `?string` are builtins;
+        // the nullable, fully-qualified logger is a class.
+        let source = r#"<?php
+namespace App\Controller;
+
+use App\Repository\UserRepository;
+
+class UserController
+{
+    public function __construct(
+        private readonly UserRepository $users,
+        private int $pageSize = 20,
+        protected ?string $locale = null,
+        private ?\Psr\Log\LoggerInterface $logger = null,
+    ) {}
+
+    public function show(int $id): array { return $this->users->find($id); }
+}
+"#;
+        let module = "src::Controller::UserController";
+        let fp = parse_file(source, "src/Controller/UserController.php", module, repo()).unwrap();
+        assert_eq!(
+            injects_targets(&fp),
+            vec!["LoggerInterface", "UserRepository"]
+        );
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
+        let class_qname = format!("{module}::UserController");
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &class_qname);
+        for r in fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+        {
+            assert_eq!(
+                r.from, class_id,
+                "the consumer CLASS injects, not __construct"
+            );
+            assert_eq!(r.from_module, module_id);
+        }
+    }
+
+    #[test]
+    fn laravel_plain_ctor_type_hint_emits_injects_ref() {
+        // Brace namespace: the class hangs off the namespace PACKAGE. Plain
+        // (non-promoted) type hints; a repeated type is deduped, a union and a
+        // variadic emit nothing, `__CONSTRUCT` still matches (PHP method names
+        // are case-insensitive) and a non-constructor method's params do not count.
+        let source = r#"<?php
+namespace App\Jobs {
+    class SendInvoiceJob
+    {
+        protected $mailer;
+
+        public function __CONSTRUCT(\App\Services\Mailer $mailer, Mailer $again, Foo|Bar $either, Listener ...$rest)
+        {
+            $this->mailer = $mailer;
+        }
+
+        public function handle(InvoiceRepository $invoices): void {}
+    }
+}
+"#;
+        let fp = parse_file(source, "app/Jobs/SendInvoiceJob.php", "app::Jobs", repo()).unwrap();
+        assert_eq!(injects_targets(&fp), vec!["Mailer"]);
+        let pkg_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Jobs");
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INJECTS)
+                .all(|r| r.from_module == pkg_id),
+            "a brace-namespace class scopes its refs to the namespace PACKAGE"
+        );
+    }
+
+    #[test]
+    fn value_object_ctor_emits_no_injects() {
+        // No service-role suffix and no class-level autoconfiguration
+        // attribute: a value object's constructor is data, not dependencies.
+        // A METHOD-level attribute must not open the gate for its class.
+        let source = r#"<?php
+namespace App\Domain;
+
+class Money
+{
+    public function __construct(private Currency $c, private int $amount) {}
+}
+
+class Audit
+{
+    public function __construct(private Clock $clock) {}
+
+    #[AsEventListener(event: 'kernel.request')]
+    public function onRequest(): void {}
+}
+"#;
+        let fp = parse_file(source, "src/Domain/Money.php", "src::Domain::Money", repo()).unwrap();
+        assert!(
+            injects_targets(&fp).is_empty(),
+            "got {:?}",
+            injects_targets(&fp)
+        );
+    }
+
+    #[test]
+    fn symfony_class_attribute_opens_the_di_gate() {
+        // `SyncUsers` has no service suffix; a fully-qualified `#[AsCommand]`
+        // declared ON the class, inside a grouped attribute list, autoconfigures it.
+        let source = r#"<?php
+namespace App\Console;
+
+#[Deprecated, \Symfony\Component\Console\Attribute\AsCommand(name: 'app:sync-users')]
+final class SyncUsers
+{
+    public function __construct(private UserRepository $users) {}
+}
+"#;
+        let fp = parse_file(
+            source,
+            "src/Console/SyncUsers.php",
+            "src::Console::SyncUsers",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(injects_targets(&fp), vec!["UserRepository"]);
     }
 }

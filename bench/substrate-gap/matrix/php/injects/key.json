@@ -10,9 +10,9 @@
   ],
   "expect_edges": [
     {"from": "OrderController", "to": "UserService", "category": "INJECTS",
-     "note": "INTENDED: the type-hinted constructor parameter is exactly the signal Laravel's container resolves on, and is the same shape parsers/code/java and parsers/code/csharp already turn into INJECTS refs. MEASURED ABSENT 2026-09-16: parsers/code/php has no INJECTS site. Recall 0/1."}
+     "note": "INTENDED: the type-hinted constructor parameter is exactly the signal Laravel's container resolves on, and is the same shape parsers/code/java and parsers/code/csharp already turn into INJECTS refs. MEASURED ABSENT 2026-09-16: parsers/code/php had no INJECTS site, recall 0/1. MEASURED PRESENT 2026-09-19 (A7.5, cargo-built CLI): emit_ctor_injects in parsers/code/php pushes one INJECTS ref per class-typed constructor parameter of a DI-gated class (the Controller suffix here); the ref resolves to CLASS UserService, recall 1/1, marker `php-ctor=1`."}
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 8 nodes / 7 edges, zero INJECTS. The promoted constructor parameter IS parsed (METHOD OrderController::OrderController::__construct exists) and the `use App\\Services\\UserService` import resolves to an IMPORTS edge, so the type name is available at the constructor — only the INJECTS ref is not emitted."
+  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 8 nodes / 7 edges, zero INJECTS. The promoted constructor parameter IS parsed (METHOD OrderController::OrderController::__construct exists) and the `use App\\Services\\UserService` import resolves to an IMPORTS edge, so the type name is available at the constructor — only the INJECTS ref was not emitted. A7.5 emits it; fixtures/php-symfony-di covers the cross-namespace Symfony form of the same cell."
 }
