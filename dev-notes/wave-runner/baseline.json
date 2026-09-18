@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "5b37aeb",
-  "after_wave": 1,
+  "measured_at_head": "08f209f",
+  "after_wave": 2,
   "cargo_test_workspace": {
-    "passed": 1236,
+    "passed": 1429,
     "failed": 0
   },
   "history_passed": [
@@ -28,33 +28,59 @@
     1044,
     1056,
     1058,
-    1236
+    1236,
+    1429
   ],
   "run_py": {
-    "fixtures": 158,
-    "blind_spots": 0,
-    "blind_spot_detail": "blind: []; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 176,
+    "blind_spots": 12,
+    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: DEFINES', 'kotlin: IMPLEMENTS', 'kotlin: IMPORTS', 'kotlin: INHERITS_FROM', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-ktor: IMPORTS', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS', 'kotlin-spring: HANDLED_BY', 'kotlin-spring: INJECTS']; missing nodes: [\"kotlin: CLASS 'UserController'\", \"kotlin: CLASS 'UserService'\", \"kotlin: CLASS 'UserDto'\", \"kotlin: METHOD 'getUser'\", \"kotlin: FUNCTION 'topLevelHelper'\", \"kotlin-ktor: FUNCTION 'itemRoutes'\", \"kotlin-ktor: METHOD 'all'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\", \"kotlin-spring: ROUTE 'GET /users'\", \"kotlin-spring: CLASS 'UserController'\", \"kotlin-spring: METHOD 'list'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
-    "blind_list": [],
+    "blind_list": [
+      "kotlin: CALLS",
+      "kotlin: DEFINES",
+      "kotlin: IMPLEMENTS",
+      "kotlin: IMPORTS",
+      "kotlin: INHERITS_FROM",
+      "kotlin-ktor: CALLS",
+      "kotlin-ktor: HANDLED_BY",
+      "kotlin-ktor: IMPORTS",
+      "kotlin-retrofit: HTTP_CALLS",
+      "kotlin-spring: CALLS",
+      "kotlin-spring: HANDLED_BY",
+      "kotlin-spring: INJECTS"
+    ],
     "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],
-    "missing_nodes_list": []
+    "missing_nodes_list": [
+      "kotlin: CLASS 'UserController'",
+      "kotlin: CLASS 'UserService'",
+      "kotlin: CLASS 'UserDto'",
+      "kotlin: METHOD 'getUser'",
+      "kotlin: FUNCTION 'topLevelHelper'",
+      "kotlin-ktor: FUNCTION 'itemRoutes'",
+      "kotlin-ktor: METHOD 'all'",
+      "kotlin-retrofit: ENDPOINT 'GET /api/users'",
+      "kotlin-spring: ROUTE 'GET /users'",
+      "kotlin-spring: CLASS 'UserController'",
+      "kotlin-spring: METHOD 'list'"
+    ]
   },
   "matrix_py": {
-    "full": 99,
+    "full": 106,
     "partial": 29,
-    "none": 19,
-    "unknown": 333,
-    "covered": 147,
+    "none": 14,
+    "unknown": 331,
+    "covered": 149,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0
   },
-  "test_matrix_py": "26 passed, 0 skipped, 0 failed (26 tests)",
+  "test_matrix_py": "31 passed, 0 skipped, 0 failed (31 tests)",
   "test_grade_py": "all passed",
   "wheel_current_as_of_head": true
 }

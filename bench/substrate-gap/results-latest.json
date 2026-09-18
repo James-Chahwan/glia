@@ -100,7 +100,7 @@
     },
     "clojure/http_client": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -110,17 +110,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        2,
         2
       ],
-      "via": null
+      "via": "http"
     },
     "clojure/http_server": {
       "extract": [
@@ -496,6 +496,30 @@
         3
       ],
       "via": "test"
+    },
+    "csharp/ws": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/ws"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "websocket"
     },
     "dart/calls": {
       "extract": [
@@ -1173,7 +1197,7 @@
     },
     "go/subproject": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1183,17 +1207,19 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
       "route": [
         0,
-        1
+        0
       ],
-      "via": "contain"
+      "via": "project"
     },
     "go/tests": {
       "extract": [
@@ -1615,7 +1641,7 @@
     },
     "java/subproject": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1625,17 +1651,19 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
       "route": [
         0,
-        1
+        0
       ],
-      "via": "contain"
+      "via": "project"
     },
     "java/tests": {
       "extract": [
@@ -1663,6 +1691,30 @@
         3
       ],
       "via": "test"
+    },
+    "java/ws": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/java/ws"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "websocket"
     },
     "php/calls": {
       "extract": [
@@ -1941,25 +1993,26 @@
     },
     "python/db": {
       "extract": [
-        1,
-        1
+        2,
+        2
       ],
       "fixtures": [
-        "fixtures/py-accesses-data"
+        "fixtures/py-accesses-data",
+        "fixtures/py-django-orm"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
-        1,
-        1
+        2,
+        2
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "db"
     },
@@ -2410,7 +2463,7 @@
     },
     "python/ws": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2420,14 +2473,14 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "websocket"
@@ -2657,25 +2710,26 @@
     },
     "rust/calls": {
       "extract": [
-        2,
-        2
+        5,
+        5
       ],
       "fixtures": [
-        "fixtures/rust-axum-calls"
+        "fixtures/rust-axum-calls",
+        "fixtures/rust-macro-arg-calls"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        5,
+        5
       ],
       "via": "call"
     },
@@ -3384,12 +3438,14 @@
     },
     "typescript/injects": {
       "extract": [
-        4,
-        4
+        8,
+        8
       ],
       "fixtures": [
         "fixtures/angular-injects",
-        "fixtures/ts-angular-di"
+        "fixtures/ts-angular-di",
+        "fixtures/ts-angular-inject-fn",
+        "fixtures/ts-nest-di"
       ],
       "forbid": [
         2,
@@ -3397,13 +3453,13 @@
       ],
       "level": "full",
       "literal": [
-        4,
-        4
+        8,
+        8
       ],
       "reasons": [],
       "route": [
-        2,
-        2
+        4,
+        4
       ],
       "via": "di"
     },
@@ -3556,7 +3612,7 @@
     },
     "typescript/subproject": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -3566,17 +3622,19 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
       "route": [
         0,
-        1
+        0
       ],
-      "via": "contain"
+      "via": "project"
     },
     "typescript/taskq": {
       "extract": [
@@ -3667,27 +3725,40 @@
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
     "fixtures/csharp-aspnet-composed",
+    "fixtures/csharp-efcore",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
+    "fixtures/enum-owned-methods",
+    "fixtures/event-name-shape",
     "fixtures/event-publish-precision",
+    "fixtures/go-closure-handled_by",
     "fixtures/graphql-op-needle-precision",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
     "fixtures/http-dart-nav-precision",
+    "fixtures/http-monorepo-owner",
     "fixtures/http-nav-route-precision",
     "fixtures/http-nav-vs-server-route",
     "fixtures/http-placeholder-fold",
     "fixtures/http-relative-paths",
     "fixtures/imports-local-filter",
     "fixtures/java-http-clients",
+    "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
     "fixtures/k8s-multidoc-cron",
+    "fixtures/kotlin-entities",
+    "fixtures/kotlin-flip-guard",
+    "fixtures/kotlin-ktor",
+    "fixtures/kotlin-retrofit",
+    "fixtures/kotlin-spring",
+    "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
     "fixtures/py-router-prefix",
     "fixtures/react-hook",
+    "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
@@ -3713,6 +3784,7 @@
     "fixtures/xcut-queue-tag-unpairable",
     "fixtures/xcut-queue-wildcard",
     "fixtures/xcut-trpc",
+    "fixtures/xcut-websocket-client-forms",
     "fixtures/xdata-source-shares",
     "fixtures/xiac-terraform-k8s",
     "fixtures/xpoly-data-entity",
@@ -3721,16 +3793,16 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 147,
+    "covered": 149,
     "error": 0,
-    "full": 99,
+    "full": 106,
     "grid": 480,
-    "none": 19,
+    "none": 14,
     "partial": 29,
-    "unknown": 333
+    "unknown": 331
   },
   "vocabulary": {
-    "digest": "a3672b018b49",
+    "digest": "e956998031b0",
     "languages": 16,
     "mechanisms": 30
   }

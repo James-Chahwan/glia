@@ -36,6 +36,7 @@ PROGRAMME = ROOT / "dev-notes" / "wave-packets.json"
 LANDED = {
     0: "L0.1 L0.3 L0.2 L0.6 L0.4 L0.5",
     1: "LG.6a LD.1 LB.3a LB.5 LB.4c LA.4 A13.1 LB.1 LA.26 LA.29 LA.25a LA.22a LA.31 A6.7 LG.6d LA.5 A13.4 LG.6b LA.8 LA.11 LG.4a LA.7a LG.10a A7.3 A7.5 A7.4",
+    2: "LB.4a LB.3b LD.3b LA.30a LB.2 LF.2a LA.18a LA.18d LA.12 LB.6 LG.13 LA.41 LA.2 LG.2 LA.22c A14.1 LA.9 A7.1 A13.13 A13.14 A13.17 A13.11",
 }
 
 ITEM_RE = re.compile(r"^(L[A-G]\.\d+)$")
