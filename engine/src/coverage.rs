@@ -60,6 +60,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "SNS→SQS fan-out is declared in infrastructure, not code — a producer to an SNS topic will not pair with the SQS consumers it feeds",
         verify: "grep the SNS subscription in terraform/CDK",
     },
+    // A10.8: the walk admits a `.json` contract by content sniff under a size
+    // cap (`walk::JSON_CONTRACT_CAP`), so a large generated spec is skipped.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "DOCUMENTS",
+        note: "contract JSON (OpenAPI/Swagger, AsyncAPI, Pact) over 512 KB is not read, and one whose format key is outside its first and last 8 KB is not recognised",
+        verify: "look for large swagger.json / openapi.json / pact files and read their paths by hand",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",

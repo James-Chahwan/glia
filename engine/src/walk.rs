@@ -6,6 +6,7 @@ use std::path::Path;
 use repo_graph_code_domain::project_roots::{self, ProjectRoot};
 use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use repo_graph_code_extractors::contracts::sniff_json_contract;
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::extract::detect_language;
@@ -44,12 +45,29 @@ fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
         && parent.parent() == Some(root)
 }
 
+/// Largest `.json` the walk reads to sniff for an API contract (A10.8). A
+/// generated spec above it (Kubernetes' swagger.json is ~4 MiB) is skipped and
+/// counted in the `[contract] json over_cap=` line. The same cap is declared
+/// in the coverage caveats, so the skip is visible rather than silent.
+const JSON_CONTRACT_CAP: u64 = 512_000;
+
+/// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
+/// `.json` the walk reached, `admitted` is the ones queued as contracts, and
+/// `over_cap` is the ones never read because they exceed [`JSON_CONTRACT_CAP`].
+#[derive(Default)]
+struct JsonAdmission {
+    sniffed: usize,
+    admitted: usize,
+    over_cap: usize,
+}
+
 pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     let mut files = Vec::new();
     let mut regions = Vec::new();
     let mut md = Vec::new();
     let mut roots = Vec::new();
     let mut counts = GateCounts::default();
+    let mut json = JsonAdmission::default();
     // Per-directory `.gitignore` layers: pushed on the way down, popped on the
     // way back up, so each verdict sees exactly the files git would. (A8.2)
     let mut ignores = IgnoreStack::default();
@@ -63,9 +81,18 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
         &mut md,
         &mut roots,
         &mut counts,
+        &mut json,
     );
     if pushed {
         ignores.pop();
+    }
+    // A10.8 fired_on marker: `... 2>&1 | grep '^\[contract\] json sniffed='`.
+    // Gated on non-zero like the other walk lines.
+    if json.sniffed > 0 {
+        eprintln!("[contract] json sniffed={} admitted={}", json.sniffed, json.admitted);
+    }
+    if json.over_cap > 0 {
+        eprintln!("[contract] json over_cap={} cap_bytes={JSON_CONTRACT_CAP}", json.over_cap);
     }
     // Explicit, although the name-sorted walk already discovers roots in a
     // stable order: A8.5's node order (and so shard bytes) keys on this Vec,
@@ -95,6 +122,7 @@ fn walk_dir(
     md: &mut Vec<(String, String)>,
     roots: &mut Vec<ProjectRoot>,
     counts: &mut GateCounts,
+    json: &mut JsonAdmission,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     // Sort by name: read_dir yields filesystem/inode order, which leaked into
@@ -149,7 +177,7 @@ fn walk_dir(
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, files, regions, md, roots, counts);
+            walk_dir(root, &path, ignores, files, regions, md, roots, counts, json);
             if pushed {
                 ignores.pop();
             }
@@ -169,6 +197,28 @@ fn walk_dir(
                 && let Ok(text) = std::fs::read_to_string(&path)
             {
                 md.push((rel_str.clone(), text));
+                continue;
+            }
+            // A10.8: a `.json` is read only to be sniffed, and queued only when
+            // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact). Lock
+            // files, tsconfig and test data are read once, dropped here, and
+            // never kept. `package.json` / `composer.json` are manifests
+            // (`is_bypass_path`) and keep their own route below. Anything under
+            // a collapsed region (node_modules, dist, ...) is never reached.
+            if rel_str.to_ascii_lowercase().ends_with(".json") && !is_bypass_path(&rel_str) {
+                json.sniffed += 1;
+                match std::fs::metadata(&path) {
+                    Ok(m) if m.len() > JSON_CONTRACT_CAP => json.over_cap += 1,
+                    Ok(_) => {
+                        if let Ok(text) = std::fs::read_to_string(&path)
+                            && sniff_json_contract(&text).is_some()
+                        {
+                            json.admitted += 1;
+                            files.push((rel_str, text));
+                        }
+                    }
+                    Err(_) => {}
+                }
                 continue;
             }
             let matches_lang = detect_language(&rel_str).is_some();
@@ -499,6 +549,72 @@ mod walk_tests {
         assert!(files.iter().any(|(p, _)| p == "app/main.py"), "{files:?}");
         let r = regions.iter().find(|r| r.rel_path == "libs/sdk").unwrap();
         assert_eq!(r.provenance, Collapse::Submodule);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A10.8 precision: `.json` is read and sniffed, and only an API contract
+    /// is queued. The lock file, tsconfig and a substrate-gap key.json are
+    /// dropped. The manifest keeps its own route, and a contract inside a
+    /// collapsed region is never reached. grade.py has no expect_absent, so
+    /// this test is the gate.
+    #[test]
+    fn walk_admits_only_sniffed_contract_json() {
+        let root = walk_tmp("json");
+        std::fs::create_dir_all(root.join("node_modules/swagger-ui")).unwrap();
+        std::fs::create_dir_all(root.join("big")).unwrap();
+        let files_in = [
+            ("openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
+            (
+                "package-lock.json",
+                r#"{"name":"shop","lockfileVersion":3,"packages":{"":{"dependencies":{"swagger-ui":"5"}}}}"#,
+            ),
+            ("tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#),
+            (
+                "key.json",
+                r#"{"framework":"contract-pact","language":"json+python","dirs":["."],"expect_nodes":[{"kind":"DOC_SECTION","name":"GET /users","note":"openapi"}]}"#,
+            ),
+            ("package.json", r#"{"name":"shop","dependencies":{"flask-openapi":"1"}}"#),
+            ("node_modules/swagger-ui/swagger.json", r#"{"swagger":"2.0","paths":{}}"#),
+        ];
+        for (rel, body) in files_in {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+
+        let (files, regions, _md, _roots) = walk_source_files(&root);
+        let json: Vec<&str> = files
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .filter(|p| p.ends_with(".json") && *p != "package.json")
+            .collect();
+        assert_eq!(json, ["openapi.json"], "exactly one of four candidate .json admitted: {files:?}");
+        assert!(files.iter().any(|(p, _)| p == "package.json"), "the manifest keeps its own route");
+        assert!(regions.iter().any(|r| r.rel_path == "node_modules"));
+
+        // Over the cap: a real contract, but never read.
+        let pad = "x".repeat(JSON_CONTRACT_CAP as usize);
+        std::fs::write(
+            root.join("big/swagger.json"),
+            format!(r#"{{"swagger":"2.0","paths":{{}},"x-pad":"{pad}"}}"#),
+        )
+        .unwrap();
+        let (files, ..) = walk_source_files(&root);
+        assert!(files.iter().all(|(p, _)| p != "big/swagger.json"), "over-cap json is skipped");
+
+        // End to end: the admitted contract becomes a DOC_SECTION under its
+        // own MODULE, and nothing else in the tree does.
+        let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        let docs: Vec<String> = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION))
+                    .map(move |n| g.nav.qname_by_id[&n.id].clone())
+            })
+            .collect();
+        assert_eq!(docs, ["contract::openapi::GET:/users"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

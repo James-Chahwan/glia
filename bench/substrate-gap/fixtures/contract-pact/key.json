@@ -1,0 +1,17 @@
+{
+  "framework": "contract-pact",
+  "language": "json+python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "GET /users", "note": "A10.8: pact interaction request (request.method + request.path)"},
+    {"kind": "ROUTE", "name": "/users", "note": "positive control: flask route already extracted today"}
+  ],
+  "expect_edges": [
+    {"from": "contract::pact::GET", "to": "/users", "category": "DOCUMENTS", "note": "A10.8 via A10.2: pact interaction -> provider ROUTE, exact (method, path) hit"}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "GET /users", "max_nodes": 1, "note": "one node per interaction request"},
+    {"kind": "MODULE", "name": "key.json", "note": "A10.8 precision: this fixture's own key.json is read and sniffed at the walk, and must never sniff as a contract"}
+  ],
+  "note": "A10.8: a consumer-driven contract. Each Pact interaction's request.method + request.path becomes a DOC_SECTION with ORIGIN {provenance: contract, source: pact, method, path, description}, which A10.2's pairing pass reads through the same http_op seam as an OpenAPI op. The interaction path is parameter-free on purpose: Pact paths are concrete (/users/42), so they only pair with a concrete ROUTE until placeholder folding lands."
+}

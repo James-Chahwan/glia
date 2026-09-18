@@ -1,7 +1,8 @@
 //! Per-file routing: which extractor or language parser sees which file.
 //! Holds the non-source branches (yaml / Dockerfile / package manifest /
-//! dotenv / `.proto`), the WP-D incremental parse-cache lookup, and the
-//! per-file panic isolation. Split out of `build_graphs_for_repo`.
+//! dotenv / contract JSON / `.proto`), the WP-D incremental parse-cache
+//! lookup, and the per-file panic isolation. Split out of
+//! `build_graphs_for_repo`.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -40,8 +41,8 @@ pub(crate) fn parse_repo_files(
     // A10.5 `[proto] files=` marker counters.
     let mut proto_messages = 0usize;
     let mut proto_enums = 0usize;
-    // A10.1 `[contract]` marker counters. All four arms are declared now so
-    // A10.3 (asyncapi) / A10.8 (pact) only ever increment.
+    // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
+    // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
     // WP-D incremental: track which main-parser files we saw so deleted files
     // get evicted; count reuse vs reparse for the marker.
@@ -177,6 +178,40 @@ pub(crate) fn parse_repo_files(
                     vec![cfg_out.nodes],
                     vec![cfg_out.edges],
                     vec![cfg_out.nav],
+                    vec![],
+                    &mut parses_by_lang,
+                );
+            }
+            continue;
+        }
+
+        // A10.8: the walker queues a `.json` only when it sniffed as an API
+        // contract. After the manifest branch, so package.json / composer.json
+        // never land here; before detect_language, which has no json arm.
+        let json_ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+        if json_ext {
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            let out = repo_graph_code_extractors::contracts::extract_json_contract(
+                source, path, module_id, repo,
+            );
+            contracts.record(&out);
+            if !out.nodes.is_empty() {
+                stash_synthetic_parse(
+                    "json",
+                    path,
+                    module_id,
+                    repo,
+                    vec![out.nodes],
+                    vec![out.edges],
+                    vec![out.nav],
                     vec![],
                     &mut parses_by_lang,
                 );

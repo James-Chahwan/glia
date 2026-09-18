@@ -1,0 +1,17 @@
+{
+  "framework": "contract-openapi-json",
+  "language": "json+python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "GET /users", "note": "A10.8: OpenAPI op from openapi.json (the Swashbuckle / springdoc / FastAPI artifact shape)"},
+    {"kind": "ROUTE", "name": "/users", "note": "positive control: flask route already extracted today"}
+  ],
+  "expect_edges": [
+    {"from": "contract::openapi::GET", "to": "/users", "category": "DOCUMENTS", "note": "A10.8 via A10.2: no servers block, so the exact (method, path) hit pairs at Strong"}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "GET /users", "max_nodes": 1, "note": "one node per declared operation"},
+    {"kind": "MODULE", "name": "key.json", "note": "A10.8 precision: this fixture's own key.json is read and sniffed at the walk, and must never sniff as a contract"}
+  ],
+  "note": "A10.8: .json is admitted at the walker only when a content sniff says it is a contract (an OpenAPI/Swagger, AsyncAPI or Pact key in the first or last 8 KiB, 512 KiB cap). extract_json_contract emits the same DOC_SECTION + ORIGIN provenance=contract shape as the yaml path, so A10.2's link_contract_routes pairs it unchanged. The walker's precision (exactly one of openapi.json / package-lock.json / tsconfig.json / key.json admitted) is gated by the engine walk_tests unit test, since grade.py has no expect_absent."
+}

@@ -1,0 +1,25 @@
+{
+  "consumer": {
+    "name": "web"
+  },
+  "provider": {
+    "name": "api"
+  },
+  "interactions": [
+    {
+      "description": "a request for users",
+      "request": {
+        "method": "GET",
+        "path": "/users"
+      },
+      "response": {
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  }
+}
