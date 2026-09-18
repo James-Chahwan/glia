@@ -1,5 +1,6 @@
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use std::collections::HashSet;
+use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
@@ -38,25 +39,36 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
+    // LB.2: top-level types are members of the PACKAGE (the directory), so
+    // their qnames hang off the directory scope, not the file module. The
+    // MODULE node above keeps `module_qname`: imports, TESTS pairing and the
+    // local-module index all read file-module qnames.
+    let scope = type_scope(module_qname);
+    let mut top_level_types = 0usize;
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         match child.kind() {
             "import_declaration" => collect_import(child, src, module_qname, &mut acc),
             "class_declaration" | "interface_declaration" | "enum_declaration"
             | "record_declaration" => {
-                visit_type_decl(
+                top_level_types += usize::from(visit_type_decl(
                     child,
                     src,
                     file_rel_path,
-                    module_qname,
+                    scope,
                     module_id,
                     module_id,
                     repo,
                     &mut acc,
-                );
+                ));
             }
             _ => {}
         }
+    }
+    if top_level_types > 0 && qname_debug() {
+        eprintln!(
+            "[qname] java: {top_level_types} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}"
+        );
     }
 
     scan_ktor_routes(source, repo, &mut acc);
@@ -79,6 +91,39 @@ pub fn parse_file(
         refs: acc.refs,
         nav: acc.nav,
         properties: Default::default(),
+    })
+}
+
+/// LB.2: a Java top-level type belongs to its package (its directory), not its
+/// file, so drop the file-stem segment the engine's `path_to_qname` puts last:
+/// `src::main::java::com::example::Foo` -> `src::main::java::com::example`, and
+/// a file at the repo root (`Foo`) -> `""`. The directory, not the declared
+/// `package`, is the scope on purpose: two services of one monorepo that both
+/// declare `com.example.Application` must keep distinct NodeIds.
+///
+/// The public class `Foo` of `Foo.java` therefore shares its qname with the
+/// file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
+/// ranks the declaration over the container, so qname lookups land on the type.
+fn type_scope(module_qname: &str) -> &str {
+    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+}
+
+/// `scope::name`, or the bare `name` for the empty (repo-root) scope.
+fn scoped(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// `GLIA_QNAME_DEBUG=1` turns on the per-file `[qname] java:` marker, read
+/// once. Off by default: it would print for every Java file of a build.
+///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] java:'`
+fn qname_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -166,27 +211,31 @@ fn is_apache_http_package(path: &str) -> bool {
     path.starts_with("org.apache.http.") || path.starts_with("org.apache.hc.")
 }
 
+/// Emit one type declaration and everything under it. `scope` is the qname the
+/// type hangs off: the package scope ([`type_scope`]) for a top-level type,
+/// the outer type's qname for a nested one. Returns whether a type node was
+/// emitted (the `[qname] java:` marker counts them).
 fn visit_type_decl(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    module_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
     let kind = match node.kind() {
         "class_declaration" | "record_declaration" => node_kind::CLASS,
         "interface_declaration" => node_kind::INTERFACE,
         "enum_declaration" => node_kind::ENUM,
-        _ => return,
+        _ => return false,
     };
-    let qname = format!("{module_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
 
     acc.nodes.push(Node {
@@ -237,7 +286,7 @@ fn visit_type_decl(
 
     // Walk body for methods + nested types.
     let Some(body) = node.child_by_field_name("body") else {
-        return;
+        return true;
     };
     // Pattern E: a Spring stereotype (@Service/@Component/@RestController/…) marks
     // this class as a DI-managed bean, so its constructor params are injected
@@ -281,6 +330,7 @@ fn visit_type_decl(
             "[java-routes] composed {composed} action routes under '{class_prefix}' in {file_rel}"
         );
     }
+    true
 }
 
 fn visit_method(
@@ -1763,6 +1813,111 @@ mod tests {
         RepoId(1)
     }
 
+    /// Every qname the parse recorded for `kind`, sorted.
+    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+        let mut out: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// LB.2 — top-level types hang off the package (directory) scope, never the
+    /// file module: no doubled `InvoiceService::InvoiceService` segment. The
+    /// module qname is the engine's own (`path_to_qname` of the repo path).
+    #[test]
+    fn top_level_types_are_package_scoped() {
+        let source = r#"
+package com.example.billing;
+
+import java.util.List;
+
+public class InvoiceService {
+    public int total(int x) { return round(x) + 1; }
+    private int round(int x) { return x; }
+    public static class Row {}
+}
+
+class LineItem {
+    void touch() {}
+}
+"#;
+        let module = "src::main::java::com::example::billing::InvoiceService";
+        let fp = parse_file(
+            source,
+            "src/main/java/com/example/billing/InvoiceService.java",
+            module,
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec![
+                "src::main::java::com::example::billing::InvoiceService",
+                "src::main::java::com::example::billing::InvoiceService::Row",
+                "src::main::java::com::example::billing::LineItem",
+            ],
+            "public, nested and secondary top-level classes"
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec![
+                "src::main::java::com::example::billing::InvoiceService::round",
+                "src::main::java::com::example::billing::InvoiceService::total",
+                "src::main::java::com::example::billing::LineItem::touch",
+            ]
+        );
+        assert!(
+            !fp.nav.qname_by_id.values().any(|q| q.contains("InvoiceService::InvoiceService")),
+            "no qname doubles the file stem: {:?}",
+            fp.nav.qname_by_id.values().collect::<Vec<_>>()
+        );
+
+        // The file MODULE is unchanged: it keeps the full module qname, so the
+        // public class shares that qname under a different kind and NodeId.
+        assert_eq!(qnames_of(&fp, node_kind::MODULE), vec![module]);
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, module);
+        assert_ne!(module_id, class_id);
+        assert!(fp.nodes.iter().any(|n| n.id == class_id), "the CLASS node is emitted");
+        assert!(
+            fp.edges.iter().any(|e| e.from == module_id
+                && e.to == class_id
+                && e.category == edge_category::DEFINES),
+            "the file module still DEFINES its public class"
+        );
+        // Imports still originate from the file module's qname.
+        assert_eq!(fp.imports.len(), 1);
+        assert_eq!(fp.imports[0].from_module, module);
+        // A nested type hangs off its outer type, not the package.
+        let row_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "src::main::java::com::example::billing::InvoiceService::Row",
+        );
+        assert_eq!(fp.nav.parent_of.get(&row_id), Some(&class_id));
+    }
+
+    /// LB.2 — a file at the repo root has an empty package scope: its type's
+    /// qname is the bare type name.
+    #[test]
+    fn root_level_file_types_have_bare_qnames() {
+        let source = "public class App {\n    public void run() {}\n}\n";
+        let fp = parse_file(source, "App.java", "App", repo()).unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["App"]);
+        assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["App::run"]);
+        assert_eq!(qnames_of(&fp, node_kind::MODULE), vec!["App"]);
+        assert_eq!(type_scope("App"), "");
+        assert_eq!(type_scope("tools::Tool"), "tools");
+        assert_eq!(scoped("", "App"), "App");
+        assert_eq!(scoped("tools", "Tool"), "tools::Tool");
+    }
+
     #[test]
     fn classes_and_methods() {
         let source = r#"
@@ -1776,7 +1931,7 @@ public class UserService {
     private void validate(User u) {}
 }
 "#;
-        let fp = parse_file(source, "src/main/java/UserService.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/UserService.java", "com::example::UserService", repo()).unwrap();
         let names: Vec<&str> = fp.nav.name_by_id.values().map(|s| s.as_str()).collect();
         assert!(names.contains(&"UserService"));
         assert!(names.contains(&"getUser"));
@@ -1798,7 +1953,7 @@ public enum Color {
     RED, GREEN, BLUE;
 }
 "#;
-        let fp = parse_file(source, "src/main/java/Types.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/Types.java", "com::example::Types", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
     }
@@ -1817,7 +1972,7 @@ public class X extends Base implements IFoo, IBar {
     public static final int RAW = 7;
 }
 "#;
-        let fp = parse_file(source, "src/main/java/X.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/X.java", "com::example::X", repo()).unwrap();
 
         // STATE_VAR: only the documented FEE survives the noise gate.
         let state_vars: Vec<&str> = fp
@@ -1860,7 +2015,7 @@ public class X extends Base implements IFoo, IBar {
         // The heritage ref must originate from the class node and carry the
         // enclosing module id (so the resolver can scope the lookup).
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "com::example::X");
-        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "com::example");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "com::example::X");
         assert!(inherits[0].from == x_id && inherits[0].from_module == module_id);
     }
 
@@ -1889,7 +2044,7 @@ interface UserRepository extends JpaRepository<User, Long> {
     User findByName(String name);
 }
 "#;
-        let fp = parse_file(source, "UserRepository.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "UserRepository.java", "com::example::UserRepository", repo()).unwrap();
 
         // @Entity → DATA_ENTITY node named User.
         let entity_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "User");
@@ -1934,7 +2089,7 @@ class Basket {
     private List<User> items;
 }
 "#;
-        let fp = parse_file(source, "Basket.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Basket.java", "com::example::Basket", repo()).unwrap();
         assert!(
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::DATA_ENTITY),
             "plain class must not emit a DATA_ENTITY"
@@ -1956,7 +2111,7 @@ import com.example.models.User;
 import java.util.*;
 import static org.junit.Assert.assertEquals;
 "#;
-        let fp = parse_file(source, "src/main/java/App.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/App.java", "com::example::App", repo()).unwrap();
         assert_eq!(fp.imports.len(), 3);
     }
 
@@ -1973,7 +2128,7 @@ public class UserController {
     public User create() { return null; }
 }
 "#;
-        let fp = parse_file(source, "src/main/java/UserController.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/UserController.java", "com::example::UserController", repo()).unwrap();
         let routes: Vec<_> = fp
             .nav
             .kind_by_id
@@ -2005,7 +2160,7 @@ public class ThingsController {
     public void destroy() {}
 }
 "#;
-        let fp = parse_file(source, "ThingsController.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "ThingsController.java", "com::example::ThingsController", repo()).unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -2038,7 +2193,7 @@ public class UserController {
         let fp = parse_file(
             SPRING_CLASS_PREFIXED,
             "server/UserController.java",
-            "com::example",
+            "com::example::UserController",
             repo(),
         )
         .unwrap();
@@ -2073,7 +2228,7 @@ public class UserController {
         let fp = parse_file(
             SPRING_CLASS_PREFIXED,
             "server/UserController.java",
-            "com::example",
+            "com::example::UserController",
             repo(),
         )
         .unwrap();
@@ -2113,7 +2268,7 @@ fun Application.module() {
     }
 }
 "#;
-        let fp = parse_file(source, "Application.kt", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Application.kt", "com::example::Application", repo()).unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -2141,7 +2296,7 @@ public class RouterConfig {
     }
 }
 "#;
-        let fp = parse_file(source, "RouterConfig.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "RouterConfig.java", "com::example::RouterConfig", repo()).unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -2169,7 +2324,7 @@ public class App {
     }
 }
 "#;
-        let fp = parse_file(source, "App.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "App.java", "com::example::App", repo()).unwrap();
         let routes: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -2194,7 +2349,7 @@ public class Svc {
     }
 }
 "#;
-        let fp = parse_file(source, "Svc.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Svc.java", "com::example::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "single-arg `.get(\"/key\")` must not emit a route");
     }
@@ -2208,7 +2363,7 @@ public class Svc {
     }
 }
 "#;
-        let fp = parse_file(source, "Svc.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Svc.java", "com::example::Svc", repo()).unwrap();
         let has_route = fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE);
         assert!(!has_route, "non-`/` first arg must not emit a route");
     }
@@ -2240,7 +2395,7 @@ public class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "client/ApiClient.java", "com::example::client", repo()).unwrap();
+        let fp = parse_file(source, "client/ApiClient.java", "com::example::client::ApiClient", repo()).unwrap();
 
         let ep_get =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/${…}");
@@ -2289,7 +2444,7 @@ public class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "ApiClient.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "ApiClient.java", "com::example::ApiClient", repo()).unwrap();
         let hit = |qname: &str| -> String {
             let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, qname);
             let node = fp.nodes.iter().find(|n| n.id == id).expect("ENDPOINT node");
@@ -2321,7 +2476,7 @@ public class Client {
     }
 }
 "#;
-        let fp = parse_file(source, "Client.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Client.java", "com::example::Client", repo()).unwrap();
         let ep_get =
             NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users/{id}");
         let ep_post =
@@ -2345,7 +2500,7 @@ public class Cache {
     }
 }
 "#;
-        let fp = parse_file(source, "Cache.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Cache.java", "com::example::Cache", repo()).unwrap();
         assert!(
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::ENDPOINT),
             "map.put(\"key\", …) must not emit an ENDPOINT"
@@ -2397,7 +2552,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert_eq!(
             endpoint_qnames(&fp),
             [
@@ -2441,7 +2596,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert_eq!(endpoint_qnames(&fp), ["endpoint:DELETE:/items/7"]);
         assert_eq!(
             fp.edges
@@ -2464,7 +2619,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert!(
             endpoint_qnames(&fp).is_empty(),
             "{:?}",
@@ -2494,7 +2649,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert_eq!(
             endpoint_qnames(&fp),
             [
@@ -2527,7 +2682,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert_eq!(
             endpoint_qnames(&fp),
             [
@@ -2561,7 +2716,7 @@ public class Clients {
     }
 }
 "#;
-        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Clients.java", "com::example::Clients", repo()).unwrap();
         assert!(
             endpoint_qnames(&fp).is_empty(),
             "{:?}",
@@ -2580,7 +2735,7 @@ public class ApiClient {
     }
 }
 "#;
-        let fp = parse_file(source, "ApiClient.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "ApiClient.java", "com::example::ApiClient", repo()).unwrap();
         assert_eq!(endpoint_qnames(&fp), ["endpoint:GET:/users"]);
     }
 
@@ -2615,7 +2770,7 @@ class UserController {
     }
 }
 "#;
-        let fp = parse_file(source, "UserController.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "UserController.java", "com::example::UserController", repo()).unwrap();
 
         let injects: Vec<&UnresolvedRef> = fp
             .refs
@@ -2664,7 +2819,7 @@ class Point {
     public Point(Helper helper, int x) { this.x = x; }
 }
 "#;
-        let fp = parse_file(source, "Point.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "Point.java", "com::example::Point", repo()).unwrap();
         assert!(
             !fp.refs.iter().any(|r| r.category == edge_category::INJECTS),
             "plain data class must not emit INJECTS refs"
@@ -2691,7 +2846,7 @@ public class App {
     }
 }
 "#;
-        let fp = parse_file(source, "App.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "App.java", "com::example::App", repo()).unwrap();
         let compute_id = NodeId::from_parts(
             GRAPH_TYPE,
             repo(),
@@ -2727,7 +2882,7 @@ public class Service {
     private void validate() {}
 }
 "#;
-        let fp = parse_file(source, "src/main/java/Service.java", "com::example", repo()).unwrap();
+        let fp = parse_file(source, "src/main/java/Service.java", "com::example::Service", repo()).unwrap();
         let self_calls: Vec<_> = fp
             .calls
             .iter()

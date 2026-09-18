@@ -1,0 +1,40 @@
+{
+  "framework": "java-package-qnames",
+  "language": "java",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.2 identity fixture (legacy-only, no matrix cell). Baseline 2026-09-18 debug CLI at 7a4883b: METHOD src::main::java::com::example::billing::InvoiceService::InvoiceService::total - the file stem doubles the class segment. The nested class is Row (not Line) so its recall row cannot substring-match LineItem.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "com::example::billing::InvoiceService::total"
+    },
+    {
+      "kind": "CLASS",
+      "name": "com::example::billing::LineItem"
+    },
+    {
+      "kind": "CLASS",
+      "name": "com::example::billing::InvoiceService::Row"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "InvoiceService::total",
+      "to": "InvoiceService::round",
+      "category": "CALLS",
+      "note": "control - intra-class call resolution unchanged"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "METHOD",
+      "name": "src::main::java::com::example::billing::InvoiceService::InvoiceService::total"
+    },
+    {
+      "kind": "CLASS",
+      "name": "src::main::java::com::example::billing::InvoiceService::InvoiceService"
+    }
+  ]
+}
