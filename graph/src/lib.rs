@@ -26,20 +26,24 @@ mod signal;
 mod traversal;
 mod types;
 
+// 0.5.0 leap primitives: one public module each, reached by module path
+// (`repo_graph_graph::roles::roles_in`), never flattened into the root.
+pub mod cells;
+pub mod identity;
+pub mod nav;
+pub mod roles;
+pub mod rust_paths;
+
 #[cfg(test)]
 mod test_support;
 
-pub use activation::{code_activation_defaults, code_activation_profile};
-pub use blast::{BlastHit, Reach, blast_carry_edges};
-pub use build::{build_dotted, build_go, build_python, build_ruby, build_typescript};
-pub use merged::{CrossLink, MergedGraph, channel_of, cluster_key_for, cross_links};
-pub use resolvers::{
-    CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
-    EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
-    MessageSchemaResolver, PackageResolver, QueueStackResolver, RpcStackResolver,
-    SharedSchemaResolver, WebSocketStackResolver, normalise_http_path,
-};
-// A10.2 — the HTTP route index + match ladder, for passes that pair a declared
-// path (a contract operation) with the ROUTE that serves it.
-pub use resolvers::{HttpRouteMatcher, RouteMatch};
-pub use types::{GraphError, RepoGraph, SymbolTable};
+// Facade: each module's `pub` items are the crate's public surface. A helper
+// that must stay crate-internal is `pub(crate)`, never `pub`. `calls`,
+// `imports`, `signal` and `traversal` declare no free `pub` items (their public
+// methods hang off `RepoGraph` / `MergedGraph`), so they are not globbed.
+pub use activation::*;
+pub use blast::*;
+pub use build::*;
+pub use merged::*;
+pub use resolvers::*;
+pub use types::*;
