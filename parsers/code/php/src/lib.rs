@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
 pub use repo_graph_code_domain::{
@@ -25,7 +26,12 @@ pub fn parse_file(
     let src = source.as_bytes();
     let root = tree.root_node();
 
-    let mut acc = Acc::default();
+    // Namespaces, `use` maps and Eloquent model classes are read up front, so a
+    // query site resolves its receiver whatever the declaration order.
+    let mut acc = Acc {
+        eloquent: Eloquent::prescan(root, src),
+        ..Acc::default()
+    };
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -62,6 +68,12 @@ pub fn parse_file(
             acc.endpoint_seen.len()
         );
     }
+    if acc.eloquent.models + acc.eloquent.queries > 0 {
+        eprintln!(
+            "[orm-eloquent] models={} table_cells={} queries={} in {file_rel_path}",
+            acc.eloquent.models, acc.eloquent.table_cells, acc.eloquent.queries
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -85,6 +97,8 @@ struct Acc {
     /// ENDPOINT ids already minted in THIS file — `push_client_endpoint` dedups
     /// the node through it while still pushing one CALLS edge per call site.
     endpoint_seen: std::collections::HashSet<NodeId>,
+    /// Eloquent model / query-site state for this file (`[orm-eloquent]`).
+    eloquent: Eloquent,
 }
 
 fn visit_children(
@@ -187,6 +201,9 @@ fn visit_class(
     });
     acc.nav
         .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+    if acc.eloquent.model_classes.contains(&node.id()) {
+        emit_eloquent_model(node, src, name, id, repo, acc);
+    }
 
     // Symfony composes a controller's class-level `#[Route('/prefix')]` onto
     // every action template, so the prefix must be known before the body walk.
@@ -317,7 +334,7 @@ fn visit_function(
 
     let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc, &types);
+        collect_calls_in(body, src, id, repo, acc, &types);
         collect_client_endpoints_in(body, src, id, repo, file_rel, &types, acc);
     }
 }
@@ -358,7 +375,7 @@ fn visit_method(
 
     let types = local_receiver_types(node, src);
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc, &types);
+        collect_calls_in(body, src, id, repo, acc, &types);
         collect_client_endpoints_in(body, src, id, repo, file_rel, &types, acc);
     }
 
@@ -1306,6 +1323,7 @@ fn collect_calls_in(
     node: TsNode,
     src: &[u8],
     from: NodeId,
+    repo: RepoId,
     acc: &mut Acc,
     types: &HashMap<String, String>,
 ) {
@@ -1375,6 +1393,7 @@ fn collect_calls_in(
                         name: name.to_string(),
                     },
                 });
+                eloquent_query_site(n, src, from, repo, acc);
             }
             _ => {}
         }
@@ -1390,6 +1409,482 @@ fn collect_calls_in(
             }
         }
     }
+}
+
+// ============================================================================
+// Laravel Eloquent -> DATA_ENTITY (A13.14)
+// ============================================================================
+//
+// Identity follows A13.1's ORM rule (`code_domain::data_entity`): a model is
+// keyed on its CLASS name, `data_entity:sql:<Model>`, because that is the one
+// token every query site in any file can name (`User::where(...)`). The table
+// a model DECLARES (`protected $table = 'app_users'`) rides a table cell,
+// emitted only at the declaration site; the graph builder stacks it onto the
+// one node the query sites share, and `DbResolver` joins on it.
+//
+// DECLARATION. A non-abstract class whose base's last `\` segment is `Model`
+// (`extends Model`, `extends \Illuminate\Database\Eloquent\Model`), or whose
+// base resolves through the file's `use` map to another Eloquent base (the
+// default Laravel `User extends Authenticatable`, pivots), is a model: it
+// DEFINES its entity. No table cell without a `$table` literal — Laravel's
+// snake_case-plural default is the resolver's fold, never hand-rolled here.
+//
+// QUERY SITE. A static builder call on a model (`User::where|find|all|...`)
+// emits ACCESSES_DATA from the enclosing method to the model's entity. The
+// receiver must resolve by PHP's own name rules (`use` alias, leading `\`,
+// else the current namespace) into a `\Models\` namespace — the Laravel
+// convention, which keeps `Carbon::create` and `Str::of` out — or name a
+// same-file model class. An UNIMPORTED receiver that only reaches `\Models\`
+// through the implicit current namespace must also not be a facade name.
+// `DB::table('x')` names its table directly, so it is table-keyed.
+//
+// Namespaces are tracked per scope (semicolon form runs to the next
+// `namespace` statement, brace form is its body), so a multi-namespace file
+// resolves each site against its own `use` map.
+
+/// Base classes a model may extend, beyond any `…\Model`, as FQCNs.
+const ELOQUENT_BASES: &[&str] = &[
+    "Illuminate\\Database\\Eloquent\\Model",
+    "Illuminate\\Foundation\\Auth\\User",
+    "Illuminate\\Database\\Eloquent\\Relations\\Pivot",
+    "Illuminate\\Database\\Eloquent\\Relations\\MorphPivot",
+];
+
+/// Static Eloquent entry points that run (or start) a query on the model's
+/// table. Compared case-insensitively: PHP method names are. Excludes the
+/// statics that never touch the table (`factory`, `observe`, `make`, `boot`).
+const ELOQUENT_QUERY_METHODS: &[&str] = &[
+    "where", "whereIn", "whereNotIn", "whereNull", "whereNotNull", "whereBetween", "whereHas",
+    "whereKey", "orWhere", "firstWhere", "find", "findOrFail", "findMany", "findOrNew", "first",
+    "firstOrFail", "firstOrCreate", "firstOrNew", "updateOrCreate", "all", "get", "create",
+    "forceCreate", "insert", "upsert", "destroy", "query", "with", "withCount", "withTrashed",
+    "onlyTrashed", "has", "doesntHave", "select", "orderBy", "latest", "oldest", "paginate",
+    "simplePaginate", "cursorPaginate", "count", "exists", "pluck", "chunk", "cursor", "sum",
+    "max", "min", "avg",
+];
+
+/// Laravel facades: a query-shaped name on one of these (`Session::all()`,
+/// `Schema::create(...)`) is never a model query.
+const LARAVEL_FACADES: &[&str] = &[
+    "Route", "DB", "Cache", "Log", "Auth", "Config", "Storage", "Http", "Mail", "Queue", "Event",
+    "Gate", "Session", "Schema", "Validator",
+];
+
+/// Receivers of `::table('x')` that open a query on a named table.
+const DB_TABLE_RECEIVERS: &[&str] = &[
+    "Illuminate\\Support\\Facades\\DB",
+    "DB",
+    "Illuminate\\Database\\Capsule\\Manager",
+];
+
+/// One PHP namespace scope: its byte range, name and class `use` map.
+struct PhpScope {
+    start: usize,
+    end: usize,
+    /// `App\Http`, or empty for the global namespace.
+    namespace: String,
+    /// Lowercased alias -> FQCN without a leading `\`.
+    uses: HashMap<String, String>,
+    /// Lowercased simple names of the Eloquent models declared in this scope.
+    models: HashSet<String>,
+}
+
+impl PhpScope {
+    fn new(start: usize, end: usize, namespace: String) -> Self {
+        Self {
+            start,
+            end,
+            namespace,
+            uses: HashMap::new(),
+            models: HashSet::new(),
+        }
+    }
+
+    /// Resolve a class reference as PHP does: a leading `\` is absolute, the
+    /// first segment of anything else goes through the `use` map, and an
+    /// unimported name lives in the current namespace.
+    fn resolve(&self, written: &str) -> String {
+        let w = written.trim();
+        if let Some(abs) = w.strip_prefix('\\') {
+            return abs.to_string();
+        }
+        if let Some(rel) = w.strip_prefix("namespace\\") {
+            return self.qualify(rel);
+        }
+        let (first, rest) = match w.split_once('\\') {
+            Some((f, r)) => (f, Some(r)),
+            None => (w, None),
+        };
+        match (self.uses.get(&first.to_ascii_lowercase()), rest) {
+            (Some(fq), Some(r)) => format!("{fq}\\{r}"),
+            (Some(fq), None) => fq.clone(),
+            (None, _) => self.qualify(w),
+        }
+    }
+
+    /// True when `written` names its class explicitly — absolute, qualified,
+    /// or imported — rather than falling into the current namespace.
+    fn is_explicit(&self, written: &str) -> bool {
+        let w = written.trim();
+        w.contains('\\') || self.uses.contains_key(&w.to_ascii_lowercase())
+    }
+
+    fn qualify(&self, name: &str) -> String {
+        if self.namespace.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}\\{name}", self.namespace)
+        }
+    }
+
+    /// Record every class alias one `namespace_use_declaration` introduces.
+    /// Function / const imports (`use function …`) name no class and are skipped.
+    fn add_uses(&mut self, decl: TsNode, src: &[u8]) {
+        if decl.child_by_field_name("type").is_some() {
+            return;
+        }
+        let mut cursor = decl.walk();
+        let kids: Vec<TsNode> = decl.named_children(&mut cursor).collect();
+        // Group form `use App\Models\{User, Post as P};` puts the shared prefix
+        // in a `namespace_name` beside the `namespace_use_group` body.
+        let prefix = kids
+            .iter()
+            .find(|k| k.kind() == "namespace_name")
+            .map(|p| text_of(*p, src).trim().trim_start_matches('\\').to_string());
+        for kid in &kids {
+            match kid.kind() {
+                "namespace_use_clause" => self.add_clause(*kid, src, None),
+                "namespace_use_group" => {
+                    let mut gc = kid.walk();
+                    for clause in kid.named_children(&mut gc) {
+                        if clause.kind() == "namespace_use_clause" {
+                            self.add_clause(clause, src, prefix.as_deref());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn add_clause(&mut self, clause: TsNode, src: &[u8], prefix: Option<&str>) {
+        if clause.child_by_field_name("type").is_some() {
+            return;
+        }
+        let alias = clause.child_by_field_name("alias");
+        let alias_id = alias.map(|a| a.id());
+        let mut cursor = clause.walk();
+        let Some(target) = clause
+            .named_children(&mut cursor)
+            .find(|c| matches!(c.kind(), "name" | "qualified_name") && Some(c.id()) != alias_id)
+        else {
+            return;
+        };
+        let path = text_of(target, src).trim().trim_start_matches('\\');
+        let fqcn = match prefix {
+            Some(p) if !p.is_empty() => format!("{p}\\{path}"),
+            _ => path.to_string(),
+        };
+        let key = match alias {
+            Some(a) => text_of(a, src).trim().to_string(),
+            None => fqcn.rsplit('\\').next().unwrap_or(&fqcn).to_string(),
+        };
+        if !key.is_empty() && !fqcn.is_empty() {
+            self.uses.insert(key.to_ascii_lowercase(), fqcn);
+        }
+    }
+}
+
+/// Per-file Eloquent state: the prescanned scopes and model classes, the
+/// entities / access edges already pushed, and the `[orm-eloquent]` counters.
+#[derive(Default)]
+struct Eloquent {
+    scopes: Vec<PhpScope>,
+    /// tree-sitter ids of the `class_declaration`s that are Eloquent models.
+    model_classes: HashSet<usize>,
+    /// DATA_ENTITY ids pushed from this file, so each is pushed once.
+    entities: HashSet<NodeId>,
+    /// `(from, entity)` ACCESSES_DATA pairs pushed, one edge per pair.
+    access_edges: HashSet<(NodeId, NodeId)>,
+    models: usize,
+    table_cells: usize,
+    queries: usize,
+}
+
+impl Eloquent {
+    /// Walk the file's top level (and brace-form namespace bodies) once for
+    /// namespaces, `use` maps and model classes. Classes are classified after
+    /// every `use` is known, so declaration order does not matter.
+    fn prescan(root: TsNode, src: &[u8]) -> Self {
+        let mut ctx = Self::default();
+        ctx.scopes.push(PhpScope::new(0, usize::MAX, String::new()));
+        let mut current = 0usize;
+        let mut classes: Vec<(TsNode, usize)> = Vec::new();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            match child.kind() {
+                "namespace_definition" => {
+                    let ns = child
+                        .child_by_field_name("name")
+                        .map(|n| text_of(n, src).trim().to_string())
+                        .unwrap_or_default();
+                    if let Some(body) = child.child_by_field_name("body") {
+                        let idx = ctx.scopes.len();
+                        ctx.scopes
+                            .push(PhpScope::new(body.start_byte(), body.end_byte(), ns));
+                        let mut bc = body.walk();
+                        for item in body.named_children(&mut bc) {
+                            ctx.prescan_item(item, src, idx, &mut classes);
+                        }
+                    } else {
+                        // Semicolon form: the scope runs to the next `namespace`.
+                        if current != 0 {
+                            ctx.scopes[current].end = child.start_byte();
+                        }
+                        current = ctx.scopes.len();
+                        ctx.scopes
+                            .push(PhpScope::new(child.start_byte(), usize::MAX, ns));
+                    }
+                }
+                _ => ctx.prescan_item(child, src, current, &mut classes),
+            }
+        }
+        for (class, idx) in classes {
+            let Some(scope) = ctx.scopes.get(idx) else {
+                continue;
+            };
+            if !is_eloquent_model(class, src, scope) {
+                continue;
+            }
+            let name = class
+                .child_by_field_name("name")
+                .map(|n| text_of(n, src).to_ascii_lowercase());
+            ctx.model_classes.insert(class.id());
+            if let (Some(name), Some(scope)) = (name, ctx.scopes.get_mut(idx)) {
+                scope.models.insert(name);
+            }
+        }
+        ctx
+    }
+
+    fn prescan_item<'a>(
+        &mut self,
+        item: TsNode<'a>,
+        src: &[u8],
+        idx: usize,
+        classes: &mut Vec<(TsNode<'a>, usize)>,
+    ) {
+        match item.kind() {
+            "namespace_use_declaration" => {
+                if let Some(scope) = self.scopes.get_mut(idx) {
+                    scope.add_uses(item, src);
+                }
+            }
+            "class_declaration" => classes.push((item, idx)),
+            _ => {}
+        }
+    }
+
+    /// The innermost scope holding byte `pos`: brace bodies and later
+    /// semicolon scopes are pushed after the global one, so the last hit wins.
+    fn scope_at(&self, pos: usize) -> Option<&PhpScope> {
+        self.scopes
+            .iter()
+            .rev()
+            .find(|s| s.start <= pos && pos < s.end)
+    }
+}
+
+/// A non-abstract class extending `…\Model` or a use-resolved Eloquent base.
+fn is_eloquent_model(class: TsNode, src: &[u8], scope: &PhpScope) -> bool {
+    let mut cursor = class.walk();
+    let kids: Vec<TsNode> = class.named_children(&mut cursor).collect();
+    if kids.iter().any(|k| k.kind() == "abstract_modifier") {
+        return false; // a shared base model maps no table of its own
+    }
+    let Some(base) = kids.iter().find(|k| k.kind() == "base_clause") else {
+        return false;
+    };
+    let mut bc = base.walk();
+    base.named_children(&mut bc).any(|b| {
+        let written = text_of(b, src).trim();
+        let last = written.rsplit('\\').next().unwrap_or(written);
+        let resolved = scope.resolve(written);
+        last.eq_ignore_ascii_case("Model")
+            || ELOQUENT_BASES.iter().any(|f| f.eq_ignore_ascii_case(&resolved))
+    })
+}
+
+/// A plain (non-interpolating) string literal's text, else `None`.
+fn php_literal_string(node: TsNode, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "string" => Some(php_string_inner(node, src)),
+        "encapsed_string" => {
+            let mut c = node.walk();
+            let plain = node
+                .named_children(&mut c)
+                .all(|p| matches!(p.kind(), "string_content" | "escape_sequence"));
+            plain.then(|| php_encapsed_template(node, src))
+        }
+        _ => None,
+    }
+}
+
+/// The literal of the model's instance `$table` property, if it declares one.
+fn eloquent_table_property(class: TsNode, src: &[u8]) -> Option<String> {
+    let body = class.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    for decl in body.named_children(&mut cursor) {
+        if decl.kind() != "property_declaration" {
+            continue;
+        }
+        let mut dc = decl.walk();
+        let kids: Vec<TsNode> = decl.named_children(&mut dc).collect();
+        if kids.iter().any(|k| k.kind() == "static_modifier") {
+            continue;
+        }
+        for el in kids.iter().filter(|k| k.kind() == "property_element") {
+            let is_table = el
+                .child_by_field_name("name")
+                .is_some_and(|n| text_of(n, src) == "$table");
+            if !is_table {
+                continue;
+            }
+            let table = el
+                .child_by_field_name("default_value")
+                .and_then(|v| php_literal_string(v, src))?;
+            let table = table.trim();
+            return (!table.is_empty()).then(|| table.to_string());
+        }
+    }
+    None
+}
+
+/// The model-keyed (or `DB::table`-keyed) DATA_ENTITY qname and id.
+fn eloquent_entity(name: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+/// Declaration site: the model's entity, the class DEFINES edge, and the
+/// `$table` override as a table cell. A query site earlier in the same file
+/// may already have pushed the node, so the cell then joins that node.
+fn emit_eloquent_model(
+    class: TsNode,
+    src: &[u8],
+    name: &str,
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let (qname, entity_id) = eloquent_entity(name, repo);
+    let cell = eloquent_table_property(class, src)
+        .map(|table| data_entity::table_cell(&table, data_entity::orm::ELOQUENT));
+    acc.eloquent.models += 1;
+    if cell.is_some() {
+        acc.eloquent.table_cells += 1;
+    }
+    if acc.eloquent.entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: cell.into_iter().collect(),
+        });
+    } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == entity_id) {
+        existing.cells.extend(cell);
+    }
+    acc.nav
+        .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    acc.edges.push(Edge {
+        from: class_id,
+        to: entity_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+}
+
+/// Query site: a `scoped_call_expression` inside the method / function `from`.
+fn eloquent_query_site(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc: &mut Acc) {
+    let Some(receiver) = call.child_by_field_name("scope") else {
+        return;
+    };
+    if !matches!(receiver.kind(), "name" | "qualified_name" | "relative_name") {
+        return; // `static::` / `$class::` / expressions name no class
+    }
+    let Some(method) = call.child_by_field_name("name").filter(|n| n.kind() == "name") else {
+        return;
+    };
+    let method = text_of(method, src);
+    let written = text_of(receiver, src).trim();
+    let Some(scope) = acc.eloquent.scope_at(call.start_byte()) else {
+        return;
+    };
+    let target = if method.eq_ignore_ascii_case("table") {
+        db_table_target(call, src, written, scope)
+    } else if ELOQUENT_QUERY_METHODS
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(method))
+    {
+        eloquent_model_target(written, scope)
+    } else {
+        None
+    };
+    let Some(name) = target else {
+        return;
+    };
+    let (qname, entity_id) = eloquent_entity(&name, repo);
+    acc.eloquent.queries += 1;
+    if acc.eloquent.entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Medium,
+            cells: vec![],
+        });
+        acc.nav
+            .record(entity_id, &name, &qname, node_kind::DATA_ENTITY, Some(from));
+    }
+    if acc.eloquent.access_edges.insert((from, entity_id)) {
+        acc.edges.push(Edge {
+            from,
+            to: entity_id,
+            category: edge_category::ACCESSES_DATA,
+            confidence: Confidence::Medium,
+        });
+    }
+}
+
+/// The model a static receiver names, when it passes the precision gate.
+fn eloquent_model_target(written: &str, scope: &PhpScope) -> Option<String> {
+    let fqcn = scope.resolve(written);
+    let (namespace, model) = fqcn.rsplit_once('\\').unwrap_or(("", fqcn.as_str()));
+    if model.is_empty() {
+        return None;
+    }
+    let in_models_ns = format!("\\{namespace}\\").contains("\\Models\\");
+    let facade = LARAVEL_FACADES.iter().any(|f| f.eq_ignore_ascii_case(model));
+    if in_models_ns && (scope.is_explicit(written) || !facade) {
+        return Some(model.to_string());
+    }
+    let same_file_model =
+        !scope.is_explicit(written) && scope.models.contains(&written.to_ascii_lowercase());
+    same_file_model.then(|| written.to_string())
+}
+
+/// `DB::table('users as u')` -> `users`, when the receiver is the DB facade.
+fn db_table_target(call: TsNode, src: &[u8], written: &str, scope: &PhpScope) -> Option<String> {
+    let fqcn = scope.resolve(written);
+    if !DB_TABLE_RECEIVERS.iter().any(|r| r.eq_ignore_ascii_case(&fqcn)) {
+        return None;
+    }
+    let arg = nth_arg(call.child_by_field_name("arguments"), 0).and_then(arg_expr)?;
+    let literal = php_literal_string(arg, src)?;
+    let table = literal.split_whitespace().next()?;
+    let name_shaped = table.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    name_shaped.then(|| table.to_string())
 }
 
 // ============================================================================
@@ -2580,5 +3075,325 @@ final class SyncUsers
         )
         .unwrap();
         assert_eq!(injects_targets(&fp), vec!["UserRepository"]);
+    }
+
+    // ========================================================================
+    // Eloquent models and query sites (A13.14)
+    // ========================================================================
+
+    fn entity_id(name: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            &format!("data_entity:sql:{name}"),
+        )
+    }
+
+    fn entity_names(fp: &FileParse) -> Vec<String> {
+        let mut names: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::DATA_ENTITY)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn has_edge(fp: &FileParse, from: NodeId, to: NodeId, category: u32) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category.0 == category)
+    }
+
+    fn method_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname)
+    }
+
+    #[test]
+    fn eloquent_table_property_used_as_entity_key() {
+        // The declared table is the entity's JOIN key (DbResolver reads it back
+        // through `table_of`); the node itself stays model-keyed so query sites
+        // in other files converge on it.
+        let source = r#"<?php
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class User extends Model
+{
+    protected $table = 'app_users';
+}
+"#;
+        let fp = parse_file(source, "app/Models/User.php", "app::Models::User", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:User"]);
+        let entity = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == entity_id("User"))
+            .expect("model-keyed entity node");
+        assert_eq!(
+            data_entity::table_of(&entity.cells),
+            Some("app_users".to_string())
+        );
+        let CellPayload::Json(raw) = &entity.cells[0].payload else {
+            panic!("table cell must be Json");
+        };
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(v["orm"], data_entity::orm::ELOQUENT);
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "app::Models::User::User",
+        );
+        assert!(has_edge(&fp, class_id, entity_id("User"), edge_category::DEFINES.0));
+        assert!(
+            !fp.nodes.iter().any(|n| n.id == entity_id("app_users")),
+            "no table-keyed second id"
+        );
+    }
+
+    #[test]
+    fn eloquent_model_without_table_falls_back_to_class_name() {
+        // No `$table`: no cell, so the join key is the qname tail (the class
+        // name), folded by DbResolver — Laravel's plural is never hand-rolled.
+        // `static $table` is not Eloquent's property and does not count.
+        let source = r#"<?php
+namespace App\Models;
+
+class Post extends \Illuminate\Database\Eloquent\Model
+{
+    protected static $table = 'ignored';
+    protected $fillable = ['title'];
+}
+"#;
+        let fp = parse_file(source, "app/Models/Post.php", "app::Models::Post", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:Post"]);
+        let entity = fp.nodes.iter().find(|n| n.id == entity_id("Post")).unwrap();
+        assert!(entity.cells.is_empty(), "got {:?}", entity.cells);
+        assert_eq!(fp.nav.name_by_id.get(&entity_id("Post")).map(String::as_str), Some("Post"));
+    }
+
+    #[test]
+    fn plain_php_class_emits_no_entity() {
+        // A value object, a non-Eloquent base, and an ABSTRACT shared base model
+        // (which maps no table of its own) all emit nothing.
+        let source = r#"<?php
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Money {}
+class LoginForm extends FormModelBase {}
+abstract class BaseModel extends Model {}
+"#;
+        let fp = parse_file(source, "app/Models/Misc.php", "app::Models::Misc", repo()).unwrap();
+        assert!(entity_names(&fp).is_empty(), "got {:?}", entity_names(&fp));
+        assert!(!fp.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
+    }
+
+    #[test]
+    fn eloquent_auth_user_base_resolves_through_use_alias() {
+        // Laravel's default `User extends Authenticatable`, where the alias names
+        // `Illuminate\Foundation\Auth\User` — no `Model` segment is written.
+        let source = r#"<?php
+namespace App\Models;
+
+use Illuminate\Foundation\Auth\User as Authenticatable;
+
+class User extends Authenticatable
+{
+    protected $table = "members";
+}
+"#;
+        let fp = parse_file(source, "app/Models/User.php", "app::Models::User", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:User"]);
+        let entity = fp.nodes.iter().find(|n| n.id == entity_id("User")).unwrap();
+        assert_eq!(data_entity::table_of(&entity.cells), Some("members".to_string()));
+    }
+
+    #[test]
+    fn eloquent_static_query_emits_accesses_data_from_the_enclosing_method() {
+        // Plain import, aliased import, grouped import, absolute name, and a
+        // query inside a closure all resolve into `\Models\` and anchor on the
+        // enclosing method. Two queries on one model in one method: one edge.
+        let source = r#"<?php
+namespace App\Http;
+
+use App\Models\User;
+use App\Models\Billing\Invoice as Bill;
+use App\Models\{Post, Tag as Label};
+
+class ReportController
+{
+    public function active() {
+        $n = User::where('active', 1)->count();
+        return User::query()->latest()->get();
+    }
+    public function billing() { return Bill::findOrFail(1); }
+    public function posts() {
+        return collect([1])->map(function ($id) { return Post::find($id); });
+    }
+    public function labels() { return Label::all(); }
+    public function orders() { return \App\Models\Order::paginate(10); }
+}
+"#;
+        let fp = parse_file(
+            source,
+            "app/Http/ReportController.php",
+            "app::Http::ReportController",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            entity_names(&fp),
+            vec![
+                "data_entity:sql:Invoice",
+                "data_entity:sql:Order",
+                "data_entity:sql:Post",
+                "data_entity:sql:Tag",
+                "data_entity:sql:User",
+            ]
+        );
+        let m = |name: &str| method_id(&format!("app::Http::ReportController::ReportController::{name}"));
+        let ad = edge_category::ACCESSES_DATA.0;
+        assert!(has_edge(&fp, m("active"), entity_id("User"), ad));
+        assert!(has_edge(&fp, m("billing"), entity_id("Invoice"), ad));
+        assert!(has_edge(&fp, m("posts"), entity_id("Post"), ad));
+        assert!(has_edge(&fp, m("labels"), entity_id("Tag"), ad));
+        assert!(has_edge(&fp, m("orders"), entity_id("Order"), ad));
+        let access_edges = fp.edges.iter().filter(|e| e.category.0 == ad).count();
+        assert_eq!(access_edges, 5, "one edge per (method, entity)");
+        // Query sites carry no table cell: only the declaration site knows it.
+        assert!(fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
+            .all(|n| n.cells.is_empty()));
+        // The ordinary CALLS site is still pushed for the static call.
+        assert!(fp.calls.iter().any(|c| matches!(
+            &c.qualifier,
+            CallQualifier::Attribute { base, name } if base == "User" && name == "where"
+        )));
+    }
+
+    #[test]
+    fn eloquent_query_precision_denies_facades_and_non_models() {
+        // Query-shaped names on a non-`\Models\` class (Carbon), on imported
+        // facades, on an UNIMPORTED facade name that only the implicit current
+        // namespace would put in `\Models\`, on `static::` / `$cls::`, and a
+        // non-query static on a real model (`factory`) all emit nothing.
+        let source = r#"<?php
+namespace App\Models;
+
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Session;
+use Illuminate\Support\Facades\Schema;
+
+class Maintenance
+{
+    public function run($cls) {
+        Carbon::create(2024, 1, 1);
+        Session::all();
+        Schema::create('users', fn ($t) => null);
+        Cache::get('k');
+        Event::with('x');
+        static::find(1);
+        $cls::find(1);
+        Account::factory();
+    }
+}
+"#;
+        let fp = parse_file(source, "app/Models/Maintenance.php", "app::Models::Maintenance", repo())
+            .unwrap();
+        assert!(entity_names(&fp).is_empty(), "got {:?}", entity_names(&fp));
+    }
+
+    #[test]
+    fn eloquent_same_file_model_outside_models_namespace() {
+        // A model declared in the same file resolves even outside `\Models\`,
+        // and the declaration's table cell joins the node the query pushed
+        // first (the query class is declared before the model).
+        let source = r#"<?php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Reports
+{
+    public function recent() { return Flight::latest()->get(); }
+}
+
+class Flight extends Model
+{
+    protected $table = 'flights_v2';
+}
+"#;
+        let fp = parse_file(source, "app/Reports.php", "app::Reports", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:Flight"]);
+        let nodes: Vec<&Node> = fp.nodes.iter().filter(|n| n.id == entity_id("Flight")).collect();
+        assert_eq!(nodes.len(), 1, "one node per entity per file");
+        assert_eq!(data_entity::table_of(&nodes[0].cells), Some("flights_v2".to_string()));
+        assert!(has_edge(
+            &fp,
+            method_id("app::Reports::Reports::recent"),
+            entity_id("Flight"),
+            edge_category::ACCESSES_DATA.0
+        ));
+    }
+
+    #[test]
+    fn db_table_query_is_table_keyed() {
+        // `DB::table('x')` names the table itself; an alias clause is dropped,
+        // a non-literal argument and a non-DB `table()` receiver emit nothing.
+        let source = r#"<?php
+namespace App\Services;
+
+use Illuminate\Support\Facades\DB;
+
+class AuditService
+{
+    public function log() { DB::table('audit_log as a')->insert(['e' => 1]); }
+    public function dynamic($t) { return DB::table($t)->get(); }
+    public function other() { return Html::table('users'); }
+}
+"#;
+        let fp = parse_file(source, "app/Services/AuditService.php", "app::Services::AuditService", repo())
+            .unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:audit_log"]);
+        assert!(has_edge(
+            &fp,
+            method_id("app::Services::AuditService::AuditService::log"),
+            entity_id("audit_log"),
+            edge_category::ACCESSES_DATA.0
+        ));
+    }
+
+    #[test]
+    fn eloquent_scopes_follow_each_namespace_block() {
+        // Brace-form namespaces: each block resolves against its OWN `use` map,
+        // so the second block's `User` (a non-Models import) emits nothing.
+        let source = r#"<?php
+namespace App\Http {
+    use App\Models\User;
+    class A { public function a() { return User::all(); } }
+}
+namespace App\Legacy {
+    use App\Legacy\User;
+    class B { public function b() { return User::all(); } }
+}
+"#;
+        let fp = parse_file(source, "app/Multi.php", "app::Multi", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:User"]);
+        let ad: Vec<&Edge> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::ACCESSES_DATA)
+            .collect();
+        assert_eq!(ad.len(), 1);
+        assert_eq!(ad[0].from, method_id("App::Http::A::a"));
     }
 }

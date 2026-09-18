@@ -1,0 +1,24 @@
+{
+  "framework": "php-eloquent",
+  "language": "php",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "model-keyed entity (A13.1 identity rule): the declaration site and the query site share one id"},
+    {"kind": "CLASS", "name": "User", "note": "the Eloquent model"},
+    {"kind": "DATA_ENTITY", "name": "audit_log", "note": "DB::table('audit_log') is table-keyed: the query builder names the table itself"}
+  ],
+  "expect_edges": [
+    {"from": "active", "to": "data_entity:sql:User", "category": "ACCESSES_DATA", "note": "User::where in the controller, another file than the model; the receiver resolves through `use App\\Models\\User`"},
+    {"from": "audit", "to": "data_entity:sql:audit_log", "category": "ACCESSES_DATA", "note": "DB::table('audit_log') query-builder site"},
+    {"from": "User", "to": "data_entity:sql:User", "category": "DEFINES", "note": "the model CLASS defines its entity at the declaration site; the qname-shaped target cannot lenient-match the module->class DEFINES edge"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "app_users", "note": "protected $table override rides a table cell {table, orm: eloquent} at the declaration site"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "app_users", "note": "the model stays model-keyed; a table-keyed second id would orphan every query site"},
+    {"kind": "DATA_ENTITY", "name": "Carbon", "note": "Carbon::create resolves to Carbon\\Carbon, outside any \\Models\\ namespace"},
+    {"kind": "DATA_ENTITY", "name": "Session", "note": "Session::all is a facade, not a model"}
+  ],
+  "note": "A13.14: first PHP DATA_ENTITY. Laravel Eloquent model (extends Model) + protected $table, queried by a static call in a controller in another namespace and file. Carbon::create and Session::all use query-shaped method names and are the precision probes."
+}
