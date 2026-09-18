@@ -108,11 +108,12 @@ enum Cmd {
         /// Drop nodes not reachable from an entrypoint (likely-dead code).
         #[arg(long)]
         live_only: bool,
-        /// Restrict the answer to nodes whose file is under this repo-relative
-        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
-        /// repo's paths are relative to its OWN root, so a path passed as a
-        /// separate repo will not match here. Nodes with no file (ENDPOINT /
-        /// ROUTE / doc spaces) are kept, not dropped.
+        /// Restrict the answer to a repo-relative path or a project label (see
+        /// `glia projects`), e.g. `services/api` or `@shop/web`. Narrows
+        /// WITHIN a repo: each `--with` repo's paths are relative to its OWN
+        /// root, so a path passed as a separate repo will not match here.
+        /// Nodes with no file (ENDPOINT / ROUTE / doc spaces) are kept, not
+        /// dropped.
         #[arg(long)]
         scope: Option<String>,
         /// Emit JSON instead of a table.
@@ -129,11 +130,12 @@ enum Cmd {
         /// Additional repos to merge in. Repeatable.
         #[arg(long)]
         with: Vec<String>,
-        /// Restrict the answer to nodes whose file is under this repo-relative
-        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
-        /// repo's paths are relative to its OWN root, so a path passed as a
-        /// separate repo will not match here. Nodes with no file (ENDPOINT /
-        /// ROUTE / doc spaces) are kept, not dropped.
+        /// Restrict the answer to a repo-relative path or a project label (see
+        /// `glia projects`), e.g. `services/api` or `@shop/web`. Narrows
+        /// WITHIN a repo: each `--with` repo's paths are relative to its OWN
+        /// root, so a path passed as a separate repo will not match here.
+        /// Nodes with no file (ENDPOINT / ROUTE / doc spaces) are kept, not
+        /// dropped.
         #[arg(long)]
         scope: Option<String>,
         /// Emit JSON instead of a table.
@@ -144,6 +146,19 @@ enum Cmd {
     /// extraction caveats + edges-found per flagged category, so you fall back
     /// to grep deliberately where glia is known-partial.
     Coverage {
+        /// Path to the repo root.
+        repo: String,
+        /// Additional repos to merge in. Repeatable.
+        #[arg(long)]
+        with: Vec<String>,
+        /// Emit JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Projects (A8.6): the manifest-rooted sub-projects in the repo — label,
+    /// ecosystem, path, manifest. The vocabulary for `--scope`: pass a label
+    /// (`@shop/web`) or a path (`apps/web`) and get the same answer.
+    Projects {
         /// Path to the repo root.
         repo: String,
         /// Additional repos to merge in. Repeatable.
@@ -203,11 +218,12 @@ enum Cmd {
         /// Keep only the top-K by relevance.
         #[arg(long)]
         top_k: Option<usize>,
-        /// Restrict the answer to nodes whose file is under this repo-relative
-        /// path (e.g. `services/api`). Narrows WITHIN a repo: each `--with`
-        /// repo's paths are relative to its OWN root, so a path passed as a
-        /// separate repo will not match here. Nodes with no file (ENDPOINT /
-        /// ROUTE / doc spaces) are kept, not dropped.
+        /// Restrict the answer to a repo-relative path or a project label (see
+        /// `glia projects`), e.g. `services/api` or `@shop/web`. Narrows
+        /// WITHIN a repo: each `--with` repo's paths are relative to its OWN
+        /// root, so a path passed as a separate repo will not match here.
+        /// Nodes with no file (ENDPOINT / ROUTE / doc spaces) are kept, not
+        /// dropped.
         #[arg(long)]
         scope: Option<String>,
 
@@ -383,6 +399,7 @@ fn main() {
             cmd_docs_for(&repo, &qname, &with, scope.as_deref(), json)
         }
         Cmd::Coverage { repo, with, json } => cmd_coverage(&repo, &with, json),
+        Cmd::Projects { repo, with, json } => cmd_projects(&repo, &with, json),
         Cmd::Contracts { repo, with, mismatch_only, json } => {
             cmd_contracts(&repo, &with, mismatch_only, json)
         }
@@ -823,6 +840,43 @@ fn cmd_coverage(repo: &str, with: &[String], json: bool) -> i32 {
         println!(
             "| {} | {} | {} | {} — _{}_ |",
             n.language, n.edge_category, n.edges_found, n.note, n.verify
+        );
+    }
+    0
+}
+
+// ----------------------------------------------------------------------------
+// `projects` (A8.6 — the `--scope` vocabulary)
+// ----------------------------------------------------------------------------
+
+fn cmd_projects(repo: &str, with: &[String], json: bool) -> i32 {
+    let result = match generate_for(repo, with) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let roots = repo_graph_engine::project_roots(&result.merged);
+    eprintln!("[projects] surface=cli roots={}", roots.len());
+    if json {
+        println!("{}", serde_json::to_string(&roots).unwrap_or_default());
+        return 0;
+    }
+    println!("# glia projects `{repo}`");
+    println!();
+    if roots.is_empty() {
+        println!("_(no manifest-rooted projects)_");
+        return 0;
+    }
+    println!("_Pass a label or a path as `--scope` — both give the same answer._");
+    println!();
+    println!("| label | ecosystem | path | manifest |");
+    println!("|---|---|---|---|");
+    for p in &roots {
+        println!(
+            "| `{}` | {} | `{}` | `{}` |",
+            p.label, p.ecosystem, p.path, p.manifest
         );
     }
     0

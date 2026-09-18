@@ -259,7 +259,8 @@ impl PyGraph {
     /// resolves to no node.
     ///
     /// `scope` (optional, default `None` = no-op) restricts the answer to nodes
-    /// whose file lives under that repo-relative path, applied BEFORE the
+    /// whose file lives under that repo-relative path — or under the project
+    /// with that label (see `project_roots`) — applied BEFORE the
     /// `top_k` cut so a scoped `top_k` spends its budget in scope. Nodes with no
     /// locatable file (ENDPOINT/ROUTE/doc spaces) are KEPT. `scope` narrows
     /// WITHIN a repo — under a multi-repo merge each repo's paths are relative
@@ -291,7 +292,8 @@ impl PyGraph {
     /// `qname` — "what are the rules for X?" — located, in one call. Each record
     /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
     /// `scope` (optional) keeps only the sections whose own file lives under
-    /// that repo-relative path; sections with no file are KEPT.
+    /// that repo-relative path or project label (see `project_roots`);
+    /// sections with no file are KEPT.
     #[pyo3(signature = (qname, scope=None))]
     fn governing_docs(&self, qname: &str, scope: Option<&str>) -> PyResult<String> {
         let docs = repo_graph_engine::governing_docs(&self.merged, qname, scope)
@@ -310,6 +312,18 @@ impl PyGraph {
         serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
+    /// **project_roots** (A8.6): the manifest-rooted sub-projects in this graph
+    /// — the vocabulary for every `scope=` argument. Each record `{qname,
+    /// label, ecosystem, manifest, path}`, sorted by `path` (`.` is the repo
+    /// root). Pass a `label` (e.g. `@shop/web`) or a `path` as `scope`; both
+    /// give the same answer. Read back out of the graph's PROJECT anchors, so
+    /// a graph from `load_from_gmap` answers exactly like a fresh one.
+    /// Returns a JSON array.
+    fn project_roots(&self) -> PyResult<String> {
+        let roots = repo_graph_engine::project_roots(&self.merged);
+        serde_json::to_string(&roots).map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     /// **contracts** (A12): for every queue topic, the producer's and
     /// consumer's declared message type and whether they agree. Each row
     /// `{topic, topic_is_tag, pattern, producer, consumer, status, confidence,
@@ -324,8 +338,10 @@ impl PyGraph {
     }
 
     /// **service_map** (v6 follow-on): the architecture summary — one record
-    /// per service (a top-level directory in a monorepo, or one per repo when
-    /// several were merged) plus the aggregated cross-service links, each
+    /// per service (a manifest project root in a monorepo, with files under
+    /// no root in one `(outside projects)` bucket; a top-level directory when
+    /// the repo has no nested roots; one per repo when several were merged)
+    /// plus the aggregated cross-service links, each
     /// labelled with its mechanism (HTTP_CALLS / QUEUE_FLOWS / GRPC_CALLS …)
     /// and the channel it travels over (route, topic, service name). Returns
     /// `{keying, services:[…], links:[…], self_links, unlocated_nodes}` as a
@@ -362,7 +378,8 @@ impl PyGraph {
     /// to. Resolution order preserved; each record
     /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
     ///
-    /// `scope` (optional, default `None` = no-op) filters the SEEDS before the
+    /// `scope` (optional, default `None` = no-op; a path or a project label —
+    /// see `project_roots`) filters the SEEDS before the
     /// PPR run, not the rendered result: frames resolve by file BASENAME, so an
     /// unscoped `utils.py` frame seeds every `utils.py` in the monorepo and
     /// those bogus seeds shape the scores of the real one. Scoped scores
@@ -403,13 +420,15 @@ impl PyGraph {
     /// `scope` (optional) narrows the hits to one part of a monorepo using the
     /// same `/`-boundary rule as `blast_radius`/`resolve`/`governing_docs`, so
     /// a consumer never has to re-derive a path guess in Python. Nodes with no
-    /// locatable file are KEPT.
+    /// locatable file are KEPT. A project label (see `project_roots`) works
+    /// here too — it is resolved once, before the per-node filter.
     #[pyo3(signature = (pattern, scope=None))]
     fn find_nodes_by_qname(&self, pattern: &str, scope: Option<&str>) -> Vec<u64> {
+        let scope = scope.map(|s| repo_graph_engine::resolve_scope(&self.merged, s));
         self.merged
             .qnames_containing(pattern)
             .into_iter()
-            .filter(|id| repo_graph_engine::node_in_scope(&self.merged, *id, scope))
+            .filter(|id| repo_graph_engine::node_in_scope(&self.merged, *id, scope.as_deref()))
             .map(|id| id.0)
             .collect()
     }

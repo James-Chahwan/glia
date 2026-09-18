@@ -421,11 +421,12 @@ fn scope_file_of(merged: &MergedGraph, id: NodeId) -> Option<String> {
 /// True when `file` lives under `scope`. Prefix match on a `/` boundary only,
 /// so `scope = "services/ap"` does NOT match `services/api/handler.py`. Both
 /// sides are normalised by trimming a leading `./` or `/` and a trailing `/`;
-/// an empty scope matches everything.
+/// an empty scope matches everything, and so does `.` — the path the ROOT
+/// project resolves to (A8.6), which otherwise matched nothing at all.
 fn in_scope(file: &str, scope: &str) -> bool {
     let f = file.trim_start_matches("./").trim_start_matches('/');
     let s = scope.trim_start_matches("./").trim_matches('/');
-    if s.is_empty() {
+    if s.is_empty() || s == "." {
         return true;
     }
     f == s || f.starts_with(&format!("{s}/"))
@@ -439,6 +440,10 @@ fn in_scope(file: &str, scope: &str) -> bool {
 /// `scope` narrows WITHIN a repo: under a multi-repo merge each repo's POSITION
 /// paths are relative to its OWN root, so a path that was passed as a separate
 /// `--with` repo will not match as a scope.
+///
+/// `scope` here is a PATH. A caller holding a user-supplied scope that may be
+/// a project label resolves it ONCE with [`resolve_scope`] before looping —
+/// this runs per node, and resolving per node would walk the graph N times.
 pub fn node_in_scope(merged: &MergedGraph, id: NodeId, scope: Option<&str>) -> bool {
     let Some(s) = scope else { return true };
     match scope_file_of(merged, id) {
@@ -450,6 +455,12 @@ pub fn node_in_scope(merged: &MergedGraph, id: NodeId, scope: Option<&str>) -> b
 /// One shared applier so the scoped call sites cannot drift apart. `scope =
 /// None` is a strict no-op: the input is returned untouched and no marker is
 /// emitted, so no existing answer, ranking or cell value changes.
+///
+/// A8.6: the scope is label-resolved HERE, once per call, so all three scoped
+/// primitives — and the pyo3 / CLI surfaces over them — accept `@shop/web` as
+/// well as `apps/web` without any of them knowing about labels. Resolution is
+/// a pass-through for anything that is not a project, so every A8.3 path
+/// scope behaves exactly as before.
 fn apply_scope<T>(
     merged: &MergedGraph,
     items: Vec<T>,
@@ -457,7 +468,9 @@ fn apply_scope<T>(
     id_of: impl Fn(&T) -> NodeId,
     what: &str,
 ) -> Vec<T> {
-    let Some(s) = scope else { return items };
+    let Some(raw) = scope else { return items };
+    let resolved = resolve_scope(merged, raw);
+    let s = resolved.as_str();
     let before = items.len();
     let mut unlocatable = 0usize;
     let out: Vec<T> = items
@@ -475,6 +488,114 @@ fn apply_scope<T>(
         out.len()
     );
     out
+}
+
+// ============================================================================
+// A8.6 — project roots as the `scope` vocabulary.
+//
+// A8.3's scope is a repo-relative path, which is exactly what a human or an
+// agent does not know in a monorepo: you know the service is `@shop/web`, not
+// that it lives at `apps/web`. A8.5 put both in the graph as PROJECT anchors;
+// this reads them back. Nothing is cached and nothing rides on a side field,
+// so a freshly generated graph and one reopened from a `.gmap` answer alike.
+// ============================================================================
+
+/// One manifest-rooted sub-project: a PROJECT anchor (A8.5) decoded from its
+/// ORIGIN cell. `path` is repo-relative, `.` for the repo root.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ProjectInfo {
+    pub qname: String,
+    pub label: String,
+    pub ecosystem: String,
+    pub manifest: String,
+    pub path: String,
+}
+
+/// Every PROJECT anchor in the graph, sorted by `path` (then `qname`, for the
+/// several `.` roots of a `--with` merge) so callers and tests see a stable
+/// order. A node whose ORIGIN cell is missing or will not parse is SKIPPED,
+/// not fatal — the same degrade-don't-fail rule `locate_node` applies to a
+/// bad POSITION cell.
+pub fn project_roots(merged: &MergedGraph) -> Vec<ProjectInfo> {
+    let mut out = Vec::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PROJECT) {
+                continue;
+            }
+            let origin = n.cells.iter().filter(|c| c.kind == cell_type::ORIGIN).find_map(|c| {
+                match &c.payload {
+                    CellPayload::Json(s) | CellPayload::Text(s) => {
+                        serde_json::from_str::<serde_json::Value>(s).ok()
+                    }
+                    CellPayload::Bytes(_) => None,
+                }
+            });
+            let Some(v) = origin.filter(serde_json::Value::is_object) else { continue };
+            let field = |k: &str| v.get(k).and_then(serde_json::Value::as_str).map(String::from);
+            let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+            // The walker records the root as `""`; `.` is what the qname says
+            // and what a human types.
+            let path = field("path")
+                .or_else(|| qname.strip_prefix("project:").map(String::from))
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| ".".to_string());
+            let label = field("label")
+                .or_else(|| g.nav.name_by_id.get(&n.id).cloned())
+                .unwrap_or_default();
+            out.push(ProjectInfo {
+                qname,
+                label,
+                ecosystem: field("ecosystem").unwrap_or_default(),
+                manifest: field("manifest").unwrap_or_default(),
+                path,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.qname.cmp(&b.qname)));
+    out
+}
+
+/// Turn a user-supplied scope into a repo-relative path.
+///
+/// 1. A project's own path (`apps/web`, or `.`) is returned UNCHANGED — so
+///    this is idempotent: resolving an already-resolved scope is a no-op, and
+///    a path wins over a label that happens to spell the same string.
+/// 2. A project's full qname (`project:apps/web`) resolves to its path.
+/// 3. An exact `label` match (`@shop/web`) resolves to its path. When several
+///    projects share the label (two Maven modules with one artifactId), the
+///    lexicographically smallest path wins and a `[scope] ambiguous` warning
+///    names all of them — never a panic, never a silent pick.
+/// 4. Anything else passes through untouched: a literal path scope.
+///
+/// O(nodes) per call; the scoped primitives call it once, not per node.
+pub fn resolve_scope(merged: &MergedGraph, scope: &str) -> String {
+    let roots = project_roots(merged);
+    if roots.iter().any(|p| p.path == scope) {
+        return scope.to_string();
+    }
+    if let Some(p) = roots.iter().find(|p| p.qname == scope) {
+        eprintln!("[scope] resolved qname '{scope}' -> {}", p.path);
+        return p.path.clone();
+    }
+    // `roots` is sorted by path, so the first match is the smallest path.
+    let hits: Vec<&ProjectInfo> = roots.iter().filter(|p| p.label == scope).collect();
+    let Some(first) = hits.first() else {
+        return scope.to_string();
+    };
+    if hits.len() > 1 {
+        let paths: Vec<&str> = hits.iter().map(|p| p.path.as_str()).collect();
+        eprintln!(
+            "[scope] ambiguous label '{scope}' matches {} projects ({}); using {}",
+            hits.len(),
+            paths.join(", "),
+            first.path
+        );
+    }
+    // fired_on marker (A8.6). Label path only — a literal path scope never
+    // prints it, so it cannot be confused with A8.3's `[scope] <what>` line.
+    eprintln!("[scope] resolved label '{scope}' -> {}", first.path);
+    first.path.clone()
 }
 
 // ============================================================================
@@ -936,6 +1057,60 @@ mod scope_tests {
         // An empty scope is "everything", not "nothing".
         assert!(in_scope("web/client.py", ""));
         assert!(in_scope("web/client.py", "/"));
+        // So is `.` — the root project's path (A8.6).
+        assert!(in_scope("web/client.py", "."));
+        assert!(in_scope("main.go", "./"));
+    }
+}
+
+#[cfg(test)]
+mod project_scope_tests {
+    use super::{project_roots, resolve_scope};
+    use repo_graph_code_domain::project_roots::ProjectRoot;
+    use repo_graph_core::{CellPayload, RepoId};
+    use repo_graph_graph::MergedGraph;
+
+    fn graph(roots: &[ProjectRoot]) -> MergedGraph {
+        MergedGraph::new(vec![crate::walk::build_project_graph(roots, RepoId(1))])
+    }
+
+    /// Two Maven modules sharing an artifactId: the smallest path wins,
+    /// deterministically, whatever order the anchors were emitted in.
+    #[test]
+    fn ambiguous_label_resolves_to_the_smallest_path() {
+        let label = || Some("billing".to_string());
+        let m = graph(&[
+            ProjectRoot::new("svc/zeta".into(), "maven", "pom.xml", label()),
+            ProjectRoot::new("svc/alpha".into(), "maven", "pom.xml", label()),
+        ]);
+        assert_eq!(resolve_scope(&m, "billing"), "svc/alpha");
+        // Both paths still resolve to themselves.
+        assert_eq!(resolve_scope(&m, "svc/zeta"), "svc/zeta");
+        assert_eq!(resolve_scope(&m, "svc/alpha"), "svc/alpha");
+    }
+
+    /// A PROJECT whose ORIGIN will not parse is skipped, not fatal, and the
+    /// root's `""` walker path surfaces as `.`.
+    #[test]
+    fn unparseable_origin_is_skipped_and_root_is_dot() {
+        let mut m = graph(&[
+            ProjectRoot::new(String::new(), "npm", "package.json", Some("mono".into())),
+            ProjectRoot::new("apps/web".into(), "npm", "package.json", Some("web".into())),
+        ]);
+        let broken = m.graphs[0]
+            .nodes
+            .iter_mut()
+            .find(|n| {
+                matches!(&n.cells[0].payload, CellPayload::Json(s) if s.contains("apps/web"))
+            })
+            .expect("apps/web anchor");
+        broken.cells[0].payload = CellPayload::Json("{not json".into());
+        let roots = project_roots(&m);
+        assert_eq!(roots.len(), 1, "the broken anchor is skipped");
+        assert_eq!((roots[0].path.as_str(), roots[0].label.as_str()), (".", "mono"));
+        assert_eq!(roots[0].qname, "project:.");
+        assert_eq!(resolve_scope(&m, "mono"), ".");
+        assert_eq!(resolve_scope(&m, "web"), "web", "a skipped label passes through");
     }
 }
 

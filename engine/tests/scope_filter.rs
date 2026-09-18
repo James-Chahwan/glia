@@ -10,12 +10,16 @@
 //!     BASENAME ONLY, so an unscoped frame naming `utils.py` seeds every
 //!     same-named file in a monorepo and skews the ranking of the real one.
 //! Plus the `/`-boundary rule and the keep-unlocatable policy.
+//!
+//! A8.6 extends it: a scope may also be a PROJECT label (`@shop/web`), which
+//! `resolve_scope` turns into that project's path before any filter runs, so
+//! a label answer must EQUAL the path answer — never approximate it.
 
 use std::path::Path;
 
 use repo_graph_engine::{
     GenerateResult, blast_radius_by_qname, generate_one, governing_docs, locate_node,
-    node_in_scope, resolve_signal_located,
+    node_in_scope, project_roots, resolve_scope, resolve_signal_located,
 };
 
 /// A three-subproject monorepo. `services/api` calls both into `shared` and
@@ -239,4 +243,183 @@ fn unlocatable_nodes_are_kept_and_endpoint_hit_is_the_fallback() {
 
     // scope=None is a strict no-op for everything.
     assert!(node_in_scope(m, m.graphs[0].nodes[0].id, None));
+}
+
+// ============================================================================
+// A8.6 — a project LABEL is scope vocabulary too.
+// ============================================================================
+
+/// The committed A8.5 fixture: four manifest roots under ONE RepoId.
+fn walk_project_roots() -> String {
+    format!(
+        "{}/../bench/substrate-gap/fixtures/walk-project-roots",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        if src.is_dir() {
+            copy_tree(&src, &dst);
+        } else if e.file_name() != "key.json" {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
+
+/// The same four manifests plus a call graph that crosses a project boundary.
+/// On the committed fixture every radius is EMPTY, so "label == path" there
+/// would hold vacuously. Here `webEntry` calls `helper` inside `apps/web`, and
+/// root-level `tools/run.ts` (under no nested root) calls `webEntry`.
+fn project_fixture() -> (tempfile::TempDir, GenerateResult) {
+    let td = tempfile::tempdir().unwrap();
+    let d = td.path();
+    copy_tree(Path::new(&walk_project_roots()), d);
+    std::fs::write(
+        d.join("apps/web/index.ts"),
+        "import { helper } from \"./helper\";\n\n\
+         export function webEntry(): number {\n  return helper();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("apps/web/helper.ts"),
+        "export function helper(): number {\n  return 1;\n}\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(d.join("tools")).unwrap();
+    std::fs::write(
+        d.join("tools/run.ts"),
+        "import { webEntry } from \"../apps/web/index\";\n\n\
+         export function runAll(): number {\n  return webEntry();\n}\n",
+    )
+    .unwrap();
+    let result = generate_one(d.to_str().unwrap()).expect("generate_one");
+    (td, result)
+}
+
+fn qnames<T>(v: &[T], q: impl Fn(&T) -> &str) -> Vec<String> {
+    let mut out: Vec<String> = v.iter().map(|x| q(x).to_string()).collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn project_roots_decodes_every_anchor_sorted_by_path() {
+    let r = generate_one(&walk_project_roots()).expect("fixture builds");
+    let roots = project_roots(&r.merged);
+    let got: Vec<(&str, &str, &str, &str, &str)> = roots
+        .iter()
+        .map(|p| {
+            (
+                p.path.as_str(),
+                p.label.as_str(),
+                p.ecosystem.as_str(),
+                p.manifest.as_str(),
+                p.qname.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (".", "shop-monorepo", "npm", "package.json", "project:."),
+            ("apps/web", "@shop/web", "npm", "apps/web/package.json", "project:apps/web"),
+            ("libs/core", "shop-core", "cargo", "libs/core/Cargo.toml", "project:libs/core"),
+            (
+                "services/api",
+                "github.com/shop/api",
+                "go",
+                "services/api/go.mod",
+                "project:services/api"
+            ),
+        ]
+    );
+
+    // Everything is read back out of the graph, so a graph reopened from a
+    // `.gmap` (pyo3 `load_from_gmap`) answers identically — no side channel.
+    let td = tempfile::tempdir().unwrap();
+    repo_graph_store::write_merged_sharded(&r.merged, td.path()).expect("write .gmap");
+    let loaded = repo_graph_store::read_merged_sharded(td.path()).expect("read .gmap");
+    let reread = project_roots(&loaded);
+    assert_eq!(
+        serde_json::to_string(&reread).unwrap(),
+        serde_json::to_string(&roots).unwrap(),
+        "a reopened .gmap must list the same projects"
+    );
+}
+
+#[test]
+fn resolve_scope_maps_labels_and_passes_everything_else_through() {
+    let r = generate_one(&walk_project_roots()).expect("fixture builds");
+    let m = &r.merged;
+    // label -> path, including a label that itself contains `/`.
+    assert_eq!(resolve_scope(m, "@shop/web"), "apps/web");
+    assert_eq!(resolve_scope(m, "github.com/shop/api"), "services/api");
+    assert_eq!(resolve_scope(m, "shop-core"), "libs/core");
+    // The root project resolves to `.`, which scopes to the whole repo.
+    assert_eq!(resolve_scope(m, "shop-monorepo"), ".");
+    // The full PROJECT qname is accepted too.
+    assert_eq!(resolve_scope(m, "project:apps/web"), "apps/web");
+    // IDEMPOTENT on a path: resolving a resolved scope changes nothing.
+    assert_eq!(resolve_scope(m, "apps/web"), "apps/web");
+    assert_eq!(resolve_scope(m, &resolve_scope(m, "@shop/web")), "apps/web");
+    // Unknown strings — plain dirs included — pass through untouched, no error.
+    assert_eq!(resolve_scope(m, "nonsense"), "nonsense");
+    assert_eq!(resolve_scope(m, "apps"), "apps");
+    // Exact match only: no case folding, no prefix guessing.
+    assert_eq!(resolve_scope(m, "@SHOP/WEB"), "@SHOP/WEB");
+    assert_eq!(resolve_scope(m, "@shop"), "@shop");
+}
+
+#[test]
+fn a_label_scope_equals_its_path_scope() {
+    let (_td, r) = project_fixture();
+    let m = &r.merged;
+
+    let all = blast_radius_by_qname(m, "webEntry", "both", 4, None, false, None).unwrap();
+    let all_q = qnames(&all, |a| &a.qname);
+    assert!(
+        all_q.iter().any(|q| q.contains("runAll")) && all_q.iter().any(|q| q.contains("helper")),
+        "precondition: unscoped radius reaches both tools/ and apps/web; got {all_q:?}"
+    );
+
+    let by_path =
+        blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("apps/web")).unwrap();
+    let by_label =
+        blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("@shop/web")).unwrap();
+    let path_q = qnames(&by_path, |a| &a.qname);
+    assert!(!path_q.is_empty(), "the in-scope helper must survive");
+    assert!(
+        !path_q.iter().any(|q| q.contains("runAll")),
+        "tools/run.ts is outside apps/web; got {path_q:?}"
+    );
+    assert_eq!(qnames(&by_label, |a| &a.qname), path_q, "label scope == path scope");
+    // Same set AND same ranking — label resolution runs before the filter.
+    let scores = |v: &[repo_graph_engine::BlastAnswer]| {
+        v.iter().map(|a| (a.qname.clone(), a.score.to_bits())).collect::<Vec<_>>()
+    };
+    assert_eq!(scores(&by_label), scores(&by_path));
+
+    // The ROOT project's label resolves to `.`, i.e. the whole repo.
+    let root = blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("shop-monorepo"))
+        .unwrap();
+    assert_eq!(qnames(&root, |a| &a.qname), all_q, "`.` scopes to everything");
+
+    // A second primitive, through the same applier: `resolve` filters its
+    // SEEDS, so equal seeds must give equal PPR scores too.
+    let diff = "apps/web/helper.ts\ntools/run.ts\n";
+    let located = |scope: &str| {
+        resolve_signal_located(m, diff, "diff", None, Some(scope))
+            .iter()
+            .map(|n| (n.qname.clone(), n.score.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    let (res_path, res_label) = (located("apps/web"), located("@shop/web"));
+    assert!(
+        !res_path.is_empty() && res_path.iter().all(|(q, _)| q.starts_with("apps::web::")),
+        "only apps/web seeds survive; got {res_path:?}"
+    );
+    assert_eq!(res_label, res_path, "label scope == path scope, scores included");
 }

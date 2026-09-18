@@ -11,8 +11,9 @@
 //!    service is wrong for a monorepo: `generate_one` on a stack renders as ONE
 //!    service with ZERO links even while cross-edges sit in the graph. When
 //!    there is a single repo, the key is the enclosing manifest project root
-//!    (A8.5's PROJECT anchors). A repo with no roots below its top level falls
-//!    back to the top-level path segment.
+//!    (A8.5's PROJECT anchors), and every file under no root shares ONE
+//!    `(outside projects)` bucket (A8.6). A repo with no roots below its top
+//!    level falls back to the top-level path segment.
 //! 3. [`service_map`] — the rendered answer: services, the links between them
 //!    (via `repo_graph_graph::cross_links`), and the honest residuals
 //!    (`self_links`, `unlocated_nodes`).
@@ -159,7 +160,7 @@ pub enum ServiceKeying {
     TopLevelDir,
     /// Explicit project roots, longest prefix wins. [`default_keying`] selects
     /// this for a single repo whose graph carries PROJECT anchors below its
-    /// root (A8.5).
+    /// root (A8.5). A file under none of them lands in [`OUTSIDE_PROJECTS`].
     ProjectRoots(Vec<String>),
 }
 
@@ -210,6 +211,13 @@ fn project_root_paths(merged: &MergedGraph) -> Vec<String> {
     roots.into_iter().collect()
 }
 
+/// The one service id, under `ProjectRoots` keying, for every file under no
+/// declared root (A8.6). Before it, each top-level dir outside a project
+/// (`docs`, `scripts`, `.ai`, `(root)`) was listed as a pseudo-service beside
+/// the real projects. One bucket keeps that code PLACED — its files, nodes,
+/// languages and any link from it still count — without inventing services.
+const OUTSIDE_PROJECTS: &str = "(outside projects)";
+
 /// The service id a `file` in `repo` belongs to under `keying`.
 ///
 /// `TopLevelDir` / `ProjectRoots` ids are prefixed with the repo label once
@@ -232,9 +240,8 @@ pub fn service_of(
                 .iter()
                 .filter(|r| file == r.as_str() || file.starts_with(&format!("{r}/")))
                 .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.as_str().cmp(b.as_str())));
-            // A file under no declared root is still PLACED (top-level dir),
-            // never dropped.
-            let key = best.cloned().unwrap_or_else(|| top_level_dir(file));
+            // A file under no declared root is still PLACED, never dropped.
+            let key = best.cloned().unwrap_or_else(|| OUTSIDE_PROJECTS.to_string());
             prefixed(key, repo, labels)
         }
     }
@@ -636,8 +643,15 @@ mod tests {
         let l = labels(1);
         assert_eq!(service_of("services/api/main.go", 0, &k, &l), "services/api");
         assert_eq!(service_of("services/other/x.go", 0, &k, &l), "services");
-        // No declared root matches → TopLevelDir fallback, still placed.
-        assert_eq!(service_of("tools/z.py", 0, &k, &l), "tools");
+        // No declared root matches → ONE shared bucket, still placed (A8.6):
+        // `tools/`, `docs/` and top-level files are not pseudo-services.
+        assert_eq!(service_of("tools/z.py", 0, &k, &l), "(outside projects)");
+        assert_eq!(service_of("docs/a.md", 0, &k, &l), "(outside projects)");
+        assert_eq!(service_of("main.go", 0, &k, &l), "(outside projects)");
+        // `servicesX/` is not under `services/` — segment boundary, not prefix.
+        assert_eq!(service_of("servicesX/y.go", 0, &k, &l), "(outside projects)");
+        // Two merged repos: the bucket is repo-qualified like any other id.
+        assert_eq!(service_of("tools/z.py", 1, &k, &labels(2)), "r1/(outside projects)");
         assert_eq!(k.name(), "project_roots");
     }
 
