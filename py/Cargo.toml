@@ -13,7 +13,11 @@ name = "repo_graph_py"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"] }
+# `multiple-pymethods`: one `#[pymethods] impl PyGraph` per primitive module.
+# NO `extension-module` here: its registrations would leave the unit-test
+# executable with undefined libpython symbols. Wheels get it from
+# pyproject.toml's `[tool.maturin] features` (see src/lib.rs, "Link note").
+pyo3 = { version = "0.28", features = ["abi3-py311", "multiple-pymethods"] }
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
@@ -24,3 +28,8 @@ repo-graph-store = { path = "../store" }
 # Parse POSITION cell JSON + build answer records for the P3 primitives
 # (blast_radius/resolve). Already in the tree via the engine.
 serde_json = "1"
+# Self-registration of module functions (`registry::ModuleFns`): each module
+# submits its own `register`, so adding a primitive never edits lib.rs. The
+# same crate backs pyo3's `multiple-pymethods`, so it adds no new class of
+# dependency.
+inventory = "0.3"
