@@ -41,6 +41,9 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         // A10.4: a standalone GraphQL schema. Routed to the SDL resolver scan
         // in `route.rs`, never to a language parser.
         "graphql" | "gql" => Some("graphql"),
+        // A10.6: an Avro schema. Routed to the MESSAGE_TYPE scan in
+        // `route.rs` by extension, never through A10.8's `.json` sniff.
+        "avsc" => Some("avro"),
         _ => None,
     }
 }

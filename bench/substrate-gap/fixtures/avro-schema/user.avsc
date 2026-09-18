@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "User",
+  "namespace": "com.shop",
+  "doc": "A registered shop user.",
+  "fields": [
+    {"name": "id", "type": "string"},
+    {"name": "email", "type": ["null", "string"], "default": null},
+    {
+      "name": "address",
+      "type": ["null", {
+        "type": "record",
+        "name": "Address",
+        "fields": [
+          {"name": "street", "type": "string"},
+          {"name": "city", "type": "string"}
+        ]
+      }],
+      "default": null
+    },
+    {"name": "status", "type": {"type": "enum", "name": "Status", "symbols": ["ACTIVE", "SUSPENDED"]}}
+  ]
+}

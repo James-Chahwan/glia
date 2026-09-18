@@ -1,0 +1,27 @@
+{
+  "framework": "avro-schema",
+  "language": "avro",
+  "dirs": ["."],
+  "note": "A10.6: .avsc is routed explicitly (not via A10.8's .json sniff), and each named Avro type (record / enum / fixed) becomes a MESSAGE_TYPE with the A10.5 qname shape message:avro:<fullname>. Fullname is Avro's own: a nested named type inherits the enclosing NAMESPACE (com.shop.Address), it is not qualified by the outer record's name, because that is the name every Avro codegen and every other .avsc refers to it by. Nesting is structural: outer DEFINES nested, as A10.5 does for proto.",
+  "expect_nodes": [
+    {"kind": "MESSAGE_TYPE", "name": "User", "note": "top-level record -> message:avro:com.shop.User"},
+    {"kind": "MESSAGE_TYPE", "name": "Address", "note": "record declared inline inside a field's union type -> message:avro:com.shop.Address"},
+    {"kind": "MESSAGE_TYPE", "name": "Status", "note": "inline enum -> message:avro:com.shop.Status"}
+  ],
+  "expect_edges": [
+    {"from": "message:avro:com.shop.User", "to": "message:avro:com.shop.Address", "category": "DEFINES", "note": "outer record DEFINES the record nested in its field"},
+    {"from": "message:avro:com.shop.User", "to": "message:avro:com.shop.Status", "category": "DEFINES", "note": "outer record DEFINES the enum nested in its field"}
+  ],
+  "expect_cells": [
+    {"kind": "MESSAGE_TYPE", "node": "message:avro:com.shop.User", "cell": "POSITION", "contains": "\"file\":\"user.avsc\",\"start_line\":0,\"end_line\":22", "note": "0-indexed: the record object's opening brace through its closing brace"},
+    {"kind": "MESSAGE_TYPE", "node": "message:avro:com.shop.Address", "cell": "POSITION", "contains": "\"start_line\":10,\"end_line\":17", "note": "the nested record's own braces, inside the union"},
+    {"kind": "MESSAGE_TYPE", "node": "message:avro:com.shop.User", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"avro\",\"decl\":\"record\",\"namespace\":\"com.shop\"", "note": "same ORIGIN shape as the proto path, source avro"}
+  ],
+  "forbid": [
+    {"kind": "MESSAGE_TYPE", "name": "id", "note": "a field is not a declared type"},
+    {"kind": "MESSAGE_TYPE", "name": "email", "note": "a field is not a declared type"},
+    {"kind": "MESSAGE_TYPE", "name": "street", "note": "a nested record's field is not a declared type"},
+    {"kind": "MESSAGE_TYPE", "name": "message:avro:com.shop.User.Address", "note": "Avro fullnames do not nest under the outer record"},
+    {"kind": "MESSAGE_TYPE", "max_nodes": 3, "note": "exactly the three named types: User, Address, Status"}
+  ]
+}

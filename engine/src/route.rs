@@ -44,6 +44,11 @@ pub(crate) fn parse_repo_files(
     // A10.4 `[graphql-sdl]` marker counters.
     let mut sdl_files = 0usize;
     let mut sdl_resolvers = 0usize;
+    // A10.6 `[avro]` marker counters.
+    let mut avro_files = 0usize;
+    let mut avro_records = 0usize;
+    let mut avro_enums = 0usize;
+    let mut avro_fixed = 0usize;
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
@@ -313,6 +318,39 @@ pub(crate) fn parse_repo_files(
             continue;
         }
 
+        // A10.6: an Avro `.avsc` is the shared contract under a Kafka stack.
+        // Its named types (record / enum / fixed) become MESSAGE_TYPE nodes
+        // under the file's MODULE, the shape A10.5 gives a `.proto` message.
+        if lang == "avro" {
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            let recs = repo_graph_code_extractors::schemas::extract_avro_records(
+                source, path, module_id, repo,
+            );
+            avro_files += 1;
+            avro_records += recs.message_count;
+            avro_enums += recs.enum_count;
+            avro_fixed += recs.fixed_count;
+            if !recs.nodes.is_empty() {
+                stash_synthetic_parse(
+                    "avro",
+                    path,
+                    module_id,
+                    repo,
+                    vec![recs.nodes],
+                    vec![recs.edges],
+                    vec![recs.nav],
+                    recs.module_cells,
+                    &mut parses_by_lang,
+                );
+            }
+            continue;
+        }
+
         // WP-D incremental: reuse the cached parse if the source is unchanged;
         // only changed / new files pay tree-sitter.
         let hash = cache.is_some().then(|| cache::content_hash(source));
@@ -418,6 +456,15 @@ pub(crate) fn parse_repo_files(
     // file routed, so `resolvers=0` flags operation-only documents.
     if sdl_files > 0 {
         eprintln!("[graphql-sdl] files={sdl_files} resolvers={sdl_resolvers}");
+    }
+
+    // A10.6 fired_on marker: `.avsc` files are walked and their named types
+    // are MESSAGE_TYPE nodes. `files` counts every schema routed, so all-zero
+    // counts flag a malformed or bare-type-string `.avsc`.
+    if avro_files > 0 {
+        eprintln!(
+            "[avro] files={avro_files} records={avro_records} enums={avro_enums} fixed={avro_fixed}"
+        );
     }
 
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
@@ -557,6 +604,36 @@ mod tests {
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::GRAPHQL_OPERATION),
             "a schema declares no client operations"
         );
+    }
+
+    #[test]
+    fn avro_schema_files_route_to_the_message_type_scan() {
+        assert_eq!(detect_language("schemas/user.avsc"), Some("avro"));
+
+        let avsc = "{\"type\": \"record\", \"name\": \"User\", \"namespace\": \"com.shop\",\n \"fields\": [{\"name\": \"id\", \"type\": \"string\"}]}\n";
+        let parses = route("schemas/user.avsc", avsc);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["avro"]);
+        let fp = &parses["avro"][0];
+
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "schemas::user");
+        assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
+        let module_pos = fp.nodes[0].cells.iter().find(|c| c.kind == cell_type::POSITION);
+        assert!(
+            matches!(module_pos.map(|c| &c.payload), Some(CellPayload::Json(s))
+                if s == r#"{"file":"schemas/user.avsc","start_line":0,"end_line":1}"#),
+            "{module_pos:?}"
+        );
+        let user = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MESSAGE_TYPE,
+            "message:avro:com.shop.User",
+        );
+        assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::MESSAGE_TYPE));
+        assert_eq!(fp.nav.parent_of.get(&user), Some(&module_id));
+
+        assert!(route("schemas/broken.avsc", "{\"type\": ").is_empty(), "malformed: no MODULE");
     }
 
     #[test]
