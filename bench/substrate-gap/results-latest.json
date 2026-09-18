@@ -373,11 +373,13 @@
     },
     "csharp/injects": {
       "extract": [
-        3,
-        3
+        6,
+        6
       ],
       "fixtures": [
-        "fixtures/csharp-aspnet"
+        "fixtures/csharp-aspnet",
+        "fixtures/csharp-fromservices",
+        "fixtures/csharp-primary-ctor"
       ],
       "forbid": [
         0,
@@ -385,13 +387,13 @@
       ],
       "level": "full",
       "literal": [
-        3,
-        3
+        6,
+        6
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        3,
+        3
       ],
       "via": "di"
     },
@@ -470,10 +472,11 @@
     },
     "csharp/tests": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
+        "fixtures/csharp-camel-tests",
         "matrix/csharp/tests"
       ],
       "forbid": [
@@ -482,15 +485,15 @@
       ],
       "level": "partial",
       "literal": [
-        2,
-        2
+        3,
+        3
       ],
       "reasons": [
         "routing edge missing"
       ],
       "route": [
-        0,
-        2
+        2,
+        3
       ],
       "via": "test"
     },
@@ -1495,8 +1498,8 @@
         "fixtures/java-spring-injects"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
@@ -1636,10 +1639,11 @@
     },
     "java/tests": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
+        "fixtures/java-camel-tests",
         "matrix/java/tests"
       ],
       "forbid": [
@@ -1648,15 +1652,15 @@
       ],
       "level": "partial",
       "literal": [
-        2,
-        2
+        3,
+        3
       ],
       "reasons": [
         "routing edge missing"
       ],
       "route": [
-        0,
-        2
+        2,
+        3
       ],
       "via": "test"
     },
@@ -1735,27 +1739,26 @@
     },
     "php/injects": {
       "extract": [
-        2,
-        2
+        4,
+        4
       ],
       "fixtures": [
+        "fixtures/php-symfony-di",
         "matrix/php/injects"
       ],
       "forbid": [
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
         2,
         2
-      ],
-      "reasons": [
-        "routing edge missing"
-      ],
-      "route": [
-        0,
-        1
       ],
       "via": "di"
     },
@@ -1780,7 +1783,7 @@
         "routing edge missing"
       ],
       "route": [
-        0,
+        1,
         2
       ],
       "via": "test"
@@ -1888,7 +1891,7 @@
     },
     "python/cli_inv": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1898,17 +1901,19 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "partial",
       "literal": [
-        0,
+        1,
         1
       ],
-      "reasons": [],
+      "reasons": [
+        "routing edge missing"
+      ],
       "route": [
         0,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "python/config": {
       "extract": [
@@ -2129,6 +2134,32 @@
         1
       ],
       "via": "import"
+    },
+    "python/injects": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/py-fastapi-depends"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        2,
+        2
+      ],
+      "via": "di"
     },
     "python/kafka": {
       "extract": [
@@ -3353,21 +3384,21 @@
     },
     "typescript/injects": {
       "extract": [
-        2,
-        2
+        4,
+        4
       ],
       "fixtures": [
         "fixtures/angular-injects",
         "fixtures/ts-angular-di"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        4,
+        4
       ],
       "reasons": [],
       "route": [
@@ -3638,19 +3669,27 @@
     "fixtures/csharp-aspnet-composed",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
+    "fixtures/docs-md-section-lines",
+    "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
+    "fixtures/event-publish-precision",
+    "fixtures/graphql-op-needle-precision",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
     "fixtures/http-dart-nav-precision",
     "fixtures/http-nav-route-precision",
+    "fixtures/http-nav-vs-server-route",
     "fixtures/http-placeholder-fold",
+    "fixtures/http-relative-paths",
     "fixtures/imports-local-filter",
+    "fixtures/java-http-clients",
     "fixtures/java-spring-kafka-msgtype",
     "fixtures/k8s-multidoc-cron",
     "fixtures/php-laravel-prefix",
     "fixtures/py-router-prefix",
     "fixtures/react-hook",
     "fixtures/ruby-rails-scope",
+    "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/swift-imports",
     "fixtures/terraform-depends_on",
@@ -3659,11 +3698,14 @@
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-nested-submodule",
     "fixtures/walk-project-roots",
+    "fixtures/xcli-invokes",
     "fixtures/xcut-config-env-value",
     "fixtures/xcut-graphql-precision",
     "fixtures/xcut-graphql-sdl",
     "fixtures/xcut-proto-shared",
     "fixtures/xcut-queue-annot-listener",
+    "fixtures/xcut-queue-const-topic",
+    "fixtures/xcut-queue-const-topic-java",
     "fixtures/xcut-queue-msgtype-go",
     "fixtures/xcut-queue-msgtype-go-mismatch",
     "fixtures/xcut-queue-nest-processor",
@@ -3673,18 +3715,19 @@
     "fixtures/xcut-trpc",
     "fixtures/xdata-source-shares",
     "fixtures/xiac-terraform-k8s",
+    "fixtures/xpoly-data-entity",
     "fixtures/xschema-csharp-namespace",
     "fixtures/xstack-host-pairing"
   ],
   "schema": 1,
   "totals": {
-    "covered": 146,
+    "covered": 147,
     "error": 0,
-    "full": 97,
+    "full": 99,
     "grid": 480,
-    "none": 20,
+    "none": 19,
     "partial": 29,
-    "unknown": 334
+    "unknown": 333
   },
   "vocabulary": {
     "digest": "a3672b018b49",

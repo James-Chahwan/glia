@@ -35,6 +35,7 @@ PROGRAMME = ROOT / "dev-notes" / "wave-packets.json"
 # then guards that re-running the scheduler reproduces history.
 LANDED = {
     0: "L0.1 L0.3 L0.2 L0.6 L0.4 L0.5",
+    1: "LG.6a LD.1 LB.3a LB.5 LB.4c LA.4 A13.1 LB.1 LA.26 LA.29 LA.25a LA.22a LA.31 A6.7 LG.6d LA.5 A13.4 LG.6b LA.8 LA.11 LG.4a LA.7a LG.10a A7.3 A7.5 A7.4",
 }
 
 ITEM_RE = re.compile(r"^(L[A-G]\.\d+)$")

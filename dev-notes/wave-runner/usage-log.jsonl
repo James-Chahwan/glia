@@ -1,2 +1,4 @@
 {"wave": "W0", "event": "start", "pct": 4, "resets_at": 1789771200, "ts": 1789755315}
 {"wave": "W0", "event": "end", "pct": 6, "resets_at": 1789771200, "ts": 1789758013}
+{"wave": "W1", "event": "start", "pct": 6, "resets_at": 1789771200, "ts": 1789758028}
+{"wave": "W1", "event": "end", "pct": 24, "resets_at": 1789771200, "ts": 1789759681}

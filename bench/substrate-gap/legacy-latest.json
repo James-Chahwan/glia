@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 140,
+  "fixtures": 158,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -129,6 +129,20 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "csharp-camel-tests": {
+      "framework": "csharp-camel-tests",
+      "language": "csharp",
+      "per_category": {
+        "TESTS": 1.0
+      }
+    },
+    "csharp-fromservices": {
+      "framework": "csharp-fromservices",
+      "language": "csharp",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
     "csharp-httpclient-http": {
       "framework": "csharp-httpclient-http",
       "language": "csharp",
@@ -147,6 +161,13 @@
       "language": "csharp",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-primary-ctor": {
+      "framework": "csharp-primary-ctor",
+      "language": "csharp",
+      "per_category": {
+        "INJECTS": 1.0
       }
     },
     "csharp-refit-http": {
@@ -170,6 +191,16 @@
       "per_category": {
         "IMPORTS": 1.0
       }
+    },
+    "docs-md-section-lines": {
+      "framework": "docs-md-section-lines",
+      "language": "markdown",
+      "per_category": {}
+    },
+    "elixir-docs": {
+      "framework": "elixir-docs",
+      "language": "elixir",
+      "per_category": {}
     },
     "elixir-http": {
       "framework": "elixir-http",
@@ -208,6 +239,13 @@
         "IMPORTS": 1.0
       }
     },
+    "event-publish-precision": {
+      "framework": "event-publish-precision",
+      "language": "python",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
     "go-accesses-data": {
       "framework": "go-accesses-data",
       "language": "go",
@@ -242,6 +280,11 @@
       "per_category": {
         "INJECTS": 1.0
       }
+    },
+    "graphql-op-needle-precision": {
+      "framework": "graphql-op-needle-precision",
+      "language": "typescript",
+      "per_category": {}
     },
     "http-absolute-url-client": {
       "framework": "http-absolute-url-client",
@@ -281,9 +324,24 @@
       "language": "typescript",
       "per_category": {}
     },
+    "http-nav-vs-server-route": {
+      "framework": "http-nav-vs-server-route",
+      "language": "typescript+python",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "http-placeholder-fold": {
       "framework": "http-placeholder-fold",
       "language": "typescript+python",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "http-relative-paths": {
+      "framework": "http-relative-paths",
+      "language": "rust+clojure+go+typescript",
       "per_category": {
         "HTTP_CALLS": 1.0
       }
@@ -292,6 +350,20 @@
       "framework": "imports-local-filter",
       "language": "rust+python+java+php+c_cpp+csharp+elixir+go",
       "per_category": {}
+    },
+    "java-camel-tests": {
+      "framework": "java-camel-tests",
+      "language": "java",
+      "per_category": {
+        "TESTS": 1.0
+      }
+    },
+    "java-http-clients": {
+      "framework": "java-http-clients",
+      "language": "java",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
     },
     "java-spring-accessdata": {
       "framework": "java-spring",
@@ -402,6 +474,13 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "php-symfony-di": {
+      "framework": "php-symfony-di",
+      "language": "php",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
     "py-accesses-data": {
       "framework": "py-accesses-data",
       "language": "python",
@@ -414,6 +493,14 @@
       "language": "python",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "py-fastapi-depends": {
+      "framework": "py-fastapi-depends",
+      "language": "python",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "INJECTS": 1.0
       }
     },
     "py-flask-handled": {
@@ -610,6 +697,11 @@
         "INHERITS_FROM": 1.0
       }
     },
+    "solidity-natspec": {
+      "framework": "solidity-natspec",
+      "language": "solidity",
+      "per_category": {}
+    },
     "solidity-state_var": {
       "framework": "solidity-state_var",
       "language": "solidity",
@@ -730,6 +822,13 @@
       "language": "typescript+go+rust",
       "per_category": {}
     },
+    "xcli-invokes": {
+      "framework": "xcli-invokes",
+      "language": "go+python",
+      "per_category": {
+        "CLI_INVOKES": 1.0
+      }
+    },
     "xcut-config-env-value": {
       "framework": "xcut-config-env-value",
       "language": "yaml",
@@ -823,6 +922,20 @@
     "xcut-queue-cloud-sqs": {
       "framework": "xcut-queue-cloud-sqs",
       "language": "python",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-const-topic": {
+      "framework": "xcut-queue-const-topic",
+      "language": "typescript",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-const-topic-java": {
+      "framework": "xcut-queue-const-topic-java",
+      "language": "java",
       "per_category": {
         "QUEUE_FLOWS": 1.0
       }
@@ -934,7 +1047,9 @@
       "framework": "xcut-trpc",
       "language": "typescript",
       "per_category": {
-        "RPC_CALLS": 1.0
+        "CONTAINS": 1.0,
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-websocket-precision": {
@@ -963,6 +1078,14 @@
       "language": "terraform+yaml",
       "per_category": {
         "SHARES_INFRA_REF": 1.0
+      }
+    },
+    "xpoly-data-entity": {
+      "framework": "xpoly-data-entity",
+      "language": "java+python",
+      "per_category": {
+        "ACCESSES_DATA": 1.0,
+        "SHARES_DATA_ENTITY": 1.0
       }
     },
     "xschema-csharp-namespace": {
