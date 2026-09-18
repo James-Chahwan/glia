@@ -1,0 +1,17 @@
+{
+  "framework": "java-camel-tests",
+  "language": "java",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["java/tests"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserServiceTest", "note": "JUnit test class"},
+    {"kind": "CLASS", "name": "UserService", "note": "unit under test"},
+    {"kind": "METHOD", "name": "UserService::add", "note": "the tested method; scopes the tests cell's extract/literal to a real symbol"}
+  ],
+  "expect_edges": [
+    {"from": "test/java/UserServiceTest", "to": "main/java/UserService", "category": "TESTS",
+     "note": "module-level TESTS. Maven layout: engine/src/passes.rs is_test_qname ALREADY accepts this module (qname contains `::test::`), so a miss here isolates strip_test_affixes, whose snake_case-only rule returned the CamelCase tail `UserServiceTest` unchanged and the emit loop skipped it (A6.7)."}
+  ],
+  "note": "A6.7. Maven src/main + src/test layout. Module qnames src::main::java::UserService and src::test::java::UserServiceTest; the from/to patterns carry the path so they cannot confuse the same-named MODULE and CLASS nodes."
+}

@@ -1,0 +1,16 @@
+{
+  "framework": "csharp-camel-tests",
+  "language": "csharp",
+  "dirs": ["."],
+  "mechanism": "tests",
+  "cells": ["csharp/tests"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserServiceTests", "note": "xUnit test class"},
+    {"kind": "METHOD", "name": "UserService::Add", "note": "the tested method; scopes the tests cell's extract/literal to a real symbol"}
+  ],
+  "expect_edges": [
+    {"from": "tests/UserServiceTests", "to": "src/UserService", "category": "TESTS",
+     "note": "module-level TESTS with the plural `Tests` suffix. Top-level tests/ dir, the .NET/xUnit layout: is_test_qname accepts the module via its `tests::` prefix, then strip_test_affixes must strip the CamelCase `Tests` (A6.7). matrix/csharp/tests covers the flat layout; this fixture keeps only the path-gated variant."}
+  ],
+  "note": "A6.7. .NET layout: src/ + tests/ at the repo root."
+}

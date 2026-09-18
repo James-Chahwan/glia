@@ -688,7 +688,35 @@ fn is_test_fixture(file: &str, qname: &str) -> bool {
 // Post passes
 // ----------------------------------------------------------------------------
 
+/// Module-level TESTS edges emitted by one run, split by which affix family
+/// paired the test module with its target (A6.7).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestsEdgeStats {
+    /// `test_x` / `x_test` / `x_spec` / `x.test` / `x.spec` — the pre-A6.7 rule.
+    snake: usize,
+    /// `XTest` / `XTests` / `XTestCase` / `XSpec` / `XSpecs` / `TestX`.
+    camel: usize,
+}
+
 fn emit_tests_edges(merged: &mut MergedGraph) {
+    let (edges, stats) = tests_module_edges(merged);
+    // A6.7 fired_on marker: `... 2>&1 | grep '^\[tests\] module TESTS edges:'`
+    if stats.snake + stats.camel > 0 {
+        eprintln!(
+            "[tests] module TESTS edges: {} (snake={} camel={})",
+            stats.snake + stats.camel,
+            stats.snake,
+            stats.camel
+        );
+    }
+    merged.cross_edges.extend(edges);
+}
+
+/// Pair each test MODULE with the module(s) it tests by stripping the test
+/// affix off its qname tail and looking the stem up among module tails.
+fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
+    let mut edges = Vec::new();
+    let mut stats = TestsEdgeStats::default();
     let mut modules_by_tail: HashMap<String, Vec<(NodeId, String)>> = HashMap::new();
     let mut module_info: Vec<(NodeId, String)> = Vec::new();
     for g in &merged.graphs {
@@ -707,7 +735,7 @@ fn emit_tests_edges(merged: &mut MergedGraph) {
         }
     }
     for (from_id, qname) in &module_info {
-        if !is_test_qname(qname) {
+        if !is_test_module_qname(qname) {
             continue;
         }
         let Some(tail) = qname.rsplit("::").next() else { continue };
@@ -716,8 +744,14 @@ fn emit_tests_edges(merged: &mut MergedGraph) {
             continue;
         }
         let Some(candidates) = modules_by_tail.get(stripped) else { continue };
+        let snake = strip_snake_test_affixes(tail) != tail;
         for to_id in select_test_targets(*from_id, qname, candidates) {
-            merged.cross_edges.push(Edge {
+            if snake {
+                stats.snake += 1;
+            } else {
+                stats.camel += 1;
+            }
+            edges.push(Edge {
                 from: *from_id,
                 to: to_id,
                 category: edge_category::TESTS,
@@ -725,6 +759,7 @@ fn emit_tests_edges(merged: &mut MergedGraph) {
             });
         }
     }
+    (edges, stats)
 }
 
 fn select_test_targets(
@@ -836,7 +871,33 @@ fn is_test_qname(qname: &str) -> bool {
         || t.ends_with(".spec")
 }
 
+/// Test-module gate for TESTS-edge emission only (A6.7). Deliberately distinct
+/// from `is_test_qname`, which also drives the ORIGIN `test_fixture`
+/// provenance cell via `is_test_fixture` — broadening that would change the
+/// existing cell on every Java/C#/Swift test class. This adds only the
+/// CamelCase tails (`CalcTest`, `CalcTests`, `TestCalc`, ...) that sit outside
+/// any test/ directory, e.g. a flat or PSR-4 layout.
+fn is_test_module_qname(qname: &str) -> bool {
+    if is_test_qname(qname) {
+        return true;
+    }
+    let Some(tail) = qname.rsplit("::").next() else { return false };
+    strip_test_affixes(tail) != tail
+}
+
+/// Strip a test affix off a module tail: the snake_case arms first, so every
+/// name the pre-A6.7 rule stripped strips identically, then the CamelCase arms.
+/// Returns `name` unchanged when neither family matches.
 fn strip_test_affixes(name: &str) -> &str {
+    let snake = strip_snake_test_affixes(name);
+    if snake != name {
+        return snake;
+    }
+    strip_camel_test_affixes(name)
+}
+
+/// `test_x`, `x_test`, `x_spec`, `x.test`, `x.spec` (ASCII case-insensitive).
+fn strip_snake_test_affixes(name: &str) -> &str {
     let lowered = name.to_ascii_lowercase();
     if let Some(rest) = lowered.strip_prefix("test_") {
         return &name[name.len() - rest.len()..];
@@ -845,6 +906,29 @@ fn strip_test_affixes(name: &str) -> &str {
         if lowered.ends_with(suffix) {
             return &name[..name.len() - suffix.len()];
         }
+    }
+    name
+}
+
+/// CamelCase conventions: JUnit/xUnit/NUnit `FooTest`/`FooTests`, ScalaTest
+/// and Quick `FooSpec`/`FooSpecs`, XCTest `FooTests`, JUnit `FooTestCase`, and
+/// the prefix form `TestFoo`. Matched case-SENSITIVELY on the capital, and the
+/// remaining stem must itself start uppercase, so a production name like
+/// `Fastest`, `Manifest` or `Latest` never strips. Order matters: `TestCase`
+/// and `Tests` before `Test`, `Specs` before `Spec`.
+fn strip_camel_test_affixes(name: &str) -> &str {
+    const CAMEL_SUFFIXES: [&str; 5] = ["TestCase", "Tests", "Test", "Specs", "Spec"];
+    for suffix in CAMEL_SUFFIXES {
+        if let Some(stem) = name.strip_suffix(suffix)
+            && stem.chars().next().is_some_and(char::is_uppercase)
+        {
+            return stem;
+        }
+    }
+    if let Some(rest) = name.strip_prefix("Test")
+        && rest.chars().next().is_some_and(char::is_uppercase)
+    {
+        return rest;
     }
     name
 }
@@ -1304,6 +1388,90 @@ mod passes_tests {
         assert!(is_test_fixture("app/login.spec.ts", "quokka_web::login"));
         assert!(is_test_fixture("pkg/foo.go", "pkg::tests::seed_users"));
         assert!(!is_test_fixture("services/auth.go", "turps::auth::HashPassword"));
+    }
+
+    #[test]
+    fn strip_test_affixes_camel_and_snake() {
+        // A6.7 CamelCase arms.
+        assert_eq!(strip_test_affixes("UserServiceTest"), "UserService");
+        assert_eq!(strip_test_affixes("UserServiceTests"), "UserService");
+        assert_eq!(strip_test_affixes("UserServiceTestCase"), "UserService");
+        assert_eq!(strip_test_affixes("UserServiceSpec"), "UserService");
+        assert_eq!(strip_test_affixes("UserServiceSpecs"), "UserService");
+        assert_eq!(strip_test_affixes("TestUserService"), "UserService");
+        // Must-not-strip: a lowercase `test` inside a production word, the bare
+        // affix itself, and a lowercase stem or remainder.
+        assert_eq!(strip_test_affixes("Fastest"), "Fastest");
+        assert_eq!(strip_test_affixes("Manifest"), "Manifest");
+        assert_eq!(strip_test_affixes("Latest"), "Latest");
+        assert_eq!(strip_test_affixes("Test"), "Test");
+        assert_eq!(strip_test_affixes("Tests"), "Tests");
+        assert_eq!(strip_test_affixes("Testimonial"), "Testimonial");
+        assert_eq!(strip_test_affixes("userServiceTest"), "userServiceTest");
+        // The snake_case rule is unchanged and still wins first.
+        assert_eq!(strip_test_affixes("test_calc"), "calc");
+        assert_eq!(strip_test_affixes("calc_test"), "calc");
+        assert_eq!(strip_test_affixes("math.test"), "math");
+        assert_eq!(strip_test_affixes("Login.spec"), "Login");
+    }
+
+    #[test]
+    fn camel_test_module_gate_leaves_provenance_alone() {
+        // The ORIGIN `test_fixture` cell reads is_test_fixture -> is_test_qname,
+        // and A6.7 must not move it: a flat-layout `FooTest` stays unflagged.
+        assert!(!is_test_fixture("src/Foo.java", "src::FooTest"));
+        assert!(!is_test_qname("src::FooTest"));
+        // ...while the TESTS-only gate accepts it.
+        assert!(is_test_module_qname("src::FooTest"));
+        assert!(is_test_module_qname("CalcTests"));
+        assert!(is_test_module_qname("src::test::java::helpers"));
+        assert!(!is_test_module_qname("src::Manifest"));
+        assert!(!is_test_module_qname("src::Calc"));
+    }
+
+    #[test]
+    fn tests_module_edges_pair_camel_and_snake_modules() {
+        let mut h = Hand::new("test://tests-edges/one");
+        let mut module = |q: &str| {
+            let tail = q.rsplit("::").next().unwrap_or(q).to_string();
+            h.add(node_kind::MODULE, &tail, q, vec![])
+        };
+        // Flat JUnit/PHPUnit layout: only the CamelCase tail marks the test.
+        let calc = module("Calc");
+        let calc_test = module("CalcTest");
+        // Maven layout: the path already marks it; the affix used to block it.
+        let user_service = module("src::main::java::UserService");
+        let user_service_test = module("src::test::java::UserServiceTest");
+        // Prefix form under a tests/ dir.
+        let cart = module("src::Cart");
+        let test_cart = module("tests::TestCart");
+        // Pre-A6.7 snake cases, unchanged.
+        let py_calc = module("pkg::calc");
+        let py_test = module("pkg::test_calc");
+        let math = module("math");
+        let math_test = module("math.test");
+        // A production name ending in lowercase `test` pairs with nothing.
+        let _fas = module("Fas");
+        let _fastest = module("Fastest");
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = tests_module_edges(&merged);
+        let mut got: Vec<(NodeId, NodeId)> = edges
+            .iter()
+            .inspect(|e| assert_eq!(e.category, edge_category::TESTS))
+            .map(|e| (e.from, e.to))
+            .collect();
+        got.sort_by_key(|(f, t)| (f.0, t.0));
+        let mut want = vec![
+            (calc_test, calc),
+            (user_service_test, user_service),
+            (test_cart, cart),
+            (py_test, py_calc),
+            (math_test, math),
+        ];
+        want.sort_by_key(|(f, t)| (f.0, t.0));
+        assert_eq!(got, want);
+        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 3 });
     }
 
     #[test]
