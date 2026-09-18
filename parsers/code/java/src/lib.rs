@@ -63,6 +63,14 @@ pub fn parse_file(
     scan_webflux_routes(source, repo, &mut acc);
     scan_javalin_routes(source, repo, &mut acc);
 
+    if acc.http_clients.any() {
+        let c = acc.http_clients;
+        eprintln!(
+            "[java-http] clients jdk={} okhttp={} apache={} path={file_rel_path}",
+            c.jdk, c.okhttp, c.apache
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -84,6 +92,78 @@ struct Acc {
     nav: CodeNav,
     /// Dedups client ENDPOINT nodes across a file (Pattern A).
     endpoint_seen: HashSet<NodeId>,
+    /// LA.22a: the imperative HTTP client libraries this file imports.
+    http_libs: JavaHttpLibs,
+    /// LA.22a: imperative-client call sites that became an ENDPOINT, per
+    /// library, for the `[java-http] clients` marker.
+    http_clients: JavaHttpClientCounts,
+}
+
+/// LA.22a: the imperative HTTP client libraries whose request shapes the
+/// endpoint arms recognise. Each arm emits only for a library in scope.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JavaHttpClient {
+    /// `java.net.http`: `HttpRequest.newBuilder(…)…build()`.
+    Jdk,
+    /// `okhttp3`: `new Request.Builder().url(…)…build()`.
+    OkHttp,
+    /// Apache HttpClient 4 (`org.apache.http`) / 5 (`org.apache.hc`):
+    /// `new HttpGet(url)` …, and 5's `SimpleRequestBuilder.get(url)` ….
+    Apache,
+}
+
+/// LA.22a: which [`JavaHttpClient`] libraries the file imports. Set by
+/// `collect_import`; `parse_file` walks every import before any type body, so
+/// the flags are final before a method body is scanned.
+#[derive(Default, Clone, Copy)]
+struct JavaHttpLibs {
+    jdk: bool,
+    okhttp: bool,
+    apache: bool,
+}
+
+impl JavaHttpLibs {
+    /// Record one import path (`java.net.http.HttpRequest`, `okhttp3.*`, …).
+    fn note_import(&mut self, path: &str) {
+        self.jdk |= path.starts_with("java.net.http.");
+        self.okhttp |= path.starts_with("okhttp3.");
+        self.apache |= is_apache_http_package(path);
+    }
+
+    fn has(&self, client: JavaHttpClient) -> bool {
+        match client {
+            JavaHttpClient::Jdk => self.jdk,
+            JavaHttpClient::OkHttp => self.okhttp,
+            JavaHttpClient::Apache => self.apache,
+        }
+    }
+}
+
+/// LA.22a: per-file ENDPOINT emissions by [`JavaHttpClient`].
+#[derive(Default, Clone, Copy)]
+struct JavaHttpClientCounts {
+    jdk: usize,
+    okhttp: usize,
+    apache: usize,
+}
+
+impl JavaHttpClientCounts {
+    fn bump(&mut self, client: JavaHttpClient) {
+        match client {
+            JavaHttpClient::Jdk => self.jdk += 1,
+            JavaHttpClient::OkHttp => self.okhttp += 1,
+            JavaHttpClient::Apache => self.apache += 1,
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.jdk + self.okhttp + self.apache > 0
+    }
+}
+
+/// `org.apache.http.…` (HttpClient 4) or `org.apache.hc.…` (HttpClient 5).
+fn is_apache_http_package(path: &str) -> bool {
+    path.starts_with("org.apache.http.") || path.starts_with("org.apache.hc.")
 }
 
 fn visit_type_decl(
@@ -1035,6 +1115,7 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         .trim_start_matches("static ")
         .trim_end_matches(';')
         .trim();
+    acc.http_libs.note_import(path);
 
     if path.ends_with(".*") {
         // Wildcard import — module import
@@ -1078,6 +1159,9 @@ fn collect_calls_in(
             try_detect_java_endpoint(n, src, from, repo, file_rel, acc);
             let qualifier = classify_method_invocation(n, src);
             acc.calls.push(CallSite { from, qualifier });
+        } else if n.kind() == "object_creation_expression" {
+            // LA.22a: Apache `new HttpGet(url)` is a request, not a call.
+            try_detect_java_request_object(n, src, from, repo, file_rel, acc);
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -1137,9 +1221,25 @@ const HTTP_VERBS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "
 ///                  verb walked back down the fluent chain (`.get()`/`.post()`/
 ///                  `.method(HttpMethod.GET)`).
 ///
+/// LA.22a adds the imperative clients, each only when the file imports the
+/// library (see [`JavaHttpLibs`]):
+///
+///   java.net.http: `HttpRequest.newBuilder(…)…build()` and
+///   OkHttp:        `new Request.Builder()…build()` — fire on the `.build()`
+///                  that finishes the chain, via [`builder_request_parts`], so
+///                  a request is one ENDPOINT however many setters it has.
+///                  Every other arm skips a chain rooted at one of these
+///                  builders: its `.uri(…)` / `.put(body)` are setters of the
+///                  request the `build` arm emits.
+///   Apache 5:      `SimpleRequestBuilder.get(url)` / `ClassicRequestBuilder
+///                  .post(url)` — verb from the method name. (Apache's
+///                  `new HttpGet(url)` is [`try_detect_java_request_object`].)
+///
 /// URL is the first call argument: a plain `"…"` literal (→ Strong) or a `+`
-/// concatenation whose non-literal parts become `${…}` wildcards (→ Medium).
-/// The `url_to_path` filter (path must start `/`) rules out `map.put("k", v)` &c.
+/// concatenation whose non-literal parts become `${…}` wildcards (→ Medium),
+/// either one optionally wrapped in `URI.create` & co (see
+/// [`url_string_from_arg`]). The `url_to_path` filter (path must start `/`)
+/// rules out `map.put("k", v)` &c.
 fn try_detect_java_endpoint(
     n: TsNode,
     src: &[u8],
@@ -1153,10 +1253,53 @@ fn try_detect_java_endpoint(
         .map(|x| text_of(x, src))
         .unwrap_or("");
     let args = n.child_by_field_name("arguments");
+    let obj = n.child_by_field_name("object");
+    let root = obj.and_then(|o| request_builder_root(o, src));
+
+    if let Some(client) = root {
+        if name == "build"
+            && acc.http_libs.has(client)
+            && let Some((method, url_arg)) = builder_request_parts(n, client, src)
+        {
+            emit_java_client_endpoint(
+                n,
+                method,
+                url_arg,
+                Some(client),
+                src,
+                from,
+                repo,
+                file_rel,
+                acc,
+            );
+        }
+        return;
+    }
+
+    if acc.http_libs.apache
+        && let Some(o) = obj
+        && is_apache5_request_builder(text_of(o, src))
+        && let Some(verb) = lower_verb(name)
+    {
+        if let Some(url_arg) = first_arg(args) {
+            emit_java_client_endpoint(
+                n,
+                verb,
+                url_arg,
+                Some(JavaHttpClient::Apache),
+                src,
+                from,
+                repo,
+                file_rel,
+                acc,
+            );
+        }
+        return;
+    }
 
     let method = if name == "uri" {
         // WebClient: verb comes from the fluent chain the `.uri(…)` hangs off.
-        let Some(obj) = n.child_by_field_name("object") else {
+        let Some(obj) = obj else {
             return;
         };
         let Some(v) = webclient_verb(obj, src) else {
@@ -1179,18 +1322,39 @@ fn try_detect_java_endpoint(
     let Some(url_arg) = first_arg(args) else {
         return;
     };
+    emit_java_client_endpoint(n, method, url_arg, None, src, from, repo, file_rel, acc);
+}
+
+/// Shared sink of every Java client arm: resolve `url_arg` to a path, and emit
+/// the ENDPOINT (+ CALLS from `from`) positioned at `site`, the node that
+/// fired. `client` names the LA.22a library to count for the marker (`None`
+/// for the Spring arms). Returns whether an endpoint was emitted; a URL that
+/// is not a literal / concatenation, or whose path does not start `/`, emits
+/// nothing.
+#[allow(clippy::too_many_arguments)]
+fn emit_java_client_endpoint(
+    site: TsNode,
+    method: String,
+    url_arg: TsNode,
+    client: Option<JavaHttpClient>,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> bool {
     let Some((raw, strong)) = url_string_from_arg(url_arg, src) else {
-        return;
+        return false;
     };
     // Path is the ENDPOINT's identity; the authority rides on ENDPOINT_HIT as
     // `host` (A11.5), and only when it is literal (`"http://" + h + "/x"` has
     // none).
     let (host, path) = endpoint::client_url_split(&raw);
     let Some(path) = path else {
-        return;
+        return false;
     };
 
-    let pos = n.start_position();
+    let pos = site.start_position();
     let ep = ClientEndpoint {
         method,
         path,
@@ -1217,6 +1381,180 @@ fn try_detect_java_endpoint(
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
+    if let Some(c) = client {
+        acc.http_clients.bump(c);
+    }
+    true
+}
+
+/// LA.22a: Apache HttpClient's `new HttpGet(url)` & co — a request object
+/// whose class names the verb and whose first constructor argument is the URL.
+/// Gated on the file importing `org.apache.http` / `org.apache.hc`, or on the
+/// class being spelled fully qualified.
+fn try_detect_java_request_object(
+    n: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let Some(ty) = n.child_by_field_name("type").map(|t| text_of(t, src)) else {
+        return;
+    };
+    if !acc.http_libs.apache && !is_apache_http_package(ty) {
+        return;
+    }
+    let class = ty.rsplit('.').next().unwrap_or(ty);
+    let Some(method) = apache_request_class_verb(class) else {
+        return;
+    };
+    let Some(url_arg) = first_arg(n.child_by_field_name("arguments")) else {
+        return;
+    };
+    emit_java_client_endpoint(
+        n,
+        method.to_string(),
+        url_arg,
+        Some(JavaHttpClient::Apache),
+        src,
+        from,
+        repo,
+        file_rel,
+        acc,
+    );
+}
+
+/// Apache HttpClient 4/5 request class → verb (`HttpGet` → `GET`, …).
+fn apache_request_class_verb(class: &str) -> Option<&'static str> {
+    match class {
+        "HttpGet" => Some("GET"),
+        "HttpPost" => Some("POST"),
+        "HttpPut" => Some("PUT"),
+        "HttpPatch" => Some("PATCH"),
+        "HttpDelete" => Some("DELETE"),
+        "HttpHead" => Some("HEAD"),
+        "HttpOptions" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+/// Apache HttpClient 5's static request builders (`SimpleRequestBuilder.get(url)`,
+/// `ClassicRequestBuilder.post(url)`), bare or fully qualified.
+fn is_apache5_request_builder(receiver: &str) -> bool {
+    let simple = receiver.rsplit('.').next().unwrap_or(receiver);
+    matches!(simple, "SimpleRequestBuilder" | "ClassicRequestBuilder")
+}
+
+/// A lower-case verb method name (`get`, `post`, …) → its upper-case verb.
+fn lower_verb(name: &str) -> Option<String> {
+    let up = name.to_ascii_uppercase();
+    (name == up.to_ascii_lowercase() && HTTP_VERBS.contains(&up.as_str())).then_some(up)
+}
+
+/// LA.22a: the builder a receiver chain hangs off — walk the `object` field of
+/// each `method_invocation` down to the chain's first expression. `Jdk` when it
+/// is `HttpRequest.newBuilder(…)`, `OkHttp` when it is `new Request.Builder()`.
+/// No import gate: it decides which arm OWNS a chain; the arms that emit gate.
+fn request_builder_root(obj: TsNode, src: &[u8]) -> Option<JavaHttpClient> {
+    let mut cur = obj;
+    loop {
+        match cur.kind() {
+            "method_invocation" => {
+                if is_jdk_new_builder(cur, src) {
+                    return Some(JavaHttpClient::Jdk);
+                }
+                cur = cur.child_by_field_name("object")?;
+            }
+            "object_creation_expression" => {
+                let ty = cur
+                    .child_by_field_name("type")
+                    .map(|t| text_of(t, src))
+                    .unwrap_or("");
+                return matches!(ty, "Request.Builder" | "okhttp3.Request.Builder")
+                    .then_some(JavaHttpClient::OkHttp);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// `HttpRequest.newBuilder(…)` (java.net.http), bare or fully qualified.
+fn is_jdk_new_builder(inv: TsNode, src: &[u8]) -> bool {
+    let name = inv
+        .child_by_field_name("name")
+        .map(|x| text_of(x, src))
+        .unwrap_or("");
+    name == "newBuilder"
+        && inv
+            .child_by_field_name("object")
+            .is_some_and(|o| matches!(text_of(o, src), "HttpRequest" | "java.net.http.HttpRequest"))
+}
+
+/// LA.22a: `(verb, url argument)` of the request a JDK / OkHttp `.build()`
+/// finishes. `chain_top` is the `build` invocation; its receiver chain is
+/// walked down to the builder root. The OUTERMOST setter wins, as the builder
+/// keeps the last value set, so the URL and verb are taken only while unset.
+///
+///   Jdk:    URL from `.uri(u)`, else `newBuilder(u)`; verb from `.GET()` /
+///           `.POST(b)` / `.PUT(b)` / `.DELETE()` / `.HEAD()`.
+///   OkHttp: URL from `.url(u)`; verb from `.get()` / `.post(b)` / `.put(b)` /
+///           `.patch(b)` / `.delete()` / `.delete(b)` / `.head()`.
+///   Both:   `.method("PATCH", b)` — a string-literal verb; any other verb
+///           argument leaves the verb unknown and emits nothing. Unset → GET,
+///           each builder's own default. No URL → nothing.
+fn builder_request_parts<'a>(
+    chain_top: TsNode<'a>,
+    client: JavaHttpClient,
+    src: &[u8],
+) -> Option<(String, TsNode<'a>)> {
+    let mut url: Option<TsNode<'a>> = None;
+    // Outer None = unset; Some(None) = set, but not to a literal verb.
+    let mut verb: Option<Option<String>> = None;
+    let mut cur = chain_top.child_by_field_name("object")?;
+    while cur.kind() == "method_invocation" {
+        let name = cur
+            .child_by_field_name("name")
+            .map(|x| text_of(x, src))
+            .unwrap_or("");
+        let args = cur.child_by_field_name("arguments");
+        let (url_setter, verb_setter) = match client {
+            JavaHttpClient::Jdk => (
+                name == "uri",
+                matches!(name, "GET" | "POST" | "PUT" | "DELETE" | "HEAD"),
+            ),
+            JavaHttpClient::OkHttp => (
+                name == "url",
+                matches!(name, "get" | "post" | "put" | "patch" | "delete" | "head"),
+            ),
+            JavaHttpClient::Apache => return None,
+        };
+        let is_root = client == JavaHttpClient::Jdk && is_jdk_new_builder(cur, src);
+        if url_setter || is_root {
+            url = url.or_else(|| first_arg(args));
+        } else if verb_setter {
+            verb.get_or_insert_with(|| Some(name.to_ascii_uppercase()));
+        } else if name == "method" {
+            verb.get_or_insert_with(|| literal_verb_arg(args, src));
+        }
+        if is_root {
+            break;
+        }
+        cur = cur.child_by_field_name("object")?;
+    }
+    let verb = verb.unwrap_or_else(|| Some("GET".to_string()))?;
+    Some((verb, url?))
+}
+
+/// A `.method("PATCH", body)` first argument, when it is a string literal
+/// naming an HTTP verb.
+fn literal_verb_arg(args: Option<TsNode>, src: &[u8]) -> Option<String> {
+    let a = first_arg(args)?;
+    if a.kind() != "string_literal" {
+        return None;
+    }
+    let up = java_string_inner(a, src).to_ascii_uppercase();
+    HTTP_VERBS.contains(&up.as_str()).then_some(up)
 }
 
 /// Map a RestTemplate convenience-method name to its HTTP verb. `put`/`delete`
@@ -1298,7 +1636,12 @@ fn first_arg<'a>(args: Option<TsNode<'a>>) -> Option<TsNode<'a>> {
 /// reconstructed with `${…}` in place of every non-literal operand so an
 /// interpolated URL (`"/users/" + id`) normalises like a template path
 /// (`/users/${…}` → `/users/{}`); `strong` is false for that case.
+///
+/// LA.22a: a single-argument URL wrapper — `URI.create(x)`, `new URI(x)`,
+/// `HttpUrl.parse(x)`, `HttpUrl.get(x)` — is unwrapped first, so `x` is judged
+/// by the same literal / concatenation rule.
 fn url_string_from_arg(arg: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    let arg = unwrap_url_wrappers(arg, src);
     if arg.kind() == "string_literal" {
         return Some((java_string_inner(arg, src), true));
     }
@@ -1320,6 +1663,54 @@ fn url_string_from_arg(arg: TsNode, src: &[u8]) -> Option<(String, bool)> {
         }
     }
     None
+}
+
+/// Peel URL wrappers off a URL argument: `URI.create(x)`, `new URI(x)`
+/// (java.net), `HttpUrl.parse(x)` / `HttpUrl.get(x)` (OkHttp), bare or fully
+/// qualified. Only the one-argument forms: `new URI(scheme, host, path, …)`
+/// has no single URL argument. Anything else is returned as is.
+fn unwrap_url_wrappers<'a>(arg: TsNode<'a>, src: &[u8]) -> TsNode<'a> {
+    let mut cur = arg;
+    loop {
+        let (wrapper, args) = match cur.kind() {
+            "method_invocation" => {
+                let recv = cur
+                    .child_by_field_name("object")
+                    .map(|o| text_of(o, src))
+                    .unwrap_or("");
+                let name = cur
+                    .child_by_field_name("name")
+                    .map(|x| text_of(x, src))
+                    .unwrap_or("");
+                let w = match recv {
+                    "URI" | "java.net.URI" => name == "create",
+                    "HttpUrl" | "okhttp3.HttpUrl" => matches!(name, "parse" | "get"),
+                    _ => false,
+                };
+                (w, cur.child_by_field_name("arguments"))
+            }
+            "object_creation_expression" => {
+                let ty = cur
+                    .child_by_field_name("type")
+                    .map(|t| text_of(t, src))
+                    .unwrap_or("");
+                (
+                    matches!(ty, "URI" | "java.net.URI"),
+                    cur.child_by_field_name("arguments"),
+                )
+            }
+            _ => return cur,
+        };
+        let Some(a) = args.filter(|_| wrapper) else {
+            return cur;
+        };
+        let mut c = a.walk();
+        let mut named = a.named_children(&mut c);
+        match (named.next(), named.next()) {
+            (Some(only), None) => cur = only,
+            _ => return cur,
+        }
+    }
 }
 
 /// Inner text of a Java `string_literal` node (strip the surrounding quotes).
@@ -1959,6 +2350,238 @@ public class Cache {
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::ENDPOINT),
             "map.put(\"key\", …) must not emit an ENDPOINT"
         );
+    }
+
+    /// ENDPOINT qnames in a parse, sorted.
+    fn endpoint_qnames(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn endpoint_hit(fp: &FileParse, qname: &str) -> String {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, qname);
+        let node = fp.nodes.iter().find(|n| n.id == id).expect("ENDPOINT node");
+        match &node.cells[0].payload {
+            CellPayload::Json(j) if node.cells[0].kind == cell_type::ENDPOINT_HIT => j.clone(),
+            other => panic!("not an ENDPOINT_HIT json cell: {other:?}"),
+        }
+    }
+
+    /// LA.22a — java.net.http: `.uri(URI.create(…)).GET().build()`,
+    /// `newBuilder(URI.create(…)).POST(…)` and `.method("PATCH", …)`, each one
+    /// ENDPOINT at its `.build()` with the URL authority as `host`.
+    #[test]
+    fn jdk_http_request_builders_emit_one_endpoint_each() {
+        let source = r#"
+import java.net.URI;
+import java.net.http.HttpRequest;
+
+public class Clients {
+    public void a() {
+        HttpRequest r = HttpRequest.newBuilder().uri(URI.create("http://users-svc/users")).GET().build();
+    }
+    public void b() {
+        HttpRequest r = HttpRequest.newBuilder(URI.create("http://orders-svc/orders"))
+            .POST(HttpRequest.BodyPublishers.ofString("{}")).build();
+    }
+    public void c() {
+        HttpRequest r = HttpRequest.newBuilder(new URI("/carts/" + id))
+            .method("PATCH", HttpRequest.BodyPublishers.noBody()).build();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert_eq!(
+            endpoint_qnames(&fp),
+            [
+                "endpoint:GET:/users",
+                "endpoint:PATCH:/carts/${…}",
+                "endpoint:POST:/orders"
+            ]
+        );
+        assert!(endpoint_hit(&fp, "endpoint:GET:/users").contains(r#""host":"users-svc""#));
+        assert!(endpoint_hit(&fp, "endpoint:POST:/orders").contains(r#""host":"orders-svc""#));
+        assert!(
+            endpoint_hit(&fp, "endpoint:PATCH:/carts/${…}").contains(r#""confidence":"medium""#)
+        );
+        let ep = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            "endpoint:GET:/users",
+        );
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.to == ep && e.category == edge_category::CALLS)
+                .count(),
+            1,
+            "one CALLS edge per request, from the enclosing method"
+        );
+    }
+
+    /// LA.22a — the verb set BEFORE `.uri(…)` must not also fire the WebClient
+    /// `.uri` arm: exactly one ENDPOINT, one CALLS edge.
+    #[test]
+    fn jdk_verb_before_uri_is_one_endpoint() {
+        let source = r#"
+import java.net.URI;
+import java.net.http.HttpRequest;
+
+public class Clients {
+    public void a() {
+        HttpRequest r = HttpRequest.newBuilder().DELETE().uri(URI.create("http://svc/items/7")).build();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert_eq!(endpoint_qnames(&fp), ["endpoint:DELETE:/items/7"]);
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::CALLS
+                    && fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT))
+                .count(),
+            1
+        );
+    }
+
+    /// LA.22a — the java.net.http arm is gated on the import: the same chain in
+    /// a file that does not import `java.net.http` emits nothing.
+    #[test]
+    fn jdk_builder_without_the_import_is_not_an_endpoint() {
+        let source = r#"
+public class Clients {
+    public void a() {
+        Object r = HttpRequest.newBuilder().uri(URI.create("http://svc/users")).GET().build();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert!(
+            endpoint_qnames(&fp).is_empty(),
+            "{:?}",
+            endpoint_qnames(&fp)
+        );
+    }
+
+    /// LA.22a — OkHttp: `new Request.Builder().url(…).build()` defaults to GET;
+    /// `.post(body)` sets POST; `HttpUrl.parse(…)` is unwrapped; the `.put(body)`
+    /// setter never reaches the RestTemplate `put` arm.
+    #[test]
+    fn okhttp_request_builder_emits_endpoint() {
+        let source = r#"
+import okhttp3.HttpUrl;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+
+public class Clients {
+    public void a() {
+        Request r = new Request.Builder().url("http://users-svc/accounts").build();
+    }
+    public void b(RequestBody body) {
+        Request r = new Request.Builder().url(HttpUrl.parse("/orders")).post(body).build();
+    }
+    public void c() {
+        Request r = new Request.Builder().url("/carts").put(RequestBody.create("/x", null)).build();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert_eq!(
+            endpoint_qnames(&fp),
+            [
+                "endpoint:GET:/accounts",
+                "endpoint:POST:/orders",
+                "endpoint:PUT:/carts"
+            ]
+        );
+        assert!(endpoint_hit(&fp, "endpoint:GET:/accounts").contains(r#""host":"users-svc""#));
+    }
+
+    /// LA.22a — Apache HttpClient 4 `new HttpDelete(url)` and HttpClient 5's
+    /// `SimpleRequestBuilder.post(url)` / `ClassicRequestBuilder.put(url)`.
+    #[test]
+    fn apache_request_classes_and_builders_emit_endpoints() {
+        let source = r#"
+import org.apache.http.client.methods.HttpDelete;
+import org.apache.hc.client5.http.async.methods.SimpleRequestBuilder;
+import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
+
+public class Clients {
+    public void a() {
+        HttpDelete del = new HttpDelete("http://users-svc/invoices");
+    }
+    public void b() {
+        var req = SimpleRequestBuilder.post("http://billing/charges").build();
+    }
+    public void c() {
+        var req = ClassicRequestBuilder.put(URI.create("/limits")).build();
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert_eq!(
+            endpoint_qnames(&fp),
+            [
+                "endpoint:DELETE:/invoices",
+                "endpoint:POST:/charges",
+                "endpoint:PUT:/limits"
+            ]
+        );
+        assert!(endpoint_hit(&fp, "endpoint:DELETE:/invoices").contains(r#""host":"users-svc""#));
+    }
+
+    /// LA.22a negatives: an unrelated `new HashMap<>()`, a `StringBuilder`'s
+    /// `.build()`-alike and a non-Apache `new HttpGet(…)` (no import) emit
+    /// nothing; nor does `new URI(scheme, host, path, frag)`.
+    #[test]
+    fn unrelated_objects_and_builders_are_not_endpoints() {
+        let source = r#"
+import java.net.URI;
+import java.net.http.HttpRequest;
+import okhttp3.Request;
+
+public class Clients {
+    public void a() {
+        Map<String, String> m = new HashMap<>();
+        String s = new StringBuilder().append("/users").build();
+        Object g = new HttpGet("/users");
+        Object q = Other.newBuilder().uri("/users").build();
+        Request r = new Request.Builder().build();
+        HttpRequest h = HttpRequest.newBuilder().method(verb, null).uri(URI.create("/x")).build();
+        URI u = new URI("http", "svc", "/users", null);
+    }
+}
+"#;
+        let fp = parse_file(source, "Clients.java", "com::example", repo()).unwrap();
+        assert!(
+            endpoint_qnames(&fp).is_empty(),
+            "{:?}",
+            endpoint_qnames(&fp)
+        );
+    }
+
+    /// LA.22a — `URI.create(…)` unwrapping also reaches the existing Spring
+    /// arms: `rest.getForObject(URI.create("/users"), …)`.
+    #[test]
+    fn uri_create_is_unwrapped_for_rest_template() {
+        let source = r#"
+public class ApiClient {
+    public String fetch() {
+        return rest.getForObject(URI.create("http://svc/users"), String.class);
+    }
+}
+"#;
+        let fp = parse_file(source, "ApiClient.java", "com::example", repo()).unwrap();
+        assert_eq!(endpoint_qnames(&fp), ["endpoint:GET:/users"]);
     }
 
     #[test]

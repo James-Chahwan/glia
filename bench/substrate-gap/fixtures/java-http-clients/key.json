@@ -1,0 +1,60 @@
+{
+  "framework": "java-http-clients",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /users",
+      "note": "java.net.http: HttpRequest.newBuilder().uri(URI.create(...)).GET().build()"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /orders",
+      "note": "java.net.http: newBuilder(URI.create(...)).POST(...)"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /accounts",
+      "note": "OkHttp: new Request.Builder().url(...).build(), default verb GET"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "DELETE /invoices",
+      "note": "Apache: new HttpDelete(...)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:POST:/orders",
+      "to": "route:/orders",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/accounts",
+      "to": "route:/accounts",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:DELETE:/invoices",
+      "to": "route:/invoices",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "max_nodes": 4,
+      "note": "exactly one ENDPOINT per request: the intermediate .uri()/.GET() invocations of a builder chain must not mint their own"
+    }
+  ],
+  "note": "LA.22a. The three imperative Java clients that are blind on HEAD, each against a Go chi server. Legacy-only (no `cells`): java/http_client is already measured full by java-spring-http (RestTemplate). Baseline HEAD: 0 ENDPOINT, 0 HTTP_CALLS."
+}
