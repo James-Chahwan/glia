@@ -15,6 +15,10 @@ use repo_graph_code_domain::endpoint;
 use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint};
 // A7: every INJECTS ref is counted by shape for the `[di]` fired-on line.
 use repo_graph_code_domain::di_stats::{self, DiShape};
+// A13.11: the EF Core table cell shares one writer with every ORM parser, so
+// `DbResolver`'s `table_of` reads a C# model exactly as it reads a JPA one.
+use repo_graph_code_domain::data_entity::{orm, table_cell};
+use std::collections::{HashMap, HashSet};
 
 pub fn parse_file(
     source: &str,
@@ -61,6 +65,20 @@ pub fn parse_file(
         );
     }
 
+    let ef = &acc.efcore;
+    if ef.contexts > 0 {
+        eprintln!(
+            "[orm-efcore] contexts={} entities={} table_cells={} (to_table={} table_attr={} dbset_name={} type_name={}) in {file_rel_path}",
+            ef.contexts,
+            ef.entities,
+            ef.to_table + ef.table_attr + ef.dbset_name + ef.type_name,
+            ef.to_table,
+            ef.table_attr,
+            ef.dbset_name,
+            ef.type_name
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -91,6 +109,28 @@ struct Acc {
     /// counted separately from the attribute-routing pass so a regression in
     /// either is visible on its own fired-on line.
     minimal_api_routes: usize,
+    /// A13.11: `[Table("x")]` on the classes of this file, simple class name →
+    /// table. Filled lazily by the first DbContext the visit meets, so a file
+    /// without one never pays for the walk, and a context declared ABOVE its
+    /// entity classes still sees their attributes.
+    efcore_table_attrs: Option<HashMap<String, String>>,
+    /// A13.11: DATA_ENTITY ids minted in this file — one node per model.
+    efcore_entities_seen: HashSet<NodeId>,
+    efcore: EfCoreStats,
+}
+
+/// A13.11 marker counters for the `[orm-efcore]` fired-on line. Every entity
+/// carries exactly one table cell; the four sources split `table_cells` by
+/// where its value came from, so a regression in any rung of the precedence
+/// chain is visible on its own.
+#[derive(Default)]
+struct EfCoreStats {
+    contexts: usize,
+    entities: usize,
+    to_table: usize,
+    table_attr: usize,
+    dbset_name: usize,
+    type_name: usize,
 }
 
 fn visit_children(
@@ -230,6 +270,12 @@ fn visit_type_decl(
             };
             emit_heritage_ref(raw, category, id, module_id, acc);
         }
+    }
+
+    // A13.11: an EF Core DbContext is the one place a .NET service declares
+    // every table it owns. Only a class can derive from DbContext.
+    if node.kind() == "class_declaration" && is_db_context(node, src) {
+        emit_efcore_entities(node, src, id, repo, acc);
     }
 
     // Pattern E (DI): is this a class that receives injected dependencies?
@@ -562,6 +608,378 @@ fn emit_heritage_ref(
         qualifier: CallQualifier::Bare(simple.to_string()),
         category,
     });
+}
+
+// ============================================================================
+// A13.11 — EF Core: DbSet<T> / ToTable() → DATA_ENTITY
+// ============================================================================
+//
+// IDENTITY (A13.1): the entity is keyed on its MODEL, `data_entity:sql:<T>`, so
+// a query site in any other file (`_db.Users…`, `Set<User>()`) can target it
+// without knowing the table. The table rides a `{table, orm: efcore}` CODE cell
+// on EVERY entity, valued by EF Core's own precedence: `ToTable("x")` in
+// `OnModelCreating` ?? `[Table("x")]` on the entity class (same file) ?? the
+// DbSet PROPERTY name (`DbSet<Person> People` maps to `People`, which no plural
+// of `Person` derives) ?? the type name (an entity configured through
+// `Entity<T>()` with no DbSet).
+//
+// ANCHOR: ACCESSES_DATA runs from the DbContext CLASS — the declaration site.
+// A repository or service querying through the context reaches the table one
+// hop further than a Java repository does; anchoring on query sites needs
+// receiver-type inference, which is out of this packet's scope.
+
+/// Does this class derive from EF Core's `DbContext`, directly or through a
+/// `*DbContext` base (`IdentityDbContext<AppUser>`, `ApiAuthorizationDbContext`)?
+/// Matched on the base type's simple name, with generics and any namespace or
+/// `global::` qualifier stripped. A C# 12 primary-constructor base
+/// (`: DbContext(options)`) keeps its type in the `type` field.
+fn is_db_context(class_node: TsNode, src: &[u8]) -> bool {
+    let mut cursor = class_node.walk();
+    let Some(base_list) = class_node
+        .children(&mut cursor)
+        .find(|c| c.kind() == "base_list")
+    else {
+        return false;
+    };
+    let mut bl = base_list.walk();
+    let bases: Vec<TsNode> = base_list.named_children(&mut bl).collect();
+    bases.into_iter().any(|base| {
+        let ty = match base.kind() {
+            "argument_list" => return false,
+            "primary_constructor_base_type" => match base.child_by_field_name("type") {
+                Some(t) => t,
+                None => return false,
+            },
+            _ => base,
+        };
+        simple_type_name(text_of(ty, src)).is_some_and(|n| n.ends_with("DbContext"))
+    })
+}
+
+/// The simple name of a type reference: generics, a nullable `?`, and any
+/// `Ns.` / `global::` qualifier dropped (`global::Shop.Models.User?` → `User`).
+/// `None` unless what remains is identifier-shaped, so an array, tuple or
+/// predefined type never mints an entity.
+fn simple_type_name(raw: &str) -> Option<&str> {
+    let base = raw
+        .split('<')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_end_matches('?');
+    let simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
+    let mut chars = simple.chars();
+    let first = chars.next()?;
+    ((first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_'))
+        .then_some(simple)
+}
+
+/// If `generic` is `<ident><T, …>` with `ident == want`, the simple name of
+/// its first type argument.
+fn generic_first_arg<'a>(generic: TsNode<'a>, want: &str, src: &'a [u8]) -> Option<&'a str> {
+    if generic.kind() != "generic_name" {
+        return None;
+    }
+    let mut cursor = generic.walk();
+    let children: Vec<TsNode> = generic.named_children(&mut cursor).collect();
+    let ident = children.iter().find(|c| c.kind() == "identifier")?;
+    if text_of(*ident, src) != want {
+        return None;
+    }
+    let targs = children.iter().find(|c| c.kind() == "type_argument_list")?;
+    let mut tc = targs.walk();
+    let first = targs.named_children(&mut tc).next()?;
+    simple_type_name(text_of(first, src))
+}
+
+/// `public DbSet<User> Users { get; set; }` → `(User, Users)`. Also accepts the
+/// nullable `DbSet<User>?`, a qualified `Microsoft.EntityFrameworkCore.DbSet<User>`
+/// and an expression-bodied `DbSet<User> Users => Set<User>();` — all three
+/// are the same `property_declaration` with a different `type` wrapper. A
+/// DbSet FIELD is not an EF Core entity set (discovery reads properties only).
+fn dbset_property<'a>(prop: TsNode<'a>, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    let mut ty = prop.child_by_field_name("type")?;
+    loop {
+        ty = match ty.kind() {
+            "nullable_type" => ty.child_by_field_name("type")?,
+            "qualified_name" | "alias_qualified_name" => ty.child_by_field_name("name")?,
+            _ => break,
+        };
+    }
+    let model = generic_first_arg(ty, "DbSet", src)?;
+    let name = text_of(prop.child_by_field_name("name")?, src);
+    (!name.is_empty()).then_some((model, name))
+}
+
+/// `modelBuilder.Entity<User>(…)` → `User`: the model configured by this
+/// invocation, when its function is a member access to the generic `Entity<T>`.
+fn entity_builder_model<'a>(invocation: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let func = invocation.child_by_field_name("function")?;
+    if func.kind() != "member_access_expression" {
+        return None;
+    }
+    generic_first_arg(func.child_by_field_name("name")?, "Entity", src)
+}
+
+/// The names a lambda declares: `b => …` or `(b) => …` / `(EntityTypeBuilder<T> b) => …`.
+fn lambda_param_names<'a>(lambda: TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
+    let Some(params) = lambda.child_by_field_name("parameters") else {
+        return Vec::new();
+    };
+    if params.kind() == "implicit_parameter" {
+        return vec![text_of(params, src)];
+    }
+    let mut cursor = params.walk();
+    params
+        .named_children(&mut cursor)
+        .filter(|p| p.kind() == "parameter")
+        .filter_map(|p| p.child_by_field_name("name"))
+        .map(|n| text_of(n, src))
+        .collect()
+}
+
+/// `….ToTable("x")` (or `.ToView("x")`, EF Core's mapping of an entity onto a
+/// view — the relation name another service's SQL names) → `(model, "x")`.
+///
+/// The model is found one of two ways, both bounded to this statement:
+/// * the fluent chain — `modelBuilder.Entity<User>().HasKey(…).ToTable("x")`:
+///   the receiver chain is walked down to the `Entity<T>` invocation;
+/// * the builder lambda — `modelBuilder.Entity<User>(b => { b.ToTable("x"); })`,
+///   the reverse-engineered (scaffolded) shape: the chain bottoms out at an
+///   identifier, and the NEAREST enclosing lambda declaring that identifier
+///   must be the argument of an `Entity<T>` invocation. That is what keeps
+///   `b.OwnsOne(x => x.Address, a => a.ToTable("addresses"))` — an OWNED type's
+///   table — from being credited to `User`: `a` belongs to `OwnsOne`'s lambda.
+///
+/// A non-literal name (`nameof(…)`, a constant) returns `None` and the model
+/// keeps its next-precedence table.
+fn to_table_call<'a>(
+    invocation: TsNode<'a>,
+    stop: TsNode<'a>,
+    src: &'a [u8],
+) -> Option<(&'a str, String)> {
+    let func = invocation.child_by_field_name("function")?;
+    if func.kind() != "member_access_expression" {
+        return None;
+    }
+    let verb = text_of(func.child_by_field_name("name")?, src);
+    if verb != "ToTable" && verb != "ToView" {
+        return None;
+    }
+    let table = string_literal_text(nth_arg_expr(invocation, 0)?, src)?;
+    let table = table.trim();
+    if table.is_empty() {
+        return None;
+    }
+
+    let mut expr = func.child_by_field_name("expression")?;
+    while expr.kind() == "invocation_expression" {
+        if let Some(model) = entity_builder_model(expr, src) {
+            return Some((model, table.to_string()));
+        }
+        let inner = expr.child_by_field_name("function")?;
+        if inner.kind() != "member_access_expression" {
+            return None;
+        }
+        expr = inner.child_by_field_name("expression")?;
+    }
+    if expr.kind() != "identifier" {
+        return None;
+    }
+    let receiver = text_of(expr, src);
+
+    let mut cur = invocation;
+    while let Some(parent) = cur.parent() {
+        if parent == stop {
+            return None;
+        }
+        if parent.kind() == "lambda_expression"
+            && lambda_param_names(parent, src).contains(&receiver)
+        {
+            let arg = parent.parent().filter(|p| p.kind() == "argument")?;
+            let call = arg
+                .parent()
+                .filter(|p| p.kind() == "argument_list")?
+                .parent()
+                .filter(|p| p.kind() == "invocation_expression")?;
+            return entity_builder_model(call, src).map(|m| (m, table.to_string()));
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// Walk an `OnModelCreating` body: every `Entity<T>` it configures (source
+/// order, deduped) and every `ToTable` / `ToView` it declares. The FIRST
+/// declaration of a model's table wins, so the result is order-stable.
+fn collect_model_builder<'a>(
+    method: TsNode<'a>,
+    src: &'a [u8],
+    configured: &mut Vec<&'a str>,
+    to_table: &mut HashMap<&'a str, String>,
+) {
+    let Some(body) = method.child_by_field_name("body") else {
+        return;
+    };
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "invocation_expression" {
+            if let Some(model) = entity_builder_model(n, src)
+                && !configured.contains(&model)
+            {
+                configured.push(model);
+            }
+            if let Some((model, table)) = to_table_call(n, body, src) {
+                to_table.entry(model).or_insert(table);
+            }
+        }
+        // Reverse push → pre-order pop, so `configured` keeps source order.
+        let mut cursor = n.walk();
+        let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+}
+
+/// `[Table("x")]` on every class / record declared in the file containing
+/// `node`, keyed by the class's simple name. Descends only through namespace
+/// and type bodies — never into a method — since an attribute on a type is
+/// the only shape wanted.
+fn collect_table_attrs(node: TsNode, src: &[u8]) -> HashMap<String, String> {
+    let mut root = node;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    let mut out = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "compilation_unit"
+            | "namespace_declaration"
+            | "file_scoped_namespace_declaration"
+            | "declaration_list" => {}
+            "class_declaration" | "record_declaration" => {
+                let table = own_attributes(n, src)
+                    .into_iter()
+                    .find(|(name, arg)| name == "Table" && arg.is_some())
+                    .and_then(|(_, arg)| arg);
+                if let (Some(table), Some(name)) = (table, n.child_by_field_name("name")) {
+                    let table = table.trim();
+                    if !table.is_empty() {
+                        out.entry(text_of(name, src).to_string())
+                            .or_insert_with(|| table.to_string());
+                    }
+                }
+            }
+            _ => continue,
+        }
+        let mut cursor = n.walk();
+        let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(children);
+    }
+    out
+}
+
+/// Emit one model-keyed DATA_ENTITY per model the DbContext `class_node`
+/// declares — its `DbSet<T>` properties, then any `Entity<T>()` configured in
+/// `OnModelCreating` without one — each with its table cell and an
+/// ACCESSES_DATA edge from the context. Both halves are collected before
+/// anything is emitted, so `ToTable` wins regardless of source order.
+fn emit_efcore_entities<'a>(
+    class_node: TsNode<'a>,
+    src: &'a [u8],
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(body) = class_node.child_by_field_name("body") else {
+        return;
+    };
+    let mut dbsets: Vec<(&str, &str)> = Vec::new();
+    let mut configured: Vec<&str> = Vec::new();
+    let mut to_table: HashMap<&str, String> = HashMap::new();
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        match member.kind() {
+            "property_declaration" => {
+                let Some((model, prop)) = dbset_property(member, src) else {
+                    continue;
+                };
+                if !dbsets.iter().any(|(m, _)| *m == model) {
+                    dbsets.push((model, prop));
+                }
+            }
+            "method_declaration" => {
+                let Some(name) = member.child_by_field_name("name") else {
+                    continue;
+                };
+                if text_of(name, src) == "OnModelCreating" {
+                    collect_model_builder(member, src, &mut configured, &mut to_table);
+                }
+            }
+            _ => {}
+        }
+    }
+    acc.efcore.contexts += 1;
+
+    let mut models: Vec<(&str, Option<&str>)> =
+        dbsets.iter().map(|(m, p)| (*m, Some(*p))).collect();
+    for model in configured {
+        if !models.iter().any(|(m, _)| *m == model) {
+            models.push((model, None));
+        }
+    }
+    if models.is_empty() {
+        return;
+    }
+    // Taken out and restored so the loop can mutate `acc` freely.
+    let attrs = acc
+        .efcore_table_attrs
+        .take()
+        .unwrap_or_else(|| collect_table_attrs(class_node, src));
+
+    for (model, dbset_prop) in models {
+        let qname = format!("data_entity:sql:{model}");
+        let entity_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+        // A second context in the same file declaring the same model adds its
+        // edge; the node and its one table cell are minted once.
+        if acc.efcore_entities_seen.insert(entity_id) {
+            let stats = &mut acc.efcore;
+            let table = if let Some(t) = to_table.get(model) {
+                stats.to_table += 1;
+                t.clone()
+            } else if let Some(t) = attrs.get(model) {
+                stats.table_attr += 1;
+                t.clone()
+            } else if let Some(p) = dbset_prop {
+                stats.dbset_name += 1;
+                p.to_string()
+            } else {
+                stats.type_name += 1;
+                model.to_string()
+            };
+            stats.entities += 1;
+            acc.nodes.push(Node {
+                id: entity_id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![table_cell(&table, orm::EFCORE)],
+            });
+            acc.nav.record(
+                entity_id,
+                model,
+                &qname,
+                node_kind::DATA_ENTITY,
+                Some(class_id),
+            );
+        }
+        acc.edges.push(Edge {
+            from: class_id,
+            to: entity_id,
+            category: edge_category::ACCESSES_DATA,
+            confidence: Confidence::Strong,
+        });
+    }
+    acc.efcore_table_attrs = Some(attrs);
 }
 
 /// G19: class-level constants / static fields. `const TYPE NAME = ...;` or
@@ -2432,5 +2850,175 @@ public class Startup {
                 .any(|e| e.category == edge_category::HANDLED_BY && e.to == configure),
             "UseEndpoints route should hang off Configure"
         );
+    }
+
+    // ---- A13.11: EF Core DbContext → model-keyed DATA_ENTITY ----
+
+    /// `{model: table}` for every DATA_ENTITY in the parse, read back through
+    /// the same `table_of` the graph crate's DbResolver uses.
+    fn efcore_tables(fp: &FileParse) -> Vec<(String, Option<String>)> {
+        let mut out: Vec<(String, Option<String>)> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
+            .map(|n| {
+                (
+                    fp.nav.name_by_id.get(&n.id).cloned().unwrap_or_default(),
+                    repo_graph_code_domain::data_entity::table_of(&n.cells),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn entity(model: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            &format!("data_entity:sql:{model}"),
+        )
+    }
+
+    fn accesses(fp: &FileParse, from: NodeId, to: NodeId) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::ACCESSES_DATA)
+    }
+
+    #[test]
+    fn efcore_dbset_emits_entity() {
+        let source = r#"
+using Microsoft.EntityFrameworkCore;
+namespace Shop;
+public class AppDbContext : DbContext {
+    public DbSet<User> Users { get; set; }
+    public DbSet<Person> People => Set<Person>();
+    public Microsoft.EntityFrameworkCore.DbSet<global::Shop.Models.Order>? Orders { get; set; }
+}
+"#;
+        let fp = parse_file(source, "AppDbContext.cs", "Shop", repo()).unwrap();
+        assert_eq!(
+            efcore_tables(&fp),
+            vec![
+                ("Order".to_string(), Some("Orders".to_string())),
+                ("Person".to_string(), Some("People".to_string())),
+                ("User".to_string(), Some("Users".to_string())),
+            ],
+            "model-keyed, table = the DbSet PROPERTY name (People, not Persons)"
+        );
+        let ctx = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "Shop::AppDbContext");
+        for model in ["User", "Person", "Order"] {
+            assert!(
+                accesses(&fp, ctx, entity(model)),
+                "AppDbContext -> {model}: {:?}",
+                fp.edges
+            );
+        }
+        let orm_tag = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == entity("User"))
+            .and_then(|n| n.cells.first())
+            .map(|c| format!("{:?}", c.payload))
+            .unwrap_or_default();
+        assert!(orm_tag.contains("efcore"), "{orm_tag}");
+    }
+
+    #[test]
+    fn efcore_to_table_overrides_dbset_name() {
+        // ToTable appears AFTER the DbSet in source, [Table] sits on a class
+        // declared BELOW the context, and the scaffolded builder-lambda form
+        // names the table on a lambda parameter — all three still win.
+        let source = r#"
+namespace Shop;
+public class ShopContext : IdentityDbContext<AppUser> {
+    public DbSet<User> Users { get; set; }
+    public DbSet<Product> Products { get; set; }
+    public DbSet<Order> Orders { get; set; }
+    protected override void OnModelCreating(ModelBuilder modelBuilder) {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.Entity<User>().HasKey(u => u.Id).ToTable("app_users", "dbo");
+        modelBuilder.Entity<Order>(entity => {
+            entity.ToTable("sales_orders");
+            entity.OwnsOne(o => o.Address, a => a.ToTable("order_addresses"));
+        });
+        modelBuilder.Entity<AuditEntry>().ToView("v_audit");
+        modelBuilder.Entity<Tag>().HasNoKey();
+    }
+}
+[Table("legacy_products")]
+public class Product { }
+"#;
+        let fp = parse_file(source, "ShopContext.cs", "Shop", repo()).unwrap();
+        assert_eq!(
+            efcore_tables(&fp),
+            vec![
+                ("AuditEntry".to_string(), Some("v_audit".to_string())),
+                ("Order".to_string(), Some("sales_orders".to_string())),
+                ("Product".to_string(), Some("legacy_products".to_string())),
+                ("Tag".to_string(), Some("Tag".to_string())),
+                ("User".to_string(), Some("app_users".to_string())),
+            ],
+            "ToTable ?? [Table] ?? DbSet name ?? type name; the OwnsOne lambda's ToTable is not Order's"
+        );
+        assert!(
+            !fp.nav
+                .name_by_id
+                .values()
+                .any(|n| n == "app_users" || n == "order_addresses"),
+            "a declared table is a cell, never an id"
+        );
+    }
+
+    #[test]
+    fn plain_class_emits_no_entity() {
+        // No DbContext base → no DATA_ENTITY, no ACCESSES_DATA, even with a
+        // DbSet-looking property and a ToTable chain in the body.
+        let source = r#"
+namespace Shop;
+public class Basket : BasketBase, IBasket {
+    public List<User> Items { get; set; }
+    public DbSet<User> Users { get; set; }
+    public void OnModelCreating(ModelBuilder modelBuilder) {
+        modelBuilder.Entity<User>().ToTable("users");
+    }
+}
+public class DbContextFactory : IDesignTimeDbContextFactory<AppDbContext> {
+    public DbSet<Order> Orders { get; set; }
+}
+"#;
+        let fp = parse_file(source, "Basket.cs", "Shop", repo()).unwrap();
+        assert!(efcore_tables(&fp).is_empty(), "{:?}", efcore_tables(&fp));
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA),
+            "no DbContext base → no ACCESSES_DATA edge"
+        );
+    }
+
+    #[test]
+    fn efcore_same_model_in_two_contexts_is_one_node_two_edges() {
+        let source = r#"
+namespace Shop;
+public class ReadContext : DbContext { public DbSet<User> Users { get; set; } }
+public class WriteContext(DbContextOptions<WriteContext> o) : DbContext(o) { public DbSet<User> Accounts { get; set; } }
+"#;
+        let fp = parse_file(source, "Contexts.cs", "Shop", repo()).unwrap();
+        assert_eq!(
+            fp.nodes.iter().filter(|n| n.id == entity("User")).count(),
+            1
+        );
+        assert_eq!(
+            efcore_tables(&fp),
+            vec![("User".to_string(), Some("Users".to_string()))],
+            "the first context to declare the model supplies its one table cell"
+        );
+        for ctx in ["Shop::ReadContext", "Shop::WriteContext"] {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, ctx);
+            assert!(accesses(&fp, id, entity("User")), "{ctx} -> User");
+        }
     }
 }

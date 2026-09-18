@@ -1,0 +1,27 @@
+{
+  "framework": "csharp-efcore",
+  "language": "csharp",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "model-keyed data_entity:sql:User (A13.1 identity rule), not the table"},
+    {"kind": "DATA_ENTITY", "name": "Person", "note": "DbSet<Person> People"},
+    {"kind": "DATA_ENTITY", "name": "Product", "note": "DbSet<Product>? — nullable DbSet"},
+    {"kind": "CLASS", "name": "AppDbContext", "note": "the DbContext"}
+  ],
+  "expect_edges": [
+    {"from": "AppDbContext", "to": "data_entity:sql:User", "category": "ACCESSES_DATA", "note": "the context owns the table it declares"},
+    {"from": "AppDbContext", "to": "data_entity:sql:Person", "category": "ACCESSES_DATA", "note": "expression-bodied DbSet property"},
+    {"from": "AppDbContext", "to": "data_entity:sql:Product", "category": "ACCESSES_DATA", "note": "nullable DbSet property"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "app_users", "note": "modelBuilder.Entity<User>().ToTable(...) overrides the DbSet property name"},
+    {"kind": "DATA_ENTITY", "node": "Person", "cell": "CODE", "contains": "people", "note": "EF Core's default table is the DbSet PROPERTY name, not a plural of the type"},
+    {"kind": "DATA_ENTITY", "node": "Product", "cell": "CODE", "contains": "legacy_products", "note": "[Table(...)] on the entity class beats the DbSet property name"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "app_users", "note": "the declared table rides a cell; a table-keyed id would orphan every query site"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:Report", "note": "ReportBuilder is not a DbContext: its List<Report> and Entity<Report>().ToTable are noise"},
+    {"kind": "DATA_ENTITY", "max_nodes": 3, "note": "one node per DbSet model, nothing else"}
+  ],
+  "note": "A13.11: EF Core DbContext. Every DbSet<T> becomes a model-keyed DATA_ENTITY with an ACCESSES_DATA edge from the context and a {table, orm: efcore} CODE cell: ToTable ?? [Table] ?? the DbSet property name."
+}
