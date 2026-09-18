@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::is_canonical_http_path;
+use repo_graph_code_domain::endpoint::{is_canonical_http_path, split_owner};
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
@@ -38,7 +38,7 @@ impl CrossGraphResolver for HttpStackResolver {
         // fixtures and tests) must stay a pure function of its argument.
         let prefixes = api_prefixes();
         let mut stats = HttpMatchStats::default();
-        let (index, stripped) = build_route_index(&merged.graphs, &prefixes, &mut stats);
+        let (index, stripped, owners) = build_route_index(&merged.graphs, &prefixes, &mut stats);
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in `run_all_resolvers` does not matter.
@@ -52,6 +52,7 @@ impl CrossGraphResolver for HttpStackResolver {
                     continue;
                 };
                 stats.qnames.endpoint(qname);
+                stats.owned_endpoints += usize::from(split_owner(qname).1.is_some());
                 let Some((method, raw_path)) = parse_endpoint_qname(qname) else {
                     continue;
                 };
@@ -90,6 +91,7 @@ impl CrossGraphResolver for HttpStackResolver {
         stats.report_placeholder_folds();
         stats.report_client_normalised();
         stats.report_host_narrowed(aliases.len());
+        stats.report_owners(&owners);
     }
 }
 
@@ -175,6 +177,10 @@ struct HttpMatchStats {
     host_narrowed: usize,
     /// LB.5: the `[http-qname]` census.
     qnames: QnameCensus,
+    /// LB.4a: indexed ROUTE nodes whose qname carries an owner segment
+    /// (` @<project path>`), and ENDPOINT nodes likewise.
+    owned_routes: usize,
+    owned_endpoints: usize,
 }
 
 /// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
@@ -195,11 +201,14 @@ struct QnameCensus {
 }
 
 impl QnameCensus {
+    /// The path part is read off the owner-free qname (LB.4a), so an owner
+    /// segment never sits inside the judged path.
     fn route(&mut self, qname: &str) {
         self.routes += 1;
-        let path = qname
+        let base = split_owner(qname).0;
+        let path = base
             .strip_prefix("route:")
-            .or_else(|| qname.split_once(' ').map(|(_, p)| p));
+            .or_else(|| base.split_once(' ').map(|(_, p)| p));
         self.judge(qname, path);
     }
 
@@ -335,6 +344,22 @@ impl HttpMatchStats {
         );
     }
 
+    /// LB.4a fired_on marker, graph side: what the resolver saw of the owner
+    /// segments the engine's owner pass wrote. Printed only when a ROUTE or
+    /// ENDPOINT carried one, so a repo without nested project roots is silent.
+    /// Cross-checks the engine's `[http-owner] qualified` line.
+    fn report_owners(&self, owners: &RouteOwners) {
+        if self.owned_routes + self.owned_endpoints == 0 {
+            return;
+        }
+        eprintln!(
+            "[http-owner] index routes={} endpoints={} route_owners={}",
+            self.owned_routes,
+            self.owned_endpoints,
+            owners.len(),
+        );
+    }
+
     /// A11.4 fired_on marker. Printed only when narrowing removed at least one
     /// pairing, so every build without a known service host stays silent.
     fn report_host_narrowed(&self, aliases: usize) {
@@ -355,16 +380,52 @@ struct RouteTarget {
     /// The repo the ROUTE lives in, which is what host narrowing (A11.4) keys
     /// on.
     repo: RepoId,
+    /// LB.4a: the ROUTE's owner segment (the nested project root it lives
+    /// under) as an index into the build's [`RouteOwners`], so the target
+    /// stays `Copy`. `None` for a route outside every nested root.
+    owner: Option<u32>,
+}
+
+/// LB.4a: the owner segments of every indexed ROUTE, interned, so a
+/// [`RouteTarget`] carries a `u32` instead of a string. Built alongside the
+/// route index, in index order.
+#[derive(Debug, Default)]
+struct RouteOwners {
+    names: Vec<String>,
+    by_name: HashMap<String, u32>,
+}
+
+impl RouteOwners {
+    /// The index of `owner`, interning it on first sight. `None` only past
+    /// `u32::MAX` distinct owners, which a repo cannot reach.
+    fn intern(&mut self, owner: &str) -> Option<u32> {
+        if let Some(&i) = self.by_name.get(owner) {
+            return Some(i);
+        }
+        let i = u32::try_from(self.names.len()).ok()?;
+        self.names.push(owner.to_string());
+        self.by_name.insert(owner.to_string(), i);
+        Some(i)
+    }
+
+    fn len(&self) -> usize {
+        self.names.len()
+    }
 }
 
 /// Build `(METHOD, normalised_path) → Vec<RouteTarget>` across every graph in
 /// the merge. One entry per `ROUTE_METHOD` cell found on each Route node.
+///
+/// A ROUTE's owner segment (LB.4a) is split off first: the method and path
+/// are read from the owner-free qname, so pairing ignores owners, and the
+/// owner rides on the target through the returned [`RouteOwners`] table.
 fn build_route_index(
     graphs: &[RepoGraph],
     prefixes: &[String],
     stats: &mut HttpMatchStats,
-) -> (RouteIndex, RouteIndex) {
+) -> (RouteIndex, RouteIndex, RouteOwners) {
     let mut index: RouteIndex = HashMap::new();
+    let mut owners = RouteOwners::default();
     // A3.1: the SYMMETRIC half of the prefix strip. Before A3.1 the strip only
     // ever removed prefixes from the client path, so a client calling `/users`
     // against a server mounted at `/api/users` could never pair. Every route is
@@ -393,11 +454,14 @@ fn build_route_index(
             }
             stats.routes += 1;
             stats.qnames.route(qname);
+            let (qname, owner) = split_owner(qname);
             let target = RouteTarget {
                 route_id: n.id,
                 confidence: n.confidence,
                 repo: g.repo,
+                owner: owner.and_then(|o| owners.intern(o)),
             };
+            stats.owned_routes += usize::from(target.owner.is_some());
             if let Some(path) =
                 index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes)
             {
@@ -405,7 +469,7 @@ fn build_route_index(
             }
         }
     }
-    (index, stripped)
+    (index, stripped, owners)
 }
 
 /// The resolver's ROUTE index and match ladder, reusable by a pass that pairs
@@ -442,7 +506,7 @@ impl HttpRouteMatcher {
     pub fn new(graphs: &[RepoGraph]) -> Self {
         let prefixes = api_prefixes();
         let mut scratch = HttpMatchStats::default();
-        let (index, stripped) = build_route_index(graphs, &prefixes, &mut scratch);
+        let (index, stripped, _owners) = build_route_index(graphs, &prefixes, &mut scratch);
         Self { index, stripped, prefixes }
     }
 
@@ -500,7 +564,8 @@ fn is_nav_route(cells: &[Cell]) -> bool {
 ///
 /// Returns the raw path the qname carried (once per node, however many
 /// methods it stacks), or `None` for a qname neither shape describes — the
-/// A3.2 fold counter reads it.
+/// A3.2 fold counter reads it. `qname` is owner-free: [`build_route_index`]
+/// splits the LB.4a owner segment off before it calls here.
 fn index_route_node<'q>(
     index: &mut RouteIndex,
     stripped: &mut RouteIndex,
@@ -572,8 +637,10 @@ fn cell_method(cell: &Cell) -> Option<String> {
     }
 }
 
+/// `endpoint:<METHOD>:<path>[ @<owner>]` -> `(METHOD upper-cased, path)`. The
+/// LB.4a owner segment is split off first, so the path never carries it.
 pub(crate) fn parse_endpoint_qname(qname: &str) -> Option<(String, &str)> {
-    let rest = qname.strip_prefix("endpoint:")?;
+    let rest = split_owner(qname).0.strip_prefix("endpoint:")?;
     let (method, path) = rest.split_once(':')?;
     Some((method.to_uppercase(), path))
 }
@@ -1229,6 +1296,66 @@ mod tests {
             Some(("POST".to_string(), "/api/login"))
         );
         assert_eq!(parse_endpoint_qname("route:/users"), None);
+        // LB.4a: the owner segment is split off before the path is read.
+        assert_eq!(
+            parse_endpoint_qname("endpoint:GET:/health @web"),
+            Some(("GET".to_string(), "/health"))
+        );
+        assert_eq!(
+            parse_endpoint_qname("endpoint:get:${…}/users @apps/@shop/web"),
+            Some(("GET".to_string(), "${…}/users"))
+        );
+        assert_eq!(parse_endpoint_qname("route:/users @api"), None);
+    }
+
+    /// LB.4a: two services of one repo serving `/health` are two ROUTE ids
+    /// (each qualified with its project). Pairing reads the owner-free path,
+    /// so an owner-qualified client reaches both (narrowing by project is
+    /// LB.4b), in both route shapes, and the owners ride on the targets.
+    #[test]
+    fn owner_segments_are_ignored_by_pairing_and_carried_on_targets() {
+        let repo = RepoId(77);
+        let (g, ids) = repo_graph(
+            repo,
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/health @web", vec![hit(r#"{"method":"GET"}"#)]),
+                (node_kind::ROUTE, "GET /health @services/admin", vec![text_get()]),
+                (node_kind::ROUTE, "route:/health @services/users", get_route()),
+            ],
+        );
+        let mut stats = HttpMatchStats::default();
+        let (index, _, owners) = build_route_index(std::slice::from_ref(&g), &[], &mut stats);
+        let targets = index
+            .get(&("GET".to_string(), "/health".to_string()))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut got: Vec<(u64, Option<&str>)> = targets
+            .iter()
+            .map(|t| (t.route_id.0, t.owner.and_then(|i| owners.names.get(i as usize)).map(String::as_str)))
+            .collect();
+        got.sort();
+        let mut want = vec![(ids[1].0, Some("services/admin")), (ids[2].0, Some("services/users"))];
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!((stats.owned_routes, owners.len()), (2, 2));
+        assert!(stats.qnames.offenders.is_empty(), "the owner is not judged as path");
+
+        let mut merged = MergedGraph::new(vec![g]);
+        HttpStackResolver.resolve(&mut merged);
+        let mut to: Vec<u64> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS && e.from == ids[0])
+            .map(|e| e.to.0)
+            .collect();
+        to.sort_unstable();
+        let mut both = vec![ids[1].0, ids[2].0];
+        both.sort_unstable();
+        assert_eq!(to, both);
+    }
+
+    fn text_get() -> Cell {
+        Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) }
     }
 
     #[test]
@@ -1547,6 +1674,7 @@ mod tests {
                     route_id: NodeId(n),
                     confidence: Confidence::Strong,
                     repo: RepoId(repo),
+                    owner: None,
                 },
                 MatchTier::Exact,
             )
@@ -1705,5 +1833,17 @@ mod tests {
             got,
             vec!["GET widgets", "endpoint:DELETE:protected/x", "route:items"]
         );
+
+        // LB.4a: the owner segment is stripped before judging, both ways: it
+        // never makes a canonical path an offender, and never hides one.
+        let mut c = QnameCensus::default();
+        c.route("GET /users @services/api");
+        c.route("route:/items @web");
+        c.route("GET widgets @api");
+        c.endpoint("endpoint:GET:/users @web");
+        c.endpoint("endpoint:GET:users @web");
+        let mut got = c.offenders.clone();
+        got.sort_unstable();
+        assert_eq!(got, vec!["GET widgets @api", "endpoint:GET:users @web"]);
     }
 }

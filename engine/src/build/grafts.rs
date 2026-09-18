@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
     FileParse, GRAPH_TYPE, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
 };
@@ -17,18 +18,22 @@ use repo_graph_core::{CellPayload, NodeId, RepoId};
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
 use crate::extract::{detect_language, path_to_qname};
+use crate::http_owner;
 
 /// Run every post-cache graft over one repo's parses, in order: the A11.2
-/// endpoint fold, the LA.4 queue-topic const fold, the A5.2 / A5.3 RPC needles
-/// with their `[grpc-client]` / `[grpc-server-impl]` markers, the A5.8
-/// `[marker-anchor]` census, then the A16.4 IMPORTS-cell filter. `const_table`
-/// is the repo's A11.1 table.
+/// endpoint fold, the LB.4a HTTP owner segment, the LA.4 queue-topic const
+/// fold, the A5.2 / A5.3 RPC needles with their `[grpc-client]` /
+/// `[grpc-server-impl]` markers, the A5.8 `[marker-anchor]` census, then the
+/// A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1 table; `roots`
+/// are the walk's project roots (A8.4).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_post_cache(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     repo: RepoId,
     rpc: &RpcContext,
     const_table: &ConstTable,
+    roots: &[ProjectRoot],
     parse_errors: &mut Vec<String>,
     repo_label: &str,
 ) {
@@ -36,6 +41,12 @@ pub(super) fn apply_post_cache(
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse.
     endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo)
+        .report(repo_label);
+    // LB.4a: qualify ROUTE / ENDPOINT / page nodes under a nested project root
+    // with ` @<project path>`. After the fold, which keys endpoints by their
+    // owner-free path; per parse, so HashMap order cannot reach the ids.
+    let owners = http_owner::OwnerIndex::from_roots(roots);
+    http_owner::qualify_repo(parses_by_lang.values_mut().flatten(), &owners, repo)
         .report(repo_label);
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then

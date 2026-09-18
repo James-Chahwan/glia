@@ -56,6 +56,8 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::rekey::rewrite_node_id;
+
 /// What the pass did to one repo, for the `[endpoint-fold]` and
 /// `[endpoint-host]` markers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -382,50 +384,6 @@ fn update_nav(
         {
             nav.parent_of.insert(plan.id, p);
             nav.children_of.entry(p).or_default().push(plan.id);
-        }
-    }
-}
-
-/// Move `old`'s place in the nav to `new`: drop its name/qname/kind, hand
-/// over its parent slot (keeping its position among the siblings) and its
-/// children. If `new` is already in the nav (another call site in the file
-/// was already on that path), `new` keeps its own parent and `old` is only
-/// removed from its parent's list. Re-keying a node inside a FileParse
-/// happens only here, so the `children_of` bookkeeping has to be exact:
-/// a nav-derived traversal that loses a child does so silently.
-fn rewrite_node_id(nav: &mut CodeNav, old: NodeId, new: NodeId) {
-    nav.name_by_id.remove(&old);
-    nav.qname_by_id.remove(&old);
-    nav.kind_by_id.remove(&old);
-    if let Some(p) = nav.parent_of.remove(&old) {
-        let adopt = !nav.parent_of.contains_key(&new);
-        if adopt {
-            nav.parent_of.insert(new, p);
-        }
-        if let Some(kids) = nav.children_of.get_mut(&p) {
-            let at = kids.iter().position(|k| *k == old);
-            kids.retain(|k| *k != old);
-            if adopt && !kids.contains(&new) {
-                // `at` is at most the new length: only `old` entries were
-                // removed, and none of them came before it.
-                let at = at.unwrap_or(kids.len()).min(kids.len());
-                kids.insert(at, new);
-            }
-        }
-    }
-    if let Some(kids) = nav.children_of.remove(&old) {
-        for k in &kids {
-            if let Some(p) = nav.parent_of.get_mut(k)
-                && *p == old
-            {
-                *p = new;
-            }
-        }
-        let slot = nav.children_of.entry(new).or_default();
-        for k in kids {
-            if !slot.contains(&k) {
-                slot.push(k);
-            }
         }
     }
 }

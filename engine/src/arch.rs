@@ -263,39 +263,54 @@ fn rel_under<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
 /// an npm `tools/plugin` dir stays a service.
 ///
 /// Reads only PROJECT nodes and their ORIGIN cells (via
-/// [`crate::answers::project_roots`], sorted by path — an ancestor is decided
-/// before its descendants), so a fresh build and a loaded `.gmap` agree.
+/// [`crate::answers::project_roots`]), so a fresh build and a loaded `.gmap`
+/// agree. The rule itself is [`platform_host_owners`].
 fn platform_host_roots(merged: &MergedGraph) -> BTreeMap<String, String> {
     let roots = crate::answers::project_roots(merged);
+    let pairs: Vec<(&str, &str)> =
+        roots.iter().map(|r| (r.path.as_str(), r.ecosystem.as_str())).collect();
+    platform_host_owners(&pairs)
+}
+
+/// The pure core of [`platform_host_roots`], over `(path, ecosystem)` pairs
+/// with the repo root spelled `.`. Shared with the LB.4a HTTP owner pass
+/// (`crate::http_owner`), which reads the walk's roots before any graph
+/// exists, so an owner segment names exactly the service `glia arch` prints.
+///
+/// The pairs are sorted by path here, so an ancestor is always decided before
+/// its descendants whatever order the caller passes them in.
+pub(crate) fn platform_host_owners(roots: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let mut roots: Vec<(&str, &str)> = roots.to_vec();
+    roots.sort_unstable();
     let owners: Vec<&str> = roots
         .iter()
-        .filter(|r| HOST_OWNER_ECOSYSTEMS.contains(&r.ecosystem.as_str()))
-        .map(|r| r.path.as_str())
+        .filter(|(_, eco)| HOST_OWNER_ECOSYSTEMS.contains(eco))
+        .map(|(path, _)| *path)
         .collect();
     let mut hosts: BTreeMap<String, String> = BTreeMap::new();
-    for r in &roots {
-        if !HOST_SHELL_ECOSYSTEMS.contains(&r.ecosystem.as_str()) {
+    for &(path, eco) in &roots {
+        if !HOST_SHELL_ECOSYSTEMS.contains(&eco) {
             continue;
         }
         // Nearest owner = the deepest ancestor; the root `.` is the shallowest.
         let nearest = owners
             .iter()
-            .filter_map(|o| rel_under(&r.path, o).map(|rest| (*o, rest)))
+            .filter_map(|o| rel_under(path, o).map(|rest| (*o, rest)))
             .max_by_key(|(o, _)| if *o == "." { 0 } else { o.len() });
         let Some((owner, rest)) = nearest else { continue };
         let first = rest.split('/').next().unwrap_or(rest);
         if !PLATFORM_HOST_DIRS.contains(&first) {
             continue;
         }
-        let between_all_hosts = roots.iter().all(|m| {
-            m.path == r.path
-                || m.path == owner
-                || rel_under(&r.path, &m.path).is_none()
-                || rel_under(&m.path, owner).is_none()
-                || hosts.contains_key(&m.path)
+        let between_all_hosts = roots.iter().all(|&(m, _)| {
+            m == path
+                || m == owner
+                || rel_under(path, m).is_none()
+                || rel_under(m, owner).is_none()
+                || hosts.contains_key(m)
         });
         if between_all_hosts {
-            hosts.insert(r.path.clone(), owner.to_string());
+            hosts.insert(path.to_string(), owner.to_string());
         }
     }
     hosts
@@ -855,6 +870,26 @@ mod tests {
             ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle", None),
         ];
         assert!(platform_host_roots(&graph(&blocked)).is_empty());
+    }
+
+    /// LB.4a: the pure core answers from `(path, ecosystem)` pairs exactly
+    /// what the graph fold answers from PROJECT nodes, whatever the pair order.
+    #[test]
+    fn platform_host_owners_matches_the_graph_fold_in_any_order() {
+        use repo_graph_code_domain::project_roots::ProjectRoot;
+
+        let stack = [
+            ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", None),
+            ProjectRoot::new("mobile/android".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new("mobile/android/app".into(), "gradle", "build.gradle.kts", None),
+            ProjectRoot::new("server".into(), "go", "go.mod", None),
+        ];
+        let m = MergedGraph::new(vec![crate::walk::build_project_graph(&stack, RepoId(1))]);
+        let reversed: Vec<(&str, &str)> =
+            stack.iter().rev().map(|r| (r.rel_path.as_str(), r.ecosystem)).collect();
+        assert_eq!(platform_host_owners(&reversed), platform_host_roots(&m));
+        assert_eq!(platform_host_owners(&reversed).len(), 2);
+        assert!(platform_host_owners(&[]).is_empty());
     }
 
     #[test]

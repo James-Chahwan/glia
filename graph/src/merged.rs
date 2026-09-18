@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{CodeNav, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
@@ -350,6 +351,13 @@ pub struct CrossLink {
 /// crate. `strip_prefix` rather than `split_once` throughout, so a topic or
 /// schedule that itself contains `:` survives intact.
 ///
+/// HTTP qnames carry an LB.4a owner segment (` @<project path>`) when their
+/// node sits under a nested project root. The channel is the literal the link
+/// travels over, which the owner is not, so it is stripped: the endpoint
+/// branch through `parse_endpoint_qname`, the `route:` branch here, and a
+/// legacy `<METHOD> <path>` route through its display name, which never
+/// carried one.
+///
 /// Total: falls back to `name`, then to `qname`, so there is no failure mode.
 pub fn channel_of(qname: &str, name: &str) -> String {
     if let Some((method, path)) = parse_endpoint_qname(qname) {
@@ -375,6 +383,9 @@ pub fn channel_of(qname: &str, name: &str) -> String {
     ];
     for p in SUFFIX_PREFIXES {
         if let Some(rest) = qname.strip_prefix(p) {
+            if *p == "route:" {
+                return split_owner(rest).0.to_string();
+            }
             return rest.to_string();
         }
     }
@@ -810,6 +821,10 @@ mod tests {
         assert_eq!(channel_of("config:env:DATABASE_URL", "DATABASE_URL"), "env:DATABASE_URL");
         assert_eq!(channel_of("infra:image:api", "api"), "image:api");
         assert_eq!(channel_of("route:/users", "/users"), "/users");
+        // LB.4a: the owner segment is not part of the channel.
+        assert_eq!(channel_of("route:/users @services/api", "/users"), "/users");
+        assert_eq!(channel_of("endpoint:POST:/users @web", "POST /users"), "POST /users");
+        assert_eq!(channel_of("GET /users @api", "GET /users"), "GET /users");
         // strip_prefix, not split_once — a schedule full of colons survives.
         assert_eq!(channel_of("cron:0 4 * * *:cleanup", "cleanup"), "0 4 * * *:cleanup");
         // Fallbacks: name, then qname.

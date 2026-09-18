@@ -4,6 +4,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{cell_type, di_stats, node_kind};
 use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_core::RepoId;
@@ -40,7 +41,8 @@ fn build_const_table(files: &[(String, String)], parse_errors: &mut Vec<String>)
 /// `repo_label` is the repo path as the caller was given it. It only prefixes
 /// the `[incremental]` marker, so a multi-repo build prints one attributable
 /// line per repo; it never reaches the graph. `rpc` is the build-wide proto
-/// service set (A5.2).
+/// service set (A5.2). `roots` are the walk's project roots (A8.4), the owner
+/// vocabulary of the LB.4a HTTP owner segment.
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
@@ -48,6 +50,7 @@ pub(super) fn build_graphs_for_repo(
     cache: Option<&mut ParseCache>,
     repo_label: &str,
     rpc: &RpcContext,
+    roots: &[ProjectRoot],
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     // Suppress the default panic-print-to-stderr while we run per-file parsers
     // — we catch panics below and report them as parse_errors. The default
@@ -73,13 +76,15 @@ pub(super) fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
-    // A11.2, A5.2 / A5.3, A5.8, A16.4: the post-cache grafts, in that order.
+    // A11.2, LB.4a, LA.4, A5.2 / A5.3, A5.8, A16.4: the post-cache grafts,
+    // in that order.
     grafts::apply_post_cache(
         &mut parses_by_lang,
         files,
         repo,
         rpc,
         &const_table,
+        roots,
         &mut parse_errors,
         repo_label,
     );

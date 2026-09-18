@@ -1397,6 +1397,43 @@ pub mod endpoint {
         format!("endpoint:{method}:{}", canonical_http_path(path))
     }
 
+    /// LB.4a: the separator between an HTTP qname and its OWNER segment, the
+    /// repo-relative dir of the nested project root the node lives under:
+    /// `GET /health @services/users`, `route:/users @api`,
+    /// `endpoint:GET:/health @web`, `page:/users @web`. A suffix, so every
+    /// reader that parses from the `route:` / `endpoint:` / `<METHOD> ` start
+    /// keeps working once it strips it with [`split_owner`]. A canonical path
+    /// never contains a space, so the LAST ` @` is the separator.
+    pub const OWNER_SEP: &str = " @";
+
+    /// `qname` qualified with `owner` ([`OWNER_SEP`]). An empty owner leaves the
+    /// qname unchanged: a node outside every nested project root keeps its
+    /// pre-0.5.0 identity. The caller passes a whitespace-free owner (the
+    /// engine escapes whitespace in a root path), or [`split_owner`] could not
+    /// read it back.
+    pub fn with_owner(qname: &str, owner: &str) -> String {
+        if owner.is_empty() {
+            qname.to_string()
+        } else {
+            format!("{qname}{OWNER_SEP}{owner}")
+        }
+    }
+
+    /// Split an HTTP qname into `(qname without owner, owner)`. `(q, None)`
+    /// when `q` carries no owner: no ` @`, or what follows the last one is
+    /// empty or holds whitespace. An `@` with no space before it (an npm scope
+    /// in a path segment, `/pkg/@scope`) is never a separator. The inverse of
+    /// [`with_owner`]; every consumer that parses a ROUTE / ENDPOINT / page
+    /// qname strips the owner with this first.
+    pub fn split_owner(q: &str) -> (&str, Option<&str>) {
+        match q.rsplit_once(OWNER_SEP) {
+            Some((base, owner)) if !owner.is_empty() && !owner.contains(char::is_whitespace) => {
+                (base, Some(owner))
+            }
+            _ => (q, None),
+        }
+    }
+
     /// True if `name` names an HTTP *client* receiver — `dio`, `http`,
     /// `httpClient`, `apiClient`, `api`, `userApi`, `restClient`, `_client`. A
     /// `.get('/x')` on one of these is an OUTBOUND call (an ENDPOINT), never a
@@ -2573,6 +2610,35 @@ mod tests {
             endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "x"),
             endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "/x"),
         );
+    }
+
+    /// LB.4a — the owner segment round-trips through every HTTP qname shape,
+    /// an empty owner is no owner, and an `@` without the space before it is
+    /// part of the path, never an owner.
+    #[test]
+    fn owner_segment_round_trips_and_ignores_bare_at() {
+        use endpoint::{split_owner, with_owner};
+        for base in [
+            "GET /health",
+            "route:/users",
+            "endpoint:GET:/health",
+            "page:/users",
+            "endpoint:GET:${…}/users",
+        ] {
+            let q = with_owner(base, "services/users");
+            assert_eq!(q, format!("{base} @services/users"));
+            assert_eq!(split_owner(&q), (base, Some("services/users")));
+            assert_eq!(split_owner(base), (base, None), "no owner: {base}");
+        }
+        assert_eq!(with_owner("GET /x", ""), "GET /x");
+        assert_eq!(with_owner("GET /x", "packages/@shop/web"), "GET /x @packages/@shop/web");
+        assert_eq!(split_owner("GET /x @packages/@shop/web"), ("GET /x", Some("packages/@shop/web")));
+        // `@` inside a path segment, no space before it: not an owner.
+        assert_eq!(split_owner("route:/pkg/@scope/x"), ("route:/pkg/@scope/x", None));
+        assert_eq!(split_owner("GET /users/@me"), ("GET /users/@me", None));
+        // An empty or whitespace-bearing tail is not an owner.
+        assert_eq!(split_owner("GET /x @"), ("GET /x @", None));
+        assert_eq!(split_owner("GET /x @a b"), ("GET /x @a b", None));
     }
 
     /// LB.5 — a relative client path becomes the canonical node, carries the

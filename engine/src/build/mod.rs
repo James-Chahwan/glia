@@ -4,8 +4,9 @@
 //!
 //! - [`assemble`] — `build_graphs_for_repo`: parse, const table, post-cache
 //!   grafts, per-language build, per-repo markers, under one panic-hook guard.
-//! - [`grafts`] — the post-cache graft sequence (endpoint fold, RPC needles and
-//!   their markers, anchor census, IMPORTS-cell filter).
+//! - [`grafts`] — the post-cache graft sequence (endpoint fold, HTTP owner
+//!   segment, queue const fold, RPC needles and their markers, anchor census,
+//!   IMPORTS-cell filter).
 //! - [`rpc_needles`] — the build-wide proto service set and the gRPC
 //!   client / server needle passes.
 //! - [`lang_build`] — the deterministic per-language `build_*` dispatch.
@@ -104,7 +105,7 @@ fn generate_one_inner(
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
     let (mut graphs, mut parse_errors) =
-        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path, &rpc);
+        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path, &rpc, &roots);
     // Slot order is regions, then projects, then docs. It fixes the shard index,
     // so generate_many_inner must use the same order.
     if !regions.is_empty() {
@@ -213,7 +214,7 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
             c.validate_context(&ident.key, &go_prefix);
         }
         let (graphs, parse_errors) =
-            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path, &rpc);
+            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path, &rpc, &roots);
         if let Some(c) = cache.as_ref()
             && let Err(e) = c.save(path)
         {
