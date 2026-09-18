@@ -146,6 +146,9 @@ fn visit_class(
                     visit_class_member(member, src, file_rel, &qname, id, repo, acc);
                 }
             }
+            // LA.23e: declared / constructor-initialised field types, for
+            // A6.2a's receiver-type pass.
+            collect_dart_field_types(child, src, id, acc);
         }
     }
 }
@@ -228,6 +231,11 @@ fn visit_class_member(
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    // LA.23e: the METHOD this member declared, if any. Only a body under its
+    // own METHOD emits call sites: a constructor / getter / setter signature
+    // mints no node, and attributing its calls to `acc.nodes.last()` (the
+    // previous member, or an ENDPOINT it pushed) would mint wrong CALLS edges.
+    let mut own_method: Option<NodeId> = None;
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
         if child.kind() == "method_signature"
@@ -249,11 +257,19 @@ fn visit_class_member(
             });
             acc.nav
                 .record(id, &name, &qname, node_kind::METHOD, Some(parent_id));
+            own_method = Some(id);
         }
-        if child.kind() == "function_body"
-            && let Some(method_id) = acc.nodes.last().map(|n| n.id)
-        {
-            collect_calls_in(child, src, method_id, repo, file_rel, acc);
+        if child.kind() == "function_body" {
+            // A body without its own METHOD keeps the pre-LA.23e source for
+            // Pattern A endpoints (`acc.nodes.last()`), unchanged, and emits
+            // no call sites.
+            let (from, call_sites) = match own_method {
+                Some(id) => (Some(id), true),
+                None => (acc.nodes.last().map(|n| n.id), false),
+            };
+            if let Some(from) = from {
+                collect_calls_in(child, src, from, call_sites, repo, file_rel, acc);
+            }
         }
     }
 }
@@ -471,10 +487,14 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     });
 }
 
+/// Walk a body for Pattern A endpoints and, when `call_sites` is set, the
+/// receiver call sites of every selector chain in it (LA.23e). Nested
+/// closures and local functions are not entered.
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
     from: NodeId,
+    call_sites: bool,
     repo: RepoId,
     file_rel: &str,
     acc: &mut Acc,
@@ -484,39 +504,8 @@ fn collect_calls_in(
         // Pattern A: client HTTP call (`dio.get('/x')`) → ENDPOINT node so the
         // HttpStackResolver can pair it with a server ROUTE.
         try_detect_dart_endpoint(n, src, from, repo, file_rel, acc);
-        match n.kind() {
-            "selector_expression" => {
-                if let Some(field) = n.child_by_field_name("field") {
-                    let target = n.named_child(0).map(|c| text_of(c, src)).unwrap_or("");
-                    let method = text_of(field, src);
-                    if target == "this" {
-                        acc.calls.push(CallSite {
-                            from,
-                            qualifier: CallQualifier::SelfMethod(method.to_string()),
-                        });
-                    } else if n.named_child(0).is_some_and(|c| c.kind() == "identifier") {
-                        acc.calls.push(CallSite {
-                            from,
-                            qualifier: CallQualifier::Attribute {
-                                base: target.to_string(),
-                                name: method.to_string(),
-                            },
-                        });
-                    }
-                }
-            }
-            "identifier" => {
-                if n.parent().is_some_and(|p| {
-                    p.kind() == "arguments" || p.kind() == "argument_part"
-                }) {
-                    // skip — arguments, not calls
-                } else if n.parent().is_some_and(|p| {
-                    p.kind() == "selector_expression"
-                }) {
-                    // handled above
-                }
-            }
-            _ => {}
+        if call_sites {
+            push_selector_chain_calls(n, src, from, acc);
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -525,6 +514,321 @@ fn collect_calls_in(
                 "function_expression" | "class_definition" | "function_definition"
             ) {
                 stack.push(child);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// LA.23e: receiver call sites over tree-sitter-dart's selector chains
+// ============================================================================
+//
+// tree-sitter-dart 0.1.0 has no `selector_expression` / call node. A postfix
+// expression is a primary followed by SIBLING `selector` nodes inside whatever
+// node holds it (an `expression_statement`, `return_statement`, `argument`,
+// `await_expression`, `initialized_identifier`, a `=>` `function_body`, ...):
+//
+//   repo.find(id)       identifier  selector(.find)  selector(argument_part)
+//   this.repo.find(id)  this        selector(.repo)  selector(.find)  selector(argument_part)
+//
+// `this` is an ANONYMOUS node, so the scan walks every child, not only the
+// named ones. One call site per `argument_part`:
+//
+//   f()          -> Bare(f)             this.m()    -> SelfMethod(m)
+//   x.m()        -> Attribute{x, m}     x?.m()      -> Attribute{x, m}
+//   this.f.m()   -> ComplexReceiver{"this.f", m}
+//   a.b().c()    -> Attribute{a, b}, then ComplexReceiver{"a.b()", c}
+//
+// A ComplexReceiver's receiver is the primary's and the preceding selectors'
+// texts, concatenated (so layout whitespace between chained selectors drops).
+// `super.m()`, cascades (`..m()`), `new` / `const` constructions, a
+// parenthesised primary (`(a).m()`) and the second call of `f()()` emit
+// nothing here.
+
+/// What one `selector` in a postfix chain does.
+enum SelectorPart<'a> {
+    /// `.name` / `?.name`: a member access.
+    Member(&'a str),
+    /// `(args)`: invokes what the chain has built so far.
+    Call,
+    /// `<T>`: generic arguments of the call that follows. Transparent.
+    TypeArgs,
+    /// `!`, `[i]`, anything else: the receiver is no longer a plain name.
+    Opaque,
+}
+
+fn selector_part<'a>(sel: TsNode<'a>, src: &'a [u8]) -> SelectorPart<'a> {
+    let Some(inner) = sel.named_child(0) else {
+        return SelectorPart::Opaque; // the `!` null assertion has no named child
+    };
+    match inner.kind() {
+        "argument_part" => SelectorPart::Call,
+        "type_arguments" => SelectorPart::TypeArgs,
+        "unconditional_assignable_selector" | "conditional_assignable_selector" => {
+            // `.name` / `?.name`, not an index `[i]` / `?[i]` (whose named child
+            // can be an identifier too): the leading token decides.
+            let dotted = inner
+                .child(0)
+                .is_some_and(|t| matches!(t.kind(), "." | "?."));
+            match inner.named_child(0) {
+                Some(id) if dotted && id.kind() == "identifier" => {
+                    SelectorPart::Member(text_of(id, src))
+                }
+                _ => SelectorPart::Opaque,
+            }
+        }
+        _ => SelectorPart::Opaque,
+    }
+}
+
+/// Emit the call sites of every `identifier` / `this` primary among `n`'s
+/// children that is followed by one or more `selector` siblings.
+fn push_selector_chain_calls(n: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let mut cursor = n.walk();
+    let kids: Vec<TsNode> = n.children(&mut cursor).collect();
+    let mut i = 0;
+    while let Some(primary) = kids.get(i).copied() {
+        if !matches!(primary.kind(), "identifier" | "this") {
+            i += 1;
+            continue;
+        }
+        let selectors: Vec<TsNode> = kids
+            .iter()
+            .skip(i + 1)
+            .take_while(|k| k.kind() == "selector")
+            .copied()
+            .collect();
+        i += 1 + selectors.len();
+        for qualifier in chain_call_sites(primary, &selectors, src) {
+            acc.calls.push(CallSite { from, qualifier });
+        }
+    }
+}
+
+/// The call sites of one primary + selector chain, in source order.
+fn chain_call_sites(primary: TsNode, selectors: &[TsNode], src: &[u8]) -> Vec<CallQualifier> {
+    let head = text_of(primary, src);
+    let is_this = primary.kind() == "this";
+    let mut out = Vec::new();
+    // The member access awaiting its call: (selector index, name).
+    let mut pending: Option<(usize, &str)> = None;
+    // True while nothing but `<T>` follows the primary, so `f()` / `f<T>()`
+    // calls the primary itself.
+    let mut bare = true;
+    for (j, sel) in selectors.iter().enumerate() {
+        match selector_part(*sel, src) {
+            SelectorPart::Member(name) => {
+                pending = Some((j, name));
+                bare = false;
+            }
+            SelectorPart::TypeArgs => {}
+            SelectorPart::Opaque => {
+                pending = None;
+                bare = false;
+            }
+            SelectorPart::Call => {
+                let site = match pending.take() {
+                    // `this.m()` / `x.m()`: the member hangs off the primary.
+                    Some((0, name)) if is_this => Some(CallQualifier::SelfMethod(name.to_string())),
+                    Some((0, name)) => Some(CallQualifier::Attribute {
+                        base: head.to_string(),
+                        name: name.to_string(),
+                    }),
+                    // `this.f.m()`, `a.b().c()`, `x!.m()`: everything before
+                    // the member is the receiver.
+                    Some((at, name)) => {
+                        let mut receiver = head.to_string();
+                        for s in selectors.iter().take(at) {
+                            receiver.push_str(text_of(*s, src));
+                        }
+                        Some(CallQualifier::ComplexReceiver {
+                            receiver,
+                            name: name.to_string(),
+                        })
+                    }
+                    None if bare && !is_this => Some(CallQualifier::Bare(head.to_string())),
+                    None => None,
+                };
+                out.extend(site);
+                bare = false;
+            }
+        }
+    }
+    out
+}
+
+// ============================================================================
+// LA.23e: declared field types -> CodeNav::field_types
+// ============================================================================
+//
+// Read by A6.2a's receiver-type pass in the graph crate: `repo.find()` /
+// `this.repo.find()` inside a method binds `find` on the type of the enclosing
+// class's field `repo`. A field's type comes from its declaration (`final T x;`,
+// `late T x;`, `T? x;`, `T x = ...;`, `static final T x = ...;`, `p.T x;`) or,
+// untyped, from a constructor-call initialiser (`final x = T();`,
+// `var x = T.named();`, `final x = p.T();`, `const T()`, `new T()`).
+// Constructor field formals (`UserService(this.repo)`) add nothing: the
+// field's own declaration carries the type.
+
+/// Core-library types: a field of one of these never names a repo class.
+const DART_BUILTIN_TYPES: &[&str] = &[
+    "int", "double", "String", "bool", "num", "dynamic", "Object", "List", "Map", "Set", "Future",
+    "Stream", "Iterable", "Function", "FutureOr", "Null", "Never",
+];
+
+/// What a field `declaration` says about its type.
+enum DeclaredType {
+    /// A named repo-class candidate (`final UserRepo repo;`).
+    Named(String),
+    /// No type written (`final x = ...`, `var x = ...`): the initialiser decides.
+    Untyped,
+    /// A builtin, `void`, function or record type: nothing to bind.
+    Rejected,
+}
+
+/// The type written in a field `declaration`, read from the children before
+/// its identifier list. tree-sitter-dart inlines the type as siblings:
+/// `type_identifier` (twice with a `.` for an import prefix `p.T`), then an
+/// optional `type_arguments` and `?`. The last `type_identifier` is the simple
+/// name, so generics, prefixes and nullability drop.
+fn dart_declared_type(decl: TsNode, src: &[u8]) -> DeclaredType {
+    let mut name: Option<&str> = None;
+    let mut cursor = decl.walk();
+    for child in decl.children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => name = Some(text_of(child, src)),
+            "function_type" | "record_type" | "void_type" => return DeclaredType::Rejected,
+            "initialized_identifier_list" | "static_final_declaration_list" => break,
+            _ => {}
+        }
+    }
+    match name {
+        None => DeclaredType::Untyped,
+        Some(t) if DART_BUILTIN_TYPES.contains(&t) => DeclaredType::Rejected,
+        Some(t) => DeclaredType::Named(t.to_string()),
+    }
+}
+
+/// A capitalised identifier (`UserRepo`, `_RepoImpl`): a class name by Dart
+/// convention, as opposed to a function or an import prefix.
+fn is_dart_class_name(name: &str) -> bool {
+    name.trim_start_matches('_')
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// The class a field initialiser constructs, for an untyped field. `item` is
+/// an `initialized_identifier` / `static_final_declaration`: the field's
+/// `identifier`, `=`, then the initialiser expression inlined as siblings.
+fn dart_initialiser_type(item: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = item.walk();
+    let kids: Vec<TsNode> = item.named_children(&mut cursor).collect();
+    // kids[0] is the field name; the initialiser starts at kids[1].
+    let init = kids.get(1).copied()?;
+    let name = match init.kind() {
+        // `const T()` / `new T()` / `const p.T()`: the last capitalised type.
+        "const_object_expression" | "new_expression" => {
+            let mut c = init.walk();
+            let last = init
+                .named_children(&mut c)
+                .filter(|k| k.kind() == "type_identifier")
+                .map(|k| text_of(k, src))
+                .filter(|t| is_dart_class_name(t))
+                .last();
+            last?.to_string()
+        }
+        // `T(...)`, `T<A>(...)`, `T.named(...)`, `p.T(...)`, then optional
+        // cascades (`T()..init()` still yields the T).
+        "identifier" => {
+            let head = text_of(init, src);
+            let rest: Vec<TsNode> = kids.iter().skip(2).copied().collect();
+            let selectors: Vec<TsNode> = rest
+                .iter()
+                .take_while(|k| k.kind() == "selector")
+                .copied()
+                .collect();
+            if rest
+                .iter()
+                .skip(selectors.len())
+                .any(|k| k.kind() != "cascade_section")
+            {
+                return None;
+            }
+            let mut member: Option<&str> = None;
+            let mut members = 0usize;
+            let mut called = false;
+            for sel in &selectors {
+                if called {
+                    return None; // `T().build()`: the result is something else
+                }
+                match selector_part(*sel, src) {
+                    SelectorPart::Member(m) => {
+                        member = Some(m);
+                        members += 1;
+                    }
+                    SelectorPart::TypeArgs => {}
+                    SelectorPart::Call => called = true,
+                    SelectorPart::Opaque => return None,
+                }
+            }
+            if !called || members > 1 {
+                return None;
+            }
+            match member {
+                // `T(...)` / `T<A>(...)`
+                None if is_dart_class_name(head) => head.to_string(),
+                // `T.named(...)`: a named constructor or static factory
+                Some(_) if is_dart_class_name(head) => head.to_string(),
+                // `p.T(...)`: an import-prefixed class
+                Some(m) if is_dart_class_name(m) => m.to_string(),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    (!DART_BUILTIN_TYPES.contains(&name.as_str())).then_some(name)
+}
+
+/// Record every typed or constructor-initialised field of the class whose
+/// body is `class_body` into `acc.nav.field_types` under `class_id`.
+fn collect_dart_field_types(class_body: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let mut members = class_body.walk();
+    for member in class_body.named_children(&mut members) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let mut decls = member.walk();
+        for decl in member.named_children(&mut decls) {
+            if decl.kind() != "declaration" {
+                continue;
+            }
+            let declared = dart_declared_type(decl, src);
+            let mut lists = decl.walk();
+            for list in decl.named_children(&mut lists) {
+                let item_kind = match list.kind() {
+                    "initialized_identifier_list" => "initialized_identifier",
+                    "static_final_declaration_list" => "static_final_declaration",
+                    _ => continue,
+                };
+                let mut items = list.walk();
+                for item in list.named_children(&mut items) {
+                    if item.kind() != item_kind {
+                        continue;
+                    }
+                    let Some(field) = item.named_child(0).filter(|n| n.kind() == "identifier")
+                    else {
+                        continue;
+                    };
+                    let ty = match &declared {
+                        DeclaredType::Named(t) => Some(t.clone()),
+                        DeclaredType::Untyped => dart_initialiser_type(item, src),
+                        DeclaredType::Rejected => None,
+                    };
+                    if let Some(t) = ty {
+                        acc.nav.record_field_type(class_id, text_of(field, src), &t);
+                    }
+                }
             }
         }
     }
@@ -1237,5 +1541,334 @@ class ApiClient {
             "{orders}"
         );
         assert!(!orders.contains("\"host\""), "{orders}");
+    }
+
+    // ---- LA.23e: selector-chain call sites + field types --------------------
+
+    fn method_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname)
+    }
+
+    /// The call qualifiers emitted from one method, sorted: `collect_calls_in`
+    /// walks a body with a stack (last statement first), which is
+    /// deterministic but not source order.
+    fn calls_from(fp: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = method_id(qname);
+        let mut out: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect();
+        out.sort_by_key(|q| format!("{q:?}"));
+        out
+    }
+
+    fn sorted(mut v: Vec<CallQualifier>) -> Vec<CallQualifier> {
+        v.sort_by_key(|q| format!("{q:?}"));
+        v
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn complex(receiver: &str, name: &str) -> CallQualifier {
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn field_types(fp: &FileParse, class_qname: &str) -> std::collections::HashMap<String, String> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, class_qname);
+        fp.nav.field_types.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// The grammar shape the scanner is written against: tree-sitter-dart
+    /// 0.1.0 has no call node; a call is a primary followed by sibling
+    /// `selector`s, and `this` is an anonymous token.
+    #[test]
+    fn grammar_pins_the_sibling_selector_shape() {
+        let source = "class A { void m() { repo.find(id); this.go(); } }\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_dart::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let src = source.as_bytes();
+        let mut stmts = Vec::new();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "expression_statement" {
+                stmts.push(n);
+            }
+            let mut c = n.walk();
+            stack.extend(n.named_children(&mut c));
+        }
+        stmts.sort_by_key(|n| n.start_byte());
+        let kinds = |n: TsNode| -> Vec<(String, bool)> {
+            let mut c = n.walk();
+            n.children(&mut c)
+                .map(|k| (k.kind().to_string(), k.is_named()))
+                .collect()
+        };
+        assert_eq!(text_of(stmts[0], src), "repo.find(id);");
+        assert_eq!(
+            kinds(stmts[0]),
+            vec![
+                ("identifier".to_string(), true),
+                ("selector".to_string(), true),
+                ("selector".to_string(), true),
+                (";".to_string(), false),
+            ]
+        );
+        assert_eq!(kinds(stmts[1])[0], ("this".to_string(), false));
+        assert!(!tree_sitter_dart::NODE_TYPES.contains("\"selector_expression\""));
+    }
+
+    #[test]
+    fn selector_chains_emit_call_sites() {
+        let source = r#"class A {
+  void run() {
+    x.m();
+    this.m();
+    this.f.m();
+    f();
+    a.b().c();
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::run"),
+            sorted(vec![
+                attr("x", "m"),
+                CallQualifier::SelfMethod("m".to_string()),
+                complex("this.f", "m"),
+                CallQualifier::Bare("f".to_string()),
+                attr("a", "b"),
+                complex("a.b()", "c"),
+            ])
+        );
+        // Within one chain the sites come out in call order.
+        let id = method_id("lib::a::A::run");
+        let chain: Vec<&CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| &c.qualifier)
+            .filter(|q| matches!(q, CallQualifier::Attribute { base, .. } if base == "a")
+                || matches!(q, CallQualifier::ComplexReceiver { receiver, .. } if receiver == "a.b()"))
+            .collect();
+        assert_eq!(chain, vec![&attr("a", "b"), &complex("a.b()", "c")]);
+    }
+
+    #[test]
+    fn selector_chains_in_other_positions_and_shapes() {
+        let source = r#"class A {
+  String get(int id) => repo.find(id);
+  Future<void> run() async {
+    final r = await _other.find(1);
+    x?.m();
+    y!.m();
+    list[i].m();
+    g(1);
+    use(repo.find(2));
+    f()();
+    super.m();
+    repo..find(3);
+    (a).m();
+    return this
+        .repo
+        .find(4);
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::get"),
+            vec![attr("repo", "find")]
+        );
+        // `super.m()`, the cascade, `(a).m()` and the call on `f()`'s result
+        // emit nothing. (A generic call `g<int>()` is not probed: this grammar
+        // parses it as a relational expression, `g < int > ()`.)
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::run"),
+            sorted(vec![
+                attr("_other", "find"),
+                attr("x", "m"),
+                complex("y!", "m"),
+                complex("list[i]", "m"),
+                CallQualifier::Bare("g".to_string()),
+                CallQualifier::Bare("use".to_string()),
+                attr("repo", "find"),
+                CallQualifier::Bare("f".to_string()),
+                complex("this.repo", "find"),
+            ])
+        );
+    }
+
+    /// A constructor / getter body mints no METHOD, so it emits no call site
+    /// rather than lending its calls to the member before it.
+    #[test]
+    fn body_without_its_own_method_emits_no_call_site() {
+        let source = r#"class A {
+  void first() {}
+  A(this.repo) {
+    repo.init();
+  }
+  String get name => repo.name();
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+    }
+
+    #[test]
+    fn typed_and_late_and_nullable_fields_record_their_type() {
+        let source = r#"class S {
+  final UserRepo repo;
+  late UserRepo lateRepo;
+  late final Cache cache;
+  UserRepo? maybe;
+  AuthApi a, b;
+  final p.Remote remote;
+  final Box<UserRepo> box;
+  Mailer mailer = Mailer();
+  static final Clock clock = Clock();
+  S(this.repo);
+}
+"#;
+        let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
+        let f = field_types(&fp, "lib::s::S");
+        let want = [
+            ("repo", "UserRepo"),
+            ("lateRepo", "UserRepo"),
+            ("cache", "Cache"),
+            ("maybe", "UserRepo"),
+            ("a", "AuthApi"),
+            ("b", "AuthApi"),
+            ("remote", "Remote"),
+            ("box", "Box"),
+            ("mailer", "Mailer"),
+            ("clock", "Clock"),
+        ];
+        for (field, ty) in want {
+            assert_eq!(f.get(field).map(String::as_str), Some(ty), "{field}: {f:?}");
+        }
+        assert_eq!(f.len(), want.len(), "{f:?}");
+    }
+
+    #[test]
+    fn untyped_fields_take_the_constructed_class() {
+        let source = r#"class S {
+  final _other = UserRepo();
+  var named = UserRepo.named(1);
+  final generic = Holder<int>();
+  final prefixed = p.Remote();
+  final konst = const Settings();
+  final fresh = new Pool();
+  final cascaded = Bus()..start();
+  final _impl = _RepoImpl();
+  static const k = Registry();
+  final fromCall = makeRepo();
+  final chained = Factory().build();
+  final lower = repo.create();
+  final literal = 3;
+}
+"#;
+        let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
+        let f = field_types(&fp, "lib::s::S");
+        let want = [
+            ("_other", "UserRepo"),
+            ("named", "UserRepo"),
+            ("generic", "Holder"),
+            ("prefixed", "Remote"),
+            ("konst", "Settings"),
+            ("fresh", "Pool"),
+            ("cascaded", "Bus"),
+            ("_impl", "_RepoImpl"),
+            ("k", "Registry"),
+        ];
+        for (field, ty) in want {
+            assert_eq!(f.get(field).map(String::as_str), Some(ty), "{field}: {f:?}");
+        }
+        for untyped in ["fromCall", "chained", "lower", "literal"] {
+            assert!(!f.contains_key(untyped), "{untyped}: {f:?}");
+        }
+    }
+
+    #[test]
+    fn builtin_function_and_record_types_are_rejected() {
+        let source = r#"class S {
+  final int count;
+  String name = 'x';
+  dynamic d;
+  Object o = UserRepo();
+  final List<UserRepo> repos = [];
+  final Future<UserRepo> pending;
+  final void Function(int) cb;
+  final (int, String) rec;
+  final list = List<int>.filled(3, 0);
+  final done = Future.value(1);
+}
+"#;
+        let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
+        assert!(
+            field_types(&fp, "lib::s::S").is_empty(),
+            "{:?}",
+            fp.nav.field_types
+        );
+    }
+
+    /// The LA.23e fixture's own file: both fields typed, all three call shapes
+    /// emitted from the three methods.
+    #[test]
+    fn field_dispatch_fixture_shape() {
+        let source = r#"import 'user_repo.dart';
+
+class UserService {
+  final UserRepo repo;
+  final _other = UserRepo();
+
+  UserService(this.repo);
+
+  String get(int id) {
+    return repo.find(id);
+  }
+
+  String other(int id) {
+    return _other.find(id);
+  }
+
+  String viaThis(int id) {
+    return this.repo.find(id);
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/user_service.dart", "lib::user_service", repo()).unwrap();
+        let f = field_types(&fp, "lib::user_service::UserService");
+        assert_eq!(f.get("repo").map(String::as_str), Some("UserRepo"));
+        assert_eq!(f.get("_other").map(String::as_str), Some("UserRepo"));
+        assert_eq!(f.len(), 2);
+        let q = "lib::user_service::UserService";
+        assert_eq!(
+            calls_from(&fp, &format!("{q}::get")),
+            vec![attr("repo", "find")]
+        );
+        assert_eq!(
+            calls_from(&fp, &format!("{q}::other")),
+            vec![attr("_other", "find")]
+        );
+        assert_eq!(
+            calls_from(&fp, &format!("{q}::viaThis")),
+            vec![complex("this.repo", "find")]
+        );
+        // The untyped field's initialiser is a class-level expression, not a
+        // method body: it emits no call site.
+        assert_eq!(fp.calls.len(), 3, "{:?}", fp.calls);
     }
 }

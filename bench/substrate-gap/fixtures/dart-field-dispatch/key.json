@@ -1,0 +1,31 @@
+{
+  "framework": "dart-field-dispatch",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "dart/calls"
+  ],
+  "expect_edges": [
+    {
+      "from": "UserService::get",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "repo.find: `final UserRepo repo;`"
+    },
+    {
+      "from": "UserService::other",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "_other.find: `final _other = UserRepo();` untyped, type from the constructor initialiser"
+    },
+    {
+      "from": "UserService::viaThis",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "this.repo.find: ComplexReceiver `this.repo`"
+    }
+  ],
+  "note": "LA.23e. Baseline HEAD: zero CALLS for all three; tree-sitter-dart 0.1.0 has no `selector_expression` node, so parsers/code/dart/src/lib.rs collect_calls_in emits no receiver call site at all."
+}
