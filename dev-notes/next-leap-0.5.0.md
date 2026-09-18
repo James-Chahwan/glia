@@ -251,8 +251,10 @@ orchestrator edits, the integration report) · `dev-notes/leap-corrections.json`
 · `closeout.py --leap N <run-id>`.
 
 **Running a wave** (not started — spec and plan only): `python3 dev-notes/wave-runner/leap_schedule.py --verify`, then
+`python3 dev-notes/wave-runner/usage_gate.py --start WN` (launch only on GO: it holds at >= 80% of the 5-hour limit, or
+when usage plus a measured average wave would pass 100%, unless the window resets within an hour), then
 `python3 dev-notes/wave-runner/gen_wave.py --leap N <scratch>/leap-wN.js`, run it as a Workflow, then
-`python3 dev-notes/wave-runner/closeout.py --leap N <run-id>`. Wave 0 and single-packet waves render as sequential scripts.
+`python3 dev-notes/wave-runner/closeout.py --leap N <run-id>` (records the wave's cost and prints the next wave's verdict). Wave 0 and single-packet waves render as sequential scripts.
 The baseline (`baseline.json`, 1,056 tests / 140 fixtures / matrix 146 of 480) was measured after programme wave 19;
 no code has changed since.
 

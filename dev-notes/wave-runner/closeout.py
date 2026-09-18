@@ -5,7 +5,8 @@
     python3 closeout.py --leap <wave> <run-id>        the 0.5.0 leap (waves W0..)
     python3 closeout.py --leap <wave> --plan-only     print the wave's packets and exit
 
---leap schedules through leap_schedule.py, folds followups into
+--leap schedules through leap_schedule.py, records the wave's 5-hour usage
+cost (usage_gate.py --end) and prints whether the next wave can start, folds followups into
 leap-corrections.json (ids A*.* and L*.*), records LANDED in leap_schedule.py,
 and also runs scripts/check-engram-export.sh once LG.13 has created it.
 
@@ -237,6 +238,12 @@ def main():
         flag = "--leap " if leap else ""
         out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{'leap-' if leap else ''}wave{wave+1}.js")
         say("== " + out.strip().replace("\n", " | "))
+
+    if leap:
+        # Record this wave's 5-hour usage cost and say whether the next wave can start (usage_gate.py).
+        sh(f"python3 dev-notes/wave-runner/usage_gate.py --end W{wave}")
+        out, _ = sh("python3 dev-notes/wave-runner/usage_gate.py")
+        say("== usage for the next wave: " + out.strip().replace("\n", " | "))
 
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")

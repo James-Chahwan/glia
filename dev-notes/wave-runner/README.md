@@ -40,4 +40,5 @@ The same tools run the leap (`dev-notes/next-leap-0.5.0.md` §7) with `--leap`:
 | `shared_brief_leap.md` | the brief for the breaking release (declared breaks allowed, other repos read-only, L0.1 ids) |
 | `gen_wave.py --leap N out.js` | renders leap wave N; Batch C packets get their standing correction + re-verification + leap correction; W0 and single-packet waves render sequential |
 | `closeout.py --leap N <run-id>` | end of leap wave; folds followups into `dev-notes/leap-corrections.json`; runs `scripts/check-engram-export.sh` once LG.13 created it; `--plan-only` prints the wave |
+| `usage_gate.py` | before launching a leap wave: `python3 usage_gate.py --start W<N>` prints GO / HOLD / UNKNOWN from the account's 5-hour usage (exit 0 / 2 / 3) and records the launch reading; `closeout.py --leap` records the end reading, so the gate learns what a wave costs. HOLD at >= 80% or when usage + an average wave passes 100%, unless the window resets within an hour. Data comes from `~/.claude/rate-limits.json`, written by the status line script on every render |
 
