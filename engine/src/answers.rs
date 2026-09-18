@@ -87,60 +87,147 @@ fn is_entrypoint(
     }
 }
 
+/// Types whose liveness a live METHOD they declare implies (A7.8): the
+/// method's direct `parent_of` must be one of these for the owner step to fire.
+const OWNER_KINDS: [repo_graph_core::NodeKindId; 3] =
+    [node_kind::CLASS, node_kind::STRUCT, node_kind::INTERFACE];
+
+/// One liveness walk: the live set plus how each part of it got there, for
+/// the `[live]` marker and the unit tests.
+struct LiveWalk {
+    live: std::collections::HashSet<NodeId>,
+    /// Entries by kind / name.
+    by_kind: usize,
+    /// Entries only a ROLE cell made (LB.3b).
+    by_role: usize,
+    /// Types made live by a live METHOD they declare.
+    owners: usize,
+    /// Nodes made live by an IMPLEMENTS edge into a live node.
+    implementers: usize,
+    /// Every node in the merged graph.
+    total: usize,
+}
+
 /// The entrypoint-reachable ("live") node set: every entrypoint plus everything
 /// forward-reachable from one along semantic carry edges. A node absent from
 /// this set is likely dead code. Conservative (generous entrypoint set) to avoid
 /// false-dead flags — the failure mode the handoff warns about.
 ///
-/// Prints `[live] seeds=S (kind=K role=R) live=N` once per process (MCP
-/// sessions call this per query): `kind` counts entries by kind / name, `role`
-/// the ones only a ROLE cell made entries (LB.3b). The returned set does not
-/// depend on whether the line was printed.
+/// Two steps besides the forward carry walk (A7.8), each applied as a node is
+/// popped from the queue:
+/// - **Owner.** A live METHOD makes its owning CLASS / STRUCT / INTERFACE (its
+///   direct `parent_of`) live. DEFINES stays out of `blast_carry_edges`, since
+///   pulling in a whole container is the impact fan-out that list exists to
+///   prevent. Liveness is a different question: a controller whose action is
+///   route-reachable is not dead, and it is the CLASS, not the METHOD, that
+///   owns the INJECTS edges to its services. One level, upward only: no climb
+///   to MODULE and no walk down to sibling methods.
+/// - **Implementer.** A live node makes every node with an IMPLEMENTS edge
+///   into it live: the implementing CLASS of a live INTERFACE, and (A6.6's
+///   method-level IMPLEMENTS) the implementing METHOD of a live interface
+///   METHOD. Interface-typed DI (`UsersController -INJECTS-> IUserService`) is
+///   otherwise the canonical false-dead: the real `UserService` has no inbound
+///   carry edge. INHERITS_FROM stays forward-only: a live base class does not
+///   make its subclasses live.
+///
+/// Prints `[live] entrypoints=E (kind=K role=R) owners=O implementers=I
+/// reached=N/M` once per process (MCP sessions call this per query): `kind`
+/// counts entries by kind / name, `role` the ones only a ROLE cell made entries
+/// (LB.3b), `owners` / `implementers` the nodes each A7.8 step made live, `N`
+/// the live set and `M` every node. The returned set does not depend on
+/// whether the line was printed.
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
-    use std::collections::{HashSet, VecDeque};
     use std::sync::atomic::{AtomicBool, Ordering};
     static PRINTED: AtomicBool = AtomicBool::new(false);
+
+    let w = live_walk(merged);
+    if !PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[live] entrypoints={} (kind={} role={}) owners={} implementers={} reached={}/{}",
+            w.by_kind + w.by_role,
+            w.by_kind,
+            w.by_role,
+            w.owners,
+            w.implementers,
+            w.live.len(),
+            w.total
+        );
+    }
+    w.live
+}
+
+/// The walk behind [`entrypoint_reachable`]. Every iteration is over a `Vec`
+/// (`merged.graphs`, `g.nodes`, the collected edges); the maps are only looked
+/// up, never iterated, so the counts are deterministic.
+fn live_walk(merged: &MergedGraph) -> LiveWalk {
+    use std::collections::{HashSet, VecDeque};
 
     let carry: HashSet<repo_graph_core::EdgeCategoryId> =
         repo_graph_graph::blast_carry_edges().into_iter().collect();
     let edges: Vec<&Edge> = merged.all_edges().collect();
+    // Reverse IMPLEMENTS: interface (or interface method) -> its implementers.
+    let mut implementers_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in &edges {
+        if e.category == edge_category::IMPLEMENTS {
+            implementers_of.entry(e.to).or_default().push(e.from);
+        }
+    }
 
-    let mut live: HashSet<NodeId> = HashSet::new();
+    let mut w = LiveWalk {
+        live: HashSet::new(),
+        by_kind: 0,
+        by_role: 0,
+        owners: 0,
+        implementers: 0,
+        total: 0,
+    };
+    let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
-    let (mut by_kind, mut by_role) = (0usize, 0usize);
     for g in &merged.graphs {
+        w.total += g.nodes.len();
         for n in &g.nodes {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
+            if kind == Some(node_kind::METHOD)
+                && let Some(&p) = g.nav.parent_of.get(&n.id)
+                && g.nav.kind_by_id.get(&p).is_some_and(|k| OWNER_KINDS.contains(k))
+            {
+                owner_of.insert(n.id, p);
+            }
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
             let seeded = if is_entrypoint(kind, name, &[]) {
-                &mut by_kind
+                &mut w.by_kind
             } else if is_entrypoint(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
             {
-                &mut by_role
+                &mut w.by_role
             } else {
                 continue;
             };
-            if live.insert(n.id) {
+            if w.live.insert(n.id) {
                 *seeded += 1;
                 queue.push_back(n.id);
             }
         }
     }
     while let Some(node) = queue.pop_front() {
+        if let Some(&owner) = owner_of.get(&node)
+            && w.live.insert(owner)
+        {
+            w.owners += 1;
+            queue.push_back(owner);
+        }
+        for &imp in implementers_of.get(&node).map(Vec::as_slice).unwrap_or(&[]) {
+            if w.live.insert(imp) {
+                w.implementers += 1;
+                queue.push_back(imp);
+            }
+        }
         for e in &edges {
-            if e.from == node && carry.contains(&e.category) && live.insert(e.to) {
+            if e.from == node && carry.contains(&e.category) && w.live.insert(e.to) {
                 queue.push_back(e.to);
             }
         }
     }
-    if !PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "[live] seeds={} (kind={by_kind} role={by_role}) live={}",
-            by_kind + by_role,
-            live.len()
-        );
-    }
-    live
+    w
 }
 
 /// The node a user-supplied qname or bare name means (LA.14). Candidates are
@@ -1949,5 +2036,318 @@ mod role_live_tests {
         assert!(is_entrypoint(Some(node_kind::COMPONENT), "Card", &[]));
         assert!(is_entrypoint(Some(node_kind::FUNCTION), "main", &[]));
         assert!(!is_entrypoint(class, "Page", &[]));
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    //! A7.8 — liveness past the entry set: a live METHOD makes its owning
+    //! type live, a live interface makes its implementers live, and neither
+    //! step turns into "everything is live".
+
+    use super::{entrypoint_reachable, is_entrypoint, live_walk};
+    use repo_graph_code_domain::{
+        CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind,
+    };
+    use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+    use repo_graph_graph::roles::roles_in;
+    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable, build_typescript};
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://live")
+    }
+
+    /// Hand-built graph: nodes recorded with kind, qname and parent; the simple
+    /// name is the last `::` segment of the qname.
+    #[derive(Default)]
+    struct G {
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        nav: CodeNav,
+    }
+
+    impl G {
+        fn node(&mut self, kind: NodeKindId, qname: &str, parent: Option<NodeId>) -> NodeId {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            self.nav.record(id, name, qname, kind, parent);
+            self.nodes.push(Node {
+                id,
+                repo: repo(),
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
+            id
+        }
+
+        fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
+            self.edges.push(Edge {
+                from,
+                to,
+                category,
+                confidence: Confidence::Strong,
+            });
+        }
+
+        fn merged(self) -> MergedGraph {
+            MergedGraph::new(vec![RepoGraph {
+                repo: repo(),
+                nodes: self.nodes,
+                edges: self.edges,
+                nav: self.nav,
+                symbols: SymbolTable::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            }])
+        }
+    }
+
+    /// LB.3 folds the `@Component` overlay into its CLASS; the surviving CLASS
+    /// is an entrypoint through its ROLE cell and what it injects is live.
+    /// Built through `build_typescript`, so the fold itself runs.
+    #[test]
+    fn merged_component_seeds_its_injects() {
+        let id = |k, q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), k, q);
+        let node = |nid| Node {
+            id: nid,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        };
+        let parse = |nodes, edges, refs, nav| FileParse {
+            nodes,
+            edges,
+            imports: vec![],
+            calls: vec![],
+            refs,
+            nav,
+            properties: Default::default(),
+        };
+        // m.ts: `@Injectable() class UserService {}` (no entry role).
+        let (m, svc_class, svc_overlay) = (
+            id(node_kind::MODULE, "m"),
+            id(node_kind::CLASS, "m::UserService"),
+            id(node_kind::SERVICE, "m::UserService"),
+        );
+        let mut nav = CodeNav::default();
+        nav.record(m, "m", "m", node_kind::MODULE, None);
+        nav.record(
+            svc_class,
+            "UserService",
+            "m::UserService",
+            node_kind::CLASS,
+            Some(m),
+        );
+        nav.record(
+            svc_overlay,
+            "UserService",
+            "m::UserService",
+            node_kind::SERVICE,
+            Some(m),
+        );
+        let service = parse(
+            vec![node(m), node(svc_class), node(svc_overlay)],
+            vec![Edge {
+                from: m,
+                to: svc_class,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            }],
+            vec![],
+            nav,
+        );
+        // n.ts: `@Component() class UsersComponent { constructor(s: UserService) }`.
+        let (n, comp_class, comp_overlay) = (
+            id(node_kind::MODULE, "n"),
+            id(node_kind::CLASS, "n::UsersComponent"),
+            id(node_kind::COMPONENT, "n::UsersComponent"),
+        );
+        let mut nav = CodeNav::default();
+        nav.record(n, "n", "n", node_kind::MODULE, None);
+        nav.record(
+            comp_class,
+            "UsersComponent",
+            "n::UsersComponent",
+            node_kind::CLASS,
+            Some(n),
+        );
+        nav.record(
+            comp_overlay,
+            "UsersComponent",
+            "n::UsersComponent",
+            node_kind::COMPONENT,
+            Some(n),
+        );
+        let component = parse(
+            vec![node(n), node(comp_class), node(comp_overlay)],
+            vec![Edge {
+                from: n,
+                to: comp_class,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            }],
+            vec![UnresolvedRef {
+                from: comp_class,
+                from_module: n,
+                qualifier: CallQualifier::Bare("UserService".into()),
+                category: edge_category::INJECTS,
+            }],
+            nav,
+        );
+        let g = build_typescript(repo(), vec![service, component], |_, _| None).expect("build");
+
+        // The fold left one node per declaration, the CLASS, with the role.
+        assert!(
+            g.nodes
+                .iter()
+                .all(|x| x.id != comp_overlay && x.id != svc_overlay)
+        );
+        let comp = g
+            .nodes
+            .iter()
+            .find(|x| x.id == comp_class)
+            .expect("the CLASS survives");
+        let roles = roles_in(Some(node_kind::CLASS), &comp.cells);
+        assert!(is_entrypoint(
+            Some(node_kind::CLASS),
+            "UsersComponent",
+            &roles
+        ));
+        assert!(g.edges.iter().any(|e| e.from == comp_class
+            && e.to == svc_class
+            && e.category == edge_category::INJECTS));
+
+        let w = live_walk(&MergedGraph::new(vec![g]));
+        assert!(
+            w.live.contains(&comp_class),
+            "the folded component is an entry"
+        );
+        assert!(w.live.contains(&svc_class), "what it injects is live");
+        assert_eq!(
+            (w.by_kind, w.by_role, w.owners, w.implementers),
+            (0, 1, 0, 0)
+        );
+    }
+
+    /// ROUTE -HANDLED_BY-> METHOD, whose CLASS -INJECTS-> a service: the
+    /// method makes the class live, and the class carries the injection.
+    #[test]
+    fn method_liveness_propagates_to_owning_class() {
+        let mut g = G::default();
+        let module = g.node(node_kind::MODULE, "app", None);
+        let ctrl = g.node(node_kind::CLASS, "app::ReportsController", Some(module));
+        let get = g.node(node_kind::METHOD, "app::ReportsController::Get", Some(ctrl));
+        let route = g.node(node_kind::ROUTE, "GET /reports", None);
+        let svc = g.node(node_kind::CLASS, "app::ReportService", Some(module));
+        let point = g.node(node_kind::STRUCT, "app::Point", Some(module));
+        let norm = g.node(node_kind::METHOD, "app::Point::norm", Some(point));
+        g.edge(module, ctrl, edge_category::DEFINES);
+        g.edge(ctrl, get, edge_category::DEFINES);
+        g.edge(route, get, edge_category::HANDLED_BY);
+        g.edge(ctrl, svc, edge_category::INJECTS);
+        g.edge(get, norm, edge_category::CALLS);
+
+        let w = live_walk(&g.merged());
+        for (id, what) in [
+            (ctrl, "the controller"),
+            (svc, "its injected service"),
+            (point, "a STRUCT"),
+        ] {
+            assert!(w.live.contains(&id), "{what} is live");
+        }
+        assert!(!w.live.contains(&module), "no climb to MODULE");
+        assert_eq!((w.by_kind, w.owners, w.implementers), (1, 2, 0));
+        assert_eq!(w.total, 7);
+    }
+
+    /// The guard against "everything is live": a CLASS with no live method and
+    /// no entry role stays dead, and a live method's class does not make its
+    /// sibling methods live (upward only).
+    #[test]
+    fn unrelated_class_stays_dead() {
+        let mut g = G::default();
+        let ctrl = g.node(node_kind::CLASS, "app::Ctrl", None);
+        let get = g.node(node_kind::METHOD, "app::Ctrl::get", Some(ctrl));
+        let helper = g.node(node_kind::METHOD, "app::Ctrl::helper", Some(ctrl));
+        let route = g.node(node_kind::ROUTE, "GET /x", None);
+        let other = g.node(node_kind::CLASS, "app::Unused", None);
+        let run = g.node(node_kind::METHOD, "app::Unused::run", Some(other));
+        let dep = g.node(node_kind::CLASS, "app::Dep", None);
+        g.edge(ctrl, get, edge_category::DEFINES);
+        g.edge(ctrl, helper, edge_category::DEFINES);
+        g.edge(route, get, edge_category::HANDLED_BY);
+        g.edge(other, run, edge_category::DEFINES);
+        g.edge(other, dep, edge_category::INJECTS);
+
+        let live = entrypoint_reachable(&g.merged());
+        assert!(live.contains(&ctrl));
+        for (id, what) in [
+            (helper, "a sibling of the live method"),
+            (other, "an unrelated class"),
+            (run, "its method"),
+            (dep, "what it injects"),
+        ] {
+            assert!(!live.contains(&id), "{what} stays dead");
+        }
+    }
+
+    /// A class that is live as a route handler DEFINES a method nothing calls:
+    /// DEFINES still does not carry, so the method stays dead.
+    #[test]
+    fn defines_still_does_not_carry() {
+        let mut g = G::default();
+        let ctrl = g.node(node_kind::CLASS, "app::Ctrl", None);
+        let unused = g.node(node_kind::METHOD, "app::Ctrl::unused", Some(ctrl));
+        let route = g.node(node_kind::ROUTE, "ANY /api", None);
+        g.edge(route, ctrl, edge_category::HANDLED_BY);
+        g.edge(ctrl, unused, edge_category::DEFINES);
+
+        let w = live_walk(&g.merged());
+        assert!(w.live.contains(&ctrl));
+        assert!(!w.live.contains(&unused), "DEFINES is not a carry edge");
+        assert_eq!((w.owners, w.implementers), (0, 0));
+    }
+
+    /// Interface-typed DI: the controller injects `IRepo` and calls
+    /// `IRepo::find`; the implementing class and its `find` are live, and the
+    /// implementation's own callees with them. INHERITS_FROM stays forward-only
+    /// and an implementer of a dead interface stays dead.
+    #[test]
+    fn implementer_of_live_interface_is_live() {
+        let mut g = G::default();
+        let route = g.node(node_kind::ROUTE, "GET /items", None);
+        let ctrl = g.node(node_kind::CLASS, "app::Ctrl", None);
+        let get = g.node(node_kind::METHOD, "app::Ctrl::get", Some(ctrl));
+        let irepo = g.node(node_kind::INTERFACE, "app::IRepo", None);
+        let ifind = g.node(node_kind::METHOD, "app::IRepo::find", Some(irepo));
+        let repo_c = g.node(node_kind::CLASS, "app::Repo", None);
+        let find = g.node(node_kind::METHOD, "app::Repo::find", Some(repo_c));
+        let load = g.node(node_kind::METHOD, "app::Repo::load", Some(repo_c));
+        let cached = g.node(node_kind::CLASS, "app::CachedRepo", None);
+        let idead = g.node(node_kind::INTERFACE, "app::IDead", None);
+        let dead_impl = g.node(node_kind::CLASS, "app::DeadImpl", None);
+        g.edge(route, get, edge_category::HANDLED_BY);
+        g.edge(ctrl, irepo, edge_category::INJECTS);
+        g.edge(get, ifind, edge_category::CALLS);
+        g.edge(repo_c, irepo, edge_category::IMPLEMENTS);
+        g.edge(find, ifind, edge_category::IMPLEMENTS);
+        g.edge(find, load, edge_category::CALLS);
+        g.edge(cached, repo_c, edge_category::INHERITS_FROM);
+        g.edge(dead_impl, idead, edge_category::IMPLEMENTS);
+
+        let w = live_walk(&g.merged());
+        for (id, what) in [
+            (repo_c, "the implementing class"),
+            (find, "the implementing method"),
+            (load, "the implementation's callee"),
+        ] {
+            assert!(w.live.contains(&id), "{what} is live");
+        }
+        assert!(!w.live.contains(&cached), "INHERITS_FROM is forward-only");
+        assert!(!w.live.contains(&idead) && !w.live.contains(&dead_impl));
+        // Implementers: Repo (via IRepo) and Repo::find (via IRepo::find).
+        // Owners: Ctrl (via get); IRepo and Repo were already live.
+        assert_eq!((w.owners, w.implementers), (1, 2));
     }
 }
