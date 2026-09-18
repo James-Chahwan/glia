@@ -30,10 +30,23 @@ are made for you, so you never re-derive them:
 
 | decision | comes from | why it is not yours to guess |
 |---|---|---|
-| how many dirs | `cross_repo` | `grade.py` calls `generate()` for one dir and `generate_many()` for several. A single-repo run only ever has **one `RepoId`**, so a cross-repo resolver has nothing to pair against and its edge can never appear. `cross_repo: true` ⇒ `dirs: ["client","server"]`; `false` ⇒ `dirs: ["."]`, where a second dir is pure noise. |
+| how many dirs | `cross_repo` | `grade.py` calls `generate()` for one dir and `generate_many()` for several, and **every cross-graph resolver runs in both**. The stack resolvers (HTTP, gRPC, RPC, queue, GraphQL, WebSocket, EventBus, CLI) pair inside ONE repo, so a single-dir fixture shows their edges. Only the pairwise `SHARES_*` resolvers require two separate `RepoId`s (`matrix_vocab.REPO_PAIRWISE_CATEGORIES`). Two dirs stay the default for cross-service columns because (1) it is the realistic client/server shape, (2) a single `RepoId` merges same-qname markers from both sides into one node, changing edge counts, and (3) HTTP host narrowing is keyed per repo, so a single-dir build can over-pair (`xstack-host-pairing`: 4 `HTTP_CALLS` vs 2). `cross_repo: true` ⇒ `dirs: ["client","server"]`; `false` ⇒ `dirs: ["."]`. **Consequence: a single-dir fixture is NOT a negative control for a cross-service edge — use a `forbid`.** Measured table below. |
 | which node kinds | `kinds[0]` | the *intended* extraction path. Later groups are the alternative registries (see **via**, below). |
 | which edge category | `categories[0]` | the routing proof. An ANCHOR mechanism (matrix_vocab `anchor: True`, today only subproject) has no routing vocabulary; its cell is graded on the anchor node, the literal and the forbid guards. The scaffold gives it `expect_edges: []` and a `max_nodes: 1` duplicate-anchor forbid instead. |
 | which literal | `literal` | the identifying string that must survive into the node name/qname. Extraction without it is `partial`, not `full`. |
+
+**Single-dir vs two-dir, measured** (installed wheel, 2026-09-19: the same
+fixture built with `generate_many(dirs)` and with `generate(fixture_root)`; the
+first four rows are pinned by `test_matrix.py`
+`test_single_dir_pairing_matches_the_vocabulary`):
+
+| category | pairs single-dir? | example (two-dir → single-dir edge count) |
+|---|---|---|
+| `HTTP_CALLS` `GRPC_CALLS` `RPC_CALLS` | yes | `xstack-go-http`, `xcut-grpc-grpc_calls`, `xcut-trpc`: 1 → 1 |
+| `QUEUE_FLOWS` `WS_CONNECTS` `GRAPHQL_CALLS` `EVENT_FLOWS` | yes | `xcut-queue-queue_flows`, `xcut-websocket-ws_connects`, `xcut-graphql-graphql_calls`, `xcut-eventbus-spring`: 1 → 1 |
+| `CLI_INVOKES` | yes | `xcli-invokes`: 2 → 2 |
+| `SHARES_*` (all seven) | **no** — same-repo pairs are skipped | `xcut-proto-shared` `SHARES_SCHEMA`, `xdata-source-shares` `SHARES_DATA_SOURCE`, `xiac-terraform-k8s` `SHARES_INFRA_REF`, `xpoly-data-entity` `SHARES_DATA_ENTITY`: 1 → 0 |
+| stack edge, different count | yes, but not the same edges | `matrix/python/amqp`, `matrix/csharp/amqp` `QUEUE_FLOWS` 2 → 1 (same-qname merge); `xstack-host-pairing` `HTTP_CALLS` 2 → 4 (host narrowing is per repo) |
 
 The scaffolder **refuses to overwrite** an existing cell without `--force`,
 because `--force` destroys an authored key and its baseline.

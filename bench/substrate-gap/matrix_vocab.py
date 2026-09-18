@@ -21,14 +21,16 @@ re-invent:
                grades it on extract + literal + forbid, with route not-applicable
                rather than a cap. Opt-in per mechanism: every other column keeps
                the rule that an unrouted cell is not proven.
-  cross_repo   whether the routing edge is emitted by a cross-repo resolver.
-               This decides the fixture's `dirs`: grade.py:122-126 calls
-               rg.generate() for a single dir and rg.generate_many() for several,
-               and engine/src/build.rs:85 runs run_all_resolvers in BOTH cases --
-               but a single-repo run only ever has one RepoId to pair, so a
-               cross-repo edge can never appear. cross_repo True therefore means
-               the fixture MUST use dirs ["client", "server"] (or similar);
-               False means dirs ["."] is correct and two dirs would be noise.
+  cross_repo   whether the column is about a cross-service flow. It decides the
+               scaffold's `dirs`: True gives ["client", "server"], False gives
+               ["."]. It does NOT mean a single dir cannot show the edge: every
+               cross-graph resolver runs in both generate() and generate_many(),
+               and the stack resolvers (HTTP, gRPC, RPC, queue, GraphQL, WS,
+               EventBus, CLI) pair inside one repo. Only the pairwise SHARES_*
+               resolvers need two separate RepoIds -- REPO_PAIRWISE_CATEGORIES
+               below, pinned by test_matrix.py. Two dirs stay the default for
+               the realistic shape and the precise counts; AUTHORING.md step 1
+               has the measured table.
 
 Every kind and category name here is checked against the LOCKED code-domain
 registries via repo_graph_py's decode tables (`--selftest`), so the vocabulary
@@ -227,6 +229,18 @@ MECHANISMS = [
 
 _BY_ID = {m["id"]: m for m in MECHANISMS}
 MECHANISM_IDS = [m["id"] for m in MECHANISMS]
+
+# The cross-graph categories that appear ONLY when the build has two separate
+# RepoIds: their resolvers pair a shared name across repos and skip same-repo
+# pairs (graph/src/resolvers/mod.rs emit_cross_repo_pairs, and the equivalent
+# check in config / cron / iac / package / shared_schema / db). Every other
+# cross-graph category pairs inside one repo. Module level, NOT a MECHANISMS
+# field, so the vocabulary digest does not move. test_matrix.py
+# test_single_dir_pairing_matches_the_vocabulary holds real builds to it.
+REPO_PAIRWISE_CATEGORIES = frozenset({
+    "SHARES_SCHEMA", "SHARES_DATA_ENTITY", "SHARES_DATA_SOURCE", "SHARES_CONFIG",
+    "SHARES_INFRA_REF", "SHARES_DEPENDENCY", "SHARES_CRON_SCHEDULE",
+})
 
 
 # ---------------------------------------------------------------------------

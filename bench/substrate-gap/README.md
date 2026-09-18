@@ -46,9 +46,9 @@ The eleven fields below are the **complete and only** vocabulary:
   "framework": "ts-angular-di",
   "language":  "typescript",
   "dirs":      ["."],              // 1 dir => generate(); 2+ => generate_many()
-                                   //   (distinct RepoIds so cross-graph resolvers
-                                   //   — HttpStack, gRPC, Queue … — fire across
-                                   //   the boundary; the documented substrate-eval path)
+                                   //   (a RepoId per dir; stack resolvers pair
+                                   //   either way, only SHARES_* need two repos
+                                   //   — AUTHORING.md step 1 has the measured table)
 
   // ---- RECALL: what MUST be emitted ----
   "expect_nodes": [ {"kind": "SERVICE", "name": "ApiService", "note": "…"} ],

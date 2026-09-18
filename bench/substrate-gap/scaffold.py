@@ -6,10 +6,12 @@
 16 x 30 = 480 cells is far past hand-authoring, and six corpus packets follow
 this one. Every fixture needs four decisions the vocabulary ALREADY holds:
 
-    how many dirs   `cross_repo` -- a cross-repo resolver only ever has a second
-                    RepoId to pair against when the fixture ships two dirs
-                    (grade.py calls generate_many() at 2+), so cross_repo True
-                    means dirs ["client", "server"] and False means dirs ["."].
+    how many dirs   `cross_repo` -- True means the column is about a
+                    cross-service flow and gets dirs ["client", "server"];
+                    False gets dirs ["."]. Two dirs are the realistic shape, not
+                    a necessity: stack edges (HTTP, gRPC, queue, ...) pair
+                    single-dir too, only SHARES_* need two repos (AUTHORING.md
+                    step 1), so a single dir is no negative control.
     which kinds     the FIRST `kinds` group -- the intended extraction path.
     which category  `categories[0]` -- the routing proof. An ANCHOR mechanism
                     (`anchor: True`, e.g. subproject) has no routing vocabulary:

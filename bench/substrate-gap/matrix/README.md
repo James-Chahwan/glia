@@ -35,10 +35,12 @@ matrix/python/kafka/
   server/           dirs[1]
 ```
 
-A `cross_repo` mechanism needs two dirs because `grade.py` calls
-`generate_many()` at two or more, and a cross-repo resolver needs two distinct
-`RepoId`s to pair. Single-repo mechanisms use `dirs: ["."]` and keep their stubs
-in the cell root.
+A `cross_repo` mechanism gets two dirs because a cross-service flow is a
+client/server shape, not because one dir cannot show the edge: stack resolvers
+(HTTP, gRPC, queue, …) pair inside one repo, and only the `SHARES_*` resolvers
+need two repos — see [`../AUTHORING.md`](../AUTHORING.md) step 1 for the measured
+table. Single-repo mechanisms use `dirs: ["."]` and keep their stubs in the cell
+root.
 
 The scaffolder's template lives as a constant inside `scaffold.py`
 (`python3 ../scaffold.py --template` prints it), **not** as an on-disk

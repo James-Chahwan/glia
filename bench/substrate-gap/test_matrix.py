@@ -24,6 +24,10 @@ Two halves, deliberately kept apart:
 
 An anchor grades ONLY the fixtures that declare its cell, not the whole corpus,
 so this file stays cheap and does not re-grade 79 fixtures run.py already owns.
+
+  PAIRING (LA.10) builds a fixed list of two-dir fixtures once with two dirs
+  and once as one, and holds matrix_vocab.REPO_PAIRWISE_CATEGORIES to what the
+  engine does: stack edges pair single-dir, SHARES_* edges need two repos.
 """
 import io
 import json
@@ -534,6 +538,76 @@ def test_anchor_clojure_kafka_is_unknown():
     # fixture started scoring a cell it does not cover.
     level, via = measure("clojure/kafka")
     assert (level, via) == ("unknown", None), (level, via)
+
+
+# ---------------------------------------------------------------------------
+# Single-dir pairing — which cross-graph edges need two RepoIds (LA.10)
+# ---------------------------------------------------------------------------
+
+# Every category a cross-graph resolver (graph/src/resolvers/) emits. Intra-graph
+# categories such as IMPORTS are left out: single-dir qnames carry the dir
+# prefix, so their edges move for reasons that have nothing to do with RepoIds.
+CROSS_GRAPH_CATEGORIES = frozenset({
+    "HTTP_CALLS", "GRPC_CALLS", "RPC_CALLS", "QUEUE_FLOWS", "GRAPHQL_CALLS",
+    "WS_CONNECTS", "EVENT_FLOWS", "CLI_INVOKES",
+    "SHARES_SCHEMA", "SHARES_DATA_ENTITY", "SHARES_DATA_SOURCE", "SHARES_CONFIG",
+    "SHARES_INFRA_REF", "SHARES_DEPENDENCY", "SHARES_CRON_SCHEDULE",
+})
+
+# Two-dir fixtures, each with the cross-graph category it exists to show.
+PAIRING_PROBES = [
+    ("xcut-proto-shared", "SHARES_SCHEMA"),
+    ("xdata-source-shares", "SHARES_DATA_SOURCE"),
+    ("xiac-terraform-k8s", "SHARES_INFRA_REF"),
+    ("xpoly-data-entity", "SHARES_DATA_ENTITY"),
+    ("xcli-invokes", "CLI_INVOKES"),
+    ("xstack-go-http", "HTTP_CALLS"),
+    ("xcut-grpc-grpc_calls", "GRPC_CALLS"),
+    ("xcut-trpc", "RPC_CALLS"),
+    ("xcut-queue-queue_flows", "QUEUE_FLOWS"),
+    ("xcut-websocket-ws_connects", "WS_CONNECTS"),
+    ("xcut-graphql-graphql_calls", "GRAPHQL_CALLS"),
+    ("xcut-eventbus-spring", "EVENT_FLOWS"),
+]
+
+
+def test_single_dir_pairing_matches_the_vocabulary():
+    # Builds each probe twice -- generate_many(dirs) and generate(root) -- and
+    # holds every cross-graph category of the two-dir build to one rule: it
+    # appears single-dir exactly when REPO_PAIRWISE_CATEGORIES omits it. Fails
+    # the day a stack resolver starts needing two RepoIds, or a SHARES_*
+    # resolver starts pairing inside one repo.
+    rg = matrix._grade.rg          # grade's import set GLIA_NO_PERSIST first
+    names = dict(rg.category_names())
+    unknown = (CROSS_GRAPH_CATEGORIES | vocab.REPO_PAIRWISE_CATEGORIES) - set(names.values())
+    assert not unknown, f"not in the locked edge_category registry: {sorted(unknown)}"
+    assert vocab.REPO_PAIRWISE_CATEGORIES <= CROSS_GRAPH_CATEGORIES, (
+        "REPO_PAIRWISE_CATEGORIES names a category no cross-graph resolver emits")
+
+    def cross(g):
+        return {names[e["category"]] for e in json.loads(g.edges_json())} & CROSS_GRAPH_CATEGORIES
+
+    def persisted():
+        return {(p, p.stat().st_mtime_ns) for f, _ in PAIRING_PROBES
+                for p in (HERE / "fixtures" / f).rglob("*.gmap")}
+
+    before, wrong = persisted(), []
+    for fixture, shown in PAIRING_PROBES:
+        root = (HERE / "fixtures" / fixture).resolve()
+        dirs = json.loads((root / "key.json").read_text())["dirs"]
+        assert len(dirs) >= 2, f"{fixture}: a pairing probe needs two dirs, has {dirs}"
+        two = cross(rg.generate_many([str((root / d).resolve()) for d in dirs]))
+        assert shown in two, (
+            f"{fixture}: the two-dir build no longer shows {shown}, so it proves nothing")
+        one = cross(rg.generate(str(root), False))
+        for cat in sorted(two):
+            pairwise = cat in vocab.REPO_PAIRWISE_CATEGORIES
+            if (cat in one) == pairwise:
+                wrong.append(f"{fixture}: {cat} {'appears' if cat in one else 'is absent'} "
+                             f"single-dir, but REPO_PAIRWISE_CATEGORIES "
+                             f"{'lists' if pairwise else 'omits'} it")
+    assert not wrong, "single-dir pairing disagrees with the vocabulary:\n  " + "\n  ".join(wrong)
+    assert persisted() == before, "GLIA_NO_PERSIST leaked .gmap writes into the probe fixtures"
 
 
 # ---------------------------------------------------------------------------

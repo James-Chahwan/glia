@@ -21,9 +21,9 @@ key.json schema:
     "framework": "ts-angular-di",         # row label in the matrix
     "language":  "typescript",
     "dirs":      ["."],                    # relative dirs; 1 => generate(),
-                                           #   2+ => generate_many() (distinct
-                                           #   RepoIds so cross-graph resolvers
-                                           #   fire — documented substrate-eval path)
+                                           #   2+ => generate_many(), a RepoId
+                                           #   per dir. Stack resolvers pair either
+                                           #   way; only SHARES_* need two repos.
     "expect_nodes": [                      # node-extraction ground truth
       {"kind": "ENDPOINT", "name": "GET /users", "note": "..."}
     ],
@@ -210,7 +210,7 @@ def build_graph(fixture_dir, key):
         if len(dirs) == 1:
             g = rg.generate(dirs[0], False)  # non-incremental => hermetic per run
         else:
-            g = rg.generate_many(dirs)  # distinct RepoIds => cross resolvers fire
+            g = rg.generate_many(dirs)  # a RepoId per dir => SHARES_* can pair
         nodes = json.loads(g.nodes_json())
         edges = json.loads(g.edges_json())
         by_id = {n["id"]: n for n in nodes}
