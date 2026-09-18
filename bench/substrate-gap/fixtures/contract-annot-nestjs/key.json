@@ -1,0 +1,19 @@
+{
+  "framework": "contract-annot-nestjs",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LA.15 (programme A10.11). @nestjs/swagger decorators: @ApiOperation({summary, operationId}) + @ApiResponse({status}) in the decorator block of a NestJS handler; method + path compose from that block's @Get(':id') and the class @Controller('users'), the composition ts_routes already uses. create() carries no swagger decorator. Baseline 2026-09-18 (HEAD 7a4883b): ROUTE route:/users/:id exists, no DOC_SECTION, no DOCUMENTS.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "contract::users.controller::GET:/users/:id", "note": "one op for the decorated handler"}
+  ],
+  "expect_edges": [
+    {"from": "contract::users.controller::GET:/users/:id", "to": "route:/users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link route matcher"}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "contract::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"source\":\"nestjs\"", "note": "framework discriminator"},
+    {"kind": "DOC_SECTION", "node": "contract::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"responses\":[\"200\"]", "note": "@ApiResponse status"}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "contract::users.controller::POST:/users", "note": "PRECISION: no swagger decorator, no op"}
+  ]
+}

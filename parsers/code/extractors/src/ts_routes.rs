@@ -471,7 +471,7 @@ fn nestjs_routes(source: &str) -> Vec<(&'static str, String)> {
     out
 }
 
-fn extract_decorator_string(line: &str) -> Option<String> {
+pub(crate) fn extract_decorator_string(line: &str) -> Option<String> {
     // Find first quoted literal after the opening paren.
     let open = line.find('(')?;
     let rest = &line[open + 1..];
@@ -503,7 +503,7 @@ fn extract_decorator_string(line: &str) -> Option<String> {
     None
 }
 
-fn combine_nest_paths(prefix: &str, suffix: &str) -> String {
+pub(crate) fn combine_nest_paths(prefix: &str, suffix: &str) -> String {
     let prefix = prefix.trim_matches('/');
     let suffix = suffix.trim_matches('/');
     let mut out = String::from("/");

@@ -145,7 +145,7 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
-        queues, react, services, trpc, ts_routes, vue, websocket,
+        openapi_annot, queues, react, services, trpc, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -282,6 +282,16 @@ pub(crate) fn apply_cross_cutting_extractors(
             source, path, &module_qname, module_id, repo
         ));
     }
+
+    // LA.15a: OpenAPI annotations on a handler (springdoc / springfox,
+    // Swashbuckle / [ProducesResponseType], @nestjs/swagger) become contract
+    // ops, keyed on the ROUTE the language parser above already emitted for
+    // that handler. DOC_SECTION is not a marker kind, so `anchor::attach`
+    // below ignores them; the result is a function of this file alone, so it
+    // is cached with the parse.
+    run!(openapi_annot::extract_annotated_ops(
+        source, path, lang, fp, module_id, repo
+    ));
 
     // A5.8: locate every RPC-family marker and tie it to the METHOD/FUNCTION
     // whose span holds its needle (module CONTAINS when none does). Runs after

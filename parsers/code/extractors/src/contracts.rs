@@ -43,7 +43,9 @@ pub struct ContractNodes {
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
     /// Which contract format the file sniffed as; `None` for a non-contract
-    /// yaml. Drives the per-format `[contract]` counters.
+    /// yaml, and for the ops `openapi_annot` reads off handler annotations
+    /// (LA.15a), which are counted by `[openapi-annot]`, never here. Drives
+    /// the per-format `[contract]` counters.
     pub source: Option<ContractSource>,
 }
 
@@ -113,7 +115,7 @@ const MAX_OPS: usize = 2000;
 /// How far into the file the `openapi:` / `swagger:` marker may sit.
 const SNIFF_LINES: usize = 64;
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -716,7 +718,7 @@ fn scan_asyncapi_v3(lines: &[&str]) -> Vec<ChannelOp> {
 /// Push one contract-operation node. Every contract format shares this shape:
 /// DOC_SECTION + CODE / POSITION / ORIGIN cells, parented to the module.
 #[allow(clippy::too_many_arguments)]
-fn push_op(
+pub(crate) fn push_op(
     out: &mut ContractNodes,
     qname: &str,
     name: &str,
@@ -754,7 +756,7 @@ fn push_op(
 
 /// `,"operation_id":"<id>"`, or nothing when the spec names none (the field is
 /// OMITTED, never null).
-fn operation_id_field(oid: Option<&str>) -> String {
+pub(crate) fn operation_id_field(oid: Option<&str>) -> String {
     match oid {
         Some(oid) => format!(r#","operation_id":"{}""#, esc(oid)),
         None => String::new(),
@@ -797,7 +799,7 @@ pub fn extract_yaml_contracts(
 }
 
 /// The qname segment a contract file contributes: `openapi` for `openapi.yaml`.
-fn file_stem(path: &str) -> &str {
+pub(crate) fn file_stem(path: &str) -> &str {
     std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
