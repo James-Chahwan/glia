@@ -3630,6 +3630,7 @@
     "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
+    "fixtures/avro-schema",
     "fixtures/contract-asyncapi-nats",
     "fixtures/contract-openapi-json",
     "fixtures/contract-openapi-yaml",

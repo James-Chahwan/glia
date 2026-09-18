@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 138,
+  "fixtures": 139,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -45,6 +45,13 @@
       "language": "typescript+go",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "avro-schema": {
+      "framework": "avro-schema",
+      "language": "avro",
+      "per_category": {
+        "DEFINES": 1.0
       }
     },
     "c_cpp-calls": {
