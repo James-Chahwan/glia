@@ -25,10 +25,11 @@ use repo_graph_engine::{
 /// A three-subproject monorepo. `services/api` calls both into `shared` and
 /// within itself; `shared/util.py::call_shared` has three callers so it
 /// outranks the in-scope `local_dep` globally. A flask route and a `requests`
-/// call give us a ROUTE node (no POSITION, no ENDPOINT_HIT — genuinely
-/// unlocatable) and an ENDPOINT node (locatable only via its ENDPOINT_HIT
-/// `file`). Two markdown docs, one at the root and one under `docs/`, both name
-/// `handle` so `governing_docs` has something to narrow.
+/// call give us a ROUTE node (no POSITION, located via the handler it is
+/// HANDLED_BY — A3.6) and an ENDPOINT node (located via its ENDPOINT_HIT
+/// `file`). A Django `path(...)` registration names no handler, so its ROUTE
+/// is genuinely unlocatable. Two markdown docs, one at the root and one under
+/// `docs/`, both name `handle` so `governing_docs` has something to narrow.
 fn write_fixture(dir: &Path) {
     for d in ["services/api", "shared", "web", "docs"] {
         std::fs::create_dir_all(dir.join(d)).unwrap();
@@ -44,6 +45,11 @@ fn write_fixture(dir: &Path) {
         dir.join("services/api/app.py"),
         "from flask import Flask\n\napp = Flask(__name__)\n\n\n\
          @app.route(\"/v1/items\")\ndef items():\n    return []\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("services/api/urls.py"),
+        "from django.urls import path\n\nurlpatterns = [path(\"/v1/legacy\", legacy_view)]\n",
     )
     .unwrap();
     std::fs::write(dir.join("shared/util.py"), "def call_shared():\n    return 1\n").unwrap();
@@ -199,38 +205,56 @@ fn governing_docs_scope_drops_out_of_tree_sections() {
 }
 
 #[test]
-fn unlocatable_nodes_are_kept_and_endpoint_hit_is_the_fallback() {
+fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
     let (_td, result) = fixture();
     let m = &result.merged;
-    let by_kind = |want: &str| -> Vec<_> {
-        m.graphs
-            .iter()
-            .flat_map(|g| g.nodes.iter())
-            .map(|n| n.id)
-            .filter(|id| locate_node(m, *id).2 == want)
-            .collect::<Vec<_>>()
+    let by_qname = |q: &str| {
+        m.node_id_by_qname(q)
+            .unwrap_or_else(|| panic!("fixture should emit `{q}`"))
     };
 
-    // (f) A ROUTE carries only ROUTE_METHOD (the bare HTTP verb) — no POSITION,
-    // no ENDPOINT_HIT — so it is unlocatable and must be KEPT under any scope.
-    // Dropping unlocatables would silently delete every ROUTE/ENDPOINT/DOC_SPACE
+    // (f) KEEP-UNLOCATABLE. The Django route's ROUTE_METHOD is the bare verb
+    // and it names no handler, so no `locate_node` tier places it: it must be
+    // KEPT under any scope. Dropping unlocatables would silently delete them
     // from a scoped answer, which is the cross-service half of the result.
-    let routes = by_kind("ROUTE");
-    assert!(!routes.is_empty(), "fixture should emit a flask ROUTE node");
-    for r in &routes {
-        assert!(locate_node(m, *r).3.is_none(), "ROUTE should have no POSITION");
-        assert!(
-            node_in_scope(m, *r, Some("no/such/dir")),
-            "unlocatable nodes must be kept under any scope"
-        );
-    }
+    let orphan = by_qname("ANY /v1/legacy");
+    assert_eq!(locate_node(m, orphan).3, None, "a handler-less route has no span");
+    assert!(
+        node_in_scope(m, orphan, Some("no/such/dir")),
+        "unlocatable nodes must be kept under any scope"
+    );
 
-    // An ENDPOINT has no POSITION either, but its ENDPOINT_HIT cell names the
-    // call site — the fallback makes it genuinely scopable rather than kept.
-    let endpoints = by_kind("ENDPOINT");
+    // A3.6: the flask ROUTE has no POSITION and only the bare verb, but it is
+    // HANDLED_BY `items`, so it is located at — and scoped by — its handler's
+    // file rather than kept as unlocatable.
+    let route = by_qname("GET /v1/items");
+    assert_eq!(
+        locate_node(m, route).3.as_deref(),
+        Some("services/api/app.py"),
+        "the ROUTE borrows its handler's POSITION"
+    );
+    assert!(node_in_scope(m, route, Some(SCOPE)));
+    assert!(
+        !node_in_scope(m, route, Some("web")),
+        "a located ROUTE is scoped like any other node"
+    );
+
+    // An ENDPOINT has no POSITION either; its ENDPOINT_HIT cell names the
+    // call site, which is what `locate_node` and the scope filter both report.
+    let endpoints: Vec<_> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter())
+        .map(|n| n.id)
+        .filter(|id| locate_node(m, *id).2 == "ENDPOINT")
+        .collect();
     assert!(!endpoints.is_empty(), "fixture should emit an ENDPOINT node");
     for e in &endpoints {
-        assert!(locate_node(m, *e).3.is_none(), "ENDPOINT should have no POSITION");
+        assert_eq!(
+            locate_node(m, *e).3.as_deref(),
+            Some("web/client.py"),
+            "ENDPOINT is located at its ENDPOINT_HIT call site"
+        );
         assert!(
             node_in_scope(m, *e, Some("web")),
             "ENDPOINT_HIT file web/client.py should place it under `web`"

@@ -852,6 +852,7 @@ dependencies = [
  "repo-graph-core",
  "rkyv",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

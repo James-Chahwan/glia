@@ -1322,6 +1322,53 @@ pub mod endpoint {
         });
         id
     }
+
+    /// Best-effort source span for an HTTP node that carries no POSITION cell
+    /// (A3.6). The reader for the two JSON payloads this crate's writers and
+    /// its parsers produce:
+    ///
+    /// - `ENDPOINT_HIT` — every client language, via [`endpoint_hit_json`];
+    /// - `ROUTE_METHOD` as JSON — parser-go's `route_method_cell` and
+    ///   ts_routes. The other ROUTE_METHOD writers store the bare verb
+    ///   (`Text("GET")`), which fails to parse and is skipped.
+    ///
+    /// ENDPOINT_HIT is tried before ROUTE_METHOD, and within a kind the FIRST
+    /// usable cell wins — the same rule `locate_node` applies to a node that
+    /// carries several POSITION cells (A2.8).
+    ///
+    /// Returns `(file, line0)`. `line0` is ZERO-indexed to match POSITION's
+    /// `start_line` (`repo_graph_doc::position_json` stores
+    /// `start_position().row`), while these cells store `row + 1`. A `line`
+    /// of 0 is ts_routes' "unknown" placeholder and yields `None`, as does a
+    /// missing or non-integer `line`. A cell without a non-empty string
+    /// `file` is skipped. Total: never panics, `None` on any failure.
+    pub fn http_node_span(cells: &[Cell]) -> Option<(String, Option<i64>)> {
+        [cell_type::ENDPOINT_HIT, cell_type::ROUTE_METHOD]
+            .into_iter()
+            .find_map(|kind| {
+                cells
+                    .iter()
+                    .filter(|c| c.kind == kind)
+                    .find_map(|c| span_of(&c.payload))
+            })
+    }
+
+    /// `(file, line0)` from one ENDPOINT_HIT / ROUTE_METHOD payload.
+    fn span_of(payload: &CellPayload) -> Option<(String, Option<i64>)> {
+        let (CellPayload::Json(s) | CellPayload::Text(s)) = payload else {
+            return None;
+        };
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        let file = v
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .filter(|f| !f.is_empty())?;
+        let line0 = match v.get("line").and_then(serde_json::Value::as_i64) {
+            Some(n) if n >= 1 => Some(n - 1),
+            _ => None,
+        };
+        Some((file.to_string(), line0))
+    }
 }
 
 // ============================================================================
@@ -2280,5 +2327,66 @@ mod tests {
             infra::canonical_kind("kubernetes_service"),
             infra::canonical_kind("kubernetes_deployment")
         );
+    }
+
+    /// A3.6 — the HTTP span reader. One row per payload shape the parsers
+    /// actually write, plus the malformed ones it must survive. Every `Some`
+    /// line is the cell's 1-indexed `line` minus one (POSITION is 0-indexed).
+    #[test]
+    fn http_node_span_reads_endpoint_hit_and_json_route_method() {
+        use endpoint::http_node_span;
+        let json = |kind, s: &str| Cell { kind, payload: CellPayload::Json(s.into()) };
+        let text = |kind, s: &str| Cell { kind, payload: CellPayload::Text(s.into()) };
+        let hit = cell_type::ENDPOINT_HIT;
+        let rm = cell_type::ROUTE_METHOD;
+        let span = |f: &str, l: Option<i64>| Some((f.to_string(), l));
+
+        let table: Vec<(&str, Vec<Cell>, Option<(String, Option<i64>)>)> = vec![
+            (
+                "ENDPOINT_HIT, as endpoint_hit_json writes it",
+                vec![json(hit, r#"{"method":"GET","path":"/users","file":"web/api.ts","line":2,"col":21,"confidence":"strong"}"#)],
+                span("web/api.ts", Some(1)),
+            ),
+            (
+                "parser-go ROUTE_METHOD json",
+                vec![json(rm, r#"{"method":"GET","handler":"listUsers","file":"main.go","line":15,"col":2}"#)],
+                span("main.go", Some(14)),
+            ),
+            (
+                "ts_routes line:0 is unknown, not row -1",
+                vec![json(rm, r#"{"method":"GET","handler":"","file":"server.ts","line":0,"col":0}"#)],
+                span("server.ts", None),
+            ),
+            ("bare-verb Text ROUTE_METHOD", vec![text(rm, "GET")], None),
+            ("malformed JSON", vec![json(hit, r#"{"file":"a.ts","line":"#)], None),
+            ("empty file is no file", vec![json(hit, r#"{"file":"","line":3}"#)], None),
+            ("non-integer line", vec![json(hit, r#"{"file":"a.ts","line":"3"}"#)], span("a.ts", None)),
+            (
+                "a POSITION cell is not an HTTP span",
+                vec![json(cell_type::POSITION, r#"{"file":"a.py","start_line":4,"end_line":9}"#)],
+                None,
+            ),
+            (
+                "first usable ROUTE_METHOD wins, the bare verb is skipped",
+                vec![
+                    text(rm, "POST"),
+                    json(rm, r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#),
+                    json(rm, r#"{"method":"PUT","handler":null,"file":"b.go","line":9,"col":1}"#),
+                ],
+                span("a.go", Some(6)),
+            ),
+            (
+                "ENDPOINT_HIT outranks an earlier ROUTE_METHOD",
+                vec![
+                    json(rm, r#"{"method":"GET","handler":null,"file":"a.go","line":7,"col":1}"#),
+                    json(hit, r#"{"file":"c.ts","line":1}"#),
+                ],
+                span("c.ts", Some(0)),
+            ),
+            ("no cells", vec![], None),
+        ];
+        for (what, cells, want) in table {
+            assert_eq!(http_node_span(&cells), want, "{what}");
+        }
     }
 }

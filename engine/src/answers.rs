@@ -5,10 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
+use repo_graph_code_domain::{cell_type, edge_category, endpoint, node_kind};
 use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Cell, CellPayload, Edge, NodeId};
-use repo_graph_graph::{MergedGraph, Reach};
+use repo_graph_core::{Cell, CellPayload, Edge, Node, NodeId};
+use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
 /// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
@@ -89,10 +89,11 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
 /// `scope` (A8.3) restricts the answer to nodes whose file lives under that
 /// repo-relative path, applied BEFORE `top_k` truncation so a scoped `--top-k`
 /// spends its whole budget in scope instead of on whatever PPR liked globally.
-/// A node with no locatable file (ENDPOINT/ROUTE/DOC_SPACE — see
-/// [`node_in_scope`]) is KEPT, never dropped: those are the cross-boundary part
-/// of the answer. `scope` narrows WITHIN a repo — under a multi-repo merge each
-/// repo's POSITION paths are relative to its OWN root.
+/// A node with no locatable file (DOC_SPACE, a handler-less route — see
+/// [`node_in_scope`]) is KEPT, never dropped. ENDPOINT / ROUTE nodes are
+/// located (A3.6) and scoped by where they are defined. `scope` narrows
+/// WITHIN a repo — under a multi-repo merge each repo's POSITION paths are
+/// relative to its OWN root.
 pub fn blast_radius_by_qname(
     merged: &MergedGraph,
     qname: &str,
@@ -326,8 +327,20 @@ pub fn governing_docs(
 }
 
 /// `(name, qname, kind_name, file, line)` for a node across the merged graphs.
-/// `file`/`line` come from the POSITION cell; `None` for synthetic nodes
-/// (ENDPOINT/DOC_SPACE) that carry no span. Shared "locate" for the primitives.
+/// Shared "locate" for the primitives. `line` is 0-indexed (POSITION's
+/// `start_line`). Three tiers, first hit wins:
+///
+/// 1. the node's first POSITION cell ([`position_of`]) — every parsed entity;
+/// 2. ROUTE / ENDPOINT only (A3.6): the ENDPOINT_HIT cell or a JSON
+///    ROUTE_METHOD cell ([`endpoint::http_node_span`]), which carry the call
+///    or registration site. ts_routes' `"line":0` placeholder yields a file
+///    with `line: None`;
+/// 3. ROUTE only (A3.6): the POSITION of the handler the route is HANDLED_BY,
+///    for the parsers whose ROUTE_METHOD is the bare verb. "Where is this
+///    route" is answered by its handler.
+///
+/// `None` for nodes none of the tiers place (DOC_SPACE, a handler-less
+/// Django/Rails route).
 pub fn locate_node(
     merged: &MergedGraph,
     id: NodeId,
@@ -338,42 +351,85 @@ pub fn locate_node(
         }
         let name = g.nav.name_by_id.get(&id).cloned().unwrap_or_default();
         let qname = g.nav.qname_by_id.get(&id).cloned().unwrap_or_default();
-        let kind = g
-            .nav
-            .kind_by_id
-            .get(&id)
-            .map(|k| node_kind::name(*k))
-            .unwrap_or("UNKNOWN");
+        let kind_id = g.nav.kind_by_id.get(&id).copied();
+        let kind = kind_id.map(node_kind::name).unwrap_or("UNKNOWN");
         let (mut file, mut line) = (None, None);
         if let Some(n) = g.nodes.iter().find(|n| n.id == id) {
-            for c in &n.cells {
-                if c.kind != repo_graph_code_domain::cell_type::POSITION {
-                    continue;
-                }
-                if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload
-                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+            (file, line) = position_of(n);
+            let is_route = kind_id == Some(node_kind::ROUTE);
+            if file.is_none() && (is_route || kind_id == Some(node_kind::ENDPOINT)) {
+                if let Some((f, l)) = endpoint::http_node_span(&n.cells) {
+                    (file, line) = (Some(f), l);
+                    log_http_locate_once("cell", &qname);
+                } else if is_route
+                    && let Some((f, l)) = handler_position(g, id)
                 {
-                    file = v.get("file").and_then(|f| f.as_str()).map(String::from);
-                    line = v.get("start_line").and_then(serde_json::Value::as_i64);
-                    // FIRST POSITION WINS — A2.8, and it is load-bearing, not
-                    // cosmetic. Do NOT remove this `break`.
-                    //
-                    // A node can carry MORE than one POSITION cell:
-                    // `merge_parses` appends the cells of every `FileParse` that
-                    // minted the same NodeId, which is the normal case for a
-                    // queue topic two files publish to. Without the break the
-                    // LAST file parsed won, so `blast_radius` / `trace` /
-                    // `resolve` reported a different file from
-                    // `passes::position_file` and
-                    // `projection_text::node_position`, both of which return the
-                    // first. This aligns all three on the first.
-                    break;
+                    (file, line) = (Some(f), l);
+                    log_http_locate_once("handled_by", &qname);
                 }
             }
         }
         return (name, qname, kind, file, line);
     }
     (String::new(), format!("(unknown:{})", id.0), "UNKNOWN", None, None)
+}
+
+/// `(file, start_line)` from a node's FIRST parseable POSITION cell;
+/// `(None, None)` when it has none.
+///
+/// FIRST POSITION WINS — A2.8, and it is load-bearing, not cosmetic. A node
+/// can carry MORE than one POSITION cell: `merge_parses` appends the cells of
+/// every `FileParse` that minted the same NodeId, which is the normal case
+/// for a queue topic two files publish to. Returning on the first parseable
+/// cell is what keeps `blast_radius` / `trace` / `resolve` on the same file
+/// as `passes::position_file` and `projection_text::node_position`, both of
+/// which return the first. Scanning on would let the LAST file parsed win.
+fn position_of(n: &Node) -> (Option<String>, Option<i64>) {
+    for c in &n.cells {
+        if c.kind != cell_type::POSITION {
+            continue;
+        }
+        if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+        {
+            let file = v.get("file").and_then(|f| f.as_str()).map(String::from);
+            let line = v.get("start_line").and_then(serde_json::Value::as_i64);
+            return (file, line);
+        }
+    }
+    (None, None)
+}
+
+/// Tier 3 of [`locate_node`]: the POSITION of the first handler (in edge
+/// order) that `route` is HANDLED_BY and that carries a file. Confined to the
+/// route's own repo graph — a ROUTE's HANDLED_BY never crosses repos — so it
+/// costs one scan of that repo's edges, and only for a route tiers 1–2 could
+/// not place.
+fn handler_position(g: &RepoGraph, route: NodeId) -> Option<(String, Option<i64>)> {
+    g.edges
+        .iter()
+        .filter(|e| e.from == route && e.category == edge_category::HANDLED_BY)
+        .find_map(|e| {
+            let h = g.nodes.iter().find(|h| h.id == e.to)?;
+            match position_of(h) {
+                (Some(f), l) => Some((f, l)),
+                (None, _) => None,
+            }
+        })
+}
+
+/// The A3.6 fired_on marker, once per process PER TIER: `locate_node` runs
+/// inside the P3 answer loops (twice per edge in `cross_stack_trace`), so a
+/// per-call line would flood stderr, while one line per process would hide
+/// whichever tier fired second. `source` is `cell` (tier 2) or `handled_by`
+/// (tier 3), so a run prints at most two lines.
+fn log_http_locate_once(source: &'static str, qname: &str) {
+    static CELL: std::sync::Once = std::sync::Once::new();
+    static HANDLED_BY: std::sync::Once = std::sync::Once::new();
+    let once = if source == "cell" { &CELL } else { &HANDLED_BY };
+    once.call_once(|| {
+        eprintln!("[locate] http span fallback fired: source={source} node={qname}");
+    });
 }
 
 // ============================================================================
@@ -383,39 +439,21 @@ pub fn locate_node(
 //   1. the filter runs BEFORE `truncate(top_k)` (blast_radius) and BEFORE
 //      `activate` (resolve), so it changes the RANKING, not just the display;
 //   2. a node with NO locatable file is KEPT. Dropping unlocatable nodes would
-//      silently delete every ENDPOINT / ROUTE / DOC_SPACE from a scoped answer
-//      and destroy the cross-service result these primitives exist for. The
-//      `[scope]` marker reports the kept-unlocatable count so that is visible.
+//      silently delete every DOC_SPACE (and, before A3.6 located them, every
+//      ENDPOINT / ROUTE) from a scoped answer and destroy the cross-service
+//      result these primitives exist for. The `[scope]` marker reports the
+//      kept-unlocatable count so that is visible.
 // ============================================================================
 
-/// The repo-relative path a node should be scoped by. POSITION first (the
-/// normal case), then the `ENDPOINT_HIT` cell's `file` for synthetic ENDPOINT
-/// nodes that carry no span. `None` for nodes with neither — ROUTE nodes
-/// included, because `ROUTE_METHOD` is a bare text cell holding only the HTTP
-/// verb, not a path.
+/// The repo-relative path a node should be scoped by: exactly the file
+/// [`locate_node`] reports. Since A3.6 that places ENDPOINT nodes by their
+/// ENDPOINT_HIT call site and ROUTE nodes by their JSON ROUTE_METHOD cell or
+/// their HANDLED_BY handler, so an HTTP node is scoped where it is defined
+/// instead of being kept as unlocatable. `None` only for the nodes no tier
+/// places (DOC_SPACE, a handler-less route) — those fall under the
+/// keep-unlocatable rule above.
 fn scope_file_of(merged: &MergedGraph, id: NodeId) -> Option<String> {
-    if let (_, _, _, Some(file), _) = locate_node(merged, id) {
-        return Some(file);
-    }
-    for g in &merged.graphs {
-        let Some(n) = g.nodes.iter().find(|n| n.id == id) else {
-            continue;
-        };
-        for c in &n.cells {
-            if c.kind != repo_graph_code_domain::cell_type::ENDPOINT_HIT {
-                continue;
-            }
-            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
-                continue;
-            };
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-                if let Some(f) = v.get("file").and_then(|f| f.as_str()) {
-                    return Some(f.to_string());
-                }
-            }
-        }
-    }
-    None
+    locate_node(merged, id).3
 }
 
 /// True when `file` lives under `scope`. Prefix match on a `/` boundary only,
@@ -985,8 +1023,8 @@ mod locate_tests {
     use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
     use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
 
-    /// A2.8 — FIRST POSITION WINS, and the `break` in `locate_node` is what
-    /// makes it so. `merge_parses` appends the cells of every `FileParse` that
+    /// A2.8 — FIRST POSITION WINS, and `position_of` returning on the first
+    /// parseable cell is what makes it so. `merge_parses` appends the cells of every `FileParse` that
     /// minted the same NodeId, so a queue topic published from two files
     /// carries TWO POSITION cells. Without the break the LAST file parsed won,
     /// which disagreed with `passes::position_file` and
@@ -1038,6 +1076,79 @@ mod locate_tests {
         assert_eq!(kind, "QUEUE_PRODUCER");
         assert_eq!(file.as_deref(), Some("a.go"));
         assert_eq!(line, Some(4));
+    }
+
+    /// A3.6 tier 3 — a bare-verb ROUTE borrows the POSITION of the handler it
+    /// is HANDLED_BY. The first handler (edge order) that carries a file
+    /// wins, a handler with no POSITION is skipped, and the handler's own
+    /// POSITION keeps A2.8's first-wins. A route with no handler, and a
+    /// non-HTTP node carrying an HTTP-shaped cell, stay unlocated.
+    #[test]
+    fn bare_verb_route_is_located_by_its_first_positioned_handler() {
+        use repo_graph_code_domain::edge_category;
+        use repo_graph_core::Edge;
+        let repo = RepoId::from_canonical("test://locate-route");
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, repo, kind, q);
+        let pos = |file: &str, line: u32| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":{line},"end_line":{line}}}"#
+            )),
+        };
+        let verb = Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Text("GET".into()),
+        };
+        let hit = Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(r#"{"file":"x.ts","line":3}"#.into()),
+        };
+        let route = id(node_kind::ROUTE, "GET /users");
+        let orphan = id(node_kind::ROUTE, "ANY /posts");
+        let bare = id(node_kind::FUNCTION, "app::no_span");
+        let handler = id(node_kind::FUNCTION, "app::list_users");
+        let func_with_hit = id(node_kind::FUNCTION, "app::odd");
+        let node = |id, cells| Node { id, repo, confidence: Confidence::Strong, cells };
+        let mut nav = CodeNav::default();
+        for (nid, q, k) in [
+            (route, "GET /users", node_kind::ROUTE),
+            (orphan, "ANY /posts", node_kind::ROUTE),
+            (bare, "app::no_span", node_kind::FUNCTION),
+            (handler, "app::list_users", node_kind::FUNCTION),
+            (func_with_hit, "app::odd", node_kind::FUNCTION),
+        ] {
+            nav.record(nid, q, q, k, None);
+        }
+        let handled_by = |to| Edge {
+            from: route,
+            to,
+            category: edge_category::HANDLED_BY,
+            confidence: Confidence::Strong,
+        };
+        let g = RepoGraph {
+            repo,
+            nodes: vec![
+                node(route, vec![verb.clone()]),
+                node(orphan, vec![verb]),
+                node(bare, vec![]),
+                node(handler, vec![pos("app.py", 6), pos("other.py", 40)]),
+                node(func_with_hit, vec![hit]),
+            ],
+            edges: vec![handled_by(bare), handled_by(handler)],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let m = MergedGraph::new(vec![g]);
+        let at = |nid| {
+            let (_, _, _, file, line) = locate_node(&m, nid);
+            (file, line)
+        };
+        assert_eq!(at(route), (Some("app.py".to_string()), Some(6)));
+        assert_eq!(at(orphan), (None, None), "no handler, no span");
+        assert_eq!(at(func_with_hit), (None, None), "tiers 2-3 are HTTP-only");
     }
 }
 
