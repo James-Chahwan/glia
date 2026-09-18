@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -36,7 +38,27 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
+    // LB.7a: top-level types are members of the PACKAGE (the directory), so
+    // their qnames hang off the directory scope, not the file module. The
+    // MODULE node above keeps `module_qname`, and so do imports, the package
+    // clause and top-level `def` / `val` (Scala 3 makes those file members).
+    let scope = type_scope(module_qname);
+    let top_level_types = visit_top(
+        root,
+        src,
+        file_rel_path,
+        module_qname,
+        scope,
+        module_id,
+        module_id,
+        repo,
+        &mut acc,
+    );
+    if top_level_types > 0 && qname_debug() {
+        eprintln!(
+            "[qname] scala: {top_level_types} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}"
+        );
+    }
     scan_scala_routes(source, repo, &mut acc);
     if acc.endpoint_hits > 0 {
         eprintln!(
@@ -56,6 +78,41 @@ pub fn parse_file(
     })
 }
 
+/// LB.7a: a Scala top-level type belongs to its package (its directory, the
+/// LB.2 rule), not its file, so drop the file-stem segment the engine's
+/// `path_to_qname` puts last: `src::main::scala::shop::Widget` ->
+/// `src::main::scala::shop`, and a file at the repo root (`Widget`) -> `""`.
+/// The directory, not the declared `package`, is the scope on purpose: two
+/// services of one monorepo that both declare `package shop` must keep
+/// distinct NodeIds. Scala forbids two same-named top-level types in one
+/// package, so the change never merges distinct declarations.
+///
+/// The public class `Widget` of `Widget.scala` therefore shares its qname with
+/// the file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
+/// ranks the declaration over the container, so qname lookups land on the type.
+fn type_scope(module_qname: &str) -> &str {
+    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+}
+
+/// `scope::name`, or the bare `name` for the empty (repo-root) scope.
+fn scoped(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// `GLIA_QNAME_DEBUG=1` turns on the per-file `[qname] scala:` marker, read
+/// once. Off by default: it would print for every Scala file of a build.
+///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] scala:'`
+fn qname_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
 #[derive(Default)]
 struct Acc {
     nodes: Vec<Node>,
@@ -72,29 +129,38 @@ struct Acc {
     inject_seen: std::collections::HashSet<(NodeId, String)>,
 }
 
+/// Walk the file's top-level declarations. `parent_qname` is the file MODULE's
+/// qname (imports, the package clause and top-level `def` / `val` hang off it);
+/// `scope` is the package scope ([`type_scope`]) the top-level types hang off.
+/// Returns how many top-level type nodes were emitted (the `[qname] scala:`
+/// marker counts them).
+#[allow(clippy::too_many_arguments)]
 fn visit_top(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> usize {
+    let mut top_level_types = 0usize;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "import_declaration" => collect_import(child, src, parent_qname, acc),
             "package_clause" => collect_package(child, src, parent_qname, acc),
-            "object_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
-            }
-            "class_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::CLASS, acc);
+            "object_definition" | "class_definition" => {
+                top_level_types += usize::from(visit_type_def(
+                    child, src, file_rel, scope, parent_id, module_id, repo, node_kind::CLASS, acc,
+                ));
             }
             "trait_definition" => {
-                visit_type_def(child, src, file_rel, parent_qname, parent_id, module_id, repo, node_kind::INTERFACE, acc);
+                top_level_types += usize::from(visit_type_def(
+                    child, src, file_rel, scope, parent_id, module_id, repo, node_kind::INTERFACE, acc,
+                ));
             }
             "function_definition" | "val_definition" | "var_definition" => {
                 visit_function(
@@ -111,25 +177,31 @@ fn visit_top(
             _ => {}
         }
     }
+    top_level_types
 }
 
+/// Emit one class / object / trait and everything under it. `scope` is the
+/// qname the type hangs off: the package scope ([`type_scope`]) for a top-level
+/// type, the outer type's qname for a nested one. A companion `object Widget`
+/// and `class Widget` share one qname and one kind (CLASS), so `merge_parses`
+/// folds them into one node. Returns whether a type node was emitted.
 #[allow(clippy::too_many_arguments)]
 fn visit_type_def(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
 
     acc.nodes.push(Node {
@@ -152,6 +224,7 @@ fn visit_type_def(
     if let Some(body) = node.child_by_field_name("body") {
         visit_body_members(body, src, file_rel, &qname, id, module_id, repo, acc);
     }
+    true
 }
 
 /// Scala class/trait/object heritage. The `extend`/`extends_clause` node holds
@@ -1062,6 +1135,141 @@ mod tests {
         RepoId(1)
     }
 
+    /// Sorted qnames of every nav-recorded node of `kind`.
+    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+        let mut out: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(|s| s.as_str()))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// LB.7a — top-level classes / objects / traits hang off the package
+    /// (directory) scope, never the file module: no doubled `Widget::Widget`
+    /// segment. The companion object folds into the class node (same qname,
+    /// same kind); a Scala 3 top-level `def` keeps the file scope. Source is
+    /// the `scala-package-qnames` fixture's.
+    #[test]
+    fn top_level_types_are_package_scoped() {
+        let source = include_str!(
+            "../../../../bench/substrate-gap/fixtures/scala-package-qnames/src/main/scala/shop/Widget.scala"
+        );
+        let fp = parse_file(
+            source,
+            "src/main/scala/shop/Widget.scala",
+            "src::main::scala::shop::Widget",
+            repo(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["src::main::scala::shop::Widget"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::INTERFACE),
+            vec!["src::main::scala::shop::Gadget"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            // `Gadget::go` is an abstract `function_declaration`, which the
+            // body walk does not emit (unchanged by LB.7a).
+            vec![
+                "src::main::scala::shop::Widget::helper",
+                "src::main::scala::shop::Widget::make",
+                "src::main::scala::shop::Widget::run",
+            ]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::FUNCTION),
+            vec!["src::main::scala::shop::Widget::topLevel"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::MODULE),
+            vec!["src::main::scala::shop::Widget"]
+        );
+
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::MODULE,
+            "src::main::scala::shop::Widget",
+        );
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "src::main::scala::shop::Widget",
+        );
+        assert_ne!(module_id, class_id, "type and file MODULE share a qname, not an id");
+        assert_eq!(fp.nav.parent_of.get(&class_id), Some(&module_id));
+        for member in ["run", "make"] {
+            let id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::METHOD,
+                &format!("src::main::scala::shop::Widget::{member}"),
+            );
+            assert_eq!(
+                fp.nav.parent_of.get(&id),
+                Some(&class_id),
+                "{member} must hang off the (companion-folded) CLASS node"
+            );
+        }
+        let top_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "src::main::scala::shop::Widget::topLevel",
+        );
+        assert_eq!(fp.nav.parent_of.get(&top_id), Some(&module_id));
+        assert!(
+            fp.edges.iter().any(|e| e.from == module_id
+                && e.to == class_id
+                && e.category == edge_category::DEFINES),
+            "DEFINES stays MODULE -> type"
+        );
+    }
+
+    /// LB.7a — a nested type hangs off its outer type, not the package scope.
+    #[test]
+    fn nested_types_keep_their_outer_type_scope() {
+        let source = r#"
+object Outer {
+  class Inner {
+    def go(): Unit = {}
+  }
+  trait Port
+}
+"#;
+        let fp = parse_file(source, "app/Outer.scala", "app::Outer", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["app::Outer", "app::Outer::Inner"]
+        );
+        assert_eq!(qnames_of(&fp, node_kind::INTERFACE), vec!["app::Outer::Port"]);
+        assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["app::Outer::Inner::go"]);
+    }
+
+    /// LB.7a — a file at the repo root has an empty package scope: its type's
+    /// qname is the bare type name.
+    #[test]
+    fn root_level_file_types_have_bare_qnames() {
+        let source = "class App {\n  def run(): Unit = {}\n}\n";
+        let fp = parse_file(source, "App.scala", "App", repo()).unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["App"]);
+        assert_eq!(qnames_of(&fp, node_kind::METHOD), vec!["App::run"]);
+        assert_eq!(qnames_of(&fp, node_kind::MODULE), vec!["App"]);
+        assert_eq!(type_scope("App"), "");
+        assert_eq!(type_scope("src::main::scala::shop::Widget"), "src::main::scala::shop");
+        assert_eq!(scoped("", "App"), "App");
+        assert_eq!(scoped("shop", "Widget"), "shop::Widget");
+    }
+
     #[test]
     fn object_and_trait() {
         let source = r#"
@@ -1078,6 +1286,9 @@ object UserServiceImpl {
         let fp = parse_file(source, "src/UserService.scala", "src::UserService", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::CLASS).count(), 1);
+        // LB.7a: package-scoped, not `src::UserService::UserService`.
+        assert_eq!(qnames_of(&fp, node_kind::INTERFACE), vec!["src::UserService"]);
+        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["src::UserServiceImpl"]);
     }
 
     #[test]
@@ -1092,6 +1303,11 @@ class Config {
 "#;
         let fp = parse_file(source, "src/Config.scala", "src::Config", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        // LB.7a: package-scoped, not `src::Config::Config::load`.
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["src::Config::load", "src::Config::save"]
+        );
     }
 
     #[test]

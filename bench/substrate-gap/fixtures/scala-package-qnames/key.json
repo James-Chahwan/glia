@@ -1,0 +1,47 @@
+{
+  "framework": "scala-package-qnames",
+  "language": "scala",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.7a identity fixture (legacy-only, no matrix cell). Scala top-level types are package members (a package is a directory here, the LB.2 rule), so the file stem is dropped: HEAD doubles it (src::main::scala::shop::Widget::Widget::run). The companion object folds into the class node (same qname, same kind) as it does today. A Scala 3 top-level def is not a type and keeps its file scope (control).",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "src::main::scala::shop::Widget::run"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::main::scala::shop::Widget::make",
+      "note": "companion object member lands on the same class node"
+    },
+    {
+      "kind": "INTERFACE",
+      "name": "src::main::scala::shop::Gadget",
+      "note": "a secondary top-level type is package-scoped too"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::main::scala::shop::Widget::topLevel",
+      "note": "control: top-level def keeps the file scope"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Widget::run",
+      "to": "Widget::helper",
+      "category": "CALLS",
+      "note": "control: intra-class call resolution unchanged"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "src::main::scala::shop::Widget::Widget"
+    },
+    {
+      "kind": "INTERFACE",
+      "name": "src::main::scala::shop::Widget::Gadget"
+    }
+  ]
+}
