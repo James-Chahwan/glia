@@ -1,0 +1,22 @@
+{
+  "framework": "xcut-graphql-sdl",
+  "language": "graphql+typescript",
+  "dirs": ["schema", "client"],
+  "expect_nodes": [
+    {"kind": "GRAPHQL_RESOLVER", "name": "getUser", "note": "A10.4: SDL field under `type Query {` in schema.graphql (server)"},
+    {"kind": "GRAPHQL_OPERATION", "name": "getUser", "note": "positive control: apollo gql query getUser (client)"}
+  ],
+  "expect_edges": [
+    {"from": "getUser", "to": "getUser", "category": "GRAPHQL_CALLS", "note": "client op -> SDL-declared resolver field, paired by A5.5's exact field key"},
+    {"from": "schema", "to": "graphql_resolver:getUser", "category": "CONTAINS", "note": "A10.4: the .graphql file is a MODULE that parents its resolver fields (no function to own them)"}
+  ],
+  "expect_cells": [
+    {"kind": "GRAPHQL_RESOLVER", "node": "graphql_resolver:getUser", "cell": "POSITION", "contains": "\"file\":\"schema.graphql\",\"start_line\":1,\"end_line\":1", "note": "A10.4: 0-indexed `getUser(id: ID!): User` line"}
+  ],
+  "forbid": [
+    {"kind": "GRAPHQL_RESOLVER", "name": "User", "note": "an object type is not a root operation type"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "id", "note": "a field of `type User` is not a resolver operation"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "name", "note": "a field of `type User` is not a resolver operation"},
+    {"kind": "GRAPHQL_OPERATION", "max_nodes": 1, "note": "the schema declares the server side only: the client's getUser is the one operation"}
+  ]
+}

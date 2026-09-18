@@ -1,6 +1,6 @@
 //! Per-file routing: which extractor or language parser sees which file.
 //! Holds the non-source branches (yaml / Dockerfile / package manifest /
-//! dotenv / contract JSON / `.proto`), the WP-D incremental parse-cache
+//! dotenv / contract JSON / `.proto` / `.graphql`), the WP-D incremental parse-cache
 //! lookup, and the per-file panic isolation. Split out of
 //! `build_graphs_for_repo`.
 
@@ -41,6 +41,9 @@ pub(crate) fn parse_repo_files(
     // A10.5 `[proto] files=` marker counters.
     let mut proto_messages = 0usize;
     let mut proto_enums = 0usize;
+    // A10.4 `[graphql-sdl]` marker counters.
+    let mut sdl_files = 0usize;
+    let mut sdl_resolvers = 0usize;
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
@@ -266,6 +269,48 @@ pub(crate) fn parse_repo_files(
             continue;
         }
 
+        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan that
+        // embedded `type Query {` blocks already get, so a schema-first
+        // service has resolvers for its clients' operations to pair with.
+        // Resolver side only: a schema declares server fields, and the
+        // operation needles would mint client ops from its keywords.
+        if lang == "graphql" {
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            let repo_graph_code_extractors::graphql::GraphqlNodes {
+                nodes,
+                nav,
+                mut anchors,
+            } = repo_graph_code_extractors::graphql::extract_graphql_resolver_nodes(
+                source, module_id, repo,
+            );
+            sdl_files += 1;
+            sdl_resolvers += nodes.len();
+            if !nodes.is_empty() {
+                stash_synthetic_parse(
+                    "graphql",
+                    path,
+                    module_id,
+                    repo,
+                    vec![nodes],
+                    vec![],
+                    vec![nav],
+                    vec![],
+                    &mut parses_by_lang,
+                );
+                // A5.8: POSITION on each field, and the MODULE CONTAINS
+                // fallback, since no function in a schema owns a field.
+                if let Some(fp) = parses_by_lang.get_mut("graphql").and_then(|v| v.last_mut()) {
+                    repo_graph_code_extractors::anchor::attach(fp, path, module_id, &mut anchors);
+                }
+            }
+            continue;
+        }
+
         // WP-D incremental: reuse the cached parse if the source is unchanged;
         // only changed / new files pay tree-sitter.
         let hash = cache.is_some().then(|| cache::content_hash(source));
@@ -360,6 +405,13 @@ pub(crate) fn parse_repo_files(
         );
     }
 
+    // A10.4 fired_on marker: `.graphql` / `.gql` files are walked and their
+    // SDL fields are GRAPHQL_RESOLVER nodes. `files` counts every schema
+    // file routed, so `resolvers=0` flags operation-only documents.
+    if sdl_files > 0 {
+        eprintln!("[graphql-sdl] files={sdl_files} resolvers={sdl_resolvers}");
+    }
+
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
     let contract_ops = contracts.openapi + contracts.asyncapi + contracts.pact;
@@ -432,4 +484,76 @@ fn stash_synthetic_parse(
         ..Default::default()
     };
     parses_by_lang.entry(lang_key).or_default().push(fp);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use repo_graph_code_domain::{cell_type, edge_category};
+    use repo_graph_core::CellPayload;
+
+    fn route(path: &str, source: &str) -> HashMap<&'static str, Vec<FileParse>> {
+        let files = vec![(path.to_string(), source.to_string())];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        parses
+    }
+
+    #[test]
+    fn graphql_schema_files_route_to_the_sdl_scan() {
+        assert_eq!(detect_language("api/schema.graphql"), Some("graphql"));
+        assert_eq!(detect_language("api/schema.gql"), Some("graphql"));
+
+        let sdl = "type Query {\n  getUser(id: ID!): User\n}\n\ntype User {\n  id: ID!\n}\n";
+        let parses = route("api/schema.graphql", sdl);
+        let fps = &parses["graphql"];
+        assert_eq!(fps.len(), 1);
+        let fp = &fps[0];
+
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "api::schema");
+        assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
+
+        let mut resolvers: Vec<&str> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::GRAPHQL_RESOLVER))
+            .filter_map(|n| fp.nav.qname_by_id.get(&n.id).map(String::as_str))
+            .collect();
+        resolvers.sort_unstable();
+        assert_eq!(resolvers, ["graphql_resolver:Query", "graphql_resolver:getUser"]);
+
+        let get_user = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:getUser",
+        );
+        let node = fp.nodes.iter().find(|n| n.id == get_user).expect("getUser node");
+        let position = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::POSITION)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            });
+        assert_eq!(
+            position.as_deref(),
+            Some(r#"{"file":"api/schema.graphql","start_line":1,"end_line":1}"#)
+        );
+        assert!(fp.edges.iter().any(|e| e.from == module_id
+            && e.to == get_user
+            && e.category == edge_category::CONTAINS));
+        assert!(
+            !fp.nav.kind_by_id.values().any(|k| *k == node_kind::GRAPHQL_OPERATION),
+            "a schema declares no client operations"
+        );
+    }
+
+    #[test]
+    fn graphql_operation_documents_mint_nothing() {
+        let doc = "query getUser($id: ID!) {\n  getUser(id: $id) { id }\n}\n";
+        assert!(route("client/getUser.graphql", doc).is_empty());
+    }
 }

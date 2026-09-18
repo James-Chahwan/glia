@@ -38,6 +38,9 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "sol" => Some("solidity"),
         "tf" | "hcl" => Some("terraform"),
         "proto" => Some("proto"),
+        // A10.4: a standalone GraphQL schema. Routed to the SDL resolver scan
+        // in `route.rs`, never to a language parser.
+        "graphql" | "gql" => Some("graphql"),
         _ => None,
     }
 }
