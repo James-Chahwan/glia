@@ -7,21 +7,25 @@
 //!
 //! - tier 2 — the ENDPOINT_HIT cell (every client language) and the JSON
 //!   ROUTE_METHOD cell (parser-go, ts_routes) carry `file` + a 1-indexed
-//!   `line`, which `locate_node` must convert to POSITION's 0-indexed row;
+//!   `line`, which the locator converts to POSITION's 0-indexed row;
 //! - tier 3 — the eleven parsers that write ROUTE_METHOD as a bare verb are
 //!   placed by the handler the route is HANDLED_BY.
 //!
-//! Every assertion pins an EXACT line: the 1 → 0 conversion is the easy thing
-//! to get wrong, and `is_some()` would not catch an off-by-one.
+//! LD.1: every tier stays row-based internally and `Locator::locate` adds 1
+//! at its single exit, so a reported `line` is the 1-based line an editor
+//! shows — the same number the cell (tier 2) or `nodes_json` (tiers 1, 3)
+//! carries. Every assertion pins an EXACT line: the base conversion is the
+//! easy thing to get wrong (twice, or not at all), and `is_some()` would not
+//! catch an off-by-one.
 
-use repo_graph_engine::{cross_stack_trace, generate_many, locate_node};
+use repo_graph_engine::{Locator, cross_stack_trace, generate_many, locate_node};
 use repo_graph_graph::MergedGraph;
 
 /// Three services under one tempdir:
-/// - `web/`    — a TS client (`fetch('/users')`, call on 0-indexed row 1) and
+/// - `web/`    — a TS client (`fetch('/users')`, call on line 2) and
 ///   an Express server whose inline handler gives ts_routes nothing to bind,
 ///   so its ROUTE carries only the `"line":0` placeholder;
-/// - `goapi/`  — a chi server, `r.Get("/users", listUsers)` on row 14;
+/// - `goapi/`  — a chi server, `r.Get("/users", listUsers)` on line 15;
 /// - `pyapi/`  — a Flask server, `@app.route('/users/<int:uid>')` + `get_user`.
 fn fixture() -> (tempfile::TempDir, MergedGraph) {
     let td = tempfile::tempdir().expect("tempdir");
@@ -79,9 +83,10 @@ fn locate(m: &MergedGraph, qname: &str) -> (&'static str, Option<String>, Option
     let id = m
         .node_id_by_qname(qname)
         .unwrap_or_else(|| panic!("no node `{qname}` in the fixture graph"));
-    let (_, q, kind, file, line) = locate_node(m, id);
-    assert_eq!(q, qname);
-    (kind, file, line)
+    let at = locate_node(m, id);
+    assert_eq!(at.qname, qname);
+    assert_eq!(at.id, id.0);
+    (at.kind, at.file, at.line)
 }
 
 #[test]
@@ -89,17 +94,17 @@ fn http_nodes_are_located_by_cell_or_handler() {
     let (_td, m) = fixture();
 
     // (1) ENDPOINT via its ENDPOINT_HIT cell: `fetch` sits on 1-indexed line
-    // 2 of api.ts, which is 0-indexed row 1 — the POSITION convention.
+    // 2 of api.ts — the cell's own line, reported as-is (1 → row 1 → +1).
     assert_eq!(
         locate(&m, "endpoint:GET:/users"),
-        ("ENDPOINT", Some("api.ts".to_string()), Some(1)),
+        ("ENDPOINT", Some("api.ts".to_string()), Some(2)),
     );
 
     // (2) Go ROUTE via its JSON ROUTE_METHOD cell: `r.Get(...)` is 1-indexed
-    // line 15, 0-indexed row 14.
+    // line 15.
     assert_eq!(
         locate(&m, "route:/users"),
-        ("ROUTE", Some("main.go".to_string()), Some(14)),
+        ("ROUTE", Some("main.go".to_string()), Some(15)),
     );
 
     // (3) Flask ROUTE: ROUTE_METHOD is the bare text "GET", so the span is
@@ -108,7 +113,7 @@ fn http_nodes_are_located_by_cell_or_handler() {
     let handler = locate(&m, "app::get_user");
     assert_eq!(handler.0, "FUNCTION");
     assert_eq!(handler.1.as_deref(), Some("app.py"));
-    assert_eq!(handler.2, Some(6), "get_user's POSITION starts on its `def` row");
+    assert_eq!(handler.2, Some(7), "get_user's span starts on its 1-based `def` line");
     assert_eq!(
         locate(&m, "GET /users/<int:uid>"),
         ("ROUTE", handler.1.clone(), handler.2),
@@ -134,11 +139,69 @@ fn trace_hops_into_http_nodes_carry_a_location() {
         .map(|h| (h.to_qname.as_str(), h.to_file.as_deref(), h.to_line))
         .collect();
     assert!(
-        located.contains(&("endpoint:GET:/users", Some("api.ts"), Some(1))),
+        located.contains(&("endpoint:GET:/users", Some("api.ts"), Some(2))),
         "{located:?}"
     );
     assert!(
-        located.contains(&("route:/users", Some("main.go"), Some(14))),
+        located.contains(&("route:/users", Some("main.go"), Some(15))),
         "{located:?}"
+    );
+}
+
+/// LD.1 scale: a `Locator` is built once (O(V)) and then answers each row from
+/// its index, so an answer with R rows costs O(V + R). Before LD.1 every
+/// located row re-scanned `g.nodes`: 20k rows over a 20k-node graph was 4e8
+/// node visits. 20k lookups against a 20k-node graph must finish well inside
+/// 2 s even in a debug build, and each must be the right node.
+#[test]
+fn locator_answers_do_not_rescan_nodes() {
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use repo_graph_graph::{RepoGraph, SymbolTable};
+
+    const N: usize = 20_000;
+    let repo = RepoId::from_canonical("test://locator-scale");
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::with_capacity(N);
+    let mut expect: Vec<(NodeId, String)> = Vec::with_capacity(N);
+    for i in 0..N {
+        let qname = format!("m::f{i}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
+        nav.record(id, &format!("f{i}"), &qname, node_kind::FUNCTION, None);
+        nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"m.py","start_line":{i},"end_line":{i}}}"#
+                )),
+            }],
+        });
+        expect.push((id, qname));
+    }
+    let m = MergedGraph::new(vec![RepoGraph {
+        repo,
+        nodes,
+        edges: vec![],
+        nav,
+        symbols: SymbolTable::default(),
+        unresolved_calls: vec![],
+        unresolved_refs: vec![],
+        properties: Default::default(),
+    }]);
+
+    let started = std::time::Instant::now();
+    let loc = Locator::new(&m);
+    for (i, (id, qname)) in expect.iter().enumerate() {
+        let at = loc.locate(*id);
+        assert_eq!(&at.qname, qname);
+        assert_eq!(at.line, Some(i as i64 + 1), "row {i} is line {}", i + 1);
+    }
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "{N} locates over {N} nodes took {took:?}: the index is being bypassed"
     );
 }

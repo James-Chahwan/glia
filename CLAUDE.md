@@ -234,6 +234,9 @@ WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
+Every record's `line` is 1-based (an editor's line), located through one
+`Locator` per answer; POSITION cells store 0-based rows — `Locator::locate` is
+the only place that converts.
 
 CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
 - `glia arch <repo> [--mermaid] [--include-shared]` — the whole-stack view: the

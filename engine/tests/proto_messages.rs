@@ -61,10 +61,10 @@ fn messages_only_proto_yields_located_message_types() {
         );
     }
 
-    let (name, qname, kind, file, line) = locate_node(&merged, found[0].1);
-    assert_eq!(name, "Money", "nav name is the bare declared name");
-    assert_eq!(qname, "message:proto:common.v1.Money");
-    assert_eq!(kind, "MESSAGE_TYPE");
-    assert_eq!(file.as_deref(), Some("shared/common.proto"));
-    assert_eq!(line, Some(4), "0-indexed `message Money {{` line");
+    let at = locate_node(&merged, found[0].1);
+    assert_eq!(at.name, "Money", "nav name is the bare declared name");
+    assert_eq!(at.qname, "message:proto:common.v1.Money");
+    assert_eq!(at.kind, "MESSAGE_TYPE");
+    assert_eq!(at.file.as_deref(), Some("shared/common.proto"));
+    assert_eq!(at.line, Some(5), "1-based `message Money {{` line");
 }

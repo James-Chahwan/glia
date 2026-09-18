@@ -67,7 +67,7 @@ fn has_edge(m: &MergedGraph, from: NodeId, to: NodeId, cat: EdgeCategoryId) -> b
 }
 
 fn qname_of(m: &MergedGraph, id: NodeId) -> String {
-    locate_node(m, id).1
+    locate_node(m, id).qname
 }
 
 #[test]
@@ -80,12 +80,15 @@ fn go_grpc_client_is_located_owned_and_traceable() {
     assert_eq!(
         positions(&m, client),
         vec![r#"{"file":"main.go","start_line":17,"end_line":17}"#.to_string()],
-        "one-line span at the 0-indexed pb.NewUserServiceClient( line"
+        "one-line span at the 0-indexed pb.NewUserServiceClient( row (storage is 0-based)"
     );
-    let (_, _, kind, file, line) = locate_node(&m, client);
+    // LD.1: the stored row 17 above and the reported line 18 here are the
+    // convention's regression guard — storage stays 0-based, every answer
+    // record is 1-based.
+    let at = locate_node(&m, client);
     assert_eq!(
-        (kind, file.as_deref(), line),
-        ("GRPC_CLIENT", Some("main.go"), Some(17))
+        (at.kind, at.file.as_deref(), at.line),
+        ("GRPC_CLIENT", Some("main.go"), Some(18))
     );
 
     assert!(has_edge(&m, fetch, client, edge_category::USES));

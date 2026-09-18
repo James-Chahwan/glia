@@ -26,6 +26,7 @@ pub struct BlastAnswer {
     /// = likely dead. Best-effort; annotated, not filtered, unless `live_only`.
     pub live: bool,
     pub file: Option<String>,
+    /// 1-based (see [`Located`]).
     pub line: Option<i64>,
 }
 
@@ -115,28 +116,29 @@ pub fn blast_radius_by_qname(
     };
     let live = entrypoint_reachable(merged);
     let hits = merged.blast_radius(seed, reach, max_depth, None);
+    let loc = Locator::new(merged);
     let out: Vec<BlastAnswer> = hits
         .iter()
         .filter(|h| !live_only || live.contains(&h.id))
         .map(|h| {
-            let (name, qname, kind, file, line) = locate_node(merged, h.id);
+            let at = loc.locate(h.id);
             BlastAnswer {
                 id: h.id.0,
-                qname,
-                name,
-                kind,
+                qname: at.qname,
+                name: at.name,
+                kind: at.kind,
                 reason: edge_category::name(h.reason),
                 depth: h.depth,
                 score: h.score,
                 live: live.contains(&h.id),
-                file,
-                line,
+                file: at.file,
+                line: at.line,
             }
         })
         .collect();
     // Scope BEFORE the cut: filtering after `truncate` would spend the budget
     // on out-of-scope nodes and return fewer (or zero) in-scope answers.
-    let mut out = apply_scope(merged, out, scope, |a| NodeId(a.id), "blast_radius");
+    let mut out = apply_scope(&loc, out, scope, |a| NodeId(a.id), "blast_radius");
     if let Some(k) = top_k {
         out.truncate(k);
     }
@@ -157,6 +159,7 @@ pub struct TraceHop {
     pub to_qname: String,
     pub to_kind: &'static str,
     pub to_file: Option<String>,
+    /// 1-based (see [`Located`]).
     pub to_line: Option<i64>,
 }
 
@@ -189,6 +192,7 @@ pub fn cross_stack_trace(
     let carry: HashSet<repo_graph_core::EdgeCategoryId> =
         repo_graph_graph::blast_carry_edges().into_iter().collect();
     let edges: Vec<&Edge> = merged.all_edges().collect();
+    let loc = Locator::new(merged);
 
     let mut hops = Vec::new();
     let mut visited: HashSet<NodeId> = HashSet::from([seed]);
@@ -202,18 +206,18 @@ pub fn cross_stack_trace(
                 continue;
             }
             if visited.insert(e.to) {
-                let (_, from_qname, _, _, _) = locate_node(merged, e.from);
-                let (_, to_qname, to_kind, to_file, to_line) = locate_node(merged, e.to);
+                let from = loc.locate(e.from);
+                let to = loc.locate(e.to);
                 let cross_service = repo_of.get(&e.from) != repo_of.get(&e.to);
                 hops.push(TraceHop {
                     depth: depth + 1,
                     mechanism: edge_category::name(e.category),
                     cross_service,
-                    from_qname,
-                    to_qname,
-                    to_kind,
-                    to_file,
-                    to_line,
+                    from_qname: from.qname,
+                    to_qname: to.qname,
+                    to_kind: to.kind,
+                    to_file: to.file,
+                    to_line: to.line,
                 });
                 queue.push_back((e.to, depth + 1));
             }
@@ -232,6 +236,7 @@ pub struct LocatedNode {
     pub kind: &'static str,
     pub score: f64,
     pub file: Option<String>,
+    /// 1-based (see [`Located`]).
     pub line: Option<i64>,
 }
 
@@ -255,8 +260,9 @@ pub fn resolve_signal_located(
     scope: Option<&str>,
 ) -> Vec<LocatedNode> {
     let seeds = merged.resolve_signal(text, kind);
+    let loc = Locator::new(merged);
     // Pre-PPR: `activate` below must only see in-scope seeds.
-    let seeds = apply_scope(merged, seeds, scope, |id| *id, "resolve");
+    let seeds = apply_scope(&loc, seeds, scope, |id| *id, "resolve");
     if seeds.is_empty() {
         return Vec::new();
     }
@@ -268,15 +274,15 @@ pub fn resolve_signal_located(
     let mut out: Vec<LocatedNode> = seeds
         .iter()
         .map(|id| {
-            let (name, qname, kind, file, line) = locate_node(merged, *id);
+            let at = loc.locate(*id);
             LocatedNode {
                 id: id.0,
-                qname,
-                name,
-                kind,
+                qname: at.qname,
+                name: at.name,
+                kind: at.kind,
                 score: scores.get(id).copied().unwrap_or(0.0),
-                file,
-                line,
+                file: at.file,
+                line: at.line,
             }
         })
         .collect();
@@ -303,6 +309,7 @@ pub fn governing_docs(
         .node_id_by_qname(qname)
         .or_else(|| merged.resolve_name(qname))
         .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
+    let loc = Locator::new(merged);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for e in merged.all_edges() {
@@ -310,25 +317,47 @@ pub fn governing_docs(
             && e.category == edge_category::DOCUMENTS
             && seen.insert(e.from)
         {
-            let (name, qn, kind, file, line) = locate_node(merged, e.from);
+            let at = loc.locate(e.from);
             out.push(LocatedNode {
                 id: e.from.0,
-                qname: qn,
-                name,
-                kind,
+                qname: at.qname,
+                name: at.name,
+                kind: at.kind,
                 score: 0.0,
-                file,
-                line,
+                file: at.file,
+                line: at.line,
             });
         }
     }
-    let out = apply_scope(merged, out, scope, |d| NodeId(d.id), "governing_docs");
+    let out = apply_scope(&loc, out, scope, |d| NodeId(d.id), "governing_docs");
     Ok(out)
 }
 
-/// `(name, qname, kind_name, file, line)` for a node across the merged graphs.
-/// Shared "locate" for the primitives. `line` is 0-indexed (POSITION's
-/// `start_line`). Three tiers, first hit wins:
+/// Identity + location of one node, shared by every answer record.
+///
+/// **`line` is 1-based** — the first line of the node's span as an editor
+/// shows it; `None` when no tier places the node. This is the ONE line
+/// convention of every answer record (`blast_radius_by_qname`,
+/// `cross_stack_trace`, `resolve_signal_located`, `governing_docs`,
+/// `message_contracts`) and of the pyo3 `nodes_json` span. POSITION cells keep
+/// storing 0-based tree-sitter rows; [`Locator::locate`] converts, once, at its
+/// single exit. A record builder copies `line` as-is and never adds 1 again.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Located {
+    pub id: u64,
+    pub name: String,
+    pub qname: String,
+    pub kind: &'static str,
+    pub file: Option<String>,
+    pub line: Option<i64>,
+}
+
+/// A node index over one [`MergedGraph`], built once in O(V) so an answer with
+/// R located rows costs O(V + R) instead of the O(R × V) of a per-row scan.
+/// Build one per answer and pass it down; never build one per row.
+///
+/// Placement has three tiers, first hit wins:
 ///
 /// 1. the node's first POSITION cell ([`position_of`]) — every parsed entity;
 /// 2. ROUTE / ENDPOINT only (A3.6): the ENDPOINT_HIT cell or a JSON
@@ -339,43 +368,157 @@ pub fn governing_docs(
 ///    for the parsers whose ROUTE_METHOD is the bare verb. "Where is this
 ///    route" is answered by its handler.
 ///
-/// `None` for nodes none of the tiers place (DOC_SPACE, a handler-less
-/// Django/Rails route).
-pub fn locate_node(
-    merged: &MergedGraph,
-    id: NodeId,
-) -> (String, String, &'static str, Option<String>, Option<i64>) {
-    for g in &merged.graphs {
-        if !g.nav.qname_by_id.contains_key(&id) {
-            continue;
+/// All three produce 0-based ROWS internally; only [`Locator::locate`] turns a
+/// row into a 1-based `line`. `None` for nodes no tier places (DOC_SPACE, a
+/// handler-less Django/Rails route).
+pub struct Locator<'a> {
+    merged: &'a MergedGraph,
+    /// NodeId → index of the FIRST graph (in `merged.graphs` order) whose nav
+    /// names it. Built with `or_insert` over graphs in Vec order, so the
+    /// per-graph HashMap iteration order cannot change the winner.
+    first_graph: HashMap<NodeId, usize>,
+    /// Per graph: NodeId → index of its FIRST node in `g.nodes` with that id.
+    node_at: Vec<HashMap<NodeId, usize>>,
+}
+
+impl<'a> Locator<'a> {
+    /// Index every graph of `merged`. Prints the LD.1 fired_on marker once per
+    /// process (a Locator is built per answer, so a per-build line would flood
+    /// a long-running MCP server's stderr).
+    pub fn new(merged: &'a MergedGraph) -> Self {
+        let mut first_graph: HashMap<NodeId, usize> = HashMap::new();
+        let mut node_at: Vec<HashMap<NodeId, usize>> = Vec::with_capacity(merged.graphs.len());
+        for (gi, g) in merged.graphs.iter().enumerate() {
+            for id in g.nav.qname_by_id.keys() {
+                first_graph.entry(*id).or_insert(gi);
+            }
+            let mut at: HashMap<NodeId, usize> = HashMap::with_capacity(g.nodes.len());
+            for (ni, n) in g.nodes.iter().enumerate() {
+                at.entry(n.id).or_insert(ni);
+            }
+            node_at.push(at);
         }
+        static BUILT: std::sync::Once = std::sync::Once::new();
+        BUILT.call_once(|| {
+            eprintln!(
+                "[locate] locator built: nodes={} graphs={} line_base=1",
+                first_graph.len(),
+                merged.graphs.len()
+            );
+        });
+        Locator { merged, first_graph, node_at }
+    }
+
+    /// Identity + 1-based location of `id`. An id no graph names comes back as
+    /// `qname: "(unknown:<id>)"`, `kind: "UNKNOWN"`, unlocated. A node named
+    /// by a graph's nav but absent from its node list keeps its name and qname
+    /// and is unlocated.
+    pub fn locate(&self, id: NodeId) -> Located {
+        let Some((gi, g)) = self.graph_of(id) else {
+            return Located {
+                id: id.0,
+                name: String::new(),
+                qname: format!("(unknown:{})", id.0),
+                kind: "UNKNOWN",
+                file: None,
+                line: None,
+            };
+        };
         let name = g.nav.name_by_id.get(&id).cloned().unwrap_or_default();
         let qname = g.nav.qname_by_id.get(&id).cloned().unwrap_or_default();
         let kind_id = g.nav.kind_by_id.get(&id).copied();
-        let kind = kind_id.map(node_kind::name).unwrap_or("UNKNOWN");
-        let (mut file, mut line) = (None, None);
-        if let Some(n) = g.nodes.iter().find(|n| n.id == id) {
-            (file, line) = position_of(n);
-            let is_route = kind_id == Some(node_kind::ROUTE);
-            if file.is_none() && (is_route || kind_id == Some(node_kind::ENDPOINT)) {
-                if let Some((f, l)) = endpoint::http_node_span(&n.cells) {
-                    (file, line) = (Some(f), l);
-                    log_http_locate_once("cell", &qname);
-                } else if is_route
-                    && let Some((f, l)) = handler_position(g, id)
-                {
-                    (file, line) = (Some(f), l);
-                    log_http_locate_once("handled_by", &qname);
-                }
-            }
+        let (file, row) = self.place(gi, g, id, &qname);
+        Located {
+            id: id.0,
+            name,
+            qname,
+            kind: kind_id.map(node_kind::name).unwrap_or("UNKNOWN"),
+            file,
+            // THE conversion: a 0-based stored row becomes a 1-based line here
+            // and nowhere else. Saturating, so a corrupt i64::MAX row cannot
+            // overflow-panic a debug build.
+            line: row.map(|r| r.saturating_add(1)),
         }
-        return (name, qname, kind, file, line);
     }
-    (String::new(), format!("(unknown:{})", id.0), "UNKNOWN", None, None)
+
+    /// The repo-relative file [`Locator::locate`] reports for `id` — what the
+    /// A8.3 scope filter keys on — without cloning the name and qname.
+    pub(crate) fn file_of(&self, id: NodeId) -> Option<String> {
+        let (gi, g) = self.graph_of(id)?;
+        let qname = g.nav.qname_by_id.get(&id).map(String::as_str).unwrap_or("");
+        self.place(gi, g, id, qname).0
+    }
+
+    fn graph_of(&self, id: NodeId) -> Option<(usize, &'a RepoGraph)> {
+        let gi = *self.first_graph.get(&id)?;
+        Some((gi, self.merged.graphs.get(gi)?))
+    }
+
+    fn node(&self, gi: usize, g: &'a RepoGraph, id: NodeId) -> Option<&'a Node> {
+        g.nodes.get(*self.node_at.get(gi)?.get(&id)?)
+    }
+
+    /// `(file, 0-based row)` through the three tiers.
+    fn place(
+        &self,
+        gi: usize,
+        g: &'a RepoGraph,
+        id: NodeId,
+        qname: &str,
+    ) -> (Option<String>, Option<i64>) {
+        let Some(n) = self.node(gi, g, id) else {
+            return (None, None);
+        };
+        let placed = position_of(n);
+        if placed.0.is_some() {
+            return placed;
+        }
+        let kind_id = g.nav.kind_by_id.get(&id).copied();
+        let is_route = kind_id == Some(node_kind::ROUTE);
+        if !is_route && kind_id != Some(node_kind::ENDPOINT) {
+            return placed;
+        }
+        if let Some((f, l)) = endpoint::http_node_span(&n.cells) {
+            log_http_locate_once("cell", qname);
+            return (Some(f), l);
+        }
+        if is_route && let Some((f, l)) = self.handler_position(gi, g, id) {
+            log_http_locate_once("handled_by", qname);
+            return (Some(f), l);
+        }
+        placed
+    }
+
+    /// Tier 3: the POSITION of the first handler (in edge order) that `route`
+    /// is HANDLED_BY and that carries a file. Confined to the route's own repo
+    /// graph — a ROUTE's HANDLED_BY never crosses repos — so it costs one scan
+    /// of that repo's edges, and only for a route tiers 1–2 could not place.
+    /// The handler is found through the node index, not a node scan.
+    fn handler_position(
+        &self,
+        gi: usize,
+        g: &'a RepoGraph,
+        route: NodeId,
+    ) -> Option<(String, Option<i64>)> {
+        g.edges
+            .iter()
+            .filter(|e| e.from == route && e.category == edge_category::HANDLED_BY)
+            .find_map(|e| match position_of(self.node(gi, g, e.to)?) {
+                (Some(f), l) => Some((f, l)),
+                (None, _) => None,
+            })
+    }
+}
+
+/// [`Located`] for one node — a one-off [`Locator`]. O(V) per call: a caller
+/// locating more than one node builds a `Locator` once and calls
+/// [`Locator::locate`] instead.
+pub fn locate_node(merged: &MergedGraph, id: NodeId) -> Located {
+    Locator::new(merged).locate(id)
 }
 
 /// `(file, start_line)` from a node's FIRST parseable POSITION cell;
-/// `(None, None)` when it has none.
+/// `(None, None)` when it has none. `start_line` is the stored 0-based row.
 ///
 /// FIRST POSITION WINS — A2.8, and it is load-bearing, not cosmetic. A node
 /// can carry MORE than one POSITION cell: `merge_parses` appends the cells of
@@ -400,27 +543,9 @@ fn position_of(n: &Node) -> (Option<String>, Option<i64>) {
     (None, None)
 }
 
-/// Tier 3 of [`locate_node`]: the POSITION of the first handler (in edge
-/// order) that `route` is HANDLED_BY and that carries a file. Confined to the
-/// route's own repo graph — a ROUTE's HANDLED_BY never crosses repos — so it
-/// costs one scan of that repo's edges, and only for a route tiers 1–2 could
-/// not place.
-fn handler_position(g: &RepoGraph, route: NodeId) -> Option<(String, Option<i64>)> {
-    g.edges
-        .iter()
-        .filter(|e| e.from == route && e.category == edge_category::HANDLED_BY)
-        .find_map(|e| {
-            let h = g.nodes.iter().find(|h| h.id == e.to)?;
-            match position_of(h) {
-                (Some(f), l) => Some((f, l)),
-                (None, _) => None,
-            }
-        })
-}
-
-/// The A3.6 fired_on marker, once per process PER TIER: `locate_node` runs
-/// inside the P3 answer loops (twice per edge in `cross_stack_trace`), so a
-/// per-call line would flood stderr, while one line per process would hide
+/// The A3.6 fired_on marker, once per process PER TIER: [`Locator::locate`]
+/// runs inside the P3 answer loops, so a per-call line would flood stderr,
+/// while one line per process would hide
 /// whichever tier fired second. `source` is `cell` (tier 2) or `handled_by`
 /// (tier 3), so a run prints at most two lines.
 fn log_http_locate_once(source: &'static str, qname: &str) {
@@ -446,14 +571,14 @@ fn log_http_locate_once(source: &'static str, qname: &str) {
 // ============================================================================
 
 /// The repo-relative path a node should be scoped by: exactly the file
-/// [`locate_node`] reports. Since A3.6 that places ENDPOINT nodes by their
+/// [`Locator::locate`] reports. Since A3.6 that places ENDPOINT nodes by their
 /// ENDPOINT_HIT call site and ROUTE nodes by their JSON ROUTE_METHOD cell or
 /// their HANDLED_BY handler, so an HTTP node is scoped where it is defined
 /// instead of being kept as unlocatable. `None` only for the nodes no tier
 /// places (DOC_SPACE, a handler-less route) — those fall under the
 /// keep-unlocatable rule above.
-fn scope_file_of(merged: &MergedGraph, id: NodeId) -> Option<String> {
-    locate_node(merged, id).3
+fn scope_file_of(loc: &Locator<'_>, id: NodeId) -> Option<String> {
+    loc.file_of(id)
 }
 
 /// True when `file` lives under `scope`. Prefix match on a `/` boundary only,
@@ -482,9 +607,13 @@ fn in_scope(file: &str, scope: &str) -> bool {
 /// `scope` here is a PATH. A caller holding a user-supplied scope that may be
 /// a project label resolves it ONCE with [`resolve_scope`] before looping —
 /// this runs per node, and resolving per node would walk the graph N times.
+///
+/// Builds a one-off [`Locator`] when `scope` is set: O(V) per call, the same
+/// order as the node scan it replaced. A caller filtering many nodes builds
+/// one `Locator` and filters on its `file` instead.
 pub fn node_in_scope(merged: &MergedGraph, id: NodeId, scope: Option<&str>) -> bool {
     let Some(s) = scope else { return true };
-    match scope_file_of(merged, id) {
+    match scope_file_of(&Locator::new(merged), id) {
         Some(f) => in_scope(&f, s),
         None => true,
     }
@@ -500,20 +629,20 @@ pub fn node_in_scope(merged: &MergedGraph, id: NodeId, scope: Option<&str>) -> b
 /// a pass-through for anything that is not a project, so every A8.3 path
 /// scope behaves exactly as before.
 fn apply_scope<T>(
-    merged: &MergedGraph,
+    loc: &Locator<'_>,
     items: Vec<T>,
     scope: Option<&str>,
     id_of: impl Fn(&T) -> NodeId,
     what: &str,
 ) -> Vec<T> {
     let Some(raw) = scope else { return items };
-    let resolved = resolve_scope(merged, raw);
+    let resolved = resolve_scope(loc.merged, raw);
     let s = resolved.as_str();
     let before = items.len();
     let mut unlocatable = 0usize;
     let out: Vec<T> = items
         .into_iter()
-        .filter(|it| match scope_file_of(merged, id_of(it)) {
+        .filter(|it| match scope_file_of(loc, id_of(it)) {
             Some(f) => in_scope(&f, s),
             None => {
                 unlocatable += 1;
@@ -705,7 +834,8 @@ pub struct MessageContractSide {
     /// Qualified name of the parent MODULE — the file the call site is in.
     pub module: Option<String>,
     /// The node's own POSITION (A2.8: first call site in the first file that
-    /// uses the topic), else the parent MODULE's.
+    /// uses the topic), else the parent MODULE's. `line` is 1-based (see
+    /// [`Located`]).
     pub file: Option<String>,
     pub line: Option<i64>,
     /// The best MESSAGE_TYPE `type`: beside-the-call-site before whole-file,
@@ -813,7 +943,7 @@ fn collect_queue_nodes(merged: &MergedGraph) -> BTreeMap<u64, QueueNodeAcc<'_>> 
     out
 }
 
-fn contract_side(merged: &MergedGraph, id: u64, acc: &QueueNodeAcc<'_>) -> MessageContractSide {
+fn contract_side(loc: &Locator<'_>, id: u64, acc: &QueueNodeAcc<'_>) -> MessageContractSide {
     let parsed: Vec<ParsedType> = acc.types.iter().filter_map(|c| parse_message_type(c)).collect();
     // `min_by_key` keeps the FIRST of equal keys, so first-seen breaks ties.
     let best = parsed
@@ -835,15 +965,18 @@ fn contract_side(merged: &MergedGraph, id: u64, acc: &QueueNodeAcc<'_>) -> Messa
         }
     }
 
-    let (_, _, _, mut file, mut line) = locate_node(merged, NodeId(id));
-    if file.is_none()
+    let mut at = loc.locate(NodeId(id));
+    if at.file.is_none()
         && let Some(p) = acc.parent
     {
-        (_, _, _, file, line) = locate_node(merged, p);
+        at = loc.locate(p);
     }
+    let (file, line) = (at.file, at.line);
     let module = acc
         .parent
-        .and_then(|p| merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&p).cloned()));
+        .and_then(|p| {
+            loc.merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&p).cloned())
+        });
 
     MessageContractSide {
         node_id: id,
@@ -918,9 +1051,10 @@ pub fn message_contracts(merged: &MergedGraph) -> Vec<MessageContractRow> {
                 && !is_tag_id(t)
         })
         .collect();
+    let loc = Locator::new(merged);
     let sides: BTreeMap<u64, MessageContractSide> = nodes
         .iter()
-        .map(|(id, acc)| (*id, contract_side(merged, *id, acc)))
+        .map(|(id, acc)| (*id, contract_side(&loc, *id, acc)))
         .collect();
 
     let mut rows: Vec<MessageContractRow> = Vec::new();
@@ -1070,12 +1204,14 @@ mod locate_tests {
             unresolved_refs: vec![],
             properties: Default::default(),
         };
-        let (name, qname, kind, file, line) = locate_node(&MergedGraph::new(vec![g]), id);
-        assert_eq!(name, "orders");
-        assert_eq!(qname, "queue_producer:orders");
-        assert_eq!(kind, "QUEUE_PRODUCER");
-        assert_eq!(file.as_deref(), Some("a.go"));
-        assert_eq!(line, Some(4));
+        let at = locate_node(&MergedGraph::new(vec![g]), id);
+        assert_eq!(at.id, id.0);
+        assert_eq!(at.name, "orders");
+        assert_eq!(at.qname, "queue_producer:orders");
+        assert_eq!(at.kind, "QUEUE_PRODUCER");
+        assert_eq!(at.file.as_deref(), Some("a.go"));
+        // Stored row 4 (0-based) is reported as line 5 (1-based, LD.1).
+        assert_eq!(at.line, Some(5));
     }
 
     /// A3.6 tier 3 — a bare-verb ROUTE borrows the POSITION of the handler it
@@ -1143,12 +1279,69 @@ mod locate_tests {
         };
         let m = MergedGraph::new(vec![g]);
         let at = |nid| {
-            let (_, _, _, file, line) = locate_node(&m, nid);
-            (file, line)
+            let at = locate_node(&m, nid);
+            (at.file, at.line)
         };
-        assert_eq!(at(route), (Some("app.py".to_string()), Some(6)));
+        // The handler's stored row 6 is line 7 (LD.1).
+        assert_eq!(at(route), (Some("app.py".to_string()), Some(7)));
         assert_eq!(at(orphan), (None, None), "no handler, no span");
         assert_eq!(at(func_with_hit), (None, None), "tiers 2-3 are HTTP-only");
+    }
+
+    /// LD.1 parity: the Locator index keeps HEAD's scan semantics. The FIRST
+    /// graph (Vec order) whose nav names an id owns it, even when a later graph
+    /// carries a POSITION for the same id; a nav entry with no node in that
+    /// graph keeps its name and qname and is unlocated; an id no graph names is
+    /// `(unknown:<id>)`.
+    #[test]
+    fn locator_keeps_the_first_graph_rule() {
+        use super::Locator;
+        let repo = RepoId::from_canonical("test://locate-parity");
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, q);
+        let pos = |file: &str, line: u32| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":{line},"end_line":{line}}}"#
+            )),
+        };
+        let (shared, nav_only) = (id("m::shared"), id("m::nav_only"));
+        let graph = |nodes: Vec<Node>, named: &[NodeId]| {
+            let mut nav = CodeNav::default();
+            for nid in named {
+                let q = if *nid == shared { "m::shared" } else { "m::nav_only" };
+                nav.record(*nid, q, q, node_kind::FUNCTION, None);
+            }
+            RepoGraph {
+                repo,
+                nodes,
+                edges: vec![],
+                nav,
+                symbols: SymbolTable::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            }
+        };
+        let node = |nid, cells| Node { id: nid, repo, confidence: Confidence::Strong, cells };
+        let m = MergedGraph::new(vec![
+            graph(vec![node(shared, vec![pos("a.py", 2)])], &[shared, nav_only]),
+            graph(
+                vec![node(shared, vec![pos("b.py", 9)]), node(nav_only, vec![pos("c.py", 5)])],
+                &[shared, nav_only],
+            ),
+        ]);
+        let loc = Locator::new(&m);
+        let at = loc.locate(shared);
+        assert_eq!((at.file.as_deref(), at.line), (Some("a.py"), Some(3)), "first graph wins");
+        let at = loc.locate(nav_only);
+        assert_eq!(at.qname, "m::nav_only");
+        assert_eq!((at.file, at.line), (None, None), "nav-only in the owning graph: unlocated");
+        let ghost = id("m::ghost");
+        let at = loc.locate(ghost);
+        assert_eq!(at.qname, format!("(unknown:{})", ghost.0));
+        assert_eq!((at.kind, at.name.as_str(), at.line), ("UNKNOWN", "", None));
+        assert_eq!(loc.file_of(shared).as_deref(), Some("a.py"), "file_of agrees with locate");
+        assert_eq!(locate_node(&m, shared), loc.locate(shared), "the one-off wrapper agrees");
     }
 }
 
@@ -1284,7 +1477,7 @@ mod contracts_tests {
 
     fn side_of(merged: &MergedGraph, id: NodeId) -> MessageContractSide {
         let nodes = super::collect_queue_nodes(merged);
-        contract_side(merged, id.0, &nodes[&id.0])
+        contract_side(&super::Locator::new(merged), id.0, &nodes[&id.0])
     }
 
     #[test]

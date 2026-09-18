@@ -218,7 +218,7 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
     // KEPT under any scope. Dropping unlocatables would silently delete them
     // from a scoped answer, which is the cross-service half of the result.
     let orphan = by_qname("ANY /v1/legacy");
-    assert_eq!(locate_node(m, orphan).3, None, "a handler-less route has no span");
+    assert_eq!(locate_node(m, orphan).file, None, "a handler-less route has no span");
     assert!(
         node_in_scope(m, orphan, Some("no/such/dir")),
         "unlocatable nodes must be kept under any scope"
@@ -229,7 +229,7 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
     // file rather than kept as unlocatable.
     let route = by_qname("GET /v1/items");
     assert_eq!(
-        locate_node(m, route).3.as_deref(),
+        locate_node(m, route).file.as_deref(),
         Some("services/api/app.py"),
         "the ROUTE borrows its handler's POSITION"
     );
@@ -246,12 +246,12 @@ fn unlocatable_nodes_are_kept_and_http_nodes_are_scoped_where_defined() {
         .iter()
         .flat_map(|g| g.nodes.iter())
         .map(|n| n.id)
-        .filter(|id| locate_node(m, *id).2 == "ENDPOINT")
+        .filter(|id| locate_node(m, *id).kind == "ENDPOINT")
         .collect();
     assert!(!endpoints.is_empty(), "fixture should emit an ENDPOINT node");
     for e in &endpoints {
         assert_eq!(
-            locate_node(m, *e).3.as_deref(),
+            locate_node(m, *e).file.as_deref(),
             Some("web/client.py"),
             "ENDPOINT is located at its ENDPOINT_HIT call site"
         );
