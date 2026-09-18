@@ -1,0 +1,14 @@
+{
+  "framework": "xpoly-data-entity",
+  "language": "java+python",
+  "dirs": ["java", "python"],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "java @Entity projection"},
+    {"kind": "DATA_ENTITY", "name": "users", "note": "python __tablename__"}
+  ],
+  "expect_edges": [
+    {"from": "User", "to": "users", "category": "SHARES_DATA_ENTITY", "note": "polyglot join: the @Entity User IS the users table"},
+    {"from": "find_users", "to": "users", "category": "ACCESSES_DATA", "note": "control: the python accessor anchor must not regress"}
+  ],
+  "note": "A13.1: DbResolver buckets DATA_ENTITY on (flavor, canonical name), so Java's bare @Entity `User` and Python's `data_entity:sql:users` are one entity across the service boundary."
+}
