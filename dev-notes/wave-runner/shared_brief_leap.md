@@ -38,7 +38,7 @@ For new matrix probes use `python3 bench/substrate-gap/scaffold.py <lang> <mech>
 - SECURITY GATES (locked): no taint or value data-flow, no CVE / vulnerability-feed joins, no mass-corpus crawling, no lists of routes reaching data without auth. Untrusted text (CI logs, .env, config) goes through the A13.7 redaction before it is stored.
 
 === OTHER REPOS ARE READ-ONLY ===
-Never write under /home/ivy/Code/{repo-graph,neuropil,Engram,quokka-stack,lapse} unless your files_touched names the path (only LG.7 / LG.14 edit Engram, after James's explicit OK — Engram is NOT a git repo, so back it up first as your packet says).
+Never write under /home/ivy/Code/{repo-graph,neuropil,Engram,quokka-stack,lapse} unless your files_touched names the path (only LG.7 / LG.14 edit Engram, with James's OK — Engram is a git repo since 2026-09-19: commit your Engram changes there with the same protocol; its config.yaml holds an API key and must never be staged).
 Probing another repo: use `GLIA_NO_PERSIST=1 ./target/debug/glia <cmd> <repo>` only. NEVER call the wheel's `repo_graph_py.generate(...)` on another repo: it writes and purges `<repo>/.ai/repo-graph/` even with GLIA_NO_PERSIST (the spec run left stray caches in quokka-stack and neuropil that way).
 
 === ORDER OF WORK (fixture-first) ===
