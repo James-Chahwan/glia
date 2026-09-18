@@ -69,6 +69,10 @@ pub fn parse_file(
     // assigned above their handlers, but this makes file order irrelevant.
     scan_router_prefixes(root, src, &mut acc);
 
+    // LA.23a pre-pass: this file's class names, for the qualified-type check
+    // in `record_field_type` (a field may be typed above the class it names).
+    acc.file_classes = collect_file_class_names(root, src);
+
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         match child.kind() {
@@ -231,7 +235,96 @@ struct Acc {
     /// Count of routes whose path was composed from a receiver prefix. Drives
     /// the `[py-routes]` fired_on marker.
     routes_composed: usize,
+    /// LA.23a — the source of each `(class, field)` type already recorded in
+    /// `nav.field_types`, so a weaker source never overwrites a stronger one
+    /// (see [`FieldTypeSource`]).
+    field_type_source: HashMap<(NodeId, String), FieldTypeSource>,
+    /// LA.23a — names of the classes this file defines at top level, from a
+    /// pre-pass, so a qualified field type naming one of them can be refused
+    /// wherever it appears in the file (see [`record_field_type`]).
+    file_classes: std::collections::HashSet<String>,
     nav: CodeNav,
+}
+
+/// LA.23a — a field's declared type as an annotation or constructor spells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FieldType {
+    /// The class name with any qualifier stripped (`trio.Process` -> `Process`).
+    name: String,
+    /// Spelled through a qualifier (`trio.Process`, `models.User`).
+    qualified: bool,
+}
+
+/// LA.23a — where a field's declared type was read, weakest first. When one
+/// field is typed twice the higher variant wins, and within one variant the
+/// first writer wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum FieldTypeSource {
+    /// `self.x = Cls(...)` in `__init__`, or class-level `x = Cls(...)`.
+    Constructor,
+    /// `self.x = p` in `__init__`, where the parameter is `p: Cls`.
+    Param,
+    /// Class-level `x: Cls` / `x: Cls = ...`, or `self.x: Cls = ...` in `__init__`.
+    Annotation,
+}
+
+/// LA.23a — record `class_id.field : ty` into `CodeNav::field_types` (A6.2a's
+/// carrier, read by the graph crate's receiver-type pass) unless a source at
+/// least as strong already typed that field. Dunder names are language
+/// machinery, never fields.
+///
+/// A qualified type whose name is a class of this very file
+/// (`_process: trio.Process` inside the wrapper `class Process`) is some
+/// other module's class: the graph binds a type by bare name, which would
+/// turn every delegating call into a self-call. It types nothing, but still
+/// claims the field at its strength, so a weaker writer cannot type it either.
+fn record_field_type(
+    acc: &mut Acc,
+    class_id: NodeId,
+    field: &str,
+    ty: &FieldType,
+    source: FieldTypeSource,
+) {
+    if field.is_empty() || (field.starts_with("__") && field.ends_with("__")) {
+        return;
+    }
+    let key = (class_id, field.to_string());
+    if acc
+        .field_type_source
+        .get(&key)
+        .is_some_and(|prev| *prev >= source)
+    {
+        return;
+    }
+    acc.field_type_source.insert(key, source);
+    if ty.qualified && acc.file_classes.contains(&ty.name) {
+        if let Some(fields) = acc.nav.field_types.get_mut(&class_id) {
+            fields.remove(field);
+        }
+        return;
+    }
+    acc.nav.record_field_type(class_id, field, &ty.name);
+}
+
+/// LA.23a pre-pass — the names of the classes a file defines at top level
+/// (plain or decorated), which `record_field_type` reads before their
+/// `class` statement is visited.
+fn collect_file_class_names(root: TsNode, src: &[u8]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        let class = match child.kind() {
+            "class_definition" => Some(child),
+            "decorated_definition" => split_decorated(child)
+                .1
+                .filter(|c| c.kind() == "class_definition"),
+            _ => None,
+        };
+        if let Some(name) = class.and_then(|c| child_text(c, "name", src)) {
+            out.insert(name.to_string());
+        }
+    }
+    out
 }
 
 struct UnresolvedCall {
@@ -369,15 +462,45 @@ fn visit_class(
                                     node_kind::ATTRIBUTE,
                                     &attr_qname,
                                 );
-                                if let Some(ty) = child.child_by_field_name("type") {
+                                let ty = child.child_by_field_name("type");
+                                if let Some(ty) = ty {
                                     collect_attr_type_ref(ty, src, attr_id, module_id, acc);
                                 }
                                 // v0.4.13b — RHS constructor inference for
                                 // class-level `x = Target(...)`.
-                                if let Some(rhs) = child.child_by_field_name("right") {
+                                let rhs = child.child_by_field_name("right");
+                                if let Some(rhs) = rhs {
                                     emit_rhs_constructor_refs(
                                         rhs, src, attr_id, module_id, acc,
                                     );
+                                }
+                                // LA.23a — the field's type for receiver-typed
+                                // calls: the annotation (dataclass / pydantic /
+                                // attrs fields), else an untyped RHS constructor.
+                                match ty {
+                                    Some(ty) => {
+                                        if let Some(t) = py_type_name(ty, src) {
+                                            record_field_type(
+                                                acc,
+                                                class_id,
+                                                attr_name,
+                                                &t,
+                                                FieldTypeSource::Annotation,
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        if let Some(t) = rhs.and_then(|r| constructor_type(r, src))
+                                        {
+                                            record_field_type(
+                                                acc,
+                                                class_id,
+                                                attr_name,
+                                                &t,
+                                                FieldTypeSource::Constructor,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -566,8 +689,19 @@ fn visit_method(
         // v0.4.13b — RHS constructor inference: `self.<attr> = Target(...)`
         // emits USES ref from ATTRIBUTE to Target so PPR can surface the
         // concrete type when the attribute is activated.
+        // LA.23a — in `__init__` the same walk records each field's type for
+        // receiver-typed calls; other methods re-binding a field would make
+        // its type ambiguous, so they record nothing.
+        let init_params = (name == "__init__").then(|| collect_init_param_flow(n, src));
         collect_self_attr_rhs_types(
-            body, src, class_qname, module_id, repo, acc,
+            body,
+            src,
+            class_qname,
+            class_id,
+            init_params.as_ref(),
+            module_id,
+            repo,
+            acc,
         );
     }
 }
@@ -1989,14 +2123,28 @@ fn collect_attr_type_ref(
 /// `self.<attr> = Target(...)` or `self.<attr> = mod.Target(...)` and emits a
 /// USES ref from the ATTRIBUTE node to the callee name. Enables PPR to
 /// surface concrete types for attributes initialised via constructor calls.
+///
+/// LA.23a — `init_params` is `Some` only for `__init__` (the annotated
+/// parameters, from [`collect_init_param_flow`]); there the walk also records
+/// each field's type into `CodeNav::field_types` on `class_id` (through
+/// [`record_field_type`]):
+/// `self.x: T = …` as an annotation, `self.x = p` with `p: T` as a parameter
+/// flow, `self.x = T(...)` as a constructor. An unannotated parameter records
+/// nothing.
+#[allow(clippy::too_many_arguments)]
 fn collect_self_attr_rhs_types(
     body: TsNode,
     src: &[u8],
     class_qname: &str,
+    class_id: NodeId,
+    init_params: Option<&HashMap<String, FieldType>>,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    // LA.23a field types, keyed by source offset: the stack walk visits
+    // siblings last-first, and "first writer wins" means first in source.
+    let mut typed: Vec<(usize, &str, FieldType, FieldTypeSource)> = Vec::new();
     let mut stack = vec![body];
     while let Some(node) = stack.pop() {
         if matches!(node.kind(), "function_definition" | "class_definition") {
@@ -2009,10 +2157,12 @@ fn collect_self_attr_rhs_types(
             && obj.kind() == "identifier"
             && text(obj, src) == "self"
             && let Some(attr) = lhs.child_by_field_name("attribute")
-            && let Some(rhs) = node.child_by_field_name("right")
         {
             let attr_name = text(attr, src);
-            if !(attr_name.starts_with("__") && attr_name.ends_with("__")) {
+            let rhs = node.child_by_field_name("right");
+            if let Some(rhs) = rhs
+                && !(attr_name.starts_with("__") && attr_name.ends_with("__"))
+            {
                 let attr_qname = format!("{class_qname}::{attr_name}");
                 let attr_id = NodeId::from_parts(
                     GRAPH_TYPE,
@@ -2022,11 +2172,35 @@ fn collect_self_attr_rhs_types(
                 );
                 emit_rhs_constructor_refs(rhs, src, attr_id, module_id, acc);
             }
+            if let Some(params) = init_params {
+                // An annotation is authoritative: one py_type_name rejects
+                // (`list[T]`, `int`) records nothing rather than falling
+                // back to the RHS.
+                let found = match (node.child_by_field_name("type"), rhs) {
+                    (Some(ty), _) => {
+                        py_type_name(ty, src).map(|t| (t, FieldTypeSource::Annotation))
+                    }
+                    (None, Some(rhs)) if rhs.kind() == "identifier" => params
+                        .get(text(rhs, src))
+                        .map(|t| (t.clone(), FieldTypeSource::Param)),
+                    (None, Some(rhs)) => {
+                        constructor_type(rhs, src).map(|t| (t, FieldTypeSource::Constructor))
+                    }
+                    (None, None) => None,
+                };
+                if let Some((t, source)) = found {
+                    typed.push((node.start_byte(), attr_name, t, source));
+                }
+            }
         }
         let mut c = node.walk();
         for child in node.named_children(&mut c) {
             stack.push(child);
         }
+    }
+    typed.sort_by_key(|(at, ..)| *at);
+    for (_, field, t, source) in typed {
+        record_field_type(acc, class_id, field, &t, source);
     }
 }
 
@@ -2041,21 +2215,8 @@ fn emit_rhs_constructor_refs(
     module_id: NodeId,
     acc: &mut Acc,
 ) {
-    if rhs.kind() != "call" {
+    let Some(name) = rhs_callee_name(rhs, src) else {
         return;
-    }
-    let Some(func) = rhs.child_by_field_name("function") else {
-        return;
-    };
-    let name = match func.kind() {
-        "identifier" => text(func, src),
-        "attribute" => {
-            let Some(attr) = func.child_by_field_name("attribute") else {
-                return;
-            };
-            text(attr, src)
-        }
-        _ => return,
     };
     if is_type_noise(name) {
         return;
@@ -2066,6 +2227,218 @@ fn emit_rhs_constructor_refs(
         qualifier: CallQualifier::Bare(name.to_string()),
         category: edge_category::USES,
     });
+}
+
+/// The callee of a call RHS: `Target(...)` -> `Target`, `mod.Target(...)` ->
+/// `Target`; anything but a call on a name or dotted name -> `None`.
+fn rhs_callee_name<'a>(rhs: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    if rhs.kind() != "call" {
+        return None;
+    }
+    let func = rhs.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => Some(text(func, src)),
+        "attribute" => Some(text(func.child_by_field_name("attribute")?, src)),
+        _ => None,
+    }
+}
+
+/// LA.23a — the class a constructor-call RHS builds (`AuditLog()`,
+/// `audit.AuditLog()`), or `None` for a factory function (`make()`), a
+/// builtin (`dict()`) or anything that is not a call.
+fn constructor_type(rhs: TsNode, src: &[u8]) -> Option<FieldType> {
+    let name = rhs_callee_name(rhs, src).filter(|n| is_field_type_name(n))?;
+    let qualified = rhs
+        .child_by_field_name("function")
+        .is_some_and(|f| f.kind() == "attribute");
+    Some(FieldType {
+        name: name.to_string(),
+        qualified,
+    })
+}
+
+/// LA.23a — `__init__`'s annotated parameters, name -> declared type (through
+/// [`py_type_name`]), so `self.x = p` can take `p`'s type. Unannotated,
+/// `*args` / `**kwargs` and untypeable (`list[T]`, `int`) parameters are left
+/// out: an untyped parameter never types a field.
+fn collect_init_param_flow(def: TsNode, src: &[u8]) -> HashMap<String, FieldType> {
+    let mut out = HashMap::new();
+    let Some(params) = def.child_by_field_name("parameters") else {
+        return out;
+    };
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        let name = match p.kind() {
+            // `typed_parameter` has no `name` field: its one direct
+            // identifier is the name (the annotation sits under `type`);
+            // `*a: T` / `**k: T` carry a splat pattern instead and are skipped.
+            "typed_parameter" => {
+                let mut c = p.walk();
+                p.named_children(&mut c).find(|c| c.kind() == "identifier")
+            }
+            "typed_default_parameter" => p.child_by_field_name("name"),
+            _ => None,
+        };
+        if let Some(name) = name
+            && let Some(ty) = p.child_by_field_name("type")
+            && let Some(t) = py_type_name(ty, src)
+        {
+            out.insert(text(name, src).to_string(), t);
+        }
+    }
+    out
+}
+
+/// LA.23a — the one class a field annotation names, or `None` when it names
+/// none or several:
+///
+/// ```text
+/// UserRepo / repo.UserRepo                  -> UserRepo
+/// Optional[UserRepo] / typing.Optional[...]  -> UserRepo   (generic_type / subscript)
+/// Union[UserRepo, None]                      -> UserRepo
+/// UserRepo | None / None | UserRepo          -> UserRepo   (binary_operator)
+/// "UserRepo" / "Optional[UserRepo]"          -> UserRepo   (forward reference)
+/// list[UserRepo] / int / Any / factory       -> None
+/// ```
+///
+/// The name passes [`is_field_type_name`]: capitalised and not typing sugar.
+/// `qualified` marks the dotted spellings (`repo.UserRepo`, `"pkg.X"`).
+fn py_type_name(ty: TsNode, src: &[u8]) -> Option<FieldType> {
+    let (name, qualified) = match ty.kind() {
+        // The `type` wrapper every annotation field holds.
+        "type" => return py_type_name(ty.named_child(0)?, src),
+        "identifier" => (text(ty, src), false),
+        "attribute" => (text(ty.child_by_field_name("attribute")?, src), true),
+        "generic_type" => {
+            // `Optional[X]` → (identifier) (type_parameter (type X))
+            let head = ty.named_child(0)?;
+            let args = ty.named_child(1)?;
+            let mut c = args.walk();
+            let members: Vec<TsNode> = args.named_children(&mut c).collect();
+            return optional_member(text(head, src), &members, src);
+        }
+        "subscript" => {
+            // `typing.Optional[X]` → subscript value: (attribute) subscript: X
+            let head = ty.child_by_field_name("value")?;
+            let head = match head.kind() {
+                "identifier" => head,
+                "attribute" => head.child_by_field_name("attribute")?,
+                _ => return None,
+            };
+            let mut c = ty.walk();
+            let members: Vec<TsNode> = ty.children_by_field_name("subscript", &mut c).collect();
+            return optional_member(text(head, src), &members, src);
+        }
+        "binary_operator" => {
+            let op = ty.child_by_field_name("operator")?;
+            if text(op, src) != "|" {
+                return None;
+            }
+            let members = [
+                ty.child_by_field_name("left")?,
+                ty.child_by_field_name("right")?,
+            ];
+            return single_non_none(&members, src);
+        }
+        "union_type" => {
+            let mut c = ty.walk();
+            let members: Vec<TsNode> = ty.named_children(&mut c).collect();
+            return single_non_none(&members, src);
+        }
+        "string" => return py_type_name_text(&strip_string_quotes(text(ty, src))),
+        _ => return None,
+    };
+    is_field_type_name(name).then(|| FieldType {
+        name: name.to_string(),
+        qualified,
+    })
+}
+
+/// `Optional[..]` with one member, or `Union[..]` with exactly one non-`None`
+/// member -> that member's type; any other subscripted head (`list[T]`,
+/// `Dict[K, V]`) is a container, not the field's class -> `None`.
+fn optional_member(head: &str, members: &[TsNode], src: &[u8]) -> Option<FieldType> {
+    match (head, members) {
+        ("Optional", [one]) => py_type_name(*one, src),
+        ("Union", _) => single_non_none(members, src),
+        _ => None,
+    }
+}
+
+/// The type of the one member of a union that is not `None`.
+fn single_non_none(members: &[TsNode], src: &[u8]) -> Option<FieldType> {
+    let is_none = |n: &TsNode| {
+        n.kind() == "none"
+            || (n.kind() == "type" && n.named_child(0).is_some_and(|c| c.kind() == "none"))
+    };
+    match members
+        .iter()
+        .filter(|n| !is_none(n))
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [one] => py_type_name(**one, src),
+        _ => None,
+    }
+}
+
+/// [`py_type_name`] over the text of a string (forward-reference) annotation,
+/// which tree-sitter leaves unparsed: the same shapes, read textually.
+fn py_type_name_text(s: &str) -> Option<FieldType> {
+    let s = s.trim();
+    if let Some(open) = s.find('[')
+        && let Some(inner) = s[open + 1..].strip_suffix(']')
+    {
+        let head = s[..open].trim();
+        let head = head.rsplit('.').next().unwrap_or(head);
+        return match head {
+            "Optional" => py_type_name_text(inner),
+            "Union" => {
+                let members: Vec<&str> = inner
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|m| *m != "None")
+                    .collect();
+                match members.as_slice() {
+                    [one] => py_type_name_text(one),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+    }
+    if s.contains('|') {
+        let members: Vec<&str> = s
+            .split('|')
+            .map(str::trim)
+            .filter(|m| *m != "None")
+            .collect();
+        return match members.as_slice() {
+            [one] => py_type_name_text(one),
+            _ => None,
+        };
+    }
+    if s.is_empty()
+        || !s
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    {
+        return None;
+    }
+    let name = s.rsplit('.').next().unwrap_or(s);
+    is_field_type_name(name).then(|| FieldType {
+        name: name.to_string(),
+        qualified: name != s,
+    })
+}
+
+/// LA.23a — a name that can type a field: capitalised (Python classes are
+/// CapWords; `make` / `dict` / `datetime` are not project classes) and not a
+/// builtin or typing wrapper ([`is_type_noise`]).
+fn is_field_type_name(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !is_type_noise(name)
 }
 
 /// Tokens we don't want to churn the unresolved-refs list with. Python
@@ -3701,5 +4074,144 @@ class Field:
             "svc::ItemService::__init__",
         );
         assert_eq!(injects_from(&parse, init_id), vec!["get_db".to_string()]);
+    }
+
+    // ---- LA.23a: field types for receiver-typed calls ----------------------
+
+    /// The `field -> type` map the parse recorded for class `qname`.
+    fn field_types(parse: &FileParse, qname: &str) -> Vec<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname);
+        let mut out: Vec<(String, String)> = parse
+            .nav
+            .field_types
+            .get(&id)
+            .map(|m| m.iter().map(|(f, t)| (f.clone(), t.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn field_types_record_every_form_and_skip_untyped_params() {
+        // The py-field-dispatch fixture's four forms plus its untyped decoy.
+        let src = "class UserService:\n    audit: AuditLog\n\n    def __init__(self, repo: UserRepo, cache):\n        self.repo = repo\n        self.cache = cache\n        self.log = AuditLog()\n        self.other: UserRepo = make()\n";
+        let parse = parse_file(src, "svc.py", "svc", repo()).unwrap();
+        assert_eq!(
+            field_types(&parse, "svc::UserService"),
+            pairs(&[
+                ("audit", "AuditLog"),
+                ("log", "AuditLog"),
+                ("other", "UserRepo"),
+                ("repo", "UserRepo"),
+            ]),
+            "`self.cache = cache` has no annotated param: it must stay untyped"
+        );
+    }
+
+    #[test]
+    fn field_types_read_class_level_annotations_and_constructors() {
+        // dataclass / pydantic shapes: annotated class attributes, a default
+        // constructor, a qualified type; a factory call types nothing.
+        let src = "class Order:\n    repo: repo.OrderRepo\n    cache = Cache()\n    made = make_it()\n    count: int = 0\n    __slots__ = ()\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(
+            field_types(&parse, "m::Order"),
+            pairs(&[("cache", "Cache"), ("repo", "OrderRepo")])
+        );
+    }
+
+    #[test]
+    fn field_types_unwrap_optional_union_and_string_annotations() {
+        let src = "class S:\n    a: Optional[A]\n    b: B | None\n    c: \"C\"\n    d: typing.Optional[D]\n    e: None | E\n    f: Union[F, None]\n    g: Optional[\"G\"]\n    h: \"Optional[H]\"\n    i: \"I | None\"\n    j: list[J]\n    k: Union[K, L]\n    m: Dict[str, M]\n    n: Any\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(
+            field_types(&parse, "m::S"),
+            pairs(&[
+                ("a", "A"),
+                ("b", "B"),
+                ("c", "C"),
+                ("d", "D"),
+                ("e", "E"),
+                ("f", "F"),
+                ("g", "G"),
+                ("h", "H"),
+                ("i", "I"),
+            ]),
+            "containers, two-class unions and typing sugar name no single class"
+        );
+    }
+
+    #[test]
+    fn field_types_skip_builtin_and_lowercase_types() {
+        let src = "class S:\n    name: str\n    tags: List[str]\n    when: datetime\n    def __init__(self, n: int, d: dict, when: datetime):\n        self.n = n\n        self.d = d\n        self.when2 = when\n        self.raw = dict()\n        self.log = logging.getLogger()\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(field_types(&parse, "m::S"), Vec::new());
+    }
+
+    #[test]
+    fn field_types_outside_init_record_nothing() {
+        // Re-binding a field in an ordinary method makes its type ambiguous.
+        let src = "class S:\n    def setup(self, repo: UserRepo):\n        self.repo = repo\n        self.log = AuditLog()\n        self.other: UserRepo = make()\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(field_types(&parse, "m::S"), Vec::new());
+    }
+
+    #[test]
+    fn field_types_prefer_annotation_then_param_then_constructor() {
+        // Class-level annotation beats the __init__ constructor; a parameter
+        // flow beats a constructor whichever comes first; the first of two
+        // same-strength writers wins.
+        let src = "class S:\n    audit: AuditLog\n    def __init__(self, repo: UserRepo, alt: AltRepo, *args: Extra, **kw: Extra):\n        self.audit = FileAudit()\n        self.repo = CachedRepo()\n        self.repo = repo\n        self.two = First()\n        self.two = Second()\n        self.alt = alt\n        self.alt: Pinned = alt\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(
+            field_types(&parse, "m::S"),
+            pairs(&[
+                ("alt", "Pinned"),
+                ("audit", "AuditLog"),
+                ("repo", "UserRepo"),
+                ("two", "First"),
+            ])
+        );
+    }
+
+    #[test]
+    fn field_types_default_typed_param_flows() {
+        let src = "class S:\n    def __init__(self, repo: Optional[UserRepo] = None, n: int = 3):\n        self.repo = repo\n        self.n = n\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(field_types(&parse, "m::S"), pairs(&[("repo", "UserRepo")]));
+    }
+
+    #[test]
+    fn field_types_refuse_a_qualified_type_that_names_a_class_of_this_file() {
+        // anyio's shape: a wrapper class holding the same-named class of
+        // another module. A bare-name bind would make every delegating call a
+        // self-call. A qualified name no local class shadows still records.
+        let src = "import trio\nfrom . import models\n\nclass Holder:\n    ev: trio.Event\n    repo: models.UserRepo\n\nclass Process:\n    _process: trio.Process\n    def __init__(self):\n        self._lock = trio.Lock()\n        self._repo = models.UserRepo()\n\n@final\nclass Event:\n    pass\n\nclass Lock:\n    pass\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(
+            field_types(&parse, "m::Holder"),
+            pairs(&[("repo", "UserRepo")])
+        );
+        assert_eq!(
+            field_types(&parse, "m::Process"),
+            pairs(&[("_repo", "UserRepo")])
+        );
+    }
+
+    #[test]
+    fn field_types_refused_qualified_type_still_outranks_weaker_writers() {
+        // The class-level constructor records local `Lock`; the stronger
+        // `__init__` annotation names trio's Lock, so the field ends untyped
+        // rather than keeping the weaker (wrong) type. The class-level
+        // annotation on `b` likewise keeps the weaker constructor out.
+        let src = "import trio\n\nclass Lock:\n    pass\n\nclass S:\n    a = Lock()\n    b: trio.Lock\n    def __init__(self):\n        self.a: trio.Lock = trio.Lock()\n        self.b = Lock()\n";
+        let parse = parse_file(src, "m.py", "m", repo()).unwrap();
+        assert_eq!(field_types(&parse, "m::S"), Vec::new());
     }
 }

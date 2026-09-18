@@ -1,0 +1,45 @@
+{
+  "framework": "py-field-dispatch",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "python/calls"
+  ],
+  "expect_edges": [
+    {
+      "from": "UserService::get",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "self.repo.find: `self.repo = repo` with `repo: UserRepo` in __init__"
+    },
+    {
+      "from": "UserService::get",
+      "to": "AuditLog::write",
+      "category": "CALLS",
+      "note": "self.audit.write: class-level annotation `audit: AuditLog`"
+    },
+    {
+      "from": "UserService::log_it",
+      "to": "AuditLog::write",
+      "category": "CALLS",
+      "note": "self.log.write: `self.log = AuditLog()`"
+    },
+    {
+      "from": "UserService::other_find",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "self.other.find: `self.other: UserRepo = make()`"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "svc::UserService::get",
+      "to": "repo::Cache::find",
+      "category": "CALLS",
+      "note": "`self.cache = cache` has no type: must not bind to the unrelated Cache.find"
+    }
+  ],
+  "note": "LA.23a. Baseline HEAD: the only CALLS edges are the constructor calls (`__init__ -> AuditLog`, `make -> UserRepo`); all four field-typed calls are missing."
+}
