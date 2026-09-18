@@ -24,6 +24,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, HitExtras, canonical_http_path, client_url_split, join_path,
@@ -85,6 +86,7 @@ pub fn parse_file(
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         if child.kind() == "type_declaration" {
+            acc.gorm.tagged |= has_gorm_tag(child, src);
             collect_types(
                 child,
                 src,
@@ -167,6 +169,15 @@ pub fn parse_file(
             forms.pattern
         );
     }
+    let gorm = &acc.gorm;
+    if !gorm.models.is_empty() || !gorm.tables.is_empty() {
+        eprintln!(
+            "[orm-gorm] models={} table_cells={} tables={} in {file_rel_path}",
+            gorm.models.len(),
+            gorm.table_cells,
+            gorm.tables.len()
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -230,6 +241,31 @@ struct Acc {
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
     route_forms: RouteFormCounts,
+    /// A13.12: this file's GORM evidence and the `[orm-gorm]` marker counters.
+    gorm: GormFile,
+}
+
+/// A13.12: what one Go file shows of GORM. The two evidence flags gate the
+/// detectors, because `.Model(` / `.Table(` / `TableName()` are generic names
+/// outside a GORM file; the sets and count feed the `[orm-gorm]` marker.
+#[derive(Default)]
+struct GormFile {
+    /// The file imports `gorm.io/gorm` or `github.com/jinzhu/gorm`. Gates the
+    /// query sites and the `TableName()` declaration. Set by `record_import`,
+    /// which runs before any function body is walked (Go requires imports
+    /// before every other declaration).
+    import: bool,
+    /// A top-level struct in this file carries a `gorm:"…"` field tag. A pure
+    /// model file often imports nothing, so this also gates the `TableName()`
+    /// declaration (never a query site). Set in the first (types) pass.
+    tagged: bool,
+    /// Distinct model names this file keys an entity on: query-site models
+    /// plus `TableName()` receivers. Only counted, never iterated.
+    models: std::collections::HashSet<String>,
+    /// `TableName()` table cells emitted.
+    table_cells: usize,
+    /// Distinct `.Table("x")` literals. Only counted, never iterated.
+    tables: std::collections::HashSet<String>,
 }
 
 /// LA.32a: per-file route registration counters. `registrations` counts
@@ -548,6 +584,10 @@ fn visit_method(
         confidence: Confidence::Strong,
     });
 
+    if name == "TableName" {
+        try_emit_gorm_table_name(decl, &receiver_type, src, repo, acc);
+    }
+
     if let Some(body) = decl.child_by_field_name("body") {
         collect_calls_in(body, src, id, receiver_var.as_deref(), repo, file_rel, acc);
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
@@ -652,6 +692,14 @@ fn record_import(
     // Strip the surrounding quotes.
     let raw = text_of(path_node, src);
     let path_str = raw.trim_matches('"').to_string();
+
+    // A13.12: a GORM import (not a blank one, which binds no `*gorm.DB`) turns
+    // on the GORM query-site and `TableName()` detectors for this file.
+    if matches!(path_str.as_str(), "gorm.io/gorm" | "github.com/jinzhu/gorm")
+        && alias.as_deref() != Some("_")
+    {
+        acc.gorm.import = true;
+    }
 
     // A7.6: remember which local name binds a DI container package. Blank and
     // dot imports bind no selector base, so they are skipped.
@@ -777,6 +825,9 @@ fn collect_calls_in(
             // cross-cutting data-entities extractor; this adds the fine-grained
             // fn→table attribution the DbResolver / call-site queries want.
             try_detect_go_data_access(child, src, from, repo, acc);
+            // GORM: `db.Model(&User{})` → the model-keyed entity,
+            // `db.Table("x")` → the table-keyed one, from the same `from` (A13.12).
+            try_detect_gorm_access(child, src, from, repo, acc);
             // DI container registration: `wire.Build(NewA, NewB)` → INJECTS
             // from the injector (`from`) to each provider (A7.6).
             try_detect_go_provider_set(child, src, from, acc);
@@ -1198,9 +1249,12 @@ fn try_detect_go_data_access(
 
 /// Emit (once per enclosing-fn × table) a DATA_ENTITY node + ACCESSES_DATA edge.
 /// The node mirrors the data-entities extractor so ids collapse at graph build.
+///
+/// `table` is the entity's key: a SQL / `.Table("x")` table name, or a GORM
+/// model name on the model-keyed path (A13.1's identity rule). Either way the
+/// nav name is the key itself, so a model-keyed entity is named after its model.
 fn emit_data_access(table: &str, from: NodeId, repo: RepoId, acc: &mut Acc) {
-    let qname = format!("data_entity:sql:{table}");
-    let entity_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    let (qname, entity_id) = sql_entity(table, repo);
     if !acc.data_access_seen.insert((from, entity_id)) {
         return;
     }
@@ -1218,6 +1272,222 @@ fn emit_data_access(table: &str, from: NodeId, repo: RepoId, acc: &mut Acc) {
         category: edge_category::ACCESSES_DATA,
         confidence: Confidence::Medium,
     });
+}
+
+/// The `data_entity:sql:<key>` qname and id — the one construction site shared
+/// by the raw-SQL path, the GORM query sites and the `TableName()` declaration,
+/// so every one of them lands on the same node as the data-entities extractor.
+fn sql_entity(key: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{key}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+// ============================================================================
+// GORM (A13.12)
+// ============================================================================
+//
+// A GORM service issues no SQL strings, so the raw-SQL scan above sees none of
+// its data access. Per A13.1's ORM identity rule a model is keyed on its MODEL
+// name, `data_entity:sql:User` — the one token a query site in any file can
+// name. `db.Model(&User{})` and the CRUD finishers given a `User` literal
+// target that id; `db.Table("x")` names a table directly and stays table-keyed
+// like raw SQL. A `func (User) TableName() string { return "app_users" }`
+// override emits the model's entity at the declaration site with a table cell,
+// which stacks onto the query sites' node at graph build, and DbResolver joins
+// it to `app_users`. Without an override its fold joins `User` to `users`.
+
+/// GORM chain methods whose argument #0, when it is a composite literal
+/// (`&User{}`, `User{Name: n}`, `&[]User{}`) or `new(User)`, names the model
+/// they read or write. A variable argument (`db.Create(&u)`) carries no type
+/// the parser can see and is skipped.
+const GORM_MODEL_ARG_METHODS: &[&str] = &[
+    "Model",
+    "Create",
+    "Save",
+    "Delete",
+    "First",
+    "Last",
+    "Take",
+    "Find",
+    "FirstOrCreate",
+    "FirstOrInit",
+    "Updates",
+];
+
+/// Detect a GORM query call in a file that imports GORM and emit an
+/// ACCESSES_DATA edge from `from` (the enclosing fn) through `emit_data_access`,
+/// so the node id, dedupe and edge match the raw-SQL path. `AutoMigrate`
+/// names a model in every argument; the other model methods in argument #0.
+fn try_detect_gorm_access(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc: &mut Acc) {
+    if !acc.gorm.import {
+        return;
+    }
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    if func.kind() != "selector_expression" {
+        return;
+    }
+    let (Some(field), Some(args)) = (
+        func.child_by_field_name("field"),
+        call.child_by_field_name("arguments"),
+    ) else {
+        return;
+    };
+    let method = text_of(field, src);
+    let mut cursor = args.walk();
+    let mut named = args.named_children(&mut cursor).filter(|a| a.kind() != "comment");
+    if method == "Table" {
+        // `db.Table("users u")` / `db.Table("public.users")`: the table is the
+        // first word, normalised like a raw-SQL table so the two collapse. A
+        // subquery (`"(?) as u"`) is no identifier and is dropped.
+        let Some(table) = named
+            .next()
+            .and_then(|a| string_literal_text(a, src))
+            .and_then(|lit| lit.split_whitespace().next().and_then(canonical_sql_table))
+        else {
+            return;
+        };
+        emit_data_access(&table, from, repo, acc);
+        acc.gorm.tables.insert(table);
+        return;
+    }
+    let models: Vec<String> = if method == "AutoMigrate" {
+        named.filter_map(|a| gorm_model_arg(a, src)).collect()
+    } else if GORM_MODEL_ARG_METHODS.contains(&method) {
+        named.next().and_then(|a| gorm_model_arg(a, src)).into_iter().collect()
+    } else {
+        return;
+    };
+    for model in models {
+        emit_data_access(&model, from, repo, acc);
+        acc.gorm.models.insert(model);
+    }
+}
+
+/// The model a GORM argument names: `&User{}`, `User{..}`, `&[]User{}`,
+/// `models.User{}` or `new(User)` → `User`. Anything else (a variable, a map
+/// literal, an anonymous struct) names no model.
+fn gorm_model_arg(arg: TsNode, src: &[u8]) -> Option<String> {
+    let literal = match arg.kind() {
+        "unary_expression" => {
+            let op = arg.child_by_field_name("operator")?;
+            if text_of(op, src) != "&" {
+                return None;
+            }
+            arg.child_by_field_name("operand")?
+        }
+        "call_expression" => {
+            // `new(User)` — the argument parses as an expression or a type.
+            let func = arg.child_by_field_name("function")?;
+            if func.kind() != "identifier" || text_of(func, src) != "new" {
+                return None;
+            }
+            let args = arg.child_by_field_name("arguments")?;
+            let ty = args.named_child(0)?;
+            return match ty.kind() {
+                "identifier" => Some(text_of(ty, src).to_string()),
+                "selector_expression" => {
+                    Some(text_of(ty.child_by_field_name("field")?, src).to_string())
+                }
+                _ => gorm_model_type_name(ty, src),
+            };
+        }
+        _ => arg,
+    };
+    if literal.kind() != "composite_literal" {
+        return None;
+    }
+    gorm_model_type_name(literal.child_by_field_name("type")?, src)
+}
+
+/// The bare model name of a composite literal's type: `User`, `pkg.User`,
+/// `*User`, `[]User` / `[]*User` → `User`. Maps, arrays, generics and
+/// anonymous structs name no model.
+fn gorm_model_type_name(ty: TsNode, src: &[u8]) -> Option<String> {
+    let name = match ty.kind() {
+        "type_identifier" => text_of(ty, src),
+        "qualified_type" => text_of(ty.child_by_field_name("name")?, src),
+        "pointer_type" => return gorm_model_type_name(ty.named_child(0)?, src),
+        "slice_type" => return gorm_model_type_name(ty.child_by_field_name("element")?, src),
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `func (User) TableName() string { return "app_users" }` in a file with GORM
+/// evidence: emit the model-keyed `data_entity:sql:User` carrying the declared
+/// table as a `data_entity::table_cell`. The node stacks onto the query sites'
+/// node (same id) at graph build, in whichever file they live. A body that is
+/// anything but one string-literal return (a computed or tenant-prefixed name)
+/// declares no fixed table and emits nothing.
+fn try_emit_gorm_table_name(decl: TsNode, model: &str, src: &[u8], repo: RepoId, acc: &mut Acc) {
+    if !(acc.gorm.import || acc.gorm.tagged) || model.is_empty() {
+        return;
+    }
+    let (Some(params), Some(result), Some(body)) = (
+        decl.child_by_field_name("parameters"),
+        decl.child_by_field_name("result"),
+        decl.child_by_field_name("body"),
+    ) else {
+        return;
+    };
+    if params.named_child_count() != 0 || text_of(result, src) != "string" {
+        return;
+    }
+    let Some(table) = single_string_return(body, src) else {
+        return;
+    };
+    let table = table.trim();
+    if table.is_empty() {
+        return;
+    }
+    let (qname, entity_id) = sql_entity(model, repo);
+    acc.nodes.push(Node {
+        id: entity_id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: vec![data_entity::table_cell(table, data_entity::orm::GORM)],
+    });
+    acc.nav
+        .record(entity_id, model, &qname, node_kind::DATA_ENTITY, None);
+    acc.gorm.models.insert(model.to_string());
+    acc.gorm.table_cells += 1;
+}
+
+/// The string literal of a block whose only statement is `return "<lit>"`.
+fn single_string_return(body: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = body.walk();
+    let list = body
+        .named_children(&mut cursor)
+        .find(|n| n.kind() == "statement_list")?;
+    let mut cursor = list.walk();
+    let mut stmts = list.named_children(&mut cursor).filter(|n| n.kind() != "comment");
+    let ret = stmts.next()?;
+    if stmts.next().is_some() || ret.kind() != "return_statement" {
+        return None;
+    }
+    let exprs = ret.named_child(0)?;
+    if exprs.kind() != "expression_list" || exprs.named_child_count() != 1 {
+        return None;
+    }
+    string_literal_text(exprs.named_child(0)?, src)
+}
+
+/// True when `node` (a top-level `type_declaration`) holds a struct field whose
+/// tag carries a `gorm:"…"` key — the GORM evidence of a model file that
+/// imports nothing.
+fn has_gorm_tag(node: TsNode, src: &[u8]) -> bool {
+    if node.kind() == "field_declaration"
+        && node
+            .child_by_field_name("tag")
+            .is_some_and(|tag| text_of(tag, src).contains("gorm:\""))
+    {
+        return true;
+    }
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).any(|c| has_gorm_tag(c, src))
 }
 
 /// True when `s` contains an unambiguous SQL statement signature. Mirrors the
@@ -2385,6 +2655,181 @@ func log(l *Logger) {
                 .any(|e| e.category == edge_category::ACCESSES_DATA),
             "non-SQL string must not mint ACCESSES_DATA"
         );
+    }
+
+    // ========================================================================
+    // GORM (A13.12) — model-keyed entities, TableName() table cells
+    // ========================================================================
+
+    fn sql_entity_id(key: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            &format!("data_entity:sql:{key}"),
+        )
+    }
+
+    fn access_targets(parse: &FileParse, from: NodeId) -> Vec<NodeId> {
+        parse
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::ACCESSES_DATA)
+            .map(|e| e.to)
+            .collect()
+    }
+
+    fn table_cells_of(parse: &FileParse, id: NodeId) -> Vec<String> {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| data_entity::table_of(std::slice::from_ref(c)))
+            .collect()
+    }
+
+    #[test]
+    fn gorm_model_arg_targets_model_entity() {
+        const SRC: &str = r#"package store
+
+import "gorm.io/gorm"
+
+func ListUsers(db *gorm.DB) ([]User, error) {
+    var us []User
+    err := db.Model(&User{}).Find(&us).Error
+    return us, err
+}
+
+func Purge(db *gorm.DB) {
+    db.Where("stale = ?", true).Delete(models.Order{})
+    db.First(new(Invoice))
+    db.AutoMigrate(&Account{}, &[]Ledger{})
+}
+"#;
+        let parse = parse_file(SRC, "store.go", "store", "", repo()).unwrap();
+        let list = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::ListUsers");
+        let user = sql_entity_id("User");
+        assert_eq!(access_targets(&parse, list), vec![user], "model-keyed, from the enclosing fn");
+        assert_eq!(parse.nav.name_by_id.get(&user).map(String::as_str), Some("User"));
+        assert!(table_cells_of(&parse, user).is_empty(), "a query site never knows the table");
+
+        let purge = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::Purge");
+        let got: std::collections::HashSet<NodeId> =
+            access_targets(&parse, purge).into_iter().collect();
+        let want: std::collections::HashSet<NodeId> = ["Order", "Invoice", "Account", "Ledger"]
+            .iter()
+            .map(|m| sql_entity_id(m))
+            .collect();
+        assert_eq!(got, want, "value literal, qualified type, new(T), AutoMigrate's every arg");
+    }
+
+    #[test]
+    fn tablename_method_emits_table_cell() {
+        const SRC: &str = r#"package store
+
+import "gorm.io/gorm"
+
+type User struct {
+    gorm.Model
+    Email string
+}
+
+func (User) TableName() string { return "app_users" }
+
+func (*Order) TableName() string {
+    // the legacy name
+    return `legacy_orders`
+}
+
+func (t Tenant) TableName() string { return t.prefix + "_tenants" }
+"#;
+        let parse = parse_file(SRC, "model.go", "store", "", repo()).unwrap();
+        assert_eq!(table_cells_of(&parse, sql_entity_id("User")), vec!["app_users"]);
+        assert_eq!(table_cells_of(&parse, sql_entity_id("Order")), vec!["legacy_orders"]);
+        let cell = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == sql_entity_id("User"))
+            .and_then(|n| n.cells.first())
+            .unwrap();
+        let CellPayload::Json(raw) = &cell.payload else {
+            panic!("table cell must be JSON");
+        };
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(v["orm"], data_entity::orm::GORM);
+        assert!(
+            !parse.nodes.iter().any(|n| n.id == sql_entity_id("Tenant")),
+            "a computed TableName() declares no fixed table"
+        );
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA),
+            "a declaration is not an access"
+        );
+    }
+
+    #[test]
+    fn tablename_in_tag_only_model_file_emits_table_cell() {
+        // A pure model file imports nothing; its `gorm:"…"` tags are the evidence.
+        const TAGGED: &str = "package store\n\ntype User struct {\n    ID uint `gorm:\"primaryKey\"`\n}\n\nfunc (User) TableName() string { return \"app_users\" }\n";
+        let parse = parse_file(TAGGED, "model.go", "store", "", repo()).unwrap();
+        assert_eq!(table_cells_of(&parse, sql_entity_id("User")), vec!["app_users"]);
+
+        // No import, no tag: `TableName()` is just a method name.
+        const PLAIN: &str = "package report\n\ntype Sheet struct{ Title string }\n\nfunc (Sheet) TableName() string { return \"sheet\" }\n";
+        let parse = parse_file(PLAIN, "sheet.go", "report", "", repo()).unwrap();
+        assert!(!parse.nodes.iter().any(|n| n.id == sql_entity_id("Sheet")));
+    }
+
+    #[test]
+    fn gorm_table_literal_is_table_keyed() {
+        const SRC: &str = r#"package store
+
+import "github.com/jinzhu/gorm"
+
+func Count(db *gorm.DB) {
+    db.Table("public.deleted_users u").Count(&n)
+    db.Table("(?) as sub", q).Scan(&rows)
+}
+"#;
+        let parse = parse_file(SRC, "count.go", "store", "", repo()).unwrap();
+        let count = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "store::Count");
+        assert_eq!(
+            access_targets(&parse, count),
+            vec![sql_entity_id("deleted_users")],
+            "schema and alias stripped like raw SQL; a subquery names no table"
+        );
+    }
+
+    #[test]
+    fn non_composite_model_arg_emits_nothing() {
+        const GORM: &str = r#"package store
+
+import "gorm.io/gorm"
+
+func Update(db *gorm.DB, u *User, cfg Config) {
+    db.Model(u).Update("name", "x")
+    db.Create(&u)
+    x.Model(cfg)
+    db.Updates(map[string]any{"a": 1})
+}
+"#;
+        let parse = parse_file(GORM, "update.go", "store", "", repo()).unwrap();
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA),
+            "a variable argument carries no model type"
+        );
+
+        // Without a GORM import, `.Model(&T{})` is somebody else's method.
+        const NO_IMPORT: &str = r#"package view
+
+func Render(t *Template) {
+    t.Model(&Page{})
+    t.Table("rows")
+}
+"#;
+        let parse = parse_file(NO_IMPORT, "view.go", "view", "", repo()).unwrap();
+        assert!(!parse.edges.iter().any(|e| e.category == edge_category::ACCESSES_DATA));
     }
 
     #[test]

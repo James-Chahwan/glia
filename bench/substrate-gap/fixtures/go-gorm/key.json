@@ -1,0 +1,19 @@
+{
+  "framework": "go-gorm",
+  "language": "go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "model-keyed entity; the TableName() file and the query file share one id"},
+    {"kind": "FUNCTION", "name": "ListUsers", "note": "accessor"}
+  ],
+  "expect_edges": [
+    {"from": "ListUsers", "to": "User", "category": "ACCESSES_DATA", "note": "db.Model(&User{}) in another file than the model"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "app_users", "note": "TableName() override rides a table cell at the declaration site"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "max_nodes": 1, "note": "declaration and query site are ONE model-keyed node; a table-keyed second id would orphan the query"}
+  ],
+  "note": "A13.12: GORM db.Model(&T{}) + TableName(). Go stays model-keyed (A13.1 identity rule); the declared table rides a CODE table cell {table, orm: gorm}."
+}
