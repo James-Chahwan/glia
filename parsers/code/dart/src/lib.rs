@@ -47,6 +47,16 @@ pub fn parse_file(
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
     scan_dart_routes(source, repo, &mut acc);
 
+    // LA.34 fired_on marker: this file had an unqualified call that Dart's
+    // lexical scope decided (a class member or a local binding).
+    let s = &acc.bare_calls;
+    if s.self_calls + s.local_skip > 0 {
+        eprintln!(
+            "[dart-calls] self={} bare={} local_skip={} file={file_rel_path}",
+            s.self_calls, s.bare, s.local_skip
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -69,6 +79,19 @@ struct Acc {
     /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
     /// (method, path) even if the same endpoint is called twice in a file.
     endpoint_seen: HashSet<NodeId>,
+    /// LA.34: how this file's unqualified calls inside class members were
+    /// classified, for the `[dart-calls]` marker.
+    bare_calls: BareCallStats,
+}
+
+#[derive(Default)]
+struct BareCallStats {
+    /// `<id>(..)` naming a member of the enclosing class -> SelfMethod.
+    self_calls: usize,
+    /// `<id>(..)` naming nothing the class or the member binds -> Bare.
+    bare: usize,
+    /// `<id>(..)` naming a parameter or local -> no call site.
+    local_skip: usize,
 }
 
 fn visit_top(
@@ -140,10 +163,13 @@ fn visit_class(
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
         if child.kind() == "class_body" {
+            // LA.34: the names this class declares, which an unqualified call
+            // in any of its members reaches before library scope.
+            let members = class_member_names(child, src);
             let mut c2 = child.walk();
             for member in child.named_children(&mut c2) {
                 if member.kind() == "class_member" {
-                    visit_class_member(member, src, file_rel, &qname, id, repo, acc);
+                    visit_class_member(member, src, file_rel, &qname, id, &members, repo, acc);
                 }
             }
             // LA.23e: declared / constructor-initialised field types, for
@@ -222,12 +248,16 @@ fn emit_heritage_ref(
     });
 }
 
+/// `members` is the enclosing class's [`class_member_names`], which LA.34
+/// needs to classify the member body's unqualified calls.
+#[allow(clippy::too_many_arguments)]
 fn visit_class_member(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    members: &HashSet<String>,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -236,11 +266,14 @@ fn visit_class_member(
     // mints no node, and attributing its calls to `acc.nodes.last()` (the
     // previous member, or an ENDPOINT it pushed) would mint wrong CALLS edges.
     let mut own_method: Option<NodeId> = None;
+    // LA.34: the signature that declared it, whose parameters are locals.
+    let mut own_signature: Option<TsNode> = None;
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
         if child.kind() == "method_signature"
             && let Some(name) = find_method_name(child, src)
         {
+            own_signature = Some(child);
             let qname = format!("{parent_qname}::{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
             acc.nodes.push(Node {
@@ -263,12 +296,19 @@ fn visit_class_member(
             // A body without its own METHOD keeps the pre-LA.23e source for
             // Pattern A endpoints (`acc.nodes.last()`), unchanged, and emits
             // no call sites.
-            let (from, call_sites) = match own_method {
-                Some(id) => (Some(id), true),
-                None => (acc.nodes.last().map(|n| n.id), false),
-            };
-            if let Some(from) = from {
-                collect_calls_in(child, src, from, call_sites, repo, file_rel, acc);
+            match own_method {
+                Some(from) => {
+                    let scope = CallScope {
+                        members,
+                        locals: local_names(own_signature, child, src),
+                    };
+                    collect_calls_in(child, src, from, Some(&scope), repo, file_rel, acc);
+                }
+                None => {
+                    if let Some(from) = acc.nodes.last().map(|n| n.id) {
+                        collect_calls_in(child, src, from, None, repo, file_rel, acc);
+                    }
+                }
             }
         }
     }
@@ -487,14 +527,16 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     });
 }
 
-/// Walk a body for Pattern A endpoints and, when `call_sites` is set, the
-/// receiver call sites of every selector chain in it (LA.23e). Nested
-/// closures and local functions are not entered.
+/// Walk a body for Pattern A endpoints and, when a `scope` is given, the
+/// call sites of every selector chain in it (LA.23e), its unqualified calls
+/// classified by that scope (LA.34). `None` (a body with no METHOD of its
+/// own) emits no call site. Nested closures and local functions are not
+/// entered.
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
     from: NodeId,
-    call_sites: bool,
+    scope: Option<&CallScope>,
     repo: RepoId,
     file_rel: &str,
     acc: &mut Acc,
@@ -504,8 +546,8 @@ fn collect_calls_in(
         // Pattern A: client HTTP call (`dio.get('/x')`) → ENDPOINT node so the
         // HttpStackResolver can pair it with a server ROUTE.
         try_detect_dart_endpoint(n, src, from, repo, file_rel, acc);
-        if call_sites {
-            push_selector_chain_calls(n, src, from, acc);
+        if let Some(scope) = scope {
+            push_selector_chain_calls(n, src, from, scope, acc);
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -582,8 +624,16 @@ fn selector_part<'a>(sel: TsNode<'a>, src: &'a [u8]) -> SelectorPart<'a> {
 }
 
 /// Emit the call sites of every `identifier` / `this` primary among `n`'s
-/// children that is followed by one or more `selector` siblings.
-fn push_selector_chain_calls(n: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+/// children that is followed by one or more `selector` siblings. An
+/// unqualified call goes through `scope` (LA.34): it may become a
+/// SelfMethod, or no call site at all.
+fn push_selector_chain_calls(
+    n: TsNode,
+    src: &[u8],
+    from: NodeId,
+    scope: &CallScope,
+    acc: &mut Acc,
+) {
     let mut cursor = n.walk();
     let kids: Vec<TsNode> = n.children(&mut cursor).collect();
     let mut i = 0;
@@ -600,7 +650,9 @@ fn push_selector_chain_calls(n: TsNode, src: &[u8], from: NodeId, acc: &mut Acc)
             .collect();
         i += 1 + selectors.len();
         for qualifier in chain_call_sites(primary, &selectors, src) {
-            acc.calls.push(CallSite { from, qualifier });
+            if let Some(qualifier) = scope.classify(qualifier, &mut acc.bare_calls) {
+                acc.calls.push(CallSite { from, qualifier });
+            }
         }
     }
 }
@@ -655,6 +707,224 @@ fn chain_call_sites(primary: TsNode, selectors: &[TsNode], src: &[u8]) -> Vec<Ca
         }
     }
     out
+}
+
+// ============================================================================
+// LA.34: Dart lexical scope for an unqualified call inside a class member
+// ============================================================================
+//
+// Dart resolves a bare `f(..)` against the local scope first (the member's
+// parameters and everything bound in its body), then the enclosing class's
+// own members (instance and static), then library scope; inherited members
+// come after library scope. The graph's Bare arm only knows library scope
+// (imports, the file MODULE's symbols), so the parser, which holds this
+// file's class body and member body, decides the first two steps:
+//
+//   local      -> no call site (a parameter or closure, never a class or
+//                 library function)
+//   member     -> SelfMethod(f): graph resolve_calls binds it against the
+//                 enclosing CLASS's methods, ahead of a same-named top-level
+//                 function
+//   otherwise  -> Bare(f), as LA.23e emitted it
+//
+// Inherited members stay Bare (no heritage walk). The local set is per member
+// body and conservative: a name bound anywhere in it suppresses every bare
+// call of that name in the body, so a shadow in one block can lose an edge in
+// a sibling block, never add a wrong one.
+
+/// The names an unqualified call inside one class member can reach before
+/// library scope.
+struct CallScope<'a> {
+    /// Everything the enclosing class declares: methods, getters, setters and
+    /// fields, instance or static ([`class_member_names`]).
+    members: &'a HashSet<String>,
+    /// The member's parameters and every name bound in its body
+    /// ([`local_names`]).
+    locals: HashSet<String>,
+}
+
+impl CallScope<'_> {
+    /// Apply Dart's lexical order to one call site. Only `Bare` changes:
+    /// `this.m()` and receiver calls pass through as LA.23e built them.
+    fn classify(&self, q: CallQualifier, stats: &mut BareCallStats) -> Option<CallQualifier> {
+        let CallQualifier::Bare(name) = q else {
+            return Some(q);
+        };
+        if self.locals.contains(&name) {
+            stats.local_skip += 1;
+            None
+        } else if self.members.contains(&name) {
+            stats.self_calls += 1;
+            Some(CallQualifier::SelfMethod(name))
+        } else {
+            stats.bare += 1;
+            Some(CallQualifier::Bare(name))
+        }
+    }
+}
+
+/// The names a class body declares, read from each `class_member`'s
+/// `method_signature` (a member with a body) or `declaration` (abstract /
+/// external members and fields): method, getter and setter names, and field
+/// names. A field of function type is called as `f()` just like a method, and
+/// Dart binds that call to the field, so a field name must shadow a top-level
+/// function too. Constructor and operator names are not members: a bare
+/// `Calc(..)` inside `Calc` is a constructor call and stays Bare.
+fn class_member_names(class_body: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut members = class_body.walk();
+    for member in class_body.named_children(&mut members) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let mut parts = member.walk();
+        for part in member.named_children(&mut parts) {
+            if !matches!(part.kind(), "method_signature" | "declaration") {
+                continue;
+            }
+            let mut decls = part.walk();
+            for decl in part.named_children(&mut decls) {
+                match decl.kind() {
+                    "function_signature" | "getter_signature" | "setter_signature" => {
+                        if let Some(n) = decl.child_by_field_name("name") {
+                            names.insert(text_of(n, src).to_string());
+                        }
+                    }
+                    "initialized_identifier_list" | "static_final_declaration_list" => {
+                        let mut items = decl.walk();
+                        for item in decl.named_children(&mut items) {
+                            if let Some(n) = item.child_by_field_name("name") {
+                                names.insert(text_of(n, src).to_string());
+                            }
+                        }
+                    }
+                    "identifier_list" => {
+                        let mut items = decl.walk();
+                        for item in decl.named_children(&mut items) {
+                            if item.kind() == "identifier" {
+                                names.insert(text_of(item, src).to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The names local to one member: the parameters of its `method_signature`
+/// and every name bound anywhere in `body` - local variables (each declarator
+/// of `var a = 1, b = 2;`), local functions, for-in loop variables, catch
+/// parameters, pattern variables, and the parameters of closures and local
+/// functions.
+fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Some(sig) = signature {
+        let mut c = sig.walk();
+        for part in sig.named_children(&mut c) {
+            if !matches!(part.kind(), "function_signature" | "setter_signature") {
+                continue;
+            }
+            let mut p = part.walk();
+            for params in part.children_by_field_name("parameters", &mut p) {
+                if params.kind() == "formal_parameter_list" {
+                    param_names(params, src, &mut names);
+                }
+            }
+        }
+    }
+    let insert_field = |n: TsNode, field: &str, names: &mut HashSet<String>| {
+        if let Some(id) = n.child_by_field_name(field) {
+            names.insert(text_of(id, src).to_string());
+        }
+    };
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            // A closure's or local function's parameters; their own nested
+            // function-typed parameter lists bind nothing here.
+            "formal_parameter_list" => {
+                param_names(n, src, &mut names);
+                continue;
+            }
+            // `var x = ..`, `final T x = ..`, and each further declarator.
+            "initialized_variable_definition" | "initialized_identifier" => {
+                insert_field(n, "name", &mut names);
+            }
+            // A local function's name (in a body, a `function_signature`
+            // only heads a `local_function_declaration`).
+            "function_signature" => insert_field(n, "name", &mut names),
+            // `for (final x in xs)`: the declared loop variable.
+            "for_statement" => insert_field(n, "name", &mut names),
+            "catch_clause" => {
+                insert_field(n, "exception", &mut names);
+                insert_field(n, "stack_trace", &mut names);
+            }
+            // `case (var a, int b)`, `var (x, y) = ..` with typed parts.
+            "variable_pattern" => insert_field(n, "name", &mut names),
+            // `var (a, b) = ..`, `for (final (k, v) in ..)`: an untyped
+            // pattern variable is a plain identifier inside the pattern.
+            "record_pattern" | "list_pattern" | "map_pattern" | "object_pattern"
+                if n
+                    .parent()
+                    .is_some_and(|p| matches!(p.kind(), "pattern_variable_declaration" | "for_statement")) =>
+            {
+                pattern_identifiers(n, src, &mut names);
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
+    names
+}
+
+/// The parameter names of one `formal_parameter_list`: positional, `[..]`
+/// optional and `{..}` named, each `formal_parameter`'s `name`.
+///
+/// A typed parameter (`int x`, `int Function(int) f`) carries a `name` field;
+/// an untyped one (`(x) => ..`) and the old function-typed form
+/// (`int f(int x)`) hold the name as their only direct `identifier` child.
+fn param_names(list: TsNode, src: &[u8], names: &mut HashSet<String>) {
+    let mut c = list.walk();
+    for p in list.named_children(&mut c) {
+        match p.kind() {
+            "formal_parameter" => {
+                let name = p.child_by_field_name("name").or_else(|| {
+                    let mut k = p.walk();
+                    p.named_children(&mut k).find(|n| n.kind() == "identifier")
+                });
+                if let Some(id) = name {
+                    names.insert(text_of(id, src).to_string());
+                }
+            }
+            "optional_formal_parameters" => param_names(p, src, names),
+            _ => {}
+        }
+    }
+}
+
+/// Every identifier bound by a declaration pattern: the plain identifiers in
+/// it, descending through nested patterns but not into a `label` (`x:` of a
+/// record / object field) or a type. The wildcard `_` binds nothing.
+fn pattern_identifiers(pattern: TsNode, src: &[u8], names: &mut HashSet<String>) {
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier" {
+            let name = text_of(n, src);
+            if name != "_" {
+                names.insert(name.to_string());
+            }
+            continue;
+        }
+        if matches!(n.kind(), "label" | "type_identifier" | "type_arguments") {
+            continue;
+        }
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
 }
 
 // ============================================================================
@@ -1870,5 +2140,333 @@ class UserService {
         // The untyped field's initialiser is a class-level expression, not a
         // method body: it emits no call site.
         assert_eq!(fp.calls.len(), 3, "{:?}", fp.calls);
+    }
+
+    // ---- LA.34: Dart lexical scope for unqualified calls ---------------------
+
+    fn self_m(name: &str) -> CallQualifier {
+        CallQualifier::SelfMethod(name.to_string())
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    /// The `dart-bare-calls` fixture's own file.
+    const BARE_CALLS_FIXTURE: &str = r#"int add(int a, int b) => a - b;
+
+class Calc {
+  int add(int a, int b) => a + b;
+
+  int total(List<int> xs) {
+    var acc = 0;
+    for (final x in xs) {
+      acc = add(acc, x);
+    }
+    return acc;
+  }
+
+  int viaTop(int a) => helper(a);
+
+  int shadow(int a) {
+    final twice = (int v) => v * 2;
+    return twice(a);
+  }
+
+  int twice(int a) => a + a;
+
+  int param(int Function(int) add) => add(1);
+
+  static int make() => 1;
+
+  int useStatic() => make();
+}
+
+int helper(int x) => x + 1;
+"#;
+
+    fn bare_calls_fixture() -> FileParse {
+        parse_file(BARE_CALLS_FIXTURE, "lib/calc.dart", "lib::calc", repo()).unwrap()
+    }
+
+    #[test]
+    fn bare_member_call_is_self_method() {
+        let fp = bare_calls_fixture();
+        assert_eq!(calls_from(&fp, "lib::calc::Calc::total"), vec![self_m("add")]);
+    }
+
+    /// The top-level `add` shares the member's name: inside the class the
+    /// member wins, so the call never reaches library scope as a Bare.
+    #[test]
+    fn member_wins_over_top_level_function() {
+        let fp = bare_calls_fixture();
+        assert!(
+            !fp.calls.iter().any(|c| c.qualifier == bare("add")),
+            "{:?}",
+            fp.calls
+        );
+    }
+
+    #[test]
+    fn static_member_bare_call_is_self_method() {
+        let fp = bare_calls_fixture();
+        assert_eq!(calls_from(&fp, "lib::calc::Calc::useStatic"), vec![self_m("make")]);
+    }
+
+    #[test]
+    fn bare_call_to_a_non_member_stays_bare() {
+        let fp = bare_calls_fixture();
+        assert_eq!(calls_from(&fp, "lib::calc::Calc::viaTop"), vec![bare("helper")]);
+    }
+
+    /// `final twice = (v) => ..; twice(a)`: the local closure shadows the
+    /// member `twice`, so the call is neither a SelfMethod nor a Bare.
+    #[test]
+    fn local_closure_shadows_member() {
+        let fp = bare_calls_fixture();
+        assert_eq!(calls_from(&fp, "lib::calc::Calc::shadow"), vec![]);
+    }
+
+    /// `param(int Function(int) add) => add(1)`: the parameter shadows both
+    /// the member `add` and the top-level `add`.
+    #[test]
+    fn parameter_shadows_member_and_top_level() {
+        let fp = bare_calls_fixture();
+        assert_eq!(calls_from(&fp, "lib::calc::Calc::param"), vec![]);
+        // Every call site of the file: total, useStatic, viaTop.
+        assert_eq!(fp.calls.len(), 3, "{:?}", fp.calls);
+    }
+
+    /// A bare `Calc(..)` / `Calc.named(..)` inside `Calc` constructs: the
+    /// class name and a named constructor are not member names.
+    #[test]
+    fn constructor_call_stays_bare() {
+        let source = r#"class Calc {
+  Calc();
+  Calc.named();
+  Calc copy() => Calc();
+  Calc other() => Calc.named();
+}
+"#;
+        let fp = parse_file(source, "lib/c.dart", "lib::c", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::c::Calc::copy"), vec![bare("Calc")]);
+        assert_eq!(calls_from(&fp, "lib::c::Calc::other"), vec![attr("Calc", "named")]);
+    }
+
+    /// `local_names` of every member of the first class in `source`, keyed by
+    /// the member's name.
+    fn member_locals(source: &str) -> std::collections::HashMap<String, HashSet<String>> {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_dart::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let src = source.as_bytes();
+        let class = tree.root_node().named_child(0).unwrap();
+        let body = class.child_by_field_name("body").unwrap();
+        let mut out = std::collections::HashMap::new();
+        let mut c = body.walk();
+        for member in body.named_children(&mut c) {
+            let mut k = member.walk();
+            let kids: Vec<TsNode> = member.named_children(&mut k).collect();
+            let sig = kids.iter().copied().find(|n| n.kind() == "method_signature");
+            let Some(fbody) = kids.iter().copied().find(|n| n.kind() == "function_body") else {
+                continue;
+            };
+            let name = sig
+                .and_then(|s| s.named_child(0))
+                .and_then(|n| n.child_by_field_name("name"))
+                .map(|n| text_of(n, src).to_string())
+                .unwrap();
+            out.insert(name, local_names(sig, fbody, src));
+        }
+        out
+    }
+
+    /// Every way a member binds a name: named and optional parameters, the
+    /// old function-typed parameter form, a setter parameter, `var a, b`
+    /// declarators, a local function, a for-in variable, catch parameters,
+    /// typed and untyped pattern variables, and closure parameters (typed and
+    /// untyped).
+    #[test]
+    fn local_names_covers_every_binding_form() {
+        let source = r#"class A {
+  void named({required int Function() pn}) { pn(); }
+  void optional([int Function()? po]) { po(); }
+  void oldStyle(int of(int inner)) { of(1); }
+  set value(void Function() sv) { sv(); }
+  void decls() {
+    var d1 = f, d2 = f;
+    d1();
+  }
+  void localFn() {
+    int lf(int lp) => lp;
+    lf(1);
+  }
+  void loops(List<void Function()> xs) {
+    for (final fx in xs) { fx(); }
+  }
+  void caught() {
+    try {} catch (ce, cs) { ce(); }
+  }
+  void patterns(r) {
+    var (pa, pb) = r;
+    final (void Function() pc, _) = r;
+    for (final (pk, pv) in r) {}
+    pa();
+  }
+  void closure() {
+    run((cp) => cp());
+    run((int ct) => ct);
+  }
+}
+"#;
+        let locals = member_locals(source);
+        let want: &[(&str, &[&str])] = &[
+            ("named", &["pn"]),
+            ("optional", &["po"]),
+            ("oldStyle", &["of"]),
+            ("value", &["sv"]),
+            ("decls", &["d1", "d2"]),
+            ("localFn", &["lf", "lp"]),
+            ("loops", &["xs", "fx"]),
+            ("caught", &["ce", "cs"]),
+            ("patterns", &["r", "pa", "pb", "pc", "pk", "pv"]),
+            ("closure", &["cp", "ct"]),
+        ];
+        for (member, names) in want {
+            let got = &locals[*member];
+            let want: HashSet<String> = names.iter().map(|n| n.to_string()).collect();
+            assert_eq!(got, &want, "{member}");
+        }
+    }
+
+    /// Through `parse_file`: every locally bound name shadows the class member
+    /// of the same name, so no call below is a SelfMethod; only `run`, which
+    /// nothing binds and the class does not declare, stays Bare. The closure
+    /// parameter `cp` suppresses the `cp()` after the closure too - the
+    /// conservative per-body rule.
+    #[test]
+    fn every_local_binding_form_shadows_a_member() {
+        let source = r#"class A {
+  void named({required int Function() pn}) { pn(); }
+  void optional([int Function()? po]) { po(); }
+  void oldStyle(int of(int inner)) { of(1); }
+  void decls() {
+    var d1 = f, d2 = f;
+    d1();
+    d2();
+  }
+  void localFn() {
+    int lf() => 1;
+    lf();
+  }
+  void loops(List<void Function()> xs) {
+    for (final fx in xs) { fx(); }
+  }
+  void caught() {
+    try {} catch (ce, cs) { ce(); cs(); }
+  }
+  void patterns(r) {
+    var (pa, pb) = r;
+    pa();
+    pb();
+    final (void Function() pc, _) = r;
+    pc();
+  }
+  void closure() {
+    run((cp) => cp());
+    cp();
+  }
+  void pn() {}
+  void po() {}
+  void of() {}
+  void d1() {}
+  void d2() {}
+  void lf() {}
+  void fx() {}
+  void ce() {}
+  void cs() {}
+  void pa() {}
+  void pb() {}
+  void pc() {}
+  void cp() {}
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        let calls: Vec<CallQualifier> = fp.calls.iter().map(|c| c.qualifier.clone()).collect();
+        assert_eq!(calls, vec![bare("run")], "{:?}", fp.calls);
+    }
+
+    /// A name bound in the member shadows only inside that member: a sibling
+    /// member calling the same name still reaches the class member.
+    #[test]
+    fn a_local_shadows_only_its_own_member() {
+        let source = r#"class A {
+  void a(void Function() go) { go(); }
+  void b() { go(); }
+  void go() {}
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::a::A::a"), vec![]);
+        assert_eq!(calls_from(&fp, "lib::a::A::b"), vec![self_m("go")]);
+    }
+
+    /// Fields, getters, setters and abstract members are class members too:
+    /// Dart binds `cb()` to the field `cb` (a function-typed field), never to
+    /// a same-named top-level function.
+    #[test]
+    fn fields_getters_and_abstract_members_are_members() {
+        let source = r#"void cb() {}
+void builder() {}
+void hook() {}
+void later() {}
+void ext() {}
+abstract class A {
+  final void Function() cb;
+  static final Function builder = () {};
+  void Function() get hook => () {};
+  late void Function() later, other;
+  void ext();
+  A(this.cb);
+  void run() {
+    cb();
+    builder();
+    hook();
+    later();
+    ext();
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(
+            calls_from(&fp, "lib::a::A::run"),
+            sorted(vec![
+                self_m("cb"),
+                self_m("builder"),
+                self_m("hook"),
+                self_m("later"),
+                self_m("ext"),
+            ])
+        );
+    }
+
+    /// The committed `matrix/dart/calls` probe: `add(acc, x)` in `total`.
+    #[test]
+    fn matrix_dart_calls_probe_shape() {
+        let source = r#"class Calc {
+  int add(int a, int b) => a + b;
+
+  int total(List<int> xs) {
+    var acc = 0;
+    for (final x in xs) {
+      acc = add(acc, x);
+    }
+    return acc;
+  }
+}
+"#;
+        let fp = parse_file(source, "calc.dart", "calc", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "calc::Calc::total"), vec![self_m("add")]);
     }
 }

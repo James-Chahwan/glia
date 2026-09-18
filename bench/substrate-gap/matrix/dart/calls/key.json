@@ -10,7 +10,7 @@
   ],
   "expect_edges": [
     {"from": "Calc::total", "to": "Calc::add", "category": "CALLS",
-     "note": "INTENDED: the unqualified self-call `add(acc, x)` inside `total` walks to the enclosing CLASS — the SelfMethod resolution CLAUDE.md's parser/graph split describes. MEASURED ABSENT 2026-09-16: the fixture emits ZERO CALLS edges. parsers/code/dart/src/lib.rs collect_calls_in only pushes a CallQualifier::SelfMethod for a `selector_expression` whose receiver text is literally `this`, so a bare self-call is dropped. PROBED: rewriting the call as `this.add(acc, x)` ALSO emits nothing, so the blind spot is not an artefact of choosing the idiomatic unqualified form (Dart's own `unnecessary_this` lint forbids the qualified one). Recall 0/1."}
+     "note": "RESOLVED (LA.34): the unqualified self-call `add(acc, x)` inside `total` is classified in the parser by Dart's lexical scope (locals, then the class's own members, then library scope): `add` is a member of Calc, so it is emitted as a SelfMethod and graph resolve_calls binds it against the enclosing CLASS's methods. History: MEASURED ABSENT 2026-09-16 (zero CALLS: collect_calls_in matched only a `selector_expression`, which tree-sitter-dart 0.1.0 does not have; `this.add(acc, x)` emitted nothing either); after LA.23e the call was emitted as `Bare(add)` and stayed unresolved, since the Bare arm never looks in the enclosing class. Recall 0/1 -> 1/1."}
   ],
   "expect_cells": [],
   "forbid": [],

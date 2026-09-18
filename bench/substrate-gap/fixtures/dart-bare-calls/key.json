@@ -1,0 +1,54 @@
+{
+  "framework": "dart-bare-calls",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "expect_edges": [
+    {
+      "from": "lib/calc/Calc/total",
+      "to": "lib/calc/Calc/add",
+      "category": "CALLS",
+      "note": "bare self-call: the member add, not the top-level add"
+    },
+    {
+      "from": "lib/calc/Calc/useStatic",
+      "to": "lib/calc/Calc/make",
+      "category": "CALLS",
+      "note": "bare call to a static member"
+    },
+    {
+      "from": "lib/calc/Calc/viaTop",
+      "to": "lib/calc/helper",
+      "category": "CALLS",
+      "note": "a name the class does not declare stays Bare and binds the top-level function"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "lib/calc/Calc/total",
+      "to": "lib/calc/add",
+      "category": "CALLS",
+      "note": "PRECISION: the class member shadows the top-level function inside the class"
+    },
+    {
+      "from": "lib/calc/Calc/shadow",
+      "to": "lib/calc/Calc/twice",
+      "category": "CALLS",
+      "note": "PRECISION: the local closure `twice` shadows the member twice"
+    },
+    {
+      "from": "lib/calc/Calc/param",
+      "to": "lib/calc/Calc/add",
+      "category": "CALLS",
+      "note": "PRECISION: the parameter `add` shadows the member add"
+    },
+    {
+      "from": "lib/calc/Calc/param",
+      "to": "lib/calc/add",
+      "category": "CALLS",
+      "note": "PRECISION: the parameter `add` shadows the top-level add too"
+    }
+  ],
+  "note": "LA.34: Dart lexical scope for unqualified calls inside a class member. A name the class itself declares (instance or static member) is an implicit `this.` call (SelfMethod) and wins over a same-named top-level function; any other bare name stays Bare (library scope); a name bound locally (parameter, local variable, local function) is never a class or library call. Baseline HEAD f672dcb: zero CALLS (collect_calls_in matched only `selector_expression`, which tree-sitter-dart 0.1.0 does not have). Baseline HEAD c8f4e84 (after LA.23e, installed wheel): CALLS 1/3 - only viaTop -> helper; LA.23e emits `Bare(add)` and nothing binds a Bare call to a class member, so total -> Calc::add and useStatic -> Calc::make are absent, and FORBID VIOLATIONS 2: total -> lib/calc/add and param -> lib/calc/add (the Bare(add) binds the top-level add)."
+}
