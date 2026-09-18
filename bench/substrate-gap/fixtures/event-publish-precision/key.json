@@ -1,0 +1,45 @@
+{
+  "framework": "event-publish-precision",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.29. The eventbus `publish(` needle (parsers/code/extractors/src/eventbus.rs EMITTER_PATTERNS) matches the first `publish(` anywhere in a file, definitions included, so a Python `def publish(self, ...)` mints event_emit:publish (owned by Notifier::publish via USES). Its conjugate `.subscribe(` does the same for any RxJS observable, minting event_handle:subscribe (orphan nodes in quokka-stack, lapse and neuropil at HEAD). Both verbs now need a bus-shaped receiver or an in-process pub/sub import, and a declaration never counts. The type-keyed `.send(new ` needle (MediatR) also fires on AWS SDK v3 command objects (orders.ts: event_emit:PutItemCommand; fixtures/xcut-queue-annot-listener mints event_emit:SendMessageCommand beside its SQS QUEUE_PRODUCER). posts.ts (graphql-subscriptions PubSub) is the control on both sides. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:POST_ADDED",
+      "note": "posts.ts pubsub.publish(\"POST_ADDED\") - the control"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:POST_ADDED",
+      "note": "posts.ts pubsub.subscribe(\"POST_ADDED\") - the control"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "event_emit:POST_ADDED",
+      "to": "event_handle:POST_ADDED",
+      "category": "EVENT_FLOWS",
+      "note": "the in-process pair still resolves"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:publish",
+      "note": "notifier.py: def publish(self, ...) / def publish(report) / notifier.publish(...) - a function named publish"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:subscribe",
+      "note": "profile.component.ts: RxJS this.route.params.subscribe(...)"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:PutItemCommand",
+      "note": "orders.ts: AWS SDK v3 ddb.send(new PutItemCommand(...)) matched the MediatR-shaped `.send(new ` type needle"
+    }
+  ]
+}
