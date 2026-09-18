@@ -1,0 +1,31 @@
+{
+  "framework": "clojure-docs",
+  "language": "clojure",
+  "dirs": [
+    "."
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "greet",
+      "cell": "DOC",
+      "contains": "Returns a greeting for name.",
+      "note": "(defn greet \"docstring\" [name] ...)"
+    },
+    {
+      "kind": "MODULE",
+      "node": "core",
+      "cell": "DOC",
+      "contains": "Core namespace docs.",
+      "note": "(ns myapp.core \"docstring\") on the file MODULE"
+    },
+    {
+      "kind": "INTERFACE",
+      "node": "Greeter",
+      "cell": "DOC",
+      "contains": "Things that greet.",
+      "note": "(defprotocol Greeter \"docstring\" ...)"
+    }
+  ],
+  "note": "LA.7b. Baseline HEAD: defn / ns / defprotocol docstrings produce no DOC; a `;;` leading comment produces DOC `;; leading comment` with the marker still attached (the `;` strip is unit-tested in repo-graph-doc; `(def banner \"not a doc\")` staying docless is unit-tested in the clojure parser)."
+}

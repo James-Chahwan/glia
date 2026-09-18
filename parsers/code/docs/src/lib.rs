@@ -3,7 +3,7 @@
 //! Every parser is tree-sitter/AST already; this gives them one uniform way to
 //! capture the doc comment that precedes a definition — Rust `///` / `//!`, Go
 //! Godoc, JSDoc `/** */`, Javadoc, C# `///`, PHPDoc, Swift `///`, Dart `///`,
-//! Scala/C/C++ `/* */`, Solidity NatSpec, Ruby `#`. Grammar-agnostic: it keys
+//! Scala/C/C++ `/* */`, Solidity NatSpec, Ruby `#`, Clojure `;`/`;;`. Grammar-agnostic: it keys
 //! off node *kind* (`…comment…`) rather than per-language node names, and skips
 //! attributes/decorators/annotations sitting between the doc and the item
 //! (tree-sitter represents a multi-line `@Component({…})` as ONE node, so the
@@ -298,7 +298,15 @@ fn finish_tag(tag: String, raw: &str) -> DocTag {
 
 /// Strip a single line's comment markers (`///` `//!` `//` `/**` `/*` `*/` `*`
 /// `///` `#`-with-space and NatSpec `@notice`/`@dev` tags left as text).
+///
+/// A line that STARTS with `;` is a Lisp/Clojure comment (`;`, `;;`, `;;;`):
+/// the whole run of `;` is its one marker, so the text after it is returned
+/// as-is — `;; * note` keeps its `*`. No other language's doc comment starts
+/// with `;`, so every other parser sees the old behaviour. (LA.7b)
 fn strip_markers(t: &str) -> String {
+    if t.starts_with(';') {
+        return t.trim_start_matches(';').trim().to_string();
+    }
     let mut s = t;
     for m in ["///", "//!", "//", "/**", "/*", "*/", "*"] {
         if let Some(rest) = s.strip_prefix(m) {
@@ -541,6 +549,23 @@ mod tests {
         let mut bare = got[1].clone();
         bare.unbind_name();
         assert_eq!(bare, tag("inheritdoc", None, "IVault"));
+    }
+
+    #[test]
+    fn clojure_semicolon_comment_markers_are_stripped() {
+        assert_eq!(strip_markers(";; leading comment"), "leading comment");
+        assert_eq!(strip_markers("; one"), "one");
+        assert_eq!(strip_markers(";;;section"), "section");
+        // The `;` run is the only marker: what follows it is text.
+        assert_eq!(strip_markers(";; * bullet"), "* bullet");
+        // Only a line that STARTS with `;` is touched.
+        assert_eq!(strip_markers("// a; b"), "a; b");
+        assert_eq!(strip_markers("x ;; y"), "x ;; y");
+        // Through the shared line cleaner: `;;` lines, blank `;;` lines dropped.
+        assert_eq!(
+            clean_lines(";; Line one.\n;;\n;; Line two."),
+            Some(lines(&["Line one.", "Line two."]))
+        );
     }
 
     #[test]

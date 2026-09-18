@@ -49,6 +49,12 @@ pub fn parse_file(
             acc.clj_http_hits, acc.hato_hits
         );
     }
+    if acc.docstrings_attached + acc.ns_docstrings > 0 {
+        eprintln!(
+            "[doc] clojure docstrings attached={} ns={} path={file_rel_path}",
+            acc.docstrings_attached, acc.ns_docstrings
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -79,6 +85,11 @@ struct Acc {
     /// the `[clj-http]` marker.
     clj_http_hits: usize,
     hato_hits: usize,
+    /// LA.7b: FUNCTION / INTERFACE nodes whose DOC came from a docstring (or
+    /// `:doc` metadata), and file MODULEs that took an `ns` docstring, for the
+    /// `[doc]` marker.
+    docstrings_attached: usize,
+    ns_docstrings: usize,
 }
 
 fn visit_top(
@@ -113,7 +124,10 @@ fn visit_form(
     };
 
     match head {
-        "ns" => collect_ns(node, src, parent_qname, acc),
+        "ns" => {
+            collect_ns(node, src, parent_qname, acc);
+            attach_ns_docstring(node, src, parent_id, acc);
+        }
         "def" | "defn" | "defn-" | "defmacro" => {
             visit_defn(node, src, file_rel, parent_qname, parent_id, repo, acc);
         }
@@ -177,11 +191,18 @@ fn visit_defn(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
 
+    let form = if first_symbol(node, src) == Some("def") {
+        DocForm::Def
+    } else {
+        DocForm::Fn
+    };
+    let doc = form_docstring(node, src, form);
+    acc.docstrings_attached += usize::from(doc.is_some());
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, doc),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -211,11 +232,13 @@ fn visit_defprotocol(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &qname);
 
+    let doc = form_docstring(node, src, DocForm::Protocol);
+    acc.docstrings_attached += usize::from(doc.is_some());
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, doc),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -237,7 +260,7 @@ fn visit_defprotocol(
                 id: mid,
                 repo,
                 confidence: Confidence::Strong,
-                cells: entity_cells(&child, src, file_rel),
+                cells: entity_cells(&child, src, file_rel, None),
             });
             acc.edges.push(Edge {
                 from: id,
@@ -270,7 +293,7 @@ fn visit_defrecord(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, None),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -302,6 +325,151 @@ fn collect_ns(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
             collect_require(child, src, from_module, acc);
         }
     }
+}
+
+// ============================================================================
+// Clojure docstrings (LA.7b)
+// ============================================================================
+//
+// A Clojure docstring is not a comment: it is the string literal after the
+// name INSIDE the defining form, so `repo_graph_doc::leading_doc` (which walks
+// preceding comment siblings) never sees it. Clojure's own precedence, lowest
+// first: `^{:doc ".."}` metadata on the name symbol, then the docstring, then
+// an attr-map `{:doc ".."}` right after it (defn / defmacro / ns only). A
+// form the parser does not visit (defmulti, ...) keeps its docstring dropped:
+// this adds DOC cells, never nodes.
+
+/// Which docstring grammar a defining form follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocForm {
+    /// `(def name "doc"? init?)`: the string is a docstring only when an init
+    /// follows it. A lone `(def x "s")` binds the string as x's VALUE.
+    Def,
+    /// `(defn name "doc"? {attr-map}? [params] body)`, and defn- / defmacro.
+    Fn,
+    /// `(defprotocol Name "doc"? opts* method-sigs*)`.
+    Protocol,
+    /// `(ns name "doc"? {attr-map}? references*)`.
+    Ns,
+}
+
+/// The docstring of a defining form, cleaned to the one-line shape
+/// `repo_graph_doc::leading_doc` produces. `None` when the form has none, so
+/// the caller falls back to the comment above it.
+fn form_docstring(list: TsNode, src: &[u8], form: DocForm) -> Option<String> {
+    let vals: Vec<TsNode> = values(list).collect();
+    let name = vals.get(1).filter(|n| n.kind() == "sym_lit")?;
+    // def / defn need a form after the string or map (an init, an arg
+    // vector); ns and defprotocol may end on their docstring.
+    let followed = |i: usize| match form {
+        DocForm::Def | DocForm::Fn => vals.len() > i + 1,
+        DocForm::Protocol | DocForm::Ns => true,
+    };
+    let mut doc = name_meta_doc(*name, src);
+    let mut next = 2;
+    if let Some(s) = vals.get(next).filter(|n| n.kind() == "str_lit")
+        && followed(next)
+    {
+        doc = str_content(*s, src);
+        next += 1;
+    }
+    if matches!(form, DocForm::Fn | DocForm::Ns)
+        && let Some(m) = vals.get(next).filter(|n| n.kind() == "map_lit")
+        && followed(next)
+        && let Some(d) = map_doc(*m, src)
+    {
+        doc = Some(d);
+    }
+    doc.map(clean_docstring).filter(|d| !d.is_empty())
+}
+
+/// `:doc` from reader metadata on the name symbol: `^{:doc "x"} name` (or
+/// the old `#^{...}`). The metadata is part of the `sym_lit` node.
+fn name_meta_doc<'a>(sym: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = sym.walk();
+    let metas: Vec<TsNode> = sym
+        .named_children(&mut cursor)
+        .filter(|c| matches!(c.kind(), "meta_lit" | "old_meta_lit"))
+        .collect();
+    metas.into_iter().find_map(|m| {
+        let map = m.child_by_field_name("value").filter(|v| v.kind() == "map_lit")?;
+        map_doc(map, src)
+    })
+}
+
+/// The raw text of a string-valued `:doc` key in a map literal.
+fn map_doc<'a>(map: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let kv: Vec<TsNode> = values(map).collect();
+    kv.chunks_exact(2).find_map(|pair| {
+        if pair[0].kind() == "kwd_lit"
+            && text_of(pair[0], src) == ":doc"
+            && pair[1].kind() == "str_lit"
+        {
+            str_content(pair[1], src)
+        } else {
+            None
+        }
+    })
+}
+
+/// Decode a docstring's escapes (`\"`, `\\`, `\uXXXX`; `\n` `\t` `\r` `\f`
+/// `\b` are whitespace), collapse every whitespace run (the docstring's
+/// continuation-line indent included) to one space, and cap at
+/// [`repo_graph_doc::DOC_MAX`] bytes on a char boundary.
+fn clean_docstring(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n' | 't' | 'r' | 'f' | 'b') => out.push(' '),
+            Some('u') => {
+                let hex: String = chars.clone().take(4).collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(ch) if hex.len() == 4 => {
+                        out.push(ch);
+                        chars.nth(3);
+                    }
+                    _ => out.push_str("\\u"),
+                }
+            }
+            Some(e) => out.push(e),
+            None => out.push('\\'),
+        }
+    }
+    let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.len() <= repo_graph_doc::DOC_MAX {
+        return joined;
+    }
+    let mut end = repo_graph_doc::DOC_MAX;
+    while !joined.is_char_boundary(end) {
+        end -= 1;
+    }
+    joined[..end].trim_end().to_string()
+}
+
+/// `(ns app.core "doc" ...)` documents the file: the docstring goes on the
+/// file MODULE, which `parse_file` pushes first. `module_id` is the
+/// `parent_id` of a top-level form, and the id check keeps the cell off any
+/// other node. A second `ns` form in one file never overwrites the first's.
+fn attach_ns_docstring(ns: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let Some(doc) = form_docstring(ns, src, DocForm::Ns) else {
+        return;
+    };
+    let Some(module) = acc.nodes.first_mut().filter(|n| n.id == module_id) else {
+        return;
+    };
+    if module.cells.iter().any(|c| c.kind == cell_type::DOC) {
+        return;
+    }
+    module.cells.push(Cell {
+        kind: cell_type::DOC,
+        payload: CellPayload::Text(doc),
+    });
+    acc.ns_docstrings += 1;
 }
 
 fn extract_require_from_vec<'a>(vec_node: TsNode<'a>, src: &'a [u8]) -> String {
@@ -816,7 +984,9 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
     ]
 }
 
-fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
+/// CODE + POSITION, and a DOC cell: the form's own docstring (`doc`, from
+/// [`form_docstring`]) wins; the `;;` comment above the form is the fallback.
+fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str, doc: Option<String>) -> Vec<Cell> {
     let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
@@ -827,7 +997,7 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
             payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = doc.or_else(|| repo_graph_doc::leading_doc(node, src)) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -1219,6 +1389,189 @@ mod tests {
 "#;
         let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
         assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+    }
+
+    // ---- LA.7b: docstrings ----
+
+    /// The DOC cell of the node `(kind, qname)`, if any.
+    fn doc_of(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> Option<String> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        let node = fp.nodes.iter().find(|n| n.id == id)?;
+        node.cells.iter().find_map(|c| match (&c.payload, c.kind == cell_type::DOC) {
+            (CellPayload::Text(s), true) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    /// The fixture file (bench/substrate-gap/fixtures/clojure-docs).
+    const DOCS: &str = r#"(ns myapp.core
+  "Core namespace docs.")
+
+(defprotocol Greeter
+  "Things that greet."
+  (greet-all [this]))
+
+(defn greet
+  "Returns a greeting for name."
+  [name]
+  (str "hi " name))
+
+(def banner "not a doc")
+
+;; leading comment
+(defn plain [x] x)
+"#;
+
+    #[test]
+    fn defn_docstring_becomes_doc_cell() {
+        let fp = parse_file(DOCS, "src/core.clj", "src::core", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::core::greet").as_deref(),
+            Some("Returns a greeting for name.")
+        );
+    }
+
+    #[test]
+    fn ns_docstring_lands_on_the_file_module() {
+        let fp = parse_file(DOCS, "src/core.clj", "src::core", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::MODULE, "src::core").as_deref(),
+            Some("Core namespace docs.")
+        );
+        // Exactly one DOC on the module.
+        let module = &fp.nodes[0];
+        assert_eq!(module.cells.iter().filter(|c| c.kind == cell_type::DOC).count(), 1);
+    }
+
+    #[test]
+    fn defprotocol_docstring_lands_on_the_interface() {
+        let fp = parse_file(DOCS, "src/core.clj", "src::core", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::INTERFACE, "src::core::Greeter").as_deref(),
+            Some("Things that greet.")
+        );
+        // The method signature is not handed the protocol's docstring.
+        assert_eq!(doc_of(&fp, node_kind::METHOD, "src::core::Greeter::greet-all"), None);
+    }
+
+    #[test]
+    fn def_string_value_is_not_a_docstring() {
+        let fp = parse_file(DOCS, "src/core.clj", "src::core", repo()).unwrap();
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::core::banner"), None);
+    }
+
+    #[test]
+    fn def_docstring_needs_an_init_after_it() {
+        let source = "(def answer \"The answer.\" 42)\n(def label \"just a value\")\n";
+        let fp = parse_file(source, "src/v.clj", "src::v", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::v::answer").as_deref(),
+            Some("The answer.")
+        );
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::v::label"), None);
+    }
+
+    #[test]
+    fn leading_semicolon_comment_is_the_fallback_without_its_marker() {
+        let fp = parse_file(DOCS, "src/core.clj", "src::core", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::core::plain").as_deref(),
+            Some("leading comment")
+        );
+    }
+
+    #[test]
+    fn defn_private_and_defmacro_docstrings() {
+        let source = r#"
+(defn- helper
+  "Private helper."
+  [x] x)
+
+(defmacro unless
+  "Inverted when."
+  [test & body]
+  `(when-not ~test ~@body))
+"#;
+        let fp = parse_file(source, "src/m.clj", "src::m", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::m::helper").as_deref(),
+            Some("Private helper.")
+        );
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::m::unless").as_deref(),
+            Some("Inverted when.")
+        );
+    }
+
+    #[test]
+    fn docstring_wins_over_a_leading_comment() {
+        let source = ";; the comment\n(defn f\n  \"The docstring.\"\n  [x] x)\n";
+        let fp = parse_file(source, "src/w.clj", "src::w", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::w::f").as_deref(),
+            Some("The docstring.")
+        );
+    }
+
+    #[test]
+    fn doc_metadata_on_the_name_and_attr_map() {
+        // `^{:doc}` on the name symbol. The name keeps its metadata text in the
+        // qname today (`second_symbol` reads the whole sym_lit), so find the
+        // one FUNCTION node by kind.
+        let source = "(defn ^{:doc \"Meta doc.\"} f [x] x)\n";
+        let fp = parse_file(source, "src/a.clj", "src::a", repo()).unwrap();
+        let fns: Vec<&Node> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::FUNCTION))
+            .collect();
+        assert_eq!(fns.len(), 1);
+        let qname = fp.nav.qname_by_id.get(&fns[0].id).cloned().unwrap_or_default();
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, &qname).as_deref(), Some("Meta doc."));
+
+        // attr-map after the name, and after a docstring (the attr-map wins,
+        // as in `defn`'s own metadata merge).
+        let source = r#"
+(defn g {:doc "Attr doc." :added "1.0"} [x] x)
+(defn h "String doc." {:doc "Attr wins."} [x] x)
+(defn k {:added "1.0"} [x] x)
+"#;
+        let fp = parse_file(source, "src/b.clj", "src::b", repo()).unwrap();
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::g").as_deref(), Some("Attr doc."));
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::h").as_deref(), Some("Attr wins."));
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::b::k"), None);
+
+        // ns with `^{:doc}` metadata on its name (the older clojure.core style).
+        let source = "(ns ^{:doc \"Set ops.\" :author \"x\"} app.sets)\n";
+        let fp = parse_file(source, "src/sets.clj", "src::sets", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::MODULE, "src::sets").as_deref(),
+            Some("Set ops.")
+        );
+    }
+
+    #[test]
+    fn docstring_escapes_and_whitespace_are_cleaned() {
+        let source = "(defn f\n  \"Line one.\n   Says \\\"hi\\\" \\u00e9\\tend.\"\n  [x] x)\n";
+        let fp = parse_file(source, "src/e.clj", "src::e", repo()).unwrap();
+        assert_eq!(
+            doc_of(&fp, node_kind::FUNCTION, "src::e::f").as_deref(),
+            Some("Line one. Says \"hi\" é end.")
+        );
+        // Capped at DOC_MAX on a char boundary.
+        let long = "é".repeat(repo_graph_doc::DOC_MAX);
+        let source = format!("(defn g \"{long}\" [x] x)\n");
+        let fp = parse_file(&source, "src/e.clj", "src::e", repo()).unwrap();
+        let doc = doc_of(&fp, node_kind::FUNCTION, "src::e::g").unwrap_or_default();
+        assert!(doc.len() <= repo_graph_doc::DOC_MAX);
+        assert_eq!(doc.chars().count(), repo_graph_doc::DOC_MAX / 2);
+    }
+
+    #[test]
+    fn empty_docstring_falls_back_to_the_comment() {
+        let source = ";; kept\n(defn f \"\" [x] x)\n";
+        let fp = parse_file(source, "src/z.clj", "src::z", repo()).unwrap();
+        assert_eq!(doc_of(&fp, node_kind::FUNCTION, "src::z::f").as_deref(), Some("kept"));
     }
 
     #[test]
