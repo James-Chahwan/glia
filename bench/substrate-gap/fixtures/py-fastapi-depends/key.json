@@ -1,0 +1,16 @@
+{
+  "framework": "py-fastapi-depends",
+  "language": "python",
+  "dirs": ["."],
+  "cells": ["python/injects"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "read_user", "note": "FastAPI handler"},
+    {"kind": "FUNCTION", "name": "get_db", "note": "dependency provider"},
+    {"kind": "ROUTE", "name": "/users/{uid}", "note": "@app.get route (already extracted)"}
+  ],
+  "expect_edges": [
+    {"from": "read_user", "to": "get_db", "category": "INJECTS", "note": "GAP: Depends() in a parameter default; collect_calls_in walks the function body only"},
+    {"from": "admin", "to": "verify_token", "category": "INJECTS", "note": "GAP: Annotated[bool, Depends(verify_token)] marker form"},
+    {"from": "/users/{uid}", "to": "read_user", "category": "HANDLED_BY", "note": "control: already 1.00, must not regress"}
+  ]
+}

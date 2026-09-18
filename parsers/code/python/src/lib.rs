@@ -19,6 +19,7 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
@@ -531,6 +532,11 @@ fn visit_method(
     // when composing access paths.
     collect_return_type_ref(n, src, method_id, module_id, acc);
 
+    // A7.4 — FastAPI `Depends(...)` in parameter defaults, Annotated markers
+    // and route-decorator `dependencies=[...]` (class-based views, dependency
+    // classes' `__init__`).
+    collect_depends_refs(n, decorators, src, method_id, module_id, acc);
+
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), repo, file_rel, acc);
         // v0.4.13 — scan for `self.<attr> = …` assignments that define class
@@ -595,6 +601,10 @@ fn visit_function(
 
     // v0.4.13 — RETURNS_TYPE edge for explicit `def f() -> T:` annotations.
     collect_return_type_ref(n, src, func_id, module_id, acc);
+
+    // A7.4 — FastAPI `Depends(...)` in parameter defaults, Annotated markers
+    // and route-decorator `dependencies=[...]`.
+    collect_depends_refs(n, decorators, src, func_id, module_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, repo, file_rel, acc);
@@ -1276,6 +1286,244 @@ fn collect_type_refs(def: TsNode, src: &[u8], from: NodeId, module_id: NodeId, a
     // Return type: `def foo() -> Ret:`.
     if let Some(ret) = def.child_by_field_name("return_type") {
         emit_type_idents(ret, src, from, module_id, acc);
+    }
+}
+
+/// Callables whose call in a parameter default, an `Annotated[...]` marker or
+/// a decorator's `dependencies=[...]` is a framework-wired dependency: `Depends` / `Security` are FastAPI,
+/// `Provide` is dependency-injector's call form. Matched on the trailing
+/// dotted segment, so `fastapi.Depends(...)` counts too.
+const DEPENDS_MARKERS: &[&str] = &["Depends", "Security", "Provide"];
+
+/// A7.4 — FastAPI dependency injection. Blind to the call walker because the
+/// call lives in a parameter DEFAULT, inside an `Annotated[...]` subscript, or
+/// in a decorator argument, and `collect_calls_in` only walks the body:
+///
+/// ```text
+/// def read(db: Session = Depends(get_db)):            # typed_default_parameter.value
+/// def read(db = Depends(get_db)):                      # default_parameter.value
+/// def read(db: Annotated[Session, Depends(get_db)]):   # type -> generic_type / subscript
+/// @router.get("/x", dependencies=[Depends(auth)])      # decorator keyword argument
+/// ```
+///
+/// The INJECTS target is the *provider* (`get_db`), not the annotation type:
+/// that is what FastAPI actually wires and what `trace` needs to walk. The
+/// annotation type keeps its USES ref from `collect_type_refs`. A bare
+/// `Depends()` (FastAPI infers the dependency from the annotation) targets the
+/// annotated class instead. A route decorator's `dependencies=[...]` list
+/// runs each provider for the route without passing its value; the handler
+/// still INJECTS it. One ref per provider name per def.
+fn collect_depends_refs(
+    def: TsNode,
+    decorators: &[TsNode],
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let mut seen: std::collections::HashSet<String> = Default::default();
+    if let Some(params) = def.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for p in params.named_children(&mut cursor) {
+            let ty = p.child_by_field_name("type");
+            if matches!(p.kind(), "default_parameter" | "typed_default_parameter")
+                && let Some(v) = p.child_by_field_name("value")
+            {
+                push_depends_target(v, ty, src, from, module_id, &mut seen, acc);
+            }
+            // `Annotated[T, Depends(f)]` — the marker lives inside the type.
+            if let Some(ty) = ty {
+                scan_annotated_depends(ty, src, from, module_id, &mut seen, acc);
+            }
+        }
+    }
+    // `@router.get("/x", dependencies=[Depends(f), ...])`.
+    for deco in decorators {
+        let Some(args) = deco
+            .named_child(0)
+            .filter(|c| c.kind() == "call")
+            .and_then(|c| c.child_by_field_name("arguments"))
+        else {
+            continue;
+        };
+        let mut cursor = args.walk();
+        for kw in args.named_children(&mut cursor) {
+            if kw.kind() != "keyword_argument"
+                || kw.child_by_field_name("name").map(|n| text(n, src)) != Some("dependencies")
+            {
+                continue;
+            }
+            let Some(list) = kw
+                .child_by_field_name("value")
+                .filter(|v| matches!(v.kind(), "list" | "tuple"))
+            else {
+                continue;
+            };
+            let mut c = list.walk();
+            for item in list.named_children(&mut c) {
+                push_depends_target(item, None, src, from, module_id, &mut seen, acc);
+            }
+        }
+    }
+}
+
+/// If `expr` is a `Depends(...)`-family call, push one INJECTS ref to its
+/// provider. The provider is the first positional argument or the
+/// `dependency=` keyword, read as an identifier or the trailing name of an
+/// attribute (`deps.get_db` → `get_db`, the `emit_type_idents` convention).
+/// Any other provider expression (a lambda, `Provide[Container.x]`) is not a
+/// named symbol and emits nothing. With no provider argument at all,
+/// `fallback_type` (the annotated type) names the dependency.
+fn push_depends_target(
+    expr: TsNode,
+    fallback_type: Option<TsNode>,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    seen: &mut std::collections::HashSet<String>,
+    acc: &mut Acc,
+) {
+    if expr.kind() != "call" {
+        return;
+    }
+    let Some(func) = expr.child_by_field_name("function") else {
+        return;
+    };
+    let callee = text(func, src);
+    let tail = callee.rsplit('.').next().unwrap_or(callee).trim();
+    if !DEPENDS_MARKERS.contains(&tail) {
+        return;
+    }
+    let provider = expr
+        .child_by_field_name("arguments")
+        .and_then(|args| depends_provider_arg(args, src));
+    let name = match provider {
+        Some(arg) => symbol_tail_name(arg, src),
+        None => fallback_type.and_then(|t| first_type_name(t, src)),
+    };
+    let Some(name) = name else {
+        return;
+    };
+    if is_type_noise(&name) || !seen.insert(name.clone()) {
+        return;
+    }
+    acc.refs.push(UnresolvedRef {
+        from,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(name),
+        category: edge_category::INJECTS,
+    });
+    di_stats::record(DiShape::PyFastapiDepends);
+}
+
+/// The provider argument of a `Depends(...)` call: the first positional
+/// argument, else the value of a `dependency=` keyword. `None` when the call
+/// names no provider (`Depends()`, `Depends(use_cache=False)`).
+fn depends_provider_arg<'t>(args: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let mut cursor = args.walk();
+    let mut keyword = None;
+    for a in args.named_children(&mut cursor) {
+        match a.kind() {
+            "comment" => {}
+            "keyword_argument" => {
+                let is_dependency = a
+                    .child_by_field_name("name")
+                    .is_some_and(|n| text(n, src) == "dependency");
+                if is_dependency && keyword.is_none() {
+                    keyword = a.child_by_field_name("value");
+                }
+            }
+            _ => return Some(a),
+        }
+    }
+    keyword
+}
+
+/// `get_db` → `get_db`; `deps.get_db` → `get_db`. Anything else is not a
+/// named symbol.
+fn symbol_tail_name(n: TsNode, src: &[u8]) -> Option<String> {
+    match n.kind() {
+        "identifier" => Some(text(n, src).to_string()),
+        "attribute" => n
+            .child_by_field_name("attribute")
+            .map(|a| text(a, src).to_string()),
+        _ => None,
+    }
+}
+
+/// First non-noise type name in `ty`, in source order: `CommonQueryParams`
+/// for `Optional[CommonQueryParams]`. `Annotated` itself is skipped (it is a
+/// wrapper, not the dependency).
+fn first_type_name(ty: TsNode, src: &[u8]) -> Option<String> {
+    let mut stack = vec![ty];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" | "attribute" => {
+                if let Some(s) = symbol_tail_name(n, src)
+                    && s != "Annotated"
+                    && !is_type_noise(&s)
+                {
+                    return Some(s);
+                }
+            }
+            // A call inside a type is a marker (`Depends()`), never the type.
+            "call" => {}
+            _ => {
+                let mut c = n.walk();
+                let children: Vec<TsNode> = n.named_children(&mut c).collect();
+                stack.extend(children.into_iter().rev());
+            }
+        }
+    }
+    None
+}
+
+/// `Annotated[T, ...]` (as a `generic_type` or an expression `subscript`) →
+/// its first argument `T`; `None` for anything else.
+fn annotated_first_arg<'t>(n: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let (head, first) = match n.kind() {
+        "generic_type" => {
+            let head = n.named_child(0)?;
+            let mut c = n.walk();
+            let params = n
+                .named_children(&mut c)
+                .find(|ch| ch.kind() == "type_parameter")?;
+            (head, params.named_child(0)?)
+        }
+        "subscript" => (
+            n.child_by_field_name("value")?,
+            n.child_by_field_name("subscript")?,
+        ),
+        _ => return None,
+    };
+    let head_text = text(head, src);
+    let tail = head_text.rsplit('.').next().unwrap_or(head_text).trim();
+    (tail == "Annotated").then_some(first)
+}
+
+/// Walk a parameter's type annotation for `Depends(...)` markers. A `call` is
+/// handed to [`push_depends_target`] and not descended into. Inside
+/// `Annotated[T, ...]`, `T` is the fallback for a bare `Depends()`. Handles
+/// nesting such as `Optional[Annotated[T, Depends(f)]]`.
+fn scan_annotated_depends(
+    ty: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    seen: &mut std::collections::HashSet<String>,
+    acc: &mut Acc,
+) {
+    let mut stack: Vec<(TsNode, Option<TsNode>)> = vec![(ty, None)];
+    while let Some((n, fallback)) = stack.pop() {
+        if n.kind() == "call" {
+            push_depends_target(n, fallback, src, from, module_id, seen, acc);
+            continue;
+        }
+        let inner = annotated_first_arg(n, src).or(fallback);
+        let mut c = n.walk();
+        for child in n.named_children(&mut c) {
+            stack.push((child, inner));
+        }
     }
 }
 
@@ -2910,5 +3158,99 @@ class Field:
             .iter()
             .any(|r| r.category == edge_category::TESTS);
         assert!(!has_tests_ref, "non-test fn must not emit a TESTS ref");
+    }
+
+    /// Bare-name INJECTS targets pushed from `from`, in emission order.
+    fn injects_from(parse: &FileParse, from: NodeId) -> Vec<String> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == from && r.category == edge_category::INJECTS)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn fn_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    #[test]
+    fn fastapi_depends_default_emits_injects_ref() {
+        // Untyped and typed defaults, bare and module-qualified `Depends`.
+        let src = "from fastapi import Depends\nimport fastapi\nfrom deps import get_db, get_user\n\n\n@app.get(\"/u\")\ndef read(db = Depends(get_db), user: User = fastapi.Depends(deps.get_user)):\n    return db\n";
+        let parse = parse_file(src, "app.py", "app", repo()).unwrap();
+        assert_eq!(
+            injects_from(&parse, fn_id("app::read")),
+            vec!["get_db".to_string(), "get_user".to_string()],
+        );
+    }
+
+    #[test]
+    fn fastapi_annotated_depends_emits_injects_ref() {
+        // `Annotated[T, Depends(f)]`, also nested under Optional; `Security`
+        // is the same shape. The provider is the target, never the type.
+        let src = "from typing import Annotated, Optional\nfrom fastapi import Depends, Security\n\n\ndef admin(ok: Annotated[bool, Depends(verify_token)], u: Optional[Annotated[User, Security(current_user, scopes=[\"a\"])]] = None):\n    return ok\n";
+        let parse = parse_file(src, "app.py", "app", repo()).unwrap();
+        let mut got = injects_from(&parse, fn_id("app::admin"));
+        got.sort();
+        assert_eq!(got, vec!["current_user".to_string(), "verify_token".to_string()]);
+    }
+
+    #[test]
+    fn non_depends_default_emits_no_injects() {
+        // A call default that is not a Depends marker, a non-call default, and
+        // a Depends whose provider is not a named symbol all emit nothing.
+        let src = "def f(x = compute(), y = 3, z = Depends(lambda: 1), w: int = other(get_db)):\n    return x\n";
+        let parse = parse_file(src, "app.py", "app", repo()).unwrap();
+        assert!(
+            parse.refs.iter().all(|r| r.category != edge_category::INJECTS),
+            "expected no INJECTS refs, got {:?}",
+            injects_from(&parse, fn_id("app::f"))
+        );
+    }
+
+    #[test]
+    fn fastapi_bare_depends_falls_back_to_annotation_type() {
+        // `Depends()` with no provider: FastAPI instantiates the annotated
+        // class. `dependency=` keyword names the provider explicitly.
+        let src = "def list_items(q: Annotated[Pager, Depends(use_cache=False)], commons: CommonQueryParams = Depends(), r = Depends(dependency=get_repo)):\n    return commons\n";
+        let parse = parse_file(src, "app.py", "app", repo()).unwrap();
+        assert_eq!(
+            injects_from(&parse, fn_id("app::list_items")),
+            vec![
+                "Pager".to_string(),
+                "CommonQueryParams".to_string(),
+                "get_repo".to_string()
+            ],
+        );
+    }
+
+    #[test]
+    fn fastapi_decorator_dependencies_emit_injects_ref() {
+        // Route-level `dependencies=[...]`: every provider in the list, deduped
+        // against the parameter spellings; other keywords never fire.
+        let src = "@router.get(\n    \"/\",\n    dependencies=[Depends(get_current_active_superuser), Security(audit)],\n    response_model=Depends(not_a_dep),\n)\ndef read_users(db = Depends(audit)):\n    return db\n";
+        let parse = parse_file(src, "users.py", "users", repo()).unwrap();
+        assert_eq!(
+            injects_from(&parse, fn_id("users::read_users")),
+            vec!["audit".to_string(), "get_current_active_superuser".to_string()],
+        );
+    }
+
+    #[test]
+    fn fastapi_depends_on_method_emits_injects_ref() {
+        // Class-based dependency / view: the method visitor wires it too.
+        let src = "class ItemService:\n    def __init__(self, db = Depends(get_db)):\n        self.db = db\n";
+        let parse = parse_file(src, "svc.py", "svc", repo()).unwrap();
+        let init_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "svc::ItemService::__init__",
+        );
+        assert_eq!(injects_from(&parse, init_id), vec!["get_db".to_string()]);
     }
 }
