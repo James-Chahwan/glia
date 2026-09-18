@@ -1,4 +1,4 @@
-//! Angular component/service/directive/pipe/guard/module + Angular Router extraction.
+//! Angular component/service/directive/pipe/guard/module extraction.
 //!
 //! Pattern-based, runs per-file on TS under Angular-detected projects. Emits:
 //!   - COMPONENT: class with `@Component({...})` decorator.
@@ -6,20 +6,17 @@
 //!   - DIRECTIVE: class with `@Directive({...})` decorator.
 //!   - PIPE: class with `@Pipe({...})` decorator.
 //!   - GUARD: classes ending in `Guard` (CanActivate/CanDeactivate patterns).
-//!   - ROUTE: `{ path: 'users', component: UsersComponent }` entries — a
-//!     browser page, qname `page:/users` (LB.4c), name `/users`, method GET.
+//!
+//! Angular Router tables (`{ path: 'users', component: UsersComponent,
+//! children: [...] }`) are the shared route-table walker's
+//! (`crate::nav_routes`, LA.6b).
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
-
-use crate::react::nav_route_origin_cell;
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use repo_graph_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 pub struct AngularNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
-    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
-    /// `provenance: nav_route` ORIGIN cell.
-    pub nav_routes: usize,
 }
 
 pub fn extract_angular_nodes(
@@ -43,44 +40,7 @@ pub fn extract_angular_nodes(
         nav.record(id, &name, &qname, kind, Some(module_id));
     }
 
-    // Angular Router entries are BROWSER navigation, not server endpoints
-    // (A3.4) — marked so the HTTP route index skips them. LB.4c: a page lives
-    // in its own `page:<path>` qname namespace, so it never shares a NodeId
-    // with a same-repo server route `GET <path>`.
-    let mut nav_routes = 0usize;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in scan_angular_router_paths(source) {
-        let normalized = if path.starts_with('/') {
-            path
-        } else {
-            format!("/{path}")
-        };
-        let canonical = format!("page:{normalized}");
-        if !seen.insert(canonical.clone()) {
-            continue;
-        }
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &canonical);
-        nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Medium,
-            cells: vec![
-                Cell {
-                    kind: cell_type::ROUTE_METHOD,
-                    payload: CellPayload::Text("GET".to_string()),
-                },
-                nav_route_origin_cell(),
-            ],
-        });
-        nav.record(id, &normalized, &canonical, node_kind::ROUTE, None);
-        nav_routes += 1;
-    }
-
-    AngularNodes {
-        nodes,
-        nav,
-        nav_routes,
-    }
+    AngularNodes { nodes, nav }
 }
 
 fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
@@ -211,59 +171,11 @@ fn extract_class_name(line: &str) -> Option<String> {
     }
 }
 
-fn scan_angular_router_paths(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    // Angular Router routes: `{ path: 'users', component: UsersComponent }`.
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("path:") {
-        let start = search_from + rel + "path:".len();
-        let rest = source[start..].trim_start();
-        if let Some(path) = first_string_literal(rest) {
-            // Skip template-source expressions captured from framework internals
-            // (`path: \`/${this.routeConfig.path}\``). A `${...}` path is not a
-            // literal route — emitting it mints noise like `GET /${...}` that
-            // clears trigram thresholds against many queries. (glia-v2 G8)
-            if !path.contains("${") {
-                out.push(path);
-            }
-        }
-        search_from = start + 1;
-    }
-    // Also RouterModule.forRoot([...]) + forChild([...]).
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn first_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let delim = match bytes[0] {
-        b'"' => b'"',
-        b'\'' => b'\'',
-        b'`' => b'`',
-        _ => return None,
-    };
-    let mut j = 1;
-    while j < bytes.len() && bytes[j] != delim {
-        if bytes[j] == b'\\' && j + 1 < bytes.len() {
-            j += 2;
-        } else {
-            j += 1;
-        }
-    }
-    if j < bytes.len() {
-        Some(s[1..j].to_string())
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use repo_graph_code_domain::{CallQualifier, cell_type, edge_category};
+    use repo_graph_core::CellPayload;
 
     fn repo() -> RepoId {
         RepoId(1)
@@ -379,7 +291,11 @@ const routes: Routes = [
 ];
 RouterModule.forRoot(routes);
 "#;
-        let r = extract_angular_nodes(src, "test", module_id(), repo());
+        // LA.6b: Angular Router tables are the shared walker's; the Angular
+        // extractor itself mints no ROUTE any more.
+        let own = extract_angular_nodes(src, "test", module_id(), repo());
+        assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id
@@ -422,5 +338,26 @@ RouterModule.forRoot(routes);
                 "nav route must carry the ORIGIN provenance mark"
             );
         }
+        // LA.6b: `component: X` binds each route to its page component.
+        let mut bound: Vec<(&str, &str)> = r
+            .refs
+            .iter()
+            .filter(|x| x.category == edge_category::HANDLED_BY)
+            .filter_map(|x| match &x.qualifier {
+                CallQualifier::Bare(h) => {
+                    Some((r.nav.qname_by_id.get(&x.from)?.as_str(), h.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        bound.sort_unstable();
+        assert_eq!(
+            bound,
+            [
+                ("page:/", "HomeComponent"),
+                ("page:/users", "UsersComponent"),
+                ("page:/users/:id", "UserDetailComponent"),
+            ]
+        );
     }
 }

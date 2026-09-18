@@ -1,0 +1,51 @@
+{
+  "framework": "nav-react-routes",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/settings/profile",
+      "note": "<Route path=\"profile\"> nested inside <Route path=\"/settings\">"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/reports"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/settings/profile",
+      "to": "ProfilePage",
+      "category": "HANDLED_BY",
+      "note": "element={<ProfilePage />}"
+    },
+    {
+      "from": "/reports",
+      "to": "Reports",
+      "category": "HANDLED_BY",
+      "note": "object form `Component: Reports`"
+    },
+    {
+      "from": "/old",
+      "to": "/reports",
+      "category": "NAVIGATES_TO",
+      "note": "element={<Navigate to=\"/reports\" />}"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /profile",
+      "note": "the relative child path must not appear un-composed (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/profile",
+      "note": "the relative child path must not appear un-composed (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6b. React Router v6 nested JSX routes, an index route, a <Navigate> redirect and a createBrowserRouter object table in a second file. Baseline HEAD: nested child paths are emitted uncomposed and no ROUTE has an edge."
+}

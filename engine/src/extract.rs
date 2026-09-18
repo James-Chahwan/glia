@@ -132,7 +132,19 @@ pub fn parse_one_with(
 pub(crate) struct ExtractStats {
     /// A3.4: ROUTE nodes marked `provenance: nav_route` (client-router browser
     /// navigation targets, excluded from the HTTP pairing index downstream).
+    /// LA.6b: minted once per file by the shared route-table walker.
     pub nav_routes: usize,
+    /// LA.6b: route -> component `HANDLED_BY` refs the route tables emitted.
+    pub nav_bound: usize,
+    /// LA.6b: route -> route `NAVIGATES_TO` refs (redirects) emitted.
+    pub nav_redirects: usize,
+    /// LA.6b: records whose path was composed onto a parent record's.
+    pub nav_children: usize,
+    /// LA.6b: `path` objects refused as route records (no router key, or not
+    /// a URL path).
+    pub nav_rejected: usize,
+    /// LA.6b: nav ROUTEs whose path ends in a wildcard (`**`, `*`, `:x*`).
+    pub nav_catchalls: usize,
     /// A3.5: ts_routes Express-scan matches rejected because the receiver is
     /// an HTTP client (`this.http.get('/users')`) — phantom server ROUTEs no
     /// longer minted.
@@ -150,23 +162,12 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
-        openapi_annot, queues, react, services, trpc, ts_routes, vue, websocket,
+        nav_routes, openapi_annot, queues, react, services, trpc, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
         ($call:expr) => {{
             let out = $call;
-            fp.nodes.extend(out.nodes);
-            merge_nav(&mut fp.nav, out.nav);
-        }};
-    }
-
-    /// Like `run!` but also accumulates the extractor's own counters into
-    /// `stats` for the build markers (A3.4 `nav_routes`).
-    macro_rules! run_counted {
-        ($call:expr) => {{
-            let out = $call;
-            stats.nav_routes += out.nav_routes;
             fp.nodes.extend(out.nodes);
             merge_nav(&mut fp.nav, out.nav);
         }};
@@ -270,6 +271,22 @@ pub(crate) fn apply_cross_cutting_extractors(
         }
         run_marked!(procs);
         run_marked!(calls);
+        // LA.6b: Angular Router / React Router / vue-router tables, ONE walk
+        // per file (the three framework extractors below used to scan `path:`
+        // each, minting one literal up to three times on a plain `.ts`). Not
+        // `run!`: the routes carry HANDLED_BY (route -> component) and
+        // NAVIGATES_TO (redirect) refs, bound by the graph builder's
+        // `resolve_refs`.
+        let tables = nav_routes::extract_route_tables(source, module_id, repo);
+        stats.nav_routes += tables.nav_routes;
+        stats.nav_bound += tables.bound;
+        stats.nav_redirects += tables.redirects;
+        stats.nav_children += tables.children;
+        stats.nav_rejected += tables.rejected;
+        stats.nav_catchalls += tables.catchalls;
+        fp.refs.extend(tables.refs);
+        fp.nodes.extend(tables.nodes);
+        merge_nav(&mut fp.nav, tables.nav);
     }
     if matches!(lang, "react" | "typescript") {
         let module_qname = fp
@@ -278,7 +295,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run_counted!(react::extract_react_nodes(
+        run!(react::extract_react_nodes(
             source, &module_qname, module_id, repo
         ));
     }
@@ -289,7 +306,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run_counted!(angular::extract_angular_nodes(
+        run!(angular::extract_angular_nodes(
             source, &module_qname, module_id, repo
         ));
     }
@@ -300,7 +317,7 @@ pub(crate) fn apply_cross_cutting_extractors(
             .get(&module_id)
             .cloned()
             .unwrap_or_default();
-        run_counted!(vue::extract_vue_nodes(
+        run!(vue::extract_vue_nodes(
             source, path, &module_qname, module_id, repo
         ));
     }

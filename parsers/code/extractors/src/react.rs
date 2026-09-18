@@ -1,10 +1,12 @@
-//! React component + hook + React Router extraction.
+//! React component + hook extraction.
 //!
 //! Runs per-file for TS/TSX/JS/JSX under React-detected projects. Emits:
 //!   - COMPONENT nodes: capitalized function/const declarations returning JSX.
 //!   - HOOK nodes: functions whose name starts with `use` (camelCase).
-//!   - ROUTE nodes: React Router v6 `<Route path="/...">` and
-//!     `createBrowserRouter([{ path: '/...', ... }])`.
+//!
+//! React Router tables (`<Route path>` trees and `createBrowserRouter([...])`)
+//! are the shared route-table walker's (`crate::nav_routes`, LA.6b), which
+//! also covers Angular Router and vue-router.
 //!
 //! This is pattern-based — intentional to stay zero-AST-dependency like the
 //! other cross-cutting extractors.
@@ -28,9 +30,10 @@ use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 /// value — the provenance vocabulary is already open-ended (the doc pipeline
 /// writes `"provenance":"documentation"`), so no new CellType id is minted.
 ///
-/// Canonical for the whole extractors crate: `angular` and `vue` import this
-/// rather than re-spelling the payload, since the graph-side matcher is a
-/// literal substring test on exactly this text.
+/// Canonical for the whole extractors crate: `nav_routes` (Angular / React /
+/// Vue route tables, LA.6b) imports this rather than re-spelling the payload,
+/// since the graph-side matcher is a literal substring test on exactly this
+/// text.
 pub(crate) fn nav_route_origin_cell() -> Cell {
     Cell {
         kind: cell_type::ORIGIN,
@@ -41,10 +44,6 @@ pub(crate) fn nav_route_origin_cell() -> Cell {
 pub struct ReactNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
-    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
-    /// `provenance: nav_route` ORIGIN cell. Feeds the engine's
-    /// `[extract] nav-routes marked: N` marker.
-    pub nav_routes: usize,
 }
 
 pub fn extract_react_nodes(
@@ -82,46 +81,7 @@ pub fn extract_react_nodes(
         nav.record(id, &name, &qname, node_kind::HOOK, Some(module_id));
     }
 
-    // --- React Router routes (browser-side, GET-only by nature). LB.4c: a
-    // page lives in its own `page:<path>` qname namespace (name = the path), so
-    // a SPA page never shares a NodeId with a same-repo server `GET <path>`.
-    let mut nav_routes = 0usize;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in scan_react_router_paths(source) {
-        if !looks_like_url_path(&path) {
-            continue;
-        }
-        // Drop template-source expressions (`/${...}`) captured from framework
-        // internals — not literal routes. (glia-v2 G8)
-        if path.contains("${") {
-            continue;
-        }
-        let canonical = format!("page:{path}");
-        if !seen.insert(canonical.clone()) {
-            continue;
-        }
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &canonical);
-        nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Medium,
-            cells: vec![
-                Cell {
-                    kind: cell_type::ROUTE_METHOD,
-                    payload: CellPayload::Text("GET".to_string()),
-                },
-                nav_route_origin_cell(),
-            ],
-        });
-        nav.record(id, &path, &canonical, node_kind::ROUTE, None);
-        nav_routes += 1;
-    }
-
-    ReactNodes {
-        nodes,
-        nav,
-        nav_routes,
-    }
+    ReactNodes { nodes, nav }
 }
 
 fn scan_component_names(source: &str) -> Vec<String> {
@@ -194,89 +154,6 @@ fn scan_hook_names(source: &str) -> Vec<String> {
         }
     }
     dedup(out)
-}
-
-/// Reject path strings that look like JS code rather than URLs. The bare
-/// `path:` substring scan in `scan_react_router_paths` catches `path: '/foo'`
-/// in arbitrary JS files (Hapi's `'Invalid path: ...'` error string was the
-/// canonical FP that emitted ~80 garbage routes per hapi/lib file). Url paths
-/// don't contain newlines, parens, semicolons, or quotes.
-fn looks_like_url_path(p: &str) -> bool {
-    if p.is_empty() || p.len() > 256 || !p.starts_with('/') {
-        return false;
-    }
-    p.chars().all(|c| match c {
-        '\n' | '\r' | '\t' | ' ' => false,
-        c if c.is_ascii_control() => false,
-        '(' | ')' | ';' | '"' | '\'' | '`' | ',' => false,
-        _ => true,
-    })
-}
-
-fn scan_react_router_paths(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    // JSX: <Route path="/foo" ... />
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("<Route") {
-        let start = search_from + rel;
-        let end_gt = source[start..]
-            .find('>')
-            .map(|e| start + e)
-            .unwrap_or(source.len());
-        let tag = &source[start..end_gt];
-        if let Some(path) = extract_attr(tag, "path") {
-            out.push(path);
-        }
-        search_from = end_gt.max(start + 1);
-    }
-    // Object form: { path: '/foo', element: ... } or path: "/foo" inside
-    // createBrowserRouter / createMemoryRouter / createHashRouter literal.
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("path:") {
-        let start = search_from + rel + "path:".len();
-        let rest = source[start..].trim_start();
-        if let Some(path) = first_string_literal(rest) {
-            // Crude guard: previous char should be { or , or whitespace (an object key).
-            out.push(path);
-        }
-        search_from = start + 1;
-    }
-    dedup(out)
-}
-
-fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    // attr="..."  or  attr='...'  or  attr={"..."}
-    let key = format!("{attr}=");
-    let idx = tag.find(&key)?;
-    let rest = &tag[idx + key.len()..];
-    let rest = rest.trim_start_matches('{').trim_start();
-    first_string_literal(rest)
-}
-
-fn first_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let delim = match bytes[0] {
-        b'"' => b'"',
-        b'\'' => b'\'',
-        b'`' => b'`',
-        _ => return None,
-    };
-    let mut j = 1;
-    while j < bytes.len() && bytes[j] != delim {
-        if bytes[j] == b'\\' && j + 1 < bytes.len() {
-            j += 2;
-        } else {
-            j += 1;
-        }
-    }
-    if j < bytes.len() {
-        Some(s[1..j].to_string())
-    } else {
-        None
-    }
 }
 
 fn take_ident(s: &str) -> Option<String> {
@@ -370,7 +247,11 @@ export function UserCard({ user }: Props) {
   <Route path="/users/:id" element={<UserDetail />} />
 </Routes>
 "#;
-        let r = extract_react_nodes(src, "test", module_id(), repo());
+        // LA.6b: React Router tables are the shared walker's; the React
+        // extractor itself mints no ROUTE any more.
+        let own = extract_react_nodes(src, "test", module_id(), repo());
+        assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id
@@ -399,6 +280,11 @@ export function UserCard({ user }: Props) {
         assert!(r.nodes.iter().any(|n| n.id == page));
         assert!(r.nodes.iter().all(|n| n.id != server));
         assert_eq!(r.nav_routes, 2, "A3.4: every client-router ROUTE counted");
+        // LA.6b: `element={<X />}` binds the route to its page component.
+        assert_eq!(
+            handled_by(&r),
+            [("page:/users", "Users"), ("page:/users/:id", "UserDetail")]
+        );
         // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
         // is what `graph::nav::is_nav_route` reads to keep it out of
         // the HTTP pairing index.
@@ -429,7 +315,11 @@ createBrowserRouter([
     { path: '/about', element: <About /> },
 ]);
 "#;
-        let r = extract_react_nodes(src, "test", module_id(), repo());
+        // LA.6b: React Router tables are the shared walker's; the React
+        // extractor itself mints no ROUTE any more.
+        let own = extract_react_nodes(src, "test", module_id(), repo());
+        assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id
@@ -450,6 +340,28 @@ createBrowserRouter([
             .collect();
         qnames.sort_unstable();
         assert_eq!(qnames, ["page:/", "page:/about"]);
+        assert_eq!(
+            handled_by(&r),
+            [("page:/", "Home"), ("page:/about", "About")]
+        );
+    }
+
+    /// `(route qname, handler)` for every LA.6b HANDLED_BY ref, sorted.
+    fn handled_by(r: &crate::nav_routes::NavRouteOut) -> Vec<(&str, &str)> {
+        use repo_graph_code_domain::{CallQualifier, edge_category};
+        let mut out: Vec<(&str, &str)> = r
+            .refs
+            .iter()
+            .filter(|x| x.category == edge_category::HANDLED_BY)
+            .filter_map(|x| match &x.qualifier {
+                CallQualifier::Bare(h) => {
+                    Some((r.nav.qname_by_id.get(&x.from)?.as_str(), h.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     #[test]

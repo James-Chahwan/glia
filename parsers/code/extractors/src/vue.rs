@@ -1,22 +1,18 @@
-//! Vue component/composable + Vue Router extraction.
+//! Vue component/composable extraction.
 //!
 //! Pattern-based. Runs per-file on TS under Vue-detected projects. Emits:
 //!   - COMPONENT: one per `.vue` file (name from basename) + `defineComponent({...})`.
 //!   - COMPOSABLE: `export function useX` / `export const useX = (...) =>`.
-//!   - ROUTE: `{ path: '/x', component: X }` → a browser page, qname `page:/x`
-//!     (LB.4c), name `/x`, method GET (Vue Router shape).
+//!
+//! vue-router tables (`{ path: '/x', component: X, children: [...] }`) are
+//! the shared route-table walker's (`crate::nav_routes`, LA.6b).
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
-
-use crate::react::nav_route_origin_cell;
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
 pub struct VueNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
-    /// A3.4: how many of `nodes` are browser-navigation ROUTEs carrying the
-    /// `provenance: nav_route` ORIGIN cell.
-    pub nav_routes: usize,
 }
 
 pub fn extract_vue_nodes(
@@ -69,49 +65,7 @@ pub fn extract_vue_nodes(
         nav.record(id, &name, &qname, node_kind::COMPOSABLE, Some(module_id));
     }
 
-    // --- Vue Router routes: `{ path: '/x', component: X }`. BROWSER
-    // navigation, not server endpoints (A3.4) — marked so the HTTP route
-    // index skips them. LB.4c: a page lives in its own `page:<path>` qname
-    // namespace, so it never shares a NodeId with a server `GET <path>`.
-    let mut nav_routes = 0usize;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path_str in scan_router_paths(source) {
-        // Drop template-source expressions (`/${...}`) captured from framework
-        // internals — not literal routes. (glia-v2 G8)
-        if path_str.contains("${") {
-            continue;
-        }
-        let normalized = if path_str.starts_with('/') {
-            path_str
-        } else {
-            format!("/{path_str}")
-        };
-        let canonical = format!("page:{normalized}");
-        if !seen.insert(canonical.clone()) {
-            continue;
-        }
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &canonical);
-        nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Medium,
-            cells: vec![
-                Cell {
-                    kind: cell_type::ROUTE_METHOD,
-                    payload: CellPayload::Text("GET".to_string()),
-                },
-                nav_route_origin_cell(),
-            ],
-        });
-        nav.record(id, &normalized, &canonical, node_kind::ROUTE, None);
-        nav_routes += 1;
-    }
-
-    VueNodes {
-        nodes,
-        nav,
-        nav_routes,
-    }
+    VueNodes { nodes, nav }
 }
 
 fn vue_component_name_from_path(path: &str) -> Option<String> {
@@ -174,46 +128,6 @@ fn scan_composable_names(source: &str) -> Vec<String> {
     dedup(out)
 }
 
-fn scan_router_paths(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("path:") {
-        let start = search_from + rel + "path:".len();
-        let rest = source[start..].trim_start();
-        if let Some(path) = first_string_literal(rest) {
-            out.push(path);
-        }
-        search_from = start + 1;
-    }
-    dedup(out)
-}
-
-fn first_string_literal(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        return None;
-    }
-    let delim = match bytes[0] {
-        b'"' => b'"',
-        b'\'' => b'\'',
-        b'`' => b'`',
-        _ => return None,
-    };
-    let mut j = 1;
-    while j < bytes.len() && bytes[j] != delim {
-        if bytes[j] == b'\\' && j + 1 < bytes.len() {
-            j += 2;
-        } else {
-            j += 1;
-        }
-    }
-    if j < bytes.len() {
-        Some(s[1..j].to_string())
-    } else {
-        None
-    }
-}
-
 fn take_ident(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -245,6 +159,8 @@ fn dedup(mut v: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use repo_graph_code_domain::{CallQualifier, cell_type, edge_category};
+    use repo_graph_core::CellPayload;
 
     fn repo() -> RepoId {
         RepoId(1)
@@ -302,7 +218,11 @@ const routes = [
 ];
 createRouter({ history: createWebHistory(), routes });
 "#;
-        let r = extract_vue_nodes(src, "src/router.ts", "test", module_id(), repo());
+        // LA.6b: vue-router tables are the shared walker's; the Vue extractor
+        // itself mints no ROUTE any more.
+        let own = extract_vue_nodes(src, "src/router.ts", "test", module_id(), repo());
+        assert!(own.nav.kind_by_id.values().all(|k| *k != node_kind::ROUTE));
+        let r = crate::nav_routes::extract_route_tables(src, module_id(), repo());
         let names: Vec<&str> = r
             .nav
             .name_by_id
@@ -345,6 +265,27 @@ createRouter({ history: createWebHistory(), routes });
                 "nav route must carry the ORIGIN provenance mark"
             );
         }
+        // LA.6b: `component: X` binds each route to its page component.
+        let mut bound: Vec<(&str, &str)> = r
+            .refs
+            .iter()
+            .filter(|x| x.category == edge_category::HANDLED_BY)
+            .filter_map(|x| match &x.qualifier {
+                CallQualifier::Bare(h) => {
+                    Some((r.nav.qname_by_id.get(&x.from)?.as_str(), h.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        bound.sort_unstable();
+        assert_eq!(
+            bound,
+            [
+                ("page:/", "Home"),
+                ("page:/users", "Users"),
+                ("page:/users/:id", "UserDetail")
+            ]
+        );
     }
 
     #[test]

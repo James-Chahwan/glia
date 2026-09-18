@@ -1,0 +1,81 @@
+{
+  "framework": "nav-angular-routes",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/admin/users",
+      "note": "child `users` composed under parent `admin`"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/home"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/profile"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/**",
+      "note": "root catch-all kept as a node; LA.6a never matches a link to it"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/home",
+      "to": "HomeComponent",
+      "category": "HANDLED_BY",
+      "note": "`component: HomeComponent`, bound through the file's import binding"
+    },
+    {
+      "from": "/admin/users",
+      "to": "AdminUsersComponent",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "/profile",
+      "to": "ProfileComponent",
+      "category": "HANDLED_BY",
+      "note": "loadComponent: () => import(...).then(m => m.ProfileComponent)"
+    },
+    {
+      "from": "/chat",
+      "to": "/home",
+      "category": "NAVIGATES_TO",
+      "note": "redirectTo is a route-to-route navigation"
+    },
+    {
+      "from": "/**",
+      "to": "/login",
+      "category": "NAVIGATES_TO",
+      "note": "the catch-all's redirect target"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /users",
+      "note": "the un-composed child path must not survive as its own route (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/users",
+      "note": "the un-composed child path must not survive as its own route (LB.4c page: qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /tmp/out.txt",
+      "note": "util.ts `{ path: 'tmp/out.txt', mode: 1 }` is not a route record (no router sibling key) (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/tmp/out.txt",
+      "note": "util.ts `{ path: 'tmp/out.txt', mode: 1 }` is not a route record (no router sibling key) (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6b. Angular route table with a child table, a lazy loadComponent, a redirect, a ** catch-all, and a non-router object carrying a `path:` key. Route patterns are path-only so they hold for either nav qname shape (LB.4c). Baseline HEAD: ROUTEs /admin, /chat, /home, /profile, /users (child NOT composed) and a phantom /tmp/out.txt; zero edges touch any ROUTE; NAVIGATES_TO raises in grade.py until L0.1 ships in the wheel."
+}

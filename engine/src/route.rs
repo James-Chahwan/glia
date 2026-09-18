@@ -76,6 +76,12 @@ pub(crate) fn parse_repo_files(
     // build — a cache hit replays a FileParse whose ROUTE nodes already carry
     // the mark, so the graph-side `[http]` marker is the complete figure.
     let mut nav_routes_marked = 0usize;
+    // LA.6b: the route-table walker's counters, same reparsed-only caveat.
+    let mut nav_bound = 0usize;
+    let mut nav_redirects = 0usize;
+    let mut nav_children = 0usize;
+    let mut nav_rejected = 0usize;
+    let mut nav_catchalls = 0usize;
     // A3.5 `[extract] ts-routes` marker counter, same reparsed-only caveat.
     let mut ts_client_calls_skipped = 0usize;
 
@@ -444,6 +450,11 @@ pub(crate) fn parse_repo_files(
         match parse_result {
             Ok(Ok((fp, stats))) => {
                 nav_routes_marked += stats.nav_routes;
+                nav_bound += stats.nav_bound;
+                nav_redirects += stats.nav_redirects;
+                nav_children += stats.nav_children;
+                nav_rejected += stats.nav_rejected;
+                nav_catchalls += stats.nav_catchalls;
                 ts_client_calls_skipped += stats.ts_client_calls_skipped;
                 if let Some(h) = hash {
                     pending.push((path.clone(), h, lang, fp.clone()));
@@ -497,7 +508,10 @@ pub(crate) fn parse_repo_files(
     // A sum of per-file counts, so HashMap iteration order cannot leak into it.
     // Kind-gated to ROUTE: a module qnamed `page` (a root `page.tsx`) has
     // children `page::X`, which a bare prefix test would miscount.
-    // Only printed when a build actually has one.
+    // LA.6b fired_on: the second parenthesis is the shared route-table
+    // walker's work on the reparsed files - route -> component refs, redirect
+    // refs, composed child routes, `path` objects refused as route records,
+    // wildcard routes. Only printed when a build has a page or refused a record.
     let page_qnamed: usize = parses_by_lang
         .values()
         .flatten()
@@ -511,8 +525,12 @@ pub(crate) fn parse_repo_files(
                 .count()
         })
         .sum();
-    if nav_routes_marked > 0 || page_qnamed > 0 {
-        eprintln!("[extract] nav-routes marked: {nav_routes_marked} (page-qnamed {page_qnamed})");
+    if nav_routes_marked > 0 || page_qnamed > 0 || nav_rejected > 0 {
+        eprintln!(
+            "[extract] nav-routes marked: {nav_routes_marked} (page-qnamed {page_qnamed}) \
+             (bound={nav_bound} redirects={nav_redirects} children={nav_children} \
+             rejected={nav_rejected} catchall={nav_catchalls})"
+        );
     }
     // A3.5 fired_on marker: ts_routes declined to mint a server ROUTE from an
     // HTTP-client call (`this.http.get('/users')`). Only printed when it did.
