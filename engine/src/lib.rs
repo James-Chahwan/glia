@@ -22,6 +22,39 @@ mod passes;
 mod route;
 mod walk;
 
+// 0.5.0 leap primitives: one public module each, reached by module path
+// (`repo_graph_engine::delta::graph_delta_vs_rev`), never flattened into the
+// root. Each slot's owner fills its file; no later packet edits this list.
+pub mod absence;
+pub mod check;
+pub mod contract_fields;
+pub mod cycles;
+pub mod delta;
+pub mod diff_impact;
+pub mod effects;
+pub mod feature_flows;
+pub mod find;
+pub mod gaps;
+pub mod implementors;
+pub mod merge;
+pub mod pages;
+pub mod patterns;
+pub mod persist;
+pub mod profile;
+pub mod serves;
+pub mod spec_status;
+pub mod tests_for;
+pub mod trace;
+pub mod why;
+
+// 0.5.0 leap internals: crate-private slots, cross-module items `pub(crate)`.
+mod adr;
+mod external;
+mod git_rev;
+mod http_owner;
+mod parallel;
+mod rekey;
+
 pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
@@ -34,14 +67,12 @@ pub use cache::{CacheStats, ParseCache};
 /// dependency on the `stamp` crate.
 pub use repo_graph_stamp::{BUILD_STAMP, PARSER_STAMP, RELEASE, VERSION_LINE};
 
-pub use answers::{
-    BlastAnswer, LocatedNode, MessageContractRow, MessageContractSide, ProjectInfo, TraceHop,
-    blast_radius_by_qname, cross_stack_trace, entrypoint_reachable, governing_docs, locate_node,
-    message_contracts, node_in_scope, project_roots, resolve_scope, resolve_signal_located,
-};
-pub use build::{
-    GenerateResult, generate_many, generate_many_incremental, generate_one,
-    generate_one_incremental, generate_one_with_cache,
-};
-pub use coverage::{CoverageCaveat, CoverageNote, coverage_report};
-pub use extract::{parse_one, parse_one_with};
+// Facade: every `pub` item in these four modules is the crate's flat public
+// surface. A helper another module needs is `pub(crate)`, never `pub`. `arch`
+// and `cache` are public modules with a partial flat list (kept explicit);
+// `docs`, `endpoint_fold`, `passes`, `route` and `walk` declare no free `pub`
+// items, so they are not globbed.
+pub use answers::*;
+pub use build::*;
+pub use coverage::*;
+pub use extract::*;

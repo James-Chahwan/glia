@@ -38,29 +38,118 @@ py/                 pyo3 bindings — the only Rust crate published to PyPI (as 
 
 Parsers live at `parsers/<domain>/<language>/`. When v0.5.0 adds non-code domains, they nest alongside `parsers/code/`.
 
-### Module layout — `engine` and `graph` are split, not monolithic
+### Module layout — every hot crate is a facade over modules
 
-Both crates' `lib.rs` is a **facade**: `mod` declarations plus the `pub use` list that
-fixes the crate's public surface. No logic lives there. **Never trust a line number in
+`lib.rs` (`main.rs` for `cli`) in `engine`, `graph`, `code-domain`, `py` and `cli` is a
+**facade**: module declarations plus re-exports, no logic. The 0.5.0 wave 0 (L0.1–L0.6)
+split them so the leap's packets edit disjoint files. **Never trust a line number in
 older prose — `grep -rn` the symbol name.**
 
+The facade rules:
+
+1. **The pre-0.5.0 API stays flat.** `engine` glob re-exports `answers`, `build`,
+   `coverage`, `extract`; `graph` globs `activation`, `blast`, `build`, `merged`,
+   `resolvers`, `types`. A `pub` item in a globbed module IS public API, so a helper
+   another module needs is `pub(crate)`, never `pub`. Modules that declare no free `pub`
+   items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
+   `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
+   `pub mod` with an explicit, partial flat list.
+2. **Every new 0.5.0 primitive is a public module slot**, reached by module path —
+   `repo_graph_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
+   `::profile::CODE_PROFILE`, `repo_graph_graph::roles::roles_in` — never flattened into
+   the root. The slot's owner fills its file; no later packet edits a facade (only
+   LD.11a, the crate rename, touches `engine/src/lib.rs`).
+3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
+   and call the item by its module path from `cli` / `py`.
+4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
+   never `#[allow]`. A slot still doc-only at release is dead weight — LG.4b's docs
+   refresh fails on any slot file whose only lines are `//!`.
+
 ```
-engine/src/   walk.rs     repo walk, gitignore, region graph
-              route.rs    per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache
-              extract.rs  detect_language, parse_one, parse_one_with, cross-cutting extractors
-              build.rs    generate_one*, generate_many, build_graphs_for_repo, run_all_resolvers
-              docs.rs     markdown ingest          passes.rs   doc-linker, TESTS edge
-              coverage.rs coverage_report          answers.rs  the P3 primitives
-              cache.rs    incremental parse cache
-graph/src/    types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
+engine/src/   lib.rs        facade (rules above)
+              walk.rs       repo walk, gitignore, region graph
+              route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache
+              extract.rs    detect_language, parse_one, parse_one_with, cross-cutting extractors
+              build/        mod.rs         GenerateResult, generate_one* / generate_many* pipeline
+                            assemble.rs    build_graphs_for_repo, build_const_table, SuppressPanicHook
+                            grafts.rs      apply_post_cache — every post-cache graft goes here
+                            rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
+                            lang_build.rs  build_language_graphs — per-language build + markers
+                            resolvers.rs   run_all_resolvers
+              docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge
+              coverage.rs   coverage_report          answers.rs   the P3 primitives
+              cache.rs      incremental parse cache  arch.rs      service_map (glia arch)
+              endpoint_fold.rs  client base-URL fold onto the ENDPOINT path
+  public slots (repo_graph_engine::<slot>::<item>), owner (+ extenders):
+              pages LA.6e              persist LC.7 (+LC.8, LC.9, LC.10a)   merge LC.10b
+              find LD.3b (+LD.6, LD.8a) absence LD.8a        trace LD.4a (+LD.4b)
+              implementors LD.7c       serves LD.8b
+              profile LD.13, LD.14a (+LD.14b, LD.6, LE.3a, LE.4d)   contract_fields LE.10c
+              delta LE.1b              diff_impact LE.2     tests_for LE.3b   effects LE.4d
+              why LE.5                 cycles LE.6b         patterns LE.7a    check LE.8
+              spec_status LE.9b        gaps LF.2c (+LF.2e, LF.5c)   feature_flows LG.3a
+  private slots (items pub(crate)):
+              http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
+              adr LF.4b                parallel LG.1a (+LG.1b)
+              external/ LF.1a — directory module; LF.2b, LF.2e, LF.3b, LF.4a, LF.5b, LF.6b
+                        add their stage files and declare them in external/mod.rs
+
+graph/src/    lib.rs        facade (rules above)
+              types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
               blast.rs activation.rs signal.rs
-              resolvers/  one module per mechanism (http, grpc, queue, graphql,
-                          websocket, eventbus, shared_schema, db, cron, config,
-                          iac, package, cli) + mod.rs
+              resolvers/    one module per mechanism (http, grpc, queue, graphql,
+                            websocket, eventbus, shared_schema, db, cron, config,
+                            iac, package, cli) + mod.rs
+  public slots (repo_graph_graph::<slot>::<item>):
+              rust_paths LA.1a (+LA.1b, LA.3)   nav LA.6a   roles LB.3a (+LA.21a)
+              identity LB.6                     cells LF.1a
+
+code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
+                            are allocated here and nowhere else; walk_gating, project_roots
+  public slots:     data_entity A13.1   evidence LC.3a   external_inputs LF.1a (+LF.4a)
+                    glia_config LF.2a (+LG.3d)   profile LD.14a (+LD.14b, LD.6, LE.4d)
+                    snapshots LF.5a (+LF.6a)
+
+py/src/       lib.rs        #[pymodule]: add_class PyGraph, then every registered
+                            ModuleFns sorted by name — never edited for a new API
+              graph.rs      #[pyclass] PyGraph (fields pub(crate)) + its core methods
+              registry.rs   the ModuleFns inventory type + registry / version functions
+              convert.rs    escape_json (LD.2 adds the JSON -> Python converter)
+              build.rs layout.rs      #[pyfunction]s (generate*, load_from_gmap, is_stale ...)
+              text.rs records.rs traversal.rs blast.rs trace.rs find.rs docs.rs
+              arch.rs contracts.rs    one `#[pymethods] impl PyGraph` block each
+  private slots: pages LA.6e   implementors LD.7c   serves LD.8b   delta LE.1c
+              diff_impact LE.2   tests_for LE.3b   effects LE.4d   why LE.5   cycles LE.6b
+              patterns LE.7b   check LE.8   spec_status LE.9b   cells LF.1b   gaps LF.2c
+              snapshots LF.5d, LF.6d   merge LC.10c   feature_flows LG.3c
+
+cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
+              common.rs     shared helpers (generate_for, print_json, node lookup,
+                            ImpactDirection)
+              hooks.rs      install-hooks + HooksCmd (LG.2's hidden `hook`)
+              surface.rs    #[cfg(test)] CLI surface test (LG.6a)
+              cmd/mod.rs    pub(crate) mod lines — never edited again
+              cmd/<command>.rs   one per pre-0.5.0 command: clap Args + run(a) -> i32
+              cmd/<area>/mod.rs  flattened Subcommand enum per area of leap commands:
+                  query   pages LA.6e, find LD.3b, flows LD.4b, implementors LD.7c,
+                          serves LD.8b, why LE.5
+                  change  delta LE.1c, diff-impact LE.2, tests-for LE.3b, patterns LE.7b
+                  rules   effects LE.4d, cycles LE.6b, check LE.8, spec-status LE.9b
+                  store   inspect LC.4, cell LF.1c
+                  inputs  gaps LF.2c, history LF.5d, tests LF.6d
 ```
 
-To widen something across a new module boundary use `pub(crate)`, never `pub` — the
-public API is exactly what the facade re-exports.
+- **py:** pyo3 `multiple-pymethods` lets each module carry its own
+  `#[pymethods] impl PyGraph`; a module that owns `#[pyfunction]`s ends with a
+  `register()` plus `inventory::submit! { ModuleFns { .. } }`. A new API goes in its
+  primitive's module. Helpers that tests exercise stay pyo3-free (a unit test naming a
+  `#[pyclass]` fails to link under `extension-module`).
+- **cli:** a new command adds one variant and one match arm to its area's `mod.rs` and
+  its own `cli/src/cmd/<area>/<name>.rs` (`Args` + `run`).
+- **Snapshot ownership:** the packet that claims `py/src/<m>.rs` owns
+  `py/api_surface/<m>.txt` and `py/tests/surface/test_<m>.py`; the packet that claims
+  `cli/src/cmd/<..>/<c>.rs` owns `cli/surface/<c>.txt` (global options:
+  `cli/surface/_global.txt`). The owner regenerates them in the same commit.
 
 ## Data Flow
 
