@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -39,7 +40,16 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
-    visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    let top = visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    if top.types > 0 && qname_debug() {
+        eprintln!(
+            "[qname] swift: {} top-level types scoped to {} ({} extensions, {} file-private kept) file={file_rel_path}",
+            top.types,
+            type_scope(module_qname),
+            top.extensions,
+            top.file_private
+        );
+    }
 
     scan_vapor_routes(source, repo, &mut acc);
 
@@ -65,31 +75,156 @@ struct Acc {
     /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
     /// (method, path) even if the same endpoint is called twice in a file.
     endpoint_seen: HashSet<NodeId>,
+    /// LB.7c: type nodes already emitted by this file, so a same-file
+    /// `extension T` folds onto `T`'s node instead of pushing a second node,
+    /// a second DEFINES edge and a second `children_of` entry. Lookup only.
+    type_seen: HashSet<NodeId>,
+}
+
+/// LB.7c: a Swift type belongs to its MODULE (the target directory), not its
+/// file, so drop the file-stem segment the engine's `path_to_qname` puts last:
+/// `Sources::Shop::Widget` -> `Sources::Shop`, a repo-root file (`Widget`) ->
+/// `""`. Swift forbids two same-named module-level types, so this never merges
+/// two declarations, and an `extension Widget` in `Widget+Extras.swift` gets
+/// the qname (and NodeId) of the class it extends.
+///
+/// The type `Widget` of `Widget.swift` therefore shares its qname with the
+/// file MODULE (different kind, different NodeId); `MergedGraph::pick_primary`
+/// ranks the declaration over the container, so qname lookups land on it.
+fn type_scope(module_qname: &str) -> &str {
+    module_qname.rsplit_once("::").map_or("", |(dir, _stem)| dir)
+}
+
+/// `scope::name`, or the bare `name` for the empty (repo-root) scope.
+fn scoped(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// `GLIA_QNAME_DEBUG=1` turns on the per-file `[qname] swift:` marker, read
+/// once. Off by default: it would print for every Swift file of a build.
+///   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] swift:'`
+fn qname_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// Top-level type declarations of one file, for the `[qname] swift:` marker.
+/// `file_private` counts every top-level entry whose qname keeps the file
+/// segment: private / fileprivate declarations and the same-file extensions
+/// of them (it can overlap `extensions`).
+#[derive(Default)]
+struct TopLevelTypes {
+    types: usize,
+    extensions: usize,
+    file_private: usize,
+}
+
+/// A top-level type declared (not extended) in this file: its name, kind and
+/// whether it is private / fileprivate (file-scoped).
+struct Declared<'a> {
+    name: &'a str,
+    kind: repo_graph_core::NodeKindId,
+    file_private: bool,
 }
 
 fn visit_top(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
+    module_qname: &str,
+    module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> TopLevelTypes {
+    let scope = type_scope(module_qname);
+    // Pre-scan, in source order: the types this file DECLARES, so an
+    // extension of one of them takes its kind (a `struct Part` + `extension
+    // Part` pair is one STRUCT node) and its scope (a private type's
+    // extension stays in the file). Vec + first match, never a HashMap walk.
+    let mut declared: Vec<Declared> = Vec::new();
+    {
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if matches!(child.kind(), "class_declaration" | "protocol_declaration")
+                && !is_extension(child)
+                && let Some(name_node) = child.child_by_field_name("name")
+            {
+                declared.push(Declared {
+                    name: text_of(name_node, src),
+                    kind: swift_type_kind(child),
+                    file_private: is_file_private(child, src),
+                });
+            }
+        }
+    }
+
+    let mut top = TopLevelTypes::default();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "import_declaration" => collect_import(child, src, parent_qname, acc),
+            "import_declaration" => collect_import(child, src, module_qname, acc),
             "class_declaration" | "protocol_declaration" => {
-                let kind = swift_type_kind(child);
-                visit_type(child, src, file_rel, parent_qname, parent_id, repo, kind, acc);
+                let ext = is_extension(child);
+                let (kind, file_private) = if ext {
+                    // An extension of a type declared in another file (or
+                    // outside the repo: `extension String`) stays CLASS.
+                    let name = child
+                        .child_by_field_name("name")
+                        .map(|n| text_of(n, src))
+                        .unwrap_or("");
+                    declared
+                        .iter()
+                        .find(|d| d.name == name)
+                        .map_or((node_kind::CLASS, false), |d| (d.kind, d.file_private))
+                } else {
+                    (swift_type_kind(child), is_file_private(child, src))
+                };
+                let qscope = if file_private { module_qname } else { scope };
+                if visit_type(child, src, file_rel, qscope, module_id, repo, kind, acc) {
+                    top.types += 1;
+                    top.extensions += usize::from(ext);
+                    top.file_private += usize::from(file_private);
+                }
             }
             "function_declaration" => {
-                visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_function(child, src, file_rel, module_qname, module_id, repo, acc);
             }
             _ => {}
         }
     }
+    top
+}
+
+/// `extension T { … }` — tree-sitter-swift 0.7 parses it as a
+/// `class_declaration` whose `declaration_kind` field is the `extension`
+/// keyword (actor / class / enum / extension / struct).
+fn is_extension(node: TsNode) -> bool {
+    node.child_by_field_name("declaration_kind")
+        .is_some_and(|k| k.kind() == "extension")
+}
+
+/// `private` / `fileprivate` at top level is FILE scope in Swift: such a type
+/// keeps the file segment in its qname, so two files may each declare
+/// `private enum Constants` without merging. Reads the `modifiers` child's
+/// `visibility_modifier` (exact text; `private(set)` is a setter modifier and
+/// never file scope).
+fn is_file_private(node: TsNode, src: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|c| c.kind() == "modifiers")
+        .any(|mods| {
+            let mut c = mods.walk();
+            mods.named_children(&mut c).any(|m| {
+                m.kind() == "visibility_modifier"
+                    && matches!(text_of(m, src).trim(), "private" | "fileprivate")
+            })
+        })
 }
 
 fn swift_type_kind(node: TsNode) -> repo_graph_core::NodeKindId {
@@ -110,37 +245,57 @@ fn swift_type_kind(node: TsNode) -> repo_graph_core::NodeKindId {
     node_kind::CLASS
 }
 
+/// Emit one type (class / struct / enum / actor / protocol / extension) and
+/// its members. `scope` is what the type hangs off: the module scope
+/// ([`type_scope`]) for a top-level type or extension, the file module for a
+/// private / fileprivate one, the outer type's qname for a nested one.
+/// Returns whether the type was emitted (the `[qname] swift:` marker counts
+/// them). A type this file already emitted (`class Widget` + `extension
+/// Widget`) folds onto the existing node: its cells are appended — the
+/// declaration's first, so POSITION locates the declaration — and no second
+/// DEFINES edge or nav entry is written.
 #[allow(clippy::too_many_arguments)]
 fn visit_type(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
 
-    acc.nodes.push(Node {
-        id,
-        repo,
-        confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
-    });
-    acc.edges.push(Edge {
-        from: parent_id,
-        to: id,
-        category: edge_category::DEFINES,
-        confidence: Confidence::Strong,
-    });
-    acc.nav.record(id, name, &qname, kind, Some(parent_id));
+    let cells = entity_cells(&node, src, file_rel);
+    if acc.type_seen.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav.record(id, name, &qname, kind, Some(parent_id));
+    } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == id) {
+        if is_extension(node) {
+            existing.cells.extend(cells);
+        } else {
+            // The declaration follows an extension of it in this file.
+            let ext_cells = std::mem::replace(&mut existing.cells, cells);
+            existing.cells.extend(ext_cells);
+        }
+    }
 
     // tree-sitter-swift 0.7 uses class_body / enum_class_body — find by suffix.
     let body = {
@@ -163,6 +318,7 @@ fn visit_type(
             }
         }
     }
+    true
 }
 
 fn visit_function(
@@ -616,6 +772,195 @@ struct Point {
         assert!(names.contains(&"User"));
         assert!(names.contains(&"Point"));
         assert!(names.contains(&"greet"));
+        // LB.7c: module-scoped (`Sources::User`), not file-scoped
+        // (`Sources::Models::User`).
+        let qnames: Vec<&str> = fp.nav.qname_by_id.values().map(|s| s.as_str()).collect();
+        assert!(qnames.contains(&"Sources::User"), "{qnames:?}");
+        assert!(qnames.contains(&"Sources::Point"), "{qnames:?}");
+        assert!(qnames.contains(&"Sources::User::greet"), "{qnames:?}");
+        assert!(!qnames.iter().any(|q| q.starts_with("Sources::Models::")), "{qnames:?}");
+    }
+
+    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn fixture(file: &str) -> String {
+        let path = format!(
+            "{}/../../../bench/substrate-gap/fixtures/swift-module-qnames/Sources/Shop/{file}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    fn node_count(fp: &FileParse, id: NodeId) -> usize {
+        fp.nodes.iter().filter(|n| n.id == id).count()
+    }
+
+    fn start_lines(fp: &FileParse, id: NodeId) -> Vec<String> {
+        let node = fp.nodes.iter().find(|n| n.id == id).expect("node");
+        node.cells
+            .iter()
+            .filter(|c| c.kind == cell_type::POSITION)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(j) => j
+                    .split("\"start_line\":")
+                    .nth(1)
+                    .and_then(|s| s.split(',').next())
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// LB.7c: Swift types and extensions hang off the module (the target
+    /// directory), so a cross-file `extension Widget` lands on the class's
+    /// node; a same-file `extension Part` of `struct Part` takes its kind and
+    /// node; private / fileprivate top-level types keep the file segment.
+    /// Drives the swift-module-qnames fixture's three files as the engine does.
+    #[test]
+    fn types_and_extensions_are_module_scoped() {
+        let widget = parse_file(
+            &fixture("Widget.swift"),
+            "Sources/Shop/Widget.swift",
+            "Sources::Shop::Widget",
+            repo(),
+        )
+        .unwrap();
+        let extras = parse_file(
+            &fixture("Widget+Extras.swift"),
+            "Sources/Shop/Widget+Extras.swift",
+            "Sources::Shop::Widget+Extras",
+            repo(),
+        )
+        .unwrap();
+        let part = parse_file(
+            &fixture("Part.swift"),
+            "Sources/Shop/Part.swift",
+            "Sources::Shop::Part",
+            repo(),
+        )
+        .unwrap();
+
+        // No doubled stem: CLASS Sources::Shop::Widget holds run / helper and
+        // the same-file extension's extra, folded into ONE node.
+        let class = id(node_kind::CLASS, "Sources::Shop::Widget");
+        assert_eq!(node_count(&widget, class), 1);
+        assert_eq!(widget.nav.kind_by_id.get(&class), Some(&node_kind::CLASS));
+        assert!(!widget.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Widget::Widget"));
+        for m in ["run", "helper", "extra"] {
+            let mid = id(node_kind::METHOD, &format!("Sources::Shop::Widget::{m}"));
+            assert_eq!(widget.nav.parent_of.get(&mid), Some(&class), "{m}");
+        }
+        let module = id(node_kind::MODULE, "Sources::Shop::Widget");
+        let defines = |fp: &FileParse, from: NodeId, to: NodeId| {
+            fp.edges
+                .iter()
+                .filter(|e| e.from == from && e.to == to && e.category == edge_category::DEFINES)
+                .count()
+        };
+        assert_eq!(defines(&widget, module, class), 1, "one DEFINES for class + extension");
+        assert_eq!(
+            widget.nav.children_of.get(&module).map(|c| c.iter().filter(|x| **x == class).count()),
+            Some(1)
+        );
+        // The declaration's POSITION first (line 0), the extension's second.
+        assert_eq!(start_lines(&widget, class), vec!["0", "10"]);
+
+        // The cross-file extension mints the SAME NodeId and holds `more`.
+        assert_eq!(node_count(&extras, class), 1);
+        let more = id(node_kind::METHOD, "Sources::Shop::Widget::more");
+        assert_eq!(extras.nav.parent_of.get(&more), Some(&class));
+        assert!(!extras.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Widget+Extras::Widget"));
+
+        // Control: the private enums keep their file segment, two nodes.
+        let c1 = id(node_kind::ENUM, "Sources::Shop::Widget::Constants");
+        let c2 = id(node_kind::ENUM, "Sources::Shop::Widget+Extras::Constants");
+        assert_ne!(c1, c2);
+        assert_eq!(node_count(&widget, c1), 1);
+        assert_eq!(node_count(&extras, c2), 1);
+        for fp in [&widget, &extras] {
+            assert!(!fp.nav.qname_by_id.values().any(|q| q == "Sources::Shop::Constants"));
+        }
+
+        // struct Part + extension Part: one STRUCT node, no CLASS twin.
+        let strukt = id(node_kind::STRUCT, "Sources::Shop::Part");
+        assert_eq!(node_count(&part, strukt), 1);
+        assert_eq!(part.nav.kind_by_id.get(&strukt), Some(&node_kind::STRUCT));
+        assert_eq!(node_count(&part, id(node_kind::CLASS, "Sources::Shop::Part")), 0);
+        for m in ["weight", "heavy"] {
+            let mid = id(node_kind::METHOD, &format!("Sources::Shop::Part::{m}"));
+            assert_eq!(part.nav.parent_of.get(&mid), Some(&strukt), "{m}");
+        }
+
+        // An extension of a type declared nowhere in the file stays CLASS, at
+        // module scope.
+        let string_ext = parse_file(
+            "extension String {\n    func shout() -> String { return self }\n}\n",
+            "Sources/Shop/String+Shout.swift",
+            "Sources::Shop::String+Shout",
+            repo(),
+        )
+        .unwrap();
+        let string_class = id(node_kind::CLASS, "Sources::Shop::String");
+        assert_eq!(node_count(&string_ext, string_class), 1);
+        let shout = id(node_kind::METHOD, "Sources::Shop::String::shout");
+        assert_eq!(string_ext.nav.parent_of.get(&shout), Some(&string_class));
+    }
+
+    /// LB.7c edges of the rule: a private type's same-file extension stays in
+    /// the file; `fileprivate` is file scope too; an extension written above
+    /// its declaration still folds with the declaration's POSITION first; a
+    /// type nested in an extension hangs off the extended type; free
+    /// functions keep the file scope; a repo-root file has an empty scope.
+    #[test]
+    fn file_private_types_and_extension_order() {
+        let source = r#"
+extension Late {
+    func a() -> Int { return 1 }
+    struct Inner {}
+}
+
+struct Late {}
+
+private struct Helper {}
+
+extension Helper {
+    func h() -> Int { return 2 }
+}
+
+fileprivate class Box {}
+
+public final class Open {}
+
+func topLevel() -> Int { return 0 }
+"#;
+        let fp = parse_file(source, "Sources/Shop/A.swift", "Sources::Shop::A", repo()).unwrap();
+        let qnames: Vec<&str> = fp.nav.qname_by_id.values().map(|s| s.as_str()).collect();
+
+        let late = id(node_kind::STRUCT, "Sources::Shop::Late");
+        assert_eq!(node_count(&fp, late), 1);
+        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Late")), 0);
+        assert_eq!(start_lines(&fp, late), vec!["6", "1"], "declaration POSITION first");
+        let a = id(node_kind::METHOD, "Sources::Shop::Late::a");
+        assert_eq!(fp.nav.parent_of.get(&a), Some(&late));
+        let inner = id(node_kind::STRUCT, "Sources::Shop::Late::Inner");
+        assert_eq!(fp.nav.parent_of.get(&inner), Some(&late));
+
+        let helper = id(node_kind::STRUCT, "Sources::Shop::A::Helper");
+        assert_eq!(node_count(&fp, helper), 1);
+        let h = id(node_kind::METHOD, "Sources::Shop::A::Helper::h");
+        assert_eq!(fp.nav.parent_of.get(&h), Some(&helper));
+        assert!(!qnames.contains(&"Sources::Shop::Helper"), "{qnames:?}");
+
+        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::A::Box")), 1);
+        assert_eq!(node_count(&fp, id(node_kind::CLASS, "Sources::Shop::Open")), 1);
+        assert_eq!(node_count(&fp, id(node_kind::FUNCTION, "Sources::Shop::A::topLevel")), 1);
+
+        let root = parse_file("class Widget {}\n", "Widget.swift", "Widget", repo()).unwrap();
+        assert_eq!(node_count(&root, id(node_kind::CLASS, "Widget")), 1);
+        assert_eq!(type_scope("Widget"), "");
+        assert_eq!(type_scope("Sources::Shop::Widget+Extras"), "Sources::Shop");
     }
 
     #[test]

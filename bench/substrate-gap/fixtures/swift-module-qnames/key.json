@@ -1,0 +1,59 @@
+{
+  "framework": "swift-module-qnames",
+  "language": "swift",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.7c identity fixture (legacy-only, no matrix cell). Swift types are members of the module (the target directory), not the file, so the file stem is dropped for type declarations and extensions: a cross-file extension's methods land on the type they extend. private / fileprivate top-level types ARE file-scoped in Swift and keep the file segment (control rows: the two Constants enums must stay two nodes). HEAD: Sources::Shop::Widget::Widget::run, Sources::Shop::Widget+Extras::Widget::more.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "Sources::Shop::Widget::run"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::Shop::Widget::extra",
+      "note": "same-file extension"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::Shop::Widget::more",
+      "note": "cross-file extension merges onto the class"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::Shop::Part::heavy",
+      "note": "extension of a same-file struct takes the struct's kind and node"
+    },
+    {
+      "kind": "ENUM",
+      "name": "Sources::Shop::Widget::Constants",
+      "note": "control: private enum keeps its file scope"
+    },
+    {
+      "kind": "ENUM",
+      "name": "Sources::Shop::Widget+Extras::Constants",
+      "note": "control: the second private enum stays a separate node"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "Sources::Shop::Widget::Widget"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Sources::Shop::Widget+Extras::Widget"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Sources::Shop::Part",
+      "note": "the extension of struct Part must not mint a CLASS twin"
+    },
+    {
+      "kind": "ENUM",
+      "name": "Sources::Shop::Constants",
+      "note": "private types never move to module scope"
+    }
+  ]
+}
