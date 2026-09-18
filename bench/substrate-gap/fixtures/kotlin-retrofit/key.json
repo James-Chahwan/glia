@@ -1,0 +1,13 @@
+{
+  "framework": "kotlin-retrofit",
+  "language": "kotlin",
+  "dirs": ["client", "server"],
+  "note": "A14.1 baseline: Kotlin Retrofit client paired to a Go net/http server. The Go ROUTE side and INTERFACE UserApi are already found, so the gap is isolated to Kotlin ENDPOINT extraction.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT",  "name": "GET /api/users", "note": "client-side endpoint from @GET on a Retrofit interface fun"},
+    {"kind": "INTERFACE", "name": "UserApi",        "note": "ALREADY FOUND — regression guard"}
+  ],
+  "expect_edges": [
+    {"from": "listUsers", "to": "/api/users", "category": "HTTP_CALLS", "note": "HttpStackResolver pairs the client ENDPOINT to the Go ROUTE; resolver is proven by xstack-go-http, so a miss here is Kotlin ENDPOINT extraction"}
+  ]
+}

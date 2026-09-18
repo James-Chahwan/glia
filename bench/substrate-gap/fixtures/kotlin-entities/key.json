@@ -1,0 +1,22 @@
+{
+  "framework": "kotlin",
+  "language": "kotlin",
+  "dirs": ["."],
+  "note": "A14.1 baseline: no Kotlin parser; .kt goes through the Java grammar. Measured at HEAD: 4 nodes / 2 edges, only INTERFACE Auditable found; every edge cell 0.00. Later A14 packets are graded against this.",
+  "expect_nodes": [
+    {"kind": "CLASS",     "name": "UserController", "note": "primary constructor kills the class node under the java grammar"},
+    {"kind": "CLASS",     "name": "UserService",    "note": "`: BaseService()` heritage kills the class node"},
+    {"kind": "CLASS",     "name": "UserDto",        "note": "data class"},
+    {"kind": "INTERFACE", "name": "Auditable",      "note": "ALREADY FOUND today — regression guard"},
+    {"kind": "METHOD",    "name": "getUser",        "note": "no `fun` is ever a declaration under java"},
+    {"kind": "FUNCTION",  "name": "topLevelHelper", "note": "top-level fun"}
+  ],
+  "expect_edges": [
+    {"from": "UserController", "to": "getUser",     "category": "DEFINES",       "note": "class -> method"},
+    {"from": "getUser",        "to": "findById",    "category": "CALLS",         "note": "userService.findById(id) — Attribute qualifier"},
+    {"from": "createUser",     "to": "logIt",       "category": "CALLS",         "note": "bare call to a sibling method — needs the extra_hook"},
+    {"from": "api",            "to": "UserService", "category": "IMPORTS",       "note": "import com.acme.service.UserService"},
+    {"from": "UserService",    "to": "BaseService", "category": "INHERITS_FROM", "note": "delegation_specifier with constructor_invocation"},
+    {"from": "UserController", "to": "Auditable",   "category": "IMPLEMENTS",    "note": "delegation_specifier with bare user_type"}
+  ]
+}

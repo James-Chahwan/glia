@@ -1,0 +1,24 @@
+{
+  "framework": "kotlin-spring",
+  "language": "kotlin",
+  "dirs": ["."],
+  "note": "A14.1 baseline: Spring on Kotlin. IMPORTS and the @Service role are already green through the Java path and must stay green through the Kotlin parser flip. LB.3a folds the services.rs SERVICE overlay into its CLASS as a ROLE cell, so the @Service bean is CLASS UserService + ROLE SERVICE, not a SERVICE node.",
+  "expect_nodes": [
+    {"kind": "CLASS",   "name": "UserService",    "note": "ALREADY FOUND (plain `class X {` is java-parseable) — the @Service bean, one node after the LB.3a fold; MUST survive the flip"},
+    {"kind": "ROUTE",   "name": "GET /users",     "note": "@GetMapping on a Kotlin method"},
+    {"kind": "CLASS",   "name": "UserController", "note": "primary constructor"},
+    {"kind": "METHOD",  "name": "list",           "note": "expression-body fun"}
+  ],
+  "expect_edges": [
+    {"from": "UserController", "to": "UserService", "category": "INJECTS",    "note": "primary-constructor DI on a stereotype class"},
+    {"from": "GET /users",     "to": "list",        "category": "HANDLED_BY", "note": "route -> handler method"},
+    {"from": "list",           "to": "findAll",     "category": "CALLS",      "note": "userService.findAll()"},
+    {"from": "web",            "to": "UserService", "category": "IMPORTS",    "note": "ALREADY 1.00 — regression guard, must not drop"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "UserService", "cell": "ROLE", "contains": "SERVICE", "note": "ALREADY FOUND — services.rs detect_java_services fires while lang==java, folded into the CLASS by LB.3a; MUST survive the flip"}
+  ],
+  "forbid": [
+    {"kind": "SERVICE", "name": "UserService", "note": "overlay twin folds into the CLASS (LB.3a)"}
+  ]
+}

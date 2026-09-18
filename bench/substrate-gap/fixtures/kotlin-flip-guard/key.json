@@ -1,0 +1,20 @@
+{
+  "framework": "kotlin-flip-guard",
+  "language": "kotlin",
+  "dirs": ["."],
+  "note": "A14.1 flip guard: pins what the JAVA parser extracts from .kt files at HEAD (all green). A14.2's routing flip turns part of it red (declared transient); it must be all green again after A14.6 — the gate that the Kotlin chain loses nothing the Java path had.",
+  "expect_nodes": [
+    {"kind": "ROUTE",       "name": "GET /users",                "note": "Javalin comma form: java scan_javalin_routes on .kt today"},
+    {"kind": "ROUTE",       "name": "GET /orders",               "note": "WebFlux chained .GET: java scan_webflux_routes on .kt today"},
+    {"kind": "ROUTE",       "name": "ANY /api",                  "note": "class-level @RequestMapping: java check_route_annotations"},
+    {"kind": "DATA_ENTITY", "name": "User",                      "note": "@Entity on a Java-parseable Kotlin header"},
+    {"kind": "ENDPOINT",    "name": "endpoint:GET:/api/users",   "note": "RestTemplate.getForObject: java try_detect_java_endpoint"},
+    {"kind": "ENDPOINT",    "name": "endpoint:POST:/api/orders", "note": "WebClient.post().uri"}
+  ],
+  "expect_edges": [
+    {"from": "fetch", "to": "endpoint:GET:/api/users", "category": "CALLS", "note": "client method -> endpoint"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "UserController", "cell": "ROLE", "contains": "SERVICE", "note": "@RestController on a Java-parseable `class X {` header: the services.rs SERVICE twin, folded into the CLASS by LB.3a"}
+  ]
+}

@@ -94,6 +94,41 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "dio / http client verbs are extracted; other HTTP libraries are not",
         verify: "grep the HTTP client class name",
     },
+    // A14.1 — the Kotlin rows. `.kt` is routed to the JAVA parser
+    // (`extract::detect_language`), so these describe what the Java grammar
+    // recovers from Kotlin source, measured on bench/substrate-gap/fixtures/
+    // kotlin-{entities,spring,ktor,retrofit,flip-guard}. They go FALSE the
+    // moment a Kotlin parser lands: A14.2 owns rewriting all five together.
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "*",
+        note: "no Kotlin parser: .kt files are parsed with the Java grammar and survive only through its error recovery. Declarations whose header is also valid Java (`interface X {`, `class X {`, `open class X {`) and the block-bodied `fun`s inside them usually survive; expression-body and top-level `fun`s and classes with a primary constructor usually do not; a header the grammar cannot close can swallow the rest of the file, nesting later declarations under it with wrong qnames. `.kts` scripts (Gradle KTS) are never parsed. Treat the Kotlin surface as ungraphed.",
+        verify: "grep the Kotlin symbol directly; an empty blast_radius / impact for a .kt symbol means NOT-EXTRACTED, not dead code",
+    },
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "CALLS",
+        note: "Kotlin CALLS come only from block-bodied `fun`s the Java grammar recovered inside a class (self-calls, HTTP-client calls to an ENDPOINT); calls in expression-body, top-level or extension `fun`s and in Ktor route lambdas are never extracted",
+        verify: "grep the callee name across *.kt",
+    },
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "IMPORTS",
+        note: "Kotlin `import a.b.C` resolves only when the target class happened to survive the Java grammar; treat Kotlin import edges as best-effort",
+        verify: "grep '^import' in the .kt file",
+    },
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "INHERITS_FROM",
+        note: "Kotlin `: Base()` / `: Iface` supertype lists are never extracted — no INHERITS_FROM or IMPLEMENTS edge exists for any Kotlin type",
+        verify: "grep the supertype name across *.kt",
+    },
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "HANDLED_BY",
+        note: "Ktor `get(\"/path\") { }` ROUTE nodes ARE emitted by a text scan, but with no handler and no HANDLED_BY edge; a Spring `@GetMapping` is lost when its `fun` has an expression body or its controller has a primary constructor (the usual Kotlin shape)",
+        verify: "grep for routing { / @GetMapping in *.kt",
+    },
 ];
 
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
@@ -115,6 +150,9 @@ pub struct CoverageNote {
 /// instead of trusting a silent blind spot. One call.
 pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     let langs = languages_present(merged);
+    if langs.contains("kotlin") {
+        eprintln!("[coverage] kotlin: no parser — .kt routed through the java grammar");
+    }
     let counts = edge_category_counts(merged);
     COVERAGE_CAVEATS
         .iter()
@@ -169,6 +207,9 @@ pub(crate) fn ext_to_language(path: &str) -> Option<&'static str> {
         "swift" => "swift",
         "scala" | "sc" => "scala",
         "sol" => "solidity",
+        // A14.1: `.kt` only. `.kts` never passes the walk's read gate
+        // (`detect_language`), so an arm for it could never fire.
+        "kt" => "kotlin",
         _ => return None,
     })
 }
@@ -208,5 +249,69 @@ mod tests {
             "QUEUE_FLOWS",
             "edges_found is keyed by this spelling"
         );
+    }
+
+    /// One MODULE node whose POSITION cell names `file` — all
+    /// `languages_present` reads, so no parse is needed.
+    fn graph_with_file(file: &str) -> MergedGraph {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+        use repo_graph_core::{Cell, Confidence, Node, NodeId, RepoId};
+        use repo_graph_graph::{RepoGraph, SymbolTable};
+        let repo = RepoId::from_canonical("test://coverage");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "Sample");
+        let g = RepoGraph {
+            repo,
+            nodes: vec![Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![Cell {
+                    kind: cell_type::POSITION,
+                    payload: CellPayload::Json(format!(
+                        r#"{{"file":"{file}","start_line":0,"end_line":2}}"#
+                    )),
+                }],
+            }],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        MergedGraph::new(vec![g])
+    }
+
+    #[test]
+    fn kotlin_reports_as_blind_spot() {
+        // A14.1: `.kt` is parsed by the Java grammar, so a Kotlin repo must
+        // SAY it is ungraphed rather than answer an empty blast radius.
+        let report = coverage_report(&graph_with_file("src/Sample.kt"));
+        let kotlin: Vec<_> = report.iter().filter(|n| n.language == "kotlin").collect();
+        let mut cats: Vec<_> = kotlin.iter().map(|n| n.edge_category).collect();
+        cats.sort_unstable();
+        assert_eq!(
+            cats,
+            ["*", "CALLS", "HANDLED_BY", "IMPORTS", "INHERITS_FROM"],
+            "the five Kotlin rows, one per category"
+        );
+        assert!(kotlin.iter().all(|n| n.edges_found == 0));
+        // Every non-`*` row names a category that exists, so edges_found can count it.
+        for n in kotlin.iter().filter(|n| n.edge_category != "*") {
+            assert!(
+                edge_category::ALL
+                    .iter()
+                    .any(|(_, name)| *name == n.edge_category),
+                "{} is not an edge category",
+                n.edge_category
+            );
+        }
+        // Control: the same graph over a .java file gets no Kotlin row.
+        let java = coverage_report(&graph_with_file("src/Sample.java"));
+        assert!(java.iter().all(|n| n.language != "kotlin"));
+        assert_eq!(java.len(), report.len() - kotlin.len());
+        // `.kts` never reaches the walk, so it maps to no language.
+        assert_eq!(ext_to_language("build.gradle.kts"), None);
+        assert_eq!(ext_to_language("app/Main.kt"), Some("kotlin"));
     }
 }
