@@ -345,9 +345,10 @@ notes; the schedule grows to W0 + 41 waves (depth 30).
   import; LA.39 DOM / Redux verbs are not events; LA.41 event names must be identifier-like; LA.42 data-entity scanners
   stop reading their own source; LA.43 const-folded queue nodes keep their owner edges.
 
-Open for James: LB.12 scopes contract ops by the full file name, so a `swagger.yaml` + `swagger.json` twin in one
-directory yields two copies of each op (A10.8 meant to merge twins). Recommendation: scope by directory + stem, which
-still separates two services' `openapi.yaml` and keeps twins merged.
+Decided (James, 2026-09-19: *"Yeah sounds fine"*): LB.12 scopes contract ops and markdown doc sections by directory +
+stem, so two services' `openapi.yaml` stay separate and a `swagger.yaml` + `swagger.json` twin in one directory merges
+(as A10.8 intended). **Speccing is complete**: every item in the plan has verified packets; section 7.6 is the backlog
+for after 0.5.0.
 
 ### 7.6 After 0.5.0 — the backlog the three spec runs found beyond the cap
 
