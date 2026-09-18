@@ -24,7 +24,8 @@ const MAX_SUBCOMMAND_ARGVS: usize = 8;
 /// 1. **bin** — `<bin>` itself, exact (`mytool` -> `cli:mytool`, a cobra root).
 ///    Confidence `weakest(invocation, command)`.
 /// 2. **sub** — the subcommand word of each argv vector on the node's argv
-///    cells (`mytool migrate --yes` -> `cli:migrate`). A bare word like
+///    cells (`mytool migrate --yes` -> `cli:migrate`, `php bin/console
+///    app:sync-orders` -> `cli:app:sync-orders`). A bare word like
 ///    `migrate` is common, so this match is `Weak`, capped at
 ///    [`MAX_SUBCOMMAND_ARGVS`] vectors, and never promoted.
 ///
@@ -94,13 +95,18 @@ impl CrossGraphResolver for CliInvocationResolver {
 }
 
 /// The subcommand of one argument vector: the first token that is not a flag
-/// and is shaped like a command word (`[a-z0-9][a-z0-9_-]*`), so `-f`, `.`,
-/// `x.yaml` and `/path` are passed over.
+/// and is shaped like a command word (`[a-z0-9][a-z0-9_:-]*`), so `-f`, `.`,
+/// `x.yaml` and `/path` are passed over. LA.20b: `:` belongs to the word, since
+/// Symfony and Laravel name their commands `app:sync-orders` / `emails:send`
+/// (`php bin/console app:sync-orders` passes over `bin/console` and pairs with
+/// `cli:app:sync-orders`).
 fn subcommand_word(argv: &[String]) -> Option<&str> {
     argv.iter().map(String::as_str).find(|t| {
         let mut chars = t.chars();
         chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+            && chars.all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | ':')
+            })
     })
 }
 
@@ -119,5 +125,48 @@ mod tests {
         assert_eq!(subcommand_word(&argv(&["-f", "/tmp/x", "."])), None);
         assert_eq!(subcommand_word(&argv(&["Build"])), None);
         assert_eq!(subcommand_word(&[]), None);
+    }
+
+    /// LA.20b: `php bin/console app:sync-orders` passes over the script path
+    /// and pairs, Weak, with the Symfony command `cli:app:sync-orders`.
+    #[test]
+    fn subcommand_token_may_contain_colon() {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_code_extractors::cli::argv_cell;
+        use repo_graph_core::{Node, RepoId};
+
+        use crate::types::{RepoGraph, SymbolTable};
+
+        let repo = RepoId::from_canonical("test://cli/colon");
+        let mut nav = CodeNav::default();
+        let inv = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_INVOCATION, "cli_invoke:php");
+        nav.record(inv, "php", "cli_invoke:php", node_kind::CLI_INVOCATION, None);
+        let cmd = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_COMMAND, "cli:app:sync-orders");
+        nav.record(cmd, "app:sync-orders", "cli:app:sync-orders", node_kind::CLI_COMMAND, None);
+        let argvs = [argv(&["bin/console", "app:sync-orders"])];
+        let graph = RepoGraph {
+            repo,
+            nodes: vec![
+                Node { id: inv, repo, confidence: Confidence::Medium, cells: vec![argv_cell("php", &argvs)] },
+                Node { id: cmd, repo, confidence: Confidence::Strong, cells: vec![] },
+            ],
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        };
+        let mut merged = MergedGraph::new(vec![graph]);
+        CliInvocationResolver.resolve(&mut merged);
+        let edges: Vec<(NodeId, NodeId, Confidence)> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::CLI_INVOKES)
+            .map(|e| (e.from, e.to, e.confidence))
+            .collect();
+        assert_eq!(edges, vec![(inv, cmd, Confidence::Weak)]);
+        assert_eq!(subcommand_word(&argv(&["bin/console", "app:sync-orders"])), Some("app:sync-orders"));
+        assert_eq!(subcommand_word(&argv(&["emails:send", "--queue"])), Some("emails:send"));
     }
 }

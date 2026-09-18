@@ -1,0 +1,48 @@
+{
+  "framework": "py-typer-argparse-cli",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "import-users",
+      "note": "bare @app.command() -> dashed function name"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "purge"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "migrate"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "dbtool",
+      "note": "ArgumentParser(prog=...)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli:import-users",
+      "to": "import_users",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "cli:migrate",
+      "to": "run_migrate",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "app",
+      "max_nodes": 0,
+      "note": "the Typer app variable is not a command"
+    }
+  ],
+  "note": "LA.20b. Typer bare + explicit, argparse subparser + prog + set_defaults. Legacy-only (python/cli_def is claimed by the click probe). Baseline HEAD: only cli:purge (via commander's `.command(` needle)."
+}

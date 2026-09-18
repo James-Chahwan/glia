@@ -1,0 +1,46 @@
+{
+  "framework": "php-symfony-laravel-cli",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "php/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "app:sync-orders",
+      "note": "#[AsCommand(name: 'app:sync-orders')]"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "app:legacy-import",
+      "note": "protected static $defaultName"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "emails:send",
+      "note": "Laravel $signature, name stops at the first space"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:php",
+      "to": "cli:app:sync-orders",
+      "category": "CLI_INVOKES",
+      "note": "argv0 is php; the subcommand token needs ':' in A13.4's token shape (LA.20b widens it)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "emails:send {user} {--queue}",
+      "max_nodes": 0,
+      "note": "the signature's argument spec is not part of the name"
+    }
+  ],
+  "note": "LA.20b. Symfony attribute + defaultName, Laravel signature. Baseline HEAD: 0 CLI_COMMAND."
+}

@@ -1,0 +1,41 @@
+{
+  "framework": "ruby-thor-cli",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "ruby/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "rollout",
+      "note": "desc \"rollout ENV\" + def rollout inside class Deployer < Thor"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:deployer",
+      "to": "cli:rollout",
+      "category": "CLI_INVOKES",
+      "note": "A13.4 subcommand path"
+    },
+    {
+      "from": "cli:rollout",
+      "to": "Deployer::rollout",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "roll out a release",
+      "max_nodes": 0,
+      "note": "desc's second argument is help text"
+    }
+  ],
+  "note": "LA.20b. Thor. Baseline HEAD: 0 CLI_COMMAND (Thor appears only in cli.rs's dead CliFramework table)."
+}
