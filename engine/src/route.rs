@@ -281,11 +281,12 @@ pub(crate) fn parse_repo_files(
             continue;
         }
 
-        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan that
-        // embedded `type Query {` blocks already get, so a schema-first
-        // service has resolvers for its clients' operations to pair with.
-        // Resolver side only: a schema declares server fields, and the
-        // operation needles would mint client ops from its keywords.
+        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan, so a
+        // schema-first service has resolvers for its clients' operations to
+        // pair with. LA.27: the file is read whole as SDL; a code file reads
+        // SDL only inside a GraphQL-marked literal. Resolver side only: a
+        // schema declares server fields, and the operation needles would mint
+        // client ops from its keywords.
         if lang == "graphql" {
             let module_id = NodeId::from_parts(
                 GRAPH_TYPE,
@@ -297,7 +298,7 @@ pub(crate) fn parse_repo_files(
                 nodes,
                 nav,
                 mut anchors,
-            } = repo_graph_code_extractors::graphql::extract_graphql_resolver_nodes(
+            } = repo_graph_code_extractors::graphql::extract_graphql_sdl_file_nodes(
                 source, module_id, repo,
             );
             sdl_files += 1;

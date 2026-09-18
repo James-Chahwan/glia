@@ -1,0 +1,43 @@
+{
+  "framework": "graphql-sdl-literal-scope",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.27. extract_graphql_resolver_nodes (parsers/code/extractors/src/graphql.rs) runs on every code file of every language: the type-level RESOLVER_PATTERNS use source.find(\"type Query {\") anywhere and the SDL block scan reads any line that starts with `type Query {` / `type Mutation {` / `type Subscription {`, so a Rust comment, a Rust test raw string and a Python comment mint resolvers (the glia self-build mints graphql_resolver:Query from the comment in engine/src/route.rs). SDL in code counts only inside a GraphQL-marked literal: server/schema.ts (gql tag) and server/type_defs.py (Ariadne gql(\"\"\"...\"\"\")) are the controls. No cells binding: a precision guard, not a language x mechanism cell.",
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:listOrders",
+      "note": "server/schema.ts gql-tagged SDL field - the control"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:placeOrder",
+      "note": "server/type_defs.py Ariadne gql(\"\"\"...\"\"\") SDL field - the control"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:Subscription",
+      "note": "tools/route.rs: a comment and a test raw string are not SDL"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:orderShipped",
+      "note": "tools/route.rs: the field inside the test raw string"
+    },
+    {
+      "from": "tools::notes",
+      "to": "graphql_resolver:Query",
+      "category": "CONTAINS",
+      "note": "tools/notes.py: `type Query {` inside a Python comment (Query itself is legitimately minted by server/schema.ts)"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:Order",
+      "note": "control forbid: `type Order {` is an object type and is never a resolver in any mode"
+    }
+  ]
+}

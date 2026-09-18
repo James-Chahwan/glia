@@ -71,6 +71,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "contract JSON (OpenAPI/Swagger, AsyncAPI, Pact) over 512 KB is not read, and one whose format key is outside its first and last 8 KB is not recognised",
         verify: "look for large swagger.json / openapi.json / pact files and read their paths by hand",
     },
+    // LA.27 (James's call): SDL inside code is read only from GraphQL-marked
+    // literals, so unmarked SDL is a declared recall gap, not a silent one.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "GRAPHQL_CALLS",
+        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.gql` files are read whole.",
+        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .gql files and read the variable that holds it",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",
@@ -250,6 +258,27 @@ mod tests {
             edge_category::name(edge_category::QUEUE_FLOWS),
             "QUEUE_FLOWS",
             "edges_found is keyed by this spelling"
+        );
+    }
+
+    #[test]
+    fn embedded_sdl_caveat_names_the_variable_rule() {
+        // LA.27: code-mode SDL is read only from marked literals, and among
+        // bare variables only from typeDefs / type_defs; the row says so for
+        // every repo, and names a category edges_found can count.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let sdl: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "GRAPHQL_CALLS")
+            .collect();
+        assert_eq!(sdl.len(), 1);
+        assert_eq!((sdl[0].language, sdl[0].edges_found), ("*", 0));
+        assert!(sdl[0].note.contains("typeDefs / type_defs"));
+        assert!(sdl[0].note.contains("differently named variable"));
+        assert!(sdl[0].note.contains("is not read"));
+        assert_eq!(
+            edge_category::name(edge_category::GRAPHQL_CALLS),
+            "GRAPHQL_CALLS"
         );
     }
 

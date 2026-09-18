@@ -339,15 +339,16 @@ fn scan_operation_needles(source: &str) -> (Vec<(String, u32)>, NeedleTally) {
     (hits, tally)
 }
 
-const RESOLVER_PATTERNS: &[&str] = &[
+/// Decorator and code-first resolver nouns, read from code files: the noun
+/// (`Query`, `Resolver`, `strawberry.type`) is the resolver name. SDL root
+/// types are not here (LA.27): a `type Query {` opener is SDL, so it counts
+/// only in a `.graphql` / `.gql` file or inside a GraphQL-marked literal.
+const DECORATOR_PATTERNS: &[&str] = &[
     "@Query(",
     "@Mutation(",
     "@Subscription(",
     "@Resolver(",
     "@ResolveField(",
-    "type Query {",
-    "type Mutation {",
-    "type Subscription {",
     "@strawberry.type",
     "@strawberry.mutation",
     "ObjectType):",
@@ -355,14 +356,54 @@ const RESOLVER_PATTERNS: &[&str] = &[
 ];
 
 /// Decorators whose *following method* is the actual resolver field (e.g. the
-/// `getUser` in NestJS `@Query() async getUser()`). The type-level patterns
-/// above only recover the decorator noun ("Query"), never the field a client
-/// operation is keyed by, so GRAPHQL_CALLS never pairs.
+/// `getUser` in NestJS `@Query() async getUser()`). The decorator nouns above
+/// only recover "Query", never the field a client operation is keyed by, so
+/// GRAPHQL_CALLS never pairs.
 const RESOLVER_FIELD_DECORATORS: &[&str] =
     &["@Query(", "@Mutation(", "@Subscription(", "@ResolveField("];
 
-/// GraphQL SDL type blocks whose fields are resolver operations.
+/// GraphQL SDL root type openers: the root is a resolver, and so is each
+/// field of its block. [`sdl_resolvers`] reads them at the start of a line,
+/// also after `extend `.
 const SDL_RESOLVER_TYPES: &[&str] = &["type Query {", "type Mutation {", "type Subscription {"];
+
+/// LA.27: template tags whose body is a GraphQL document.
+const GQL_TEMPLATE_TAGS: &[&str] = &["gql`", "graphql`"];
+
+/// LA.27: calls whose first argument, when it is a literal, is GraphQL:
+/// graphql-tag / Ariadne / gql, graphql-js `buildSchema`, graph-gophers
+/// `MustParseSchema` / `ParseSchema`, graphql-ruby `from_definition`.
+const GQL_LITERAL_CALLS: &[&str] = &[
+    "gql(",
+    "graphql(",
+    "buildSchema(",
+    "MustParseSchema(",
+    "ParseSchema(",
+    "from_definition(",
+];
+
+/// LA.27 (James): the only variable / key names whose literal is read as SDL
+/// with no other marker. SDL kept in a differently named variable is not
+/// read; `engine::coverage` declares that as a caveat row.
+const SDL_VARIABLES: &[&str] = &["typeDefs", "type_defs"];
+
+/// LA.27: the magic comment that marks the literal after it as GraphQL.
+const GQL_MAGIC_COMMENT: &str = "/* GraphQL */";
+
+/// LA.27: heredoc openers whose body is GraphQL (graphql-ruby). The body ends
+/// at the line whose trimmed text is the delimiter.
+const GQL_HEREDOCS: &[(&str, &str)] = &[
+    ("<<~GRAPHQL", "GRAPHQL"),
+    ("<<-GRAPHQL", "GRAPHQL"),
+    ("<<GRAPHQL", "GRAPHQL"),
+    ("<<~GQL", "GQL"),
+    ("<<-GQL", "GQL"),
+    ("<<GQL", "GQL"),
+];
+
+/// LA.27: a leading SDL comment that marks a template or triple-quoted
+/// literal as GraphQL: Apollo Server 4 opens `typeDefs` templates with it.
+const GQL_HASH_MARKS: &[&str] = &["#graphql", "# graphql"];
 
 /// Keywords that precede a method name and must not be mistaken for one.
 const METHOD_MODIFIERS: &[&str] = &[
@@ -432,39 +473,73 @@ pub fn extract_graphql_operation_nodes(
     GraphqlNodes { nodes, nav, anchors }
 }
 
+/// CODE mode, for every code file of every language
+/// (`engine::extract::apply_cross_cutting_extractors`): the decorator nouns,
+/// the method under a field decorator, and SDL only inside a GraphQL-marked
+/// literal ([`gql_literal_regions`], LA.27). A comment or an unmarked string
+/// that holds `type Query {` mints nothing. A `.graphql` / `.gql` body goes
+/// through [`extract_graphql_sdl_file_nodes`] instead.
 pub fn extract_graphql_resolver_nodes(
     source: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> GraphqlNodes {
+    // (name, 0-indexed line the name was read from)
+    let mut names: Vec<(String, u32)> = Vec::new();
+
+    // Decorator nouns: "Query", "Resolver", "strawberry.type", ...
+    for &pattern in DECORATOR_PATTERNS {
+        if let Some(idx) = source.find(pattern) {
+            let noun = pattern
+                .trim_start_matches('@')
+                .trim_end_matches('(')
+                .trim_end_matches("):")
+                .replace("graphene.", "");
+            names.push((noun, line_of(source, idx)));
+        }
+    }
+
+    // Field level, in source order: the method under a resolver decorator,
+    // and the roots and fields of SDL held in marked literals. Fields carry
+    // the operation name a client `gql query getUser` pairs against.
+    let embedded = embedded_sdl(source);
+    if graphql_debug()
+        && let Some(marker) = embedded.marker()
+    {
+        eprintln!("{marker}");
+    }
+    let mut fields = decorator_method_names(source);
+    fields.extend(embedded.hits.into_iter().map(|h| (h.name, h.line)));
+    fields.sort_by_key(|&(_, line)| line);
+    names.extend(fields);
+
+    resolver_nodes(names, module_id, repo)
+}
+
+/// WHOLE-FILE mode for a routed `.graphql` / `.gql` schema
+/// (`engine::route::parse_repo_files`, LA.27): the whole text is SDL, so every
+/// root type block and its fields count. No decorator patterns: those are
+/// code, and never occur in SDL.
+pub fn extract_graphql_sdl_file_nodes(
+    source: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> GraphqlNodes {
+    let names = sdl_resolvers(source, 0)
+        .into_iter()
+        .map(|h| (h.name, h.line))
+        .collect();
+    resolver_nodes(names, module_id, repo)
+}
+
+/// One GRAPHQL_RESOLVER per distinct name, anchored at the line of its first
+/// occurrence in `names`.
+fn resolver_nodes(names: Vec<(String, u32)>, module_id: NodeId, repo: RepoId) -> GraphqlNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
-
-    // (name, 0-indexed line the name was read from)
-    let mut resolver_names: Vec<(String, u32)> = Vec::new();
-
-    // Type-level / decorator-noun extraction (unchanged): "Query", "Mutation", …
-    for &pattern in RESOLVER_PATTERNS {
-        if let Some(idx) = source.find(pattern) {
-            let resolver_name = pattern
-                .trim_start_matches('@')
-                .trim_end_matches('(')
-                .trim_end_matches(" {")
-                .trim_end_matches("):")
-                .replace("type ", "")
-                .replace("graphene.", "");
-            resolver_names.push((resolver_name, line_of(source, idx)));
-        }
-    }
-
-    // Field-level extraction: the method under a resolver decorator and the
-    // fields inside an SDL `type Query {}` block. These carry the operation
-    // name a client `gql query getUser` pairs against.
-    resolver_names.extend(extract_resolver_field_names(source));
-
-    for (resolver_name, line) in resolver_names {
+    for (resolver_name, line) in names {
         if seen.insert(resolver_name.clone()) {
             let qname = format!("graphql_resolver:{resolver_name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_RESOLVER, &qname);
@@ -478,59 +553,334 @@ pub fn extract_graphql_resolver_nodes(
             anchors.push(Anchor { node: id, line });
         }
     }
-
     GraphqlNodes { nodes, nav, anchors }
 }
 
-/// Collect resolver *field* names: the method following a `@Query()` /
-/// `@Mutation()` / `@Subscription()` / `@ResolveField()` decorator, and each
-/// field declared inside an SDL `type Query {}` / `type Mutation {}` block.
-/// Each name carries the 0-indexed line it was read from (the method
-/// declaration line, not the decorator's).
-fn extract_resolver_field_names(source: &str) -> Vec<(String, u32)> {
+/// The method following a `@Query()` / `@Mutation()` / `@Subscription()` /
+/// `@ResolveField()` decorator, with the 0-indexed line it was read from (the
+/// method declaration line, not the decorator's).
+fn decorator_method_names(source: &str) -> Vec<(String, u32)> {
     let mut names = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
-
-    let mut in_sdl_type = false;
     let line_u32 = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-
-        // SDL block field scan: `type Query {` … `}`.
-        if in_sdl_type {
-            if trimmed.starts_with('}') {
-                in_sdl_type = false;
-            } else if let Some(field) = sdl_field_name(trimmed) {
-                names.push((field, line_u32(i)));
-            }
-            continue;
-        }
-        if SDL_RESOLVER_TYPES.iter().any(|t| trimmed.starts_with(t)) {
-            in_sdl_type = true;
-            continue;
-        }
-
-        // Decorator-method scan: the method name after `@Query()` etc.
-        if RESOLVER_FIELD_DECORATORS
+        if !RESOLVER_FIELD_DECORATORS
             .iter()
             .any(|d| trimmed.starts_with(d))
         {
-            // The method usually sits on a following line; allow same-line
-            // (`@ResolveField() name() {}`) and skip stacked decorators.
-            for (j, candidate) in lines.iter().enumerate().skip(i).take(4) {
-                let t = candidate.trim();
-                if t.is_empty() || t.starts_with('@') {
-                    continue;
-                }
-                if let Some(name) = method_name_from_line(t) {
-                    names.push((name, line_u32(j)));
-                    break;
-                }
+            continue;
+        }
+        // The method usually sits on a following line; allow same-line
+        // (`@ResolveField() name() {}`) and skip stacked decorators.
+        for (j, candidate) in lines.iter().enumerate().skip(i).take(4) {
+            let t = candidate.trim();
+            if t.is_empty() || t.starts_with('@') {
+                continue;
+            }
+            if let Some(name) = method_name_from_line(t) {
+                names.push((name, line_u32(j)));
+                break;
             }
         }
     }
-
     names
+}
+
+/// One resolver name read from SDL: a root type (`Query`) or a field of one.
+struct SdlHit {
+    name: String,
+    /// 0-indexed source line.
+    line: u32,
+    root: bool,
+}
+
+/// The root type a trimmed SDL line opens (`type Query {`, also after
+/// `extend `), by name.
+fn sdl_root(trimmed: &str) -> Option<&'static str> {
+    let t = trimmed
+        .strip_prefix("extend ")
+        .map_or(trimmed, str::trim_start);
+    SDL_RESOLVER_TYPES
+        .iter()
+        .copied()
+        .find(|opener| t.starts_with(opener))
+        .map(|opener| opener.trim_start_matches("type ").trim_end_matches(" {"))
+}
+
+/// The SDL block scan: each root type opened at the start of a line, and each
+/// field inside its block up to the line that starts with `}`. `text` is SDL
+/// (a whole schema file, or one marked literal's body); its first line is
+/// source line `base_line`, so anchors stay source lines. A root opener in
+/// the middle of a line never counts.
+fn sdl_resolvers(text: &str, base_line: u32) -> Vec<SdlHit> {
+    let mut hits = Vec::new();
+    let mut in_root = false;
+    for (i, line) in text.lines().enumerate() {
+        let line_no = base_line.saturating_add(u32::try_from(i).unwrap_or(u32::MAX));
+        let trimmed = line.trim();
+        if in_root {
+            if trimmed.starts_with('}') {
+                in_root = false;
+            } else if let Some(field) = sdl_field_name(trimmed) {
+                hits.push(SdlHit {
+                    name: field,
+                    line: line_no,
+                    root: false,
+                });
+            }
+            continue;
+        }
+        if let Some(root) = sdl_root(trimmed) {
+            hits.push(SdlHit {
+                name: root.to_string(),
+                line: line_no,
+                root: true,
+            });
+            in_root = true;
+        }
+    }
+    hits
+}
+
+/// SDL read from one code file's GraphQL-marked literals, plus the counts the
+/// `[graphql-sdl-code]` marker reports.
+#[derive(Default)]
+struct EmbeddedSdl {
+    hits: Vec<SdlHit>,
+    literals: usize,
+    /// Root type openers outside every marked literal: what the pre-LA.27
+    /// scan minted from (comments, unmarked strings).
+    unmarked_roots: usize,
+}
+
+impl EmbeddedSdl {
+    /// The marker line, or `None` for a file with no marked literal and no
+    /// root opener.
+    fn marker(&self) -> Option<String> {
+        if self.literals == 0 && self.unmarked_roots == 0 {
+            return None;
+        }
+        let mut roots: Vec<&str> = Vec::new();
+        for h in self.hits.iter().filter(|h| h.root) {
+            if !roots.contains(&h.name.as_str()) {
+                roots.push(&h.name);
+            }
+        }
+        Some(format!(
+            "[graphql-sdl-code] literals={} roots={} fields={} unmarked_roots={}",
+            self.literals,
+            roots.join(","),
+            self.hits.iter().filter(|h| !h.root).count(),
+            self.unmarked_roots
+        ))
+    }
+}
+
+fn embedded_sdl(source: &str) -> EmbeddedSdl {
+    let regions = gql_literal_regions(source);
+    let mut out = EmbeddedSdl {
+        literals: regions.len(),
+        ..EmbeddedSdl::default()
+    };
+    for &(start, end) in &regions {
+        if let Some(body) = source.get(start..end) {
+            out.hits.extend(sdl_resolvers(body, line_of(source, start)));
+        }
+    }
+    out.unmarked_roots = SDL_RESOLVER_TYPES
+        .iter()
+        .flat_map(|opener| source.match_indices(opener))
+        .filter(|&(at, _)| !regions.iter().any(|&(s, e)| s <= at && at < e))
+        .count();
+    out
+}
+
+fn skip_ascii_ws(b: &[u8], mut i: usize) -> usize {
+    while b.get(i).is_some_and(|c| c.is_ascii_whitespace()) {
+        i += 1;
+    }
+    i
+}
+
+/// Offset of the first unescaped `close` at or after `from`. A one-line
+/// literal gives up at a newline.
+fn find_close(b: &[u8], from: usize, close: &[u8], one_line: bool) -> Option<usize> {
+    let mut i = from;
+    while let Some(&c) = b.get(i) {
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if one_line && c == b'\n' {
+            return None;
+        }
+        if b.get(i..).is_some_and(|rest| rest.starts_with(close)) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The body of the literal that opens at byte `at`, as `(start, end)`: a
+/// backtick template (multi-line), a `"""` / `'''` block, or a one-line `"` /
+/// `'` string. `None` when no literal opens there or it never closes. Both
+/// bounds sit on ASCII delimiters, so slicing the source there is char-safe.
+fn literal_body(b: &[u8], at: usize) -> Option<(usize, usize)> {
+    let q = *b.get(at)?;
+    match q {
+        b'`' => find_close(b, at + 1, b"`", false).map(|end| (at + 1, end)),
+        b'"' | b'\'' => {
+            let triple = [q, q, q];
+            if b.get(at..at + 3) == Some(&triple[..]) {
+                find_close(b, at + 3, &triple, false).map(|end| (at + 3, end))
+            } else {
+                find_close(b, at + 1, &[q], true).map(|end| (at + 1, end))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `at` past an optional `/* ... */` comment and the whitespace around it.
+fn skip_block_comment(source: &str, at: usize) -> usize {
+    let b = source.as_bytes();
+    let i = skip_ascii_ws(b, at);
+    if b.get(i..).is_some_and(|rest| rest.starts_with(b"/*"))
+        && let Some(close) = source.get(i..).and_then(|rest| rest.find("*/"))
+    {
+        return skip_ascii_ws(b, i + close + 2);
+    }
+    i
+}
+
+/// Where the value of a `typeDefs` / `type_defs` binding whose name ends at
+/// `after` starts: after `=`, after an object key's `:`, or after a
+/// `: <type> =` annotation. `None` for any other use of the name.
+fn binding_value(source: &str, after: usize) -> Option<usize> {
+    let b = source.as_bytes();
+    let i = skip_ascii_ws(b, after);
+    let assign = |eq: usize| {
+        (b.get(eq) == Some(&b'=') && !matches!(b.get(eq + 1), Some(b'=' | b'>')))
+            .then(|| skip_block_comment(source, eq + 1))
+    };
+    match b.get(i)? {
+        b'=' => assign(i),
+        b':' if b.get(i + 1) != Some(&b':') => {
+            let value = skip_block_comment(source, i + 1);
+            if literal_body(b, value).is_some() {
+                return Some(value);
+            }
+            // `typeDefs: string = ...`: step over the annotation on this line.
+            let mut j = value;
+            while let Some(&c) = b.get(j) {
+                if c == b'=' {
+                    return assign(j);
+                }
+                if !(is_ident_byte(c) || b" \t.<>[]|,?&".contains(&c)) {
+                    return None;
+                }
+                j += 1;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The bodies of the GraphQL-marked literals in a code file, as byte ranges
+/// sorted by start and deduplicated. LA.27: this is the only place code-mode
+/// SDL is read from. A tag, call, name or heredoc opener must follow a
+/// non-identifier byte (`buildSchema(` is not `rebuildSchema(`):
+/// - a `` gql` `` / `` graphql` `` template tag, not after a `.`;
+/// - `/* GraphQL */` before a literal;
+/// - a literal first argument of `gql(` / `graphql(` / `buildSchema(` /
+///   `MustParseSchema(` / `ParseSchema(` / `from_definition(`;
+/// - a literal bound to a `typeDefs` / `type_defs` variable or key (a tag or
+///   call in that position is caught by the rules above);
+/// - a GRAPHQL / GQL heredoc, to the line whose trimmed text is the delimiter;
+/// - a template or triple-quoted literal whose body opens with `#graphql`.
+///
+/// An unterminated literal yields no region.
+fn gql_literal_regions(source: &str) -> Vec<(usize, usize)> {
+    let b = source.as_bytes();
+    let bounded = |needle: &'static str| {
+        source
+            .match_indices(needle)
+            .map(|(at, _)| at)
+            .filter(move |&at| !ident_byte_before(b, at))
+    };
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+
+    for &tag in GQL_TEMPLATE_TAGS {
+        // Not after a `.` either: `` `.gql` `` / `` `.graphql` `` in a comment
+        // is a file extension closing a code span, not a tag. The backtick is
+        // the tag's last byte.
+        regions.extend(
+            bounded(tag)
+                .filter(|&at| at.checked_sub(1).and_then(|p| b.get(p)) != Some(&b'.'))
+                .filter_map(|at| literal_body(b, at + tag.len() - 1)),
+        );
+    }
+    // A literal after a marker, past whitespace.
+    let literal_after = |end: usize| literal_body(b, skip_ascii_ws(b, end));
+    regions.extend(
+        source
+            .match_indices(GQL_MAGIC_COMMENT)
+            .filter_map(|(at, _)| literal_after(at + GQL_MAGIC_COMMENT.len())),
+    );
+    for &call in GQL_LITERAL_CALLS {
+        regions.extend(bounded(call).filter_map(|at| literal_after(at + call.len())));
+    }
+    for &name in SDL_VARIABLES {
+        regions.extend(
+            bounded(name)
+                .filter(|&at| !b.get(at + name.len()).is_some_and(|&c| is_ident_byte(c)))
+                .filter_map(|at| binding_value(source, at + name.len()))
+                .filter_map(|value| literal_body(b, value)),
+        );
+    }
+    for &(opener, delimiter) in GQL_HEREDOCS {
+        regions.extend(
+            bounded(opener)
+                .map(|at| at + opener.len())
+                .filter(|&end| !b.get(end).is_some_and(|&c| is_ident_byte(c)))
+                .filter_map(|end| heredoc_body(source, end, delimiter)),
+        );
+    }
+    for &mark in GQL_HASH_MARKS {
+        regions.extend(source.match_indices(mark).filter_map(|(at, _)| {
+            let mut i = at;
+            while i > 0 && b.get(i - 1).is_some_and(|c| c.is_ascii_whitespace()) {
+                i -= 1;
+            }
+            let opener = match i.checked_sub(1).and_then(|p| b.get(p))? {
+                b'`' => i - 1,
+                q @ (b'"' | b'\'') if i >= 3 && b.get(i - 3..i) == Some(&[*q, *q, *q][..]) => i - 3,
+                _ => return None,
+            };
+            literal_body(b, opener)
+        }));
+    }
+
+    regions.sort_unstable();
+    regions.dedup();
+    regions
+}
+
+/// The body of a heredoc whose opener ends at `after_opener`: from the next
+/// line to the line whose trimmed text is `delimiter`.
+fn heredoc_body(source: &str, after_opener: usize, delimiter: &str) -> Option<(usize, usize)> {
+    let start = after_opener + source.get(after_opener..)?.find('\n')? + 1;
+    let mut line_start = start;
+    for line in source.get(start..)?.split_inclusive('\n') {
+        if line.trim() == delimiter {
+            return Some((start, line_start));
+        }
+        line_start += line.len();
+    }
+    None
 }
 
 /// Extract the method identifier from a TS/JS method declaration line, e.g.
@@ -676,8 +1026,9 @@ mod tests {
 
     #[test]
     fn detects_schema_type() {
+        // LA.27: a bare SDL document is a `.graphql` body, read whole.
         let source = "type Query {\n  users: [User]\n}";
-        let result = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let result = extract_graphql_sdl_file_nodes(source, module_id(), repo());
         assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_resolver:Query"));
     }
 
@@ -707,7 +1058,7 @@ mod tests {
     #[test]
     fn extracts_sdl_type_field_names() {
         let source = "type Query {\n  getUser(id: ID!): User\n  listUsers: [User]\n}";
-        let result = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let result = extract_graphql_sdl_file_nodes(source, module_id(), repo());
         let qnames: Vec<&String> = result.nav.qname_by_id.values().collect();
         assert!(qnames.iter().any(|q| *q == "graphql_resolver:getUser"));
         assert!(qnames.iter().any(|q| *q == "graphql_resolver:listUsers"));
@@ -878,5 +1229,168 @@ mod tests {
 
         // No needle hit, no marker line.
         assert_eq!(scan_operation_needles("const x = 1;").1.marker(), None);
+    }
+
+    // LA.27. Every source below is a one-line Rust string (`\n` escapes), so
+    // glia's own build of this file reads no SDL line from it.
+
+    /// Resolver qnames minted from `source` in code mode, sorted.
+    fn resolver_qnames(source: &str) -> Vec<String> {
+        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let mut qnames: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+        qnames.sort();
+        qnames
+    }
+
+    fn assert_resolvers(source: &str, want: &[&str]) {
+        let got = resolver_qnames(source);
+        let want: Vec<String> = want.iter().map(|n| format!("graphql_resolver:{n}")).collect();
+        assert_eq!(got, want, "{source}");
+    }
+
+    #[test]
+    fn sdl_in_a_rust_comment_mints_nothing() {
+        // engine/src/route.rs's A10.4 comment, verbatim: the glia self-build
+        // minted graphql_resolver:Query from it, HANDLED_BY parse_repo_files.
+        let source = "fn parse_repo_files() {\n        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan that\n        // embedded `type Query {` blocks already get, so a schema-first\n        // service has resolvers for its clients' operations to pair with.\n        if lang == \"graphql\" {}\n}\n";
+        assert_resolvers(source, &[]);
+        assert_eq!(
+            embedded_sdl(source).marker().as_deref(),
+            Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
+        );
+    }
+
+    #[test]
+    fn sdl_in_an_unmarked_string_mints_nothing() {
+        assert_resolvers(r#"let sdl = "type Query {\n  getUser(id: ID!): User\n}\n";"#, &[]);
+        // A multi-line raw string: the block scan read it line by line.
+        let raw = "#[test]\nfn schema_routes() {\n    let sdl = r#\"\ntype Subscription {\n  orderShipped: Order\n}\n\"#;\n    assert!(!sdl.is_empty());\n}\n";
+        assert_resolvers(raw, &[]);
+        assert_eq!(
+            embedded_sdl(raw).marker().as_deref(),
+            Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
+        );
+    }
+
+    #[test]
+    fn sdl_in_a_python_comment_mints_nothing() {
+        let source = "# How the resolver scan works: a line like\n#   type Query {\n# opens a root type block.\ndef scan(text):\n    return text.splitlines()\n";
+        assert_resolvers(source, &[]);
+    }
+
+    #[test]
+    fn gql_tagged_sdl_mints_root_and_fields() {
+        // The tag marks the literal whatever the variable is called.
+        let source = "import { gql } from \"graphql-tag\";\n\nexport const schema = gql`\n  type Query {\n    listOrders: [Order]\n  }\n\n  type Order {\n    id: ID!\n  }\n`;\n";
+        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:listOrders"), Some(4));
+        assert_eq!(out.nodes.len(), 2, "`type Order {{` is an object type, never a resolver");
+        assert_eq!(
+            embedded_sdl(source).marker().as_deref(),
+            Some("[graphql-sdl-code] literals=1 roots=Query fields=1 unmarked_roots=0")
+        );
+    }
+
+    #[test]
+    fn ariadne_gql_call_mints_fields() {
+        let source = "from ariadne import gql\n\nsdl = gql(\"\"\"\n    type Mutation {\n        placeOrder(sku: String!): Order\n    }\n\"\"\")\n";
+        assert_resolvers(source, &["Mutation", "placeOrder"]);
+        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:placeOrder"), Some(4));
+    }
+
+    #[test]
+    fn go_must_parse_schema_literal_mints_fields() {
+        let source = "func Schema() *graphql.Schema {\n\treturn graphql.MustParseSchema(`\n\ttype Query {\n\t\tuser(id: ID!): User\n\t}\n`, &resolver{})\n}\n";
+        assert_resolvers(source, &["Query", "user"]);
+        // A schema string passed by name is not a marked literal.
+        assert_resolvers("var s = `\ntype Query {\n  user: User\n}\n`\nvar _ = graphql.MustParseSchema(s, &r{})\n", &[]);
+        // `rebuildSchema(` is not `buildSchema(`.
+        assert_resolvers("rebuildSchema(`\ntype Query {\n  user: User\n}\n`)\n", &[]);
+    }
+
+    #[test]
+    fn ruby_graphql_heredoc_mints_fields() {
+        let source = "class Schema\n  DEFINITION = <<~GRAPHQL\n    type Query {\n      posts: [Post]\n    }\n  GRAPHQL\nend\nSchema2 = GraphQL::Schema.from_definition(<<-GQL)\n  extend type Mutation {\n    deletePost(id: ID!): Boolean\n  }\nGQL\n";
+        assert_resolvers(source, &["Mutation", "Query", "deletePost", "posts"]);
+        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:posts"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:deletePost"), Some(9));
+        // No terminator line: no region, and no panic.
+        assert_resolvers("q = <<~GRAPHQL\n  type Query {\n    posts: [Post]\n  }\n", &[]);
+    }
+
+    #[test]
+    fn graphql_magic_comment_template_mints_fields() {
+        let source = "const schema = /* GraphQL */ `\n  type Mutation {\n    addBook(title: String): Book\n  }\n`;\n";
+        assert_resolvers(source, &["Mutation", "addBook"]);
+    }
+
+    #[test]
+    fn hash_graphql_template_mints_fields() {
+        // Apollo Server 4: `schema` is a name no binding rule knows.
+        let source = "const schema = `#graphql\n  type Query {\n    books: [Book]\n  }\n`;\n";
+        assert_resolvers(source, &["Query", "books"]);
+        let py = "SCHEMA = \"\"\"\n# graphql\ntype Query {\n  books: [Book]\n}\n\"\"\"\n";
+        assert_resolvers(py, &["Query", "books"]);
+    }
+
+    #[test]
+    fn typedefs_bindings_mint_fields() {
+        for source in [
+            "export const typeDefs: string = `\ntype Query {\n  me: User\n}\n`;\n",
+            "type_defs = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
+            "type_defs: str = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
+            "new ApolloServer({\n  typeDefs: `\n    type Query {\n      me: User\n    }\n  `,\n  resolvers,\n});\n",
+        ] {
+            assert_resolvers(source, &["Query", "me"]);
+        }
+        // The same template in a differently named variable is not read
+        // (the coverage caveat row declares this), nor is a longer name.
+        for source in [
+            "const schema = `\ntype Query {\n  me: User\n}\n`;\n",
+            "const typeDefsV2 = `\ntype Query {\n  me: User\n}\n`;\n",
+            "if (typeDefs == `\ntype Query {\n  me: User\n}\n`) {}\n",
+        ] {
+            assert_resolvers(source, &[]);
+        }
+    }
+
+    #[test]
+    fn literal_regions_are_char_safe_and_skip_unterminated_literals() {
+        let source = "const a = gql`é type Query {`;\nconst b = gql`\ntype Query {\n  ünïcode: String\n  ok: Int\n}\n";
+        // `a` closes on its line; `b` never closes, so only `a` is a region.
+        let regions = gql_literal_regions(source);
+        assert_eq!(regions.len(), 1);
+        let (s, e) = regions[0];
+        assert_eq!(source.get(s..e), Some("é type Query {"));
+        // A root opener mid-line is not a line start, and `b` is unread.
+        assert_resolvers(source, &[]);
+        // Unterminated openers of every shape end the scan cleanly.
+        for tail in ["gql`", "gql(\"", "gql(\"\"\"", "typeDefs = '", "/* GraphQL */", "<<~GRAPHQL"] {
+            assert!(gql_literal_regions(tail).is_empty(), "{tail}");
+        }
+    }
+
+    #[test]
+    fn sdl_file_mode_scans_the_whole_file() {
+        let sdl = "# schema root\ntype Query {\n  me: User\n}\n\nextend type Mutation {\n  logout: Boolean\n}\n\ntype User {\n  id: ID!\n}\n";
+        let out = extract_graphql_sdl_file_nodes(sdl, module_id(), repo());
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        assert_eq!(
+            qnames,
+            [
+                "graphql_resolver:Mutation",
+                "graphql_resolver:Query",
+                "graphql_resolver:logout",
+                "graphql_resolver:me"
+            ]
+        );
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1));
+        assert_eq!(anchor_line(&out, "graphql_resolver:logout"), Some(6));
+        // The same bare document in a code file is not a marked literal.
+        assert_resolvers(sdl, &[]);
     }
 }
