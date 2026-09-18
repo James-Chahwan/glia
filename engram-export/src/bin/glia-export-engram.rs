@@ -55,7 +55,7 @@ fn run(args: &Args) -> i32 {
     let out_path = match &args.out {
         Some(p) => Path::new(p).to_path_buf(),
         None => {
-            let name = repo_graph_core::project_name(repo_root)
+            let name = repo_graph_code_domain::project_roots::project_name(repo_root)
                 .unwrap_or_else(|| "repo".to_string());
             std::path::PathBuf::from(format!("{name}.engram-gmap"))
         }

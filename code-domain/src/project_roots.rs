@@ -384,6 +384,47 @@ fn json_string(b: &[u8], start: usize) -> Option<(String, usize)> {
     }
 }
 
+/// Manifests [`project_name`] reads, in priority order.
+const PROJECT_NAME_MANIFESTS: [&str; 5] = [
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "composer.json",
+    "go.mod",
+];
+
+/// Human project name for `repo` (G18): the first manifest that yields a
+/// label, in priority order `Cargo.toml` (`[package].name`), `package.json`
+/// (top-level `name`), `pyproject.toml` (`[project]` or `[tool.poetry]` `name`),
+/// `composer.json` (`name`), `go.mod` (the last `/` segment of the module
+/// path); else the directory name.
+///
+/// Labels come from [`manifest_label`], so a name holding `::`, `${` or a
+/// control character is skipped exactly as it is for a project root. `None`
+/// only when no manifest names the project and `repo` has no final component
+/// (`/`, `.`, `..`).
+///
+/// Moved here from the core crate (LD.10): core carried three private hand
+/// parsers duplicating [`manifest_label`], and reading package manifests is a
+/// code concept.
+pub fn project_name(repo: &Path) -> Option<String> {
+    PROJECT_NAME_MANIFESTS
+        .iter()
+        .find_map(|base| {
+            let text = std::fs::read_to_string(repo.join(base)).ok()?;
+            let label = manifest_label(base, &text)?;
+            if *base != "go.mod" {
+                return Some(label);
+            }
+            label
+                .rsplit('/')
+                .next()
+                .filter(|seg| !seg.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| repo.file_name().and_then(|s| s.to_str()).map(str::to_string))
+}
+
 /// `3 project roots (cargo=1 go=1 npm=1)` — the `[roots]` marker body.
 /// Ecosystems are listed by name so the line is deterministic.
 pub fn marker(roots: &[ProjectRoot]) -> String {
@@ -590,5 +631,107 @@ mod tests {
             ProjectRoot::new("apps/web".into(), "npm", "package.json", None),
         ];
         assert_eq!(marker(&roots), "3 project roots (go=1 npm=2)");
+    }
+
+    /// A fresh temp dir named `glia_pn_<name>_<pid>`, removed on drop. The pid
+    /// keeps two concurrent `cargo test` runs from clearing each other's files.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("glia_pn_{name}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn write(&self, file: &str, text: &str) -> &Self {
+            std::fs::write(self.0.join(file), text).unwrap();
+            self
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn project_name_cargo_toml() {
+        let tmp = Scratch::new("cargo");
+        tmp.write("Cargo.toml", "[package]\nname = \"my-lib\"\nversion = \"0.1\"\n");
+        assert_eq!(project_name(&tmp.0), Some("my-lib".to_string()));
+    }
+
+    #[test]
+    fn project_name_cargo_skips_other_sections() {
+        let tmp = Scratch::new("cargo_other");
+        tmp.write("Cargo.toml", "[workspace]\nname = \"wrong\"\n[package]\nname = \"right\"\n");
+        assert_eq!(project_name(&tmp.0), Some("right".to_string()));
+    }
+
+    #[test]
+    fn project_name_package_json() {
+        let tmp = Scratch::new("pkg");
+        tmp.write("package.json", r#"{ "version": "1.0", "name": "my-app", "deps": {} }"#);
+        assert_eq!(project_name(&tmp.0), Some("my-app".to_string()));
+    }
+
+    #[test]
+    fn project_name_pyproject() {
+        let tmp = Scratch::new("py");
+        tmp.write(
+            "pyproject.toml",
+            "[build-system]\nrequires = [\"setuptools\"]\n[project]\nname = \"my_py\"\n",
+        );
+        assert_eq!(project_name(&tmp.0), Some("my_py".to_string()));
+    }
+
+    #[test]
+    fn project_name_go_mod_last_segment() {
+        let tmp = Scratch::new("go");
+        tmp.write("go.mod", "module github.com/me/coolservice\n\ngo 1.22\n");
+        assert_eq!(project_name(&tmp.0), Some("coolservice".to_string()));
+    }
+
+    #[test]
+    fn project_name_falls_back_to_dirname() {
+        let tmp = Scratch::new("fallback");
+        let dir = format!("glia_pn_fallback_{}", std::process::id());
+        assert_eq!(project_name(&tmp.0), Some(dir));
+    }
+
+    #[test]
+    fn project_name_priority_cargo_over_package_json() {
+        let tmp = Scratch::new("priority");
+        tmp.write("Cargo.toml", "[package]\nname = \"rust-one\"\n")
+            .write("package.json", r#"{"name":"js-one"}"#);
+        assert_eq!(project_name(&tmp.0), Some("rust-one".to_string()));
+    }
+
+    /// Where `manifest_label` is stricter than core's old hand parsers: a
+    /// nested `name` is not the package name, a label-less manifest falls
+    /// through to the next one, and a qname separator is never a name.
+    #[test]
+    fn project_name_uses_manifest_label_rules() {
+        let tmp = Scratch::new("label_rules");
+        tmp.write(
+            "package.json",
+            r#"{"author": {"name": "someone"}, "name": "shop-web"}"#,
+        );
+        assert_eq!(project_name(&tmp.0), Some("shop-web".to_string()));
+
+        let tmp = Scratch::new("label_fallthrough");
+        tmp.write("Cargo.toml", "[workspace]\nmembers = []\n")
+            .write("pyproject.toml", "[tool.poetry]\nname = 'svc'\n");
+        assert_eq!(project_name(&tmp.0), Some("svc".to_string()));
+
+        let tmp = Scratch::new("label_reject");
+        tmp.write("package.json", r#"{"name":"a::b"}"#)
+            .write("go.mod", "module \"example.com/q\" // quoted\n");
+        assert_eq!(project_name(&tmp.0), Some("q".to_string()));
+
+        assert_eq!(project_name(Path::new("/")), None);
     }
 }
