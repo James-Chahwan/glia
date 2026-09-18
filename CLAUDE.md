@@ -77,7 +77,8 @@ engine/src/   lib.rs        facade (rules above)
                             assemble.rs    build_graphs_for_repo, build_const_table, SuppressPanicHook
                             grafts.rs      apply_post_cache — every post-cache graft goes here
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
-                            lang_build.rs  build_language_graphs — per-language build + markers
+                            lang_build.rs  build_language_graphs — per-language build + markers;
+                                           rust_crates (the Cargo packages build_rust resolves against)
                             resolvers.rs   run_all_resolvers
               docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge
               coverage.rs   coverage_report          answers.rs   the P3 primitives
@@ -175,6 +176,9 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
 
 - `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent.
 - A reserved `extra_hook` seam lets a parser contribute language-specific resolution when the generic walker isn't enough.
+  Rust is the first language to use it: `build_rust` hands `resolve_calls` the path resolver in
+  `graph/src/rust_paths.rs` (`crate::` / `self::` / `super::` / `Self::` / workspace-crate paths),
+  fed the walk's Cargo packages as `RustCrate`s by `lang_build::rust_crates` (LA.1a).
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`

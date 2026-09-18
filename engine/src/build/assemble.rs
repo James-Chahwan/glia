@@ -89,8 +89,14 @@ pub(super) fn build_graphs_for_repo(
         repo_label,
     );
 
-    let (graphs, di_refs) =
-        lang_build::build_language_graphs(parses_by_lang, repo, repo_label, &mut parse_errors);
+    let rust_crates = lang_build::rust_crates(files, roots);
+    let (graphs, di_refs) = lang_build::build_language_graphs(
+        parses_by_lang,
+        repo,
+        repo_label,
+        &rust_crates,
+        &mut parse_errors,
+    );
 
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);

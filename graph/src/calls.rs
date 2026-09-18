@@ -17,9 +17,9 @@ use crate::types::RepoGraph;
 /// Cross-file call resolution — same recipe for all languages.
 ///
 /// `extra_hook` is an escape hatch for language-specific resolution shapes
-/// that the generic pass doesn't cover. Unused today (pass `|_, _| None`);
-/// it's the seam for future Go method-on-struct-via-package-alias lookups
-/// and similar language-specific call shapes.
+/// that the generic pass doesn't cover, consulted only after every generic
+/// lookup misses. Rust passes its path resolver (`crate::rust_paths`, LA.1a);
+/// every other builder passes `|_, _| None`.
 pub(crate) fn resolve_calls<H>(g: &mut RepoGraph, calls: &[CallSite], extra_hook: H)
 where
     H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,

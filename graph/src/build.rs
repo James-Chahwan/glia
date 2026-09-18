@@ -10,6 +10,7 @@ use crate::calls::{emit_method_level_implements, resolve_calls, resolve_refs};
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
+use crate::rust_paths::{RustCrate, RustIndex};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
 // ============================================================================
@@ -62,7 +63,8 @@ where
 /// Build a per-repo graph for languages whose import paths are dotted
 /// (`foo.bar.Baz`) or already normalised to `::` form. Reuses the Python
 /// resolver because `.replace('.', "::")` is a no-op on already-`::` paths.
-/// Covers Java, C#, PHP, Rust, Scala, Clojure, Elixir.
+/// Covers Java, Kotlin, C#, PHP, Scala, Clojure, Elixir; Rust has
+/// [`build_rust`].
 pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
@@ -70,6 +72,27 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
     emit_method_level_implements(&mut g);
+    Ok(g)
+}
+
+/// Build a per-repo Rust graph. Same passes as [`build_dotted`], plus the
+/// Rust path resolver in `resolve_calls`' `extra_hook` seam: a path call the
+/// generic pass misses (`crate::a::f()`, `super::f()`, `Self::f()`,
+/// `other_crate::f()`) is resolved against the module tree and `crates`, the
+/// Cargo packages the walk found (LA.1a, [`crate::rust_paths`]).
+pub fn build_rust(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    crates: &[RustCrate],
+) -> Result<RepoGraph, GraphError> {
+    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    resolve_imports_python(&mut g, &all_imports);
+    let idx = RustIndex::build(&g, crates);
+    resolve_calls(&mut g, &all_calls, |g, site| idx.resolve_call(g, site));
+    resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
+    idx.report();
     Ok(g)
 }
 

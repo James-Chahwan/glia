@@ -4,9 +4,13 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{FileParse, edge_category, recv_stats};
 use repo_graph_core::RepoId;
 use repo_graph_graph::RepoGraph;
+use repo_graph_graph::rust_paths::RustCrate;
+
+use crate::extract::path_to_qname;
 
 /// TS-family lang tags (typescript/angular/react/vue) share ONE module + symbol
 /// space in a repo: an Angular component (`.component.ts` → "angular") injects a
@@ -34,10 +38,12 @@ const JVM_GUEST: &str = "kotlin";
 /// language order with the TS family last. Returns the graphs and the A7.0
 /// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
 /// to `parse_errors`. Prints the A6.2a `[recv]` marker for `repo_label`.
+/// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a).
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
     repo: RepoId,
     repo_label: &str,
+    rust_crates: &[RustCrate],
     parse_errors: &mut Vec<String>,
 ) -> (Vec<RepoGraph>, Vec<(&'static str, usize)>) {
     let mut graphs = Vec::new();
@@ -96,9 +102,10 @@ pub(super) fn build_language_graphs(
         let graph = match lang {
             "python" => repo_graph_graph::build_python(repo, parses),
             "go" => repo_graph_graph::build_go(repo, parses),
-            "java" | "kotlin" | "csharp" | "php" | "rust" | "scala" | "clojure" | "elixir" => {
+            "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" | "elixir" => {
                 repo_graph_graph::build_dotted(repo, parses)
             }
+            "rust" => repo_graph_graph::build_rust(repo, parses, rust_crates),
             "ruby" => repo_graph_graph::build_ruby(repo, parses),
             _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
         };
@@ -121,6 +128,53 @@ pub(super) fn build_language_graphs(
     recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
 
     (graphs, di_refs)
+}
+
+/// The Cargo packages among the walk's project roots, as `build_rust` reads
+/// them (LA.1a): the package name as a path identifier (`-` -> `_`), its dir
+/// as a qname prefix, its `src/lib.rs` and every other crate root it owns
+/// (`src/main.rs`, `src/bin/*.rs`, `src/bin/*/main.rs`, `tests/*.rs`,
+/// `examples/*.rs`, `benches/*.rs`, at exactly that depth) as module qnames.
+/// A root with none of them (a `[workspace]`-only manifest) is skipped. Sorted
+/// by (dir, name); `files` is the walk's list, so only walked files count.
+pub(super) fn rust_crates(files: &[(String, String)], roots: &[ProjectRoot]) -> Vec<RustCrate> {
+    let mut crates = Vec::new();
+    for root in roots.iter().filter(|r| r.ecosystem == "cargo") {
+        let prefix = if root.rel_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", root.rel_path)
+        };
+        let mut lib_root = None;
+        let mut other_roots = Vec::new();
+        for (path, _) in files {
+            let Some(rel) = path.strip_prefix(prefix.as_str()).filter(|r| r.ends_with(".rs"))
+            else {
+                continue;
+            };
+            let segs: Vec<&str> = rel.split('/').collect();
+            match segs.as_slice() {
+                ["src", "lib.rs"] => lib_root = Some(path_to_qname(path)),
+                ["src", "main.rs"]
+                | ["src", "bin", _]
+                | ["src", "bin", _, "main.rs"]
+                | ["tests" | "examples" | "benches", _] => other_roots.push(path_to_qname(path)),
+                _ => {}
+            }
+        }
+        if lib_root.is_none() && other_roots.is_empty() {
+            continue;
+        }
+        other_roots.sort();
+        let mut c = RustCrate::default();
+        c.name = root.label.replace('-', "_");
+        c.dir = root.rel_path.replace('/', "::");
+        c.lib_root = lib_root;
+        c.other_roots = other_roots;
+        crates.push(c);
+    }
+    crates.sort_by(|a, b| (&a.dir, &a.name).cmp(&(&b.dir, &b.name)));
+    crates
 }
 
 /// Move the `kotlin` parses onto the end of the `java` entry when both exist

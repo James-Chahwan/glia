@@ -1,0 +1,24 @@
+{
+  "framework": "rust-crate-path-calls",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["rust/calls"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "core/src/api/service_map"},
+    {"kind": "FUNCTION", "name": "core/src/api/helper"},
+    {"kind": "METHOD", "name": "core/src/api/Engine/new"}
+  ],
+  "expect_edges": [
+    {"from": "app/src/main/main", "to": "core/src/api/service_map", "category": "CALLS", "note": "acme_core::service_map() — crate path through the crate root's `pub use api::service_map`"},
+    {"from": "app/src/main/main", "to": "core/src/api/helper", "category": "CALLS", "note": "acme_core::api::helper() — crate path through a child module"},
+    {"from": "app/src/main/main", "to": "core/src/api/Engine/new", "category": "CALLS", "note": "acme_core::api::Engine::new() — crate path to a type's associated fn"},
+    {"from": "core/src/lib/root_fn", "to": "core/src/api/helper", "category": "CALLS", "note": "crate::api::helper() and self::api::helper()"},
+    {"from": "core/src/api/helper", "to": "core/src/lib/root_fn2", "category": "CALLS", "note": "super::root_fn2()"},
+    {"from": "core/src/api/Engine/run", "to": "core/src/api/Engine/step", "category": "CALLS", "note": "Self::step()"}
+  ],
+  "forbid": [
+    {"from": "app/src/main/main", "to": "app/src/main/helper", "category": "CALLS", "note": "acme_core::api::helper() must bind to the core crate's helper, never the caller's same-named local fn"}
+  ],
+  "note": "LA.1a. Two-crate cargo workspace in one walked dir. Baseline 2026-09-19, HEAD c8f4e84 (after wave 5), installed 0.4.18+p167285a2dc7acd67 wheel: CALLS 0/6, forbid 0 violations; only service_map -> helper (bare) resolves, every path-qualified call is dropped."
+}
