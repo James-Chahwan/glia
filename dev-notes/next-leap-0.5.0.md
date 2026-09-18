@@ -204,7 +204,8 @@ Specced — see section 7 for the packet counts, the schedule, and the decisions
 ## 6. Not in this leap
 
 - **Later:** communities, duplicate-flow detection, dominators (needs middleware extraction + a security-gate ruling),
-  hubs, RuntimeZone resolver, cross-repo node dedupe, Notion / wiki doc adapters, LSP.
+  hubs, RuntimeZone resolver, cross-repo node dedupe, Notion / wiki doc adapters, LSP, per-graph-area rebuilds
+  (revisit if a big repo is slow after LG.1).
 - **Not doing:** error-handling / panic patterns, resource lifecycle (intra-procedural), articulation points,
   semantic search, runtime trace overlay, shared-`.gmap` multi-agent writes, dense-text semantic sigils.
 - **Gated** (`project_glia_security_dual_use`): taint / value data-flow, CVE-reachability or package reachability joined
@@ -255,20 +256,22 @@ orchestrator edits, the integration report) · `dev-notes/leap-corrections.json`
 The baseline (`baseline.json`, 1,056 tests / 140 fixtures / matrix 146 of 480) was measured after programme wave 19;
 no code has changed since.
 
-### 7.1 Decisions for James before the waves they gate
+### 7.1 Decisions (James, 2026-09-19)
 
-1. **Engram edits** — LG.7 and LG.14 write into `/home/ivy/Code/Engram`, which is not a git repo and stays uncompilable
-   until Engram's session applies `glia-v6-landed.md`. OK to edit it (after a backup)? A `git init` there first would help.
-2. **pyo3 auto-persist** — LD.2 would remove `generate()`'s auto-persist that LC.9 re-routes; the corrections keep it
-   until you rule.
-3. **Scope the verifiers added beyond the map** — LB.4c (`page:` qnames), LA.6e (a `glia pages` primitive and
-   `PyGraph.page_flow`), LG.3d (a data_entity wrapper in the overlay schema). Also LD.4a changes what `cross_service`
-   means and LD.6 widens the entry set (the dense-text `*` sigil now follows it by default).
-4. **"per graph area rebuilds"** — your 2026-05-05 perf quote has no packet; LG.1 is rayon only. Add or drop?
-5. **GLIA_NO_PERSIST gap** — `generate(incremental=False)` still purges `<repo>/.ai/repo-graph/parse_cache.bin` under
-   GLIA_NO_PERSIST. Gate it (small packet) or leave it?
-6. **LG.8** diffs exported gmaps rather than building on the graph delta as planned; a dependency on LE.1 was added
-   anyway. Confirm.
+1. **Engram edits** (LG.7, LG.14): approved — *"Yeah sure I'll do it before that wave atleast"*. James puts Engram under
+   git before W32; the packets still back it up first.
+2. **pyo3 auto-persist**: dropped — *"Oh okay that's best to fix to place we git ignore and don't double write"*.
+   `generate()` only builds; `save_to` / `save_to_default` are the one writer (LD.2). LC.9's layout dir
+   `<repo>/.glia/graph/` writes its own `.gitignore` (`*`) so it never shows in any repo's `git status`; checked-in
+   inputs (`.glia/overlay.toml`, `.glia/cells.jsonl`) stay outside it. The wrapper already saves explicitly, so it now
+   writes once instead of twice.
+3. **Verifier scope additions** (LB.4c `page:` qnames, LA.6e `glia pages`, LG.3d overlay data_entity wrapper, LD.4a
+   cross_service by project, LD.6 wider entry set): kept — *"Makes sense then"*.
+4. **Per graph area rebuilds**: not in 0.5.0 — *"Cool no worries"*. Full builds take 8.2 s (glia) and 2.8 s
+   (quokka-stack) with the debug binary; revisit only if a big repo is slow after LG.1.
+5. **GLIA_NO_PERSIST purge gap**: closed by LD.2 — *"Do it then"*. `generate(incremental=False)` reads, writes and
+   purges nothing; `purge_parse_cache()` is explicit.
+6. **LG.8** diffs exported gmaps, with a dependency on LE.1: confirmed — *"Yeah sure sounds reasonable?"*.
 
 ### 7.2 Unowned findings the spec run surfaced (no packet yet)
 
