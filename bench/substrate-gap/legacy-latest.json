@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 209,
+  "fixtures": 217,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -211,6 +211,13 @@
         "INJECTS": 1.0
       }
     },
+    "csharp-file-local-types": {
+      "framework": "csharp-file-local-types",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "csharp-fromservices": {
       "framework": "csharp-fromservices",
       "language": "csharp",
@@ -265,6 +272,13 @@
       "per_category": {
         "CALLS": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "dart-bare-calls": {
+      "framework": "dart-bare-calls",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "dart-field-dispatch": {
@@ -657,9 +671,25 @@
       "language": "kotlin",
       "per_category": {
         "CALLS": 0.0,
-        "HANDLED_BY": 0.0,
+        "HANDLED_BY": 1.0,
         "IMPORTS": 1.0,
-        "INJECTS": 0.0
+        "INJECTS": 1.0
+      }
+    },
+    "nav-angular-routes": {
+      "framework": "nav-angular-routes",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
+      }
+    },
+    "nav-react-routes": {
+      "framework": "nav-react-routes",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
       }
     },
     "php-braced-use": {
@@ -924,6 +954,13 @@
       "language": "rust",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "rust-crate-path-calls": {
+      "framework": "rust-crate-path-calls",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "rust-http": {
@@ -1418,6 +1455,29 @@
         "WS_CONNECTS": 1.0
       }
     },
+    "xcut-websocket-generic-route": {
+      "framework": "xcut-websocket-generic-route",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "xcut-websocket-go-route": {
+      "framework": "xcut-websocket-go-route",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "xcut-websocket-param-path": {
+      "framework": "xcut-websocket-param-path",
+      "language": "java",
+      "per_category": {
+        "WS_CONNECTS": 1.0
+      }
+    },
     "xcut-websocket-precision": {
       "framework": "xcut-websocket-precision",
       "language": "typescript+go",
@@ -1502,20 +1562,15 @@
       "kotlin-ktor: CALLS",
       "kotlin-ktor: HANDLED_BY",
       "kotlin-retrofit: HTTP_CALLS",
-      "kotlin-spring: CALLS",
-      "kotlin-spring: HANDLED_BY",
-      "kotlin-spring: INJECTS"
+      "kotlin-spring: CALLS"
     ],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [
-      "kotlin-flip-guard: ROUTE 'ANY /api'",
-      "kotlin-flip-guard: DATA_ENTITY 'User'",
       "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
       "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
-      "kotlin-retrofit: ENDPOINT 'GET /api/users'",
-      "kotlin-spring: ROUTE 'GET /users'"
+      "kotlin-retrofit: ENDPOINT 'GET /api/users'"
     ],
     "partial_cells": []
   },

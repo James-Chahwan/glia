@@ -79,7 +79,7 @@ swift            ●       ◐       ?       ?       ?       ?       ?       ?  
 c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 scala            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ●       ?
 clojure          ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-dart             ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ◐       ●       ◐       ◐       ?       ●       ?
+dart             ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ◐       ?       ●       ?
 elixir           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ●       ?
 rust             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ●       ●       ?       ◐       ◐       ●       ?
 solidity         ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ?       ?
@@ -109,7 +109,7 @@ PER-MECHANISM  across 16 languages:
   cron         ● 0   ◐ 1   · 0   ? 15  ! 0
   cli_def      ● 6   ◐ 1   · 0   ? 9   ! 0
   cli_inv      ● 1   ◐ 1   · 0   ? 14  ! 0
-  calls        ● 14  ◐ 1   · 0   ? 1   ! 0
+  calls        ● 15  ◐ 0   · 0   ? 1   ! 0
   imports      ● 13  ◐ 0   · 0   ? 3   ! 0
   injects      ● 7   ◐ 2   · 0   ? 7   ! 0
   impl         ● 5   ◐ 3   · 0   ? 8   ! 0
@@ -129,16 +129,16 @@ PER-LANGUAGE  across 30 mechanisms:
   c_cpp        ● 2   ◐ 0   · 1   ? 27  ! 0
   scala        ● 6   ◐ 1   · 0   ? 23  ! 0
   clojure      ● 3   ◐ 1   · 0   ? 26  ! 0
-  dart         ● 3   ◐ 4   · 0   ? 23  ! 0
+  dart         ● 4   ◐ 3   · 0   ? 23  ! 0
   elixir       ● 5   ◐ 0   · 0   ? 25  ! 0
   rust         ● 6   ◐ 2   · 0   ? 22  ! 0
   solidity     ● 4   ◐ 0   · 0   ? 26  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 165/480 cells have a fixture (34.4%) — 122 full, 29 partial, 14 none, 315 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 165/480 cells have a fixture (34.4%) — 123 full, 28 partial, 14 none, 315 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 98
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 105
 
 ## Cells routed via an alternative mechanism
 

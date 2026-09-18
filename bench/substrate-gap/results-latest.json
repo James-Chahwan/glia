@@ -587,17 +587,16 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
       "reasons": [
-        "extract probed from mechanism kinds (fixture scopes no nodes)",
-        "routing edge missing"
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        3,
+        4,
         4
       ],
       "via": "call"
@@ -3028,26 +3027,27 @@
     },
     "rust/calls": {
       "extract": [
-        5,
-        5
+        8,
+        8
       ],
       "fixtures": [
         "fixtures/rust-axum-calls",
+        "fixtures/rust-crate-path-calls",
         "fixtures/rust-macro-arg-calls"
       ],
       "forbid": [
-        2,
-        2
+        3,
+        3
       ],
       "level": "full",
       "literal": [
-        5,
-        5
+        8,
+        8
       ],
       "reasons": [],
       "route": [
-        5,
-        5
+        11,
+        11
       ],
       "via": "call"
     },
@@ -4158,9 +4158,11 @@
     "fixtures/csharp-aspnet-composed",
     "fixtures/csharp-block-using",
     "fixtures/csharp-efcore",
+    "fixtures/csharp-file-local-types",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/csharp-namespace-qnames",
+    "fixtures/dart-bare-calls",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
@@ -4193,6 +4195,8 @@
     "fixtures/kotlin-ktor",
     "fixtures/kotlin-retrofit",
     "fixtures/kotlin-spring",
+    "fixtures/nav-angular-routes",
+    "fixtures/nav-react-routes",
     "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
@@ -4232,6 +4236,9 @@
     "fixtures/xcut-queue-wildcard",
     "fixtures/xcut-trpc",
     "fixtures/xcut-websocket-client-forms",
+    "fixtures/xcut-websocket-generic-route",
+    "fixtures/xcut-websocket-go-route",
+    "fixtures/xcut-websocket-param-path",
     "fixtures/xdata-source-shares",
     "fixtures/xiac-terraform-k8s",
     "fixtures/xpoly-data-entity",
@@ -4243,10 +4250,10 @@
   "totals": {
     "covered": 165,
     "error": 0,
-    "full": 122,
+    "full": 123,
     "grid": 480,
     "none": 14,
-    "partial": 29,
+    "partial": 28,
     "unknown": 315
   },
   "vocabulary": {

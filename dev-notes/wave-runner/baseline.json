@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "dcae116",
-  "after_wave": 5,
+  "measured_at_head": "f92d557",
+  "after_wave": 6,
   "cargo_test_workspace": {
-    "passed": 1744,
+    "passed": 1816,
     "failed": 0
   },
   "history_passed": [
@@ -32,12 +32,13 @@
     1429,
     1552,
     1651,
-    1744
+    1744,
+    1816
   ],
   "run_py": {
-    "fixtures": 209,
-    "blind_spots": 10,
-    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS', 'kotlin-spring: HANDLED_BY', 'kotlin-spring: INJECTS']; missing nodes: [\"kotlin-flip-guard: ROUTE 'ANY /api'\", \"kotlin-flip-guard: DATA_ENTITY 'User'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\", \"kotlin-spring: ROUTE 'GET /users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 217,
+    "blind_spots": 8,
+    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
@@ -50,25 +51,20 @@
       "kotlin-ktor: CALLS",
       "kotlin-ktor: HANDLED_BY",
       "kotlin-retrofit: HTTP_CALLS",
-      "kotlin-spring: CALLS",
-      "kotlin-spring: HANDLED_BY",
-      "kotlin-spring: INJECTS"
+      "kotlin-spring: CALLS"
     ],
     "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],
     "missing_nodes_list": [
-      "kotlin-flip-guard: ROUTE 'ANY /api'",
-      "kotlin-flip-guard: DATA_ENTITY 'User'",
       "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
       "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
-      "kotlin-retrofit: ENDPOINT 'GET /api/users'",
-      "kotlin-spring: ROUTE 'GET /users'"
+      "kotlin-retrofit: ENDPOINT 'GET /api/users'"
     ]
   },
   "matrix_py": {
-    "full": 122,
-    "partial": 29,
+    "full": 123,
+    "partial": 28,
     "none": 14,
     "unknown": 315,
     "covered": 165,
