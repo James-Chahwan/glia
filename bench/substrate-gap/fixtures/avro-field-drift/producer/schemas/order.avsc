@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "OrderPlaced",
+  "namespace": "com.shop",
+  "fields": [
+    {"name": "orderId", "type": "string"},
+    {"name": "totalCents", "type": "long"},
+    {"name": "coupon", "type": ["null", "string"], "default": null}
+  ]
+}

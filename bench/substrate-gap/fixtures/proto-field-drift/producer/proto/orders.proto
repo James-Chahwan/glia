@@ -1,0 +1,15 @@
+// The order service owns this contract and publishes OrderCreated on checkout.
+syntax = "proto3";
+
+package shop.v1;
+
+message OrderCreated {
+  string order_id = 1;
+  int64 total_cents = 2;
+  repeated string sku = 3;
+  map<string, string> labels = 4;
+  oneof payer {
+    string card_token = 5;
+    string wallet_id = 6;
+  }
+}

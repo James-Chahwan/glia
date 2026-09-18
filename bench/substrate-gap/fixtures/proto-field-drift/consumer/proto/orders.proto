@@ -1,0 +1,10 @@
+// The billing service's vendored copy, pinned before the producer widened it.
+syntax = "proto3";
+
+package shop.v1;
+
+message OrderCreated {
+  string order_id = 1;
+  int32 total_cents = 2;
+  repeated string sku = 3;
+}

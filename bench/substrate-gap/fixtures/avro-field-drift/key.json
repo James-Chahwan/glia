@@ -1,0 +1,35 @@
+{
+  "framework": "avro-field-drift",
+  "language": "avro",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "note": "LE.10a: Avro record fields as a SCHEMA_FIELDS cell (22) on MESSAGE_TYPE. The consumer's copy narrowed totalCents long -> int and added `channel` with no default (LE.10c: avro_reader_field_no_default).",
+  "expect_nodes": [
+    {
+      "kind": "MESSAGE_TYPE",
+      "name": "com.shop.OrderPlaced"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:avro:com.shop.OrderPlaced",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"totalCents\""
+    },
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:avro:com.shop.OrderPlaced",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"type\":\"null|string\""
+    },
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:avro:com.shop.OrderPlaced",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"channel\""
+    }
+  ]
+}

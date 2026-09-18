@@ -40,17 +40,30 @@ pub struct SchemaNodes {
     /// whole-file POSITION. Empty for proto, whose module POSITION comes from
     /// `grpc.rs`.
     pub module_cells: Vec<Cell>,
+    /// LE.10a: proto messages / Avro records given a SCHEMA_FIELDS cell.
+    /// Always 0 for a JSON Schema.
+    pub schema_field_cells: usize,
+    /// LE.10a: fields listed across those cells.
+    pub schema_fields: usize,
 }
 
-#[derive(Debug, PartialEq)]
+/// The declaration scan only matches `Ident` / `Open` / `Close` / `Semi`;
+/// every other token breaks a `message <Name> {` / `package <name> ;`
+/// sequence. The field scan (LE.10a) also reads the literal and punctuation
+/// tokens, so each keeps its text.
+#[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Ident(String),
     Open,
     Close,
     Semi,
-    /// Any other punctuation or literal — only matters because it breaks a
-    /// `message <Name> {` / `package <name> ;` sequence.
-    Other,
+    /// A string literal's text between its quotes, escapes as written.
+    Str(String),
+    /// A run of digits and the alphanumerics that follow (`12`, `0x1F`).
+    Num(String),
+    /// Any other byte: punctuation (`=`, `<`, `>`, `,`, `[`, `.`) or one byte
+    /// of a non-ASCII char.
+    Sym(u8),
 }
 
 /// Comment- and string-aware tokenizer. Returns each token with its 0-indexed
@@ -86,6 +99,7 @@ fn tokenize(source: &str) -> Vec<(Tok, u32)> {
             b'"' | b'\'' => {
                 let start = line;
                 i += 1;
+                let text_start = i;
                 while i < b.len() && b[i] != c && b[i] != b'\n' {
                     // An escape consumes the next byte too; a string never
                     // spans a raw newline, so stop before counting one twice.
@@ -94,8 +108,15 @@ fn tokenize(source: &str) -> Vec<(Tok, u32)> {
                     }
                     i += 1;
                 }
-                i = (i + 1).min(b.len());
-                out.push((Tok::Other, start));
+                // `i` sits on an ASCII quote / newline or at the end, so the
+                // slice never splits a char.
+                let text = source.get(text_start..i.min(b.len())).unwrap_or_default();
+                out.push((Tok::Str(text.to_string()), start));
+                // Consume the closing quote only: an unterminated string's
+                // newline is left for the `\n` arm to count.
+                if i < b.len() && b[i] == c {
+                    i += 1;
+                }
             }
             b'{' => {
                 out.push((Tok::Open, line));
@@ -118,21 +139,42 @@ fn tokenize(source: &str) -> Vec<(Tok, u32)> {
                 out.push((Tok::Ident(source[start..i].to_string()), line));
             }
             _ if c.is_ascii_whitespace() => i += 1,
-            _ => {
-                // Skip a whole run of digits so `= 12;` is one token, and never
-                // split a multi-byte UTF-8 char (only ASCII is matched above).
-                if c.is_ascii_digit() {
-                    while i < b.len() && b[i].is_ascii_alphanumeric() {
-                        i += 1;
-                    }
-                } else {
+            _ if c.is_ascii_digit() => {
+                // A whole run of digits is one token, so `= 12;` reads as a
+                // number; only ASCII is consumed, so no char is split.
+                let start = i;
+                while i < b.len() && b[i].is_ascii_alphanumeric() {
                     i += 1;
                 }
-                out.push((Tok::Other, line));
+                out.push((Tok::Num(source.get(start..i).unwrap_or_default().to_string()), line));
+            }
+            _ => {
+                out.push((Tok::Sym(c), line));
+                i += 1;
             }
         }
     }
     out
+}
+
+/// Most fields (and, separately, reserved entries) one message / record's
+/// SCHEMA_FIELDS cell lists; past it the cell says `"truncated":true`.
+const SCHEMA_MAX_FIELDS: usize = 500;
+
+/// One field declared directly in a proto `message` body, or in a `oneof`
+/// inside it (LE.10a).
+#[derive(Debug, PartialEq)]
+pub struct ProtoField {
+    pub name: String,
+    /// The type as written minus a leading dot (`google.protobuf.Timestamp`,
+    /// `shop.v1.Money`); a map is `map<K,V>` with the whitespace removed.
+    pub type_name: String,
+    /// The field number; `None` only when the literal does not parse.
+    pub number: Option<u64>,
+    /// `repeated` / `optional` / `required`, when written.
+    pub label: Option<String>,
+    /// The enclosing `oneof`'s name.
+    pub oneof: Option<String>,
 }
 
 /// One `message` / `enum` declaration found in a `.proto`.
@@ -149,17 +191,163 @@ pub struct ProtoTypeDecl {
     pub end_line: u32,
     /// `local_name` of the enclosing message, when nested.
     pub parent: Option<String>,
+    /// A message's own fields in declaration order, `oneof` members included,
+    /// capped at [`SCHEMA_MAX_FIELDS`]. A nested message's fields are its own;
+    /// `option`, `extensions`, `extend` bodies and proto2 `group` bodies are
+    /// not fields of the message. Always empty for an enum.
+    pub fields: Vec<ProtoField>,
+    /// `reserved` numbers, ranges (`9 to 11`, `40 to max`) and names, in
+    /// declaration order, numbers written in decimal.
+    pub reserved: Vec<String>,
+    /// A cap cut `fields` or `reserved` short.
+    pub truncated: bool,
+}
+
+/// One open brace in [`parse_proto_types`].
+enum Frame {
+    /// A `message` / `enum` body: an index into the decls.
+    Decl(usize),
+    /// A `oneof <name>` body directly inside message body `msg`.
+    Oneof { msg: usize, name: String },
+    /// Any other brace: a service, rpc options, `extend`, a proto2 `group`, an
+    /// option's aggregate value.
+    Other,
+}
+
+/// Statement keywords that can never open a field, even where the rest of
+/// the statement reads like one (`option foo = 1;`).
+const PROTO_NON_FIELD_KEYWORDS: [&str; 8] =
+    ["option", "extensions", "extend", "reserved", "oneof", "message", "enum", "group"];
+
+/// A proto integer literal: decimal, `0x` hex or leading-`0` octal.
+fn parse_proto_int(s: &str) -> Option<u64> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else if s.len() > 1 && s.starts_with('0') {
+        u64::from_str_radix(s.get(1..)?, 8).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// A number as decimal text, or as written when it does not parse.
+fn proto_num_text(s: &str) -> String {
+    parse_proto_int(s).map_or_else(|| s.to_string(), |n| n.to_string())
+}
+
+/// One named type at `toks[i]`: `Name` or `.pkg.Name` (dot dropped).
+/// Returns it and the index after it.
+fn proto_named_type(toks: &[Tok], i: usize) -> Option<(String, usize)> {
+    let i = if toks.get(i) == Some(&Tok::Sym(b'.')) { i + 1 } else { i };
+    let Tok::Ident(t) = toks.get(i)? else {
+        return None;
+    };
+    Some((t.clone(), i + 1))
+}
+
+/// A field's type at `toks[i]`: a named type, or `map < K , V >`. A map's
+/// key and value are never maps themselves (proto forbids it), so this does
+/// not recurse. Returns the rendered type and the index after it.
+fn proto_type(toks: &[Tok], i: usize) -> Option<(String, usize)> {
+    let (t, next) = proto_named_type(toks, i)?;
+    if t != "map" || toks.get(next) != Some(&Tok::Sym(b'<')) {
+        return Some((t, next));
+    }
+    let (k, after_k) = proto_named_type(toks, next + 1)?;
+    (toks.get(after_k)? == &Tok::Sym(b',')).then_some(())?;
+    let (v, after_v) = proto_named_type(toks, after_k + 1)?;
+    (toks.get(after_v)? == &Tok::Sym(b'>')).then_some(())?;
+    Some((format!("map<{k},{v}>"), after_v + 1))
+}
+
+/// `[label] <type> <name> = <number> ...` (options and anything after the
+/// number are ignored), else `None`.
+fn proto_field(stmt: &[Tok], oneof: Option<&str>) -> Option<ProtoField> {
+    let label = match stmt.first()? {
+        Tok::Ident(l) if matches!(l.as_str(), "repeated" | "optional" | "required") => Some(l.clone()),
+        _ => None,
+    };
+    let at = usize::from(label.is_some());
+    if let Some(Tok::Ident(kw)) = stmt.get(at)
+        && PROTO_NON_FIELD_KEYWORDS.contains(&kw.as_str())
+    {
+        return None;
+    }
+    let (type_name, next) = proto_type(stmt, at)?;
+    let Tok::Ident(name) = stmt.get(next)? else {
+        return None;
+    };
+    if name.contains('.') || stmt.get(next + 1)? != &Tok::Sym(b'=') {
+        return None;
+    }
+    let Tok::Num(number) = stmt.get(next + 2)? else {
+        return None;
+    };
+    Some(ProtoField {
+        name: name.clone(),
+        type_name,
+        number: parse_proto_int(number),
+        label,
+        oneof: oneof.map(str::to_string),
+    })
+}
+
+/// The entries of a `reserved` statement (after the keyword): numbers,
+/// `a to b` / `a to max` ranges and names, quoted (proto2 / proto3) or bare
+/// (editions). An entry of any other shape is skipped.
+fn proto_reserved(rest: &[Tok]) -> Vec<String> {
+    rest.split(|t| *t == Tok::Sym(b','))
+        .filter_map(|entry| match entry {
+            [Tok::Str(s)] | [Tok::Ident(s)] => Some(s.clone()),
+            [Tok::Num(n)] => Some(proto_num_text(n)),
+            [Tok::Num(a), Tok::Ident(to), Tok::Num(b)] if to == "to" => {
+                Some(format!("{} to {}", proto_num_text(a), proto_num_text(b)))
+            }
+            [Tok::Num(a), Tok::Ident(to), Tok::Ident(max)] if to == "to" && max == "max" => {
+                Some(format!("{} to max", proto_num_text(a)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fold one `;`-terminated statement of a message (or `oneof`) body into its
+/// declaration: a field, a `reserved` list, or nothing.
+fn record_proto_statement(stmt: &[Tok], oneof: Option<&str>, d: &mut ProtoTypeDecl) {
+    if let [Tok::Ident(kw), rest @ ..] = stmt
+        && kw == "reserved"
+    {
+        if oneof.is_none() {
+            for r in proto_reserved(rest) {
+                if d.reserved.len() >= SCHEMA_MAX_FIELDS {
+                    d.truncated = true;
+                    break;
+                }
+                d.reserved.push(r);
+            }
+        }
+        return;
+    }
+    if let Some(f) = proto_field(stmt, oneof) {
+        if d.fields.len() >= SCHEMA_MAX_FIELDS {
+            d.truncated = true;
+        } else {
+            d.fields.push(f);
+        }
+    }
 }
 
 /// The `package` and every `message` / `enum` declaration of a `.proto`, in
-/// source order of their opening keyword. Parsers extract; ids come later.
+/// source order of their opening keyword, each message with its fields and
+/// reserved entries (LE.10a). Parsers extract; ids come later.
 pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
     let toks = tokenize(source);
     let mut package: Option<String> = None;
     let mut decls: Vec<ProtoTypeDecl> = Vec::new();
-    // One frame per open brace: `Some(index into decls)` for a message / enum
-    // body, `None` for anything else (service, rpc options, oneof, extend...).
-    let mut frames: Vec<Option<usize>> = Vec::new();
+    // One frame per open brace.
+    let mut frames: Vec<Frame> = Vec::new();
+    // The tokens of the statement being read in a message / oneof body.
+    let mut stmt: Vec<Tok> = Vec::new();
     let mut last_line: u32 = 0;
 
     let mut i = 0;
@@ -182,7 +370,10 @@ pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
                 {
                     // The innermost enclosing message / enum body, if the
                     // brace directly around this declaration is one.
-                    let parent = frames.last().copied().flatten().map(|p| decls[p].local_name.clone());
+                    let parent = match frames.last() {
+                        Some(Frame::Decl(p)) => Some(decls[*p].local_name.clone()),
+                        _ => None,
+                    };
                     let local_name = match &parent {
                         Some(p) => format!("{p}.{name}"),
                         None => name.clone(),
@@ -194,31 +385,116 @@ pub fn parse_proto_types(source: &str) -> (Option<String>, Vec<ProtoTypeDecl>) {
                         start_line: *line,
                         end_line: *line,
                         parent,
+                        fields: Vec::new(),
+                        reserved: Vec::new(),
+                        truncated: false,
                     });
-                    frames.push(Some(decls.len() - 1));
+                    frames.push(Frame::Decl(decls.len() - 1));
+                    stmt.clear();
                     i += 3;
                     continue;
                 }
             }
-            Tok::Open => frames.push(None),
-            Tok::Close => {
-                if let Some(Some(d)) = frames.pop() {
+            _ => {}
+        }
+        // A token read into a statement belongs to this message body, and to
+        // this oneof when inside one.
+        let target = match frames.last() {
+            Some(Frame::Decl(d)) if !decls[*d].is_enum => Some((*d, None)),
+            Some(Frame::Oneof { msg, name }) => Some((*msg, Some(name.as_str()))),
+            _ => None,
+        };
+        match tok {
+            Tok::Open => {
+                let frame = match (frames.last(), stmt.as_slice()) {
+                    (Some(Frame::Decl(msg)), [Tok::Ident(kw), Tok::Ident(name)])
+                        if target.is_some() && kw == "oneof" && !name.contains('.') =>
+                    {
+                        Frame::Oneof { msg: *msg, name: name.clone() }
+                    }
+                    _ => Frame::Other,
+                };
+                // An option's aggregate value (`= {`) is part of its statement;
+                // any other brace in a message body opens a block that ends it.
+                if target.is_some() && !matches!(stmt.last(), Some(Tok::Sym(b'=' | b':' | b',' | b'['))) {
+                    stmt.clear();
+                }
+                frames.push(frame);
+            }
+            Tok::Close => match frames.pop() {
+                Some(Frame::Decl(d)) => {
                     decls[d].end_line = *line;
+                    stmt.clear();
+                }
+                Some(Frame::Oneof { .. }) => stmt.clear(),
+                Some(Frame::Other) | None => {}
+            },
+            Tok::Semi => {
+                if let Some((msg, oneof)) = target {
+                    record_proto_statement(&stmt, oneof, &mut decls[msg]);
+                    stmt.clear();
                 }
             }
-            _ => {}
+            t => {
+                if target.is_some() {
+                    stmt.push(t.clone());
+                }
+            }
         }
         i += 1;
     }
     // An unterminated body ends at the file's last token.
-    for frame in frames.into_iter().flatten() {
-        decls[frame].end_line = last_line;
+    for frame in frames {
+        if let Frame::Decl(d) = frame {
+            decls[d].end_line = last_line;
+        }
     }
     (package, decls)
 }
 
 fn json_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `s` as a JSON string literal, quotes included and control characters
+/// escaped (which [`json_str`] does not do).
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| String::from("\"\""))
+}
+
+/// The SCHEMA_FIELDS cell (LE.10a): `{"format":<format>,"fields":[...]}` with
+/// the pre-rendered field objects in declaration order, then
+/// `"reserved":[...]` when there are any, then `"truncated":true` when a cap
+/// cut a list short. LE.10b writes the same shape for contract ops, so LE.10c
+/// compares one shape.
+fn schema_fields_cell(format: &str, fields: &[String], reserved: &[String], truncated: bool) -> Cell {
+    let mut j = format!(r#"{{"format":"{format}","fields":[{}]"#, fields.join(","));
+    if !reserved.is_empty() {
+        let reserved: Vec<String> = reserved.iter().map(|r| json_string(r)).collect();
+        j.push_str(&format!(r#","reserved":[{}]"#, reserved.join(",")));
+    }
+    if truncated {
+        j.push_str(r#","truncated":true"#);
+    }
+    j.push('}');
+    Cell { kind: cell_type::SCHEMA_FIELDS, payload: CellPayload::Json(j) }
+}
+
+/// `{"name":..,"type":..,"number":N,"label":..,"oneof":..}`, each optional
+/// key only when present.
+fn proto_field_json(f: &ProtoField) -> String {
+    let mut j = format!(r#"{{"name":{},"type":{}"#, json_string(&f.name), json_string(&f.type_name));
+    if let Some(n) = f.number {
+        j.push_str(&format!(r#","number":{n}"#));
+    }
+    if let Some(label) = &f.label {
+        j.push_str(&format!(r#","label":{}"#, json_string(label)));
+    }
+    if let Some(oneof) = &f.oneof {
+        j.push_str(&format!(r#","oneof":{}"#, json_string(oneof)));
+    }
+    j.push('}');
+    j
 }
 
 fn position_cell(path: &str, start_line: u32, end_line: u32) -> Cell {
@@ -235,7 +511,9 @@ fn position_cell(path: &str, start_line: u32, end_line: u32) -> Cell {
 /// parented under the file's MODULE (nested declarations under their outer
 /// message, with a DEFINES edge). Each carries a POSITION cell (declaration
 /// line through its closing brace) and an ORIGIN `provenance: contract` cell,
-/// which also keeps `tag_synthetic_provenance` from re-tagging it.
+/// which also keeps `tag_synthetic_provenance` from re-tagging it. A message
+/// (never an enum) also carries a SCHEMA_FIELDS cell listing its own fields
+/// and reserved entries (LE.10a), empty `fields` included.
 pub fn extract_proto_messages(
     source: &str,
     path: &str,
@@ -265,20 +543,22 @@ pub fn extract_proto_messages(
         ids.insert(d.local_name.clone(), id);
 
         let decl = if d.is_enum { "enum" } else { "message" };
-        out.nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Strong,
-            cells: vec![
-                position_cell(path, d.start_line, d.end_line),
-                Cell {
-                    kind: cell_type::ORIGIN,
-                    payload: CellPayload::Json(format!(
-                        r#"{{"provenance":"contract","source":"proto","decl":"{decl}"{pkg_field}}}"#
-                    )),
-                },
-            ],
-        });
+        let mut cells = vec![
+            position_cell(path, d.start_line, d.end_line),
+            Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"provenance":"contract","source":"proto","decl":"{decl}"{pkg_field}}}"#
+                )),
+            },
+        ];
+        if !d.is_enum {
+            let fields: Vec<String> = d.fields.iter().map(proto_field_json).collect();
+            cells.push(schema_fields_cell("proto", &fields, &d.reserved, d.truncated));
+            out.schema_field_cells += 1;
+            out.schema_fields += fields.len();
+        }
+        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
         let parent = d.parent.as_ref().and_then(|p| ids.get(p).copied());
         if let Some(p) = parent {
             out.edges.push(Edge {
@@ -434,6 +714,15 @@ impl JsonReader<'_> {
     }
 }
 
+/// One field of an Avro record (LE.10a).
+struct AvroField {
+    name: String,
+    /// The type rendered by [`avro_type`]; `None` when it is not a schema.
+    type_name: Option<String>,
+    /// The field declares a `default` (its value is not kept).
+    has_default: bool,
+}
+
 /// One named Avro type (`record` / `enum` / `fixed`) declared in an `.avsc`.
 struct AvroDecl {
     /// Avro fullname: `<namespace>.<Name>`, or `<Name>` in the null namespace.
@@ -445,6 +734,118 @@ struct AvroDecl {
     end_line: u32,
     /// Index of the enclosing declaration, when nested.
     parent: Option<usize>,
+    /// A record's `fields`, in declaration order, capped at
+    /// [`SCHEMA_MAX_FIELDS`] (the bool: the cap cut them short). `None` for an
+    /// enum or a fixed.
+    fields: Option<(Vec<AvroField>, bool)>,
+}
+
+/// Avro's primitive type names; any other bare type string names a type.
+const AVRO_PRIMITIVES: [&str; 8] = ["null", "boolean", "int", "long", "float", "double", "bytes", "string"];
+
+/// A named type's `(namespace, bare name)`. A dotted `name` is already a
+/// fullname, and its namespace overrides both the `namespace` attribute and
+/// the enclosing `ns`. `None` without a non-empty name.
+fn avro_name<'a>(v: &'a Json, ns: &'a str) -> Option<(&'a str, &'a str)> {
+    let raw = v.get("name").and_then(Json::as_str)?;
+    let (namespace, name) = match raw.rsplit_once('.') {
+        Some((n, bare)) => (n, bare),
+        None => (v.get("namespace").and_then(Json::as_str).unwrap_or(ns), raw),
+    };
+    (!name.is_empty()).then_some((namespace, name))
+}
+
+/// `<namespace>.<name>`, or `<name>` in the null namespace.
+fn avro_fullname(namespace: &str, name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_string()
+    } else {
+        format!("{namespace}.{name}")
+    }
+}
+
+/// A type string: a primitive as is, a named-type reference as its fullname
+/// (a bare name resolves in the enclosing namespace `ns`).
+fn avro_type_ref(s: &str, ns: &str) -> String {
+    if AVRO_PRIMITIVES.contains(&s) || s.contains('.') {
+        s.to_string()
+    } else {
+        avro_fullname(ns, s)
+    }
+}
+
+/// A field's type, rendered canonically: a primitive by name; a union as its
+/// members joined by `|` in declared order (`null|string`); `array<T>`;
+/// `map<T>`; a named or inline record / enum / fixed as its fullname; a
+/// `logicalType` appended in parentheses (`long(timestamp-millis)`). `None`
+/// when a position holds no schema, or past [`AVRO_MAX_DEPTH`].
+fn avro_type(v: &Json, ns: &str, depth: usize) -> Option<String> {
+    if depth > AVRO_MAX_DEPTH {
+        return None;
+    }
+    match v {
+        Json::Str(s) => Some(avro_type_ref(s, ns)),
+        Json::Arr(members) => {
+            let members: Option<Vec<String>> = members.iter().map(|m| avro_type(m, ns, depth + 1)).collect();
+            Some(members?.join("|"))
+        }
+        Json::Obj { .. } => {
+            let base = match v.get("type")? {
+                Json::Str(t) => match t.as_str() {
+                    "record" | "enum" | "fixed" => {
+                        let (namespace, name) = avro_name(v, ns)?;
+                        avro_fullname(namespace, name)
+                    }
+                    "array" => format!("array<{}>", avro_type(v.get("items")?, ns, depth + 1)?),
+                    "map" => format!("map<{}>", avro_type(v.get("values")?, ns, depth + 1)?),
+                    other => avro_type_ref(other, ns),
+                },
+                inner @ (Json::Obj { .. } | Json::Arr(_)) => avro_type(inner, ns, depth + 1)?,
+                Json::Other => return None,
+            };
+            Some(match v.get("logicalType").and_then(Json::as_str) {
+                Some(logical) => format!("{base}({logical})"),
+                None => base,
+            })
+        }
+        Json::Other => None,
+    }
+}
+
+/// A record's named `fields`, `ns` being the record's own namespace (the one
+/// its fields' nested names inherit). The bool: the cap cut the list short.
+fn avro_fields(fields: Option<&Json>, ns: &str, depth: usize) -> (Vec<AvroField>, bool) {
+    let Some(Json::Arr(items)) = fields else {
+        return (Vec::new(), false);
+    };
+    let mut out = Vec::new();
+    for f in items {
+        let Some(name) = f.get("name").and_then(Json::as_str) else {
+            continue;
+        };
+        if out.len() >= SCHEMA_MAX_FIELDS {
+            return (out, true);
+        }
+        out.push(AvroField {
+            name: name.to_string(),
+            type_name: f.get("type").and_then(|t| avro_type(t, ns, depth + 1)),
+            has_default: f.get("default").is_some(),
+        });
+    }
+    (out, false)
+}
+
+/// `{"name":..,"type":..,"default":true}`, each optional key only when present.
+fn avro_field_json(f: &AvroField) -> String {
+    let mut j = format!(r#"{{"name":{}"#, json_string(&f.name));
+    if let Some(t) = &f.type_name {
+        j.push_str(&format!(r#","type":{}"#, json_string(t)));
+    }
+    if f.has_default {
+        j.push_str(r#","default":true"#);
+    }
+    j.push('}');
+    j
 }
 
 /// Collect every named type under `v`, in document order. `ns` is the
@@ -473,29 +874,19 @@ fn walk_avro(v: &Json, ns: &str, parent: Option<usize>, depth: usize, out: &mut 
         Some("fixed") => Some("fixed"),
         _ => None,
     };
-    if let (Some(decl), Some(raw)) = (decl, v.get("name").and_then(Json::as_str)) {
-        // A dotted name is already a fullname, and its namespace overrides both
-        // the `namespace` attribute and the enclosing one.
-        let (namespace, name) = match raw.rsplit_once('.') {
-            Some((n, bare)) => (n, bare),
-            None => (v.get("namespace").and_then(Json::as_str).unwrap_or(ns), raw),
-        };
-        if name.is_empty() {
+    if let (Some(decl), Some(_)) = (decl, v.get("name").and_then(Json::as_str)) {
+        let Some((namespace, name)) = avro_name(v, ns) else {
             return;
-        }
-        let fullname = if namespace.is_empty() {
-            name.to_string()
-        } else {
-            format!("{namespace}.{name}")
         };
         out.push(AvroDecl {
-            fullname,
+            fullname: avro_fullname(namespace, name),
             name: name.to_string(),
             namespace: namespace.to_string(),
             decl,
             start_line,
             end_line,
             parent,
+            fields: (decl == "record").then(|| avro_fields(v.get("fields"), namespace, depth)),
         });
         let me = Some(out.len() - 1);
         if let Some(Json::Arr(fields)) = v.get("fields") {
@@ -521,7 +912,8 @@ fn walk_avro(v: &Json, ns: &str, parent: Option<usize>, depth: usize, out: &mut 
 /// shape as [`extract_proto_messages`]: parented under the file's MODULE, a
 /// nested declaration under its enclosing record with a DEFINES edge, a
 /// POSITION cell spanning the declaration's braces and an ORIGIN
-/// `provenance: contract` cell. Malformed JSON, or a schema that is only a
+/// `provenance: contract` cell; a record also carries a SCHEMA_FIELDS cell
+/// listing its fields (LE.10a). Malformed JSON, or a schema that is only a
 /// type string (`"string"`), yields nothing.
 pub fn extract_avro_records(
     source: &str,
@@ -557,21 +949,23 @@ pub fn extract_avro_records(
         } else {
             format!(r#","namespace":"{}""#, json_str(&d.namespace))
         };
-        out.nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Strong,
-            cells: vec![
-                position_cell(path, d.start_line, d.end_line),
-                Cell {
-                    kind: cell_type::ORIGIN,
-                    payload: CellPayload::Json(format!(
-                        r#"{{"provenance":"contract","source":"avro","decl":"{}"{ns_field}}}"#,
-                        d.decl
-                    )),
-                },
-            ],
-        });
+        let mut cells = vec![
+            position_cell(path, d.start_line, d.end_line),
+            Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"provenance":"contract","source":"avro","decl":"{}"{ns_field}}}"#,
+                    d.decl
+                )),
+            },
+        ];
+        if let Some((fields, truncated)) = &d.fields {
+            let fields: Vec<String> = fields.iter().map(avro_field_json).collect();
+            cells.push(schema_fields_cell("avro", &fields, &[], *truncated));
+            out.schema_field_cells += 1;
+            out.schema_fields += fields.len();
+        }
+        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
         let parent = d.parent.and_then(|p| id_of.get(p).copied());
         if let Some(p) = parent {
             out.edges.push(Edge {
@@ -944,6 +1338,191 @@ mod tests {
         );
     }
 
+    // ---- SCHEMA_FIELDS on proto messages (LE.10a) ----
+
+    fn fields_of<'a>(out: &'a SchemaNodes, qname: &str) -> Option<&'a str> {
+        let n = out.nodes.iter().find(|n| out.nav.qname_by_id[&n.id] == qname)?;
+        n.cells.iter().find(|c| c.kind == cell_type::SCHEMA_FIELDS).map(|c| match &c.payload {
+            CellPayload::Json(j) => j.as_str(),
+            other => panic!("expected a Json cell, got {other:?}"),
+        })
+    }
+
+    #[test]
+    fn proto_scalar_repeated_map_oneof_fields() {
+        let src = "syntax = \"proto3\";\npackage shop.v1;\nimport \"google/protobuf/timestamp.proto\";\n\nmessage Order {\n  option deprecated = true;\n  int64 total_cents = 2;\n  repeated string sku = 3;\n  map<string, string> labels = 4;\n  oneof payer {\n    string card_token = 5;\n    .shop.v1.Money wallet = 6 [deprecated = true];\n  }\n  google.protobuf.Timestamp at = 0x10;\n  optional string note = 017 [(validate.rules).string = { min_len: 1 }];\n  map<string, .shop.v1.Money> balances = 9;\n  extensions 100 to 199;\n  option foo = 1;\n}\n";
+        let out = extract_proto_messages(src, "o.proto", module_id(), repo());
+        assert_eq!(
+            fields_of(&out, "message:proto:shop.v1.Order"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"total_cents","type":"int64","number":2},"#,
+                r#"{"name":"sku","type":"string","number":3,"label":"repeated"},"#,
+                r#"{"name":"labels","type":"map<string,string>","number":4},"#,
+                r#"{"name":"card_token","type":"string","number":5,"oneof":"payer"},"#,
+                r#"{"name":"wallet","type":"shop.v1.Money","number":6,"oneof":"payer"},"#,
+                r#"{"name":"at","type":"google.protobuf.Timestamp","number":16},"#,
+                r#"{"name":"note","type":"string","number":15,"label":"optional"},"#,
+                r#"{"name":"balances","type":"map<string,shop.v1.Money>","number":9}"#,
+                r#"]}"#
+            )),
+            "declaration order; oneof members carry it; a leading dot is dropped; hex / octal numbers \
+             decoded; an option's aggregate value stays inside its field; option / extensions are not fields"
+        );
+        assert_eq!((out.schema_field_cells, out.schema_fields), (1, 8));
+        // The POSITION / ORIGIN cells are unchanged, SCHEMA_FIELDS comes last.
+        let kinds: Vec<_> = out.nodes[0].cells.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, vec![cell_type::POSITION, cell_type::ORIGIN, cell_type::SCHEMA_FIELDS]);
+    }
+
+    #[test]
+    fn proto_reserved_captured() {
+        let src = "message M {\n  reserved 2, 15, 9 to 11, 40 to max;\n  reserved \"foo\", \"bar\";\n  reserved baz;\n  string keep = 1;\n  reserved 0x10;\n}\nmessage Empty {}\nenum E { E_A = 0; reserved 1; }\n";
+        let out = extract_proto_messages(src, "r.proto", module_id(), repo());
+        assert_eq!(
+            fields_of(&out, "message:proto:M"),
+            Some(concat!(
+                r#"{"format":"proto","fields":[{"name":"keep","type":"string","number":1}],"#,
+                r#""reserved":["2","15","9 to 11","40 to max","foo","bar","baz","16"]}"#
+            )),
+            "numbers (decimal), ranges and quoted / bare names, in declaration order"
+        );
+        assert_eq!(
+            fields_of(&out, "message:proto:Empty"),
+            Some(r#"{"format":"proto","fields":[]}"#),
+            "a message with no fields says so; no reserved key when there is none"
+        );
+        assert_eq!(fields_of(&out, "message:proto:E"), None, "an enum declares values, not fields");
+        assert_eq!((out.schema_field_cells, out.schema_fields), (2, 1));
+    }
+
+    #[test]
+    fn proto_nested_message_fields_stay_nested() {
+        let src = "message Outer {\n  string id = 1;\n  message Inner {\n    int32 depth = 1;\n    enum Kind { KIND_A = 0; }\n    Kind kind = 2;\n  }\n  Inner inner = 2;\n  extend Base { int32 ext = 100; }\n  repeated group Legacy = 3 { optional int32 old = 4; }\n  int64 after = 5;\n}\n";
+        let out = extract_proto_messages(src, "n.proto", module_id(), repo());
+        assert_eq!(
+            qnames(&out),
+            vec!["message:proto:Outer", "message:proto:Outer.Inner", "message:proto:Outer.Inner.Kind"]
+        );
+        assert_eq!(
+            fields_of(&out, "message:proto:Outer"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"id","type":"string","number":1},"#,
+                r#"{"name":"inner","type":"Inner","number":2},"#,
+                r#"{"name":"after","type":"int64","number":5}]}"#
+            )),
+            "the nested message's fields, an extend body and a group body are not Outer's"
+        );
+        assert_eq!(
+            fields_of(&out, "message:proto:Outer.Inner"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"depth","type":"int32","number":1},"#,
+                r#"{"name":"kind","type":"Kind","number":2}]}"#
+            ))
+        );
+        assert_eq!(fields_of(&out, "message:proto:Outer.Inner.Kind"), None);
+    }
+
+    #[test]
+    fn proto_comment_and_string_braces_ignored() {
+        let src = "message Real {\n  // string ghost = 9;\n  /* int32 spectre = 10; } */\n  string note = 1 [default = \"a } b; int32 fake = 3;\"];\n  string message = 2;\n  string apostrophe = 3 [json_name = 'it\\'s'];\n}\n";
+        let out = extract_proto_messages(src, "c.proto", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["message:proto:Real"]);
+        assert_eq!(
+            fields_of(&out, "message:proto:Real"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"note","type":"string","number":1},"#,
+                r#"{"name":"message","type":"string","number":2},"#,
+                r#"{"name":"apostrophe","type":"string","number":3}]}"#
+            )),
+            "commented-out fields and braces / semicolons inside strings are not fields"
+        );
+        assert_eq!(
+            cell(&out.nodes[0], cell_type::POSITION),
+            r#"{"file":"c.proto","start_line":0,"end_line":6}"#
+        );
+
+        // An unterminated string ends at its line and leaves the newline to be
+        // counted, so every later line number holds.
+        let src = "message A {\n  string s = 1 [default = \"oops\n];\n}\nmessage B {\n}\n";
+        let out = extract_proto_messages(src, "u.proto", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["message:proto:A", "message:proto:B"]);
+        assert_eq!(
+            cell(&out.nodes[1], cell_type::POSITION),
+            r#"{"file":"u.proto","start_line":4,"end_line":5}"#
+        );
+    }
+
+    /// The exact bytes of both copies in the proto-field-drift fixture, so its
+    /// SCHEMA_FIELDS expectations are pinned here too.
+    #[test]
+    fn proto_field_drift_fixture_payloads() {
+        let producer = include_str!(
+            "../../../../bench/substrate-gap/fixtures/proto-field-drift/producer/proto/orders.proto"
+        );
+        let consumer = include_str!(
+            "../../../../bench/substrate-gap/fixtures/proto-field-drift/consumer/proto/orders.proto"
+        );
+        let p = extract_proto_messages(producer, "proto/orders.proto", module_id(), repo());
+        let c = extract_proto_messages(consumer, "proto/orders.proto", module_id(), repo());
+        assert_eq!(
+            fields_of(&p, "message:proto:shop.v1.OrderCreated"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"order_id","type":"string","number":1},"#,
+                r#"{"name":"total_cents","type":"int64","number":2},"#,
+                r#"{"name":"sku","type":"string","number":3,"label":"repeated"},"#,
+                r#"{"name":"labels","type":"map<string,string>","number":4},"#,
+                r#"{"name":"card_token","type":"string","number":5,"oneof":"payer"},"#,
+                r#"{"name":"wallet_id","type":"string","number":6,"oneof":"payer"}]}"#
+            ))
+        );
+        assert_eq!(
+            fields_of(&c, "message:proto:shop.v1.OrderCreated"),
+            Some(concat!(
+                r#"{"format":"proto","fields":["#,
+                r#"{"name":"order_id","type":"string","number":1},"#,
+                r#"{"name":"total_cents","type":"int32","number":2},"#,
+                r#"{"name":"sku","type":"string","number":3,"label":"repeated"}]}"#
+            ))
+        );
+        assert_eq!((p.schema_fields + c.schema_fields, p.schema_field_cells + c.schema_field_cells), (9, 2));
+    }
+
+    #[test]
+    fn field_cap_500() {
+        let body: String = (1..=600).map(|i| format!("  string f{i} = {i};\n")).collect();
+        let reserved: Vec<String> = (1000..1600).map(|i| i.to_string()).collect();
+        let src = format!("message Big {{\n{body}  reserved {};\n}}\n", reserved.join(", "));
+        let out = extract_proto_messages(&src, "b.proto", module_id(), repo());
+        let j = fields_of(&out, "message:proto:Big").unwrap_or_default();
+        assert_eq!(j.matches(r#""name":"#).count(), SCHEMA_MAX_FIELDS);
+        assert!(j.contains(r#""name":"f500""#) && !j.contains(r#""name":"f501""#), "the first 500 kept");
+        assert!(j.contains(r#""1499""#) && !j.contains(r#""1500""#), "reserved capped the same way");
+        assert!(j.ends_with(r#","truncated":true}"#), "{}", &j[j.len() - 40..]);
+        assert_eq!(out.schema_fields, SCHEMA_MAX_FIELDS);
+
+        // A pathological `map<map<map<...` statement is not a field, and the
+        // type scan never recurses into it.
+        let deep = format!("message D {{ {} string> x = 1; }}", "map<".repeat(100_000));
+        let out = extract_proto_messages(&deep, "d.proto", module_id(), repo());
+        assert_eq!(fields_of(&out, "message:proto:D"), Some(r#"{"format":"proto","fields":[]}"#));
+
+        let exact: String = (1..=500).map(|i| format!("  string f{i} = {i};\n")).collect();
+        let out = extract_proto_messages(&format!("message Full {{\n{exact}}}\n"), "f.proto", module_id(), repo());
+        assert!(!fields_of(&out, "message:proto:Full").unwrap_or_default().contains("truncated"));
+
+        let fields: Vec<String> = (1..=600).map(|i| format!(r#"{{"name":"f{i}","type":"int"}}"#)).collect();
+        let big = format!(r#"{{"type":"record","name":"Big","fields":[{}]}}"#, fields.join(","));
+        let out = avro(&big);
+        let j = fields_of(&out, "message:avro:Big").unwrap_or_default();
+        assert_eq!(j.matches(r#""name":"#).count(), SCHEMA_MAX_FIELDS);
+        assert!(j.ends_with(r#"{"name":"f500","type":"int"}],"truncated":true}"#));
+    }
+
     // ---- Avro (A10.6) ----
 
     fn avro(src: &str) -> SchemaNodes {
@@ -1065,6 +1644,99 @@ mod tests {
         }
         let n = avro(&deep).nodes.len();
         assert_eq!(n, AVRO_MAX_DEPTH + 1, "records at walk depth 0..=AVRO_MAX_DEPTH");
+    }
+
+    #[test]
+    fn avro_union_array_map_default() {
+        let src = r#"{"type":"record","name":"OrderPlaced","namespace":"com.shop","fields":[
+  {"name":"coupon","type":["null","string"],"default":null},
+  {"name":"skus","type":{"type":"array","items":"string"}},
+  {"name":"labels","type":{"type":"map","values":"long"},"default":{}},
+  {"name":"at","type":{"type":"long","logicalType":"timestamp-millis"}},
+  {"name":"money","type":"Money"},
+  {"name":"ext","type":"com.other.Ext"},
+  {"name":"price","type":{"type":"bytes","logicalType":"decimal","precision":9,"scale":2}},
+  {"name":"bad","type":7},
+  {"type":"string"}
+]}"#;
+        let out = avro(src);
+        assert_eq!(
+            fields_of(&out, "message:avro:com.shop.OrderPlaced"),
+            Some(concat!(
+                r#"{"format":"avro","fields":["#,
+                r#"{"name":"coupon","type":"null|string","default":true},"#,
+                r#"{"name":"skus","type":"array<string>"},"#,
+                r#"{"name":"labels","type":"map<long>","default":true},"#,
+                r#"{"name":"at","type":"long(timestamp-millis)"},"#,
+                r#"{"name":"money","type":"com.shop.Money"},"#,
+                r#"{"name":"ext","type":"com.other.Ext"},"#,
+                r#"{"name":"price","type":"bytes(decimal)"},"#,
+                r#"{"name":"bad"}]}"#
+            )),
+            "a default is flagged, never stored; a bare named reference resolves in the record's \
+             namespace; a non-schema type is left out; a field with no name is skipped"
+        );
+        assert_eq!((out.schema_field_cells, out.schema_fields), (1, 8));
+    }
+
+    #[test]
+    fn avro_nested_record_type_is_fullname() {
+        let src = r#"{"type":"record","name":"User","namespace":"com.shop","fields":[
+  {"name":"address","type":["null",{"type":"record","name":"Address","fields":[{"name":"city","type":"string"}]}]},
+  {"name":"status","type":{"type":"enum","name":"Status","symbols":["A"]}},
+  {"name":"geo","type":{"type":"fixed","name":"com.geo.Hash","size":16}},
+  {"name":"tags","type":{"type":"array","items":{"type":"record","name":"Tag","namespace":"com.meta","fields":[]}}}
+]}"#;
+        let out = avro(src);
+        assert_eq!(
+            fields_of(&out, "message:avro:com.shop.User"),
+            Some(concat!(
+                r#"{"format":"avro","fields":["#,
+                r#"{"name":"address","type":"null|com.shop.Address"},"#,
+                r#"{"name":"status","type":"com.shop.Status"},"#,
+                r#"{"name":"geo","type":"com.geo.Hash"},"#,
+                r#"{"name":"tags","type":"array<com.meta.Tag>"}]}"#
+            )),
+            "an inline named type is its fullname, the way the node that declares it is named"
+        );
+        assert_eq!(
+            fields_of(&out, "message:avro:com.shop.Address"),
+            Some(r#"{"format":"avro","fields":[{"name":"city","type":"string"}]}"#),
+            "the nested record's fields are its own cell"
+        );
+        assert_eq!(fields_of(&out, "message:avro:com.meta.Tag"), Some(r#"{"format":"avro","fields":[]}"#));
+        assert_eq!(fields_of(&out, "message:avro:com.shop.Status"), None, "an enum has no fields");
+        assert_eq!(fields_of(&out, "message:avro:com.geo.Hash"), None, "a fixed has no fields");
+        assert_eq!((out.schema_field_cells, out.schema_fields), (3, 5));
+    }
+
+    /// The exact bytes of both copies in the avro-field-drift fixture.
+    #[test]
+    fn avro_field_drift_fixture_payloads() {
+        let producer = include_str!(
+            "../../../../bench/substrate-gap/fixtures/avro-field-drift/producer/schemas/order.avsc"
+        );
+        let consumer = include_str!(
+            "../../../../bench/substrate-gap/fixtures/avro-field-drift/consumer/schemas/order.avsc"
+        );
+        assert_eq!(
+            fields_of(&avro(producer), "message:avro:com.shop.OrderPlaced"),
+            Some(concat!(
+                r#"{"format":"avro","fields":["#,
+                r#"{"name":"orderId","type":"string"},"#,
+                r#"{"name":"totalCents","type":"long"},"#,
+                r#"{"name":"coupon","type":"null|string","default":true}]}"#
+            ))
+        );
+        assert_eq!(
+            fields_of(&avro(consumer), "message:avro:com.shop.OrderPlaced"),
+            Some(concat!(
+                r#"{"format":"avro","fields":["#,
+                r#"{"name":"orderId","type":"string"},"#,
+                r#"{"name":"totalCents","type":"int"},"#,
+                r#"{"name":"channel","type":"string"}]}"#
+            ))
+        );
     }
 
     /// The exact bytes of `bench/substrate-gap/fixtures/avro-schema/user.avsc`,

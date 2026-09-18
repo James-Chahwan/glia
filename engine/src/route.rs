@@ -49,6 +49,12 @@ pub(crate) fn parse_repo_files(
     let mut avro_records = 0usize;
     let mut avro_enums = 0usize;
     let mut avro_fixed = 0usize;
+    // LE.10a `[schema-fields]` marker counters: proto messages / Avro records
+    // given a SCHEMA_FIELDS cell, and the fields those cells list.
+    let mut proto_field_messages = 0usize;
+    let mut proto_fields = 0usize;
+    let mut avro_field_records = 0usize;
+    let mut avro_fields = 0usize;
     // LA.16 (A10.12) `[jsonschema]` marker counters.
     let mut jsonschema_files = 0usize;
     let mut jsonschema_types = 0usize;
@@ -289,6 +295,8 @@ pub(crate) fn parse_repo_files(
             proto_rpcs += out.rpc_count;
             proto_messages += msgs.message_count;
             proto_enums += msgs.enum_count;
+            proto_field_messages += msgs.schema_field_cells;
+            proto_fields += msgs.schema_fields;
             if out.package.is_some() {
                 proto_packages += 1;
             }
@@ -374,6 +382,8 @@ pub(crate) fn parse_repo_files(
             avro_records += recs.message_count;
             avro_enums += recs.enum_count;
             avro_fixed += recs.fixed_count;
+            avro_field_records += recs.schema_field_cells;
+            avro_fields += recs.schema_fields;
             if !recs.nodes.is_empty() {
                 stash_synthetic_parse(
                     "avro",
@@ -536,6 +546,15 @@ pub(crate) fn parse_repo_files(
     if avro_files > 0 {
         eprintln!(
             "[avro] files={avro_files} records={avro_records} enums={avro_enums} fixed={avro_fixed}"
+        );
+    }
+
+    // LE.10a fired_on marker: proto messages and Avro records carry their
+    // declared fields as a SCHEMA_FIELDS cell. Only printed when a build gave
+    // at least one message / record that cell.
+    if proto_field_messages + avro_field_records > 0 {
+        eprintln!(
+            "[schema-fields] proto_messages={proto_field_messages} proto_fields={proto_fields} avro_records={avro_field_records} avro_fields={avro_fields}"
         );
     }
 

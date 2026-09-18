@@ -1,0 +1,42 @@
+{
+  "framework": "proto-field-drift",
+  "language": "proto",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "note": "LE.10a: proto message fields captured as a SCHEMA_FIELDS cell (22) on MESSAGE_TYPE. The consumer's copy drifted (total_cents int64 -> int32; labels / card_token / wallet_id missing), which LE.10c reports.",
+  "expect_nodes": [
+    {
+      "kind": "MESSAGE_TYPE",
+      "name": "shop.v1.OrderCreated"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "message:proto:shop.v1.OrderCreated",
+      "to": "message:proto:shop.v1.OrderCreated",
+      "category": "SHARES_SCHEMA"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:proto:shop.v1.OrderCreated",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"total_cents\""
+    },
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:proto:shop.v1.OrderCreated",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"type\":\"map<string,string>\""
+    },
+    {
+      "kind": "MESSAGE_TYPE",
+      "node": "message:proto:shop.v1.OrderCreated",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"oneof\":\"payer\""
+    }
+  ]
+}
