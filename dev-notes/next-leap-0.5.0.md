@@ -329,7 +329,7 @@ Coverage (after 0.5.0): `.graphqls` files (Spring for GraphQL / gqlgen default) 
 routers (`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is
 HTTP only).
 
-### 7.6 Run 3 — identity and correctness, specced; the loop is capped here
+### 7.5 Run 3 — identity and correctness, specced; the loop is capped here
 
 Workflow `wf_0f3c1650-f3a` (8 agents, 0 errors): 19 packets (~5.4k LOC), merged with dependencies from the verifiers'
 notes; the schedule grows to W0 + 41 waves (depth 30).
@@ -349,7 +349,7 @@ Open for James: LB.12 scopes contract ops by the full file name, so a `swagger.y
 directory yields two copies of each op (A10.8 meant to merge twins). Recommendation: scope by directory + stem, which
 still separates two services' `openapi.yaml` and keeps twins merged.
 
-### 7.7 After 0.5.0 — the backlog the three spec runs found beyond the cap
+### 7.6 After 0.5.0 — the backlog the three spec runs found beyond the cap
 
 Every spec run surfaced new gaps; after run 3 the rest wait for after 0.5.0 unless one is identity-shaped.
 
@@ -372,7 +372,7 @@ Every spec run surfaced new gaps; after run 3 the rest wait for after 0.5.0 unle
 - **Harness:** an exact-match option for `expect_edges` in grade.py (substring matching cannot tell `event_handle:x`
   from `event_handle:x @a`).
 
-### 7.5 Spec-run hygiene
+### 7.7 Spec-run hygiene
 
 The spec agents were read-only on every repo, but three of them called the wheel's `generate()` on other repos, which
 wrote untracked, regenerable `.ai/repo-graph/` caches into quokka-stack (rewrote existing shards) and neuropil (a new
