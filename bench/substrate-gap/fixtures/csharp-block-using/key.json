@@ -1,0 +1,36 @@
+{
+  "framework": "csharp-block-using",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.40a: a `using` directive written INSIDE a block namespace (StyleCop SA1200's default placement) belongs to the file. HEAD: parsers/code/csharp/src/lib.rs visit_children passes the namespace qname (`Shop::Controllers`) to collect_using as from_module, graph resolve_imports_python looks it up in module_by_qname (MODULE qnames only), misses and drops the statement: 0 IMPORTS from the file. A using at the top of the file (Services/Invoices.cs) is the control and resolves on HEAD.",
+  "expect_edges": [
+    {
+      "from": "Controllers::UserController",
+      "to": "Shop::Models",
+      "category": "IMPORTS",
+      "note": "block-namespace using -> the namespace PACKAGE (same binding the file-level form gets)"
+    },
+    {
+      "from": "Controllers::UserController",
+      "to": "Shop::Services::Billing",
+      "category": "IMPORTS",
+      "note": "second block-namespace using"
+    },
+    {
+      "from": "Services::Invoices",
+      "to": "Shop::Models",
+      "category": "IMPORTS",
+      "note": "control: a file-level using resolves on HEAD"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Shop::Controllers",
+      "to": "Shop::Models",
+      "category": "IMPORTS",
+      "note": "PRECISION: the import belongs to the file MODULE, never to the namespace PACKAGE"
+    }
+  ]
+}

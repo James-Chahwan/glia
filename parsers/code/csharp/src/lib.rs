@@ -36,7 +36,10 @@ pub fn parse_file(
     let src = source.as_bytes();
     let root = tree.root_node();
 
-    let mut acc = Acc::default();
+    let mut acc = Acc {
+        module_qname: module_qname.to_string(),
+        ..Acc::default()
+    };
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -50,6 +53,15 @@ pub fn parse_file(
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
     visit_children(root, src, file_rel_path, module_qname, module_id, module_id, repo, &mut acc);
+
+    // LA.40a fired_on:
+    // `GLIA_CSHARP_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[csharp-using\]'`
+    if acc.scoped_usings > 0 && csharp_debug() {
+        eprintln!(
+            "[csharp-using] {} block-namespace usings bound to the file module {module_qname} file={file_rel_path}",
+            acc.scoped_usings
+        );
+    }
 
     if acc.minimal_api_routes > 0 {
         eprintln!(
@@ -93,6 +105,13 @@ pub fn parse_file(
 
 #[derive(Default)]
 struct Acc {
+    /// The file's MODULE qname: the `from_module` of every `using` in the
+    /// file, whichever block it was written in (LA.40a).
+    module_qname: String,
+    /// `using` directives written inside a namespace block (StyleCop SA1200's
+    /// default placement) and bound to the file module - the `[csharp-using]`
+    /// count.
+    scoped_usings: usize,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     imports: Vec<ImportStmt>,
@@ -135,9 +154,10 @@ struct EfCoreStats {
 }
 
 /// `parent_qname` is the file module at the compilation-unit level and the
-/// namespace inside a block-namespace body. It stays the `using` from_module and
-/// the nav / DEFINES parent everywhere; only the TYPE scope differs at the root
-/// (LB.7d, see [`type_scope`]).
+/// namespace inside a block-namespace body. It stays the nav / DEFINES parent
+/// everywhere; only the TYPE scope differs at the root (LB.7d, see
+/// [`type_scope`]). A `using` never takes it: every import belongs to the file
+/// module (LA.40a, see [`collect_using`]).
 #[allow(clippy::too_many_arguments)]
 fn visit_children(
     node: TsNode,
@@ -167,7 +187,12 @@ fn visit_children(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "using_directive" => collect_using(child, src, parent_qname, acc),
+            "using_directive" => {
+                if !at_root {
+                    acc.scoped_usings += 1;
+                }
+                collect_using(child, src, acc);
+            }
             "file_scoped_namespace_declaration" => {
                 let ns = visit_namespace(child, src, file_rel, parent_id, module_id, repo, acc);
                 if let (true, Some(ns)) = (at_root, ns) {
@@ -282,6 +307,15 @@ fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG
         .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// `GLIA_CSHARP_DEBUG=1` turns on the per-file `[csharp-using]` marker, read
+/// once. Off by default: a codebase that follows SA1200 would print it for
+/// every C# file.
+fn csharp_debug() -> bool {
+    static CSHARP_DEBUG: OnceLock<bool> = OnceLock::new();
+    *CSHARP_DEBUG
+        .get_or_init(|| std::env::var("GLIA_CSHARP_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Mints the PACKAGE for a block or file-scoped namespace and walks a block
@@ -2003,7 +2037,14 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
     });
 }
 
-fn collect_using(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+/// One `using` directive -> one ImportStmt from the FILE module
+/// (`acc.module_qname`), wherever it sits (LA.40a). In C# a using inside
+/// `namespace X { }` is scoped to that block of this file; glia's import
+/// bindings are per file, so the file module is the finest scope there is. The
+/// namespace qname would be a PACKAGE, which the graph's import pass
+/// (`module_by_qname`, MODULE qnames only) drops. Two blocks of one file
+/// binding one name differently resolve last-write-wins in source order.
+fn collect_using(node: TsNode, src: &[u8], acc: &mut Acc) {
     let text = text_of(node, src).trim().to_string();
     let path = text
         .trim_start_matches("using ")
@@ -2021,7 +2062,7 @@ fn collect_using(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         let name = &path[last_dot + 1..];
         if name == "*" {
             acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
+                from_module: acc.module_qname.clone(),
                 target: ImportTarget::Module {
                     path: module_part.replace('.', "::"),
                     alias: None,
@@ -2029,7 +2070,7 @@ fn collect_using(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
             });
         } else {
             acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
+                from_module: acc.module_qname.clone(),
                 target: ImportTarget::Symbol {
                     module: module_part.replace('.', "::"),
                     name: name.to_string(),
@@ -2040,7 +2081,7 @@ fn collect_using(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         }
     } else {
         acc.imports.push(ImportStmt {
-            from_module: from_module.to_string(),
+            from_module: acc.module_qname.clone(),
             target: ImportTarget::Module {
                 path: path.replace('.', "::"),
                 alias: None,
@@ -2270,6 +2311,93 @@ using static MyApp.Helpers.StringExtensions;
 "#;
         let fp = parse_file(source, "App.cs", "MyApp", repo()).unwrap();
         assert_eq!(fp.imports.len(), 3);
+    }
+
+    /// `(from_module, target)` of every import, in source order.
+    fn import_rows(fp: &FileParse) -> Vec<(&str, String)> {
+        fp.imports
+            .iter()
+            .map(|i| {
+                let target = match &i.target {
+                    ImportTarget::Module { path, .. } => path.clone(),
+                    ImportTarget::Symbol { module, name, .. } => format!("{module}::{name}"),
+                };
+                (i.from_module.as_str(), target)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn using_inside_block_namespace_belongs_to_the_file() {
+        // LA.40a: SA1200's default placement. The using is a child of the
+        // namespace's declaration_list, but glia's import bindings are per
+        // file, so it imports from the file MODULE exactly as a file-level
+        // using does - never from the namespace PACKAGE (`Shop::Controllers`),
+        // which the graph's import pass does not look up.
+        let source = r#"
+namespace Shop.Controllers
+{
+    using Shop.Models;
+    using Shop.Services.Billing;
+
+    public class C {}
+}
+"#;
+        let fp = parse_file(
+            source,
+            "Controllers/UserController.cs",
+            "Controllers::UserController",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            import_rows(&fp),
+            vec![
+                ("Controllers::UserController", "Shop::Models".to_string()),
+                ("Controllers::UserController", "Shop::Services::Billing".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn using_in_a_nested_block_namespace_belongs_to_the_file() {
+        let source = r#"
+namespace A
+{
+    namespace B
+    {
+        using C.D;
+
+        public class E {}
+    }
+}
+"#;
+        let fp = parse_file(source, "Nested/E.cs", "Nested::E", repo()).unwrap();
+        assert_eq!(import_rows(&fp), vec![("Nested::E", "C::D".to_string())]);
+    }
+
+    #[test]
+    fn file_level_and_file_scoped_usings_unchanged() {
+        // A compilation-unit using, before and after a file-scoped
+        // `namespace X;` (tree-sitter-c-sharp 0.23 keeps the later one a
+        // compilation_unit sibling): from_module is the module qname, as HEAD.
+        let source = r#"
+using Shop.Models;
+
+namespace Shop.Api;
+
+using Shop.Services.Billing;
+
+public class Api {}
+"#;
+        let fp = parse_file(source, "Api/Api.cs", "Api::Api", repo()).unwrap();
+        assert_eq!(
+            import_rows(&fp),
+            vec![
+                ("Api::Api", "Shop::Models".to_string()),
+                ("Api::Api", "Shop::Services::Billing".to_string()),
+            ]
+        );
     }
 
     #[test]
