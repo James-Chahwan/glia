@@ -1,0 +1,23 @@
+{
+  "framework": "rust-macro-arg-calls",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["rust/calls"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "src/lib/helper"},
+    {"kind": "FUNCTION", "name": "src/lib/fmt_id"},
+    {"kind": "METHOD", "name": "src/lib/Svc/name"}
+  ],
+  "expect_edges": [
+    {"from": "src/lib/entry", "to": "src/lib/helper", "category": "CALLS", "note": "helper(..) inside run!, println!, assert_eq! and vec! arguments"},
+    {"from": "src/lib/entry", "to": "src/lib/fmt_id", "category": "CALLS", "note": "fmt_id(helper(1)) nested inside println!"},
+    {"from": "src/lib/entry", "to": "src/lib/total", "category": "CALLS", "note": "control: an ordinary call outside any macro (resolves on HEAD)"},
+    {"from": "src/lib/Svc/go", "to": "src/lib/Svc/name", "category": "CALLS", "note": "self.name() inside format!"}
+  ],
+  "forbid": [
+    {"from": "src/lib/quiet", "to": "src/lib/fmt_id", "category": "CALLS", "note": "text inside a string literal token is never a call"},
+    {"from": "src/lib/is_wrap", "to": "Wrap", "category": "CALLS", "note": "matches!(w, Some(Wrap(_))): everything after the first top-level comma is a PATTERN, not a call"}
+  ],
+  "note": "LA.2. Baseline 2026-09-19, HEAD aa91f3c, installed 0.4.18+pc71d535e2f7ee42a wheel: CALLS 1/4, only entry -> total resolves; every call inside a macro argument is invisible. Both forbids are live: a non-pattern macro over the same tokens emits is_wrap -> Wrap (STRUCT), and a real fmt_id(1) call in quiet() emits quiet -> fmt_id."
+}

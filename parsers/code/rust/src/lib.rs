@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, push_client_endpoint, route_qname, url_to_path,
@@ -113,6 +114,12 @@ pub fn parse_file(
             acc.client_endpoints, file_rel_path
         );
     }
+    if acc.macro_calls > 0 && rust_debug_enabled() {
+        eprintln!(
+            "[rust-macro-calls] {file_rel_path}: {} call site(s) in {} macro invocation(s)",
+            acc.macro_calls, acc.macro_invocations
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -137,6 +144,18 @@ struct Acc {
     endpoint_seen: HashSet<NodeId>,
     /// Outbound HTTP call sites seen in this file — drives the fired_on marker.
     client_endpoints: usize,
+    /// Call sites found inside macro arguments (LA.2 `[rust-macro-calls]` marker).
+    macro_calls: usize,
+    /// Macro invocations whose token tree was scanned, nested ones included.
+    macro_invocations: usize,
+}
+
+/// `GLIA_RUST_DEBUG=1` turns on the `[rust-macro-calls]` marker, read once. Off
+/// by default: macro-argument calls occur in most Rust files, so a per-file line
+/// would drown a normal build's stderr.
+fn rust_debug_enabled() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var("GLIA_RUST_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 fn visit_function(
@@ -710,6 +729,12 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             let qualifier = classify_call(func, src);
             acc.calls.push(CallSite { from, qualifier });
         }
+        // A macro's arguments are a flat token tree, never a call_expression,
+        // so the walk below finds nothing in them: scan the tokens instead.
+        if n.kind() == "macro_invocation" {
+            let found = collect_macro_calls(n, src, from, acc);
+            acc.macro_calls += found;
+        }
         // Don't recurse into nested function items (closures are ok).
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -768,6 +793,236 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
             name: String::new(),
         },
     }
+}
+
+// ============================================================================
+// Calls inside macro arguments (LA.2)
+// ============================================================================
+//
+// tree-sitter-rust does not parse macro arguments as expressions: `run!(f(x))`
+// is a `macro_invocation` over a flat `token_tree` of identifiers, literals,
+// punctuation and nested token trees. Re-parsing the text as an expression
+// would cost a second parse, shift every position, and mis-parse DSL macros
+// whose arguments are not expressions. Instead the token tree is scanned for
+// call-shaped runs and each becomes a CallSite of the same shape
+// `classify_call` gives the equivalent non-macro call. Any run the scanner
+// does not recognise yields no CallSite.
+
+/// Macros whose second argument is a pattern (`matches!(v, Some(Wrap(_)))`).
+/// Only the scrutinee, an `if` guard and any trailing arguments are expressions.
+const PATTERN_MACROS: &[&str] = &["matches", "assert_matches", "debug_assert_matches"];
+
+/// Never a callee name, however a token tree lexes it.
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "dyn", "else", "enum", "extern", "false",
+    "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+    "return", "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while",
+    "yield",
+];
+
+/// A path directly after one of these names what it defines or binds
+/// (`fn f(x: u32)`, `struct W(u32)`, `let W(x) = w`), never a call.
+const DEFINING_KEYWORDS: &[&str] = &["fn", "struct", "let"];
+
+/// Token trees nest one level per bracket pair; deeper input is not scanned.
+const MACRO_TT_DEPTH: usize = 32;
+
+/// Calls written inside a macro invocation's arguments. Returns the number of
+/// CallSites pushed.
+fn collect_macro_calls(invocation: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) -> usize {
+    let mut cursor = invocation.walk();
+    let Some(tt) = invocation
+        .named_children(&mut cursor)
+        .find(|c| c.kind() == "token_tree")
+    else {
+        return 0;
+    };
+    let name = invocation
+        .child_by_field_name("macro")
+        .map(|m| text_of(m, src))
+        .unwrap_or("");
+    let name = name.rsplit("::").next().unwrap_or(name);
+    acc.macro_invocations += 1;
+    scan_token_tree(tt, src, from, PATTERN_MACROS.contains(&name), 0, acc)
+}
+
+/// A token tree opened by `(`: an argument list. `[..]` and `{..}` never are.
+fn is_arg_list(n: TsNode) -> bool {
+    n.kind() == "token_tree" && n.child(0).is_some_and(|c| c.kind() == "(")
+}
+
+fn is_operand(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier" | "self" | "super" | "crate" | "primitive_type" | "metavariable"
+    ) || kind.ends_with("_literal")
+}
+
+/// Scan one token tree. `pattern_tail`: the tree is a pattern macro's argument
+/// list, so tokens from the first top-level `,` up to an `if` guard or the next
+/// top-level `,` are a pattern and are skipped.
+fn scan_token_tree(
+    tt: TsNode,
+    src: &[u8],
+    from: NodeId,
+    pattern_tail: bool,
+    depth: usize,
+    acc: &mut Acc,
+) -> usize {
+    if depth >= MACRO_TT_DEPTH {
+        return 0;
+    }
+    let mut cursor = tt.walk();
+    let toks: Vec<TsNode> = tt.children(&mut cursor).collect();
+    let kind_at = |k: usize| toks.get(k).map(|t| t.kind()).unwrap_or("");
+    let mut found = 0usize;
+    // 0 = scrutinee, 1 = inside the pattern, 2 = past it.
+    let mut pattern_phase = if pattern_tail { 0u8 } else { 2 };
+    let mut i = 0usize;
+    while i < toks.len() {
+        let t = toks[i];
+        match (pattern_phase, t.kind()) {
+            (0, ",") => pattern_phase = 1,
+            (1, "," | "if") => pattern_phase = 2,
+            _ => {}
+        }
+        if pattern_phase == 1 {
+            i += 1;
+            continue;
+        }
+
+        // `#[attr(..)]` / `#![attr]`: an attribute's arguments are never calls.
+        if t.kind() == "#" {
+            let bracket = if kind_at(i + 1) == "!" { i + 2 } else { i + 1 };
+            if toks.get(bracket).is_some_and(|b| {
+                b.kind() == "token_tree" && b.child(0).is_some_and(|c| c.kind() == "[")
+            }) {
+                i = bracket + 1;
+                continue;
+            }
+        }
+
+        // METHOD CALL: `<receiver> . name ( .. )`.
+        if t.kind() == "."
+            && kind_at(i + 1) == "identifier"
+            && toks.get(i + 2).is_some_and(|a| is_arg_list(*a))
+        {
+            let name = text_of(toks[i + 1], src).to_string();
+            acc.calls.push(CallSite {
+                from,
+                qualifier: method_qualifier(&toks, i, name, src),
+            });
+            found += 1 + scan_token_tree(toks[i + 2], src, from, false, depth + 1, acc);
+            i += 3;
+            continue;
+        }
+
+        // PATH CALL / NESTED MACRO: `a::b::c ( .. )` / `a::b ! ( .. )`. A name
+        // after `.` is a field (methods matched above); after `::` it is the
+        // tail of a path this scanner did not start (`<T as Tr>::f`, `::<T>`).
+        let after_joiner = i > 0 && matches!(kind_at(i - 1), "." | "::");
+        if matches!(
+            t.kind(),
+            "identifier" | "self" | "super" | "crate" | "primitive_type"
+        ) && !after_joiner
+        {
+            let mut segments = vec![text_of(t, src)];
+            let mut j = i + 1;
+            while kind_at(j) == "::" && kind_at(j + 1) == "identifier" {
+                segments.push(text_of(toks[j + 1], src));
+                j += 2;
+            }
+            if kind_at(j) == "!" && kind_at(j + 1) == "token_tree" {
+                let last = segments.last().copied().unwrap_or("");
+                acc.macro_invocations += 1;
+                found += scan_token_tree(
+                    toks[j + 1],
+                    src,
+                    from,
+                    PATTERN_MACROS.contains(&last),
+                    depth + 1,
+                    acc,
+                );
+                i = j + 2;
+                continue;
+            }
+            if let Some(args) = toks.get(j).copied().filter(|a| is_arg_list(*a)) {
+                let defining = i > 0 && {
+                    let prev = toks[i - 1];
+                    DEFINING_KEYWORDS.contains(&prev.kind())
+                        || DEFINING_KEYWORDS.contains(&text_of(prev, src))
+                };
+                let qualifier = match segments.as_slice() {
+                    [name] if t.kind() == "identifier" && !RUST_KEYWORDS.contains(name) => {
+                        Some(CallQualifier::Bare((*name).to_string()))
+                    }
+                    [_] => None,
+                    [base @ .., name] => Some(CallQualifier::Attribute {
+                        base: base.join("::"),
+                        name: (*name).to_string(),
+                    }),
+                    [] => None,
+                };
+                if let Some(qualifier) = qualifier.filter(|_| !defining) {
+                    acc.calls.push(CallSite { from, qualifier });
+                    found += 1;
+                }
+                found += scan_token_tree(args, src, from, false, depth + 1, acc);
+                i = j + 1;
+                continue;
+            }
+            i = j;
+            continue;
+        }
+
+        if t.kind() == "token_tree" {
+            found += scan_token_tree(t, src, from, false, depth + 1, acc);
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Qualifier for `<receiver>.name(..)` where `toks[dot]` is the `.`: the same
+/// shapes `classify_call` gives a `field_expression` callee.
+fn method_qualifier(toks: &[TsNode], dot: usize, name: String, src: &[u8]) -> CallQualifier {
+    let recv = dot.checked_sub(1).map(|k| toks[k]);
+    let lone = dot < 2 || !matches!(toks[dot - 2].kind(), "." | "::");
+    match recv {
+        Some(r) if lone && r.kind() == "self" => CallQualifier::SelfMethod(name),
+        Some(r) if lone && r.kind() == "identifier" => CallQualifier::Attribute {
+            base: text_of(r, src).to_string(),
+            name,
+        },
+        _ => CallQualifier::ComplexReceiver {
+            receiver: receiver_text(toks, dot, src),
+            name,
+        },
+    }
+}
+
+/// Text of the postfix chain ending just before `toks[dot]` (`a.b`,
+/// `f(x)?`, `format!(..)`), kept verbatim like `classify_call`'s receiver.
+fn receiver_text(toks: &[TsNode], dot: usize, src: &[u8]) -> String {
+    let mut start = dot;
+    while start > 0 {
+        let prev = toks[start - 1].kind();
+        let next = toks.get(start).map(|t| t.kind()).unwrap_or("");
+        let joins = start == dot
+            || match prev {
+                "." | "::" | "?" => true,
+                "!" => next == "token_tree",
+                k if is_operand(k) || k == "token_tree" => {
+                    matches!(next, "." | "::" | "?" | "!" | "token_tree")
+                }
+                _ => false,
+            };
+        if !joins {
+            break;
+        }
+        start -= 1;
+    }
+    toks[start..dot].iter().map(|t| text_of(*t, src)).collect()
 }
 
 // ============================================================================
@@ -1460,5 +1715,224 @@ fn lookup(map: &HashMap<String, String>, headers: &HashMap<String, String>) -> u
             "map/header `.get(` became ENDPOINTs: {:?}",
             endpoint_names(&fp)
         );
+    }
+
+    // ---- LA.2: calls inside macro arguments --------------------------------
+
+    /// bench/substrate-gap/fixtures/rust-macro-arg-calls/src/lib.rs, verbatim.
+    const MACRO_FIXTURE: &str = r#"macro_rules! run {
+    ($call:expr) => {{
+        let _ = $call;
+    }};
+}
+
+pub struct Wrap(pub u32);
+
+pub fn helper(x: u32) -> u32 { x + 1 }
+pub fn fmt_id(x: u32) -> String { format!("id-{}", x) }
+pub fn total(v: Vec<u32>) -> u32 { v.len() as u32 }
+
+pub fn entry() -> u32 {
+    run!(helper(2));
+    println!("{}", fmt_id(helper(1)));
+    assert_eq!(helper(0), 1);
+    total(vec![helper(3)])
+}
+
+pub fn quiet() { println!("fmt_id(1) is not a call"); }
+
+pub fn is_wrap(w: Option<Wrap>) -> bool { matches!(w, Some(Wrap(_))) }
+
+pub struct Svc;
+impl Svc {
+    pub fn go(&self) -> String { format!("{}", self.name()) }
+    fn name(&self) -> String { String::new() }
+}
+"#;
+
+    /// Qualifiers of every CallSite whose caller is the FUNCTION `m::<name>`.
+    fn fn_calls(fp: &FileParse, name: &str) -> Vec<CallQualifier> {
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            &format!("m::{name}"),
+        );
+        fp.calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect()
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Calls of `fn f() { <body> }`.
+    fn body_calls(body: &str) -> Vec<CallQualifier> {
+        let source = format!("fn f() {{ {body} }}\n");
+        let fp = parse_file(&source, "src/m.rs", "m", repo()).unwrap();
+        fn_calls(&fp, "f")
+    }
+
+    #[test]
+    fn macro_arg_calls_are_extracted() {
+        let source = format!(
+            "{MACRO_FIXTURE}\nmod util {{}}\n\
+             pub fn paths() -> Vec<u32> {{ vec![util::scaled(3), crate::util::scaled(4)] }}\n"
+        );
+        let fp = parse_file(&source, "src/lib.rs", "m", repo()).unwrap();
+        let entry = fn_calls(&fp, "entry");
+        assert_eq!(
+            entry.iter().filter(|q| **q == bare("helper")).count(),
+            4,
+            "{entry:?}"
+        );
+        assert_eq!(
+            entry.iter().filter(|q| **q == bare("fmt_id")).count(),
+            1,
+            "{entry:?}"
+        );
+        assert_eq!(
+            entry.iter().filter(|q| **q == bare("total")).count(),
+            1,
+            "{entry:?}"
+        );
+        assert_eq!(
+            entry.len(),
+            6,
+            "no CallSite for the macro names themselves: {entry:?}"
+        );
+
+        let paths = fn_calls(&fp, "paths");
+        assert_eq!(
+            paths,
+            vec![attr("util", "scaled"), attr("crate::util", "scaled")]
+        );
+    }
+
+    #[test]
+    fn string_literal_in_macro_is_not_a_call() {
+        let fp = parse_file(MACRO_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        assert!(
+            fn_calls(&fp, "quiet").is_empty(),
+            "{:?}",
+            fn_calls(&fp, "quiet")
+        );
+    }
+
+    #[test]
+    fn matches_pattern_is_not_a_call() {
+        let fp = parse_file(MACRO_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        assert!(
+            fn_calls(&fp, "is_wrap").is_empty(),
+            "{:?}",
+            fn_calls(&fp, "is_wrap")
+        );
+
+        // The scrutinee, an `if` guard and trailing arguments stay expressions.
+        let calls = body_calls(
+            "assert_matches!(load(1), Some(Wrap(n)) if check(n), \"{}\", why(2)); \
+             std::matches!(w, Wrap(_) | Other(_));",
+        );
+        assert_eq!(calls, vec![bare("load"), bare("check"), bare("why")]);
+    }
+
+    #[test]
+    fn self_method_inside_format() {
+        let fp = parse_file(MACRO_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        let go = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m::Svc::go");
+        let calls: Vec<&CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == go)
+            .map(|c| &c.qualifier)
+            .collect();
+        assert_eq!(calls, vec![&CallQualifier::SelfMethod("name".to_string())]);
+    }
+
+    #[test]
+    fn nested_macro_recurses() {
+        let calls = body_calls("let _ = vec![format!(\"{}\", f(1))];");
+        assert_eq!(calls, vec![bare("f")]);
+    }
+
+    #[test]
+    fn macro_method_receivers_match_classify_call() {
+        let calls = body_calls(
+            "log!(x.go(1) && !y.is_ok(), a.b.c(), format!(\"{}\", 1).len(), load()?.id(), \
+             Self::new(2), u32::from(3));",
+        );
+        assert_eq!(
+            calls,
+            vec![
+                attr("x", "go"),
+                attr("y", "is_ok"),
+                CallQualifier::ComplexReceiver {
+                    receiver: "a.b".to_string(),
+                    name: "c".to_string()
+                },
+                CallQualifier::ComplexReceiver {
+                    receiver: "format!(\"{}\", 1)".to_string(),
+                    name: "len".to_string(),
+                },
+                bare("load"),
+                CallQualifier::ComplexReceiver {
+                    receiver: "load()?".to_string(),
+                    name: "id".to_string()
+                },
+                attr("Self", "new"),
+                attr("u32", "from"),
+            ]
+        );
+    }
+
+    #[test]
+    fn macro_definitions_attributes_and_blocks_are_not_calls() {
+        let calls = body_calls(
+            "m!(#[cfg(feature = \"x\")] fn g(x: u32) { h(x) } \
+             let Wrap(a) = w; struct T(u32); Foo { a: k(1) } \
+             <T as Tr>::assoc(1), foo::<u8>(2), if(3));",
+        );
+        assert_eq!(calls, vec![bare("h"), bare("k")]);
+    }
+
+    #[test]
+    fn macro_token_tree_depth_is_capped() {
+        let deep = format!("m!({}helper(1){});", "(".repeat(40), ")".repeat(40));
+        assert!(body_calls(&deep).is_empty());
+        let shallow = format!("m!({}helper(1){});", "(".repeat(20), ")".repeat(20));
+        assert_eq!(body_calls(&shallow), vec![bare("helper")]);
+    }
+
+    #[test]
+    fn macro_counters_match_marker() {
+        // The `[rust-macro-calls]` line reports these two counters.
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(MACRO_FIXTURE, None).unwrap();
+        let src = MACRO_FIXTURE.as_bytes();
+        let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::f");
+        let mut acc = Acc::default();
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "function_item"
+                && let Some(body) = n.child_by_field_name("body")
+            {
+                collect_calls_in(body, src, from, &mut acc);
+            }
+            let mut cursor = n.walk();
+            stack.extend(n.named_children(&mut cursor));
+        }
+        assert_eq!((acc.macro_calls, acc.macro_invocations), (6, 8));
     }
 }
