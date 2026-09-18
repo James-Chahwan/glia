@@ -1,0 +1,58 @@
+{
+  "framework": "solidity-natspec",
+  "language": "solidity",
+  "dirs": [
+    "."
+  ],
+  "expect_cells": [
+    {
+      "kind": "METHOD",
+      "node": "deposit",
+      "cell": "DOC_TAGS",
+      "contains": "\"tag\":\"param\",\"name\":\"member\"",
+      "note": "@param member ..."
+    },
+    {
+      "kind": "METHOD",
+      "node": "deposit",
+      "cell": "DOC_TAGS",
+      "contains": "\"tag\":\"return\",\"name\":\"ok\"",
+      "note": "`ok` is a declared return variable, so it becomes the name"
+    },
+    {
+      "kind": "METHOD",
+      "node": "withdraw",
+      "cell": "DOC_TAGS",
+      "contains": "\"tag\":\"inheritdoc\",\"name\":\"IVault\""
+    },
+    {
+      "kind": "METHOD",
+      "node": "withdraw",
+      "cell": "DOC_TAGS",
+      "contains": "\"tag\":\"custom:security\"",
+      "note": "@custom:security non-reentrant"
+    },
+    {
+      "kind": "METHOD",
+      "node": "ping",
+      "cell": "DOC_TAGS",
+      "contains": "{\"tag\":\"return\",\"text\":\"True always.\"}",
+      "note": "unnamed return: no name key, the whole line is the description"
+    },
+    {
+      "kind": "CLASS",
+      "node": "Vault",
+      "cell": "DOC_TAGS",
+      "contains": "\"tag\":\"title\"",
+      "note": "contract-level @title / @author / @notice"
+    },
+    {
+      "kind": "METHOD",
+      "node": "deposit",
+      "cell": "DOC",
+      "contains": "@param member",
+      "note": "control: the flat DOC string is unchanged"
+    }
+  ],
+  "note": "LA.8. Baseline HEAD: every NatSpec block is one flat DOC string; DOC_TAGS rows score as misses (cell_type 19 is unregistered in the installed wheel until L0.1 + the end-of-wave rebuild)."
+}

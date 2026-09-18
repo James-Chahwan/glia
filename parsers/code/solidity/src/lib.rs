@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use repo_graph_doc::DocTag;
 use tree_sitter::{Node as TsNode, Parser};
 
 pub use repo_graph_code_domain::{
@@ -52,6 +53,14 @@ pub fn parse_file(
         &mut acc,
     );
 
+    let ns = &acc.natspec;
+    if ns.tags > 0 {
+        eprintln!(
+            "[natspec] tags={} (param={} return={} notice={} dev={} other={}) nodes={} path={}",
+            ns.tags, ns.param, ns.ret, ns.notice, ns.dev, ns.other, ns.nodes, file_rel_path
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -71,6 +80,7 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    natspec: NatspecStats,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -131,7 +141,7 @@ fn visit_contract(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -191,7 +201,7 @@ fn visit_function(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -269,7 +279,7 @@ fn visit_event(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -301,7 +311,7 @@ fn visit_enum(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -333,7 +343,7 @@ fn visit_struct_decl(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -385,7 +395,7 @@ fn visit_state_variable(
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -605,7 +615,12 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
     ]
 }
 
-fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
+fn entity_cells(
+    node: &TsNode,
+    src: &[u8],
+    file_rel: &str,
+    natspec: &mut NatspecStats,
+) -> Vec<Cell> {
     let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
@@ -622,7 +637,140 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
             payload: CellPayload::Text(doc),
         });
     }
+    if let Some(cell) = natspec_cell(node, src, natspec) {
+        cells.push(cell);
+    }
     cells
+}
+
+/// Per-file NatSpec tallies behind the `[natspec]` marker.
+#[derive(Default)]
+struct NatspecStats {
+    tags: usize,
+    param: usize,
+    ret: usize,
+    notice: usize,
+    dev: usize,
+    other: usize,
+    nodes: usize,
+}
+
+impl NatspecStats {
+    fn record(&mut self, tags: &[DocTag]) {
+        self.nodes += 1;
+        self.tags += tags.len();
+        for t in tags {
+            match t.tag.as_str() {
+                "param" => self.param += 1,
+                "return" => self.ret += 1,
+                "notice" => self.notice += 1,
+                "dev" => self.dev += 1,
+                _ => self.other += 1,
+            }
+        }
+    }
+}
+
+/// DOC_TAGS payload. Field order is the wire order (`style`, `tags`; each tag
+/// `tag`, `name` only when bound, `text`) — a derived struct keeps it, where a
+/// `serde_json::Map` would sort the keys.
+#[derive(serde::Serialize)]
+struct NatspecPayload<'a> {
+    style: &'static str,
+    tags: Vec<NatspecTagOut<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct NatspecTagOut<'a> {
+    tag: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    text: &'a str,
+}
+
+/// NatSpec comment forms: `///` lines and `/** … */` blocks. Plain `//` and
+/// `/* */` comments are not NatSpec, so a `// section` note above a function
+/// never becomes an `@notice`.
+fn is_natspec_comment(raw: &str) -> bool {
+    let t = raw.trim_start();
+    t.starts_with("///") || (t.starts_with("/**") && !t.starts_with("/**/"))
+}
+
+/// The NatSpec above `node` as a DOC_TAGS Json cell — the structured twin of
+/// the flat DOC string, which stays untouched. Tag names are bound against the
+/// AST so the data stays honest: `@param x` keeps `x` as its name only when `x`
+/// is a declared parameter, `@return y` only when `y` is a NAMED return
+/// variable (an unnamed return's whole line is its description), otherwise the
+/// word stays in the text. `@inheritdoc Base` keeps `Base` — the base
+/// contract / interface, usually declared in another file.
+fn natspec_cell(node: &TsNode, src: &[u8], stats: &mut NatspecStats) -> Option<Cell> {
+    let lines = repo_graph_doc::leading_doc_lines_where(node, src, is_natspec_comment)?;
+    let mut tags = repo_graph_doc::split_doc_tags(&lines, "notice");
+    if tags.is_empty() {
+        return None;
+    }
+    let params = param_names(node, src);
+    let returns = named_returns(node, src);
+    for t in &mut tags {
+        let bound = match t.tag.as_str() {
+            "param" => t.name.as_deref().is_some_and(|n| params.contains(&n)),
+            "return" => t.name.as_deref().is_some_and(|n| returns.contains(&n)),
+            _ => true,
+        };
+        if !bound {
+            t.unbind_name();
+        }
+    }
+    let payload = NatspecPayload {
+        style: "natspec",
+        tags: tags
+            .iter()
+            .map(|t| NatspecTagOut {
+                tag: &t.tag,
+                name: t.name.as_deref(),
+                text: &t.text,
+            })
+            .collect(),
+    };
+    let json = serde_json::to_string(&payload).ok()?;
+    stats.record(&tags);
+    Some(Cell {
+        kind: cell_type::DOC_TAGS,
+        payload: CellPayload::Json(json),
+    })
+}
+
+/// Declared parameter names of a function / modifier / constructor / event /
+/// error (its direct `parameter` / `event_parameter` / `error_parameter`
+/// children). Return variables live under `return_type`, not here.
+fn param_names<'a>(node: &TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if matches!(child.kind(), "parameter" | "event_parameter" | "error_parameter")
+            && let Some(n) = child.child_by_field_name("name")
+        {
+            out.push(text_of(n, src));
+        }
+    }
+    out
+}
+
+/// Names of a function's NAMED return variables (`returns (bool ok)` -> `ok`).
+fn named_returns<'a>(node: &TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
+    let Some(ret) = node.child_by_field_name("return_type") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = ret.walk();
+    for child in ret.named_children(&mut cursor) {
+        if child.kind() == "parameter"
+            && let Some(n) = child.child_by_field_name("name")
+        {
+            out.push(text_of(n, src));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -882,5 +1030,219 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 "#;
         let fp = parse_file(source, "contracts/Token.sol", "contracts::Token", repo()).unwrap();
         assert_eq!(fp.imports.len(), 2);
+    }
+
+    /// The payload of `cell` on the non-MODULE node named `name`, if any (the
+    /// module of `contracts/Vault.sol` is also called `Vault`).
+    fn cell_on(fp: &FileParse, name: &str, cell: repo_graph_core::CellTypeId) -> Option<String> {
+        let id = fp
+            .nav
+            .name_by_id
+            .iter()
+            .find(|(id, n)| {
+                n.as_str() == name && fp.nav.kind_by_id.get(*id) != Some(&node_kind::MODULE)
+            })
+            .map(|(id, _)| *id)?;
+        let node = fp.nodes.iter().find(|n| n.id == id)?;
+        node.cells.iter().find(|c| c.kind == cell).map(|c| match &c.payload {
+            CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+            other => format!("{other:?}"),
+        })
+    }
+
+    const VAULT: &str = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+/// @title Vault
+/// @author Kina
+/// @notice Holds deposits for members.
+contract Vault {
+    /// @notice Platform fee in basis points.
+    uint256 public feeBasisPoints;
+
+    /**
+     * @notice Deposit funds for a member.
+     * @dev Reverts when amount is zero.
+     * @param member The member credited.
+     * @param amount The amount in wei.
+     * @return ok True on success.
+     */
+    function deposit(address member, uint256 amount) public returns (bool ok) {
+        return true;
+    }
+
+    /// @notice Withdraw.
+    /// @param amount How much.
+    /// @return remaining Balance left.
+    /// @inheritdoc IVault
+    /// @custom:security non-reentrant
+    function withdraw(uint256 amount) external returns (uint256 remaining) {
+        return 0;
+    }
+
+    /// @return True always.
+    function ping() external pure returns (bool) {
+        return true;
+    }
+}
+"#;
+
+    #[test]
+    fn natspec_doc_tags_named_return_param_and_block_comment() {
+        let fp = parse_file(VAULT, "contracts/Vault.sol", "contracts::Vault", repo()).unwrap();
+        assert_eq!(
+            cell_on(&fp, "deposit", cell_type::DOC_TAGS).as_deref(),
+            Some(concat!(
+                r#"{"style":"natspec","tags":["#,
+                r#"{"tag":"notice","text":"Deposit funds for a member."},"#,
+                r#"{"tag":"dev","text":"Reverts when amount is zero."},"#,
+                r#"{"tag":"param","name":"member","text":"The member credited."},"#,
+                r#"{"tag":"param","name":"amount","text":"The amount in wei."},"#,
+                r#"{"tag":"return","name":"ok","text":"True on success."}]}"#,
+            ))
+        );
+        // The flat DOC string is untouched.
+        assert_eq!(
+            cell_on(&fp, "deposit", cell_type::DOC).as_deref(),
+            Some(
+                "@notice Deposit funds for a member. @dev Reverts when amount is zero. \
+                 @param member The member credited. @param amount The amount in wei. \
+                 @return ok True on success."
+            )
+        );
+    }
+
+    #[test]
+    fn natspec_inheritdoc_custom_and_unnamed_return() {
+        let fp = parse_file(VAULT, "contracts/Vault.sol", "contracts::Vault", repo()).unwrap();
+        assert_eq!(
+            cell_on(&fp, "withdraw", cell_type::DOC_TAGS).as_deref(),
+            Some(concat!(
+                r#"{"style":"natspec","tags":["#,
+                r#"{"tag":"notice","text":"Withdraw."},"#,
+                r#"{"tag":"param","name":"amount","text":"How much."},"#,
+                r#"{"tag":"return","name":"remaining","text":"Balance left."},"#,
+                r#"{"tag":"inheritdoc","name":"IVault","text":""},"#,
+                r#"{"tag":"custom:security","text":"non-reentrant"}]}"#,
+            ))
+        );
+        // `returns (bool)` is unnamed: `True` is description, not a name.
+        assert_eq!(
+            cell_on(&fp, "ping", cell_type::DOC_TAGS).as_deref(),
+            Some(r#"{"style":"natspec","tags":[{"tag":"return","text":"True always."}]}"#)
+        );
+    }
+
+    #[test]
+    fn natspec_contract_level_title_author_and_state_var() {
+        let fp = parse_file(VAULT, "contracts/Vault.sol", "contracts::Vault", repo()).unwrap();
+        assert_eq!(
+            cell_on(&fp, "Vault", cell_type::DOC_TAGS).as_deref(),
+            Some(concat!(
+                r#"{"style":"natspec","tags":["#,
+                r#"{"tag":"title","text":"Vault"},"#,
+                r#"{"tag":"author","text":"Kina"},"#,
+                r#"{"tag":"notice","text":"Holds deposits for members."}]}"#,
+            ))
+        );
+        assert_eq!(
+            cell_on(&fp, "feeBasisPoints", cell_type::DOC_TAGS).as_deref(),
+            Some(r#"{"style":"natspec","tags":[{"tag":"notice","text":"Platform fee in basis points."}]}"#)
+        );
+        // The module node carries no DOC_TAGS: a file is not a NatSpec target
+        // (and its SPDX line is boilerplate).
+        let module = fp
+            .nodes
+            .iter()
+            .find(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+            .expect("module node");
+        assert!(module.cells.iter().all(|c| c.kind != cell_type::DOC_TAGS));
+    }
+
+    #[test]
+    fn natspec_param_not_in_signature_stays_text() {
+        let source = r#"
+contract C {
+    /// @param amout Misspelt, so not a parameter.
+    /// @param to Recipient.
+    function send(address to, uint256 amount) external {}
+}
+"#;
+        let fp = parse_file(source, "C.sol", "C", repo()).unwrap();
+        assert_eq!(
+            cell_on(&fp, "send", cell_type::DOC_TAGS).as_deref(),
+            Some(concat!(
+                r#"{"style":"natspec","tags":["#,
+                r#"{"tag":"param","text":"amout Misspelt, so not a parameter."},"#,
+                r#"{"tag":"param","name":"to","text":"Recipient."}]}"#,
+            ))
+        );
+    }
+
+    #[test]
+    fn natspec_block_and_triple_slash_forms_give_identical_tags() {
+        let block = r#"
+contract C {
+    /**
+     * Pays out.
+     * @param who The payee,
+     *   possibly a contract.
+     * @return paid Amount paid.
+     */
+    function pay(address who) external returns (uint256 paid) {}
+}
+"#;
+        let lines = r#"
+contract C {
+    /// Pays out.
+    /// @param who The payee,
+    ///   possibly a contract.
+    /// @return paid Amount paid.
+    function pay(address who) external returns (uint256 paid) {}
+}
+"#;
+        let a = parse_file(block, "C.sol", "C", repo()).unwrap();
+        let b = parse_file(lines, "C.sol", "C", repo()).unwrap();
+        let want = concat!(
+            r#"{"style":"natspec","tags":["#,
+            r#"{"tag":"notice","text":"Pays out."},"#,
+            r#"{"tag":"param","name":"who","text":"The payee, possibly a contract."},"#,
+            r#"{"tag":"return","name":"paid","text":"Amount paid."}]}"#,
+        );
+        assert_eq!(cell_on(&a, "pay", cell_type::DOC_TAGS).as_deref(), Some(want));
+        assert_eq!(cell_on(&b, "pay", cell_type::DOC_TAGS).as_deref(), Some(want));
+    }
+
+    #[test]
+    fn natspec_plain_comments_are_not_natspec() {
+        let source = r#"
+contract C {
+    // SC-02 mutual proposal events
+    event ResolutionProposed(uint256 indexed tradeId, address by);
+
+    /// @notice Raised on a dispute.
+    /// @param tradeId The trade.
+    // (divider)
+    event DisputeRaised(uint256 indexed tradeId);
+
+    /* not natspec either */
+    function f() external {}
+}
+"#;
+        let fp = parse_file(source, "C.sol", "C", repo()).unwrap();
+        // DOC still carries the plain comment; DOC_TAGS does not claim it.
+        assert!(cell_on(&fp, "ResolutionProposed", cell_type::DOC).is_some());
+        assert_eq!(cell_on(&fp, "ResolutionProposed", cell_type::DOC_TAGS), None);
+        assert_eq!(cell_on(&fp, "f", cell_type::DOC_TAGS), None);
+        // An event's @param binds against its event parameters; the `//`
+        // divider between the NatSpec and the event is stepped over.
+        assert_eq!(
+            cell_on(&fp, "DisputeRaised", cell_type::DOC_TAGS).as_deref(),
+            Some(concat!(
+                r#"{"style":"natspec","tags":["#,
+                r#"{"tag":"notice","text":"Raised on a dispute."},"#,
+                r#"{"tag":"param","name":"tradeId","text":"The trade."}]}"#,
+            ))
+        );
     }
 }
