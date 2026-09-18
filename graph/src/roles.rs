@@ -1,7 +1,8 @@
 //! ROLE cells and the build-time role fold (LB.3a).
 //!
 //! Framework extractors classify a declaration by minting a *parallel* node
-//! with the SAME qname: `services.rs` a SERVICE over a CLASS / STRUCT,
+//! with the SAME qname: `services.rs` a SERVICE over a CLASS / STRUCT (over an
+//! Elixir `defmodule` PACKAGE since LA.21a),
 //! `angular.rs` a COMPONENT / SERVICE / DIRECTIVE / PIPE / GUARD over a CLASS,
 //! `react.rs` a COMPONENT / HOOK and `vue.rs` a COMPONENT / COMPOSABLE over a
 //! FUNCTION. Two nodes per declaration split everything that should land on
@@ -44,6 +45,8 @@ pub const ROLE_KINDS: &[NodeKindId] = &ROLE_KIND_TABLE;
 
 /// The kinds an overlay can fold into, most preferred first. Among several
 /// same-qname candidates the earliest kind here wins, then the earliest node.
+/// PACKAGE is last (LA.21a): it is the base only when nothing else shares the
+/// qname — an Elixir `defmodule`, the one PACKAGE `services.rs` classifies.
 const BASE_PRIORITY: &[NodeKindId] = &[
     node_kind::CLASS,
     node_kind::STRUCT,
@@ -51,6 +54,7 @@ const BASE_PRIORITY: &[NodeKindId] = &[
     node_kind::INTERFACE,
     node_kind::ENUM,
     node_kind::METHOD,
+    node_kind::PACKAGE,
 ];
 
 /// Roles a node plays: its own kind when that is a role kind, plus every entry
@@ -617,6 +621,91 @@ mod tests {
             vec![role_cell(&[node_kind::HOOK, node_kind::COMPOSABLE])],
             "two overlays of one base merge into ONE ROLE cell"
         );
+    }
+
+    /// LA.21a: an Elixir `defmodule` is a PACKAGE; its SERVICE overlay folds
+    /// into it (no twin), its CONTAINS to a function the module DEFINES is
+    /// dropped. PACKAGE loses to any other base kind sharing the qname.
+    #[test]
+    fn service_overlay_on_package_folds_into_the_package() {
+        let mut g = empty_graph();
+        let module = id(node_kind::MODULE, "worker");
+        let pkg = id(node_kind::PACKAGE, "worker::MyApp.Cache");
+        let init = id(node_kind::FUNCTION, "worker::MyApp.Cache::init");
+        let svc = id(node_kind::SERVICE, "worker::MyApp.Cache");
+        g.nav
+            .record(module, "worker", "worker", node_kind::MODULE, None);
+        g.nav.record(
+            pkg,
+            "Cache",
+            "worker::MyApp.Cache",
+            node_kind::PACKAGE,
+            Some(module),
+        );
+        g.nav.record(
+            init,
+            "init",
+            "worker::MyApp.Cache::init",
+            node_kind::FUNCTION,
+            Some(pkg),
+        );
+        g.nav.record(
+            svc,
+            "MyApp.Cache",
+            "worker::MyApp.Cache",
+            node_kind::SERVICE,
+            Some(module),
+        );
+        g.nodes = vec![node(module), node(pkg), node(init), node(svc)];
+        g.edges = vec![
+            edge(module, pkg, edge_category::CONTAINS),
+            edge(pkg, init, edge_category::DEFINES),
+            edge(svc, init, edge_category::CONTAINS),
+        ];
+
+        let stats = fold_role_overlays(&mut g, &mut [], &mut []);
+        assert_eq!(stats.folded, [0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(stats.standalone, 0);
+        assert_eq!(
+            g.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![module, pkg, init]
+        );
+        assert_eq!(
+            roles_in(Some(node_kind::PACKAGE), &g.nodes[1].cells),
+            vec![node_kind::SERVICE]
+        );
+        assert_eq!(
+            g.edges
+                .iter()
+                .map(|e| (e.from, e.to, e.category))
+                .collect::<Vec<_>>(),
+            vec![
+                (module, pkg, edge_category::CONTAINS),
+                (pkg, init, edge_category::DEFINES),
+            ]
+        );
+        assert!(!g.nav.kind_by_id.contains_key(&svc));
+
+        // A CLASS sharing the qname outranks the PACKAGE.
+        let mut g = empty_graph();
+        let p = id(node_kind::PACKAGE, "m::X");
+        let c = id(node_kind::CLASS, "m::X");
+        let s = id(node_kind::SERVICE, "m::X");
+        for (i, k) in [
+            (p, node_kind::PACKAGE),
+            (c, node_kind::CLASS),
+            (s, node_kind::SERVICE),
+        ] {
+            g.nav.record(i, "X", "m::X", k, None);
+            g.nodes.push(node(i));
+        }
+        fold_role_overlays(&mut g, &mut [], &mut []);
+        assert_eq!(g.nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![p, c]);
+        assert!(
+            g.nodes[0].cells.is_empty(),
+            "the PACKAGE loses to the CLASS"
+        );
+        assert_eq!(roles_in(None, &g.nodes[1].cells), vec![node_kind::SERVICE]);
     }
 
     #[test]
