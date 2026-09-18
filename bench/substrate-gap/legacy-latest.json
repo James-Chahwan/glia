@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 137,
+  "fixtures": 138,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -255,6 +255,13 @@
       "language": "typescript+go",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "http-client-not-route": {
+      "framework": "http-client-not-route",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "http-dart-nav-precision": {

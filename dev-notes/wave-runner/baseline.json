@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "48243ea",
-  "after_wave": 15,
+  "measured_at_head": "cafa83e",
+  "after_wave": 16,
   "cargo_test_workspace": {
-    "passed": 1013,
+    "passed": 1022,
     "failed": 0
   },
   "history_passed": [
@@ -22,10 +22,11 @@
     966,
     977,
     997,
-    1013
+    1013,
+    1022
   ],
   "run_py": {
-    "fixtures": 137,
+    "fixtures": 138,
     "blind_spots": 1,
     "blind_spot_detail": "blind: ['xcut-grpc-csharp: HANDLED_BY']; missing nodes: [\"xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
@@ -43,8 +44,8 @@
     ]
   },
   "matrix_py": {
-    "full": 95,
-    "partial": 30,
+    "full": 96,
+    "partial": 29,
     "none": 21,
     "unknown": 334,
     "covered": 146,

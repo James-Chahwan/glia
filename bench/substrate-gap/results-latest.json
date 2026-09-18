@@ -981,8 +981,8 @@
         "fixtures/xstack-ts-go-http"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
@@ -3285,16 +3285,14 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        3,
+        5,
         5
       ],
       "via": "http"
@@ -3643,6 +3641,7 @@
     "fixtures/csharp-minimal-api",
     "fixtures/elixir-xmodule-calls",
     "fixtures/http-absolute-url-client",
+    "fixtures/http-client-not-route",
     "fixtures/http-dart-nav-precision",
     "fixtures/http-nav-route-precision",
     "fixtures/http-placeholder-fold",
@@ -3681,10 +3680,10 @@
   "totals": {
     "covered": 146,
     "error": 0,
-    "full": 95,
+    "full": 96,
     "grid": 480,
     "none": 21,
-    "partial": 30,
+    "partial": 29,
     "unknown": 334
   },
   "vocabulary": {

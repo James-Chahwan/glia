@@ -70,7 +70,7 @@ LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unkno
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ◐       ·       ?       ●       ·       ●       ●       ·       ?       ◐       ·       ●       ●       ?       ●       ●       ?       ?
 go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ·       ◐       ●       ●       ●       ●       ●       ?       ◐       ?       ·
-typescript       ●       ◐       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
+typescript       ●       ●       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
 java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ?       ●       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ·
 csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ·       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
 ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ?       ◐       ?       ?
@@ -87,7 +87,7 @@ terraform        ?       ?       ?       ?       ?       ?       ?       ?      
 
 PER-MECHANISM  across 16 languages:
   http_client  ● 12  ◐ 0   · 2   ? 2   ! 0
-  http_server  ● 8   ◐ 5   · 0   ? 3   ! 0
+  http_server  ● 9   ◐ 4   · 0   ? 3   ! 0
   kafka        ● 4   ◐ 1   · 0   ? 11  ! 0
   amqp         ● 1   ◐ 3   · 1   ? 11  ! 0
   sqs_sns      ● 1   ◐ 1   · 1   ? 13  ! 0
@@ -120,7 +120,7 @@ PER-MECHANISM  across 16 languages:
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 16  ◐ 4   · 5   ? 5   ! 0
   go           ● 12  ◐ 3   · 5   ? 10  ! 0
-  typescript   ● 13  ◐ 6   · 2   ? 9   ! 0
+  typescript   ● 14  ◐ 5   · 2   ? 9   ! 0
   java         ● 11  ◐ 2   · 4   ? 13  ! 0
   csharp       ● 9   ◐ 2   · 2   ? 17  ! 0
   ruby         ● 6   ◐ 2   · 1   ? 21  ! 0
@@ -136,9 +136,9 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 146/480 cells have a fixture (30.4%) — 95 full, 30 partial, 21 none, 334 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 146/480 cells have a fixture (30.4%) — 96 full, 29 partial, 21 none, 334 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 45
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 46
 
 ## Cells routed via an alternative mechanism
 
