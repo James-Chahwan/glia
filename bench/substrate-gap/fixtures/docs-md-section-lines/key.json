@@ -1,0 +1,45 @@
+{
+  "framework": "docs-md-section-lines",
+  "language": "markdown",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::README::orders"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::README::placing-orders"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::README::refunds"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "DOC_SECTION",
+      "node": "docs::README::orders",
+      "cell": "POSITION",
+      "contains": "\"start_line\":0,\"end_line\":2}",
+      "note": "LG.10a: last content row, inclusive (HEAD writes 4 = the next heading's row)"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "docs::README::placing-orders",
+      "cell": "POSITION",
+      "contains": "\"start_line\":4,\"end_line\":6}",
+      "note": "LG.10a: trailing blank rows 7-8 are not part of the section (HEAD writes 9)"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "docs::README::refunds",
+      "cell": "POSITION",
+      "contains": "\"start_line\":9,\"end_line\":11}",
+      "note": "LG.10a: the last section ends on the last row 11 (HEAD writes 12 = line count)"
+    }
+  ],
+  "note": "LG.10a: markdown DOC_SECTION POSITION rows are 0-indexed and end-inclusive like every code POSITION cell. Baseline at 7a4883b: 0/3 - end_line is the exclusive next-heading row / the line count."
+}

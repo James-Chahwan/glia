@@ -73,10 +73,18 @@ fn cap_prose(s: &str) -> String {
     slice.trim_end().to_string()
 }
 
+/// One heading-delimited markdown chunk. Rows are `str::lines()` indices, so a
+/// CRLF file counts rows exactly like an LF one.
 struct DocChunk {
     slug: String,
     text: String,
+    /// 0-indexed row the chunk starts on: its heading row, or 0 for the
+    /// pre-heading preamble. Identity hints order sections by it.
     start_line: u32,
+    /// 0-indexed row of the chunk's last non-blank line, inclusive - the same
+    /// convention as every code POSITION cell (`repo-graph-doc::position_json`).
+    /// A heading followed directly by another heading ends on its own row; the
+    /// blank rows before the next heading (or EOF) are not part of the chunk.
     end_line: u32,
 }
 
@@ -88,6 +96,9 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     let mut cur_slug: Option<String> = None;
     let mut cur_start = 0u32;
     let mut buf: Vec<&str> = Vec::new();
+    // Row of the last non-blank line pushed into `buf` (the heading row counts);
+    // `None` while `buf` holds only blank lines. Reset together with `buf`.
+    let mut last_content: Option<u32> = None;
     let mut seq = 0u32;
 
     let flush = |chunks: &mut Vec<DocChunk>,
@@ -113,34 +124,34 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     };
 
     for (i, line) in lines.iter().enumerate() {
+        let row = i as u32;
         let t = line.trim_start();
         if t.starts_with("# ") || t.starts_with("## ") {
-            flush(&mut chunks, &cur_slug, &buf, cur_start, i as u32, &mut seq);
+            let end = last_content.unwrap_or(cur_start);
+            flush(&mut chunks, &cur_slug, &buf, cur_start, end, &mut seq);
             buf.clear();
+            last_content = None;
             // An emoji/punctuation-only heading slugs to "" — fall through to the
             // ordinal fallback (overview/section-N) so sections don't collide.
             let s = heading_slug(t.trim_start_matches('#').trim());
             cur_slug = if s.is_empty() { None } else { Some(s) };
-            cur_start = i as u32;
-            buf.push(line);
-        } else {
-            buf.push(line);
+            cur_start = row;
+        }
+        buf.push(line);
+        if !line.trim().is_empty() {
+            last_content = Some(row);
         }
     }
-    flush(
-        &mut chunks,
-        &cur_slug,
-        &buf,
-        cur_start,
-        lines.len() as u32,
-        &mut seq,
-    );
+    let end = last_content.unwrap_or(cur_start);
+    flush(&mut chunks, &cur_slug, &buf, cur_start, end, &mut seq);
 
-    // Fallback: no headings → one chunk of the whole file.
+    // Fallback: no headings → one chunk of the whole file, ending on its last
+    // non-blank row (0 for an all-blank file, which `cap_prose` already drops).
     if chunks.is_empty() {
         let body = cap_prose(text);
         if !body.is_empty() {
-            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line: lines.len() as u32 });
+            let end_line = lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(0) as u32;
+            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line });
         }
     }
     chunks
@@ -238,6 +249,10 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
     let mut nav = CodeNav::default();
     // Dedup DOC_SPACE nodes by qname (a space maps to many pages/records).
     let mut spaces: HashMap<String, NodeId> = HashMap::new();
+    // For the `[docs] sections=` marker: DOC_SECTIONs emitted, and the docs
+    // that contributed at least one.
+    let mut sections = 0usize;
+    let mut section_docs = 0usize;
 
     for rec in records {
         let (path, text) = (&rec.rel_path, &rec.text);
@@ -281,7 +296,12 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
             .unwrap_or("doc")
             .to_string();
 
-        for chunk in chunk_markdown(text) {
+        let chunks = chunk_markdown(text);
+        if !chunks.is_empty() {
+            section_docs += 1;
+            sections += chunks.len();
+        }
+        for chunk in chunks {
             // File qname unchanged; external qnames are namespaced by container.
             let qname = match rec.provenance.container.as_deref() {
                 Some(container) => format!("docs::{container}::{stem}::{}", chunk.slug),
@@ -326,6 +346,9 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
             }
         }
     }
+    if sections > 0 {
+        eprintln!("[docs] sections={sections} from {section_docs} doc(s) (rows 0-indexed, end inclusive)");
+    }
     if nodes.is_empty() {
         return None;
     }
@@ -357,6 +380,30 @@ mod docs_tests {
         let plain = chunk_markdown("just a paragraph with no heading at all.");
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].slug, "overview");
+        assert_eq!((plain[0].start_line, plain[0].end_line), (0, 0));
+
+        // LG.10a: rows are 0-indexed and end-INCLUSIVE, like every code POSITION
+        // cell - a section ends on its last content row, not the next heading.
+        let rows = |c: &[DocChunk]| c.iter().map(|c| (c.start_line, c.end_line)).collect::<Vec<_>>();
+        let md = "# Overview\nIntro text.\n\n## Setup\nRun the thing.\n";
+        assert_eq!(rows(&chunk_markdown(md)), vec![(0, 1), (3, 4)]);
+        // A heading followed directly by another heading ends on its own row.
+        let md = "# A\n## B\nbody\n";
+        assert_eq!(rows(&chunk_markdown(md)), vec![(0, 0), (1, 2)]);
+        // Trailing blank rows (and a CRLF file's `\r`) are not part of the last chunk.
+        let md = "# Only\r\ntext\r\n\r\n\r\n";
+        assert_eq!(rows(&chunk_markdown(md)), vec![(0, 1)]);
+        // A preamble before the first heading keeps start row 0 and ends on its
+        // last content row; blank rows between it and the heading are dropped.
+        let md = "\nlead-in\n\n# Title\nbody\n";
+        let c = chunk_markdown(md);
+        assert_eq!((c[0].slug.as_str(), c[1].slug.as_str()), ("overview", "title"));
+        assert_eq!(rows(&c), vec![(0, 1), (3, 4)]);
+        // The docs-md-section-lines fixture: 0-2 / 4-6 / 9-11 (HEAD: 4 / 9 / 12).
+        let md = "# Orders\n\nSome intro text.\n\n## Placing orders\n\n\
+                  Call `OrderService.place` to place an order.\n\n\n## Refunds\n\n\
+                  Refunds go through support.\n";
+        assert_eq!(rows(&chunk_markdown(md)), vec![(0, 2), (4, 6), (9, 11)]);
         // Include rules.
         assert!(include_doc("README.md"));
         assert!(include_doc("docs/architecture.md"));
