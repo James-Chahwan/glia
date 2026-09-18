@@ -12,7 +12,7 @@
   ],
   "expect_edges": [
     {"from": "mytool", "to": "mytool", "category": "CLI_INVOKES",
-     "note": "INTENDED: the invoker's `mytool` pairs with the declared binary. CliInvocationResolver joins `cli_invoke:<tool>` to `cli:<tool>` by EXACT tool name, so this needs both the binary declaration (absent) and a captured invocation (also absent, see python/cli_inv)."}
+     "note": "INTENDED: the invoker's `mytool` pairs with the declared binary. CliInvocationResolver joins `cli_invoke:<tool>` to `cli:<tool>` by EXACT tool name, so this needs both the binary declaration (absent: pyproject [project.scripts] is not read, LA.20) and a captured invocation (present since A13.4, see python/cli_inv). The invocation's subcommand pass pairs `cli_invoke:mytool -> cli:sync` (Weak), which this key does not assert."}
   ],
   "expect_cells": [],
   "forbid": [

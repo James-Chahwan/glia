@@ -1066,6 +1066,45 @@ fn cli_resolver_links_invocation_to_command() {
     assert_eq!(cli_edges[0].to, cmd_id);
 }
 
+/// A13.4: `subprocess.run(["mytool", "migrate", "--yes"])` pairs with the
+/// cobra root `cli:mytool` by binary AND with `cli:migrate` by the subcommand
+/// word read off the invocation's argv cell — the latter Weak. The flag and an
+/// undeclared word pair with nothing.
+#[test]
+fn cli_resolver_pairs_subcommand_from_argv_cell() {
+    let mut nav_a = CodeNav::default();
+    let (root_node, root_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:mytool", Confidence::Strong);
+    record(&mut nav_a, root_id, "mytool", "cli:mytool", node_kind::CLI_COMMAND);
+    let (sub_node, sub_id) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:migrate", Confidence::Strong);
+    record(&mut nav_a, sub_id, "migrate", "cli:migrate", node_kind::CLI_COMMAND);
+    let (other_node, _) = make_node(repo_a(), node_kind::CLI_COMMAND, "cli:yes", Confidence::Strong);
+    record(&mut nav_a, other_node.id, "yes", "cli:yes", node_kind::CLI_COMMAND);
+    let ga = make_graph(repo_a(), vec![root_node, sub_node, other_node], nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (mut inv_node, inv_id) = make_node(repo_b(), node_kind::CLI_INVOCATION, "cli_invoke:mytool", Confidence::Medium);
+    inv_node.cells.push(repo_graph_code_extractors::cli::argv_cell(
+        "mytool",
+        &[vec!["migrate".into(), "--yes".into()], vec!["--dry-run".into(), "seed".into()]],
+    ));
+    record(&mut nav_b, inv_id, "mytool", "cli_invoke:mytool", node_kind::CLI_INVOCATION);
+    let gb = make_graph(repo_b(), vec![inv_node], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    CliInvocationResolver.resolve(&mut merged);
+
+    let mut cli_edges: Vec<(NodeId, NodeId, Confidence)> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::CLI_INVOKES)
+        .map(|e| (e.from, e.to, e.confidence))
+        .collect();
+    cli_edges.sort_by_key(|(_, to, _)| to.0);
+    let mut expected = vec![(inv_id, root_id, Confidence::Medium), (inv_id, sub_id, Confidence::Weak)];
+    expected.sort_by_key(|(_, to, _)| to.0);
+    assert_eq!(cli_edges, expected);
+}
+
 // ============================================================================
 // All resolvers run together without interference
 // ============================================================================

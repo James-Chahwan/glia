@@ -1,0 +1,19 @@
+{
+  "framework": "xcli-invokes",
+  "language": "go+python",
+  "dirs": ["tool", "caller"],
+  "expect_nodes": [
+    {"kind": "CLI_COMMAND", "name": "mytool", "note": "cobra root Use"},
+    {"kind": "CLI_COMMAND", "name": "migrate", "note": "cobra subcommand Use"},
+    {"kind": "CLI_INVOCATION", "name": "mytool", "note": "subprocess.run list form: argv0 is the binary (A13.4 scan_argv; extracted nothing before)"}
+  ],
+  "expect_edges": [
+    {"from": "cli_invoke:mytool", "to": "cli:mytool", "category": "CLI_INVOKES", "note": "argv0 binary match"},
+    {"from": "cli_invoke:mytool", "to": "cli:migrate", "category": "CLI_INVOKES", "note": "argv1 subcommand match, read off the invocation's argv CODE cell (Weak)"}
+  ],
+  "forbid": [
+    {"kind": "CLI_INVOCATION", "name": "migrate", "max_nodes": 0, "note": "precision: the subcommand argument is never minted as a separate invoked tool"},
+    {"kind": "CLI_INVOCATION", "name": "--yes", "max_nodes": 0, "note": "precision: a flag is never minted as an invoked tool"}
+  ],
+  "note": "A13.4: the first CLI_INVOKES eval covering both pairing paths. Before A13.4 the list form `subprocess.run([...])` emitted no CLI_INVOCATION, so the CLI_INVOKES cell read 0.00; the resolver only paired a whole-program invocation with an identically named command, never with a subcommand."
+}

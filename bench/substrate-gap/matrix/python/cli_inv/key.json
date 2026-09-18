@@ -6,16 +6,16 @@
   "cells": ["python/cli_inv"],
   "expect_nodes": [
     {"kind": "CLI_INVOCATION", "name": "mytool",
-     "note": "INTENDED: `subprocess.run([\"mytool\", \"sync\"], check=True)` invokes the tool. EXPECTED to miss — cli.rs extract_quoted() requires a quote IMMEDIATELY after the pattern, so the LIST form (the only form that works without shell=True) yields nothing. Only `subprocess.run(\"mytool sync\")` is captured."}
+     "note": "`subprocess.run([\"mytool\", \"sync\"], check=True)` invokes the tool. Extracted since A13.4: cli.rs scan_argv reads the LIST form (the only form that works without shell=True) and keys the node on argv[0], the binary; the args ride on the node's argv CODE cell. Before A13.4 extract_quoted() demanded a quote immediately after the pattern and this yielded nothing."}
   ],
   "expect_edges": [
     {"from": "mytool", "to": "mytool", "category": "CLI_INVOKES",
-     "note": "INTENDED: invocation -> declaration. EXPECTED to miss — there is no invocation node to route from."}
+     "note": "INTENDED: invocation -> declaration. EXPECTED to miss — the invocation now exists (A13.4), but the binary `mytool` is declared only in pyproject.toml [project.scripts], which nothing reads (LA.20), so there is no `cli:mytool` to pair with. The subcommand pass pairs `cli_invoke:mytool -> cli:sync` (Weak) instead, which this key does not assert."}
   ],
   "expect_cells": [],
   "forbid": [
     {"kind": "CLI_INVOCATION", "name": "sync", "max_nodes": 0,
      "note": "precision: the subcommand argument must never be minted as a separate invoked tool"}
   ],
-  "note": "ZERO-EVERYWHERE PROBE (A15.11), and a sharply actionable one. Baseline 2026-09-16 on the installed 0.4.18 wheel: 6 nodes / 3 edges, CLI_INVOCATION 0. The gap is one line: cli.rs INVOCATION_PATTERNS matches `subprocess.run(` and then demands a quote, so the canonical Python argv-list call is invisible. cli.rs's own unit test names this — it binds the list form to `_array_form` and asserts on the string form instead."
+  "note": "ZERO-EVERYWHERE PROBE (A15.11), and a sharply actionable one. Baseline 2026-09-16 on the installed 0.4.18 wheel: 6 nodes / 3 edges, CLI_INVOCATION 0. The gap is one line: cli.rs INVOCATION_PATTERNS matches `subprocess.run(` and then demands a quote, so the canonical Python argv-list call is invisible. cli.rs's own unit test names this — it binds the list form to `_array_form` and asserts on the string form instead. A13.4 closed that gap (scan_argv reads the list form; the unit test now pins it); what still misses is the binary declaration in pyproject.toml (LA.20)."
 }
