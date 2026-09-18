@@ -3,7 +3,10 @@
 //! Extracts the declarations of one `.kt` file — its MODULE, every class /
 //! interface / enum / object (nested ones included), member and top-level
 //! functions, the properties worth a node, and its imports — plus the
-//! pure-text route scans ported from the Java parser ([`routes`]). Parsers
+//! pure-text route scans ported from the Java parser ([`routes`]) and the
+//! Spring / Micronaut / JAX-RS / JPA annotation needles ([`spring`]: routes
+//! with HANDLED_BY, stereotype and `@Inject` constructor / property INJECTS,
+//! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA). Parsers
 //! extract, the graph crate resolves: imports leave as [`ImportStmt`]s for
 //! `build_dotted`'s dotted resolver, which the engine runs over the Java and
 //! Kotlin parses of a repo as ONE graph (the JVM family), so a Kotlin import
@@ -50,9 +53,11 @@
 //!   transparent container so the declarations inside it still count.
 
 mod routes;
+mod spring;
 
 use std::collections::HashSet;
 
+use repo_graph_code_domain::UnresolvedRef;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -69,6 +74,20 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
+    let (fp, spring_counts) = parse_counting(source, file_rel_path, module_qname, repo)?;
+    // A14.4: what the Spring detectors did, for the `[kotlin/spring]` line.
+    spring::publish(spring_counts);
+    Ok(fp)
+}
+
+/// [`parse_file`] plus the file's [`spring::SpringCounts`], unpublished — so
+/// tests read one file's counts without the process-global bank.
+fn parse_counting(
+    source: &str,
+    file_rel_path: &str,
+    module_qname: &str,
+    repo: RepoId,
+) -> Result<(FileParse, spring::SpringCounts), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     parser
@@ -95,24 +114,30 @@ pub fn parse_file(
         rel: file_rel_path,
         repo,
         module_qname,
+        module_id,
     };
     let top = Owner {
         id: module_id,
         qname: module_qname,
         in_type: false,
+        route_prefix: "",
+        is_bean: false,
     };
     walk_members(root, &file, top, &mut acc);
+    // After the walk: an annotation route already in `routes_seen` is not
+    // re-emitted by a text scan that matches the same `METHOD path`.
     routes::scan_routes(source, repo, &mut acc);
 
-    Ok(FileParse {
+    let fp = FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
         imports: acc.imports,
         calls: Vec::new(),
-        refs: Vec::new(),
+        refs: acc.refs,
         nav: acc.nav,
         properties: acc.properties,
-    })
+    };
+    Ok((fp, acc.spring))
 }
 
 /// A14.2 fired_on, once per repo that holds Kotlin, counted off the parses so
@@ -120,6 +145,11 @@ pub fn parse_file(
 ///   `[kotlin] entities: N file(s) types=T fns=F props=P imports=I routes=R repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin\] entities:'`. Later Kotlin
 /// packets add their own lines HERE, so the engine's call site never moves.
+///
+/// A14.4 adds the Spring line, from the detectors that ran in this process
+/// since the last repo's line (a cache-served file ran none — see [`spring`]):
+///   `[kotlin/spring] stereotypes=S routes=R composed=C injects=J entities=E repos=P repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '\[kotlin/spring\]'`.
 pub fn trace(parses: &[FileParse], repo_label: &str) {
     let (mut types, mut fns, mut props, mut routes) = (0usize, 0usize, 0usize, 0usize);
     for fp in parses {
@@ -140,6 +170,7 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
         "[kotlin] entities: {} file(s) types={types} fns={fns} props={props} imports={imports} routes={routes} repo={repo_label}",
         parses.len()
     );
+    eprintln!("{}", spring::marker(spring::take(), repo_label));
 }
 
 #[derive(Default)]
@@ -152,8 +183,13 @@ struct Acc {
     properties: HashSet<NodeId>,
     /// Declarations emitted so far: an overload reuses its first node.
     declared: HashSet<NodeId>,
-    /// `METHOD path` keys of the ROUTEs the text scans emitted, across scans.
+    /// `METHOD path` keys of the ROUTEs emitted so far — the annotation
+    /// routes ([`spring`]) first, then the text scans.
     routes_seen: HashSet<String>,
+    /// INJECTS refs ([`spring`]); `resolve_refs` binds each `Bare(TypeName)`.
+    refs: Vec<UnresolvedRef>,
+    /// What the [`spring`] detectors did in this file.
+    spring: spring::SpringCounts,
 }
 
 /// Per-file constants every visitor needs.
@@ -162,6 +198,8 @@ struct File<'a> {
     rel: &'a str,
     repo: RepoId,
     module_qname: &'a str,
+    /// The file's MODULE node: an `UnresolvedRef`'s `from_module`.
+    module_id: NodeId,
 }
 
 /// The declaration a member hangs off: the file MODULE at the top level, a
@@ -171,6 +209,10 @@ struct Owner<'a> {
     id: NodeId,
     qname: &'a str,
     in_type: bool,
+    /// The type's route prefix its action methods compose onto (A14.4).
+    route_prefix: &'a str,
+    /// The type is a Spring stereotype: its constructors inject (A14.4).
+    is_bean: bool,
 }
 
 /// Visit every declaration directly inside `container` (the `source_file`, a
@@ -190,6 +232,9 @@ fn walk_members(container: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
             }
             "function_declaration" => visit_function(child, file, owner, acc),
             "property_declaration" => visit_property(child, file, owner, acc),
+            "secondary_constructor" if owner.in_type => {
+                spring::on_secondary_ctor(child, owner.id, owner.is_bean, file, acc);
+            }
             "ERROR" => walk_members(child, file, owner, acc),
             _ => {}
         }
@@ -217,11 +262,14 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
         scoped(type_scope(file.module_qname), name)
     };
     let id = declare(node, name, &qname, kind, owner.id, file, acc);
+    let spring = spring::on_type(node, name, id, file, acc);
     if let Some(body) = body {
         let inner = Owner {
             id,
             qname: &qname,
             in_type: true,
+            route_prefix: &spring.prefix,
+            is_bean: spring.is_bean,
         };
         walk_members(body, file, inner, acc);
     }
@@ -238,7 +286,10 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
         node_kind::FUNCTION
     };
     let qname = format!("{}::{name}", owner.qname);
-    declare(node, name, &qname, kind, owner.id, file, acc);
+    let id = declare(node, name, &qname, kind, owner.id, file, acc);
+    if owner.in_type {
+        spring::on_method(node, id, owner.route_prefix, file, acc);
+    }
 }
 
 /// A property gets a node when it carries meaning beyond a literal: `const`,
@@ -246,6 +297,11 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
 /// delegate, a getter — or nothing, for `lateinit` / abstract properties).
 /// `var plain = 3` stays quiet, like the Java parser's literal-constant gate.
 fn visit_property(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
+    // Field injection hangs off the type whether or not the property earns a
+    // node below (`@Resource var m: Mailer? = null` does not).
+    if owner.in_type {
+        spring::on_property(node, owner.id, file, acc);
+    }
     // `val (a, b) = pair` destructures into locals-to-be; no single name.
     let Some(var) = named_child_of_kind(node, &["variable_declaration"]) else {
         return;

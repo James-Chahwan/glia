@@ -1368,6 +1368,123 @@ pub mod endpoint {
         format!("/{body}")
     }
 
+    // ------------------------------------------------------------------
+    // JVM annotation routes (A4.4 recipe, hoisted by A14.4)
+    //
+    // Java and Kotlin build ONE graph (the JVM family), so a Spring /
+    // Micronaut / JAX-RS controller must mint the same ROUTE name in either
+    // language. Each parser reads a declaration's OWN annotations off its
+    // AST as `(simple name, path argument)` pairs; everything from there to
+    // the `{VERB} {path}` names is this pure-string recipe, the one place a
+    // later change (LB.4 / LB.5) edits for both languages.
+    // ------------------------------------------------------------------
+
+    /// Spring `@GetMapping`-style and Micronaut `@Get`-style verb annotations.
+    pub fn mapping_verb(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "GetMapping" | "Get" => "GET",
+            "PostMapping" | "Post" => "POST",
+            "PutMapping" | "Put" => "PUT",
+            "DeleteMapping" | "Delete" => "DELETE",
+            "PatchMapping" | "Patch" => "PATCH",
+            "Head" => "HEAD",
+            "Options" => "OPTIONS",
+            _ => return None,
+        })
+    }
+
+    /// A JAX-RS verb marker (`@GET`, `@POST`, …) — upper-case, so it never
+    /// collides with Micronaut's `@Get` / `@Post`.
+    pub fn jaxrs_verb(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "GET" => "GET",
+            "POST" => "POST",
+            "PUT" => "PUT",
+            "DELETE" => "DELETE",
+            "PATCH" => "PATCH",
+            "HEAD" => "HEAD",
+            "OPTIONS" => "OPTIONS",
+            _ => return None,
+        })
+    }
+
+    /// Compose a class-level prefix with an action template. Spring,
+    /// Micronaut and JAX-RS all CONCATENATE — a leading `/` on the method
+    /// template does not make it absolute — so `@RequestMapping("/api/v1/users")`
+    /// with `@GetMapping("/{id}")` is `/api/v1/users/{id}`. [`join_path`] does
+    /// the slash bookkeeping; [`abs_path`] supplies the leading `/` that
+    /// `join_path` deliberately does not force.
+    ///
+    /// ```text
+    /// compose_route_path("/api", "/users") == "/api/users"
+    /// compose_route_path("api",  "")       == "/api"
+    /// compose_route_path("",     "users")  == "/users"
+    /// ```
+    pub fn compose_route_path(class_prefix: &str, tmpl: &str) -> String {
+        if tmpl.is_empty() {
+            return abs_path(class_prefix);
+        }
+        abs_path(&join_path(class_prefix, tmpl))
+    }
+
+    /// The route prefix a type contributes to its action methods: the first
+    /// of Spring `@RequestMapping`, Micronaut `@Controller` or JAX-RS `@Path`
+    /// among the type's own annotations that carries a non-empty path.
+    /// Empty when the type is not prefixed.
+    pub fn jvm_route_prefix(anns: &[(String, Option<String>)]) -> String {
+        for (name, arg) in anns {
+            if matches!(name.as_str(), "RequestMapping" | "Controller" | "Path")
+                && let Some(p) = arg
+                && !p.is_empty()
+            {
+                return p.clone();
+            }
+        }
+        String::new()
+    }
+
+    /// The `(verb, path)` ROUTEs one declaration's own annotations declare,
+    /// composed onto `class_prefix` (empty at class level, the enclosing
+    /// type's [`jvm_route_prefix`] at method level), in emission order:
+    ///
+    /// - per annotation, in source order: a [`mapping_verb`] maps its path;
+    ///   Spring `@RequestMapping` / Micronaut `@Controller` map theirs as the
+    ///   `ANY` wildcard (`method = RequestMethod.GET` is not read);
+    /// - then JAX-RS: `@Path` takes the verb of a [`jaxrs_verb`] marker on the
+    ///   same declaration (`ANY` without one); a verb marker with no `@Path`
+    ///   maps the resource root itself.
+    ///
+    /// An annotation with no path of its own (`@PostMapping`) maps the class
+    /// prefix; with no prefix either there is nothing to name, so it yields
+    /// no route rather than an invented one.
+    pub fn jvm_annotation_routes(
+        anns: &[(String, Option<String>)],
+        class_prefix: &str,
+    ) -> Vec<(&'static str, String)> {
+        let mut out = Vec::new();
+        let mut emit = |verb: &'static str, tmpl: Option<&str>| {
+            if tmpl.is_none() && class_prefix.is_empty() {
+                return;
+            }
+            out.push((verb, compose_route_path(class_prefix, tmpl.unwrap_or_default())));
+        };
+        for (name, arg) in anns {
+            if let Some(verb) = mapping_verb(name) {
+                emit(verb, arg.as_deref());
+            }
+            if matches!(name.as_str(), "RequestMapping" | "Controller") {
+                emit("ANY", arg.as_deref());
+            }
+        }
+        let verb = anns.iter().find_map(|(n, _)| jaxrs_verb(n));
+        if let Some((_, arg)) = anns.iter().find(|(n, _)| n == "Path") {
+            emit(verb.unwrap_or("ANY"), arg.as_deref());
+        } else if let Some(verb) = verb {
+            emit(verb, None);
+        }
+        out
+    }
+
     /// The ONE canonical path form for ROUTE / ENDPOINT qnames (LB.5): exactly
     /// one leading `/`.
     ///
@@ -1898,6 +2015,127 @@ pub mod infra {
 }
 
 // ============================================================================
+// JVM family: the vocabulary Java and Kotlin share (A14.4)
+// ============================================================================
+
+/// What the Java and Kotlin parsers must agree on because the engine builds
+/// them as ONE graph (the JVM family): a Kotlin Spring Data repository has to
+/// name the DATA_ENTITY id a Java `@Entity` mints and back, and both must
+/// refuse the same value types as injected beans. Each parser keeps its own
+/// AST walk; only these strings are shared, so the two cannot drift apart by
+/// a copied table. The annotation-route recipe lives beside the other route
+/// helpers, in [`endpoint`](super::endpoint) (`jvm_annotation_routes`).
+pub mod jvm {
+    /// DATA_ENTITY flavor of a relational model (JPA `@Entity`) — the
+    /// `<flavor>` segment of `data_entity:<flavor>:<Model>`, the vocabulary
+    /// every DATA_ENTITY emitter shares and DbResolver buckets on.
+    pub const SQL_FLAVOR: &str = "sql";
+    /// DATA_ENTITY flavor of a document model (Spring Data Mongo `@Document`).
+    pub const NOSQL_FLAVOR: &str = "nosql";
+
+    /// Class annotations (simple names) that mark a persistent model, with
+    /// the flavor each implies. Checked in order: `@Document` first, so a
+    /// class carrying both is a Mongo document.
+    pub const DATA_ENTITY_ANNOTATIONS: &[(&str, &str)] =
+        &[("Document", NOSQL_FLAVOR), ("Entity", SQL_FLAVOR)];
+
+    /// The DATA_ENTITY qname `data_entity:<flavor>:<Model>`, keyed on the
+    /// model's simple name (the A13.1 identity rule) so a repository that
+    /// names the bare type from any file of either language reaches the node
+    /// its annotated class emits. The SURFACE name is kept verbatim —
+    /// DbResolver folds it to its canonical form at index time.
+    pub fn data_entity_qname(flavor: &str, model: &str) -> String {
+        format!("data_entity:{flavor}:{model}")
+    }
+
+    /// Spring Data repository base interfaces whose first type parameter is
+    /// the managed entity (`interface FooRepo extends JpaRepository<Foo, Long>`,
+    /// `interface FooRepo : JpaRepository<Foo, Long>`), with the DATA_ENTITY
+    /// flavor of that entity. The Mongo bases manage `@Document`s (`nosql`);
+    /// every other base is read as managing a JPA `@Entity` (`sql`). The
+    /// store-agnostic bases (`Repository`, `CrudRepository`, the Kotlin
+    /// coroutine ones, …) carry no store of their own, so over a `@Document`
+    /// declared in another file they name the `sql` id and the edge does not
+    /// reach the `nosql` node.
+    pub const REPOSITORY_BASES: &[(&str, &str)] = &[
+        ("Repository", SQL_FLAVOR),
+        ("CrudRepository", SQL_FLAVOR),
+        ("JpaRepository", SQL_FLAVOR),
+        ("PagingAndSortingRepository", SQL_FLAVOR),
+        ("JpaSpecificationExecutor", SQL_FLAVOR),
+        ("ReactiveCrudRepository", SQL_FLAVOR),
+        ("ReactiveSortingRepository", SQL_FLAVOR),
+        ("R2dbcRepository", SQL_FLAVOR),
+        ("CoroutineCrudRepository", SQL_FLAVOR),
+        ("CoroutineSortingRepository", SQL_FLAVOR),
+        ("MongoRepository", NOSQL_FLAVOR),
+        ("ReactiveMongoRepository", NOSQL_FLAVOR),
+    ];
+
+    /// The flavor of the entity a repository base manages, or `None` when
+    /// `base` (a simple name) is not a Spring Data repository base.
+    pub fn repository_flavor(base: &str) -> Option<&'static str> {
+        REPOSITORY_BASES
+            .iter()
+            .find(|(b, _)| *b == base)
+            .map(|(_, flavor)| *flavor)
+    }
+
+    /// Types that are never DI beans — skipped as injected dependencies. The
+    /// Java denylist: primitives are excluded structurally by node kind, this
+    /// covers the boxed / value types a `type_identifier` can name.
+    pub fn is_non_injectable_type(name: &str) -> bool {
+        matches!(
+            name,
+            "String"
+                | "CharSequence"
+                | "Object"
+                | "Integer"
+                | "Long"
+                | "Double"
+                | "Float"
+                | "Short"
+                | "Byte"
+                | "Boolean"
+                | "Character"
+                | "Number"
+                | "BigDecimal"
+                | "BigInteger"
+        )
+    }
+
+    /// Kotlin's additions to [`is_non_injectable_type`]: its value types
+    /// (`Int`, `Char`, `Unit`, …, which are Java primitives and so never
+    /// reach the Java list), the top / bottom types, and the collection
+    /// interfaces a generic-stripped `List<Handler>` reduces to. Kotlin
+    /// only: a Java `List` is a `generic_type` the Java walk never reads.
+    pub fn is_kotlin_value_type(name: &str) -> bool {
+        matches!(
+            name,
+            "Int"
+                | "Long"
+                | "Double"
+                | "Float"
+                | "Boolean"
+                | "Char"
+                | "Byte"
+                | "Short"
+                | "Unit"
+                | "Any"
+                | "Nothing"
+                | "List"
+                | "Map"
+                | "Set"
+                | "MutableList"
+                | "MutableMap"
+                | "MutableSet"
+                | "Collection"
+                | "Array"
+        )
+    }
+}
+
+// ============================================================================
 // Dependency-injection fired-on counters (A7.0)
 // ============================================================================
 
@@ -1952,11 +2190,13 @@ pub mod di_stats {
         PhpCtor = 11,
         GoProvider = 12,
         ScalaCtor = 13,
+        KotlinCtor = 14,
+        KotlinField = 15,
     }
 
     impl DiShape {
         /// Every shape, in discriminant order (`ALL[i] as usize == i`).
-        pub const ALL: [DiShape; 14] = [
+        pub const ALL: [DiShape; 16] = [
             Self::TsCtor,
             Self::TsInjectFn,
             Self::TsNestCtor,
@@ -1971,6 +2211,8 @@ pub mod di_stats {
             Self::PhpCtor,
             Self::GoProvider,
             Self::ScalaCtor,
+            Self::KotlinCtor,
+            Self::KotlinField,
         ];
 
         /// Wire token printed in the `shapes:` group.
@@ -1990,10 +2232,15 @@ pub mod di_stats {
                 Self::PhpCtor => "php-ctor",
                 Self::GoProvider => "go-provider",
                 Self::ScalaCtor => "scala-ctor",
+                Self::KotlinCtor => "kotlin-ctor",
+                Self::KotlinField => "kotlin-field",
             }
         }
 
-        /// The [`LANGS`] row this shape belongs to.
+        /// The language token this shape belongs to: a [`LANGS`] row, or
+        /// `kotlin`. Kotlin is not a matrix row (the engine builds it into the
+        /// Java graph), so like any non-[`LANGS`] language its refs token
+        /// prints only when non-zero.
         pub const fn lang(self) -> &'static str {
             match self {
                 Self::TsCtor | Self::TsInjectFn | Self::TsNestCtor => "typescript",
@@ -2003,6 +2250,7 @@ pub mod di_stats {
                 Self::PhpCtor => "php",
                 Self::GoProvider => "go",
                 Self::ScalaCtor => "scala",
+                Self::KotlinCtor | Self::KotlinField => "kotlin",
             }
         }
     }
@@ -2648,6 +2896,88 @@ mod tests {
         assert_eq!(endpoint::join_scope(&[], ""), "/");
     }
 
+    fn anns(list: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        list.iter()
+            .map(|(n, a)| (n.to_string(), a.map(str::to_string)))
+            .collect()
+    }
+
+    /// A14.4: the JVM annotation-route recipe both the Java and the Kotlin
+    /// parser call. Pinned case by case against the A4.4 behaviour it was
+    /// hoisted from, so a Java ROUTE name cannot move with the hoist.
+    #[test]
+    fn jvm_annotation_routes_compose_like_a4_4() {
+        use endpoint::{compose_route_path, jvm_annotation_routes, jvm_route_prefix};
+        // Class level: `@RestController @RequestMapping("/api")` — the prefix
+        // itself is an ANY route; the stereotype maps nothing.
+        let class = anns(&[("RestController", None), ("RequestMapping", Some("/api"))]);
+        assert_eq!(jvm_route_prefix(&class), "/api");
+        assert_eq!(jvm_annotation_routes(&class, ""), vec![("ANY", "/api".to_string())]);
+        // Method level composes onto the prefix; a leading `/` does not reset it.
+        let get = anns(&[("GetMapping", Some("/users/{id}"))]);
+        assert_eq!(
+            jvm_annotation_routes(&get, "/api"),
+            vec![("GET", "/api/users/{id}".to_string())]
+        );
+        assert_eq!(jvm_annotation_routes(&get, ""), vec![("GET", "/users/{id}".to_string())]);
+        // A marker maps the prefix; with no prefix it names nothing.
+        let post = anns(&[("PostMapping", None)]);
+        assert_eq!(jvm_annotation_routes(&post, "api"), vec![("POST", "/api".to_string())]);
+        assert!(jvm_annotation_routes(&post, "").is_empty());
+        // Micronaut `@Controller("/m")` + `@Get("/x")`.
+        let micronaut = anns(&[("Controller", Some("/m"))]);
+        assert_eq!(jvm_route_prefix(&micronaut), "/m");
+        assert_eq!(
+            jvm_annotation_routes(&anns(&[("Get", Some("/x"))]), "/m"),
+            vec![("GET", "/m/x".to_string())]
+        );
+        // JAX-RS: `@GET @Path("/{id}")` under `@Path("/r")`; a bare `@DELETE`
+        // maps the resource root; `@Path` alone is ANY.
+        let jaxrs = anns(&[("GET", None), ("Path", Some("/{id}"))]);
+        assert_eq!(jvm_annotation_routes(&jaxrs, "/r"), vec![("GET", "/r/{id}".to_string())]);
+        assert_eq!(
+            jvm_annotation_routes(&anns(&[("DELETE", None)]), "/r"),
+            vec![("DELETE", "/r".to_string())]
+        );
+        assert_eq!(
+            jvm_annotation_routes(&anns(&[("Path", Some("/r"))]), ""),
+            vec![("ANY", "/r".to_string())]
+        );
+        // An empty prefix argument is no prefix.
+        assert_eq!(jvm_route_prefix(&anns(&[("RequestMapping", Some(""))])), "");
+        assert_eq!(compose_route_path("/api/", "users"), "/api/users");
+        assert_eq!(compose_route_path("api", ""), "/api");
+    }
+
+    #[test]
+    fn jvm_vocabulary_is_shared_by_both_parsers() {
+        assert_eq!(jvm::data_entity_qname(jvm::SQL_FLAVOR, "User"), "data_entity:sql:User");
+        assert_eq!(jvm::DATA_ENTITY_ANNOTATIONS[0], ("Document", jvm::NOSQL_FLAVOR));
+        assert_eq!(jvm::repository_flavor("JpaRepository"), Some("sql"));
+        assert_eq!(jvm::repository_flavor("ReactiveMongoRepository"), Some("nosql"));
+        assert_eq!(jvm::repository_flavor("CoroutineCrudRepository"), Some("sql"));
+        assert_eq!(jvm::repository_flavor("UserRepository"), None);
+        assert!(jvm::is_non_injectable_type("String"));
+        assert!(!jvm::is_non_injectable_type("Int"), "Java list stays Java's");
+        assert!(jvm::is_kotlin_value_type("Int"));
+        assert!(!jvm::is_kotlin_value_type("UserService"));
+    }
+
+    #[test]
+    fn di_stats_render_kotlin_shapes_under_the_kotlin_token() {
+        use di_stats::{DiShape, render};
+        let mut shapes = [0usize; 16];
+        shapes[DiShape::KotlinCtor as usize] = 1;
+        shapes[DiShape::KotlinField as usize] = 1;
+        assert_eq!(
+            render(&[("kotlin", 2)], &shapes, "k").as_deref(),
+            Some(
+                "[di] injects refs: python=0 go=0 typescript=0 java=0 csharp=0 php=0 scala=0 kotlin=2 \
+                 (shapes: kotlin-ctor=1 kotlin-field=1) repo=k"
+            )
+        );
+    }
+
     /// `abs_path` is the single place a route template is forced to exactly
     /// one leading `/`. It must never trim a trailing one — `normalise_http_path`
     /// in repo-graph-graph already does that, and doing it twice would move
@@ -3192,13 +3522,21 @@ mod tests {
             "php-ctor",
             "go-provider",
             "scala-ctor",
+            "kotlin-ctor",
+            "kotlin-field",
         ];
-        assert_eq!(DiShape::ALL.len(), 14);
+        assert_eq!(DiShape::ALL.len(), 16);
         for (i, s) in DiShape::ALL.iter().enumerate() {
             // Counter bank and render both rely on ALL[i] as usize == i.
             assert_eq!(*s as usize, i);
             assert_eq!(s.token(), tokens[i]);
-            assert!(LANGS.contains(&s.lang()), "{:?} -> {}", s, s.lang());
+            // A LANGS row, or kotlin: not a matrix row, printed when non-zero.
+            assert!(
+                LANGS.contains(&s.lang()) || s.lang() == "kotlin",
+                "{:?} -> {}",
+                s,
+                s.lang()
+            );
             // A token must never read as a language token under a `lang=` grep.
             assert!(!LANGS.contains(&s.token()));
         }
@@ -3220,12 +3558,12 @@ mod tests {
     #[test]
     fn di_stats_render_prints_every_lang_and_only_fired_shapes() {
         use di_stats::{DiShape, render};
-        let none = [0usize; 14];
+        let none = [0usize; 16];
         // Nothing counted: no line at all.
         assert_eq!(render(&[], &none, "r"), None);
         assert_eq!(render(&[("typescript", 0), ("dart", 0)], &none, "r"), None);
 
-        let mut shapes = [0usize; 14];
+        let mut shapes = [0usize; 16];
         shapes[DiShape::GoProvider as usize] = 2;
         // Repeated languages sum; a non-LANGS language appears only when non-zero.
         let line = render(

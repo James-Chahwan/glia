@@ -10,6 +10,7 @@ pub use repo_graph_code_domain::{
 use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
+use repo_graph_code_domain::jvm;
 
 pub fn parse_file(
     source: &str,
@@ -339,7 +340,7 @@ impl DeclarativeCounts {
     }
 }
 
-/// Spring 6 HTTP-interface verb annotations. Kept apart from [`mapping_verb`]
+/// Spring 6 HTTP-interface verb annotations. Kept apart from `endpoint::mapping_verb`
 /// so the server path (`check_route_annotations`) never reads them.
 fn exchange_verb(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -512,7 +513,7 @@ fn client_mappings<'a>(
         ClientFlavour::Feign => {
             for (name, ann) in &anns {
                 if name.ends_with("Mapping")
-                    && let Some(verb) = mapping_verb(name)
+                    && let Some(verb) = endpoint::mapping_verb(name)
                 {
                     out.push((verb.to_string(), ann_path(*ann, &["value", "path"], src), *ann));
                 } else if name == "RequestMapping" {
@@ -606,7 +607,7 @@ fn emit_client_mappings(
         } else {
             (
                 iface.host.clone(),
-                compose_route_path(&iface.prefix, &tmpl),
+                endpoint::compose_route_path(&iface.prefix, &tmpl),
             )
         };
         // Drops a query / fragment (`users?sort=desc`); `raw` is absolute.
@@ -1088,33 +1089,23 @@ fn emit_heritage_ref(
     });
 }
 
-/// DATA_ENTITY flavor of a relational model (JPA `@Entity`) — the `<flavor>`
-/// segment of `data_entity:<flavor>:<name>`, the vocabulary every DATA_ENTITY
-/// emitter shares and DbResolver buckets on.
-const SQL_FLAVOR: &str = "sql";
-/// DATA_ENTITY flavor of a document model (Spring Data Mongo `@Document`).
-const NOSQL_FLAVOR: &str = "nosql";
-
-/// Class-level annotations that mark a persistent data model → DATA_ENTITY, with
-/// the flavor each implies. Checked in order: `@Document` first, so a class
-/// carrying both is a Mongo document.
-const DATA_ENTITY_ANNOTATIONS: &[(&str, &str)] =
-    &[("@Document", NOSQL_FLAVOR), ("@Entity", SQL_FLAVOR)];
-
 /// The DATA_ENTITY flavor of a class carrying a persistence annotation, or
-/// `None` when it carries none (no DATA_ENTITY projection).
+/// `None` when it carries none (no DATA_ENTITY projection). The annotation
+/// table (`@Document` before `@Entity`) is the JVM family's, shared with the
+/// Kotlin parser (A14.4).
 fn data_entity_flavor(node: &TsNode, src: &[u8]) -> Option<&'static str> {
     let mods = modifiers_text(node, src)?;
-    DATA_ENTITY_ANNOTATIONS
+    jvm::DATA_ENTITY_ANNOTATIONS
         .iter()
-        .find(|(ann, _)| has_annotation(mods, ann))
+        .find(|(ann, _)| has_annotation(mods, &format!("@{ann}")))
         .map(|(_, flavor)| *flavor)
 }
 
-/// The DATA_ENTITY qname `data_entity:<flavor>:<simple_name>`. The SURFACE name
-/// is kept verbatim — DbResolver folds it to its canonical form at index time.
+/// The DATA_ENTITY qname `data_entity:<flavor>:<simple_name>` — the JVM
+/// family's recipe (`jvm::data_entity_qname`), so a Kotlin repository and a
+/// Java entity of one model name the same node.
 fn data_entity_qname(flavor: &str, simple_name: &str) -> String {
-    format!("data_entity:{flavor}:{simple_name}")
+    jvm::data_entity_qname(flavor, simple_name)
 }
 
 /// Stable, name-derived DATA_ENTITY id — the one constructor both the entity
@@ -1155,26 +1146,6 @@ fn emit_data_entity(flavor: &str, name: &str, class_id: NodeId, repo: RepoId, ac
     acc.nav
         .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
 }
-
-/// Spring Data repository base interfaces whose first type parameter is the
-/// managed entity (`interface FooRepo extends JpaRepository<Foo, Long>`), with
-/// the DATA_ENTITY flavor of that entity. The Mongo bases manage `@Document`s
-/// (`nosql`); every other base is read as managing a JPA `@Entity` (`sql`). The
-/// store-agnostic bases (`Repository`, `CrudRepository`, …) carry no store of
-/// their own, so over a `@Document` declared in another file they name the `sql`
-/// id and the edge does not reach the `nosql` node.
-const REPOSITORY_BASES: &[(&str, &str)] = &[
-    ("Repository", SQL_FLAVOR),
-    ("CrudRepository", SQL_FLAVOR),
-    ("JpaRepository", SQL_FLAVOR),
-    ("PagingAndSortingRepository", SQL_FLAVOR),
-    ("JpaSpecificationExecutor", SQL_FLAVOR),
-    ("ReactiveCrudRepository", SQL_FLAVOR),
-    ("ReactiveSortingRepository", SQL_FLAVOR),
-    ("R2dbcRepository", SQL_FLAVOR),
-    ("MongoRepository", NOSQL_FLAVOR),
-    ("ReactiveMongoRepository", NOSQL_FLAVOR),
-];
 
 /// Detect `extends <RepositoryBase>< Entity, … >` on a class or interface and emit
 /// an ACCESSES_DATA edge from the repository to the entity's DATA_ENTITY node.
@@ -1240,7 +1211,9 @@ fn repository_entity(generic: TsNode, src: &[u8]) -> Option<(String, &'static st
     }
     let base = base?;
     let base_simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
-    let &(_, flavor) = REPOSITORY_BASES.iter().find(|(b, _)| *b == base_simple)?;
+    // The Spring Data bases (and the flavor each implies) are the JVM
+    // family's table, `jvm::REPOSITORY_BASES`, shared with the Kotlin parser.
+    let flavor = jvm::repository_flavor(base_simple)?;
     let targs = targs?;
     let mut tc = targs.walk();
     for arg in targs.named_children(&mut tc) {
@@ -1382,25 +1355,10 @@ fn is_spring_bean(node: &TsNode, src: &[u8]) -> bool {
 
 /// Types that are never DI beans — skip them as injected dependencies
 /// (primitives are excluded structurally by node kind; this is the boxed /
-/// value-type denylist for `type_identifier` nodes).
+/// value-type denylist for `type_identifier` nodes). The JVM family's list,
+/// shared with the Kotlin parser (A14.4).
 fn is_non_injectable_type(name: &str) -> bool {
-    matches!(
-        name,
-        "String"
-            | "CharSequence"
-            | "Object"
-            | "Integer"
-            | "Long"
-            | "Double"
-            | "Float"
-            | "Short"
-            | "Byte"
-            | "Boolean"
-            | "Character"
-            | "Number"
-            | "BigDecimal"
-            | "BigInteger"
-    )
+    jvm::is_non_injectable_type(name)
 }
 
 /// Simple type name of an injectable dependency, or `None` for primitives,
@@ -1616,65 +1574,19 @@ fn annotation_string_arg(args: TsNode, src: &[u8]) -> Option<String> {
     bare.or_else(|| extract_annotation_string(text_of(args, src)))
 }
 
-/// The route prefix a type contributes to its action methods: the first of
-/// Spring `@RequestMapping`, Micronaut `@Controller` or JAX-RS `@Path` that
-/// carries a non-empty string argument. Empty when the type is not prefixed.
+/// The route prefix a type contributes to its action methods (Spring
+/// `@RequestMapping`, Micronaut `@Controller`, JAX-RS `@Path`). The recipe is
+/// the JVM family's, `endpoint::jvm_route_prefix`, shared with the Kotlin
+/// parser (A14.4) so both languages compose alike.
 fn class_route_prefix(type_node: TsNode, src: &[u8]) -> String {
-    for (name, arg) in own_annotations(type_node, src) {
-        if matches!(name.as_str(), "RequestMapping" | "Controller" | "Path")
-            && let Some(p) = arg
-            && !p.is_empty()
-        {
-            return p;
-        }
-    }
-    String::new()
-}
-
-/// Spring `@GetMapping`-style and Micronaut `@Get`-style verb annotations.
-fn mapping_verb(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "GetMapping" | "Get" => "GET",
-        "PostMapping" | "Post" => "POST",
-        "PutMapping" | "Put" => "PUT",
-        "DeleteMapping" | "Delete" => "DELETE",
-        "PatchMapping" | "Patch" => "PATCH",
-        "Head" => "HEAD",
-        "Options" => "OPTIONS",
-        _ => return None,
-    })
-}
-
-/// JAX-RS verb markers (`@GET`, `@POST`, …) — upper-case, so they never
-/// collide with Micronaut's `@Get` / `@Post`.
-fn jaxrs_verb(anns: &[(String, Option<String>)]) -> Option<&'static str> {
-    anns.iter().find_map(|(n, _)| match n.as_str() {
-        "GET" => Some("GET"),
-        "POST" => Some("POST"),
-        "PUT" => Some("PUT"),
-        "DELETE" => Some("DELETE"),
-        "PATCH" => Some("PATCH"),
-        "HEAD" => Some("HEAD"),
-        "OPTIONS" => Some("OPTIONS"),
-        _ => None,
-    })
-}
-
-/// Compose a class-level prefix with an action template. Spring, Micronaut and
-/// JAX-RS all CONCATENATE — a leading `/` on the method template does not make
-/// it absolute — so `@RequestMapping("/api/v1/users")` + `@GetMapping("/{id}")`
-/// is `/api/v1/users/{id}`. `join_path` does the slash bookkeeping; `abs_path`
-/// supplies the leading `/` that `join_path` deliberately does not force.
-fn compose_route_path(class_prefix: &str, tmpl: &str) -> String {
-    if tmpl.is_empty() {
-        return endpoint::abs_path(class_prefix);
-    }
-    endpoint::abs_path(&endpoint::join_path(class_prefix, tmpl))
+    endpoint::jvm_route_prefix(&own_annotations(type_node, src))
 }
 
 /// Emit the ROUTEs declared by THIS declaration's own annotations, composed
 /// onto `class_prefix` (empty at class level, the enclosing type's prefix at
-/// method level). Returns how many routes were emitted.
+/// method level). Returns how many routes were emitted. Which annotations map
+/// which `{VERB} {path}` is `endpoint::jvm_annotation_routes` — the one ROUTE
+/// recipe the Java and Kotlin parsers share (A14.4).
 fn check_route_annotations(
     node: TsNode,
     src: &[u8],
@@ -1684,47 +1596,11 @@ fn check_route_annotations(
     class_prefix: &str,
     acc: &mut Acc,
 ) -> usize {
-    let anns = own_annotations(node, src);
-    let mut emitted = 0usize;
-    // A marker annotation (`@PostMapping`) carries no template of its own: it
-    // maps the class prefix itself. With no prefix either there is nothing to
-    // name, so stay silent rather than invent a route.
-    let mut emit = |verb: &str, tmpl: Option<&str>, acc: &mut Acc| {
-        if tmpl.is_none() && class_prefix.is_empty() {
-            return;
-        }
-        emit_route(
-            verb,
-            &compose_route_path(class_prefix, tmpl.unwrap_or_default()),
-            handler_id,
-            repo,
-            acc,
-        );
-        emitted += 1;
-    };
-
-    for (name, arg) in &anns {
-        // Spring @GetMapping("/x") / Micronaut @Get("/x").
-        if let Some(verb) = mapping_verb(name) {
-            emit(verb, arg.as_deref(), acc);
-        }
-        // Spring @RequestMapping — `method = RequestMethod.GET` is not read, so
-        // it stays the ANY wildcard it has always been.
-        // Micronaut @Controller("/api") — the class base route.
-        if matches!(name.as_str(), "RequestMapping" | "Controller") {
-            emit("ANY", arg.as_deref(), acc);
-        }
+    let routes = endpoint::jvm_annotation_routes(&own_annotations(node, src), class_prefix);
+    for (verb, path) in &routes {
+        emit_route(verb, path, handler_id, repo, acc);
     }
-
-    // JAX-RS: @Path("/x") with the verb from a marker on the SAME declaration.
-    let verb = jaxrs_verb(&anns);
-    if let Some((_, arg)) = anns.iter().find(|(n, _)| n == "Path") {
-        emit(verb.unwrap_or("ANY"), arg.as_deref(), acc);
-    } else if let Some(verb) = verb {
-        // A verb marker with no @Path maps the resource root itself.
-        emit(verb, None, acc);
-    }
-    emitted
+    routes.len()
 }
 
 fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &mut Acc) {

@@ -2,14 +2,15 @@
   "framework": "kotlin",
   "language": "kotlin",
   "dirs": ["."],
-  "note": "A14.1 baseline: no Kotlin parser; .kt went through the Java grammar — 4 nodes / 2 edges, only INTERFACE Auditable found, every edge cell 0.00. A14.2 (kotlin parser): 19 nodes / 19 edges, all six nodes found, DEFINES and IMPORTS 1.00; CALLS / INHERITS_FROM / IMPLEMENTS stay 0.00 for A14.3.",
+  "note": "A14.1 baseline: no Kotlin parser; .kt went through the Java grammar — 4 nodes / 2 edges, only INTERFACE Auditable found, every edge cell 0.00. A14.2 (kotlin parser): 19 nodes / 19 edges, all six nodes found, DEFINES and IMPORTS 1.00; CALLS / INHERITS_FROM / IMPLEMENTS stay 0.00 for A14.3. A14.4: api.kt's @GetMapping mints ROUTE GET /users/{id}.",
   "expect_nodes": [
     {"kind": "CLASS",     "name": "UserController", "note": "primary constructor killed the class node under the java grammar; found since A14.2"},
     {"kind": "CLASS",     "name": "UserService",    "note": "`: BaseService()` heritage killed the class node under the java grammar; found since A14.2"},
     {"kind": "CLASS",     "name": "UserDto",        "note": "data class; found since A14.2"},
     {"kind": "INTERFACE", "name": "Auditable",      "note": "found under the java grammar too — regression guard"},
     {"kind": "METHOD",    "name": "getUser",        "note": "no `fun` was a declaration under the java grammar; found since A14.2"},
-    {"kind": "FUNCTION",  "name": "topLevelHelper", "note": "top-level fun is a FUNCTION, a member fun a METHOD (A14.2)"}
+    {"kind": "FUNCTION",  "name": "topLevelHelper", "note": "top-level fun is a FUNCTION, a member fun a METHOD (A14.2)"},
+    {"kind": "ROUTE",     "name": "GET /users/{id}", "note": "@GetMapping on a method of an @RestController class (A14.4 annotation routes); this fixture is not Spring-named, so it is the negative control that the annotation table fires on any Kotlin controller"}
   ],
   "expect_edges": [
     {"from": "UserController", "to": "getUser",     "category": "DEFINES",       "note": "class -> method"},
