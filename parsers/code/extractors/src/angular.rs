@@ -6,7 +6,8 @@
 //!   - DIRECTIVE: class with `@Directive({...})` decorator.
 //!   - PIPE: class with `@Pipe({...})` decorator.
 //!   - GUARD: classes ending in `Guard` (CanActivate/CanDeactivate patterns).
-//!   - ROUTE: `{ path: 'users', component: UsersComponent }` entries (GET).
+//!   - ROUTE: `{ path: 'users', component: UsersComponent }` entries — a
+//!     browser page, qname `page:/users` (LB.4c), name `/users`, method GET.
 
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
@@ -43,7 +44,9 @@ pub fn extract_angular_nodes(
     }
 
     // Angular Router entries are BROWSER navigation, not server endpoints
-    // (A3.4) — marked so the HTTP route index skips them.
+    // (A3.4) — marked so the HTTP route index skips them. LB.4c: a page lives
+    // in its own `page:<path>` qname namespace, so it never shares a NodeId
+    // with a same-repo server route `GET <path>`.
     let mut nav_routes = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in scan_angular_router_paths(source) {
@@ -52,7 +55,7 @@ pub fn extract_angular_nodes(
         } else {
             format!("/{path}")
         };
-        let canonical = format!("GET {normalized}");
+        let canonical = format!("page:{normalized}");
         if !seen.insert(canonical.clone()) {
             continue;
         }
@@ -69,7 +72,7 @@ pub fn extract_angular_nodes(
                 nav_route_origin_cell(),
             ],
         });
-        nav.record(id, &canonical, &canonical, node_kind::ROUTE, None);
+        nav.record(id, &normalized, &canonical, node_kind::ROUTE, None);
         nav_routes += 1;
     }
 
@@ -384,9 +387,20 @@ RouterModule.forRoot(routes);
             .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
             .map(|(_, n)| n.as_str())
             .collect();
-        assert!(names.contains(&"GET /users"));
-        assert!(names.contains(&"GET /users/:id"));
-        assert!(names.contains(&"GET /"));
+        assert!(names.contains(&"/users"));
+        assert!(names.contains(&"/users/:id"));
+        assert!(names.contains(&"/"));
+        // LB.4c: a nav page lives in the `page:<path>` qname namespace, its
+        // display name is the bare path.
+        let mut qnames: Vec<&str> = r
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, q)| q.as_str())
+            .collect();
+        qnames.sort_unstable();
+        assert_eq!(qnames, ["page:/", "page:/users", "page:/users/:id"]);
         assert_eq!(r.nav_routes, 3, "A3.4: every client-router ROUTE counted");
         // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
         // is what `graph::resolvers::http::is_nav_route` reads to keep it out of

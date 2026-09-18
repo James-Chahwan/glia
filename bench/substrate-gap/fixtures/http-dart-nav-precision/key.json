@@ -2,14 +2,14 @@
   "framework": "http-dart-nav-precision",
   "language": "dart",
   "dirs": ["."],
-  "note": "A3.1 x A3.4 interaction guard. A3.1 makes the route index treat the method string \"ANY\" as a wildcard, so an ANY route pairs with any client verb. Dart's go_router emits every GoRoute with method \"ANY\" — so without A3.4's nav marking, turning on the ANY tier would make EVERY go_router entry an HTTP_CALLS target and this same-app `dio.get('/users')` would pair to the app's own navigation table. A3.4 stamps those ROUTEs with an ORIGIN `provenance: nav_route` cell and build_route_index skips them. Deliberately legacy-only (no `cells`): dart/http_client is already measured by dart-http-dio, this is its precision twin. Both nodes must survive — only the pairing must never exist.",
+  "note": "A3.1 x A3.4 interaction guard. A3.1 makes the route index treat the method string \"ANY\" as a wildcard, so an ANY route pairs with any client verb. Dart's go_router emits every GoRoute with method \"ANY\" — so without A3.4's nav marking, turning on the ANY tier would make EVERY go_router entry an HTTP_CALLS target and this same-app `dio.get('/users')` would pair to the app's own navigation table. A3.4 stamps those ROUTEs with an ORIGIN `provenance: nav_route` cell and build_route_index skips them. Deliberately legacy-only (no `cells`): dart/http_client is already measured by dart-http-dio, this is its precision twin. Both nodes must survive — only the pairing must never exist. LB.4c: go_router entries are `page:<path>` (name = the path; ROUTE_METHOD ANY kept), so a page never shares an identity with a server `ANY /users`; the forbid row targets the page's qname.",
   "expect_nodes": [
-    {"kind": "ROUTE", "name": "ANY /users", "note": "go_router nav route — still a node ('where is /users rendered?' is a real query), just never an HTTP target"},
+    {"kind": "ROUTE", "name": "page:/users", "note": "go_router nav route (LB.4c: qname `page:/users`) — still a node ('where is /users rendered?' is a real query), just never an HTTP target"},
     {"kind": "ENDPOINT", "name": "endpoint:GET:/users", "note": "the same-app dio.get, an outbound call to a REMOTE server"}
   ],
   "expect_edges": [],
   "forbid": [
-    {"from": "endpoint:GET:/users", "to": "ANY /users", "category": "HTTP_CALLS",
-     "note": "THE INTERACTION BUG: an ANY-method browser navigation target is not a server endpoint. Matched on the endpoint's qname and the nav ROUTE's name, since forbid matches EXACTLY."}
+    {"from": "endpoint:GET:/users", "to": "page:/users", "category": "HTTP_CALLS",
+     "note": "THE INTERACTION BUG: an ANY-method browser navigation target is not a server endpoint. Matched EXACTLY on the endpoint's qname and the nav page's qname `page:/users` (LB.4c)."}
   ]
 }

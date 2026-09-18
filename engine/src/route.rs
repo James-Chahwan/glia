@@ -431,10 +431,29 @@ pub(crate) fn parse_repo_files(
     }
 
     // A3.4 fired_on marker: client-router ROUTE nodes were tagged
-    // `provenance: nav_route` so the HTTP route index can skip them. Only
-    // printed when a build actually marked one.
-    if nav_routes_marked > 0 {
-        eprintln!("[extract] nav-routes marked: {nav_routes_marked}");
+    // `provenance: nav_route` so the HTTP route index can skip them.
+    // LB.4c: `page-qnamed` counts the nav pages minted in the `page:<path>`
+    // qname namespace across EVERY parse — cache-served ones too, and dart's
+    // go_router pages, which have no stats channel into `nav_routes_marked`.
+    // A sum of per-file counts, so HashMap iteration order cannot leak into it.
+    // Kind-gated to ROUTE: a module qnamed `page` (a root `page.tsx`) has
+    // children `page::X`, which a bare prefix test would miscount.
+    // Only printed when a build actually has one.
+    let page_qnamed: usize = parses_by_lang
+        .values()
+        .flatten()
+        .map(|fp| {
+            fp.nav
+                .qname_by_id
+                .iter()
+                .filter(|(id, q)| {
+                    q.starts_with("page:") && fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE)
+                })
+                .count()
+        })
+        .sum();
+    if nav_routes_marked > 0 || page_qnamed > 0 {
+        eprintln!("[extract] nav-routes marked: {nav_routes_marked} (page-qnamed {page_qnamed})");
     }
     // A3.5 fired_on marker: ts_routes declined to mint a server ROUTE from an
     // HTTP-client call (`this.http.get('/users')`). Only printed when it did.

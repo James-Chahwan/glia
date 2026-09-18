@@ -2,14 +2,14 @@
   "framework": "http-nav-route-precision",
   "language": "typescript",
   "dirs": ["."],
-  "note": "Deliberately legacy-only (no `cells`): this is a PRECISION twin of ts-http-fetch, not a new recall cell — typescript/http_client is already measured there. A single-repo React SPA that both navigates to /dashboard (react-router) and fetches /dashboard. The react-router ROUTE is a browser navigation target, but index_route_node's legacy `<METHOD> <path>` branch cannot tell it from a Spring/Express server route, so the same-repo fetch pairs to the app's own navigation table and HttpStackResolver emits a false HTTP_CALLS edge (a blast_radius carry edge and a weight-5.0 PPR edge). A3.4 marks client-router ROUTEs with an ORIGIN `provenance: nav_route` cell and skips them when building the route index. Both nodes must survive — only the pairing dies.",
+  "note": "Deliberately legacy-only (no `cells`): this is a PRECISION twin of ts-http-fetch, not a new recall cell — typescript/http_client is already measured there. A single-repo React SPA that both navigates to /dashboard (react-router) and fetches /dashboard. The react-router ROUTE is a browser navigation target, but index_route_node's legacy `<METHOD> <path>` branch cannot tell it from a Spring/Express server route, so the same-repo fetch pairs to the app's own navigation table and HttpStackResolver emits a false HTTP_CALLS edge (a blast_radius carry edge and a weight-5.0 PPR edge). A3.4 marks client-router ROUTEs with an ORIGIN `provenance: nav_route` cell and skips them when building the route index. Both nodes must survive — only the pairing dies. LB.4c: the nav page has its own qname namespace (`page:<path>`, name `/dashboard`), so it no longer shares an identity with a server `GET /dashboard`; the forbid row targets the page's qname (a stale `to: GET /dashboard` would pass vacuously - a dead precision gate).",
   "expect_nodes": [
-    {"kind": "ROUTE", "name": "GET /dashboard", "note": "react-router nav route — still a node ('where is /dashboard rendered?' is a real query), just not an HTTP target"},
+    {"kind": "ROUTE", "name": "page:/dashboard", "note": "react-router nav route (LB.4c: qname `page:/dashboard`) — still a node ('where is /dashboard rendered?' is a real query), just not an HTTP target"},
     {"kind": "ENDPOINT", "name": "endpoint:GET:/dashboard", "note": "the same-repo fetch"}
   ],
   "expect_edges": [],
   "forbid": [
-    {"from": "endpoint:GET:/dashboard", "to": "GET /dashboard", "category": "HTTP_CALLS",
-     "note": "THE BUG: a browser navigation target is not a server endpoint; nothing in this SPA may pair. Matched on the endpoint's qname and the nav ROUTE's name, since forbid matches EXACTLY (both nodes share the display name 'GET /dashboard')."}
+    {"from": "endpoint:GET:/dashboard", "to": "page:/dashboard", "category": "HTTP_CALLS",
+     "note": "THE BUG: a browser navigation target is not a server endpoint; nothing in this SPA may pair. Matched EXACTLY on the endpoint's qname and the nav page's qname `page:/dashboard` (LB.4c; before it, both nodes shared the display name 'GET /dashboard')."}
   ]
 }

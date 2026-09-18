@@ -682,11 +682,12 @@ fn dart_string_path(string_literal: TsNode, src: &[u8]) -> String {
 // Two framework surfaces covered via text scan (robust to tree-sitter-dart's
 // no-field-name quirk):
 //
-//   go_router navigation:  GoRoute(path: '/users', ...)  → ANY /users
+//   go_router navigation:  GoRoute(path: '/users', ...)  → page:/users (ANY)
 //   shelf / shelf_router:  router.get('/users', handler) → GET /users
 //                          ..post('/x', h)  (cascade)    → POST /x
 //
-// Shape B ROUTE nodes (METHOD <path> qname + Text ROUTE_METHOD cell).
+// Shape B ROUTE nodes (METHOD <path> qname + Text ROUTE_METHOD cell) for the
+// server routes; go_router pages take the `page:<path>` qname (LB.4c).
 
 fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
     // Track emitted routes to dedup — a file may hit the same path twice
@@ -769,9 +770,15 @@ fn first_string_literal_dart(s: &str) -> Option<String> {
 /// and a same-app `dio.get('/users')` cannot pair to the app's own navigation
 /// table. The node itself survives — only the pairing is suppressed.
 ///
+/// LB.4c: a nav page lives in its own qname namespace — qname `page:<path>`,
+/// display name `<path>` — so it never shares a NodeId with a server route on
+/// the same path (`<METHOD> <path>`). ROUTE_METHOD stays the passed method.
+///
 /// Dart has no stats channel out of `parse_file`, so nav routes marked here are
-/// not counted in the engine's `[extract] nav-routes marked` line; the
-/// graph-side `[http] nav-routes excluded from route index` marker covers them.
+/// not in the engine's `[extract] nav-routes marked: N` count; they ARE in that
+/// line's `(page-qnamed P)` figure, which the engine counts off the parses'
+/// `page:` qnames. The graph-side `[http] nav-routes excluded from route index`
+/// marker covers them too.
 fn emit_dart_route(
     method: &str,
     path: &str,
@@ -780,12 +787,17 @@ fn emit_dart_route(
     seen: &mut std::collections::HashSet<(String, String)>,
     nav: bool,
 ) {
-    let key = (method.to_string(), path.to_string());
+    let route_qname = if nav {
+        format!("page:{path}")
+    } else {
+        format!("{method} {path}")
+    };
+    let display_name = if nav { path } else { route_qname.as_str() };
+    let key = (method.to_string(), route_qname.clone());
     if !seen.insert(key) {
         return;
     }
-    let route_name = format!("{method} {path}");
-    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_qname);
     let mut cells = vec![Cell {
         kind: cell_type::ROUTE_METHOD,
         payload: CellPayload::Text(method.to_string()),
@@ -803,7 +815,7 @@ fn emit_dart_route(
         cells,
     });
     acc.nav
-        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+        .record(route_id, display_name, &route_qname, node_kind::ROUTE, None);
 }
 
 fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -971,8 +983,72 @@ final router = GoRouter(routes: [
 ]);
 "#;
         let fp = parse_file(source, "lib/router.dart", "lib::router", repo()).unwrap();
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("ANY", "/users")));
-        assert!(fp.nodes.iter().any(|n| n.id == route_id("ANY", "/users/:id")));
+        // LB.4c: go_router pages are `page:<path>`, display name the bare path,
+        // never the `ANY <path>` shape a server route on the same path takes.
+        for path in ["/users", "/users/:id"] {
+            let id = page_id(path);
+            let node = fp.nodes.iter().find(|n| n.id == id).expect("page node");
+            assert_eq!(
+                fp.nav.qname_by_id.get(&id).map(String::as_str),
+                Some(format!("page:{path}").as_str())
+            );
+            assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some(path));
+            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::ROUTE));
+            // ROUTE_METHOD and the A3.4 ORIGIN mark are unchanged.
+            assert!(node.cells.iter().any(|c| c.kind == cell_type::ROUTE_METHOD
+                && matches!(&c.payload, CellPayload::Text(m) if m == "ANY")));
+            assert!(node.cells.iter().any(|c| c.kind == cell_type::ORIGIN
+                && matches!(&c.payload, CellPayload::Json(j) if j.contains("\"provenance\":\"nav_route\""))));
+            assert!(!fp.nodes.iter().any(|n| n.id == route_id("ANY", path)));
+        }
+    }
+
+    fn page_id(path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ROUTE,
+            &format!("page:{path}"),
+        )
+    }
+
+    #[test]
+    fn go_router_page_and_shelf_route_on_one_path_are_two_nodes() {
+        // LB.4c: the page and the server route serving `/users` in one file
+        // keep distinct identities; only the server route keeps `<METHOD> <path>`
+        // and only the page carries the nav_route ORIGIN mark.
+        let source = r#"
+final router = GoRouter(routes: [
+  GoRoute(path: '/users', builder: (c, s) => UsersScreen()),
+]);
+final app = Router()
+  ..get('/users', handleList);
+"#;
+        let fp = parse_file(source, "lib/app.dart", "lib::app", repo()).unwrap();
+        let page = page_id("/users");
+        let server = route_id("GET", "/users");
+        assert_ne!(page, server);
+        let page_node = fp.nodes.iter().find(|n| n.id == page).expect("page node");
+        let server_node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == server)
+            .expect("server route");
+        assert!(page_node.cells.iter().any(|c| c.kind == cell_type::ORIGIN));
+        assert!(
+            !server_node
+                .cells
+                .iter()
+                .any(|c| c.kind == cell_type::ORIGIN)
+        );
+        assert_eq!(
+            fp.nav.name_by_id.get(&server).map(String::as_str),
+            Some("GET /users")
+        );
+        assert_eq!(
+            fp.nav.qname_by_id.get(&server).map(String::as_str),
+            Some("GET /users")
+        );
     }
 
     #[test]

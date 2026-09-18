@@ -1,0 +1,20 @@
+{
+  "framework": "http-nav-vs-server-route",
+  "language": "typescript+python",
+  "dirs": ["."],
+  "note": "LB.4c (legacy-only). One repo holding a React SPA and a Flask backend that both serve /users. Baseline at c80cb51 (debug CLI and installed wheel): two ROUTE records share qname `GET /users` (one NodeId, one stored in the TS graph and one in the Python graph) - the react-router nav page and the flask route - so the axios HTTP_CALLS edge lands on an id that is also the nav page. LB.4c gives client-router pages their own qname namespace (`page:<path>`, name = the path).",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "page:/users", "note": "react-router page, its own NodeId"},
+    {"kind": "ROUTE", "name": "GET /users", "note": "flask server route"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/users", "to": "GET /users", "category": "HTTP_CALLS", "note": "the axios call pairs to the server route"},
+    {"from": "GET /users", "to": "list_users", "category": "HANDLED_BY", "note": "@app.route -> view fn"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /users", "max_nodes": 1,
+     "note": "THE COLLISION: the nav page must not share the server route's qname (and so its NodeId). Exact on name or qname."},
+    {"from": "endpoint:GET:/users", "to": "page:/users", "category": "HTTP_CALLS",
+     "note": "a browser page is never an HTTP_CALLS target (A3.4 provenance skip, kept)"}
+  ]
+}

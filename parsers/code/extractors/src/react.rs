@@ -82,7 +82,9 @@ pub fn extract_react_nodes(
         nav.record(id, &name, &qname, node_kind::HOOK, Some(module_id));
     }
 
-    // --- React Router routes (browser-side, GET-only by nature).
+    // --- React Router routes (browser-side, GET-only by nature). LB.4c: a
+    // page lives in its own `page:<path>` qname namespace (name = the path), so
+    // a SPA page never shares a NodeId with a same-repo server `GET <path>`.
     let mut nav_routes = 0usize;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in scan_react_router_paths(source) {
@@ -94,7 +96,7 @@ pub fn extract_react_nodes(
         if path.contains("${") {
             continue;
         }
-        let canonical = format!("GET {path}");
+        let canonical = format!("page:{path}");
         if !seen.insert(canonical.clone()) {
             continue;
         }
@@ -111,7 +113,7 @@ pub fn extract_react_nodes(
                 nav_route_origin_cell(),
             ],
         });
-        nav.record(id, &canonical, &canonical, node_kind::ROUTE, None);
+        nav.record(id, &path, &canonical, node_kind::ROUTE, None);
         nav_routes += 1;
     }
 
@@ -376,8 +378,26 @@ export function UserCard({ user }: Props) {
             .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
             .map(|(_, n)| n.as_str())
             .collect();
-        assert!(names.contains(&"GET /users"));
-        assert!(names.contains(&"GET /users/:id"));
+        assert!(names.contains(&"/users"));
+        assert!(names.contains(&"/users/:id"));
+        // LB.4c: a nav page lives in the `page:<path>` qname namespace, its
+        // display name is the bare path.
+        let mut qnames: Vec<&str> = r
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, q)| q.as_str())
+            .collect();
+        qnames.sort_unstable();
+        assert_eq!(qnames, ["page:/users", "page:/users/:id"]);
+        // LB.4c: the page's NodeId is NOT the one a same-repo server route
+        // `GET /users` (Flask, Spring, Express, ...) hashes to — before LB.4c
+        // they were one NodeId stored in two per-language graphs.
+        let page = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "page:/users");
+        let server = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users");
+        assert!(r.nodes.iter().any(|n| n.id == page));
+        assert!(r.nodes.iter().all(|n| n.id != server));
         assert_eq!(r.nav_routes, 2, "A3.4: every client-router ROUTE counted");
         // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
         // is what `graph::resolvers::http::is_nav_route` reads to keep it out of
@@ -417,8 +437,19 @@ createBrowserRouter([
             .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
             .map(|(_, n)| n.as_str())
             .collect();
-        assert!(names.contains(&"GET /"));
-        assert!(names.contains(&"GET /about"));
+        assert!(names.contains(&"/"));
+        assert!(names.contains(&"/about"));
+        // LB.4c: a nav page lives in the `page:<path>` qname namespace, its
+        // display name is the bare path.
+        let mut qnames: Vec<&str> = r
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, _)| r.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, q)| q.as_str())
+            .collect();
+        qnames.sort_unstable();
+        assert_eq!(qnames, ["page:/", "page:/about"]);
     }
 
     #[test]
