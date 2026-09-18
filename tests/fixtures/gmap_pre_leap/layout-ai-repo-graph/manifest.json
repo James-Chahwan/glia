@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "engine_version": "0.4.18",
+  "build_stamp": "0.4.18+p3d23e8828e7ba01a",
+  "shards": [
+    {
+      "name": "repo-4408344475944711014-00",
+      "path": "repo-4408344475944711014-00.gmap",
+      "content_hash": "c83412944888110d"
+    },
+    {
+      "name": "repo-4408344475944711014-01",
+      "path": "repo-4408344475944711014-01.gmap",
+      "content_hash": "446838830b70eda0"
+    },
+    {
+      "name": "repo-4408344475944711014-02",
+      "path": "repo-4408344475944711014-02.gmap",
+      "content_hash": "7172c9f3a503185e"
+    }
+  ],
+  "cross": {
+    "name": "cross_stack",
+    "path": "cross_stack.gmap",
+    "content_hash": "0cf3b01c84994afa"
+  }
+}
