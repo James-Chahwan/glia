@@ -11,3 +11,6 @@ serde_json = "1"
 thiserror = "2"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 ignore = "0.4"
+# `.glia/overlay.toml` loader (LF.2a). `parse` only: the `display` writer
+# (toml_edit's serializer) is never compiled.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
