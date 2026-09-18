@@ -203,7 +203,7 @@ Specced — see section 7 for the packet counts, the schedule, and the decisions
 
 ## 6. Not in this leap
 
-- **Later:** communities, duplicate-flow detection, dominators (needs middleware extraction + a security-gate ruling),
+- **Later:** `.graphqls` routing, Go struct-held routers, ws / graphql / grpc client host narrowing, communities, duplicate-flow detection, dominators (needs middleware extraction + a security-gate ruling),
   hubs, RuntimeZone resolver, cross-repo node dedupe, Notion / wiki doc adapters, LSP, per-graph-area rebuilds
   (revisit if a big repo is slow after LG.1).
 - **Not doing:** error-handling / panic patterns, resource lifecycle (intra-procedural), articulation points,
@@ -258,8 +258,8 @@ no code has changed since.
 
 ### 7.1 Decisions (James, 2026-09-19)
 
-1. **Engram edits** (LG.7, LG.14): approved — *"Yeah sure I'll do it before that wave atleast"*. James puts Engram under
-   git before W32; the packets still back it up first.
+1. **Engram edits** (LG.7, LG.14): approved — *"Yeah sure I'll do it before that wave atleast"*. Engram is now a git
+   repo (baseline commit 8566a7b, 2026-09-19); the packets commit their Engram changes there.
 2. **pyo3 auto-persist**: dropped — *"Oh okay that's best to fix to place we git ignore and don't double write"*.
    `generate()` only builds; `save_to` / `save_to_default` are the one writer (LD.2). LC.9's layout dir
    `<repo>/.glia/graph/` writes its own `.gitignore` (`*`) so it never shows in any repo's `git status`; checked-in
@@ -288,29 +288,29 @@ into `leap-packets.json` with dependencies wired from the verifiers' notes; the 
   LA.31 tRPC POSITION; LA.32a gin ROUTE method + POSITION; LA.33 kafkajs-style callback consumers; LA.34 Dart bare
   self-calls; LA.35a/b Rust typed receivers (the LA.1b caveat row is narrowed to what stays blind, not deleted).
 
-### 7.3 Open after run 2 — decisions (recommendation first)
+### 7.3 Run 2 decisions — all taken as recommended (James, 2026-09-19: *"yeah go with your calls and run 3 also git init engram i guess because cbf"*)
 
 1. Solidity keeps `contracts::Token::Token::transfer`: a source unit is Solidity's namespace (solc names it
-   `contracts/Token.sol:Token`, and two files may both declare `contract Token`). **Keep.**
+   `contracts/Token.sol:Token`, and two files may both declare `contract Token`). **Kept.**
 2. C++ doubles too (`src::Widget::Widget::run`), and a `.h` / `.cpp` pair shares one MODULE. Needs its own design
-   (namespace scope, header/impl split). **Spec it into B.**
+   (namespace scope, header/impl split). **Specced in run 3.**
 3. PHP goes to directory scope (Laravel / Symfony put everything in `App`), file-scoped C# to namespace scope (.NET
-   namespaces are project-named). **Confirm the split.**
+   namespaces are project-named). **Confirmed.**
 4. LB.8 covers queue / ws / graphql / grpc; tRPC (RPC_PROCEDURE / RPC_CALL) and the in-process event bus collapse the
-   same way — one table row and one resolver line each. **Add them to B now.**
+   same way — one table row and one resolver line each. **Specced in run 3 (LB.8b).**
 5. With LB.9b a file's identity depends on its siblings (adding `api/user.ts` renames `api/user.py`'s symbols); LB.6's
-   move-stable record is unchanged by it. **Accept.**
+   move-stable record is unchanged by it. **Accepted.**
 6. Run-2 scope beyond the item text: LA.25b, LA.25a's CLI `[parse]` lines, LA.26 gating the whole needle table, LA.29's
-   `.subscribe(` / typed-publish duplicate / AWS SDK `.send(new ...)` cases. **Accept all** (each is a measured false
+   `.subscribe(` / typed-publish duplicate / AWS SDK `.send(new ...)` cases. **Accepted** (each is a measured false
    positive or a silent failure).
-7. LA.27 recognises embedded SDL only in `typeDefs` / `type_defs` variables. **Accept**, with a coverage caveat row.
+7. LA.27 recognises embedded SDL only in `typeDefs` / `type_defs` variables. **Accepted**, with a coverage caveat row (LA.27 correction).
 8. Go ROUTE identity is path-only (`route:/activity/:id` is one node for GET, PATCH and DELETE, so a DELETE client
    traces into the GET handler); `ts_routes` has the same shape. Identity-shaped (the verifier cut it as LA.32b).
-   **Spec it into B.**
-9. LA.35b narrows LA.1b's Rust caveat row to what stays blind instead of deleting it. **Keep narrowed.**
-10. LA.33 keeps HANDLED_BY on the subscribing setup function and adds the edge to the bound callback. **Keep both.**
+   **Specced in run 3.**
+9. LA.35b narrows LA.1b's Rust caveat row to what stays blind instead of deleting it. **Kept narrowed.**
+10. LA.33 keeps HANDLED_BY on the subscribing setup function and adds the edge to the bound callback. **Kept both.**
 
-### 7.4 Found by run 2, no packet yet
+### 7.4 Found by run 2 — identity and correctness go to run 3, coverage waits for after 0.5.0
 
 Identity-shaped (B, if done): contract-op DOC_SECTION qnames `contract::<stem>::<op>` drop the directory, so two
 services' `openapi.yaml` ops collide; same-group same-stem files (`Widget.h` + `Widget.cpp`, `util.js` + `util.ts`,
@@ -325,9 +325,9 @@ build); eventbus event names can span newlines; `data_entities.rs` scanners mint
 `using` inside a block namespace and a PHP `use` inside a braced namespace never resolve (0 IMPORTS); LA.4's post-cache
 queue re-emit loses LE.4c's owner edges.
 
-Coverage: `.graphqls` files (Spring for GraphQL / gqlgen default) are never routed; Go struct-held routers
-(`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is HTTP
-only).
+Coverage (after 0.5.0): `.graphqls` files (Spring for GraphQL / gqlgen default) are never routed; Go struct-held
+routers (`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is
+HTTP only).
 
 ### 7.5 Spec-run hygiene
 
