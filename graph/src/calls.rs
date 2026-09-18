@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, UnresolvedRef, cell_type, edge_category, node_kind,
+    recv_stats,
 };
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
@@ -90,6 +91,18 @@ where
             CallQualifier::SuperMethod(_) => None,
             CallQualifier::ComplexReceiver { .. } => None,
         };
+
+        // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
+        // declared field of the enclosing type. Strictly AFTER every lookup
+        // above, so an import binding or module symbol that shares the
+        // field's name keeps today's target.
+        let resolved = resolved.or_else(|| {
+            let hit = resolve_via_receiver_type(g, site, from_module);
+            if hit.is_some() {
+                recv_stats::record();
+            }
+            hit
+        });
 
         let resolved = resolved.or_else(|| extra_hook(g, site));
 
@@ -421,6 +434,66 @@ fn enclosing_class_or_struct(nav: &CodeNav, start: NodeId) -> Option<NodeId> {
     }
 }
 
+// ============================================================================
+// Receiver-type inference (A6.2a)
+// ============================================================================
+
+/// The field a call receiver names, one hop off the enclosing instance:
+/// `this.svc` / `self.svc` / `svc` -> `Some("svc")`. Anything chained, called,
+/// indexed, null-forgiving or conditional (`this.a.b`, `get().svc`, `a[0]`,
+/// `svc?`, `svc!`) -> `None`: only a declared field of the enclosing type has a
+/// type we know.
+fn receiver_field(receiver: &str) -> Option<&str> {
+    let r = receiver
+        .strip_prefix("this.")
+        .or_else(|| receiver.strip_prefix("self."))
+        .unwrap_or(receiver);
+    if r.is_empty() || r.contains(['.', '(', ')', '[', ']', ' ', '\t', '\n', '?', '!']) {
+        return None;
+    }
+    Some(r)
+}
+
+/// A bare type name -> its node, through the same miss-only, ambiguity-safe
+/// chain `resolve_refs` binds an INJECTS type with: the caller module's import
+/// bindings, then its own symbols, then the repo-unique name
+/// (`unique_global_function`; two distinct same-named types -> `None`).
+fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
+    g.symbols
+        .module_import_bindings
+        .get(&from_module)
+        .and_then(|b| b.get(name).copied())
+        .or_else(|| {
+            g.symbols
+                .module_symbols
+                .get(&from_module)
+                .and_then(|s| s.get(name).copied())
+        })
+        .or_else(|| unique_global_function(g, name))
+}
+
+/// `<field>.m()` where `<field>` is a declared field of the innermost
+/// enclosing CLASS / STRUCT / ENUM: bind `m` on the field's declared type.
+/// Needs an exact declared type and an exact method name on it; an INTERFACE
+/// type owns no `class_methods` entry, so interface-typed fields stay
+/// unresolved (A6.6).
+fn resolve_via_receiver_type(g: &RepoGraph, site: &CallSite, from_module: NodeId) -> Option<NodeId> {
+    let (field, method) = match &site.qualifier {
+        CallQualifier::Attribute { base, name } => (base.as_str(), name.as_str()),
+        CallQualifier::ComplexReceiver { receiver, name } => {
+            (receiver_field(receiver)?, name.as_str())
+        }
+        _ => return None,
+    };
+    if method.is_empty() {
+        return None;
+    }
+    let owner = enclosing_class_or_struct(&g.nav, site.from)?;
+    let type_name = g.nav.field_types.get(&owner)?.get(field)?;
+    let type_id = resolve_type_name(g, from_module, type_name)?;
+    g.symbols.class_methods.get(&type_id)?.get(method).copied()
+}
+
 pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) {
     g.edges.push(Edge {
         from,
@@ -716,5 +789,147 @@ mod tests {
         // The ENUM's method is indexed (it owns it) but stays out of this pool.
         assert_eq!(g.symbols.class_methods[&mode].get("run").copied(), Some(enum_run));
         assert_eq!(edges_of(&g, edge_category::HANDLED_BY), vec![(route, class_run)]);
+    }
+
+    // ---- A6.2a: receiver-type inference -------------------------------------
+
+    #[test]
+    fn receiver_field_strips_this_and_rejects_chains() {
+        assert_eq!(receiver_field("this.svc"), Some("svc"));
+        assert_eq!(receiver_field("self.svc"), Some("svc"));
+        assert_eq!(receiver_field("svc"), Some("svc"));
+        assert_eq!(receiver_field("this.a.b"), None);
+        assert_eq!(receiver_field("get().svc"), None);
+        assert_eq!(receiver_field("items[0]"), None);
+        assert_eq!(receiver_field("this.svc?"), None);
+        assert_eq!(receiver_field("this."), None);
+        assert_eq!(receiver_field(""), None);
+    }
+
+    /// `m2`: `class UserRepo { find() }` — the declared type of the field.
+    fn repo_module() -> (FileParse, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m2 = s.add(node_kind::MODULE, "m2", None);
+        let repo_cls = s.add(node_kind::CLASS, "m2::UserRepo", Some(m2));
+        let find = s.add(node_kind::METHOD, "m2::UserRepo::find", Some(repo_cls));
+        (s.file(vec![], vec![], vec![]), repo_cls, find)
+    }
+
+    /// `m1`: `class A { UserRepo repo; get() { <qualifier> } }`.
+    fn caller_module(
+        qualifier: CallQualifier,
+        imports: Vec<ImportStmt>,
+    ) -> (FileParse, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
+        let get = s.add(node_kind::METHOD, "m1::A::get", Some(a));
+        s.nav.record_field_type(a, "repo", "UserRepo");
+        (s.file(imports, vec![CallSite { from: get, qualifier }], vec![]), a, get)
+    }
+
+    #[test]
+    fn field_typed_receiver_binds_to_declared_type_method() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, _, get) = caller_module(attr("repo", "find"), vec![]);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+        assert!(g.unresolved_calls.is_empty(), "the field-typed call must bind");
+    }
+
+    /// `this.repo.find()` reaches the pass as a ComplexReceiver.
+    #[test]
+    fn this_prefixed_complex_receiver_binds_through_the_field() {
+        let (repo_file, _, find) = repo_module();
+        let qualifier = CallQualifier::ComplexReceiver {
+            receiver: "this.repo".to_string(),
+            name: "find".to_string(),
+        };
+        let (caller, _, get) = caller_module(qualifier, vec![]);
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+    }
+
+    /// `repo` is ALSO an import binding (a class `m3::repo` with its own
+    /// `find`): the import binding resolves first and keeps its target.
+    #[test]
+    fn field_type_does_not_shadow_import_binding() {
+        let (repo_file, _, typed_find) = repo_module();
+        let mut s3 = Shape::new();
+        let m3 = s3.add(node_kind::MODULE, "m3", None);
+        let imported = s3.add(node_kind::CLASS, "m3::repo", Some(m3));
+        let imported_find = s3.add(node_kind::METHOD, "m3::repo::find", Some(imported));
+        let (caller, _, get) =
+            caller_module(attr("repo", "find"), vec![import_symbol("m1", "m3", "repo")]);
+        let g = build_dotted(
+            repo(),
+            vec![repo_file, s3.file(vec![], vec![], vec![]), caller],
+        )
+        .unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, imported_find)]);
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(get, typed_find)));
+    }
+
+    /// The field belongs to its declaring type only: a sibling class B with no
+    /// `repo` field calling `repo.find()` stays unresolved, and an unknown
+    /// method on the declared type never binds.
+    #[test]
+    fn field_types_are_scoped_to_their_owner_and_need_an_exact_method() {
+        let (repo_file, _, _) = repo_module();
+        let (mut caller, _, get) = caller_module(attr("repo", "missing"), vec![]);
+        let m1 = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "m1");
+        let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "m1::B");
+        let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m1::B::run");
+        caller.nav.record(b, "B", "m1::B", node_kind::CLASS, Some(m1));
+        caller.nav.record(run, "run", "m1::B::run", node_kind::METHOD, Some(b));
+        caller.calls.push(CallSite { from: run, qualifier: attr("repo", "find") });
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 2);
+        assert_eq!(g.unresolved_calls[0].from, get);
+    }
+
+    /// Two distinct `UserRepo` types in the repo: the type name is ambiguous,
+    /// so the call stays unresolved rather than binding either one.
+    #[test]
+    fn ambiguous_declared_type_stays_unresolved() {
+        let (repo_file, _, _) = repo_module();
+        let mut s4 = Shape::new();
+        let m4 = s4.add(node_kind::MODULE, "m4", None);
+        let twin = s4.add(node_kind::CLASS, "m4::UserRepo", Some(m4));
+        s4.add(node_kind::METHOD, "m4::UserRepo::find", Some(twin));
+        let (caller, _, _) = caller_module(attr("repo", "find"), vec![]);
+        let g = build_dotted(repo(), vec![repo_file, s4.file(vec![], vec![], vec![]), caller])
+            .unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// An INTERFACE-typed field owns no `class_methods`, so it stays
+    /// unresolved until interface dispatch (A6.6) lands.
+    #[test]
+    fn interface_typed_field_stays_unresolved() {
+        let mut s2 = Shape::new();
+        let m2 = s2.add(node_kind::MODULE, "m2", None);
+        let iface = s2.add(node_kind::INTERFACE, "m2::UserRepo", Some(m2));
+        s2.add(node_kind::METHOD, "m2::UserRepo::find", Some(iface));
+        let (caller, _, _) = caller_module(attr("repo", "find"), vec![]);
+        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// Two files contributing fields to one owner (a C# `partial class`) keep
+    /// both after `merge_nav`.
+    #[test]
+    fn field_types_merge_per_owner_across_files() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, a, get) = caller_module(attr("other", "find"), vec![]);
+        let mut part = Shape::new();
+        part.nav.record_field_type(a, "other", "UserRepo");
+        let g = build_dotted(repo(), vec![repo_file, caller, part.file(vec![], vec![], vec![])])
+            .unwrap();
+        assert_eq!(g.nav.field_types[&a].len(), 2);
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
     }
 }

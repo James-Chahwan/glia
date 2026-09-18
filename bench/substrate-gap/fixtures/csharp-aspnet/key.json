@@ -19,7 +19,7 @@
     {"kind": "ROUTE", "name": "GET /api/users/{id}", "note": "class [Route(\"api/users\")] + action [HttpGet(\"{id}\")] composed, leading slash"}
   ],
   "expect_edges": [
-    {"from": "GetById", "to": "Load", "category": "CALLS", "note": "same-class call GetById()->Load() (bare => SelfMethod); field-typed instance dispatch _userService.GetById is Pattern-C 'instance dispatch blind' (no field-type resolution in resolve_calls)"},
+    {"from": "GetById", "to": "Load", "category": "CALLS", "note": "same-class call GetById()->Load() (bare => SelfMethod). The controller's field-typed call _userService.GetById is not asserted: receiver-type inference (A6.2a) reads the field's declared type, but that type is the INTERFACE IUserService, which owns no class_methods, so the call binds only once interface dispatch (A6.6) lands"},
     {"from": "UsersController", "to": "Shop/Services", "category": "IMPORTS", "note": "using Shop.Services in-repo namespace"},
     {"from": "GET /api/users/{id}", "to": "GetUser", "category": "HANDLED_BY", "note": "composed [Route(\"api/users\")] + [HttpGet(\"{id}\")] route handled by the action method"},
     {"from": "UsersController", "to": "IUserService", "category": "INJECTS", "note": "constructor DI of interface"},

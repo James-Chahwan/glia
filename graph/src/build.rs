@@ -157,6 +157,11 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     for (k, v) in src.children_of {
         dst.children_of.entry(k).or_default().extend(v);
     }
+    // A6.2a: per-owner merge, so a partial class split across files keeps
+    // every file's declared fields.
+    for (owner, fields) in src.field_types {
+        dst.field_types.entry(owner).or_default().extend(fields);
+    }
 }
 
 // ============================================================================

@@ -90,7 +90,7 @@ pub(super) fn build_graphs_for_repo(
     );
 
     let (graphs, di_refs) =
-        lang_build::build_language_graphs(parses_by_lang, repo, &mut parse_errors);
+        lang_build::build_language_graphs(parses_by_lang, repo, repo_label, &mut parse_errors);
 
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);

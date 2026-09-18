@@ -1,0 +1,17 @@
+{
+  "framework": "csharp-field-dispatch",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/calls"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserRepo", "note": "concrete dependency type"},
+    {"kind": "METHOD", "name": "Get", "note": "caller"},
+    {"kind": "METHOD", "name": "Find", "note": "callee on the field's declared type"}
+  ],
+  "expect_edges": [
+    {"from": "UserService", "to": "UserRepo", "category": "INJECTS", "note": "ctor DI — the positive control"},
+    {"from": "UserService/Get", "to": "UserRepo/Find", "category": "CALLS", "note": "_repo.Find(id): the Attribute base is a field name, not an import binding, so it binds only through the field's declared type (A6.2a receiver-type inference). The field is typed with a CONCRETE class so this isolates A6.2a from interface dispatch (A6.6)"},
+    {"from": "UserService/Lookup", "to": "UserRepo/Find", "category": "CALLS", "note": "this._repo.Find(id): a ComplexReceiver; receiver-type inference strips `this.` to the field name"},
+    {"from": "UserService/Restore", "to": "UserRepo/Find", "category": "CALLS", "note": "Archive.Find(id): an auto-property's declared type counts as a field type (property_declaration arm)"}
+  ]
+}

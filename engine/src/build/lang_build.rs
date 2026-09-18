@@ -4,17 +4,28 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::{FileParse, edge_category};
+use repo_graph_code_domain::{FileParse, edge_category, recv_stats};
 use repo_graph_core::RepoId;
 use repo_graph_graph::RepoGraph;
+
+/// TS-family lang tags (typescript/angular/react/vue) share ONE module + symbol
+/// space in a repo: an Angular component (`.component.ts` → "angular") injects a
+/// service (`.service.ts` → "typescript"), and imports cross those tags. Build
+/// them as a single graph so intra-repo ref/import resolution works across the
+/// tag boundary (Pattern E DI, Pattern B imports). Other `_`-arm langs
+/// (dart/swift/c_cpp/solidity/terraform) keep separate graphs — distinct symbol
+/// spaces that must not cross-resolve. ts_family accumulates in the sorted lang
+/// order and is built last, so graph/shard order stays deterministic.
+const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
 
 /// Build one repo's per-language graphs from its finished parses, in sorted
 /// language order with the TS family last. Returns the graphs and the A7.0
 /// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
-/// to `parse_errors`.
+/// to `parse_errors`. Prints the A6.2a `[recv]` marker for `repo_label`.
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
     repo: RepoId,
+    repo_label: &str,
     parse_errors: &mut Vec<String>,
 ) -> (Vec<RepoGraph>, Vec<(&'static str, usize)>) {
     let mut graphs = Vec::new();
@@ -25,34 +36,37 @@ pub(super) fn build_language_graphs(
     // shards optimization never fired (audit 2026-06-10 #5).
     let mut parses_by_lang: Vec<(&str, Vec<FileParse>)> = parses_by_lang.into_iter().collect();
     parses_by_lang.sort_unstable_by_key(|(lang, _)| *lang);
-    // TS-family lang tags (typescript/angular/react/vue) share ONE module + symbol
-    // space in a repo: an Angular component (`.component.ts` → "angular") injects a
-    // service (`.service.ts` → "typescript"), and imports cross those tags. Build
-    // them as a single graph so intra-repo ref/import resolution works across the
-    // tag boundary (Pattern E DI, Pattern B imports). Other `_`-arm langs
-    // (dart/swift/c_cpp/solidity/terraform) keep separate graphs — distinct symbol
-    // spaces that must not cross-resolve. ts_family accumulates in the sorted lang
-    // order and is built last, so graph/shard order stays deterministic.
-    const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
     // A7.0 `[di]` marker input: INJECTS refs per language, counted off the
     // parses themselves so cache-served files count too. The TS-family tags
     // report as `typescript`, their matrix row.
     let di_refs: Vec<(&str, usize)> = parses_by_lang
         .iter()
         .map(|(lang, parses)| {
-            let row = if TS_FAMILY.contains(lang) {
-                "typescript"
-            } else {
-                *lang
-            };
             let n = parses
                 .iter()
                 .flat_map(|fp| &fp.refs)
                 .filter(|r| r.category == edge_category::INJECTS)
                 .count();
-            (row, n)
+            (matrix_row(*lang), n)
         })
         .collect();
+    // A6.2a `[recv]` marker input: declared field types per matrix row, counted
+    // off the parses (cache-served files count too), and the receiver-typed
+    // binds `resolve_calls` records, taken after each language's build. The
+    // generic pass does not know its language, hence the take-per-build.
+    let recv_fields: Vec<(&str, usize)> = parses_by_lang
+        .iter()
+        .map(|(lang, parses)| {
+            let n = parses
+                .iter()
+                .flat_map(|fp| fp.nav.field_types.values())
+                .map(HashMap::len)
+                .sum();
+            (matrix_row(*lang), n)
+        })
+        .collect();
+    let mut recv_bound: Vec<(&str, usize)> = Vec::new();
+    recv_stats::reset();
     let mut ts_family: Vec<FileParse> = Vec::new();
     for (lang, parses) in parses_by_lang {
         if TS_FAMILY.contains(&lang) {
@@ -68,19 +82,35 @@ pub(super) fn build_language_graphs(
             "ruby" => repo_graph_graph::build_ruby(repo, parses),
             _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
         };
+        recv_bound.push((lang, recv_stats::take()));
         match graph {
             Ok(g) => graphs.push(g),
             Err(e) => parse_errors.push(format!("{lang} graph: {e}")),
         }
     }
     if !ts_family.is_empty() {
-        match repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source) {
+        let graph = repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source);
+        recv_bound.push(("typescript", recv_stats::take()));
+        match graph {
             Ok(g) => graphs.push(g),
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
     }
+    // A6.2a fired_on marker, once per repo:
+    //   `[recv] receiver-typed calls bound: csharp=N … (fields: csharp=F …) repo=<label>`
+    recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
 
     (graphs, di_refs)
+}
+
+/// The matrix row a parse-language tag reports under: the TS-family tags
+/// (angular / react / vue) are the `typescript` row.
+fn matrix_row<'a>(lang: &'a str) -> &'a str {
+    if TS_FAMILY.contains(&lang) {
+        "typescript"
+    } else {
+        lang
+    }
 }
 
 /// Resolve a TS/JS relative import specifier to the in-repo module qname it

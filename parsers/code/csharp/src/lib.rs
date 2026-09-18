@@ -291,12 +291,16 @@ fn visit_type_decl(
     // at all, which is why this scan sits ahead of the `body` early return. The
     // `: Base(svc)` forwarding arguments live in base_list's argument_list,
     // which the heritage walk above already skips, so the two never overlap.
-    if is_di {
-        let mut pc = node.walk();
-        let primary = node
-            .named_children(&mut pc)
-            .find(|c| c.kind() == "parameter_list");
-        if let Some(params) = primary {
+    let mut pc = node.walk();
+    let primary = node
+        .named_children(&mut pc)
+        .find(|c| c.kind() == "parameter_list");
+    if let Some(params) = primary {
+        // A6.2a: a primary-constructor parameter is in scope for the whole
+        // type body, exactly like a declared field, so `orders.Place()` binds
+        // through its type. A fact, so not gated on `is_di`.
+        collect_param_field_types(params, src, id, acc);
+        if is_di {
             emit_param_injects(
                 params,
                 src,
@@ -346,7 +350,13 @@ fn visit_type_decl(
                 }
             }
             "field_declaration" => {
+                collect_field_types(child, src, id, acc);
                 visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
+            }
+            // An interface property has no instance behind it inside the
+            // interface, and `resolve_calls` never walks to an INTERFACE owner.
+            "property_declaration" if kind != node_kind::INTERFACE => {
+                collect_field_types(child, src, id, acc);
             }
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
@@ -484,6 +494,86 @@ fn injectable_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
         return None;
     }
     Some(simple.to_string())
+}
+
+/// A6.2a: record the declared type of every field / property of `owner` on
+/// `acc.nav.field_types`, so `resolve_calls` can bind `_repo.Find()` to a
+/// method of that type. A `field_declaration` carries its type on the
+/// `variable_declaration` child and one name per `variable_declarator`; a
+/// `property_declaration` carries `type` and `name` fields directly. Every
+/// field counts, not only `visit_field_decl`'s const / static-readonly ones:
+/// a declared type is a fact, not a heuristic.
+fn collect_field_types(node: TsNode, src: &[u8], owner: NodeId, acc: &mut Acc) {
+    match node.kind() {
+        "field_declaration" => {
+            let mut fcursor = node.walk();
+            for var_decl in node
+                .named_children(&mut fcursor)
+                .filter(|c| c.kind() == "variable_declaration")
+            {
+                let Some(type_name) = var_decl
+                    .child_by_field_name("type")
+                    .and_then(|t| field_type_name(t, src))
+                else {
+                    continue;
+                };
+                let mut vcursor = var_decl.walk();
+                for declarator in var_decl
+                    .named_children(&mut vcursor)
+                    .filter(|c| c.kind() == "variable_declarator")
+                {
+                    if let Some(name) = declarator.child_by_field_name("name") {
+                        acc.nav
+                            .record_field_type(owner, text_of(name, src), &type_name);
+                    }
+                }
+            }
+        }
+        "property_declaration" => {
+            let (Some(type_node), Some(name)) = (
+                node.child_by_field_name("type"),
+                node.child_by_field_name("name"),
+            ) else {
+                return;
+            };
+            if let Some(type_name) = field_type_name(type_node, src) {
+                acc.nav
+                    .record_field_type(owner, text_of(name, src), &type_name);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A6.2a: primary-constructor parameters (`class OrdersController(IOrderService
+/// orders)`, `record Order(Customer Customer)`) are in scope for the whole type
+/// body, so each one's type is recorded as a field type of `owner`.
+fn collect_param_field_types(params: TsNode, src: &[u8], owner: NodeId, acc: &mut Acc) {
+    let mut cursor = params.walk();
+    for param in params.named_children(&mut cursor) {
+        if param.kind() != "parameter" {
+            continue;
+        }
+        let (Some(type_node), Some(name)) = (
+            param.child_by_field_name("type"),
+            param.child_by_field_name("name"),
+        ) else {
+            continue;
+        };
+        if let Some(type_name) = field_type_name(type_node, src) {
+            acc.nav
+                .record_field_type(owner, text_of(name, src), &type_name);
+        }
+    }
+}
+
+/// The simple type name a field is declared with, via `injectable_type_name`
+/// (generics, namespace and `?` stripped; primitives rejected), kept only when
+/// it is a plain identifier: arrays, tuples and pointers own no method table
+/// to bind against.
+fn field_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
+    injectable_type_name(type_node, src)
+        .filter(|t| t.chars().all(|c| c.is_alphanumeric() || c == '_'))
 }
 
 /// C# built-in / value types that are never resolved as injected services.
@@ -2263,6 +2353,83 @@ namespace Shop.Controllers
             injects[0].qualifier,
             CallQualifier::Bare("IUserService".to_string())
         );
+    }
+
+    /// A6.2a: every field / auto-property / primary-ctor parameter with a
+    /// class-shaped type lands on `nav.field_types` under its owning type, with
+    /// the declared type reduced to its simple name. Primitives, arrays and
+    /// interface properties are not recorded.
+    #[test]
+    fn field_types_recorded_for_fields_properties_and_primary_ctor() {
+        let source = r#"
+using Shop.Data;
+
+namespace Shop.Services
+{
+    public class UserService
+    {
+        private readonly UserRepo _repo;
+        private Shop.Data.AuditLog? _audit;
+        private List<Order> _orders;
+        private UserRepo _a, _b;
+        private static readonly HttpClient Client = new HttpClient();
+        private int _count;
+        private UserRepo[] _all;
+        public UserRepo Archive { get; }
+        public string Name { get; set; }
+
+        public class Inner
+        {
+            private Cache _cache;
+        }
+    }
+
+    public record Order(Customer Buyer, int Qty);
+
+    public interface IUserService
+    {
+        UserRepo Repo { get; }
+    }
+}
+"#;
+        let fp = parse_file(source, "Services/UserService.cs", "Shop::Services", repo()).unwrap();
+        let class = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, q);
+        let fields = |id: NodeId| -> Vec<(String, String)> {
+            let mut v: Vec<(String, String)> = fp
+                .nav
+                .field_types
+                .get(&id)
+                .map(|m| m.iter().map(|(k, t)| (k.clone(), t.clone())).collect())
+                .unwrap_or_default();
+            v.sort();
+            v
+        };
+        let pair = |f: &str, t: &str| (f.to_string(), t.to_string());
+        assert_eq!(
+            fields(class("Shop::Services::UserService")),
+            vec![
+                pair("Archive", "UserRepo"),
+                pair("Client", "HttpClient"),
+                pair("_a", "UserRepo"),
+                pair("_audit", "AuditLog"),
+                pair("_b", "UserRepo"),
+                pair("_orders", "List"),
+                pair("_repo", "UserRepo"),
+            ]
+        );
+        assert_eq!(
+            fields(class("Shop::Services::UserService::Inner")),
+            vec![pair("_cache", "Cache")]
+        );
+        assert_eq!(fields(class("Shop::Services::Order")), vec![pair("Buyer", "Customer")]);
+        let iface = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::INTERFACE,
+            "Shop::Services::IUserService",
+        );
+        assert!(fp.nav.field_types.get(&iface).is_none(), "interface properties are not fields");
+        assert_eq!(fp.nav.field_types.len(), 3);
     }
 
     #[test]

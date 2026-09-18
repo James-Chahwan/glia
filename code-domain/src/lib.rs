@@ -1121,9 +1121,32 @@ pub struct CodeNav {
     pub parent_of: HashMap<NodeId, NodeId>,
     /// Inverse of `parent_of`.
     pub children_of: HashMap<NodeId, Vec<NodeId>>,
+    /// Declared type of an instance field / property, per owning CLASS / STRUCT
+    /// node: owner -> (field name -> declared simple type name, with generics,
+    /// namespace qualifiers and `?` already stripped). Filled by parsers that
+    /// can read a declared type off the AST, through [`CodeNav::record_field_type`];
+    /// read by `resolve_calls`' receiver-type inference (A6.2a), which binds
+    /// `_repo.Find()` / `this.repo.find()` to a method of that type.
+    ///
+    /// Build-time only: deliberately NOT mirrored into the store's
+    /// `CodeNavStore`, because resolution finishes before the .gmap is written.
+    pub field_types: HashMap<NodeId, HashMap<String, String>>,
 }
 
 impl CodeNav {
+    /// Record that `owner` (a CLASS / STRUCT) declares a field or property
+    /// `field` of simple type `type_name`. Empty names are ignored. A second
+    /// record for the same `(owner, field)` replaces the first.
+    pub fn record_field_type(&mut self, owner: NodeId, field: &str, type_name: &str) {
+        if field.is_empty() || type_name.is_empty() {
+            return;
+        }
+        self.field_types
+            .entry(owner)
+            .or_default()
+            .insert(field.to_string(), type_name.to_string());
+    }
+
     /// Record a node's navigation metadata. Parsers call this right after
     /// pushing the `Node` onto the FileParse.
     pub fn record(
@@ -2072,6 +2095,104 @@ pub mod di_stats {
         COUNTS
             .get(shape as usize)
             .map_or(0, |c| c.swap(0, Ordering::Relaxed))
+    }
+}
+
+/// A6.2a fired_on marker for receiver-type inference, printed once per repo
+/// build by the engine:
+///
+/// ```text
+/// [recv] receiver-typed calls bound: csharp=N java=N typescript=N (fields: csharp=F java=F typescript=F) repo=<label>
+/// ```
+///
+/// * **bound** counts calls `resolve_calls` bound ONLY through a field's
+///   declared type ([`CodeNav::field_types`](super::CodeNav::field_types)).
+///   The generic pass does not know its language, so it calls [`record`] per
+///   bind and the engine [`take`]s the count after each per-language build.
+/// * **fields** counts the declared field types the parses carry, per
+///   language, so a cache-served file counts too. `fields > 0` with `bound = 0`
+///   means the carrier is populated but nothing resolved against it.
+///
+/// Every [`LANGS`] entry is printed, zero or not, so ` csharp=[1-9]` is an
+/// unambiguous grep. Any other language appears only when non-zero. Same
+/// shape and caveats as [`di_stats`](super::di_stats): diagnostics only, a
+/// process-global counter that assumes one build at a time per process.
+pub mod recv_stats {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Languages always printed: the matrix rows whose parser records field
+    /// types, or will (C# since A6.2a; java / typescript are fed by A6.2b /
+    /// A6.2c; LA.23 extends the set with python / ruby / go / dart).
+    pub const LANGS: [&str; 3] = ["csharp", "java", "typescript"];
+
+    static BOUND: AtomicUsize = AtomicUsize::new(0);
+
+    /// Count one call bound through a field's declared type.
+    pub fn record() {
+        BOUND.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Zero the counter. The engine calls this before a repo's language
+    /// builds, so a stray `build_*` outside a repo build cannot leak into it.
+    pub fn reset() {
+        BOUND.store(0, Ordering::Relaxed);
+    }
+
+    /// Read and zero the counter: the binds of the build that just finished.
+    pub fn take() -> usize {
+        BOUND.swap(0, Ordering::Relaxed)
+    }
+
+    /// Print the `[recv]` line for one repo build when any count is non-zero.
+    /// `bound` and `fields` hold `(language, count)` pairs; a repeated
+    /// language is summed.
+    pub fn flush_marker(bound: &[(&str, usize)], fields: &[(&str, usize)], repo: &str) {
+        if let Some(line) = render(bound, fields, repo) {
+            eprintln!("{line}");
+        }
+    }
+
+    /// The marker text, or `None` when every count is zero.
+    pub(crate) fn render(
+        bound: &[(&str, usize)],
+        fields: &[(&str, usize)],
+        repo: &str,
+    ) -> Option<String> {
+        let bound = tally(bound);
+        let fields = tally(fields);
+        let total: usize = bound.iter().chain(&fields).map(|(_, n)| n).sum();
+        if total == 0 {
+            return None;
+        }
+        Some(format!(
+            "[recv] receiver-typed calls bound: {} (fields: {}) repo={repo}",
+            group(&bound),
+            group(&fields)
+        ))
+    }
+
+    /// [`LANGS`] in order (zero-filled), then any other language in first-seen
+    /// order, with repeated languages summed.
+    fn tally<'a>(pairs: &[(&'a str, usize)]) -> Vec<(&'a str, usize)> {
+        let mut out: Vec<(&str, usize)> = LANGS.iter().map(|l| (*l, 0)).collect();
+        for &(lang, n) in pairs {
+            match out.iter_mut().find(|(l, _)| *l == lang) {
+                Some(slot) => slot.1 += n,
+                None => out.push((lang, n)),
+            }
+        }
+        out
+    }
+
+    /// `lang=N` for every [`LANGS`] entry and every other non-zero language.
+    fn group(tallied: &[(&str, usize)]) -> String {
+        tallied
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, n))| *i < LANGS.len() || *n > 0)
+            .map(|(_, (lang, n))| format!("{lang}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -3154,6 +3275,66 @@ mod tests {
         record(DiShape::JavaLombok);
         reset();
         assert_eq!(take_for_test(DiShape::JavaLombok), 0);
+    }
+
+    #[test]
+    fn recv_stats_render_prints_every_lang_and_only_nonzero_extras() {
+        use recv_stats::render;
+        // Nothing counted: no line at all.
+        assert_eq!(render(&[], &[], "r"), None);
+        assert_eq!(render(&[("csharp", 0)], &[("python", 0)], "r"), None);
+        // Fields recorded but nothing bound still prints: the carrier is live.
+        assert_eq!(
+            render(&[], &[("csharp", 2)], "a").as_deref(),
+            Some(
+                "[recv] receiver-typed calls bound: csharp=0 java=0 typescript=0 \
+                 (fields: csharp=2 java=0 typescript=0) repo=a"
+            )
+        );
+        // Repeated languages sum; a non-LANGS language appears only when non-zero.
+        assert_eq!(
+            render(
+                &[("csharp", 1), ("csharp", 2), ("python", 0)],
+                &[("csharp", 4), ("python", 1)],
+                "fixtures/csharp-field-dispatch"
+            )
+            .as_deref(),
+            Some(
+                "[recv] receiver-typed calls bound: csharp=3 java=0 typescript=0 \
+                 (fields: csharp=4 java=0 typescript=0 python=1) repo=fixtures/csharp-field-dispatch"
+            )
+        );
+    }
+
+    #[test]
+    fn recv_stats_record_take_and_reset() {
+        // The ONLY test in this crate that touches the process-global counter.
+        recv_stats::record();
+        recv_stats::record();
+        assert_eq!(recv_stats::take(), 2);
+        assert_eq!(recv_stats::take(), 0);
+        recv_stats::record();
+        recv_stats::reset();
+        assert_eq!(recv_stats::take(), 0);
+    }
+
+    #[test]
+    fn record_field_type_keys_by_owner_and_ignores_empty_names() {
+        let r = repo_graph_core::RepoId(1);
+        let a = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "m::A");
+        let b = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "m::B");
+        let mut nav = CodeNav::default();
+        nav.record_field_type(a, "_repo", "UserRepo");
+        nav.record_field_type(a, "Archive", "UserRepo");
+        nav.record_field_type(b, "_repo", "OrderRepo");
+        nav.record_field_type(a, "", "UserRepo");
+        nav.record_field_type(a, "_empty", "");
+        assert_eq!(nav.field_types[&a].len(), 2);
+        assert_eq!(nav.field_types[&a]["_repo"], "UserRepo");
+        assert_eq!(nav.field_types[&b]["_repo"], "OrderRepo");
+        // A re-record of the same field replaces the type.
+        nav.record_field_type(a, "_repo", "CachedRepo");
+        assert_eq!(nav.field_types[&a]["_repo"], "CachedRepo");
     }
 
     #[test]
