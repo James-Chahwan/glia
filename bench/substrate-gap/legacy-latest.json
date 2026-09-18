@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 176,
+  "fixtures": 189,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -75,11 +75,37 @@
         "CALLS": 1.0
       }
     },
+    "clojure-docs": {
+      "framework": "clojure-docs",
+      "language": "clojure",
+      "per_category": {}
+    },
     "clojure-imports": {
       "framework": "clojure-imports",
       "language": "clojure",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "contract-annot-nestjs": {
+      "framework": "contract-annot-nestjs",
+      "language": "typescript",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "contract-annot-springdoc": {
+      "framework": "contract-annot-springdoc",
+      "language": "java",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "contract-annot-swashbuckle": {
+      "framework": "contract-annot-swashbuckle",
+      "language": "csharp",
+      "per_category": {
+        "DOCUMENTS": 1.0
       }
     },
     "contract-asyncapi-nats": {
@@ -141,6 +167,14 @@
       "language": "csharp",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "csharp-field-dispatch": {
+      "framework": "csharp-field-dispatch",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0,
+        "INJECTS": 1.0
       }
     },
     "csharp-fromservices": {
@@ -267,6 +301,15 @@
         "EVENT_FLOWS": 1.0
       }
     },
+    "event-verb-receivers": {
+      "framework": "event-verb-receivers",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "USES": 1.0
+      }
+    },
     "go-accesses-data": {
       "framework": "go-accesses-data",
       "language": "go",
@@ -302,6 +345,13 @@
         "IMPORTS": 1.0
       }
     },
+    "go-route-registration-forms": {
+      "framework": "go-route-registration-forms",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-wire-di": {
       "framework": "go-wire-di",
       "language": "go",
@@ -311,6 +361,11 @@
     },
     "graphql-op-needle-precision": {
       "framework": "graphql-op-needle-precision",
+      "language": "typescript",
+      "per_category": {}
+    },
+    "graphql-sdl-literal-scope": {
+      "framework": "graphql-sdl-literal-scope",
       "language": "typescript",
       "per_category": {}
     },
@@ -391,6 +446,13 @@
       "language": "java",
       "per_category": {
         "TESTS": 1.0
+      }
+    },
+    "java-declarative-clients": {
+      "framework": "java-declarative-clients",
+      "language": "java",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "java-http-clients": {
@@ -519,6 +581,13 @@
         "HANDLED_BY": 0.0,
         "IMPORTS": 1.0,
         "INJECTS": 0.0
+      }
+    },
+    "php-dir-qnames": {
+      "framework": "php-dir-qnames",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "php-eloquent": {
@@ -793,6 +862,13 @@
         "INHERITS_FROM": 1.0
       }
     },
+    "scala-package-qnames": {
+      "framework": "scala-package-qnames",
+      "language": "scala",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "solidity-calls": {
       "framework": "solidity-calls",
       "language": "solidity",
@@ -843,6 +919,11 @@
       "language": "swift",
       "per_category": {}
     },
+    "swift-module-qnames": {
+      "framework": "swift-module-qnames",
+      "language": "swift",
+      "per_category": {}
+    },
     "terraform-depends_on": {
       "framework": "terraform",
       "language": "terraform",
@@ -876,6 +957,15 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-enum-members": {
+      "framework": "ts-enum-members",
+      "language": "typescript",
+      "per_category": {
+        "DEFINES": 1.0,
+        "HAS_ATTRIBUTE": 1.0,
+        "USES": 1.0
       }
     },
     "ts-http-fetch": {

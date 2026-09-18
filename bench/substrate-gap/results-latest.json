@@ -224,11 +224,12 @@
     },
     "csharp/calls": {
       "extract": [
-        3,
-        3
+        5,
+        5
       ],
       "fixtures": [
-        "fixtures/csharp-aspnet"
+        "fixtures/csharp-aspnet",
+        "fixtures/csharp-field-dispatch"
       ],
       "forbid": [
         0,
@@ -236,13 +237,13 @@
       ],
       "level": "full",
       "literal": [
-        3,
-        3
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        4,
+        4
       ],
       "via": "call"
     },
@@ -3720,6 +3721,10 @@
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
     "fixtures/avro-schema",
+    "fixtures/clojure-docs",
+    "fixtures/contract-annot-nestjs",
+    "fixtures/contract-annot-springdoc",
+    "fixtures/contract-annot-swashbuckle",
     "fixtures/contract-asyncapi-nats",
     "fixtures/contract-openapi-json",
     "fixtures/contract-openapi-yaml",
@@ -3734,8 +3739,11 @@
     "fixtures/enum-owned-methods",
     "fixtures/event-name-shape",
     "fixtures/event-publish-precision",
+    "fixtures/event-verb-receivers",
     "fixtures/go-closure-handled_by",
+    "fixtures/go-route-registration-forms",
     "fixtures/graphql-op-needle-precision",
+    "fixtures/graphql-sdl-literal-scope",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
     "fixtures/http-dart-nav-precision",
@@ -3745,6 +3753,7 @@
     "fixtures/http-placeholder-fold",
     "fixtures/http-relative-paths",
     "fixtures/imports-local-filter",
+    "fixtures/java-declarative-clients",
     "fixtures/java-http-clients",
     "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
@@ -3754,17 +3763,21 @@
     "fixtures/kotlin-ktor",
     "fixtures/kotlin-retrofit",
     "fixtures/kotlin-spring",
+    "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
     "fixtures/py-router-prefix",
     "fixtures/react-hook",
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
+    "fixtures/scala-package-qnames",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/swift-imports",
+    "fixtures/swift-module-qnames",
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
+    "fixtures/ts-enum-members",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-nested-submodule",
