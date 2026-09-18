@@ -1,0 +1,25 @@
+{
+  "framework": "go-field-dispatch",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "go/calls"
+  ],
+  "expect_edges": [
+    {
+      "from": "UserService::Get",
+      "to": "UserRepo::Find",
+      "category": "CALLS",
+      "note": "s.repo.Find: struct field `repo *UserRepo`"
+    },
+    {
+      "from": "UserService::Get",
+      "to": "UserService::audit",
+      "category": "CALLS",
+      "note": "control: receiver self-call"
+    }
+  ],
+  "note": "LA.23c. Single-file case. Baseline HEAD: `Get -> audit` present, `Get -> UserRepo.Find` missing (ComplexReceiver `s.repo` is never tried)."
+}

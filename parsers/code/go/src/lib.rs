@@ -131,7 +131,11 @@ pub fn parse_file(
                     &mut acc,
                 );
             }
-            "type_declaration" => { /* already collected in first pass */ }
+            // Types were collected in the first pass. LA.23c: their field
+            // types are read here, where `type_ids` holds every type of this
+            // file and `acc.external_pkgs` every import (Go requires imports
+            // before every other declaration); both guard `collect_field_types`.
+            "type_declaration" => collect_field_types(child, src, &mut acc, &type_ids),
             // glia v5 G19 — package-level state variables: `var X = …`,
             // `var X T = …`, `const X = …`, including grouped blocks. Only
             // top-level declarations (parent == source_file) reach here.
@@ -341,6 +345,130 @@ fn collect_types(
         });
         type_ids.insert(name, id);
     }
+}
+
+/// LA.23c: a struct's field declarations into `CodeNav::field_types` (A6.2a's
+/// carrier), so the graph's receiver-type pass binds `s.repo.Find()` (which
+/// `classify_call` normalises to receiver `self.repo`) to `UserRepo::Find`.
+///
+/// Runs after the types pass, so `type_ids` holds every type this file
+/// declares. `repo *UserRepo` records `repo -> UserRepo`; `a, b *T` records
+/// both names; an embedded field records under its type's own name
+/// (`*UserRepo` / `pkg.UserRepo` -> field `UserRepo`). Interface-typed fields
+/// are recorded too: until an interface fallback exists the lookup finds no
+/// method table on an INTERFACE and stays unresolved. Types
+/// [`go_type_name`] cannot name (slices, maps, channels, funcs, generics)
+/// record nothing.
+///
+/// A qualified `pkg.T` types nothing when the graph's bare-name lookup would
+/// land on the wrong `T`:
+/// * `pkg` is an import outside the go.mod module (`c net.Conn`): no repo
+///   type is `net.Conn`, but the unique-name fallback would bind a repo's own
+///   `Conn` (LA.18d's `external_pkgs`; with no module prefix every import is
+///   external, so every qualified field is skipped);
+/// * `T` is also a type of this file (the wrapper shape `type Logger struct
+///   { l *zap.Logger }`): the module lookup would turn every delegating call
+///   into a self-call — the same guard as the Python parser's (LA.23a).
+fn collect_field_types(
+    type_decl: TsNode,
+    src: &[u8],
+    acc: &mut Acc,
+    type_ids: &HashMap<String, NodeId>,
+) {
+    let mut cursor = type_decl.walk();
+    for spec in type_decl.named_children(&mut cursor) {
+        if spec.kind() != "type_spec" {
+            continue;
+        }
+        let (Some(name_node), Some(type_node)) =
+            (spec.child_by_field_name("name"), spec.child_by_field_name("type"))
+        else {
+            continue;
+        };
+        if type_node.kind() != "struct_type" {
+            continue;
+        }
+        let Some(&struct_id) = type_ids.get(text_of(name_node, src)) else {
+            continue;
+        };
+        let mut sc = type_node.walk();
+        let Some(list) = type_node
+            .named_children(&mut sc)
+            .find(|c| c.kind() == "field_declaration_list")
+        else {
+            continue;
+        };
+        let mut lc = list.walk();
+        for decl in list.named_children(&mut lc) {
+            if decl.kind() != "field_declaration" {
+                continue;
+            }
+            for (field, ty) in field_decl_types(decl, src, type_ids, &acc.external_pkgs) {
+                acc.nav.record_field_type(struct_id, &field, &ty);
+            }
+        }
+    }
+}
+
+/// `(field name, declared type name)` pairs of one `field_declaration`, with
+/// the qualified-type guards of [`collect_field_types`] applied.
+fn field_decl_types(
+    decl: TsNode,
+    src: &[u8],
+    type_ids: &HashMap<String, NodeId>,
+    external_pkgs: &std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let Some(type_node) = decl.child_by_field_name("type") else {
+        return Vec::new();
+    };
+    let Some(ty) = go_type_name(type_node, src) else {
+        return Vec::new();
+    };
+    let inner = unwrap_pointer(type_node);
+    if inner.kind() == "qualified_type" {
+        let external = inner
+            .child_by_field_name("package")
+            .is_some_and(|p| external_pkgs.contains(text_of(p, src)));
+        if external || type_ids.contains_key(&ty) {
+            return Vec::new();
+        }
+    }
+    let mut nc = decl.walk();
+    let names: Vec<String> = decl
+        .children_by_field_name("name", &mut nc)
+        .map(|n| text_of(n, src).to_string())
+        .collect();
+    if names.is_empty() {
+        // Embedded field: its name is the type's own name.
+        return vec![(ty.clone(), ty)];
+    }
+    names.into_iter().map(|n| (n, ty.clone())).collect()
+}
+
+/// The bare type name a field's declared type binds by: `*T` -> `T`,
+/// `pkg.T` -> `T`, `T` -> `T`. Slices, arrays, maps, channels, func types,
+/// generic instantiations and anonymous struct / interface types -> `None`:
+/// a call through such a field has no single method table to bind against.
+fn go_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
+    let inner = unwrap_pointer(type_node);
+    let name = match inner.kind() {
+        "type_identifier" => text_of(inner, src),
+        "qualified_type" => text_of(inner.child_by_field_name("name")?, src),
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Strip every `*` off a pointer type: `**T` -> `T`.
+fn unwrap_pointer(mut node: TsNode) -> TsNode {
+    while node.kind() == "pointer_type" {
+        let mut c = node.walk();
+        let Some(inner) = node.named_children(&mut c).next() else {
+            break;
+        };
+        node = inner;
+    }
+    node
 }
 
 // ============================================================================
@@ -856,13 +984,38 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
                     }
                 }
                 _ => Some(CallQualifier::ComplexReceiver {
-                    receiver: text_of(operand, src).to_string(),
+                    receiver: receiver_field_path(operand, src, receiver_var)
+                        .unwrap_or_else(|| text_of(operand, src).to_string()),
                     name,
                 }),
             }
         }
         _ => None,
     }
+}
+
+/// LA.23c: `s.repo` inside a method whose receiver is `s` -> `self.repo`.
+///
+/// Go names its receiver freely (`s`, `h`, `svc`), while the graph crate's
+/// receiver-type pass (A6.2a `receiver_field`) only strips `this.` / `self.`.
+/// Normalising here lets `s.repo.Find()` bind through the struct's declared
+/// field type. One hop only: the operand must be a selector whose own operand
+/// IS the receiver identifier and whose field is a plain field name, so
+/// `s.a.b.Find()` stays raw and a local variable `x.repo.Find()` is untouched.
+fn receiver_field_path(operand: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<String> {
+    let receiver_var = receiver_var?;
+    if operand.kind() != "selector_expression" {
+        return None;
+    }
+    let base = operand.child_by_field_name("operand")?;
+    let field = operand.child_by_field_name("field")?;
+    if base.kind() != "identifier"
+        || text_of(base, src) != receiver_var
+        || field.kind() != "field_identifier"
+    {
+        return None;
+    }
+    Some(format!("self.{}", text_of(field, src)))
 }
 
 // ============================================================================
@@ -4050,5 +4203,212 @@ func main() {
             import_local_names("github.com/stripe/stripe-go/v76"),
             vec!["stripe-go", "stripe"]
         );
+    }
+
+    // ------------------------------------------------------------------------
+    // LA.23c: receiver-field calls and struct field types
+    // ------------------------------------------------------------------------
+
+    fn method_calls(parse: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname);
+        parse
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect()
+    }
+
+    fn complex(receiver: &str, name: &str) -> CallQualifier {
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn struct_fields(parse: &FileParse, qname: &str) -> Vec<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, qname);
+        let mut out: Vec<(String, String)> = parse
+            .nav
+            .field_types
+            .get(&id)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    const FIELD_CALLS: &str = r#"package shop
+
+type UserService struct {
+    repo *UserRepo
+}
+
+func (s *UserService) Get(id int) string {
+    x := other()
+    x.repo.Find(id)
+    s.a.b.Find(id)
+    return s.repo.Find(id)
+}
+
+func (svc UserService) Put(id int) {
+    svc.repo.Save(id)
+}
+"#;
+
+    #[test]
+    fn receiver_field_calls_normalise_to_self_field() {
+        let parse = parse_file(FIELD_CALLS, "svc.go", "shop", "", repo()).unwrap();
+        let get = method_calls(&parse, "shop::UserService::Get");
+        // Receiver `s`: one hop off the receiver is normalised.
+        assert!(get.contains(&complex("self.repo", "Find")), "{get:?}");
+        // A local variable that happens to hold a struct is untouched.
+        assert!(get.contains(&complex("x.repo", "Find")), "{get:?}");
+        // Two hops stay raw: only one level is inferred.
+        assert!(get.contains(&complex("s.a.b", "Find")), "{get:?}");
+        assert!(!get.iter().any(|q| matches!(
+            q,
+            CallQualifier::ComplexReceiver { receiver, .. } if receiver.starts_with("self.a")
+        )));
+        // Receiver `svc`, value receiver.
+        let put = method_calls(&parse, "shop::UserService::Put");
+        assert_eq!(put, vec![complex("self.repo", "Save")]);
+    }
+
+    #[test]
+    fn free_function_selector_chain_stays_raw() {
+        let source = r#"package shop
+
+func run(s *UserService) {
+    s.repo.Find(1)
+}
+"#;
+        let parse = parse_file(source, "run.go", "shop", "", repo()).unwrap();
+        let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "shop::run");
+        let calls: Vec<&CallQualifier> =
+            parse.calls.iter().filter(|c| c.from == run).map(|c| &c.qualifier).collect();
+        assert_eq!(calls, vec![&complex("s.repo", "Find")]);
+    }
+
+    const FIELD_DECLS: &str = r#"package shop
+
+import (
+    "net"
+
+    "example.com/shop/store"
+    "go.uber.org/zap"
+)
+
+type Cache interface {
+    Get(key string) string
+}
+
+type Logger struct {
+    *store.Logger
+    sink store.Sink
+}
+
+type UserService struct {
+    repo    *UserRepo
+    db      store.DB
+    pdb     *store.DB
+    a, b    *Audit
+    cache   Cache
+    pp      **UserRepo
+    UserRepo
+    *Audit
+    store.Tx
+    conn    net.Conn
+    log     *zap.Logger
+    *zap.SugaredLogger
+    tags    []string
+    byID    map[int]*UserRepo
+    ch      chan int
+    fn      func() error
+    gen     Box[int]
+    anon    struct{ n int }
+    Base[int]
+}
+"#;
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect()
+    }
+
+    #[test]
+    fn struct_field_declarations_record_their_type() {
+        let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
+        let expect = pairs(&[
+            // Embedded fields record under the type's own name; `*Audit`
+            // embedded and `a, b *Audit` agree on the type.
+            ("Audit", "Audit"),
+            ("Tx", "Tx"),
+            ("UserRepo", "UserRepo"),
+            // Multi-name: both names.
+            ("a", "Audit"),
+            ("b", "Audit"),
+            // Interface-typed: recorded (A6.6 adds the interface fallback).
+            ("cache", "Cache"),
+            // Qualified through an in-module import: the type name side.
+            ("db", "DB"),
+            ("pdb", "DB"),
+            ("pp", "UserRepo"),
+            // Pointer: the pointee.
+            ("repo", "UserRepo"),
+        ]);
+        // Slices, maps, channels, funcs, generics, anonymous structs and
+        // types of packages outside the module (`net.Conn`, `*zap.Logger`,
+        // embedded `*zap.SugaredLogger`): none.
+        assert_eq!(struct_fields(&parse, "shop::UserService"), expect);
+    }
+
+    #[test]
+    fn qualified_field_named_like_a_local_type_records_nothing() {
+        let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
+        // Embedded `*store.Logger` inside `type Logger`: the graph binds types
+        // by bare name, so recording `Logger` would bind every
+        // `l.Logger.Info()` back onto `Logger` itself. `sink` is unaffected.
+        assert_eq!(struct_fields(&parse, "shop::Logger"), pairs(&[("sink", "Sink")]));
+    }
+
+    #[test]
+    fn without_a_module_prefix_qualified_fields_record_nothing() {
+        // No go.mod: every import is external, so only local types remain.
+        let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "", repo()).unwrap();
+        let expect = pairs(&[
+            ("Audit", "Audit"),
+            ("UserRepo", "UserRepo"),
+            ("a", "Audit"),
+            ("b", "Audit"),
+            ("cache", "Cache"),
+            ("pp", "UserRepo"),
+            ("repo", "UserRepo"),
+        ]);
+        assert_eq!(struct_fields(&parse, "shop::UserService"), expect);
+        assert!(struct_fields(&parse, "shop::Logger").is_empty());
+    }
+
+    #[test]
+    fn go_type_name_shapes() {
+        let src = "package p\nvar a *T\nvar b pkg.T\nvar c T\nvar d []T\nvar e map[K]T\nvar f chan T\nvar g func()\nvar h G[T]\nvar i **pkg.T\n";
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+        let mut got = Vec::new();
+        let mut cursor = root.walk();
+        for decl in root.named_children(&mut cursor) {
+            if decl.kind() != "var_declaration" {
+                continue;
+            }
+            let mut dc = decl.walk();
+            for spec in decl.named_children(&mut dc) {
+                let ty = spec.child_by_field_name("type").unwrap();
+                got.push(go_type_name(ty, src.as_bytes()));
+            }
+        }
+        let t = || Some("T".to_string());
+        assert_eq!(got, vec![t(), t(), t(), None, None, None, None, None, t()]);
     }
 }
