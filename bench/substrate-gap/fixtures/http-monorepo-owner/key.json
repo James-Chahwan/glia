@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "LB.4a (legacy-only). Two flask services (services/admin, services/users, each with its own pyproject.toml) serve /health in ONE repo, and a web/ (package.json) axios client calls http://users-svc:8080/health. Baseline at aa91f3c (debug CLI): one ROUTE `GET /health` HANDLED_BY both admin_health and users_health, and the endpoint is `endpoint:GET:/health`. LB.4a qualifies every ROUTE / ENDPOINT / page node under a nested project root with ` @<project path>`, so each service keeps its own route. LB.4b adds the host-narrowing rows.",
+  "note": "LB.4a + LB.4b (legacy-only). Two flask services (services/admin, services/users, each with its own pyproject.toml) serve /health in ONE repo, and a web/ (package.json) axios client calls http://users-svc:8080/health. Baseline at aa91f3c (debug CLI): one ROUTE `GET /health` HANDLED_BY both admin_health and users_health, and the endpoint is `endpoint:GET:/health`. LB.4a qualifies every ROUTE / ENDPOINT / page node under a nested project root with ` @<project path>`, so each service keeps its own route; after LB.4a alone the forbid HTTP_CALLS row is violated (the client pairs with both owners). LB.4b: the host `users-svc` names the `users` PROJECT (label and directory name), so the client pairs only with that project's route.",
   "expect_nodes": [
     {
       "kind": "ROUTE",
@@ -29,6 +29,11 @@
       "from": "GET /health @services/admin",
       "to": "admin_health",
       "category": "HANDLED_BY"
+    },
+    {
+      "from": "endpoint:GET:/health @web",
+      "to": "GET /health @services/users",
+      "category": "HTTP_CALLS"
     }
   ],
   "forbid": [
@@ -41,6 +46,11 @@
       "from": "GET /health @services/users",
       "to": "admin_health",
       "category": "HANDLED_BY"
+    },
+    {
+      "from": "endpoint:GET:/health @web",
+      "to": "GET /health @services/admin",
+      "category": "HTTP_CALLS"
     }
   ]
 }

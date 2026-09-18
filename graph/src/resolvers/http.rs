@@ -1,6 +1,7 @@
 //! HTTP stack resolver — frontend Endpoint → backend Route by
 //! (method, normalised path).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::endpoint::{is_canonical_http_path, split_owner};
@@ -26,10 +27,15 @@ use crate::types::RepoGraph;
 /// - Emitted edge confidence = min(endpoint_node_confidence, Strong) since
 ///   Routes are always Strong at v0.4.4 — i.e. the endpoint's confidence wins.
 ///
-/// Collisions (multiple Routes with the same method+path across repos) emit
-/// one edge per target, UNLESS the endpoint's recorded host names a service
-/// that some of those repos declare: then only their routes are kept (A11.4,
-/// `narrow_by_host`, which falls back to every target on any doubt).
+/// Collisions (multiple Routes with the same method+path) emit one edge per
+/// target, UNLESS the endpoint's recorded host names a service: then only the
+/// routes of the repos (A11.4) or nested projects (LB.4b) it names are kept
+/// (`narrow_by_host`, which falls back to every target on any doubt).
+///
+/// Every node pairs ONCE, however many graph entries carry it (LB.4b): an
+/// ENDPOINT or ROUTE id present in two language graphs of one repo, or a ROUTE
+/// with two stacked `ROUTE_METHOD` cells for one verb, yields one edge per
+/// (endpoint, route) pair, never one per entry.
 pub struct HttpStackResolver;
 
 impl CrossGraphResolver for HttpStackResolver {
@@ -43,57 +49,105 @@ impl CrossGraphResolver for HttpStackResolver {
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in `run_all_resolvers` does not matter.
-        let aliases = build_service_alias_index(&merged.graphs);
-        for g in &merged.graphs {
-            for n in &g.nodes {
-                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
-                    continue;
-                }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
-                    continue;
-                };
-                stats.qnames.endpoint(qname);
-                stats.owned_endpoints += usize::from(split_owner(qname).1.is_some());
-                let Some((method, raw_path)) = parse_endpoint_qname(qname) else {
-                    continue;
-                };
-                if raw_path == "<unresolved>" {
-                    continue;
-                }
-                stats.endpoints += 1;
-                stats.count_folds(raw_path);
-                stats.count_client_normalised(&n.cells);
-                let norm = normalise_http_path(raw_path);
-                let mut hits = lookup_route(&index, &stripped, &method, &norm, &prefixes);
-                let hosts = endpoint_hosts(&n.cells);
-                if narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
+        let (aliases, project_aliases) = build_service_alias_index(&merged.graphs, &owners);
+        let mut edges = Vec::new();
+        for ep in collect_endpoints(&merged.graphs) {
+            stats.qnames.endpoint(ep.qname);
+            stats.owned_endpoints += usize::from(split_owner(ep.qname).1.is_some());
+            let Some((method, raw_path)) = parse_endpoint_qname(ep.qname) else {
+                continue;
+            };
+            if raw_path == UNRESOLVED_PATH {
+                continue;
+            }
+            stats.endpoints += 1;
+            stats.count_folds(raw_path);
+            stats.count_client_normalised(ep.cells.iter().copied());
+            let norm = normalise_http_path(raw_path);
+            let mut hits = lookup_route(&index, &stripped, &method, &norm, &prefixes);
+            let hosts = endpoint_hosts(ep.cells.iter().copied());
+            match narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
+                Narrowed::No => {}
+                Narrowed::Repo => stats.host_narrowed += 1,
+                Narrowed::Owner => {
                     stats.host_narrowed += 1;
-                }
-                for (target, tier) in hits {
-                    stats.record(tier);
-                    merged.cross_edges.push(Edge {
-                        from: n.id,
-                        to: target.route_id,
-                        category: edge_category::HTTP_CALLS,
-                        // Tiers 1-3 reproduce pre-A3.1 confidence exactly
-                        // (`weakest(_, Strong)` is the identity); the fuzzy
-                        // tiers floor it so a consumer can tell a principled
-                        // pairing from a guessed one.
-                        confidence: weakest(
-                            weakest(n.confidence, target.confidence),
-                            tier.ceiling(),
-                        ),
-                    });
+                    stats.owner_narrowed += 1;
                 }
             }
+            for (target, tier) in hits {
+                stats.record(tier);
+                edges.push(Edge {
+                    from: ep.id,
+                    to: target.route_id,
+                    category: edge_category::HTTP_CALLS,
+                    // Tiers 1-3 reproduce pre-A3.1 confidence exactly
+                    // (`weakest(_, Strong)` is the identity); the fuzzy
+                    // tiers floor it so a consumer can tell a principled
+                    // pairing from a guessed one.
+                    confidence: weakest(weakest(ep.confidence, target.confidence), tier.ceiling()),
+                });
+            }
         }
+        merged.cross_edges.extend(edges);
         stats.report();
         stats.qnames.report();
         stats.report_placeholder_folds();
         stats.report_client_normalised();
         stats.report_host_narrowed(aliases.len());
+        stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
     }
+}
+
+/// One client ENDPOINT node, however many graph entries carry it.
+struct EndpointNode<'g> {
+    id: NodeId,
+    qname: &'g str,
+    /// The strongest confidence of any entry.
+    confidence: Confidence,
+    /// Every entry's cells, so host narrowing reads every call site.
+    cells: Vec<&'g Cell>,
+}
+
+/// Every ENDPOINT node of the merge, once per NodeId, in first-seen order.
+///
+/// An id can sit in several graphs of one repo (a TypeScript and a Dart client
+/// calling one canonical path, LB.5). Pairing each entry on its own emitted the
+/// same HTTP_CALLS edge once per entry and counted the node once per entry, so
+/// the entries are merged here, the way `grpc.rs` `pair_servers` keys on
+/// NodeId: the strongest entry confidence, and the union of the entries'
+/// cells, so one call site with no host still blocks narrowing.
+fn collect_endpoints(graphs: &[RepoGraph]) -> Vec<EndpointNode<'_>> {
+    let mut out: Vec<EndpointNode<'_>> = Vec::new();
+    let mut at: HashMap<NodeId, usize> = HashMap::new();
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
+                continue;
+            }
+            if let Some(e) = at.get(&n.id).and_then(|&i| out.get_mut(i)) {
+                e.confidence = strongest(e.confidence, n.confidence);
+                e.cells.extend(&n.cells);
+                continue;
+            }
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            at.insert(n.id, out.len());
+            out.push(EndpointNode {
+                id: n.id,
+                qname,
+                confidence: n.confidence,
+                cells: n.cells.iter().collect(),
+            });
+        }
+    }
+    out
+}
+
+/// The stronger of two confidences (the dual of [`weakest`]).
+fn strongest(a: Confidence, b: Confidence) -> Confidence {
+    if weakest(a, b) == a { b } else { a }
 }
 
 /// `(METHOD, normalised_path) -> Vec<RouteTarget>`.
@@ -176,6 +230,10 @@ struct HttpMatchStats {
     normalised_query: usize,
     /// A11.4: ENDPOINT nodes whose target list host narrowing actually cut.
     host_narrowed: usize,
+    /// LB.4b: the subset of `host_narrowed` where the cut fell INSIDE one
+    /// repo (a kept and a dropped target share a repo), i.e. the host named a
+    /// nested project rather than a whole repo.
+    owner_narrowed: usize,
     /// LB.5: the `[http-qname]` census.
     qnames: QnameCensus,
     /// LB.4a: indexed ROUTE nodes whose qname carries an owner segment
@@ -259,7 +317,7 @@ impl HttpMatchStats {
     /// repeated call sites into one node with stacked ENDPOINT_HIT cells, so a
     /// node counts at most once per bucket however many of its cells carry a
     /// `raw`.
-    fn count_client_normalised(&mut self, cells: &[Cell]) {
+    fn count_client_normalised<'c>(&mut self, cells: impl IntoIterator<Item = &'c Cell>) {
         let (mut host, mut query) = (false, false);
         for c in cells {
             if c.kind != cell_type::ENDPOINT_HIT {
@@ -372,6 +430,21 @@ impl HttpMatchStats {
             self.host_narrowed,
         );
     }
+
+    /// LB.4b fired_on marker. Printed only when a host cut a target list
+    /// inside one repo, so a build whose hosts name only whole repos (or
+    /// nothing) stays silent. `aliases` counts the alias names a nested
+    /// project contributed (its label, its directory name, or an IaC
+    /// resource declared inside it).
+    fn report_owner_narrowed(&self, aliases: usize) {
+        if self.owner_narrowed == 0 {
+            return;
+        }
+        eprintln!(
+            "[http-owner] narrowed={} (host -> project, aliases={aliases})",
+            self.owner_narrowed,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -412,10 +485,42 @@ impl RouteOwners {
     fn len(&self) -> usize {
         self.names.len()
     }
+
+    /// LB.4b: the index of the nested project at `rel` (a PROJECT qname's
+    /// repo-relative path), or `None` when no indexed ROUTE is owned by it.
+    fn id_of(&self, rel: &str) -> Option<u32> {
+        self.by_name.get(owner_spelling(rel).as_ref()).copied()
+    }
+}
+
+/// A project rel as the engine writes it into an owner segment: verbatim
+/// unless it holds whitespace or a `%`, which are percent-escaped so the
+/// segment survives `split_owner`. The twin of `owner_segment` in
+/// `engine/src/http_owner.rs`; the two must spell a rel identically, or a
+/// project whose path holds a space could never be named by a host.
+fn owner_spelling(rel: &str) -> Cow<'_, str> {
+    if !rel.chars().any(|c| c.is_whitespace() || c == '%') {
+        return Cow::Borrowed(rel);
+    }
+    let mut out = String::with_capacity(rel.len() + 8);
+    for c in rel.chars() {
+        if c.is_whitespace() || c == '%' {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    Cow::Owned(out)
 }
 
 /// Build `(METHOD, normalised_path) → Vec<RouteTarget>` across every graph in
-/// the merge. One entry per `ROUTE_METHOD` cell found on each Route node.
+/// the merge. One target per (method, path) a Route node serves: a node's
+/// entries in several graphs, and stacked `ROUTE_METHOD` cells naming one verb
+/// (gin's `router.GET("/user/2fa")` beside `userGroup.GET("/2fa")`), all land
+/// on the same target (LB.4b, [`push_target`]). The counters count nodes.
 ///
 /// A ROUTE's owner segment (LB.4a) is split off first: the method and path
 /// are read from the owner-free qname, so pairing ignores owners, and the
@@ -433,6 +538,7 @@ fn build_route_index(
     // additionally registered under each of its stripped forms here, kept in a
     // second map so the strong `index` stays exactly what it was.
     let mut stripped: RouteIndex = HashMap::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -454,8 +560,11 @@ fn build_route_index(
                 stats.nav_excluded += 1;
                 continue;
             }
-            stats.routes += 1;
-            stats.qnames.route(qname);
+            let first = seen.insert(n.id);
+            if first {
+                stats.routes += 1;
+                stats.qnames.route(qname);
+            }
             let (qname, owner) = split_owner(qname);
             let target = RouteTarget {
                 route_id: n.id,
@@ -463,11 +572,14 @@ fn build_route_index(
                 repo: g.repo,
                 owner: owner.and_then(|o| owners.intern(o)),
             };
-            stats.owned_routes += usize::from(target.owner.is_some());
-            if let Some(path) =
-                index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes)
-            {
-                stats.count_folds(path);
+            // Every entry is indexed (another graph's entry can stack a verb
+            // the first did not), but counted once.
+            let path = index_route_node(&mut index, &mut stripped, qname, &n.cells, target, prefixes);
+            if first {
+                stats.owned_routes += usize::from(target.owner.is_some());
+                if let Some(path) = path {
+                    stats.count_folds(path);
+                }
             }
         }
     }
@@ -597,18 +709,24 @@ fn push_route(
     prefixes: &[String],
 ) {
     let method = method.to_ascii_uppercase();
-    index
-        .entry((method.clone(), norm.to_string()))
-        .or_default()
-        .push(target);
+    push_target(index.entry((method.clone(), norm.to_string())).or_default(), target);
     // Every depth, not just the deepest: a route at `/api/v1/orders` must be
     // reachable from a client that says `/v1/orders` as well as one that says
     // `/orders`. Bounded at 2 segments, so this adds at most two entries.
     for cand in strip_api_prefixes(norm, prefixes) {
-        stripped
-            .entry((method.clone(), cand))
-            .or_default()
-            .push(target);
+        push_target(stripped.entry((method.clone(), cand)).or_default(), target);
+    }
+}
+
+/// Add `target` under one key, once per ROUTE id (LB.4b). A second sighting
+/// of the id (another graph's entry, or a second `ROUTE_METHOD` cell for the
+/// same verb) keeps the first slot, so hit order is unchanged, and takes the
+/// stronger confidence. A key holds only the routes sharing one (method, path),
+/// so the scan is short.
+fn push_target(targets: &mut Vec<RouteTarget>, target: RouteTarget) {
+    match targets.iter_mut().find(|t| t.route_id == target.route_id) {
+        Some(t) => t.confidence = strongest(t.confidence, target.confidence),
+        None => targets.push(target),
     }
 }
 
@@ -683,8 +801,15 @@ fn quoted_body(rest: &str) -> Option<&str> {
 // A11.4 — host narrowing
 // ============================================================================
 
-/// `normalise_alias(name) -> every repo that declares a service by that name`.
-type AliasIndex = HashMap<String, HashSet<RepoId>>;
+/// Where an alias points: a whole repo (`None`, A11.4) or one nested project of
+/// it (`Some` index into the build's [`RouteOwners`], LB.4b).
+type AliasScope = (RepoId, Option<u32>);
+
+/// `normalise_alias(name) -> every scope that declares a service by that
+/// name`. A name can be known and point at no scope: the label of a nested
+/// project that serves no route. A host naming it is known, so it does not
+/// block narrowing, but it can keep no target.
+type AliasIndex = HashMap<String, HashSet<AliasScope>>;
 
 /// The INFRA_RESOURCE kinds that NAME a service (`infra:<kind>:<name>`, see
 /// `parsers/code/extractors/src/iac.rs`). ConfigMaps, secrets, jobs and
@@ -707,16 +832,59 @@ const SERVICE_SUFFIXES: &[&str] = &["-service", "-svc", "-api", "-server"];
 /// (`.svc.cluster.local` ends in `.local`.)
 const CLUSTER_DNS_TAILS: &[&str] = &[".svc", ".local"];
 
-/// Every service alias in the merge, keyed by [`normalise_alias`]. A name
-/// declared in several repos maps to all of them. That is a real ambiguity,
-/// and narrowing then keeps the targets in every one of them.
+/// Every service alias in the merge, keyed by [`normalise_alias`], and how
+/// many distinct names a nested project contributed. A name declared in
+/// several scopes maps to all of them. That is a real ambiguity, and narrowing
+/// then keeps the targets in every one of them.
+///
+/// Two sources:
+/// - LB.4b, a nested PROJECT (qname `project:<rel>`, `rel` not the repo root):
+///   its label (the nav name, last `/` segment, so the npm `@shop/web` gives
+///   `web` and the Go `github.com/acme/users` gives `users`) and its directory
+///   name, both scoped to that project. A project that serves no route (a
+///   client app, a platform-host shell) is a known name with no scope.
+/// - A11.4, a service-naming INFRA_RESOURCE: scoped to the nested project its
+///   declaring file lies in (the MODULE that DEFINES it), and to the whole
+///   repo when that file is outside every nested project, or in one that
+///   serves no route, so an IaC alias never narrows less than it did before.
 ///
 /// The IacResolver builds its index the same way, and this one stays separate
 /// on purpose: that one pairs verbatim qnames, this one keys on a normalised
 /// NAME and only for the service-naming kinds.
-fn build_service_alias_index(graphs: &[RepoGraph]) -> AliasIndex {
+fn build_service_alias_index(graphs: &[RepoGraph], owners: &RouteOwners) -> (AliasIndex, usize) {
     let mut index = AliasIndex::new();
+    let mut project_level: HashSet<String> = HashSet::new();
+    let mut nested: HashMap<RepoId, Vec<&str>> = HashMap::new();
     for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PROJECT) {
+                continue;
+            }
+            let Some(rel) = g
+                .nav
+                .qname_by_id
+                .get(&n.id)
+                .and_then(|q| q.strip_prefix("project:"))
+                .filter(|rel| !rel.is_empty() && *rel != ".")
+            else {
+                continue;
+            };
+            nested.entry(g.repo).or_default().push(rel);
+            let scope = owners.id_of(rel).map(|o| (g.repo, Some(o)));
+            let label = g.nav.name_by_id.get(&n.id).map(String::as_str);
+            for name in label.into_iter().chain([rel]) {
+                let alias = normalise_alias(last_segment(name));
+                if alias.is_empty() {
+                    continue;
+                }
+                let scopes = index.entry(alias.clone()).or_default();
+                scopes.extend(scope);
+                project_level.insert(alias);
+            }
+        }
+    }
+    for g in graphs {
+        let declared_in = declaring_modules(g);
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::INFRA_RESOURCE) {
                 continue;
@@ -734,12 +902,73 @@ fn build_service_alias_index(graphs: &[RepoGraph]) -> AliasIndex {
                 continue;
             }
             let alias = normalise_alias(name);
-            if !alias.is_empty() {
-                index.entry(alias).or_default().insert(g.repo);
+            if alias.is_empty() {
+                continue;
             }
+            let rels = nested.get(&g.repo).map(Vec::as_slice).unwrap_or_default();
+            let mut scopes: Vec<Option<u32>> = declared_in
+                .get(&n.id)
+                .into_iter()
+                .flatten()
+                .map(|module| {
+                    g.nav
+                        .qname_by_id
+                        .get(module)
+                        .and_then(|q| module_dir(q))
+                        .and_then(|dir| enclosing_project(rels, &dir))
+                        .and_then(|rel| owners.id_of(rel))
+                })
+                .collect();
+            if scopes.is_empty() {
+                scopes.push(None);
+            }
+            if scopes.iter().any(Option::is_some) {
+                project_level.insert(alias.clone());
+            }
+            index
+                .entry(alias)
+                .or_default()
+                .extend(scopes.into_iter().map(|s| (g.repo, s)));
         }
     }
-    index
+    (index, project_level.len())
+}
+
+/// `INFRA_RESOURCE id -> the MODULEs that DEFINE it`, i.e. the files that
+/// declare it (`iac.rs` `emit_resource`). IaC nodes carry no POSITION cell,
+/// so this edge is where their file is.
+fn declaring_modules(g: &RepoGraph) -> HashMap<NodeId, Vec<NodeId>> {
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in &g.edges {
+        if e.category == edge_category::DEFINES
+            && g.nav.kind_by_id.get(&e.to) == Some(&node_kind::INFRA_RESOURCE)
+            && g.nav.kind_by_id.get(&e.from) == Some(&node_kind::MODULE)
+        {
+            out.entry(e.to).or_default().push(e.from);
+        }
+    }
+    out
+}
+
+/// The repo-relative directory of a MODULE, from its qname (the file path with
+/// the extension dropped and `/` spelled `::`): `services::users::compose`
+/// -> `services/users`. `None` for a file at the repo root.
+fn module_dir(qname: &str) -> Option<String> {
+    qname.rsplit_once("::").map(|(dir, _)| dir.replace("::", "/"))
+}
+
+/// The longest nested project rel enclosing `dir`, segment-bounded
+/// (`servicesx` is not under `services`), as the engine's owner pass picks it.
+fn enclosing_project<'r>(rels: &[&'r str], dir: &str) -> Option<&'r str> {
+    rels.iter()
+        .copied()
+        .filter(|r| dir == *r || dir.strip_prefix(*r).is_some_and(|rest| rest.starts_with('/')))
+        .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+}
+
+/// The last `/` segment of a name or path.
+fn last_segment(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
 }
 
 /// One spelling for a service name, applied identically to the alias and to
@@ -804,7 +1033,7 @@ fn hosts_list(json: &str) -> Option<Vec<&str>> {
 /// the base URL is bound differently per deployment) contributes the whole
 /// array; otherwise its `host` (A11.2). A cell with neither means one call site
 /// goes somewhere unknown, and then nothing may be narrowed.
-fn endpoint_hosts(cells: &[Cell]) -> Option<Vec<String>> {
+fn endpoint_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     let mut seen_hit = false;
     for c in cells {
@@ -829,48 +1058,62 @@ fn endpoint_hosts(cells: &[Cell]) -> Option<Vec<String>> {
     (seen_hit && !out.is_empty()).then_some(out)
 }
 
-/// Drop the targets that live outside the service the client named. Returns
-/// true only when it removed at least one.
+/// What [`narrow_by_host`] did to one endpoint's target list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Narrowed {
+    /// Left alone.
+    No,
+    /// Cut to whole repos (A11.4).
+    Repo,
+    /// Cut inside a repo: a dropped target shares its repo with a kept one,
+    /// so the host named a nested project (LB.4b).
+    Owner,
+}
+
+/// Drop the targets that live outside the service the client named.
+///
+/// A target is kept when a host's alias scopes its repo as a whole
+/// (`(repo, None)`) or its own project (`(repo, owner)`). So in a monorepo a
+/// host naming the `users` project keeps `GET /health @services/users` and
+/// drops `GET /health @services/admin`, the choice LB.4a's owner-qualified
+/// ROUTE ids make possible.
 ///
 /// It acts only on positive evidence and otherwise leaves `hits` alone:
 /// - no host, or any host (deployment) that is not a known alias: the client
 ///   may call something the map does not know;
-/// - no target in an owning repo: the map is incomplete, and losing an edge
+/// - no target in a named scope: the map is incomplete, and losing an edge
 ///   to it would be worse than keeping a collision.
 ///
-/// With several hosts the owners are their union, so a client whose dev and
-/// prod bases name different services keeps both services' routes.
-///
-/// MONOREPO IS OUT OF SCOPE, deliberately. This keys on the ROUTE's RepoId. Two
-/// services in ONE repo serving the same path collapse into a single
-/// `route:<path>` node with two HANDLED_BY edges, so there is nothing here to
-/// choose between. Closing that case needs an owner segment in ROUTE qnames, a
-/// route-identity change for the route workstream. Do not bolt a path-prefix
-/// variant onto this index to get it.
+/// With several hosts the scopes are their union, so a client whose dev and
+/// prod bases name different services keeps both services' routes. Set
+/// lookups only; `hits` keeps its order.
 fn narrow_by_host(
     aliases: &AliasIndex,
     hosts: Option<&[String]>,
     hits: &mut Vec<(RouteTarget, MatchTier)>,
-) -> bool {
+) -> Narrowed {
     let Some(hosts) = hosts else {
-        return false;
+        return Narrowed::No;
     };
     if hits.len() < 2 {
-        return false;
+        return Narrowed::No;
     }
-    let mut owners: HashSet<RepoId> = HashSet::new();
+    let mut scopes: HashSet<AliasScope> = HashSet::new();
     for h in hosts {
-        let Some(repos) = aliases.get(&normalise_alias(host_name(h))) else {
-            return false;
+        let Some(named) = aliases.get(&normalise_alias(host_name(h))) else {
+            return Narrowed::No;
         };
-        owners.extend(repos.iter().copied());
+        scopes.extend(named.iter().copied());
     }
-    let kept = hits.iter().filter(|(t, _)| owners.contains(&t.repo)).count();
+    let keeps = |t: &RouteTarget| scopes.contains(&(t.repo, None)) || scopes.contains(&(t.repo, t.owner));
+    let kept_repos: HashSet<RepoId> = hits.iter().filter(|(t, _)| keeps(t)).map(|(t, _)| t.repo).collect();
+    let kept = hits.iter().filter(|(t, _)| keeps(t)).count();
     if kept == 0 || kept == hits.len() {
-        return false;
+        return Narrowed::No;
     }
-    hits.retain(|(t, _)| owners.contains(&t.repo));
-    true
+    let within_repo = hits.iter().any(|(t, _)| !keeps(t) && kept_repos.contains(&t.repo));
+    hits.retain(|(t, _)| keeps(t));
+    if within_repo { Narrowed::Owner } else { Narrowed::Repo }
 }
 
 /// Collapse path param syntaxes into a stable form so a frontend endpoint's
@@ -1296,8 +1539,9 @@ mod tests {
 
     /// LB.4a: two services of one repo serving `/health` are two ROUTE ids
     /// (each qualified with its project). Pairing reads the owner-free path,
-    /// so an owner-qualified client reaches both (narrowing by project is
-    /// LB.4b), in both route shapes, and the owners ride on the targets.
+    /// so an owner-qualified client with no host reaches both (LB.4b narrows
+    /// only on a host), in both route shapes, and the owners ride on the
+    /// targets.
     #[test]
     fn owner_segments_are_ignored_by_pairing_and_carried_on_targets() {
         let repo = RepoId(77);
@@ -1650,42 +1894,134 @@ mod tests {
         assert_eq!(to.len(), 1);
     }
 
+    /// One target `n` in `repo`, owned by project index `owner`.
+    fn target(n: u64, repo: u64, owner: Option<u32>) -> (RouteTarget, MatchTier) {
+        (
+            RouteTarget {
+                route_id: NodeId(n),
+                confidence: Confidence::Strong,
+                repo: RepoId(repo),
+                owner,
+            },
+            MatchTier::Exact,
+        )
+    }
+
+    fn alias_index(rows: &[(&str, &[AliasScope])]) -> AliasIndex {
+        rows.iter()
+            .map(|(name, scopes)| ((*name).to_string(), scopes.iter().copied().collect()))
+            .collect()
+    }
+
+    fn host(h: &str) -> Vec<String> {
+        vec![h.to_string()]
+    }
+
+    fn kept(hits: &[(RouteTarget, MatchTier)]) -> Vec<u64> {
+        hits.iter().map(|(t, _)| t.route_id.0).collect()
+    }
+
     /// Straight at the function: an alias whose repo holds none of the
     /// targets, and a single target, both leave `hits` untouched.
     #[test]
     fn narrow_by_host_never_empties_or_touches_a_single_hit() {
-        let t = |n: u64, repo: u64| {
-            (
-                RouteTarget {
-                    route_id: NodeId(n),
-                    confidence: Confidence::Strong,
-                    repo: RepoId(repo),
-                    owner: None,
-                },
-                MatchTier::Exact,
-            )
-        };
-        let aliases: AliasIndex = [
-            ("payments".to_string(), HashSet::from([RepoId(9)])),
-            ("users".to_string(), HashSet::from([RepoId(1)])),
-        ]
-        .into_iter()
-        .collect();
-        let host = |h: &str| vec![h.to_string()];
+        let t = |n: u64, repo: u64| target(n, repo, None);
+        let aliases = alias_index(&[
+            ("payments", &[(RepoId(9), None)]),
+            ("users", &[(RepoId(1), None)]),
+        ]);
 
         let mut hits = vec![t(1, 1), t(2, 2)];
-        assert!(!narrow_by_host(&aliases, Some(&host("payments:80")), &mut hits));
+        assert_eq!(narrow_by_host(&aliases, Some(&host("payments:80")), &mut hits), Narrowed::No);
         assert_eq!(hits.len(), 2);
 
         let mut hits = vec![t(2, 2)];
-        assert!(!narrow_by_host(&aliases, Some(&host("users")), &mut hits));
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::No);
         assert_eq!(hits.len(), 1, "a lone hit in another repo is kept");
 
         let mut hits = vec![t(1, 1), t(2, 2), t(3, 1)];
-        assert!(narrow_by_host(&aliases, Some(&host("users-svc:80")), &mut hits));
-        let kept: Vec<u64> = hits.iter().map(|(x, _)| x.route_id.0).collect();
-        assert_eq!(kept, vec![1, 3], "order is kept");
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users-svc:80")), &mut hits), Narrowed::Repo);
+        assert_eq!(kept(&hits), vec![1, 3], "order is kept");
         assert!(hits.iter().all(|(_, tier)| *tier == MatchTier::Exact));
+    }
+
+    /// LB.4b: two projects of ONE repo serve the path; the host names the
+    /// users project, so only its route is kept, and the cut is owner-level.
+    #[test]
+    fn narrow_by_owner_keeps_the_named_project() {
+        let (admin, users) = (0, 1);
+        let aliases = alias_index(&[
+            ("admin", &[(RepoId(7), Some(admin))]),
+            ("users", &[(RepoId(7), Some(users))]),
+        ]);
+        let mut hits = vec![target(1, 7, Some(admin)), target(2, 7, Some(users))];
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users-svc:8080")), &mut hits), Narrowed::Owner);
+        assert_eq!(kept(&hits), vec![2]);
+
+        // A root-level route of the same repo (no owner) is not in the users
+        // project either.
+        let mut hits = vec![target(1, 7, None), target(2, 7, Some(users)), target(3, 7, Some(admin))];
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::Owner);
+        assert_eq!(kept(&hits), vec![2]);
+
+        // Hosts naming both projects keep both: nothing is cut.
+        let mut hits = vec![target(1, 7, Some(admin)), target(2, 7, Some(users))];
+        let both = vec!["users".to_string(), "admin-api".to_string()];
+        assert_eq!(narrow_by_host(&aliases, Some(&both), &mut hits), Narrowed::No);
+        assert_eq!(hits.len(), 2);
+
+        // The same project index in ANOTHER repo is a different project.
+        let mut hits = vec![target(1, 8, Some(users)), target(2, 8, Some(admin))];
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::No);
+        assert_eq!(hits.len(), 2);
+    }
+
+    /// A repo-level alias (an IaC resource outside every nested project)
+    /// keeps every owner of its repo, and only a cut across repos counts as
+    /// `Repo`.
+    #[test]
+    fn repo_level_alias_keeps_every_owner() {
+        let aliases = alias_index(&[("users", &[(RepoId(7), None)])]);
+        let mut hits =
+            vec![target(1, 7, Some(0)), target(2, 8, None), target(3, 7, Some(1)), target(4, 7, None)];
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users-service")), &mut hits), Narrowed::Repo);
+        assert_eq!(kept(&hits), vec![1, 3, 4]);
+
+        // A repo-level scope and a project scope of another repo: the union.
+        let aliases = alias_index(&[("users", &[(RepoId(7), None), (RepoId(8), Some(2))])]);
+        let mut hits = vec![target(1, 7, Some(0)), target(2, 8, Some(2)), target(3, 8, Some(3))];
+        assert_eq!(narrow_by_host(&aliases, Some(&host("users")), &mut hits), Narrowed::Owner);
+        assert_eq!(kept(&hits), vec![1, 2]);
+    }
+
+    /// Unknown hosts, a known name with no scope, and every other shortfall
+    /// of evidence keep the whole list.
+    #[test]
+    fn unknown_host_keeps_all() {
+        let aliases = alias_index(&[
+            ("users", &[(RepoId(7), Some(1))]),
+            // A project that serves no route: known, scoped to nothing.
+            ("web", &[]),
+        ]);
+        let three = || vec![target(1, 7, Some(0)), target(2, 7, Some(1)), target(3, 8, None)];
+        for hosts in [
+            vec!["billing:9000".to_string()],
+            vec!["users".to_string(), "billing".to_string()],
+            vec!["users".to_string(), String::new()],
+            vec!["web".to_string()],
+        ] {
+            let mut hits = three();
+            assert_eq!(narrow_by_host(&aliases, Some(&hosts), &mut hits), Narrowed::No, "{hosts:?}");
+            assert_eq!(hits.len(), 3, "{hosts:?}");
+        }
+        let mut hits = three();
+        assert_eq!(narrow_by_host(&aliases, None, &mut hits), Narrowed::No);
+        assert_eq!(hits.len(), 3);
+        // A known-but-empty name does not block the other host's evidence.
+        let mut hits = three();
+        let web_or_users = vec!["web".to_string(), "users".to_string()];
+        assert_eq!(narrow_by_host(&aliases, Some(&web_or_users), &mut hits), Narrowed::Owner);
+        assert_eq!(kept(&hits), vec![2]);
     }
 
     /// The degenerate root-Dockerfile image name aliases nothing.
@@ -1699,8 +2035,193 @@ mod tests {
                 (node_kind::INFRA_RESOURCE, "infra:statefulset:Users_DB", vec![]),
             ],
         );
-        let idx = build_service_alias_index(std::slice::from_ref(&g));
+        let (idx, project_level) =
+            build_service_alias_index(std::slice::from_ref(&g), &RouteOwners::default());
         assert_eq!(idx.keys().collect::<Vec<_>>(), vec!["users-db"]);
+        assert_eq!(project_level, 0);
+    }
+
+    /// Route owners interned in the given order.
+    fn route_owners(names: &[&str]) -> RouteOwners {
+        let mut o = RouteOwners::default();
+        for n in names {
+            o.intern(n);
+        }
+        o
+    }
+
+    /// LB.4b: a nested PROJECT contributes its label (last `/` segment, so an
+    /// npm scope drops) and its directory name, scoped to its route owner. A
+    /// project with no route is a known name with no scope; the repo root is
+    /// no alias at all.
+    #[test]
+    fn project_alias_from_label_and_dir_name() {
+        let r = RepoId(3);
+        let (mut g, ids) = repo_graph(
+            r,
+            vec![
+                (node_kind::PROJECT, "project:services/users", vec![]),
+                (node_kind::PROJECT, "project:apps/storefront", vec![]),
+                (node_kind::PROJECT, "project:.", vec![]),
+                (node_kind::PROJECT, "project:go/billing", vec![]),
+                (node_kind::PROJECT, "project:my app", vec![]),
+            ],
+        );
+        let labels = ["users-service", "@shop/web", "root", "github.com/acme/billing-api", "My App"];
+        for (id, label) in ids.iter().zip(labels) {
+            g.nav.name_by_id.insert(*id, label.to_string());
+        }
+        let owners = route_owners(&["services/users", "go/billing", "my%20app"]);
+        let (idx, project_level) = build_service_alias_index(std::slice::from_ref(&g), &owners);
+        let scopes = |k: &str| {
+            let mut v: Vec<AliasScope> = idx.get(k).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            v.sort_by_key(|(repo, owner)| (repo.0, *owner));
+            v
+        };
+        assert_eq!(scopes("users"), vec![(r, Some(0))], "label users-service and dir users meet");
+        assert_eq!(scopes("billing"), vec![(r, Some(1))], "Go module path: last segment");
+        assert_eq!(scopes("my app"), vec![(r, Some(2))], "a spaced rel finds its escaped owner");
+        assert!(idx.contains_key("web") && scopes("web").is_empty(), "npm scope dropped; no route, no scope");
+        assert!(idx.contains_key("storefront") && scopes("storefront").is_empty());
+        assert!(!idx.contains_key("root") && !idx.contains_key("."), "the repo root is no alias");
+        let mut keys: Vec<&String> = idx.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["billing", "my app", "storefront", "users", "web"]);
+        assert_eq!(project_level, 5);
+    }
+
+    /// LB.4b: an IaC alias is scoped to the nested project its declaring file
+    /// (the MODULE that DEFINES it) lies in, and to the whole repo from the
+    /// repo root, from a project that serves no route, or with no file.
+    #[test]
+    fn infra_alias_is_scoped_by_its_declaring_file() {
+        let r = RepoId(4);
+        let (mut g, ids) = repo_graph(
+            r,
+            vec![
+                (node_kind::PROJECT, "project:services/users", vec![]),
+                (node_kind::PROJECT, "project:web", vec![]),
+                (node_kind::MODULE, "services::users::k8s::deploy", vec![]),
+                (node_kind::MODULE, "docker-compose", vec![]),
+                (node_kind::MODULE, "web::Dockerfile", vec![]),
+                (node_kind::MODULE, "services::usersx::compose", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:deployment:users-api", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:service:orders", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:image:frontend", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:service:carts", vec![]),
+                (node_kind::INFRA_RESOURCE, "infra:service:search", vec![]),
+            ],
+        );
+        let defines = |from: NodeId, to: NodeId| Edge {
+            from,
+            to,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Medium,
+        };
+        g.edges = vec![
+            defines(ids[2], ids[6]),
+            defines(ids[3], ids[7]),
+            defines(ids[4], ids[8]),
+            defines(ids[5], ids[9]),
+        ];
+        let owners = route_owners(&["services/users"]);
+        let (idx, _) = build_service_alias_index(std::slice::from_ref(&g), &owners);
+        let scopes = |k: &str| {
+            let mut v: Vec<AliasScope> = idx.get(k).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            v.sort_by_key(|(repo, owner)| (repo.0, *owner));
+            v
+        };
+        assert_eq!(scopes("users"), vec![(r, Some(0))], "declared inside the users project");
+        assert_eq!(scopes("orders"), vec![(r, None)], "root compose: the whole repo");
+        assert_eq!(scopes("frontend"), vec![(r, None)], "a project with no route falls back to the repo");
+        assert_eq!(scopes("carts"), vec![(r, None)], "usersx is not under users");
+        assert_eq!(scopes("search"), vec![(r, None)], "no declaring file");
+    }
+
+    /// LB.4b end to end: a monorepo (PROJECT graph + two owned routes + an
+    /// owned client whose host names `users-svc`) pairs only with the users
+    /// route.
+    #[test]
+    fn host_naming_a_project_pairs_only_with_its_route() {
+        let r = RepoId(90);
+        let hit_users = hit(r#"{"method":"GET","path":"/health","host":"users-svc:8080"}"#);
+        let (code, ids) = repo_graph(
+            r,
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/health @web", vec![hit_users]),
+                (node_kind::ROUTE, "GET /health @services/admin", vec![text_get()]),
+                (node_kind::ROUTE, "GET /health @services/users", vec![text_get()]),
+            ],
+        );
+        let (mut projects, pids) = repo_graph(
+            r,
+            vec![
+                (node_kind::PROJECT, "project:services/admin", vec![]),
+                (node_kind::PROJECT, "project:services/users", vec![]),
+                (node_kind::PROJECT, "project:web", vec![]),
+            ],
+        );
+        for (id, label) in pids.iter().zip(["admin", "users", "web"]) {
+            projects.nav.name_by_id.insert(*id, label.to_string());
+        }
+        let mut merged = MergedGraph::new(vec![code, projects]);
+        HttpStackResolver.resolve(&mut merged);
+        let to: Vec<NodeId> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| e.to)
+            .collect();
+        assert_eq!(to, vec![ids[2]]);
+    }
+
+    /// LB.4b id-dedup: an ENDPOINT id in two graphs of one repo, and a ROUTE
+    /// with its verb stacked twice (and itself in two graphs), pair ONCE,
+    /// with the strongest entry confidence; the hosts are the union of both
+    /// entries' cells.
+    #[test]
+    fn a_node_in_two_graphs_pairs_once() {
+        let r = RepoId(91);
+        let twice: Vec<Cell> = get_route().into_iter().chain(get_route()).collect();
+        let (mut ts, ids) = repo_graph(
+            r,
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/user/2fa", vec![hit(r#"{"host":"users"}"#)]),
+                (node_kind::ROUTE, "route:/user/2fa", twice),
+            ],
+        );
+        let (mut dart, _) = repo_graph(
+            r,
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/user/2fa", vec![hit(r#"{"path":"/user/2fa"}"#)]),
+                (node_kind::ROUTE, "route:/user/2fa", get_route()),
+            ],
+        );
+        ts.nodes[0].confidence = Confidence::Weak;
+        dart.nodes[0].confidence = Confidence::Medium;
+        let mut merged = MergedGraph::new(vec![ts, dart]);
+        HttpStackResolver.resolve(&mut merged);
+        let calls: Vec<&Edge> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .collect();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!((calls[0].from, calls[0].to), (ids[0], ids[1]));
+        assert_eq!(calls[0].confidence, Confidence::Medium, "the strongest entry wins");
+
+        let endpoints = collect_endpoints(&merged.graphs);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].id, ids[0]);
+        assert_eq!(endpoints[0].confidence, Confidence::Medium);
+        assert_eq!(endpoints[0].cells.len(), 2, "both entries' hits");
+        // The second entry's hit names no host, so the union is no evidence.
+        assert_eq!(endpoint_hosts(endpoints[0].cells.iter().copied()), None);
+        // The route is counted, and indexed, once.
+        let mut stats = HttpMatchStats::default();
+        let (index, _, _) = build_route_index(&merged.graphs, &[], &mut stats);
+        assert_eq!(stats.routes, 1);
+        assert_eq!(index.get(&("GET".to_string(), "/user/2fa".to_string())).map(Vec::len), Some(1));
     }
 
     #[test]

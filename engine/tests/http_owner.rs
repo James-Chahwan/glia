@@ -1,4 +1,5 @@
-//! LB.4a — the owner segment on HTTP qnames, over REAL builds.
+//! LB.4a — the owner segment on HTTP qnames, over REAL builds. LB.4b — the
+//! host a client names narrows its pairing to that project's routes.
 //!
 //! A ROUTE / ENDPOINT / page node whose file lies under a NESTED project root
 //! is qualified with ` @<project path>`. Before it, two services of one repo
@@ -116,20 +117,15 @@ fn monorepo_services_keep_their_own_routes() {
         endpoints.iter().map(String::as_str).collect::<Vec<_>>(),
         ["endpoint:GET:/health @web"]
     );
-    // Pairing ignores owners: the client reaches BOTH routes until LB.4b
-    // narrows by project.
+    // Pairing ignores owners, but the host does not: `users-svc` names the
+    // `users` PROJECT, so LB.4b keeps only its route. (After LB.4a alone the
+    // client reached both.)
     assert_eq!(
         edges(&m, edge_category::HTTP_CALLS),
-        [
-            (
-                "endpoint:GET:/health @web".to_string(),
-                "GET /health @services/admin".to_string()
-            ),
-            (
-                "endpoint:GET:/health @web".to_string(),
-                "GET /health @services/users".to_string()
-            ),
-        ]
+        [(
+            "endpoint:GET:/health @web".to_string(),
+            "GET /health @services/users".to_string()
+        )]
     );
     // Display names are unchanged.
     for g in &m.graphs {
@@ -238,7 +234,9 @@ fn incremental_matches_clean() {
 }
 
 /// `glia arch` on the monorepo: each service owns its own route. HEAD
-/// (measured): admin 1, users 0 — the shared node was placed in admin.
+/// (measured): admin 1, users 0 — the shared node was placed in admin, and
+/// the one link was web -> services/admin. After LB.4a: both links. After
+/// LB.4b: exactly the one the host names, web -> services/users.
 #[test]
 fn service_map_counts_one_route_per_service() {
     let td = tempfile::tempdir().unwrap();
@@ -262,10 +260,7 @@ fn service_map_counts_one_route_per_service() {
     links.sort();
     assert_eq!(
         links,
-        [
-            ("web".to_string(), "services/admin".to_string(), "GET /health".to_string()),
-            ("web".to_string(), "services/users".to_string(), "GET /health".to_string()),
-        ],
-        "channels read the owner-free path"
+        [("web".to_string(), "services/users".to_string(), "GET /health".to_string())],
+        "the host names users; channels read the owner-free path"
     );
 }
