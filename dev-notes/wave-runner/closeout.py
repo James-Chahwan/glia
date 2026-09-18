@@ -2,6 +2,12 @@
 """End-of-wave close-out, as one command. Commits only if every gate is clean.
 
     python3 closeout.py <wave> <workflow-run-id>      e.g.  closeout.py 8 wf_63d9b695-7a3
+    python3 closeout.py --leap <wave> <run-id>        the 0.5.0 leap (waves W0..)
+    python3 closeout.py --leap <wave> --plan-only     print the wave's packets and exit
+
+--leap schedules through leap_schedule.py, folds followups into
+leap-corrections.json (ids A*.* and L*.*), records LANDED in leap_schedule.py,
+and also runs scripts/check-engram-export.sh once LG.13 has created it.
 
 Steps (README order): commits + per-packet status from the workflow journal,
 workspace tests, byte_identical, wheel rebuild + staleness check, run.py,
@@ -19,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
-WHEEL = ROOT / "target/wheels/repo_graph_py-0.4.18-cp311-abi3-manylinux_2_34_x86_64.whl"
+# The wheel's name changes with the release and with the 0.5.0 rename; take the newest.
+WHEELS = ROOT / "target/wheels"
 CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
 
 
@@ -62,17 +69,38 @@ def section(text, head):
     return n, items
 
 
+def package_name(crate_dir):
+    """cargo package name of a workspace crate — repo-graph-* before LD.11a, glia-* after."""
+    m = re.search(r'^name\s*=\s*"([^"]+)"', (ROOT / crate_dir / "Cargo.toml").read_text(), re.M)
+    return m.group(1)
+
+
 def main():
-    wave, run = int(sys.argv[1]), sys.argv[2]
+    args = sys.argv[1:]
+    leap = "--leap" in args
+    if leap:
+        args.remove("--leap")
     sys.path.insert(0, str(HERE))
-    import schedule
+    wave = int(args[0])
+    if leap:
+        import leap_schedule
+        waves = leap_schedule.schedule(*leap_schedule.load())
+        ids, remaining = waves[wave], waves[wave + 1:]
+    else:
+        import schedule
+        waves, _ = schedule.schedule(schedule.load())
+        ids, remaining = waves[wave - 1], waves[wave:]
+    if "--plan-only" in args:
+        print(f"wave {wave}: {' '.join(ids)}")
+        print(f"remaining waves: {len(remaining)}")
+        return
+    run = args[1]
     base = json.loads((HERE / "baseline.json").read_text())
     gates, lines = [], []
     say = lambda s: (print(s), lines.append(s))
+    engine_pkg, py_pkg = package_name("engine"), package_name("py")
 
     res = journal_results(run)
-    waves, _ = schedule.schedule(schedule.load())
-    ids = waves[wave - 1]
     got = {r["packet"].split("—")[0].strip(): r for r in res}
     say(f"== wave {wave}: {len(res)}/{len(ids)} returned")
     for i in ids:
@@ -94,15 +122,16 @@ def main():
     say(f"== cargo test --workspace: {passed} passed, {failed} failed, {comp} compile errors")
     if failed or comp:
         gates.append("workspace tests")
-    out, _ = sh("cargo test -p repo-graph-engine --test byte_identical 2>&1")
+    out, _ = sh(f"cargo test -p {engine_pkg} --test byte_identical 2>&1")
     bi = "2 passed; 0 failed" in out
     say(f"== byte_identical: {'green' if bi else 'RED'}")
     if not bi:
         gates.append("byte_identical")
 
-    sh("cargo clean -p repo-graph-engine -p repo-graph-py")
+    sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
-    sh(f"pip install --force-reinstall --no-deps -q {WHEEL}")
+    wheel = max(WHEELS.glob("*.whl"), key=lambda p: p.stat().st_mtime)
+    sh(f"pip install --force-reinstall --no-deps -q {wheel}")
     so, _ = sh("python3 -c \"import repo_graph_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(repo_graph_py.__file__),'*.so'))[0])\"")
     stale, _ = sh(f"find {' '.join(CRATES)} -name '*.rs' -newer {so.strip()}")
     stamp, _ = sh("python3 -c 'import repo_graph_py as r; print(r.build_stamp())'")
@@ -150,10 +179,16 @@ def main():
     if "all passed" not in tg:
         gates.append("test_grade")
 
+    if leap and (ROOT / "scripts/check-engram-export.sh").exists():
+        out, rc = sh("bash scripts/check-engram-export.sh 2>&1")
+        say(f"== engram-export (out of workspace): {'green' if rc == 0 else 'RED'}")
+        if rc:
+            gates.append("engram-export check")
+
     # fold followups into remaining packets
-    rem = {p for w in waves[wave:] for p in w}
-    pat = re.compile(r"\b(A\d+\.\d+[a-c]?)\b")
-    cp = ROOT / "dev-notes/packet-corrections.json"
+    rem = {p for w in remaining for p in w}
+    pat = re.compile(r"\b(A\d+\.\d+[a-z]?|L[A-G0]\.\d+[a-z]?)\b" if leap else r"\b(A\d+\.\d+[a-c]?)\b")
+    cp = ROOT / ("dev-notes/leap-corrections.json" if leap else "dev-notes/packet-corrections.json")
     cf = json.loads(cp.read_text())
     folded = {}
     for r in res:
@@ -182,28 +217,37 @@ def main():
     base["test_grade_py"] = tg.strip()
     (HERE / "baseline.json").write_text(json.dumps(base, indent=2))
 
-    sp = HERE / "schedule.py"
+    sp = HERE / ("leap_schedule.py" if leap else "schedule.py")
     s = sp.read_text()
-    if f"    {wave}: " not in s:
+    if leap:
+        m = re.search(r"^LANDED = \{(.*?)\}$", s, re.M | re.S)
+        if f"    {wave}: " not in m.group(1):
+            body = m.group(1).rstrip("\n") + f'\n    {wave}: "{" ".join(ids)}",\n'
+            s = s[:m.start()] + "LANDED = {" + body + "}" + s[m.end():]
+            sp.write_text(s)
+    elif f"    {wave}: " not in s:
         s = s.replace("\n}\n\n\ndef _graph_module", f'\n    {wave}: "{" ".join(ids)}",\n}}\n\n\ndef _graph_module', 1)
         sp.write_text(s)
-    ver, vrc = sh("python3 dev-notes/wave-runner/schedule.py --verify | tail -1")
-    say(f"== schedule --verify: {ver.strip()}")
+    ver, vrc = sh(f"python3 dev-notes/wave-runner/{sp.name} --verify | tail -1")
+    say(f"== {sp.name} --verify: {ver.strip()}")
     if vrc:
         gates.append("schedule --verify")
 
-    if wave < len(waves):
-        out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/wave{wave+1}.js")
+    if remaining:
+        flag = "--leap " if leap else ""
+        out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{'leap-' if leap else ''}wave{wave+1}.js")
         say("== " + out.strip().replace("\n", " | "))
 
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")
         sys.exit(1)
-    msg = (f"bench+plan: wave {wave} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/480\n\n"
-           + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\n")
+    what = f"leap wave W{wave}" if leap else f"wave {wave}"
+    msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/480\n\n"
+           + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\n"
+           + "Claude-Session: https://claude.ai/code/session_01DeZg4LEQveWWZQ1ZL1bZvd\n")
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)
     out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md bench/substrate-gap/legacy-latest.json "
-                 "dev-notes/packet-corrections.json dev-notes/wave-runner && "
+                 "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
 

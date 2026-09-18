@@ -29,3 +29,15 @@ lost at a session boundary, so it is committed now.
 4. `python3 bench/substrate-gap/run.py --no-log`, then `matrix.py --emit` and `--check`,
    `test_matrix.py`, `test_grade.py`. Commit the regenerated artefacts.
 5. Update `baseline.json` and add the wave's packets to `LANDED` in `schedule.py`.
+
+## The 0.5.0 leap (`--leap`)
+
+The same tools run the leap (`dev-notes/next-leap-0.5.0.md` §7) with `--leap`:
+
+| file | role |
+|---|---|
+| `leap_schedule.py` | reads `dev-notes/leap-packets.json`; Batch C claims come from the re-verified `files_touched_now`; applies the dependency patch, the wave-0 split remaps and the `exclusive` list; W0 is the serial split wave. `--verify`, `--stats`, `--wave N`, `--json` |
+| `shared_brief_leap.md` | the brief for the breaking release (declared breaks allowed, other repos read-only, L0.1 ids) |
+| `gen_wave.py --leap N out.js` | renders leap wave N; Batch C packets get their standing correction + re-verification + leap correction; W0 and single-packet waves render sequential |
+| `closeout.py --leap N <run-id>` | end of leap wave; folds followups into `dev-notes/leap-corrections.json`; runs `scripts/check-engram-export.sh` once LG.13 created it; `--plan-only` prints the wave |
+

@@ -199,8 +199,7 @@ A6.6-persisted · F's persisted cells need B's move-stable identity. Only Batch 
 
 ## 5. Open
 
-Nothing blocking. Engram v6 is in (see G). Packet specs for B–G, A's new items and the Engram block are the next
-deliverable; Batch C's 34 specs need re-anchoring against HEAD after 19 waves.
+Specced — see section 7 for the packet counts, the schedule, and the decisions that gate specific waves (7.1).
 
 ## 6. Not in this leap
 
@@ -211,3 +210,83 @@ deliverable; Batch C's 34 specs need re-anchoring against HEAD after 19 waves.
 - **Gated** (`project_glia_security_dual_use`): taint / value data-flow, CVE-reachability or package reachability joined
   to a vulnerability feed, SecurityZone resolver and the `^` security sigil, HTML sitemap-crawl doc adapter, git fetch
   or private-repo auth inside `glia merge`. TeamOwnership stays out ("everything but team ownership", 2026-04-17).
+
+## 7. Specced (2026-09-19) — 207 packets, W0 + 39 waves
+
+Spec run `wf_65413aa0-59f`: 11 spec → adversarial-verify pipelines, 2 Batch C re-verifiers, 1 integration critic
+(25 agents, 0 errors). Every packet has symbol-verified anchors, exhaustive files_touched, a gate with a pre-fix
+baseline measured on HEAD, a fired_on marker and a declared breaking block.
+
+| phase | packets | LOC |
+|---|---|---|
+| L0 — wave 0: id allocation + god-file splits (engine / graph facades, py, cli, engine build.rs) | 6 | 1,480 |
+| A — extraction depth (incl. 13 programme leftovers) | 44 | 11,290 |
+| Batch C — re-verified at HEAD: 9 still valid, 25 respecced, 0 obsolete | 34 | 5,045 |
+| B — identity | 9 | 3,080 |
+| C — store format | 16 | 4,600 |
+| D — API + cross-domain prep | 29 | 8,680 |
+| E — new answers | 22 | 6,065 |
+| F — outside inputs + reserved cells | 21 | 6,665 |
+| G — perf, hygiene, Engram v6, handoffs | 26 | 6,455 |
+| **total** | **207** | **~53,400** |
+
+Declared breaks across the packets: api_signature 31, cli_output 27, cell_value 15, edge_removal 13, format 11,
+qname_shape 10, node_id 10, out_of_repo 20 (96 packets break nothing).
+
+**Schedule** (`python3 dev-notes/wave-runner/leap_schedule.py`): W0 runs the six splits one at a time
+(L0.1 → L0.3 → L0.2 → L0.6 → L0.4 → L0.5; graph before engine, then py and cli), then W1–W39 file-disjoint. Dependency
+depth 28. Without the wave-0 splits the same packets need 63 waves. The critical path is the store/format spine
+(LC.2 → LC.3a → LC.3d → LC.3b → LD.13 → LD.14a → LD.15 → LD.6 → LD.4 → LG.3 → LD.11 rename) followed by the Engram
+tail (LG.7 → LG.10 → LG.8 → LG.9 → LG.12 → LG.8a → LG.11 → LG.14), which edits the same two engram-export files and can
+run as one serial workflow. LC.2 (core::Edge) and LC.3b run alone in their waves.
+
+**Registry ids** (L0.1, compacted so each ALL table stays contiguous): edge_category 35 NAVIGATES_TO, 36 CO_CHANGES;
+cell_type 19 DOC_TAGS, 20 ROLE, 21 EVIDENCE, 22 SCHEMA_FIELDS, 23 COVERAGE, 24 ENTRYPOINT, 25 ACCESS_MODE. No new node
+kinds (enum variants reuse ATTRIBUTE, inline mods reuse PACKAGE).
+
+**Files.** `dev-notes/leap-packets.json` (packets, Batch C rows, dependency patch, split remaps, exclusive list,
+orchestrator edits, the integration report) · `dev-notes/leap-corrections.json` (61 packets; overrides the spec) ·
+`dev-notes/wave-runner/leap_schedule.py` · `shared_brief_leap.md` (the breaking-release brief) · `gen_wave.py --leap N`
+· `closeout.py --leap N <run-id>`.
+
+**Running a wave** (not started — spec and plan only): `python3 dev-notes/wave-runner/leap_schedule.py --verify`, then
+`python3 dev-notes/wave-runner/gen_wave.py --leap N <scratch>/leap-wN.js`, run it as a Workflow, then
+`python3 dev-notes/wave-runner/closeout.py --leap N <run-id>`. Wave 0 and single-packet waves render as sequential scripts.
+The baseline (`baseline.json`, 1,056 tests / 140 fixtures / matrix 146 of 480) was measured after programme wave 19;
+no code has changed since.
+
+### 7.1 Decisions for James before the waves they gate
+
+1. **Engram edits** — LG.7 and LG.14 write into `/home/ivy/Code/Engram`, which is not a git repo and stays uncompilable
+   until Engram's session applies `glia-v6-landed.md`. OK to edit it (after a backup)? A `git init` there first would help.
+2. **pyo3 auto-persist** — LD.2 would remove `generate()`'s auto-persist that LC.9 re-routes; the corrections keep it
+   until you rule.
+3. **Scope the verifiers added beyond the map** — LB.4c (`page:` qnames), LA.6e (a `glia pages` primitive and
+   `PyGraph.page_flow`), LG.3d (a data_entity wrapper in the overlay schema). Also LD.4a changes what `cross_service`
+   means and LD.6 widens the entry set (the dense-text `*` sigil now follows it by default).
+4. **"per graph area rebuilds"** — your 2026-05-05 perf quote has no packet; LG.1 is rayon only. Add or drop?
+5. **GLIA_NO_PERSIST gap** — `generate(incremental=False)` still purges `<repo>/.ai/repo-graph/parse_cache.bin` under
+   GLIA_NO_PERSIST. Gate it (small packet) or leave it?
+6. **LG.8** diffs exported gmaps rather than building on the graph delta as planned; a dependency on LE.1 was added
+   anyway. Confirm.
+
+### 7.2 Unowned findings the spec run surfaced (no packet yet)
+
+Identity-shaped — should join B so identity churns once: the doubled class segment in Scala / PHP / Swift / Solidity /
+namespace-less C# (LB.2 is Java only); monorepo collapse of QUEUE / WS / GRAPHQL / GRPC nodes (LB.4 is routes only);
+cross-language MODULE qname collisions in one directory.
+
+Precision / crash bugs: a UTF-8 char-boundary panic on '≤' in `parsers/code/extractors/src/config.rs` during the glia
+self-build; the ungated `request(` needle in graphql.rs minting a false GRAPHQL_OPERATION; the GraphQL SDL scanner
+minting a `Query` resolver from a Rust comment (engine/src/route.rs); DATA_ENTITY nodes named after Rust functions
+(`data_entity:graph:pick_primary`); a Python function named `publish` minting an EVENT_EMITTER.
+
+Coverage: Java enum constants / methods and TS enums; tRPC nodes and Go gin ROUTEs without POSITION; consumer-callback
+binding (kafkajs `eachMessage`); Dart bare self-calls; Rust typed-receiver method calls (coverage caveat only).
+
+### 7.3 Spec-run hygiene
+
+The spec agents were read-only on every repo, but three of them called the wheel's `generate()` on other repos, which
+wrote untracked, regenerable `.ai/repo-graph/` caches into quokka-stack (rewrote existing shards) and neuropil (a new
+untracked `.ai/` directory). No tracked file in any repo changed; quokka's tracked `.ai/repo-graph` deletions predate
+the run. The leap brief now forbids the wheel on other repos.
