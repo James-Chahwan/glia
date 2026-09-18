@@ -212,7 +212,7 @@ Specced — see section 7 for the packet counts, the schedule, and the decisions
   to a vulnerability feed, SecurityZone resolver and the `^` security sigil, HTML sitemap-crawl doc adapter, git fetch
   or private-repo auth inside `glia merge`. TeamOwnership stays out ("everything but team ownership", 2026-04-17).
 
-## 7. Specced (2026-09-19) — 229 packets, W0 + 39 waves
+## 7. Specced (2026-09-19) — 248 packets, W0 + 41 waves
 
 Spec run `wf_65413aa0-59f`: 11 spec → adversarial-verify pipelines, 2 Batch C re-verifiers, 1 integration critic
 (25 agents, 0 errors). Every packet has symbol-verified anchors, exhaustive files_touched, a gate with a pre-fix
@@ -221,22 +221,22 @@ baseline measured on HEAD, a fired_on marker and a declared breaking block.
 | phase | packets | LOC |
 |---|---|---|
 | L0 — wave 0: id allocation + god-file splits (engine / graph facades, py, cli, engine build.rs) | 6 | 1,480 |
-| A — extraction depth (incl. 13 programme leftovers and run 2's 15 fixes) | 59 | 15,100 |
+| A — extraction depth (incl. 13 programme leftovers and runs 2–3's 25 fixes) | 69 | 17,360 |
 | Batch C — re-verified at HEAD: 9 still valid, 25 respecced, 0 obsolete | 34 | 5,045 |
-| B — identity (incl. run 2's LB.7–LB.9) | 16 | 4,760 |
+| B — identity (incl. runs 2–3's LB.7–LB.14) | 25 | 7,905 |
 | C — store format | 16 | 4,600 |
 | D — API + cross-domain prep | 29 | 8,680 |
 | E — new answers | 22 | 6,065 |
 | F — outside inputs + reserved cells | 21 | 6,665 |
 | G — perf, hygiene, Engram v6, handoffs | 26 | 6,455 |
-| **total** | **229** | **~58,850** |
+| **total** | **248** | **~64,250** |
 
 Declared breaks across the packets: api_signature 31, cli_output 27, cell_value 15, edge_removal 13, format 11,
 qname_shape 10, node_id 10, out_of_repo 20 (96 packets break nothing).
 
 **Schedule** (`python3 dev-notes/wave-runner/leap_schedule.py`): W0 runs the six splits one at a time
-(L0.1 → L0.3 → L0.2 → L0.6 → L0.4 → L0.5; graph before engine, then py and cli), then W1–W39 file-disjoint. Dependency
-depth 28. Without the wave-0 splits the same packets need 63 waves. The critical path is the store/format spine
+(L0.1 → L0.3 → L0.2 → L0.6 → L0.4 → L0.5; graph before engine, then py and cli), then W1–W41 file-disjoint. Dependency
+depth 30. Without the wave-0 splits the same packets need 63 waves. The critical path is the store/format spine
 (LC.2 → LC.3a → LC.3d → LC.3b → LD.13 → LD.14a → LD.15 → LD.6 → LD.4 → LG.3 → LD.11 rename) followed by the Engram
 tail (LG.7 → LG.10 → LG.8 → LG.9 → LG.12 → LG.8a → LG.11 → LG.14), which edits the same two engram-export files and can
 run as one serial workflow. LC.2 (core::Edge) and LC.3b run alone in their waves.
@@ -328,6 +328,49 @@ queue re-emit loses LE.4c's owner edges.
 Coverage (after 0.5.0): `.graphqls` files (Spring for GraphQL / gqlgen default) are never routed; Go struct-held
 routers (`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is
 HTTP only).
+
+### 7.6 Run 3 — identity and correctness, specced; the loop is capped here
+
+Workflow `wf_0f3c1650-f3a` (8 agents, 0 errors): 19 packets (~5.4k LOC), merged with dependencies from the verifiers'
+notes; the schedule grows to W0 + 41 waves (depth 30).
+
+- **Identity (B):** LB.8b owner rows for tRPC / Connect / Twirp and the in-process event bus (in-process events no longer
+  pair across monorepo projects; multi-repo builds keep today's pairing); LB.11a/b method-aware Go and ts_routes ROUTE
+  identity (`GET /activity/:id`, one node per method); LB.12 per-file identity for contract ops, plus markdown
+  DOC_SECTIONs (orchestrator addition — `docs::<stem>::<slug>` collides across directories the same way); LB.10a–c
+  C / C++ identity on namespace scope with `.h` / `.cpp` meeting one CLASS and METHOD; LB.13 same-group same-stem files
+  (`util.js` + `util.ts`, `.clj` / `.cljs`, `Foo.java` + `Foo.kt`); LB.14 C# `file class` scoping.
+- **Correctness (A):** LA.36a Swift self-calls (the leading dot); LA.37a/b Dart top-level bodies, mixins, extensions;
+  LA.40a/b C# block-namespace `using`, PHP braced-namespace `use`; LA.38 GraphQL decorators need real syntax and an
+  import; LA.39 DOM / Redux verbs are not events; LA.41 event names must be identifier-like; LA.42 data-entity scanners
+  stop reading their own source; LA.43 const-folded queue nodes keep their owner edges.
+
+Open for James: LB.12 scopes contract ops by the full file name, so a `swagger.yaml` + `swagger.json` twin in one
+directory yields two copies of each op (A10.8 meant to merge twins). Recommendation: scope by directory + stem, which
+still separates two services' `openapi.yaml` and keeps twins merged.
+
+### 7.7 After 0.5.0 — the backlog the three spec runs found beyond the cap
+
+Every spec run surfaced new gaps; after run 3 the rest wait for after 0.5.0 unless one is identity-shaped.
+
+- **HTTP / RPC / events:** `.graphqls` never routed; the contract yaml sniff reads only 64 lines (swaggo's alphabetical
+  `swagger.yaml` declares no op — quokka's 40 ops come from `swagger.json` only); Go routers held on a struct or passed
+  as parameters; tRPC `createCaller`; host narrowing for ws / graphql / grpc / RPC clients (LB.4b is HTTP only);
+  in-process events between nested projects that are one process (needs a project dependency closure); verb-fallback
+  event nodes (`Subject.next`, `@OnEvent`, `handle_event`, `EventBridge.putEvents`); decorator-line markers fall back to
+  CONTAINS because TS method spans exclude decorators; strawberry / graphene field resolvers.
+- **C / C++:** `extern "C"` blocks, anonymous namespaces, templates, nested types, unions; include search paths (`-I`,
+  `compile_commands.json`); implicit-this / static / object calls; free functions called through a header prototype;
+  `.hh` / `.hxx` / `.inl` / `.ipp` routing.
+- **Swift:** implicit-self calls; `a + f(x)` parsed as a complex receiver; init / deinit / subscript / computed-property
+  bodies; field types; static calls on same-module types.
+- **Dart:** constructors / factories / operators, abstract members, enum constants, unnamed extensions, top-level
+  initialisers.
+- **Namespaces:** a namespace PACKAGE shared by several files takes the last-merged file as its nav parent (C#, PHP);
+  PHP aliased `use A\B as C` and grouped `use A\{B, C}`; the LA.40 defect class in Ruby `collect_require` and C++
+  `collect_include`.
+- **Harness:** an exact-match option for `expect_edges` in grade.py (substring matching cannot tell `event_handle:x`
+  from `event_handle:x @a`).
 
 ### 7.5 Spec-run hygiene
 
