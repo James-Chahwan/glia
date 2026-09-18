@@ -1,0 +1,60 @@
+{
+  "framework": "csharp-namespace-qnames",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.7d identity fixture (legacy-only, no matrix cell). A C# 10 file-scoped `namespace X;` is the block form's syntax sugar, so its types take the namespace scope the block form already gets (Shop::Core::Order). A namespace-less type drops the file stem (LB.2 rule: Svc::Widget). A C# 11 `file` type is file-local by the language and keeps the file segment, so two `file class Scratch` stay two nodes. HEAD: Svc::Widget::Widget::Run, Svc::Order::Order::Total.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "Svc::Widget::Run"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Shop::Core::Order::Total"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Helpers::Scratch::A",
+      "note": "control: file-local type keeps the file segment"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Other::Scratch::B",
+      "note": "control"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Shop::Legacy::Legacy::Go",
+      "note": "control: block namespace unchanged"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Svc::Widget::Run",
+      "to": "Helper",
+      "category": "CALLS"
+    },
+    {
+      "from": "Shop::Core::Order::Total",
+      "to": "Round",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "Svc::Widget::Widget"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Svc::Order::Order"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Shop::Core::Scratch",
+      "note": "file-local types never move to the namespace"
+    }
+  ]
+}

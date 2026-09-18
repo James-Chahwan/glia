@@ -19,6 +19,7 @@ use repo_graph_code_domain::di_stats::{self, DiShape};
 // `DbResolver`'s `table_of` reads a C# model exactly as it reads a JPA one.
 use repo_graph_code_domain::data_entity::{orm, table_cell};
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 
 pub fn parse_file(
     source: &str,
@@ -133,6 +134,11 @@ struct EfCoreStats {
     type_name: usize,
 }
 
+/// `parent_qname` is the file module at the compilation-unit level and the
+/// namespace inside a block-namespace body. It stays the `using` from_module and
+/// the nav / DEFINES parent everywhere; only the TYPE scope differs at the root
+/// (LB.7d, see [`type_scope`]).
+#[allow(clippy::too_many_arguments)]
 fn visit_children(
     node: TsNode,
     src: &[u8],
@@ -143,16 +149,52 @@ fn visit_children(
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    // LB.7d: a top-level type is scoped by the file-scoped namespace declared
+    // above it, else by the directory - never by the file stem. tree-sitter-c-sharp
+    // 0.23 puts the declarations that follow `namespace X;` beside it as
+    // compilation_unit siblings, so the root walk adopts the namespace once it
+    // passes the declaration. Below the root (block-namespace bodies)
+    // parent_qname is the namespace and nothing changes.
+    let at_root = node.kind() == "compilation_unit";
+    let mut scope: String = if at_root {
+        type_scope(parent_qname).to_string()
+    } else {
+        parent_qname.to_string()
+    };
+    let mut scope_form = ScopeForm::Directory;
+    let mut rescoped = 0usize;
+    let mut file_local = 0usize;
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
             "using_directive" => collect_using(child, src, parent_qname, acc),
-            "namespace_declaration" | "file_scoped_namespace_declaration" => {
-                visit_namespace(child, src, file_rel, parent_qname, parent_id, module_id, repo, acc);
+            "file_scoped_namespace_declaration" => {
+                let ns = visit_namespace(child, src, file_rel, parent_id, module_id, repo, acc);
+                if let (true, Some(ns)) = (at_root, ns) {
+                    scope = ns;
+                    scope_form = ScopeForm::FileScopedNamespace;
+                }
+            }
+            "namespace_declaration" => {
+                visit_namespace(child, src, file_rel, parent_id, module_id, repo, acc);
             }
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
-                visit_type_decl(child, src, file_rel, parent_qname, parent_id, module_id, repo, acc);
+                // A C# 11 `file` type is file-local by the language: two files
+                // of one namespace may each declare `file class Scratch`, so at
+                // the root it keeps the file-module scope that tells them apart.
+                let local = at_root && has_modifier(child, src, "file");
+                let ty_scope = if local { parent_qname } else { scope.as_str() };
+                let minted = visit_type_decl(
+                    child, src, file_rel, ty_scope, parent_id, module_id, repo, acc,
+                );
+                if minted && at_root {
+                    if local {
+                        file_local += 1;
+                    } else {
+                        rescoped += 1;
+                    }
+                }
             }
             // A4.2: C# 9 top-level statements. `app.MapGet("/health", …)` in a
             // minimal-API Program.cs parses as `global_statement`, outside any
@@ -166,21 +208,95 @@ fn visit_children(
             _ => {}
         }
     }
+    // LB.7d fired_on: `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] csharp:'`
+    if rescoped > 0 && qname_debug() {
+        eprintln!(
+            "[qname] csharp: {rescoped} top-level types scoped to {scope} ({}, {file_local} file-local kept) file={file_rel}",
+            scope_form.label()
+        );
+    }
 }
 
+/// LB.7d: where a top-level type's scope came from, for the `[qname] csharp:`
+/// marker.
+#[derive(Clone, Copy)]
+enum ScopeForm {
+    /// No file-scoped namespace above the type: the file's directory.
+    Directory,
+    /// C# 10 `namespace X;` declared above the type.
+    FileScopedNamespace,
+}
+
+impl ScopeForm {
+    fn label(self) -> &'static str {
+        match self {
+            ScopeForm::Directory => "directory",
+            ScopeForm::FileScopedNamespace => "file-scoped namespace",
+        }
+    }
+}
+
+/// LB.7d: the scope of a namespace-less top-level C# type is its directory
+/// (LB.2's rule), not its file, so drop the file-stem segment the engine's
+/// `path_to_qname` puts last: `Svc::Widget` -> `Svc`, and a file at the repo
+/// root (`Program`) -> `""`. The bare global-namespace name would instead merge
+/// every `class Program` of a monorepo.
+///
+/// A type below a file-scoped `namespace X;` takes `X` instead (see
+/// `visit_children`): that form is syntax sugar for the block form, whose types
+/// have always been `<Ns>::<Type>`, so a repo migrating block -> file-scoped
+/// keeps every NodeId. .NET directories often do not mirror namespaces
+/// (`src/Orders.Api/` vs `Orders.Api`), which is why the directory is only the
+/// fallback here, unlike Java (LB.2) and PHP (LB.7b).
+///
+/// A namespace-less public class `Widget` of `Widget.cs` therefore shares its
+/// qname with the file MODULE (different kind, different NodeId);
+/// `MergedGraph::pick_primary` ranks the declaration over the container.
+fn type_scope(module_qname: &str) -> &str {
+    module_qname
+        .rsplit_once("::")
+        .map_or("", |(dir, _stem)| dir)
+}
+
+/// `scope::name`, or the bare `name` for the empty (repo-root) scope.
+fn scoped(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_string()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+/// Does this declaration carry the `modifier` keyword `word` (`file`, `static`,
+/// `partial`, ...)? tree-sitter-c-sharp 0.23's `modifier` rule includes C# 11's
+/// `file`, as a direct child of the declaration.
+fn has_modifier(node: TsNode, src: &[u8], word: &str) -> bool {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|c| c.kind() == "modifier" && text_of(c, src) == word)
+}
+
+/// `GLIA_QNAME_DEBUG=1` turns on the per-file `[qname] csharp:` marker, read
+/// once. Off by default: it would print for every C# file of a build.
+fn qname_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG
+        .get_or_init(|| std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// Mints the PACKAGE for a block or file-scoped namespace and walks a block
+/// body. Returns the namespace qname (None for a nameless declaration), which
+/// `visit_children` adopts as the type scope of a file-scoped namespace.
 fn visit_namespace(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    _parent_qname: &str,
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
-    let Some(name_node) = node.child_by_field_name("name") else {
-        return;
-    };
+) -> Option<String> {
+    let name_node = node.child_by_field_name("name")?;
     let name = text_of(name_node, src);
     let qname = name.replace('.', "::");
     let ns_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
@@ -201,26 +317,35 @@ fn visit_namespace(
     acc.nav
         .record(ns_id, simple, &qname, node_kind::PACKAGE, Some(parent_id));
 
-    // File-scoped namespace has no body block — declarations are direct children.
+    // File-scoped namespace has no body block. tree-sitter-c-sharp 0.23 puts the
+    // declarations after it beside it at the compilation_unit level (its only
+    // field is `name`), where `visit_children` gives them the namespace scope;
+    // a grammar that nests them lands them here with that same scope.
     if node.kind() == "file_scoped_namespace_declaration" {
         visit_children(node, src, file_rel, &qname, ns_id, module_id, repo, acc);
     } else if let Some(body) = node.child_by_field_name("body") {
         visit_children(body, src, file_rel, &qname, ns_id, module_id, repo, acc);
     }
+    Some(qname)
 }
 
+/// `scope` is the type's scope: a namespace, the file's directory, or - for a
+/// nested type or a root-level C# 11 `file` type - its enclosing type / file
+/// module (LB.7d). Returns whether a node was minted (a nameless or unknown
+/// declaration is not), which feeds the `[qname] csharp:` marker.
+#[allow(clippy::too_many_arguments)]
 fn visit_type_decl(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
+    scope: &str,
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
-        return;
+        return false;
     };
     let name = text_of(name_node, src);
     let kind = match node.kind() {
@@ -228,9 +353,9 @@ fn visit_type_decl(
         "struct_declaration" => node_kind::STRUCT,
         "interface_declaration" => node_kind::INTERFACE,
         "enum_declaration" => node_kind::ENUM,
-        _ => return,
+        _ => return false,
     };
-    let qname = format!("{parent_qname}::{name}");
+    let qname = scoped(scope, name);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
 
     acc.nodes.push(Node {
@@ -326,7 +451,7 @@ fn visit_type_decl(
     let mut composed_routes = 0usize;
 
     let Some(body) = node.child_by_field_name("body") else {
-        return;
+        return true;
     };
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
@@ -376,6 +501,7 @@ fn visit_type_decl(
             "[csharp-routes] composed {composed_routes} action routes under '{shown}' in {file_rel}"
         );
     }
+    true
 }
 
 /// Pattern E gate: does this type look like a DI consumer? ASP.NET controllers
@@ -2236,7 +2362,7 @@ public class OrdersController : ControllerBase {
         parse_file(
             COMPOSED_CONTROLLER,
             "server/OrdersController.cs",
-            "Shop::Controllers",
+            "server::OrdersController",
             repo(),
         )
         .unwrap()
@@ -2307,7 +2433,8 @@ public class OrdersController : ControllerBase {
             GRAPH_TYPE,
             repo(),
             node_kind::METHOD,
-            "Shop::Controllers::OrdersController::GetOrder",
+            // LB.7d: a namespace-less controller is directory-scoped.
+            "server::OrdersController::GetOrder",
         );
         assert_eq!(
             handled[0].to, action,
@@ -2908,6 +3035,160 @@ public class OrderClient {
     // emitted ZERO routes.
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // LB.7d: type identity per namespace form
+    // ------------------------------------------------------------------
+
+    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+        let mut out: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    fn id_of(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn defines(fp: &FileParse, from: NodeId, to: NodeId) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::DEFINES)
+    }
+
+    #[test]
+    fn type_scope_follows_the_namespace_form() {
+        // The sources of bench/substrate-gap/fixtures/csharp-namespace-qnames.
+        let widget = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-namespace-qnames/Svc/Widget.cs"
+        );
+        let order = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-namespace-qnames/Svc/Order.cs"
+        );
+        let helpers = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-namespace-qnames/Svc/Helpers.cs"
+        );
+        let other = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-namespace-qnames/Svc/Other.cs"
+        );
+        let legacy = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-namespace-qnames/Svc/Legacy.cs"
+        );
+
+        // Namespace-less: the directory scope (HEAD: Svc::Widget::Widget).
+        let fp = parse_file(widget, "Svc/Widget.cs", "Svc::Widget", repo()).unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["Svc::Widget"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["Svc::Widget::Helper", "Svc::Widget::Run"]
+        );
+        // The public class shares its qname with the file MODULE, under a
+        // different kind and NodeId, and the MODULE still DEFINES it.
+        let module = id_of(node_kind::MODULE, "Svc::Widget");
+        let class = id_of(node_kind::CLASS, "Svc::Widget");
+        assert_ne!(module, class);
+        assert_eq!(fp.nav.parent_of.get(&class), Some(&module));
+        assert!(defines(&fp, module, class));
+
+        // File-scoped `namespace Shop.Core;`: the namespace scope the block
+        // form has, while the nav parent stays the MODULE, not the PACKAGE.
+        let fp = parse_file(order, "Svc/Order.cs", "Svc::Order", repo()).unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::CLASS), vec!["Shop::Core::Order"]);
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["Shop::Core::Order::Round", "Shop::Core::Order::Total"]
+        );
+        assert_eq!(qnames_of(&fp, node_kind::PACKAGE), vec!["Shop::Core"]);
+        assert_eq!(qnames_of(&fp, node_kind::MODULE), vec!["Svc::Order"]);
+        let module = id_of(node_kind::MODULE, "Svc::Order");
+        let class = id_of(node_kind::CLASS, "Shop::Core::Order");
+        assert_eq!(fp.nav.parent_of.get(&class), Some(&module));
+        assert_ne!(
+            fp.nav.parent_of.get(&class),
+            Some(&id_of(node_kind::PACKAGE, "Shop::Core"))
+        );
+        assert!(defines(&fp, module, class));
+        // The self-call hangs off the re-scoped method.
+        let total = id_of(node_kind::METHOD, "Shop::Core::Order::Total");
+        assert!(fp.calls.iter().any(|c| c.from == total));
+
+        // C# 11 `file` types are file-local: each keeps its file segment, so
+        // two `file class Scratch` of one namespace stay two nodes.
+        let h = parse_file(helpers, "Svc/Helpers.cs", "Svc::Helpers", repo()).unwrap();
+        let o = parse_file(other, "Svc/Other.cs", "Svc::Other", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&h, node_kind::CLASS),
+            vec!["Svc::Helpers::Scratch"]
+        );
+        assert_eq!(qnames_of(&o, node_kind::CLASS), vec!["Svc::Other::Scratch"]);
+        assert_eq!(
+            qnames_of(&h, node_kind::METHOD),
+            vec!["Svc::Helpers::Scratch::A"]
+        );
+        assert_eq!(
+            qnames_of(&o, node_kind::METHOD),
+            vec!["Svc::Other::Scratch::B"]
+        );
+        assert_ne!(
+            id_of(node_kind::CLASS, "Svc::Helpers::Scratch"),
+            id_of(node_kind::CLASS, "Svc::Other::Scratch")
+        );
+
+        // Block form: unchanged, a `file` type inside it included, and the
+        // nav parent is the PACKAGE.
+        let fp = parse_file(legacy, "Svc/Legacy.cs", "Svc::Legacy", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["Shop::Legacy::Legacy", "Shop::Legacy::X"]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["Shop::Legacy::Legacy::Go", "Shop::Legacy::X::Y"]
+        );
+        let package = id_of(node_kind::PACKAGE, "Shop::Legacy");
+        let class = id_of(node_kind::CLASS, "Shop::Legacy::Legacy");
+        assert_eq!(fp.nav.parent_of.get(&class), Some(&package));
+        assert!(defines(&fp, package, class));
+    }
+
+    #[test]
+    fn partial_class_across_files_is_one_node() {
+        // LB.7d: without the file stem, the halves of a partial class under one
+        // file-scoped namespace (or none) mint one NodeId, as the block form
+        // always did; merge_parses folds them.
+        let a = "namespace Shop.Core;\npublic partial class Cart { public void Add() {} }\n";
+        let b = "namespace Shop.Core;\npublic partial class Cart { public void Remove() {} }\n";
+        let fa = parse_file(a, "Svc/Cart.cs", "Svc::Cart", repo()).unwrap();
+        let fb = parse_file(b, "Svc/Cart.Totals.cs", "Svc::Cart_Totals", repo()).unwrap();
+        assert_eq!(qnames_of(&fa, node_kind::CLASS), vec!["Shop::Core::Cart"]);
+        assert_eq!(qnames_of(&fb, node_kind::CLASS), vec!["Shop::Core::Cart"]);
+
+        let c = "public partial class Basket { public void Add() {} }\n";
+        let d = "public partial class Basket { public void Remove() {} }\n";
+        let fc = parse_file(c, "Svc/Basket.cs", "Svc::Basket", repo()).unwrap();
+        let fd = parse_file(d, "Svc/BasketExtra.cs", "Svc::BasketExtra", repo()).unwrap();
+        assert_eq!(qnames_of(&fc, node_kind::CLASS), vec!["Svc::Basket"]);
+        assert_eq!(qnames_of(&fd, node_kind::CLASS), vec!["Svc::Basket"]);
+
+        // A type written before a file-scoped namespace (a compile error in
+        // C#) keeps the directory scope; the one after it takes the namespace.
+        let e = "public class Early {}\nnamespace Shop.Late;\npublic class Late {}\n";
+        let fe = parse_file(e, "Svc/Mixed.cs", "Svc::Mixed", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fe, node_kind::CLASS),
+            vec!["Shop::Late::Late", "Svc::Early"]
+        );
+
+        // A repo-root namespace-less file: the empty scope gives a bare name.
+        let fr = parse_file("public class Order {}\n", "Program.cs", "Program", repo()).unwrap();
+        assert_eq!(qnames_of(&fr, node_kind::CLASS), vec!["Order"]);
+    }
+
     #[test]
     fn minimal_api_top_level_routes_emit() {
         let source = r#"
@@ -3006,7 +3287,9 @@ public class Startup {
     }
 }
 "#;
-        let fp = parse_file(source, "Startup.cs", "App", repo()).unwrap();
+        // LB.7d: a namespace-less type is scoped by the module's directory, so
+        // the module qname carries the file stem, as `path_to_qname` makes it.
+        let fp = parse_file(source, "App/Startup.cs", "App::Startup", repo()).unwrap();
         let routes = route_names(&fp);
         assert!(routes.contains(&"GET /legacy".to_string()), "{routes:?}");
         // Anchored on the enclosing METHOD, not the module.

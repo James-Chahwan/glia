@@ -68,9 +68,9 @@
     },
     {
       "from": "GET /api/users/{id}",
-      "to": "UsersController::UsersController",
+      "to": "Shop::Api::Controllers::UsersController",
       "category": "HANDLED_BY",
-      "note": "the old whole-class text scan gave the action route a SECOND HANDLED_BY to the controller CLASS"
+      "note": "the old whole-class text scan gave the action route a SECOND HANDLED_BY to the controller CLASS. LB.7d: the file-scoped namespace scopes the class, so its exact qname moved from UsersController::UsersController"
     },
     {
       "from": "endpoint:GET:/api/users/${…}",
