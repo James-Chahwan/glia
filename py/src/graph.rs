@@ -18,8 +18,9 @@ pub(crate) struct PyGraph {
     /// Files this build could not parse. Empty for a `.gmap`-loaded graph.
     pub(crate) parse_errors: Vec<String>,
     /// `RepoId.0` → human repo label, carried over from `GenerateResult`.
-    /// A `RepoId` is an xxhash of the repo path, so the label cannot be
-    /// recovered from the graph itself and does NOT live in the `.gmap`;
+    /// A `RepoId` is an xxhash of the repo identity key (git remote / git dir /
+    /// dir name, LB.1), so the label cannot be recovered from the graph itself
+    /// and does NOT live in the `.gmap`;
     /// empty for a `.gmap`-loaded graph. Only `service_map` reads it.
     pub(crate) repo_labels: std::collections::BTreeMap<u64, String>,
 }

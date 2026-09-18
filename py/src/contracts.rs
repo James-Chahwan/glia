@@ -25,8 +25,8 @@ impl PyGraph {
     /// note}` where each side is `null` or `{node_id, repo_id, qname, topic,
     /// module, file, line, message_type, message_type_raw, form, window,
     /// types_seen, conflicting}`. `status` ∈ {match, mismatch, unknown}.
-    /// `repo_id` is the raw `RepoId` (an xxhash of the repo path); Python has
-    /// no label map for it yet. Report-only: no edge is emitted. Returns a
+    /// `repo_id` is the raw `RepoId` (an xxhash of the repo identity key: git
+    /// remote / git dir / dir name, LB.1); Python has no label map for it yet. Report-only: no edge is emitted. Returns a
     /// JSON array.
     fn contracts(&self) -> PyResult<String> {
         contracts_json(&self.merged).map_err(|e| PyValueError::new_err(e.to_string()))

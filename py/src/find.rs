@@ -34,10 +34,13 @@ impl PyGraph {
     }
 
     /// Resolve a simple name to a node id. Deterministic across processes: when
-    /// several nodes share the name (e.g. an Angular component's `CLASS` and its
-    /// framework `COMPONENT` marker), the highest-degree node wins rather than
-    /// whichever the per-process `HashMap` seed happened to order first — the
-    /// root cause of `impact`/`trace` intermittently returning empty.
+    /// several nodes share the name (e.g. a class and a same-named module, or
+    /// one symbol in two repos of a merge), a declaration beats a
+    /// container, then the highest-degree node wins, rather than whichever the
+    /// per-process `HashMap` seed happened to order first — the root cause of
+    /// `impact`/`trace` intermittently returning empty. A framework role
+    /// (component, service, ...) is no longer a same-name twin: LB.3a folds it
+    /// into its declaration as a ROLE cell, listed in `nodes_json`'s `roles`.
     fn find_node(&self, name: &str) -> Option<u64> {
         self.merged.resolve_name(name).map(|id| id.0)
     }

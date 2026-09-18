@@ -33,7 +33,21 @@ pub struct BlastAnswer {
 /// Is this node an entrypoint — an externally-triggered root from which live
 /// code is reachable? Routes, gRPC/WS/event handlers, CLI commands, framework
 /// components, and `main`/`test*` functions.
-fn is_entrypoint(kind: Option<repo_graph_core::NodeKindId>, name: &str) -> bool {
+///
+/// `roles` is the node's `repo_graph_graph::roles::roles_in` (LB.3b). Since
+/// the LB.3a fold an Angular `@Component` is a CLASS carrying ROLE COMPONENT,
+/// not a COMPONENT node, so a COMPONENT role is an entry exactly as the
+/// COMPONENT kind is. The other roles (SERVICE, HOOK, COMPOSABLE, DIRECTIVE,
+/// PIPE, GUARD) were never entry kinds and stay non-entries. Pass `&[]` to ask
+/// whether the kind / name alone make the node an entry.
+fn is_entrypoint(
+    kind: Option<repo_graph_core::NodeKindId>,
+    name: &str,
+    roles: &[repo_graph_core::NodeKindId],
+) -> bool {
+    if roles.contains(&node_kind::COMPONENT) {
+        return true;
+    }
     match kind {
         Some(k)
             if k == node_kind::ROUTE
@@ -56,19 +70,37 @@ fn is_entrypoint(kind: Option<repo_graph_core::NodeKindId>, name: &str) -> bool 
 /// forward-reachable from one along semantic carry edges. A node absent from
 /// this set is likely dead code. Conservative (generous entrypoint set) to avoid
 /// false-dead flags — the failure mode the handoff warns about.
+///
+/// Prints `[live] seeds=S (kind=K role=R) live=N` once per process (MCP
+/// sessions call this per query): `kind` counts entries by kind / name, `role`
+/// the ones only a ROLE cell made entries (LB.3b). The returned set does not
+/// depend on whether the line was printed.
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
     use std::collections::{HashSet, VecDeque};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PRINTED: AtomicBool = AtomicBool::new(false);
+
     let carry: HashSet<repo_graph_core::EdgeCategoryId> =
         repo_graph_graph::blast_carry_edges().into_iter().collect();
     let edges: Vec<&Edge> = merged.all_edges().collect();
 
     let mut live: HashSet<NodeId> = HashSet::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
+    let (mut by_kind, mut by_role) = (0usize, 0usize);
     for g in &merged.graphs {
         for n in &g.nodes {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-            if is_entrypoint(kind, name) && live.insert(n.id) {
+            let seeded = if is_entrypoint(kind, name, &[]) {
+                &mut by_kind
+            } else if is_entrypoint(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
+            {
+                &mut by_role
+            } else {
+                continue;
+            };
+            if live.insert(n.id) {
+                *seeded += 1;
                 queue.push_back(n.id);
             }
         }
@@ -79,6 +111,13 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
                 queue.push_back(e.to);
             }
         }
+    }
+    if !PRINTED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "[live] seeds={} (kind={by_kind} role={by_role}) live={}",
+            by_kind + by_role,
+            live.len()
+        );
     }
     live
 }
@@ -1602,5 +1641,73 @@ mod contracts_tests {
         let rows = message_contracts(&m);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.topic_is_tag && r.note == Some(super::NOTE_TAG)));
+    }
+}
+
+#[cfg(test)]
+mod role_live_tests {
+    use super::{entrypoint_reachable, is_entrypoint};
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+
+    /// `app::Page` -INJECTS-> `app::Api`, both CLASS; `Page` carries a ROLE
+    /// cell with `roles` when given. Returns the graph and `(page, api)`.
+    fn page_injects_api(roles: Option<&str>) -> (MergedGraph, NodeId, NodeId) {
+        let repo = RepoId::from_canonical("test://role-live");
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, q);
+        let (page, api) = (id("app::Page"), id("app::Api"));
+        let mut nav = CodeNav::default();
+        nav.record(page, "Page", "app::Page", node_kind::CLASS, None);
+        nav.record(api, "Api", "app::Api", node_kind::CLASS, None);
+        let cells = roles
+            .map(|r| Cell {
+                kind: cell_type::ROLE,
+                payload: CellPayload::Json(format!(r#"{{"roles":[{r}]}}"#)),
+            })
+            .into_iter()
+            .collect();
+        let node = |nid, cells| Node { id: nid, repo, confidence: Confidence::Strong, cells };
+        let g = RepoGraph {
+            repo,
+            nodes: vec![node(page, cells), node(api, vec![])],
+            edges: vec![Edge {
+                from: page,
+                to: api,
+                category: edge_category::INJECTS,
+                confidence: Confidence::Strong,
+            }],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        (MergedGraph::new(vec![g]), page, api)
+    }
+
+    /// LB.3b: a CLASS folded from an `@Component` seeds liveness through its
+    /// ROLE cell; without the cell, or with a non-entry role, it does not.
+    #[test]
+    fn component_role_is_an_entrypoint() {
+        let (m, page, api) = page_injects_api(Some(r#""COMPONENT""#));
+        let live = entrypoint_reachable(&m);
+        assert!(live.contains(&page), "the COMPONENT-role class is an entry");
+        assert!(live.contains(&api), "what it injects is live");
+
+        let (m, page, api) = page_injects_api(None);
+        let live = entrypoint_reachable(&m);
+        assert!(!live.contains(&page) && !live.contains(&api), "no role, no entry");
+
+        let (m, _, api) = page_injects_api(Some(r#""SERVICE""#));
+        assert!(!entrypoint_reachable(&m).contains(&api), "SERVICE is not an entry role");
+
+        // The kind / name arms are unchanged and need no roles.
+        let class = Some(node_kind::CLASS);
+        assert!(is_entrypoint(class, "Page", &[node_kind::COMPONENT]));
+        assert!(!is_entrypoint(class, "Page", &[node_kind::SERVICE, node_kind::HOOK]));
+        assert!(is_entrypoint(Some(node_kind::COMPONENT), "Card", &[]));
+        assert!(is_entrypoint(Some(node_kind::FUNCTION), "main", &[]));
+        assert!(!is_entrypoint(class, "Page", &[]));
     }
 }

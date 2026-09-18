@@ -2,8 +2,10 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_core::Confidence;
-use repo_graph_graph::MergedGraph;
+use repo_graph_code_domain::node_kind;
+use repo_graph_core::{Confidence, Node};
+use repo_graph_graph::roles::roles_in;
+use repo_graph_graph::{MergedGraph, RepoGraph};
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
@@ -11,10 +13,14 @@ use crate::graph::PyGraph;
 #[pymethods]
 impl PyGraph {
     /// Every node as `{id, kind, name, qname, confidence, path, start_line,
-    /// end_line}`. `start_line` / `end_line` are 1-based and inclusive — the
-    /// same base as the `line` of every answer record (`blast_radius`,
+    /// end_line, roles}`. `start_line` / `end_line` are 1-based and inclusive —
+    /// the same base as the `line` of every answer record (`blast_radius`,
     /// `resolve`, `cross_stack_trace`, ...), so the two never disagree about
-    /// where a node starts. Returns a JSON array.
+    /// where a node starts. `roles` names the framework roles the node plays
+    /// (`["COMPONENT"]`, `["SERVICE"]`, ...; `[]` when none): since LB.3a a
+    /// component or service is a CLASS / FUNCTION carrying a ROLE cell, so a
+    /// consumer that tiers or iconifies by role reads `roles`, not `kind`.
+    /// Returns a JSON array.
     fn nodes_json(&self) -> PyResult<String> {
         Ok(nodes_json_string(&self.merged))
     }
@@ -44,56 +50,107 @@ impl PyGraph {
 }
 
 /// The body of `PyGraph::nodes_json`, pyo3-free so `cargo test -p
-/// repo-graph-py` can exercise it (see the crate doc's link note). Stored
-/// POSITION rows are 0-based; this emits them 1-based, the answer-record base.
+/// repo-graph-py` can exercise it (see the crate doc's link note).
 fn nodes_json_string(merged: &MergedGraph) -> String {
     let mut out = String::from("[");
     let mut first = true;
     for g in &merged.graphs {
         for n in &g.nodes {
-            let kind = g.nav.kind_by_id.get(&n.id).map(|k| k.0).unwrap_or(0);
-            let name = g.nav.name_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
-            let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
-            let conf = match n.confidence {
-                Confidence::Strong => "strong",
-                Confidence::Medium => "medium",
-                Confidence::Weak => "weak",
-            };
             if !first {
                 out.push(',');
             }
             first = false;
-            // GR-1: surface the node's source span from its POSITION cell.
-            // Stored rows are 0-based (tree-sitter); emit 1-based inclusive.
-            // Nodes without a span (synthetic / cross-stack) carry null.
-            let span = match repo_graph_projection_text::node_position(n) {
-                Some(p) => format!(
-                    r#","path":"{}","start_line":{},"end_line":{}"#,
-                    escape_json(&p.file),
-                    p.start_line + 1,
-                    p.end_line + 1,
-                ),
-                None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
-            };
-            out.push_str(&format!(
-                r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"{}}}"#,
-                n.id.0,
-                kind,
-                escape_json(name),
-                escape_json(qname),
-                conf,
-                span,
-            ));
+            out.push_str(&node_record_json(g, n));
         }
     }
     out.push(']');
     out
 }
 
+/// One `nodes_json` record. Stored POSITION rows are 0-based; this emits
+/// them 1-based, the answer-record base. `roles` comes from the one reader,
+/// `roles_in` (the node's own role kind plus its ROLE cell), always present.
+fn node_record_json(g: &RepoGraph, n: &Node) -> String {
+    let kind = g.nav.kind_by_id.get(&n.id).copied();
+    let name = g.nav.name_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+    let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
+    let conf = match n.confidence {
+        Confidence::Strong => "strong",
+        Confidence::Medium => "medium",
+        Confidence::Weak => "weak",
+    };
+    // GR-1: surface the node's source span from its POSITION cell.
+    // Stored rows are 0-based (tree-sitter); emit 1-based inclusive.
+    // Nodes without a span (synthetic / cross-stack) carry null.
+    let span = match repo_graph_projection_text::node_position(n) {
+        Some(p) => format!(
+            r#","path":"{}","start_line":{},"end_line":{}"#,
+            escape_json(&p.file),
+            p.start_line + 1,
+            p.end_line + 1,
+        ),
+        None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
+    };
+    let roles: Vec<String> = roles_in(kind, &n.cells)
+        .into_iter()
+        .map(|r| format!("\"{}\"", escape_json(node_kind::name(r))))
+        .collect();
+    format!(
+        r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"{},"roles":[{}]}}"#,
+        n.id.0,
+        kind.map(|k| k.0).unwrap_or(0),
+        escape_json(name),
+        escape_json(qname),
+        conf,
+        span,
+        roles.join(","),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::nodes_json_string;
-    use repo_graph_core::NodeId;
+    use super::{node_record_json, nodes_json_string};
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use repo_graph_graph::{RepoGraph, SymbolTable};
+
+    /// LB.3b: every record carries `roles`, read through `roles_in` — a CLASS
+    /// folded from an `@Injectable` names SERVICE, a plain FUNCTION an empty
+    /// list, a standalone role node its own kind.
+    #[test]
+    fn node_record_carries_roles() {
+        let repo = RepoId::from_canonical("test://records-roles");
+        let class = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, "svc::Api");
+        let func = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, "svc::helper");
+        let comp = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::COMPONENT, "ui::Card");
+        let mut nav = CodeNav::default();
+        nav.record(class, "Api", "svc::Api", node_kind::CLASS, None);
+        nav.record(func, "helper", "svc::helper", node_kind::FUNCTION, None);
+        nav.record(comp, "Card", "ui::Card", node_kind::COMPONENT, None);
+        let node = |id, cells| Node { id, repo, confidence: Confidence::Strong, cells };
+        let role = Cell {
+            kind: cell_type::ROLE,
+            payload: CellPayload::Json(r#"{"roles":["SERVICE"]}"#.into()),
+        };
+        let g = RepoGraph {
+            repo,
+            nodes: vec![node(class, vec![role]), node(func, vec![]), node(comp, vec![])],
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let rec = |i: usize| node_record_json(&g, &g.nodes[i]);
+        assert!(rec(0).ends_with(r#","roles":["SERVICE"]}"#), "{}", rec(0));
+        assert!(rec(1).ends_with(r#","roles":[]}"#), "{}", rec(1));
+        assert!(rec(2).ends_with(r#","roles":["COMPONENT"]}"#), "{}", rec(2));
+        let v: serde_json::Value = serde_json::from_str(&rec(0)).expect("valid JSON");
+        assert_eq!(v["kind"], node_kind::CLASS.0);
+        assert_eq!(v["qname"], "svc::Api");
+        assert_eq!(v["roles"], serde_json::json!(["SERVICE"]));
+    }
 
     /// LD.1: `nodes_json` and every answer record share ONE line base. Before
     /// LD.1 `nodes_json` said `helper` starts on line 4 while `blast_radius` /
