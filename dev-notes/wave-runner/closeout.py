@@ -7,11 +7,11 @@
 
 --leap schedules through leap_schedule.py, records the wave's 5-hour usage
 cost (usage_gate.py --end) and prints whether the next wave can start, folds followups into
-leap-corrections.json (ids A*.* and L*.*), records LANDED in leap_schedule.py,
-and also runs scripts/check-engram-export.sh once LG.13 has created it.
+leap-corrections.json (ids A*.* and L*.*), and records LANDED in leap_schedule.py.
 
 Steps (README order): commits + per-packet status from the workflow journal,
-workspace tests, byte_identical, wheel rebuild + staleness check, run.py,
+workspace tests, byte_identical, the out-of-workspace engram-export check
+(scripts/check-engram-export.sh), wheel rebuild + staleness check, run.py,
 matrix --emit/--check, python suites, fold the wave's followups into every
 remaining packet's correction, update baseline.json (MEASURED) and LANDED,
 schedule --verify, render the next wave, commit.
@@ -129,6 +129,14 @@ def main():
     say(f"== byte_identical: {'green' if bi else 'RED'}")
     if not bi:
         gates.append("byte_identical")
+    # engram-export is outside the workspace, so the workspace tests above never compile it (LG.13).
+    # Gate on its own last-line prefix (scripts/check-neuropil.sh prints `[neuropil-check] ...`).
+    # SKIPPED fails too: here Engram is the sibling checkout, so a skip means nothing was checked.
+    out, _ = sh("bash scripts/check-engram-export.sh 2>&1", timeout=1800)
+    last = (out.strip().splitlines() or [""])[-1]
+    say(f"== {last}")
+    if not last.startswith("[engram-export] check: ok"):
+        gates.append("engram-export (out-of-workspace)")
 
     sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
@@ -180,12 +188,6 @@ def main():
         gates.append("test_matrix")
     if "all passed" not in tg:
         gates.append("test_grade")
-
-    if leap and (ROOT / "scripts/check-engram-export.sh").exists():
-        out, rc = sh("bash scripts/check-engram-export.sh 2>&1")
-        say(f"== engram-export (out of workspace): {'green' if rc == 0 else 'RED'}")
-        if rc:
-            gates.append("engram-export check")
 
     # fold followups into remaining packets
     rem = {p for w in remaining for p in w}
