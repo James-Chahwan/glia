@@ -16,6 +16,7 @@ Companion: `dev-notes/handoff-2026-09-18-next-session.md` (state of the finished
 | the picked extras below | "these seem good to add" |
 | cross-domain prep in this leap | "also do the cross-domain prep thats a great thing to add now" |
 | first endorsed batch | "okay those all sound like reasonable inclusions" |
+| Engram's v6 needs ride the leap (not import classification); repo-graph and Engram then update to the bump | "okay add the things that engram needs in v6 to the leap bump then we can hand off to repo-graph and endgram to update to glia bump which is much more simpler yuh and yeah leave out import classification" |
 | nothing pushed until 0.5.0; the CLI line bug is fixed inside the leap | "the cli bug gets fixed in the leap" / "we aren't pushing whats commited locally till we wanna do the bump to 0.5.0 okay" |
 
 Filters every item passed: graph-native assertions over search; FACT / DERIVED / HEURISTIC evidence tiers, no
@@ -67,6 +68,8 @@ Not yet specced (need packets):
 | constant table not consumed by the queue scanner | `const TOPIC = "orders"; send(TOPIC)` falls back to the framework tag |
 | `glia arch` splits a one-file nested Gradle root into a service | `quokka_android/android/app` |
 | frontend navigation edges: `router.navigate` / `routerLink` / href → frontend ROUTE | page flow + dead deep links (quokka found `/connect` by hand) |
+| Elixir `@doc` and Clojure docstrings | Engram v4-landed: the comment walk returns None for these; needs per-parser body extraction |
+| Solidity NatSpec `@param` / `@return` / `@dev` as structured doc data | Engram v5 §8 "defer to v6"; today collapsed into one DOC cell |
 | matrix `subproject` vocabulary predates PROJECT (kind 45) | three stale `·` cells; retarget `matrix_vocab.py`, re-author 3 probes |
 | `AUTHORING.md` says single-repo builds never pair across services | measured false for HTTP / WS / GraphQL / gRPC / EVENT |
 | Confluence `Config::base()` hardcodes `https://` | add a local stub seam so `docs sync`/`push` can be tested |
@@ -151,7 +154,7 @@ neuropil keys persisted state by qname, so all of these land in one wave.
 
 After A–G every registered cell type has an emitter (TEST in E3, the rest here).
 
-### G. Perf + hygiene
+### G. Perf, hygiene, Engram v6 and the handoffs
 
 | item | note |
 |---|---|
@@ -162,6 +165,24 @@ After A–G every registered cell type has an emitter (TEST in E3, the rest here
 | reword `graph/src/resolvers/package.rs` header pitch ("differentiator vs Endor/Snyk/Socket.dev") | CVE-reachability-shaped |
 | add `SECURITY.md` | defensive framing before a bigger release |
 | clear stale `TODO.md` boxes; README v0.4.14 roadmap | most shipped |
+
+**Engram v6 (glia side) and the two handoffs.** Engram's contract is single-version and bumps in lockstep; a
+re-export is the upgrade path (Engram memory `engram-single-version-gmap`). Following the v2 precedent, glia makes
+the `engram-core` change, updates `engram-export`, and writes the landed doc; Engram's session applies it.
+
+| item | glia side |
+|---|---|
+| `engram-core` `GMAP_FORMAT_VERSION` 5 → 6 | the contract diff below, in `/home/ivy/Code/Engram/crates/engram-core` (Engram is **not a git repo** — back it up before editing) |
+| incremental export: `glia-export-engram --since <prior>` → diff gmap `{added, removed, modified}` | built on E1 graph delta + ParseCache `iter`/`diff` (A1.8); Engram adds `apply_diff` (asked since v2 G16: "full re-seed loses all Path-B learning") |
+| move-stable `identity_hint` | today `<file>:<kind>:<ordinal>` — a file move resets Engram's learned reward; built on B's move-stable identity |
+| line numbers on spans + line anchors on doc Propositions | the exporter already reads POSITION rows and converts them to bytes (`engram-export/src/lib.rs` "span story"); carry the rows (v5 consumer pass: "line numbers are a v6 follow-up"; v5 §7 "defer to v6") |
+| DOCUMENTS as its own `EdgeKind` | today folded into plain association (`engram-export/src/lib.rs:174-187`) |
+| NatSpec tags as edges | maps A's NatSpec extraction (v5 §8 "defer to v6") |
+| rename safety | `engram-export` imports `repo_graph_*` by crate name and is excluded from the workspace — `cargo test --workspace` cannot see the 0.5.0 rename break it; build it separately with Engram as a sibling |
+| handoff: `Engram/docs/glia-v6-landed.md` | the shape Engram's memory says worked: TL;DR · contract diff · mechanical compile fixes (file:line) · meaningful read-side work · re-test commands · done vs pending. Also fixes the stale `glia export-engram` wording it quotes (`persist.rs`, `ROADMAP.md`) |
+| handoff: repo-graph | one doc for the repo-graph session: every API change in D with old → new, the new primitives, the MCP SDK 2.x port, the P4 tool collapse, the `_eloc` line fix |
+
+Not in v6: runtime / dev / peer import classification.
 
 ## 3. Cross-domain prep at a glance
 
@@ -178,20 +199,8 @@ A6.6-persisted · F's persisted cells need B's move-stable identity. Only Batch 
 
 ## 5. Open
 
-- **Engram contract v6** — does it join? There is no v6 doc; it is what Engram's v2–v5 docs (`/home/ivy/Code/Engram/docs/`)
-  deferred. The contract is `engram-core` (`GMAP_FORMAT_VERSION = 5`), owned by Engram; `engram-export` is outside
-  glia's workspace and unpublished, so it does not have to ship with 0.5.0.
-  - glia-side pieces the leap already builds: stable identity across moves (B) → a move-stable `identity_hint`
-    (today `<file>:<kind>:<ordinal>`, so a file move resets Engram's learned reward); graph delta (E1) + ParseCache
-    `iter`/`diff` (A1.8) → `export --since <prior>` diff gmaps (v2 spec G16, deferred since v2).
-  - engram-core contract changes (Engram's session): diff gmap `{added, removed, modified}` + `apply_diff`;
-    DOCUMENTS as its own edge kind (today folded into plain association, `engram-export/src/lib.rs:174-187`); line
-    anchors on doc Propositions (v5 §7, "defer to v6"); NatSpec `@param`/`@return`/`@dev` as edges (v5 §8, "defer to
-    v6"); runtime / dev / peer import classification (v5 §8).
-  - glia extraction, independent of the contract: Elixir `@doc` and Clojure docstrings (v4-landed).
-  - Stale: Engram's `persist.rs` messages still say `glia export-engram`; the subcommand moved to the
-    `glia-export-engram` binary (`engram-export/src/bin/`). Already done on the glia side: `.gitignore`-aware walk,
-    intra-workspace import leak (A16.4), separate IMPLEMENTS.
+Nothing blocking. Engram v6 is in (see G). Packet specs for B–G, A's new items and the Engram block are the next
+deliverable; Batch C's 34 specs need re-anchoring against HEAD after 19 waves.
 
 ## 6. Not in this leap
 
