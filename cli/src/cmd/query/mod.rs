@@ -8,9 +8,19 @@
 
 use clap::Subcommand;
 
+mod find;
+
 #[derive(Subcommand, Debug)]
-pub(crate) enum QueryCmd {}
+pub(crate) enum QueryCmd {
+    /// Find (LD.3b): the ranked, located nodes a symbol, qname or fragment
+    /// names. Each row says which tier matched it — exact_qname, exact_name,
+    /// exact_ci, qname_suffix, name_prefix, name_word, name_substring,
+    /// qname_substring, subsequence — ranked by tier, then by degree.
+    Find(find::Args),
+}
 
 pub(crate) fn run(c: QueryCmd) -> i32 {
-    match c {}
+    match c {
+        QueryCmd::Find(a) => find::run(a),
+    }
 }
