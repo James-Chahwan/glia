@@ -112,7 +112,8 @@ def main():
             gates.append(f"{i} status {st}")
 
     dirty, _ = sh("git status --short")
-    dirty = [l for l in dirty.splitlines() if l.strip() and "packet-corrections.json" not in l]
+    dirty = [l for l in dirty.splitlines() if l.strip() and "packet-corrections.json" not in l
+             and "usage-log.jsonl" not in l]
     if dirty:
         gates.append(f"uncommitted paths: {dirty[:6]}")
 
