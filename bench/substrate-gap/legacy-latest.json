@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 133,
+  "fixtures": 135,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -82,9 +82,23 @@
         "DOCUMENTS": 1.0
       }
     },
+    "contract-openapi-json": {
+      "framework": "contract-openapi-json",
+      "language": "json+python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
     "contract-openapi-yaml": {
       "framework": "contract-openapi-yaml",
       "language": "yaml+python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "contract-pact": {
+      "framework": "contract-pact",
+      "language": "json+python",
       "per_category": {
         "DOCUMENTS": 1.0
       }
@@ -885,7 +899,9 @@
     "xcut-trpc": {
       "framework": "xcut-trpc",
       "language": "typescript",
-      "per_category": {}
+      "per_category": {
+        "RPC_CALLS": 1.0
+      }
     },
     "xcut-websocket-precision": {
       "framework": "xcut-websocket-precision",
