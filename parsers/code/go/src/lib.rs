@@ -148,6 +148,14 @@ pub fn parse_file(
         }
     }
 
+    if !acc.func_literal_handlers.is_empty() {
+        eprintln!(
+            "[go-routes] {} func-literal handlers -> {} HANDLED_BY refs in {file_rel_path}",
+            acc.func_literal_handlers.len(),
+            acc.func_literal_refs
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -191,6 +199,21 @@ struct Acc {
     di_containers: HashMap<String, DiContainer>,
     /// One INJECTS ref per (registering node, provider) per file.
     di_seen: std::collections::HashSet<(NodeId, String)>,
+    /// LA.18d: local names bound by this file's imports that lie OUTSIDE the
+    /// go.mod module (stdlib + third-party). A func-literal route handler's
+    /// `pkg.Fn(..)` through one of them is never an in-repo callee, and the
+    /// graph's HANDLED_BY fallback (`unique_global_function` /
+    /// `unique_global_method`) would otherwise bind `log.Println` to any
+    /// uniquely named repo `Println`. Filled with `di_containers`, so it is
+    /// complete before any route is visited. Only looked up, never iterated.
+    external_pkgs: std::collections::HashSet<String>,
+    /// LA.18d: start byte of every func-literal route handler already expanded
+    /// in this file. A Gorilla `.Methods("GET", "POST")` chain re-enters
+    /// `emit_route_from_call` once per verb with the same literal; its callee
+    /// refs are pushed once. `len()` is the marker's handler count.
+    func_literal_handlers: std::collections::HashSet<usize>,
+    /// LA.18d: HANDLED_BY refs pushed from func-literal handlers in this file.
+    func_literal_refs: usize,
 }
 
 // ============================================================================
@@ -604,6 +627,29 @@ fn record_import(
         }
     }
 
+    // LA.18d: remember the local name of every import outside the go.mod
+    // module, so a func-literal handler's `pkg.Fn(..)` through it is not
+    // mistaken for an in-repo callee. With no module prefix every import is
+    // external. Blank and dot imports bind no selector base.
+    let in_module = !module_import_prefix.is_empty()
+        && (path_str == module_import_prefix
+            || path_str
+                .strip_prefix(module_import_prefix)
+                .is_some_and(|rest| rest.starts_with('/')));
+    if !in_module {
+        match alias.as_deref() {
+            Some("_") | Some(".") => {}
+            Some(local) => {
+                acc.external_pkgs.insert(local.to_string());
+            }
+            None => {
+                for local in import_local_names(&path_str) {
+                    acc.external_pkgs.insert(local.to_string());
+                }
+            }
+        }
+    }
+
     // If the import lies within the go.mod module, convert to repo-local qname.
     let qname = if !module_import_prefix.is_empty() && path_str.starts_with(module_import_prefix) {
         let rel = path_str.trim_start_matches(module_import_prefix).trim_start_matches('/');
@@ -626,6 +672,42 @@ fn record_import(
             alias,
         },
     });
+}
+
+/// LA.18d: the name(s) an un-aliased Go import can bind. Go binds the imported
+/// package's declared name, which the path only suggests: normally its last
+/// segment, but a major-version suffix (`github.com/go-chi/chi/v5`) names the
+/// segment before it, gopkg.in drops a `.vN` (`gopkg.in/yaml.v3` → `yaml`),
+/// and a `go-` prefix / `-go` suffix is conventionally not part of the name
+/// (`go-sqlite3` → `sqlite3`, `stripe-go` → `stripe`). Every candidate is
+/// returned: the set is only used to SKIP calls, and none of the extras is a
+/// name an in-repo identifier could plausibly shadow.
+fn import_local_names(path: &str) -> Vec<&str> {
+    fn is_major_version(s: &str) -> bool {
+        s.len() >= 2 && s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit())
+    }
+    let mut segments = path.rsplit('/');
+    let Some(mut last) = segments.next() else {
+        return Vec::new();
+    };
+    if is_major_version(last)
+        && let Some(prev) = segments.next()
+    {
+        last = prev;
+    }
+    let mut out = vec![last];
+    if let Some((stem, version)) = last.rsplit_once('.')
+        && is_major_version(version)
+    {
+        out.push(stem);
+    }
+    if let Some(stem) = last.strip_prefix("go-") {
+        out.push(stem);
+    }
+    if let Some(stem) = last.strip_suffix("-go") {
+        out.push(stem);
+    }
+    out
 }
 
 // ============================================================================
@@ -1586,6 +1668,132 @@ fn emit_route_from_call(
             qualifier: q,
             category: edge_category::HANDLED_BY,
         });
+    }
+
+    // LA.18d: a func-literal handler (`http.HandleFunc("/ws", func(w, r) {
+    // serveWs(hub, w, r) })`) names no single target, so it has no display
+    // name; what runs for the route is the literal's own direct in-repo
+    // callees. Not the enclosing function (it registers every route), not the
+    // module (it carries no CALLS). Expanded once per literal per file.
+    if let Some(h) = handler_arg
+        && h.kind() == "func_literal"
+        && acc.func_literal_handlers.insert(h.start_byte())
+    {
+        for qualifier in func_literal_callees(h, src, &acc.external_pkgs) {
+            acc.refs.push(UnresolvedRef {
+                from: route_id,
+                from_module: module_id,
+                qualifier,
+                category: edge_category::HANDLED_BY,
+            });
+            acc.func_literal_refs += 1;
+        }
+    }
+}
+
+/// LA.18d: at most this many HANDLED_BY refs per func-literal handler, so a
+/// closure that calls a pile of helpers cannot fan one route out without bound.
+const MAX_FUNC_LITERAL_CALLEES: usize = 8;
+
+/// Go builtins and predeclared conversions. A bare call to one of these is
+/// never an in-repo function, and the HANDLED_BY `unique_global_function`
+/// fallback would otherwise bind `len(x)` to a repo function named `len`.
+const GO_PREDECLARED_CALLEES: &[&str] = &[
+    "append", "cap", "clear", "close", "complex", "copy", "delete", "imag", "len", "make", "max",
+    "min", "new", "panic", "print", "println", "real", "recover", "bool", "byte", "complex64",
+    "complex128", "error", "float32", "float64", "int", "int8", "int16", "int32", "int64", "rune",
+    "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "any",
+];
+
+/// LA.18d: the in-repo-shaped direct callees of a func-literal route handler,
+/// deduped, in source order, capped at [`MAX_FUNC_LITERAL_CALLEES`]. Nested
+/// func literals are not entered — they run later, if at all. Kept shapes are
+/// the ones the identifier / selector handler arms already resolve: a bare
+/// `name(..)` and `base.Name(..)` with an identifier `base`. Dropped: Go
+/// builtins, calls through the literal's own parameters (`c.JSON(..)`,
+/// `w.Write(..)` — framework receivers), and calls through an external
+/// import (`log.Println`, `json.NewEncoder`). A repo-local package
+/// (`handlers.ListUsers(c)`) and a captured variable (`hub.register(..)`) stay.
+fn func_literal_callees(
+    lit: TsNode,
+    src: &[u8],
+    external_pkgs: &std::collections::HashSet<String>,
+) -> Vec<CallQualifier> {
+    let mut params: Vec<&str> = Vec::new();
+    if let Some(list) = lit.child_by_field_name("parameters") {
+        let mut cursor = list.walk();
+        for decl in list.named_children(&mut cursor) {
+            let mut names = decl.walk();
+            for name in decl.children_by_field_name("name", &mut names) {
+                params.push(text_of(name, src));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(body) = lit.child_by_field_name("body") {
+        collect_literal_callees(body, src, &params, external_pkgs, &mut out);
+    }
+    out
+}
+
+fn collect_literal_callees(
+    n: TsNode,
+    src: &[u8],
+    params: &[&str],
+    external_pkgs: &std::collections::HashSet<String>,
+    out: &mut Vec<CallQualifier>,
+) {
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        if out.len() >= MAX_FUNC_LITERAL_CALLEES {
+            return;
+        }
+        if child.kind() == "func_literal" {
+            continue;
+        }
+        if child.kind() == "call_expression"
+            && let Some(q) = literal_callee(child, src, params, external_pkgs)
+            && !out.contains(&q)
+        {
+            out.push(q);
+        }
+        collect_literal_callees(child, src, params, external_pkgs, out);
+    }
+}
+
+fn literal_callee(
+    call: TsNode,
+    src: &[u8],
+    params: &[&str],
+    external_pkgs: &std::collections::HashSet<String>,
+) -> Option<CallQualifier> {
+    let func = call.child_by_field_name("function")?;
+    match func.kind() {
+        "identifier" => {
+            let name = text_of(func, src);
+            // A parameter called as a function is a func value, never a repo
+            // declaration.
+            if GO_PREDECLARED_CALLEES.contains(&name) || params.contains(&name) {
+                return None;
+            }
+            Some(CallQualifier::Bare(name.to_string()))
+        }
+        "selector_expression" => {
+            let operand = func.child_by_field_name("operand")?;
+            if operand.kind() != "identifier" {
+                return None;
+            }
+            let base = text_of(operand, src);
+            if params.contains(&base) || external_pkgs.contains(base) {
+                return None;
+            }
+            let field = func.child_by_field_name("field")?;
+            Some(CallQualifier::Attribute {
+                base: base.to_string(),
+                name: text_of(field, src).to_string(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -2777,6 +2985,202 @@ var ProviderSet = wire.NewSet(NewA, NewB)
         assert_eq!(
             injects_refs(&parse),
             vec![(set, bare("NewA")), (set, bare("NewB"))]
+        );
+    }
+
+    // ---- LA.18d: func-literal route handler → HANDLED_BY its callees ----
+
+    /// HANDLED_BY qualifiers from `route`, in emission order.
+    fn handled_by(parse: &FileParse, route: NodeId) -> Vec<CallQualifier> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == route && r.category == edge_category::HANDLED_BY)
+            .map(|r| r.qualifier.clone())
+            .collect()
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn func_literal_handler_refs_its_callees() {
+        let source = r#"package main
+
+import "net/http"
+
+func main() {
+    hub := newHub()
+    http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+        serveWs(hub, w, r)
+    })
+}
+"#;
+        let parse = parse_file(source, "main.go", "main", "example.com/chat", repo()).unwrap();
+        let ws = route_id(repo(), "/ws");
+        assert_eq!(route_methods(&parse, ws), vec!["ANY".to_string()]);
+        assert_eq!(handled_by(&parse, ws), vec![bare("serveWs")]);
+        // Same module stamp as the identifier arm.
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "main");
+        assert!(parse.refs.iter().all(|r| r.from != ws || r.from_module == module_id));
+    }
+
+    #[test]
+    fn gin_closure_skips_param_receiver_calls() {
+        let source = r#"package server
+
+import "github.com/gin-gonic/gin"
+
+func setup(r *gin.Engine) {
+    r.GET("/x", func(c *gin.Context) {
+        c.JSON(200, build())
+    })
+}
+"#;
+        let parse = parse_file(source, "server/server.go", "server", "example.com/app", repo())
+            .unwrap();
+        assert_eq!(handled_by(&parse, route_id(repo(), "/x")), vec![bare("build")]);
+    }
+
+    #[test]
+    fn external_package_calls_are_not_refs() {
+        let source = r#"package main
+
+import (
+    "encoding/json"
+    "log"
+    "net/http"
+)
+
+func main() {
+    http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+        v := []string{"ok"}
+        log.Println("health", len(v))
+        json.NewEncoder(w).Encode(v)
+        writeHealth(w)
+    })
+}
+"#;
+        let parse = parse_file(source, "main.go", "main", "example.com/health", repo()).unwrap();
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "/health")),
+            vec![bare("writeHealth")]
+        );
+    }
+
+    #[test]
+    fn versioned_and_aliased_external_imports_are_not_refs() {
+        let source = r#"package main
+
+import (
+    "net/http"
+
+    "github.com/go-chi/chi/v5"
+    jsoniter "github.com/json-iterator/go"
+    "gopkg.in/yaml.v3"
+)
+
+func main() {
+    r := chi.NewRouter()
+    r.Get("/items/{id}", func(w http.ResponseWriter, req *http.Request) {
+        id := chi.URLParam(req, "id")
+        out, _ := yaml.Marshal(id)
+        jsoniter.Marshal(out)
+        showItem(w, id)
+    })
+}
+"#;
+        let parse = parse_file(source, "main.go", "main", "example.com/shop", repo()).unwrap();
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "/items/{id}")),
+            vec![bare("showItem")]
+        );
+    }
+
+    #[test]
+    fn repo_local_package_call_is_a_ref() {
+        let source = r#"package server
+
+import (
+    "example.com/app/handlers"
+    "github.com/gin-gonic/gin"
+)
+
+func setup(r *gin.Engine, h *Hub) {
+    r.GET("/users", func(c *gin.Context) {
+        handlers.ListUsers(c)
+        h.ServeWS(c.Writer, c.Request)
+    })
+}
+"#;
+        let parse = parse_file(source, "server/server.go", "server", "example.com/app", repo())
+            .unwrap();
+        // A repo-local package and a captured variable both stay.
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "/users")),
+            vec![attr("handlers", "ListUsers"), attr("h", "ServeWS")]
+        );
+    }
+
+    #[test]
+    fn nested_func_literal_calls_are_not_refs() {
+        let source = r#"package main
+
+import "net/http"
+
+func main() {
+    http.HandleFunc("/n", func(w http.ResponseWriter, r *http.Request) {
+        defer func() { cleanup() }()
+        go func() { background() }()
+        serve(w, r)
+        serve(w, r)
+    })
+}
+"#;
+        let parse = parse_file(source, "main.go", "main", "example.com/app", repo()).unwrap();
+        assert_eq!(handled_by(&parse, route_id(repo(), "/n")), vec![bare("serve")]);
+    }
+
+    #[test]
+    fn func_literal_callees_are_capped_and_expanded_once_per_methods_chain() {
+        let source = r#"package main
+
+import "github.com/gorilla/mux"
+
+func main() {
+    r := mux.NewRouter()
+    r.HandleFunc("/many", func(w http.ResponseWriter, req *http.Request) {
+        a1(); a2(); a3(); a4(); a5(); a6(); a7(); a8(); a9(); a10()
+    }).Methods("GET", "POST")
+}
+"#;
+        let parse = parse_file(source, "main.go", "main", "example.com/app", repo()).unwrap();
+        let many = route_id(repo(), "/many");
+        assert_eq!(
+            route_methods(&parse, many),
+            vec!["GET".to_string(), "POST".to_string()]
+        );
+        let expected: Vec<CallQualifier> = (1..=8).map(|i| bare(&format!("a{i}"))).collect();
+        assert_eq!(handled_by(&parse, many), expected);
+    }
+
+    #[test]
+    fn import_local_names_follow_go_package_naming() {
+        assert_eq!(import_local_names("log"), vec!["log"]);
+        assert_eq!(import_local_names("encoding/json"), vec!["json"]);
+        assert_eq!(import_local_names("github.com/go-chi/chi/v5"), vec!["chi"]);
+        assert_eq!(import_local_names("gopkg.in/yaml.v3"), vec!["yaml.v3", "yaml"]);
+        assert_eq!(
+            import_local_names("github.com/mattn/go-sqlite3"),
+            vec!["go-sqlite3", "sqlite3"]
+        );
+        assert_eq!(
+            import_local_names("github.com/stripe/stripe-go/v76"),
+            vec!["stripe-go", "stripe"]
         );
     }
 }
