@@ -493,6 +493,7 @@ pub struct HttpRouteMatcher {
 
 /// One ROUTE an [`HttpRouteMatcher`] lookup reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RouteMatch {
     pub route: NodeId,
     /// The ROUTE node's own confidence, capped at the matching tier's ceiling.

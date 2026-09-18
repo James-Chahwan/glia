@@ -33,6 +33,7 @@ For new matrix probes use `python3 bench/substrate-gap/scaffold.py <lang> <mech>
 === CONSTRAINTS ===
 - LOCKED IDS: NodeKind / EdgeCategory / CellType ids are allocated in code-domain/src/lib.rs ONLY, by L0.1 (edge_category 35 NAVIGATES_TO, 36 CO_CHANGES; cell_type 19 DOC_TAGS, 20 ROLE, 21 EVIDENCE, 22 SCHEMA_FIELDS, 23 COVERAGE, 24 ENTRYPOINT, 25 ACCESS_MODE). Refer to them by constant NAME. NEVER pick, renumber or reuse an id.
 - FORMAT: only LC.1 bumps FORMAT_VERSION / MANIFEST_VERSION.
+- PUBLIC API (LD.9): a new pub struct / enum on the engine or graph facade (named by a `pub use` in lib.rs, or in a `pub mod` slot) is `#[non_exhaustive]` (derive `Default` if a caller outside the crate builds one) or has a private field; `engine/tests/api_stability.rs` enforces it, lists offenders as file:line, and holds the reasoned allowlist.
 - Parsers EXTRACT, the graph crate RESOLVES. No unwrap()/panic!() in non-test code. Scope in LOC, never time. No stubs, no TODOs, no deferrals: if your packet needs it, build it or report `blocked`.
 - Ship a grep-able fired_on marker: a literal stderr line with a stable prefix, e.g. `[queues] scan needle=...`, with a per-language / per-source discriminator if shared.
 - SECURITY GATES (locked): no taint or value data-flow, no CVE / vulnerability-feed joins, no mass-corpus crawling, no lists of routes reaching data without auth. Untrusted text (CI logs, .env, config) goes through the A13.7 redaction before it is stored.

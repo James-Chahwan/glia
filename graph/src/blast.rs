@@ -12,6 +12,7 @@ use crate::merged::MergedGraph;
 
 /// Which way the blast radius spreads from the seed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum Reach {
     /// Downstream — what this node affects (follow edges from→to).
     Forward,
@@ -22,7 +23,19 @@ pub enum Reach {
 }
 
 /// One node in a blast radius: reached via `reason` at `depth`, ranked by `score`.
+/// Produced by `MergedGraph::blast_radius`, never built by a struct literal
+/// outside this crate (LD.9):
+///
+/// ```compile_fail
+/// let _ = repo_graph_graph::BlastHit {
+///     id: repo_graph_core::NodeId(0),
+///     depth: 0,
+///     reason: repo_graph_core::EdgeCategoryId(0),
+///     score: 0.0,
+/// };
+/// ```
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct BlastHit {
     pub id: NodeId,
     /// Hops from the seed along carry edges.

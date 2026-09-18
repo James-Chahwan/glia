@@ -180,48 +180,38 @@ mod tests {
     use super::*;
     use repo_graph_engine::{ServiceLink, ServiceMap, ServiceSummary};
 
+    // The service-map types are `#[non_exhaustive]` (LD.9): outside the engine
+    // they are built by `Default` plus field assignment, never by a literal.
     fn svc(id: &str) -> ServiceSummary {
-        ServiceSummary {
-            id: id.to_string(),
-            repo: "r".to_string(),
-            languages: vec![],
-            files: 0,
-            nodes: 0,
-            routes: 0,
-            endpoints: 0,
-            cli_commands: 0,
-            queue_consumers: 0,
-            inbound: 9,
-            outbound: 9,
-        }
+        let mut s = ServiceSummary::default();
+        s.id = id.to_string();
+        s.repo = "r".to_string();
+        s.inbound = 9;
+        s.outbound = 9;
+        s
     }
 
     fn link(from: &str, to: &str, mechanism: &'static str) -> ServiceLink {
-        ServiceLink {
-            from: from.to_string(),
-            to: to.to_string(),
-            mechanism,
-            channel: "GET /x".to_string(),
-            count: 1,
-            confidence: "strong",
-            example_from_qname: String::new(),
-            example_to_qname: String::new(),
-        }
+        let mut l = ServiceLink::default();
+        l.from = from.to_string();
+        l.to = to.to_string();
+        l.mechanism = mechanism;
+        l.channel = "GET /x".to_string();
+        l.count = 1;
+        l.confidence = "strong";
+        l
     }
 
     #[test]
     fn non_flow_links_are_dropped_and_io_recounted() {
-        let mut map = ServiceMap {
-            keying: "top_level_dir",
-            services: vec![svc("web"), svc("api"), svc("docs")],
-            links: vec![
-                link("web", "api", "HTTP_CALLS"),
-                link("web", "api", "SHARES_SCHEMA"),
-                link("docs", "api", "DOCUMENTS"),
-            ],
-            self_links: 0,
-            unlocated_nodes: 0,
-        };
+        let mut map = ServiceMap::default();
+        map.keying = "top_level_dir";
+        map.services = vec![svc("web"), svc("api"), svc("docs")];
+        map.links = vec![
+            link("web", "api", "HTTP_CALLS"),
+            link("web", "api", "SHARES_SCHEMA"),
+            link("docs", "api", "DOCUMENTS"),
+        ];
         drop_non_flow_links(&mut map);
         assert_eq!(map.links.len(), 1, "only the HTTP_CALLS flow survives");
         assert_eq!(map.links[0].mechanism, "HTTP_CALLS");

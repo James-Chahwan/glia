@@ -12,7 +12,25 @@ use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
 /// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
+/// Produced by [`blast_radius_by_qname`], never built by a struct literal
+/// outside this crate (LD.9):
+///
+/// ```compile_fail
+/// let _ = repo_graph_engine::BlastAnswer {
+///     id: 0,
+///     qname: String::new(),
+///     name: String::new(),
+///     kind: "",
+///     reason: "",
+///     depth: 0,
+///     score: 0.0,
+///     live: false,
+///     file: None,
+///     line: None,
+/// };
+/// ```
 #[derive(serde::Serialize)]
+#[non_exhaustive]
 pub struct BlastAnswer {
     pub id: u64,
     pub qname: String,
@@ -188,6 +206,7 @@ pub fn blast_radius_by_qname(
 /// with the `mechanism` (edge category) and whether it crossed a service
 /// boundary. The destination is located.
 #[derive(serde::Serialize)]
+#[non_exhaustive]
 pub struct TraceHop {
     pub depth: usize,
     /// Edge category name — the mechanism (`CALLS`, `HTTP_CALLS`, `QUEUE_FLOWS`…).
@@ -268,6 +287,7 @@ pub fn cross_stack_trace(
 /// One located node in a `resolve` answer: identity + kind + PPR relevance +
 /// `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it doesn't walk.)
 #[derive(serde::Serialize)]
+#[non_exhaustive]
 pub struct LocatedNode {
     pub id: u64,
     pub qname: String,
@@ -709,6 +729,7 @@ fn apply_scope<T>(
 /// One manifest-rooted sub-project: a PROJECT anchor (A8.5) decoded from its
 /// ORIGIN cell. `path` is repo-relative, `.` for the repo root.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProjectInfo {
     pub qname: String,
     pub label: String,
@@ -862,6 +883,7 @@ fn is_primitive_payload(ty: &str) -> bool {
 /// One side of a message contract: the queue node, where it lives, and the
 /// payload type it says it carries.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct MessageContractSide {
     pub node_id: u64,
     /// `RepoId.0`; `GenerateResult::repo_labels` maps it to a human label.
@@ -900,6 +922,7 @@ pub struct MessageContractSide {
 /// `"strong"` or `"weak"` for a verdict and `"none"` for `unknown`. `note` says
 /// why whenever the row is anything other than a strong verdict.
 #[derive(Debug, Clone, serde::Serialize)]
+#[non_exhaustive]
 pub struct MessageContractRow {
     pub topic: String,
     pub topic_is_tag: bool,

@@ -52,6 +52,7 @@ pub struct SymbolTable {
 // ============================================================================
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum GraphError {
     #[error("module qname collision: {0}")]
     ModuleCollision(String),

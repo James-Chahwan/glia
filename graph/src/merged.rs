@@ -328,6 +328,7 @@ const SYMMETRIC: &[EdgeCategoryId] = &[
 /// Plain struct on purpose: `graph` carries no serde dependency, so shaping
 /// this for the wire is the engine's job.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CrossLink {
     pub from: String,
     pub to: String,

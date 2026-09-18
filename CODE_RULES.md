@@ -187,6 +187,20 @@ Workspace-local binaries live at `target/release/<name>` after `cargo build --re
 
 Output paths: `/tmp/<descriptive>.md` for one-off smoke tests; `<workdir>/<channel>.md` for per-instance pipeline output (cleaned up by run_instance.py if it owns the workdir).
 
+## 17. Public API types (LD.9)
+
+Adding a field to a public struct breaks every struct literal of it outside the crate. So every struct and enum that the engine or graph facade makes public, and that is defined in that crate, must meet one of three conditions. "Makes public" means named by a `pub use` in `engine/src/lib.rs` or `graph/src/lib.rs` (explicit, single or `*` glob), or declared in a `pub mod` slot there. The three conditions:
+
+- **`#[non_exhaustive]`**. Outside the crate, callers get the type from its producing function (`generate_one`, `blast_radius_by_qname`, ...) or from `Default` plus field assignment. Derive `Default` when a caller builds one, as the cli tests do with `ServiceMap`. A struct literal and `..Default::default()` are both refused (E0639). A `match` on an enum needs a wildcard arm. Constructing a variant is still allowed.
+- **A private field**: the type is already unconstructible outside the crate (`ParseCache`, `Locator`, `HttpRouteMatcher`).
+- **An allowlist entry** in `engine/tests/api_stability.rs`, with its reason:
+  - The data model: `MergedGraph`, `RepoGraph` and `SymbolTable`. The store and the tests build these by literal, and LC.2 owns their shape.
+  - Unit resolver structs pass by rule, because the engine constructs them.
+  - Re-exports from another crate are skipped. `ActivationConfig` and `DomainProfile` stay exhaustive because domains build them by literal.
+  - The rest are stopgaps, each naming the test that builds the type by literal. Delete an entry once its type is marked.
+
+`cargo test -p repo-graph-engine --test api_stability` enforces this. It prints `[api_stability] scan types=… offenders=…`, and on failure it lists each offender as `file:line`. It also fails loudly on a stale allowlist entry or on a facade shape it cannot follow. Four `compile_fail` doctests prove that the attribute refuses a literal: `GenerateResult`, `BlastAnswer`, `ServiceMap` and `BlastHit`. Each snippet is only the literal with every current field, because stable rustdoc does not check the error code. So when you add a field to one of those four types, add it to its snippet too.
+
 ---
 
 *Last updated: 2026-05-21, cycle 0.6 Rust session. Owners: glia engine + bench/{lens,latent,3d-viewer}.*

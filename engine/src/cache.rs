@@ -92,6 +92,7 @@ struct CacheEntry {
 /// `retain_paths` still drops it from the sidecar. That is the only way these
 /// numbers differ from the pre-LA.12 loop counters.
 #[derive(Default, Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct CacheStats {
     pub reused: usize,
     pub reparsed: usize,
@@ -100,6 +101,7 @@ pub struct CacheStats {
 
 /// One cached file as [`ParseCache::iter`] yields it, in path order.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct CachedFile<'a> {
     /// Repo-relative path, the key the build walks under.
     pub path: &'a str,

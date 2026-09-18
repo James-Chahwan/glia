@@ -11,6 +11,7 @@ use repo_graph_graph::MergedGraph;
 /// agent that sees this should verify that dimension with grep rather than trust
 /// a silent absence. `language == "*"` applies to every repo.
 #[derive(serde::Serialize, Clone, Copy)]
+#[non_exhaustive]
 pub struct CoverageCaveat {
     /// Language the caveat applies to (`"*"` = universal), matched to files present.
     pub language: &'static str,
@@ -134,6 +135,7 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
 /// contains that language.
 #[derive(serde::Serialize)]
+#[non_exhaustive]
 pub struct CoverageNote {
     pub language: &'static str,
     pub edge_category: &'static str,

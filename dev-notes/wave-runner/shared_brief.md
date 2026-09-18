@@ -32,6 +32,7 @@ For new matrix probes use `python3 bench/substrate-gap/scaffold.py <lang> <mech>
 - LOCKED IDS: NodeKind/EdgeCategory/CellType ids are allocated in code-domain/src/lib.rs ONLY (its RESERVED blocks). node_kind 45-49, edge_category 33-34 and cell_type 17-18 were pre-allocated in wave 0 with their owning packets named. NEVER pick an id yourself.
 - GRAPH CONTENT is correctable — removing wrong edges and fixing qname shapes is wanted — but DECLARE it and move every in-repo consumer (unit tests, fixture key.json) in the SAME commit.
 - Parsers EXTRACT, the graph crate RESOLVES. No unwrap()/panic!() in non-test code. Scope in LOC, never time.
+- PUBLIC API (LD.9): a new pub struct / enum on the engine or graph facade (named by a `pub use` in lib.rs, or in a `pub mod` slot) is `#[non_exhaustive]` (derive `Default` if a caller outside the crate builds one) or has a private field; `engine/tests/api_stability.rs` enforces it, lists offenders as file:line, and holds the reasoned allowlist.
 - Ship a grep-able fired_on marker: a literal stderr line with a stable prefix, e.g. `[queues] scan needle=...`. A bare mid-line token is not a marker; a passing test count is not a marker. If several packets share a line, carry a per-language/per-source discriminator.
 
 === ORDER OF WORK (fixture-first) ===

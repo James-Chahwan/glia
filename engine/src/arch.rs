@@ -153,6 +153,7 @@ fn file_index(merged: &MergedGraph) -> (HashMap<NodeId, String>, usize) {
 
 /// How node files are partitioned into services.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ServiceKeying {
     /// One service per repo — only correct when ≥2 repos were merged.
     PerRepo,
@@ -472,7 +473,8 @@ pub const FLOW_MECHANISMS: &[EdgeCategoryId] = &[
     edge_category::CLI_INVOKES,
 ];
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ServiceSummary {
     pub id: String,
     /// Human repo label of the first node placed here.
@@ -490,7 +492,8 @@ pub struct ServiceSummary {
     pub outbound: usize,
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct ServiceLink {
     pub from: String,
     pub to: String,
@@ -502,7 +505,21 @@ pub struct ServiceLink {
     pub example_to_qname: String,
 }
 
-#[derive(serde::Serialize, Debug)]
+/// The whole-stack view [`service_map`] / [`service_map_with`] return. Outside
+/// this crate it is built by `Default` plus field assignment, never by a
+/// struct literal (LD.9):
+///
+/// ```compile_fail
+/// let _ = repo_graph_engine::ServiceMap {
+///     keying: "",
+///     services: vec![],
+///     links: vec![],
+///     self_links: 0,
+///     unlocated_nodes: 0,
+/// };
+/// ```
+#[derive(serde::Serialize, Debug, Default)]
+#[non_exhaustive]
 pub struct ServiceMap {
     /// Which rule produced the ids — a consumer cannot otherwise tell
     /// `apps` (top-level dir) from `apps/web` (project roots).

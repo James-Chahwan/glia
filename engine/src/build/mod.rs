@@ -33,6 +33,20 @@ use assemble::build_graphs_for_repo;
 use resolvers::run_all_resolvers;
 use rpc_needles::RpcContext;
 
+/// One build's output. Outside this crate it comes from [`generate_one`] /
+/// [`generate_many`] and their variants, never from a struct literal, so a new
+/// field is not a break (LD.9, `engine/tests/api_stability.rs`):
+///
+/// ```compile_fail
+/// let _ = repo_graph_engine::GenerateResult {
+///     merged: Default::default(),
+///     total_nodes: 0,
+///     total_edges: 0,
+///     parse_errors: vec![],
+///     repo_labels: Default::default(),
+/// };
+/// ```
+#[non_exhaustive]
 pub struct GenerateResult {
     pub merged: MergedGraph,
     pub total_nodes: usize,
