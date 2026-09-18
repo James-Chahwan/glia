@@ -681,6 +681,25 @@ mod tests {
     use super::*;
     use repo_graph_core::{Cell, RepoId};
 
+    /// L0.1 guard — `cell_label_arms_are_registered`. `cell_label` matches raw
+    /// cell numbers, so an arm written from a stale packet number (the leap
+    /// texts proposed COVERAGE 27 / ENTRYPOINT 28; L0.1 allocated 23 / 24)
+    /// would label an id nothing emits. Every arm that is not the `cell`
+    /// fallback must name a registered `cell_type`.
+    #[test]
+    fn cell_label_arms_are_registered() {
+        for id in 0..=255u32 {
+            let c = CellTypeId(id);
+            if cell_label(c) != "cell" {
+                assert_ne!(
+                    cell_type::name(c),
+                    "UNKNOWN",
+                    "cell_label has an arm for unregistered cell id {id}"
+                );
+            }
+        }
+    }
+
     fn mini_graph() -> RepoGraph {
         let repo = RepoId::from_canonical("test://mini");
         let mod_id = NodeId::from_parts("code", repo, node_kind::MODULE, "m::a");

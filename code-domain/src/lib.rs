@@ -24,6 +24,27 @@ pub mod walk_gating;
 /// roots a directory, its ecosystem and its label. (A8.4)
 pub mod project_roots;
 
+// 0.5.0 leap module slots (L0.1): declared here so each owner edits only its
+// own file. Doc-only until the owning packet fills it.
+
+/// ORM table-cell writer / reader (`table_cell` / `table_of`). (A13.1)
+pub mod data_entity;
+
+/// Edge evidence: the EVIDENCE edge-cell payload and its helpers. (LC.3a)
+pub mod evidence;
+
+/// Sidecar / overlay input records (cells.jsonl, vectors.jsonl, constraints). (LF.1a)
+pub mod external_inputs;
+
+/// The `.glia/overlay.toml` schema and loader. (LF.2a)
+pub mod glia_config;
+
+/// The code domain profile tables (`CODE_TABLES`). (LD.14a)
+pub mod profile;
+
+/// Git-history / test-report snapshot records and `data_hash`. (LF.5a)
+pub mod snapshots;
+
 // ============================================================================
 // Node kinds
 // ============================================================================
@@ -368,6 +389,10 @@ pub mod edge_category {
     // in `node_kind` for the rule. Owning packet per id:
     //   33 SHARES_DATA_SOURCE — A13.3 (LANDED: DbResolver emits it)
     //   34 RPC_CALLS          — A10.10 (LANDED: RpcStackResolver emits it)
+    // 35-36 allocated centrally by L0.1 for the 0.5.0 leap (the packet texts
+    // proposed CO_CHANGES = 38; compacted so ALL stays 1..=len):
+    //   35 NAVIGATES_TO       — LA.6a
+    //   36 CO_CHANGES         — LF.5b
     // ------------------------------------------------------------------
 
     /// Cross-repo pairing: two nodes reach the same external data source
@@ -388,6 +413,21 @@ pub mod edge_category {
     /// exact procedure-path match (`rpc_call:<path>` ↔ `rpc:<path>`) — no
     /// substring fallback. In `blast_carry_edges()`. (A10.10)
     pub const RPC_CALLS: EdgeCategoryId = EdgeCategoryId(34);
+
+    /// RESERVED (LA.6a) — a frontend navigation link (`routerLink`, `<Link to>`,
+    /// `navigate()`, `router.push`, origin share links) or a route redirect,
+    /// pointing at the navigation `ROUTE` it lands on (`page:<path>` once LB.4c
+    /// lands). A dead link stays an unresolved ref of this category rather than
+    /// a guessed edge. Emitters LA.6b-d; resolved by `graph::nav` (LA.6a);
+    /// read by LA.6e and the Engram edge table (LG.11).
+    pub const NAVIGATES_TO: EdgeCategoryId = EdgeCategoryId(35);
+
+    /// RESERVED (LF.5b) — `MODULE` ↔ `MODULE`: two files that repeatedly change
+    /// together in the git-history snapshot. HEURISTIC, always
+    /// `Confidence::Weak`, activation weight 0, NOT in `blast_carry_edges()`,
+    /// symmetric in cross_links. Emitter LF.5b; read by LF.5c / LF.5d and the
+    /// Engram edge table (LG.11); the overlay loader (LF.2a) rejects it by name.
+    pub const CO_CHANGES: EdgeCategoryId = EdgeCategoryId(36);
 
     /// Canonical id→name for every edge category. Single source of truth for
     /// decode tables (pyo3 `category_names`) and the CLI. Keep in lockstep with
@@ -428,6 +468,9 @@ pub mod edge_category {
         // Centrally-allocated ids (see the RESERVED block above).
         (SHARES_DATA_SOURCE, "SHARES_DATA_SOURCE"), // emitted by DbResolver (A13.3)
         (RPC_CALLS, "RPC_CALLS"),                   // emitted by RpcStackResolver (A10.10)
+        // L0.1 leap reservations — no emitter yet.
+        (NAVIGATES_TO, "NAVIGATES_TO"), // LA.6a
+        (CO_CHANGES, "CO_CHANGES"),     // LF.5b
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
@@ -480,6 +523,18 @@ pub mod cell_type {
     // `node_kind` for the rule. Owning packet per id:
     //   17 MESSAGE_TYPE — A12.1
     //   18 RPC_PACKAGE  — A5.1
+    // 19-25 allocated centrally by L0.1 for the 0.5.0 leap. The packet texts
+    // proposed SCHEMA_FIELDS 26, COVERAGE 27, ENTRYPOINT 28; compacted so ALL
+    // stays 1..=len, with ACCESS_MODE kept at 25 so every stale number (26,
+    // 27, 28) is UNREGISTERED and decodes UNKNOWN instead of naming another
+    // cell:
+    //   19 DOC_TAGS      — LA.8
+    //   20 ROLE          — LB.3a
+    //   21 EVIDENCE      — LC.3a
+    //   22 SCHEMA_FIELDS — LE.10a (LE.10b writes it too)
+    //   23 COVERAGE      — LF.6c
+    //   24 ENTRYPOINT    — LF.3b
+    //   25 ACCESS_MODE   — LE.4a
     // ------------------------------------------------------------------
 
     /// RESERVED (A12.1) — the message / payload schema type a node sends or
@@ -489,6 +544,49 @@ pub mod cell_type {
     /// RESERVED (A5.1) — the RPC package / namespace a service declaration
     /// lives in (a proto `package foo.bar;`).
     pub const RPC_PACKAGE: CellTypeId = CellTypeId(18);
+
+    /// RESERVED (LA.8) — structured doc-comment tags, a JSON cell
+    /// `{"style":"natspec","tags":[{"tag":"param","name":"to","text":"..."}]}`
+    /// with tags in source order (NatSpec first; `name` only where the tag
+    /// takes one). Emitter LA.8; Engram mapping LG.12.
+    pub const DOC_TAGS: CellTypeId = CellTypeId(19);
+
+    /// RESERVED (LB.3a) — the framework roles a CLASS / STRUCT / FUNCTION plays
+    /// after the build-time role fold, a JSON cell `{"roles":["SERVICE",...]}`.
+    /// Written by LB.3a; read through graph `roles_in` (LB.3b, LA.6a,
+    /// LA.21a / LA.21b).
+    pub const ROLE: CellTypeId = CellTypeId(20);
+
+    /// RESERVED (LC.3a) — an EDGE cell recording why an edge exists, JSON
+    /// `{"emitter":"...","rule":"...","file":"...","line":N,"basis":"site"}`.
+    /// `rule`, `file` and `line` are optional; `line` is 0-based (the POSITION
+    /// convention); `basis` is one of `site | from_node | to_node | file |
+    /// none`. Writers LC.3a-d; readers LE.5, LC.10b, LE.1b.
+    pub const EVIDENCE: CellTypeId = CellTypeId(21);
+
+    /// RESERVED (LE.10a) — the declared fields of a schema, JSON
+    /// `{"format":"proto","<section>":[{"name","type","number"?,"label"?,
+    /// "oneof"?,"required"?,"default"?}]}`. On proto / Avro `MESSAGE_TYPE`
+    /// nodes (LE.10a) and OpenAPI / AsyncAPI / Pact contract-op DOC_SECTIONs
+    /// (LE.10b); diffed by LE.10c.
+    pub const SCHEMA_FIELDS: CellTypeId = CellTypeId(22);
+
+    /// RESERVED (LF.6c) — line coverage from an lcov snapshot, JSON
+    /// `{"source":"lcov","lines":N,"hit":N}` (integers) on a MODULE / CLASS /
+    /// FUNCTION / METHOD. Emitter LF.6c.
+    pub const COVERAGE: CellTypeId = CellTypeId(23);
+
+    /// RESERVED (LF.3b) — marks a node declared as an entrypoint in
+    /// `.glia/overlay.toml`, JSON `{"source":"config","pattern":"...",
+    /// "decl":"..."}`. Emitter LF.3b; read by the LD.6 entry seeding. Not the
+    /// LD.6 entry-KIND table: that one derives entrypoints from node kinds,
+    /// this cell carries the ones a user declared.
+    pub const ENTRYPOINT: CellTypeId = CellTypeId(24);
+
+    /// RESERVED (LE.4a) — an EDGE cell on `ACCESSES_DATA`, `CellPayload::Text`
+    /// `read | write | read_write`, taken from the SQL / collection-call /
+    /// Cypher verb. Emitter LE.4a; readers LE.4d, LE.7a.
+    pub const ACCESS_MODE: CellTypeId = CellTypeId(25);
 
     /// Canonical id→name for every cell type. Backs the pyo3 `cell_type_names`
     /// decode table so consumers that read structured cells (WP-J) can label
@@ -513,6 +611,14 @@ pub mod cell_type {
         // Reserved ids (see the RESERVED block above) — no emitter yet.
         (MESSAGE_TYPE, "MESSAGE_TYPE"),
         (RPC_PACKAGE, "RPC_PACKAGE"),
+        // L0.1 leap reservations — no emitter yet.
+        (DOC_TAGS, "DOC_TAGS"),           // LA.8
+        (ROLE, "ROLE"),                   // LB.3a
+        (EVIDENCE, "EVIDENCE"),           // LC.3a
+        (SCHEMA_FIELDS, "SCHEMA_FIELDS"), // LE.10a / LE.10b
+        (COVERAGE, "COVERAGE"),           // LF.6c
+        (ENTRYPOINT, "ENTRYPOINT"),       // LF.3b
+        (ACCESS_MODE, "ACCESS_MODE"),     // LE.4a
     ];
 
     /// Name for a cell-type id, or `"UNKNOWN"` if unregistered.
@@ -2209,13 +2315,13 @@ mod tests {
             "edge_category",
             edge_category::ALL.iter().map(|(id, _)| id.0).collect(),
             edge_category::ALL.iter().map(|(_, n)| *n).collect(),
-            34,
+            36,
         );
         check(
             "cell_type",
             cell_type::ALL.iter().map(|(id, _)| id.0).collect(),
             cell_type::ALL.iter().map(|(_, n)| *n).collect(),
-            18,
+            25,
         );
     }
 
@@ -2614,10 +2720,51 @@ mod tests {
         assert_eq!(edge_category::name(edge_category::RPC_CALLS), "RPC_CALLS");
         assert_eq!(cell_type::name(cell_type::MESSAGE_TYPE), "MESSAGE_TYPE");
         assert_eq!(cell_type::name(cell_type::RPC_PACKAGE), "RPC_PACKAGE");
+        // L0.1 — the 0.5.0 leap reservations.
+        assert_eq!(
+            edge_category::name(edge_category::NAVIGATES_TO),
+            "NAVIGATES_TO"
+        );
+        assert_eq!(edge_category::name(edge_category::CO_CHANGES), "CO_CHANGES");
+        assert_eq!(cell_type::name(cell_type::DOC_TAGS), "DOC_TAGS");
+        assert_eq!(cell_type::name(cell_type::ROLE), "ROLE");
+        assert_eq!(cell_type::name(cell_type::EVIDENCE), "EVIDENCE");
+        assert_eq!(cell_type::name(cell_type::SCHEMA_FIELDS), "SCHEMA_FIELDS");
+        assert_eq!(cell_type::name(cell_type::COVERAGE), "COVERAGE");
+        assert_eq!(cell_type::name(cell_type::ENTRYPOINT), "ENTRYPOINT");
+        assert_eq!(cell_type::name(cell_type::ACCESS_MODE), "ACCESS_MODE");
         // Reserved, not emitted: the next free ids stay UNKNOWN.
         assert_eq!(node_kind::name(NodeKindId(50)), "UNKNOWN");
-        assert_eq!(edge_category::name(EdgeCategoryId(35)), "UNKNOWN");
-        assert_eq!(cell_type::name(CellTypeId(19)), "UNKNOWN");
+        assert_eq!(edge_category::name(EdgeCategoryId(37)), "UNKNOWN");
+        assert_eq!(cell_type::name(CellTypeId(26)), "UNKNOWN");
+    }
+
+    /// L0.1 guard — `leap_ids_are_locked`. The 0.5.0 leap ids were allocated
+    /// centrally and are baked into every `.gmap` from this commit. The packet
+    /// texts proposed other numbers (SCHEMA_FIELDS 26, COVERAGE 27, ENTRYPOINT
+    /// 28, CO_CHANGES 38); the allocation was compacted so each `ALL` table
+    /// stays `1..=len`. Pinning each (const, id) pair makes a later renumbering
+    /// fail by name, and the proposed numbers stay unregistered (UNKNOWN).
+    #[test]
+    fn leap_ids_are_locked() {
+        assert_eq!(edge_category::NAVIGATES_TO, EdgeCategoryId(35));
+        assert_eq!(edge_category::CO_CHANGES, EdgeCategoryId(36));
+        assert_eq!(cell_type::DOC_TAGS, CellTypeId(19));
+        assert_eq!(cell_type::ROLE, CellTypeId(20));
+        assert_eq!(cell_type::EVIDENCE, CellTypeId(21));
+        assert_eq!(cell_type::SCHEMA_FIELDS, CellTypeId(22));
+        assert_eq!(cell_type::COVERAGE, CellTypeId(23));
+        assert_eq!(cell_type::ENTRYPOINT, CellTypeId(24));
+        assert_eq!(cell_type::ACCESS_MODE, CellTypeId(25));
+        // The stale proposed numbers decode UNKNOWN, never a registered cell.
+        for stale in [26, 27, 28] {
+            assert_eq!(
+                cell_type::name(CellTypeId(stale)),
+                "UNKNOWN",
+                "cell {stale}"
+            );
+        }
+        assert_eq!(edge_category::name(EdgeCategoryId(38)), "UNKNOWN");
     }
 
     #[test]
