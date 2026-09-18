@@ -1,0 +1,14 @@
+{
+  "framework": "ts-nest-di",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/injects"],
+  "note": "A7.1: NestJS @Controller constructor DI. `Controller` was absent from the TS parser's DI_DECORATORS, so every Nest controller emitted zero INJECTS. The `number` ctor param proves the predefined_type skip still holds.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UsersController", "note": "@Controller class (ts parser node)"},
+    {"kind": "CLASS", "name": "UsersService", "note": "@Injectable provider (ts parser node)"}
+  ],
+  "expect_edges": [
+    {"from": "UsersController", "to": "UsersService", "category": "INJECTS", "note": "NestJS ctor DI -> INJECTS (cat 8)"}
+  ]
+}

@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -83,6 +84,11 @@ struct Acc {
     refs: Vec<UnresolvedRef>,
     unresolved: Vec<UnresolvedCall>,
     endpoints: Vec<EndpointCandidate>,
+    /// A7.1: Angular 14+ `private x = inject(Foo)` class-field DI. Emitted as
+    /// INJECTS refs in `resolve_intra_file` only when the callee is bound by a
+    /// named `inject` import: a late import gate, like `EndpointCandidate::
+    /// requires_import_alias`.
+    inject_fn_candidates: Vec<InjectFnCandidate>,
     module_functions: HashMap<String, NodeId>,
     class_methods: HashMap<(NodeId, String), NodeId>,
     nav: CodeNav,
@@ -96,6 +102,19 @@ struct UnresolvedCall {
     from: NodeId,
     enclosing_class: Option<NodeId>,
     qualifier: CallQualifier,
+}
+
+/// A class field initialised by a bare call whose argument names a type:
+/// `private api = inject(ApiService)`. Whether the call is Angular's `inject`
+/// is only known once the file's imports are, so the INJECTS ref is minted in
+/// `resolve_intra_file`.
+struct InjectFnCandidate {
+    class_id: NodeId,
+    module_id: NodeId,
+    /// The local name the call goes through (`inject`, or `i` after
+    /// `import { inject as i }`).
+    callee: String,
+    type_name: String,
 }
 
 /// An HTTP-call shape detected during the call walk. Resolved into an Endpoint
@@ -227,26 +246,42 @@ fn visit_class(
     };
     let mut cursor = body.walk();
     for member in body.named_children(&mut cursor) {
-        if member.kind() == "method_definition" {
-            visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
+        match member.kind() {
+            "method_definition" => {
+                visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
+            }
+            // The one class-field visitor: every per-field extraction goes here.
+            "public_field_definition" => visit_field(member, src, module_id, class_id, acc),
+            _ => {}
         }
     }
 
-    // Angular constructor dependency injection (Pattern E). A class decorated
-    // @Component/@Injectable/@Directive/@Pipe declares its dependencies as
-    // typed constructor parameters. Each class/interface-typed param becomes an
-    // INJECTS ref (class → dependency type); the graph crate binds the bare
-    // type name to the target node and forms the edge.
+    // Constructor dependency injection (Angular Pattern E, NestJS). A DI-
+    // decorated class declares its dependencies as typed constructor
+    // parameters. Each class/interface-typed param becomes an INJECTS ref
+    // (class → dependency type); the graph crate binds the bare type name to
+    // the target node and forms the edge.
     collect_constructor_injects(n, body, src, module_id, class_id, acc);
 }
 
-/// DI decorators that mark an Angular class as an injection consumer.
+/// Class decorators that mark an Angular class as an injection consumer.
+/// `Injectable` also covers NestJS providers, guards, interceptors and pipes.
 const DI_DECORATORS: &[&str] = &["Component", "Injectable", "Directive", "Pipe"];
 
+/// NestJS class decorators that make a class an injection consumer without
+/// `@Injectable`: controller, GraphQL resolver, WebSocket gateway.
+const NEST_DI_DECORATORS: &[&str] = &["Controller", "Resolver", "WebSocketGateway"];
+
+/// Angular / NestJS constructor-parameter decorators. Any one of them on a
+/// constructor parameter proves the constructor is an injection site even when
+/// the class carries no DI decorator.
+const DI_PARAM_DECORATORS: &[&str] = &["Inject", "Optional", "Self", "SkipSelf", "Host"];
+
 /// Emit `INJECTS` refs for each class/interface-typed constructor parameter of
-/// an Angular-decorated class. Gated on a DI decorator so plain data classes
-/// don't mint injection edges. Primitive-typed params (`predefined_type`:
-/// string/number/boolean/…) are skipped.
+/// a DI-decorated class (Angular or NestJS), or of any class whose constructor
+/// has a DI parameter decorator (`@Inject(TOKEN)`, `@Optional()`, …). Gated so
+/// plain data classes don't mint injection edges. Primitive-typed params
+/// (`predefined_type`: string/number/boolean/…) are skipped.
 fn collect_constructor_injects(
     class_node: TsNode,
     body: TsNode,
@@ -255,9 +290,6 @@ fn collect_constructor_injects(
     class_id: NodeId,
     acc: &mut Acc,
 ) {
-    if !has_di_decorator(class_node, src) {
-        return;
-    }
     // Find the `constructor` method.
     let mut cursor = body.walk();
     let Some(ctor) = body.named_children(&mut cursor).find(|m| {
@@ -268,6 +300,11 @@ fn collect_constructor_injects(
     };
     let Some(params) = ctor.child_by_field_name("parameters") else {
         return;
+    };
+    let shape = match class_di_shape(class_node, src) {
+        Some(shape) => shape,
+        None if has_di_param_decorator(params, src) => DiShape::TsCtor,
+        None => return,
     };
     let mut pc = params.walk();
     for param in params.named_children(&mut pc) {
@@ -297,31 +334,95 @@ fn collect_constructor_injects(
             qualifier: CallQualifier::Bare(type_name.to_string()),
             category: edge_category::INJECTS,
         });
+        di_stats::record(shape);
     }
 }
 
-/// True if the class (or its enclosing `export`/decorated wrapper) carries one
-/// of the Angular DI decorators. Decorators attach either directly to the
-/// `class_declaration` (`@Injectable() class Foo {}`) or to the parent
-/// `export_statement` (`@Component({...}) export class Foo {}`).
-fn has_di_decorator(class_node: TsNode, src: &[u8]) -> bool {
-    let matches_decorator = |node: TsNode| -> bool {
+/// The constructor-DI shape a class's decorators select: `TsNestCtor` when a
+/// NestJS controller / resolver / gateway decorator is present, `TsCtor` for
+/// an Angular DI decorator (or `@Injectable`), `None` for an undecorated
+/// class. Decorators attach either directly to the `class_declaration`
+/// (`@Injectable() class Foo {}`) or to the parent `export_statement`
+/// (`@Component({...}) export class Foo {}`).
+fn class_di_shape(class_node: TsNode, src: &[u8]) -> Option<DiShape> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut collect = |node: TsNode| {
         let mut c = node.walk();
-        node.named_children(&mut c)
-            .filter(|ch| ch.kind() == "decorator")
-            .any(|dec| {
-                decorator_name(dec, src)
-                    .map(|n| DI_DECORATORS.contains(&n))
-                    .unwrap_or(false)
-            })
+        names.extend(
+            node.named_children(&mut c)
+                .filter(|ch| ch.kind() == "decorator")
+                .filter_map(|dec| decorator_name(dec, src)),
+        );
     };
-    if matches_decorator(class_node) {
-        return true;
+    collect(class_node);
+    if let Some(parent) = class_node.parent() {
+        collect(parent);
     }
-    class_node
-        .parent()
-        .map(matches_decorator)
-        .unwrap_or(false)
+    if names.iter().any(|n| NEST_DI_DECORATORS.contains(n)) {
+        Some(DiShape::TsNestCtor)
+    } else if names.iter().any(|n| DI_DECORATORS.contains(n)) {
+        Some(DiShape::TsCtor)
+    } else {
+        None
+    }
+}
+
+/// True if any constructor parameter carries a DI parameter decorator
+/// (`constructor(@Inject(API_URL) private url: string)`).
+fn has_di_param_decorator(params: TsNode, src: &[u8]) -> bool {
+    let mut pc = params.walk();
+    params.named_children(&mut pc).any(|param| {
+        let mut dc = param.walk();
+        param
+            .children_by_field_name("decorator", &mut dc)
+            .filter_map(|dec| decorator_name(dec, src))
+            .any(|n| DI_PARAM_DECORATORS.contains(&n))
+    })
+}
+
+/// Visit one class field (`public_field_definition`). A7.1: a field
+/// initialised by a bare call with a type-naming argument,
+/// `private api = inject(ApiService)` (also `inject<T>(TOKEN)` and
+/// `inject(ns.Foo)`), becomes an [`InjectFnCandidate`]. It is not gated on a
+/// class decorator: `inject()` is only legal in an injection context, and the
+/// import gate in `resolve_intra_file` proves the callee is `inject`.
+fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, acc: &mut Acc) {
+    let Some(value) = field.child_by_field_name("value") else {
+        return;
+    };
+    if value.kind() != "call_expression" {
+        return;
+    }
+    let Some(callee) = value.child_by_field_name("function") else {
+        return;
+    };
+    if callee.kind() != "identifier" {
+        return;
+    }
+    let Some(args) = value.child_by_field_name("arguments") else {
+        return;
+    };
+    let mut ac = args.walk();
+    let Some(arg) = args.named_children(&mut ac).find(|a| a.kind() != "comment") else {
+        return;
+    };
+    // A class or an InjectionToken constant: `Foo` or `ns.Foo`. A string,
+    // call or arrow argument names no type.
+    if !matches!(arg.kind(), "identifier" | "member_expression") {
+        return;
+    }
+    let Some(type_name) = heritage_type_name(arg, src) else {
+        return;
+    };
+    if type_name == "undefined" {
+        return;
+    }
+    acc.inject_fn_candidates.push(InjectFnCandidate {
+        class_id,
+        module_id,
+        callee: text(callee, src).to_string(),
+        type_name: type_name.to_string(),
+    });
 }
 
 /// The leading identifier of a decorator: `@Component({...})` → "Component",
@@ -1269,6 +1370,25 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // shape-2 candidates (`axios.get(url)`) can be filtered to only those
     // whose base is a real module-level binding.
     let alias_set = build_alias_set(&out.imports);
+
+    // A7.1: `x = inject(T)` class fields. The callee must be the local binding
+    // of a named `inject` import (`import { inject }`, or `{ inject as i }`),
+    // so a project-local function that happens to be called `inject` emits
+    // nothing. Fails closed on a re-export under another name.
+    let inject_bindings = inject_import_bindings(&out.imports);
+    for cand in acc.inject_fn_candidates {
+        if !inject_bindings.contains(cand.callee.as_str()) {
+            continue;
+        }
+        out.refs.push(UnresolvedRef {
+            from: cand.class_id,
+            from_module: cand.module_id,
+            qualifier: CallQualifier::Bare(cand.type_name),
+            category: edge_category::INJECTS,
+        });
+        di_stats::record(DiShape::TsInjectFn);
+    }
+
     let mut endpoint_nav_seen: std::collections::HashSet<NodeId> =
         std::collections::HashSet::new();
     let repo = acc.repo.expect("Acc.repo set in parse_file");
@@ -1303,6 +1423,20 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     }
 
     Ok(out)
+}
+
+/// Local names bound to an imported `inject` function: `inject` for
+/// `import { inject } from …`, `i` for `import { inject as i } from …`.
+fn inject_import_bindings(imports: &[ImportStmt]) -> std::collections::HashSet<&str> {
+    imports
+        .iter()
+        .filter_map(|imp| match &imp.target {
+            ImportTarget::Symbol { name, alias, .. } if name == "inject" => {
+                Some(alias.as_deref().unwrap_or(name.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 fn build_alias_set(imports: &[ImportStmt]) -> std::collections::HashSet<&str> {
@@ -1480,6 +1614,120 @@ export class PlainData {
                 .any(|r| r.category == edge_category::INJECTS),
             "undecorated class must not mint INJECTS refs, got: {:?}",
             parse.refs
+        );
+    }
+
+    /// Bare-name INJECTS targets emitted from `class_qname`.
+    fn inject_targets(parse: &FileParse, module_qname: &str, class_qname: &str) -> Vec<String> {
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_qname);
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, class_qname);
+        parse
+            .refs
+            .iter()
+            .filter(|r| {
+                r.category == edge_category::INJECTS
+                    && r.from == class_id
+                    && r.from_module == module_id
+            })
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn angular_inject_fn_field_emits_injects_ref() {
+        let body = "\
+import { ApiService } from \"./api.service\";
+import * as models from \"./models\";
+
+@Component({ selector: \"app-dash\", template: \"<div></div>\" })
+export class DashboardComponent {
+  private api = inject(ApiService);
+  private store = inject<Store>(models.StoreToken);
+  private tries = 3;
+  private label = String(\"x\");
+  private cfg = inject(\"CONFIG\");
+  load() { return this.api.list(); }
+}
+";
+        let with_import = format!("import {{ Component, inject }} from \"@angular/core\";\n{body}");
+        let parse = parse_file(&with_import, "src/dash.component.ts", "src::dash", repo()).unwrap();
+        let targets = inject_targets(&parse, "src::dash", "src::dash::DashboardComponent");
+        assert_eq!(
+            targets,
+            vec!["ApiService".to_string(), "StoreToken".to_string()],
+            "inject(T) fields -> INJECTS Bare(T); literal / non-inject initialisers emit nothing"
+        );
+
+        // Aliased import still binds.
+        let aliased = format!(
+            "import {{ Component, inject as di }} from \"@angular/core\";\n{}",
+            body.replace("inject(", "di(").replace("inject<", "di<")
+        );
+        let parse = parse_file(&aliased, "src/dash.component.ts", "src::dash", repo()).unwrap();
+        assert_eq!(
+            inject_targets(&parse, "src::dash", "src::dash::DashboardComponent"),
+            vec!["ApiService".to_string(), "StoreToken".to_string()],
+        );
+
+        // Without the `inject` import the same call is a local function: no ref.
+        let without = format!("import {{ Component }} from \"@angular/core\";\n{body}");
+        let parse = parse_file(&without, "src/dash.component.ts", "src::dash", repo()).unwrap();
+        assert!(
+            !parse.refs.iter().any(|r| r.category == edge_category::INJECTS),
+            "un-imported inject() must not mint INJECTS refs, got: {:?}",
+            parse.refs
+        );
+    }
+
+    #[test]
+    fn nest_controller_ctor_emits_injects_ref() {
+        let src = "\
+import { Controller, Get } from \"@nestjs/common\";
+import { UsersService } from \"./users.service\";
+
+@Controller(\"users\")
+export class UsersController {
+  constructor(private readonly users: UsersService, private readonly pageSize: number) {}
+  @Get()
+  findAll() { return this.users.findAll(); }
+}
+
+@Resolver(() => User)
+export class UsersResolver {
+  constructor(private readonly users: UsersService) {}
+}
+
+@WebSocketGateway()
+export class EventsGateway {
+  constructor(private readonly users: UsersService) {}
+}
+";
+        let parse = parse_file(src, "src/users.controller.ts", "src::users", repo()).unwrap();
+        for class in ["UsersController", "UsersResolver", "EventsGateway"] {
+            assert_eq!(
+                inject_targets(&parse, "src::users", &format!("src::users::{class}")),
+                vec!["UsersService".to_string()],
+                "{class}: Nest ctor DI -> INJECTS Bare(\"UsersService\"); `number` skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn di_param_decorator_gates_undecorated_ctor() {
+        // No class decorator, but an `@Inject` param decorator marks the ctor
+        // as an injection site. `string` stays skipped as a primitive.
+        let src = "\
+export class ReportJob {
+  constructor(@Inject(API_URL) private url: string, @Optional() private log: Logger) {}
+}
+";
+        let parse = parse_file(src, "src/report.ts", "src::report", repo()).unwrap();
+        assert_eq!(
+            inject_targets(&parse, "src::report", "src::report::ReportJob"),
+            vec!["Logger".to_string()],
         );
     }
 

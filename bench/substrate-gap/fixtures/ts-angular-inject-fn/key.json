@@ -1,0 +1,14 @@
+{
+  "framework": "ts-angular-inject-fn",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/injects"],
+  "note": "A7.1: Angular 14+ `private api = inject(ApiService)` class-field DI. The TS parser's class-body loop visited only method_definition, so a public_field_definition initialiser produced nothing. LB.3a (W1) folds the @Injectable / @Component overlays into their CLASS, so the nodes are CLASS (the spec's SERVICE/COMPONENT rows predate the fold). `private tries = 3` proves a non-inject() initialiser emits nothing.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "ApiService", "note": "@Injectable service, one node after the LB.3a fold"},
+    {"kind": "CLASS", "name": "DashboardComponent", "note": "@Component, one node after the LB.3a fold"}
+  ],
+  "expect_edges": [
+    {"from": "DashboardComponent", "to": "ApiService", "category": "INJECTS", "note": "inject() field form -> INJECTS (cat 8); gated on `inject` being a module-level import binding"}
+  ]
+}
