@@ -739,20 +739,238 @@ pub fn library_names(imports: &[ImportStmt], lang: &str) -> Vec<String> {
 /// "no imports" from "not extracted"). The engram exporter reads it into
 /// `Content::Symbol.imports`. (glia-v5 G15)
 pub fn attach_imports_cell(fp: &mut FileParse, lang: &str) {
-    let libs = library_names(&fp.imports, lang);
-    let json = format!(
-        "[{}]",
-        libs.iter()
-            .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let json = imports_json(&library_names(&fp.imports, lang));
     for n in &mut fp.nodes {
         n.cells.push(Cell {
             kind: cell_type::IMPORTS,
             payload: CellPayload::Json(json.clone()),
         });
     }
+}
+
+/// The IMPORTS cell payload: a JSON array of library names.
+fn imports_json(libs: &[String]) -> String {
+    format!(
+        "[{}]",
+        libs.iter()
+            .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Intra-repo import filter (A16.4, audit 2026-06-10 #12)
+// ---------------------------------------------------------------------------
+
+/// What a repo DECLARES, indexed so a candidate library name can be recognised
+/// as an intra-repo reference rather than a dependency. `library_name` decides
+/// from the import's syntax alone (Go's "no domain, not a dependency" arm); this
+/// is the repo-shaped generalisation to every language, because the leak is
+/// repo-shaped: `use crate::snapshot::Page` is only local because the repo has
+/// a `snapshot` module.
+///
+/// Feed it only language-parser parses. A synthetic parse's file-derived module
+/// (`config/logging.yaml` → `config::logging`) would shadow a real `logging`.
+///
+/// `CodeNav` is HashMap-backed; the index reads it and keeps only BTree
+/// collections, whose contents do not depend on insertion order, so the index
+/// is deterministic.
+#[derive(Debug, Default, Clone)]
+pub struct LocalModuleIndex {
+    /// Every segment-aligned prefix and suffix of every MODULE / PACKAGE qname,
+    /// normalised by [`import_segments`]. `src::snapshot` contributes `src`,
+    /// `src::snapshot` and `snapshot`. A PACKAGE's last qname segment is its
+    /// declared name, and when that name is dotted (Elixir
+    /// `defmodule MyApp.Repo`) its own prefixes (`MyApp`) are declared
+    /// namespaces too.
+    paths: std::collections::BTreeSet<String>,
+    /// Declared item names (CLASS / STRUCT / INTERFACE / ENUM / FUNCTION) →
+    /// how many nodes declare each.
+    items: std::collections::BTreeMap<String, usize>,
+    /// Declared MODULE / PACKAGE names → how many nodes declare each. A separate
+    /// count to `items`, because Java's `Helper.java` is one declaration but two nodes
+    /// (MODULE `Helper`, CLASS `Helper::Helper`); one shared count would make
+    /// every Java class ambiguous.
+    modules: std::collections::BTreeMap<String, usize>,
+}
+
+/// Split an import path or qname on every separator the parsers use (`::`,
+/// `.`, `/`, `\`), dropping empty segments.
+fn import_segments(s: &str) -> Vec<&str> {
+    s.split(|c| matches!(c, ':' | '.' | '/' | '\\'))
+        .filter(|seg| !seg.is_empty())
+        .collect()
+}
+
+impl LocalModuleIndex {
+    /// Fold one parse's declarations into the index.
+    pub fn add_parse(&mut self, fp: &FileParse) {
+        for (id, kind) in &fp.nav.kind_by_id {
+            let name = fp.nav.name_by_id.get(id);
+            let is_package = *kind == node_kind::PACKAGE;
+            match *kind {
+                node_kind::MODULE | node_kind::PACKAGE => {
+                    if let Some(qname) = fp.nav.qname_by_id.get(id) {
+                        self.add_path(qname, is_package);
+                    }
+                    if let Some(name) = name {
+                        *self.modules.entry(name.clone()).or_default() += 1;
+                    }
+                }
+                node_kind::CLASS
+                | node_kind::STRUCT
+                | node_kind::INTERFACE
+                | node_kind::ENUM
+                | node_kind::FUNCTION => {
+                    if let Some(name) = name {
+                        *self.items.entry(name.clone()).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn add_path(&mut self, qname: &str, is_package: bool) {
+        let segs = import_segments(qname);
+        for i in 1..=segs.len() {
+            self.paths.insert(segs[..i].join("::"));
+            self.paths.insert(segs[segs.len() - i..].join("::"));
+        }
+        if is_package {
+            if let Some(declared) = qname.rsplit("::").next() {
+                let segs = import_segments(declared);
+                for i in 1..=segs.len() {
+                    self.paths.insert(segs[..i].join("::"));
+                }
+            }
+        }
+    }
+
+    /// True if `lib` (any of `::` `.` `/` `\` as separator) is a segment-aligned
+    /// prefix or suffix of a declared module / package path.
+    pub fn is_local_path(&self, lib: &str) -> bool {
+        let segs = import_segments(lib);
+        !segs.is_empty() && self.paths.contains(&segs.join("::"))
+    }
+
+    /// True if exactly one declaration in the repo carries `name`. An item
+    /// declaration (class, struct, …) wins over a module of the same name.
+    pub fn is_local_symbol(&self, name: &str) -> bool {
+        match self.items.get(name) {
+            Some(n) => *n == 1,
+            None => self.modules.get(name) == Some(&1),
+        }
+    }
+}
+
+/// Languages whose `Symbol` imports name a namespace the parser emits no node
+/// for (Java / Kotlin / Scala packages) or a crate path (Rust), so the imported
+/// item's name is the only repo-shaped evidence. Anywhere else a bare name
+/// match over-fires: a one-app Django project's single `models.py` would drop
+/// `django` for its `django.db` models import, and TS
+/// `import { User } from 'firebase/auth'` beside the repo's own `interface User`
+/// would drop `firebase`.
+fn symbol_evidence_applies(lang: &str) -> bool {
+    matches!(lang, "java" | "kotlin" | "scala" | "rust")
+}
+
+/// The form of a candidate library name that is looked up in the index. A
+/// C/C++ candidate is an include path (`mathutil.h`), and the header's MODULE
+/// qname carries no extension (`c::mathutil`).
+fn local_lookup_key<'a>(lib: &'a str, lang: &str) -> &'a str {
+    if lang == "c_cpp" {
+        if let Some((stem, ext)) = lib.rsplit_once('.') {
+            let header_or_source = matches!(
+                ext,
+                "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" | "c" | "cc" | "cpp" | "cxx"
+            );
+            if header_or_source && !stem.is_empty() {
+                return stem;
+            }
+        }
+    }
+    lib
+}
+
+/// [`library_names`] minus every name that resolves inside the repo. Returns
+/// the kept names (deduped, sorted, capped at 10 AFTER filtering, so a file
+/// whose first ten names were local still reports its real dependencies) and
+/// how many distinct names were dropped.
+fn filter_library_names(
+    imports: &[ImportStmt],
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> (Vec<String>, usize) {
+    let mut kept = std::collections::BTreeSet::new();
+    let mut dropped = std::collections::BTreeSet::new();
+    for imp in imports {
+        let (path, symbol) = match &imp.target {
+            ImportTarget::Module { path, .. } => (path.as_str(), None),
+            ImportTarget::Symbol { module, name, level, .. } => {
+                if *level > 0 {
+                    continue; // Python relative import — intra-package
+                }
+                (module.as_str(), Some(name.as_str()))
+            }
+        };
+        let Some(lib) = library_name(path, lang) else { continue };
+        let is_local = local.is_local_path(local_lookup_key(&lib, lang))
+            || (symbol_evidence_applies(lang) && symbol.is_some_and(|n| local.is_local_symbol(n)));
+        if is_local {
+            dropped.insert(lib);
+        } else {
+            kept.insert(lib);
+        }
+    }
+    // A name one import proves local and another does not is still a dependency.
+    let dropped = dropped.difference(&kept).count();
+    (kept.into_iter().take(10).collect(), dropped)
+}
+
+/// [`library_names`] without the names that resolve inside the repo (A16.4).
+pub fn library_names_filtered(
+    imports: &[ImportStmt],
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> Vec<String> {
+    filter_library_names(imports, lang, local).0
+}
+
+/// [`attach_imports_cell`] with intra-repo names filtered out (A16.4). Leaves
+/// every node with exactly one IMPORTS cell: an existing one (the router's raw
+/// cell, or one replayed from a parse cache) is rewritten in its slot and any
+/// duplicate removed; a node without one gains it. Idempotent. Returns
+/// `(kept, dropped)` — library names in the cell, and distinct names dropped.
+pub fn attach_imports_cell_filtered(
+    fp: &mut FileParse,
+    lang: &str,
+    local: &LocalModuleIndex,
+) -> (usize, usize) {
+    let (libs, dropped) = filter_library_names(&fp.imports, lang, local);
+    let json = imports_json(&libs);
+    for n in &mut fp.nodes {
+        let mut seen = false;
+        n.cells.retain_mut(|c| {
+            if c.kind != cell_type::IMPORTS {
+                return true;
+            }
+            if seen {
+                return false;
+            }
+            seen = true;
+            c.payload = CellPayload::Json(json.clone());
+            true
+        });
+        if !seen {
+            n.cells.push(Cell {
+                kind: cell_type::IMPORTS,
+                payload: CellPayload::Json(json.clone()),
+            });
+        }
+    }
+    (libs.len(), dropped)
 }
 
 /// The per-file output every code-language parser produces. `repo-graph-graph`
@@ -1731,6 +1949,211 @@ mod tests {
         // Stdlib — no domain, excluded.
         assert_eq!(library_name("fmt", "go"), None);
         assert_eq!(library_name("net::http", "go"), None);
+    }
+
+    // ---- A16.4: intra-repo import filter -----------------------------------
+
+    /// A FileParse declaring `decls` (kind, qname) and importing `imports`.
+    /// A node's nav name is its last qname segment, as the parsers record it.
+    fn decl_parse(decls: &[(NodeKindId, &str)], imports: Vec<ImportStmt>) -> FileParse {
+        let mut fp = FileParse { imports, ..Default::default() };
+        for (kind, qname) in decls {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo_graph_core::RepoId(1), *kind, qname);
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            fp.nodes.push(Node {
+                id,
+                repo: repo_graph_core::RepoId(1),
+                confidence: repo_graph_core::Confidence::Strong,
+                cells: Vec::new(),
+            });
+            fp.nav.record(id, name, qname, *kind, None);
+        }
+        fp
+    }
+
+    fn index_of(decls: &[(NodeKindId, &str)]) -> LocalModuleIndex {
+        let mut local = LocalModuleIndex::default();
+        local.add_parse(&decl_parse(decls, Vec::new()));
+        local
+    }
+
+    fn module_import(path: &str) -> ImportStmt {
+        ImportStmt {
+            from_module: String::new(),
+            target: ImportTarget::Module { path: path.to_string(), alias: None },
+        }
+    }
+
+    fn symbol_import(module: &str, name: &str) -> ImportStmt {
+        ImportStmt {
+            from_module: String::new(),
+            target: ImportTarget::Symbol {
+                module: module.to_string(),
+                name: name.to_string(),
+                alias: None,
+                level: 0,
+            },
+        }
+    }
+
+    fn imports_payloads(fp: &FileParse) -> Vec<Vec<String>> {
+        fp.nodes
+            .iter()
+            .map(|n| {
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::IMPORTS)
+                    .map(|c| match &c.payload {
+                        CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                        CellPayload::Bytes(_) => String::new(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn local_index_matches_prefix_and_suffix() {
+        let local = index_of(&[(node_kind::MODULE, "src::snapshot")]);
+        assert!(local.is_local_path("snapshot"), "suffix");
+        assert!(local.is_local_path("src"), "prefix");
+        assert!(local.is_local_path("src::snapshot"), "whole qname");
+        assert!(local.is_local_path("src.snapshot") && local.is_local_path("src/snapshot"), "normalised");
+        assert!(!local.is_local_path("snap"), "segment-aligned, not substring");
+        assert!(!local.is_local_path(""), "empty is never local");
+        // Only MODULE / PACKAGE qnames are paths: a CLASS is not a namespace.
+        let local = index_of(&[(node_kind::CLASS, "models::Widget")]);
+        assert!(!local.is_local_path("models"));
+    }
+
+    #[test]
+    fn local_index_symbol_is_ambiguity_safe() {
+        let one = index_of(&[(node_kind::CLASS, "a::Helper")]);
+        assert!(one.is_local_symbol("Helper"));
+        let two = index_of(&[(node_kind::CLASS, "a::Helper"), (node_kind::CLASS, "b::Helper")]);
+        assert!(!two.is_local_symbol("Helper"), "two declarations: ambiguous");
+        // Java's Helper.java declares MODULE `Helper` AND CLASS `Helper::Helper`:
+        // one declaration, two nodes. It must still count as unique.
+        let java = index_of(&[(node_kind::MODULE, "Helper"), (node_kind::CLASS, "Helper::Helper")]);
+        assert!(java.is_local_symbol("Helper"));
+        assert!(!java.is_local_symbol("Other"));
+    }
+
+    #[test]
+    fn filtered_drops_rust_sibling_module() {
+        // `use crate::snapshot::Page;` — the parser strips `crate::`.
+        let local = index_of(&[(node_kind::MODULE, "src::snapshot"), (node_kind::MODULE, "src::confluence_rest")]);
+        let imports = vec![symbol_import("snapshot", "Page")];
+        assert_eq!(library_names(&imports, "rust"), vec!["snapshot".to_string()], "the leak this fixes");
+        assert!(library_names_filtered(&imports, "rust", &local).is_empty());
+    }
+
+    #[test]
+    fn filtered_drops_python_own_package() {
+        let local = index_of(&[(node_kind::MODULE, "myapp::auth"), (node_kind::MODULE, "myapp::users")]);
+        let imports = vec![symbol_import("myapp.users", "User"), module_import("requests")];
+        assert_eq!(library_names_filtered(&imports, "python", &local), vec!["requests".to_string()]);
+    }
+
+    #[test]
+    fn filtered_drops_java_own_package_by_symbol() {
+        // java-spring-imports: no PACKAGE node exists, so only the uniquely
+        // declared class places `com.example.util` in the repo.
+        let local = index_of(&[
+            (node_kind::MODULE, "Main"),
+            (node_kind::CLASS, "Main::Main"),
+            (node_kind::MODULE, "Helper"),
+            (node_kind::CLASS, "Helper::Helper"),
+        ]);
+        let imports = vec![symbol_import("com::example::util", "Helper")];
+        assert!(library_names_filtered(&imports, "java", &local).is_empty());
+        // An external class from a package the repo does not declare stays.
+        let imports = vec![symbol_import("org::slf4j", "Logger")];
+        assert_eq!(library_names_filtered(&imports, "java", &local), vec!["org::slf4j".to_string()]);
+    }
+
+    #[test]
+    fn filtered_keeps_external() {
+        let local = index_of(&[(node_kind::MODULE, "cmd::server"), (node_kind::PACKAGE, "internal::util")]);
+        let imports = vec![module_import("github.com::external::lib")];
+        assert_eq!(
+            library_names_filtered(&imports, "go", &local),
+            vec!["github.com/external/lib".to_string()]
+        );
+    }
+
+    #[test]
+    fn filtered_drops_declared_namespaces_and_local_headers() {
+        // PHP / C#: the declared namespace is a PACKAGE node.
+        let local = index_of(&[(node_kind::PACKAGE, "App::Services"), (node_kind::PACKAGE, "Shop::Services")]);
+        let php = vec![symbol_import("App::Services", "Greeter"), symbol_import("GuzzleHttp", "Client")];
+        assert_eq!(library_names_filtered(&php, "php", &local), vec!["GuzzleHttp".to_string()]);
+        let cs = vec![symbol_import("Shop", "Services"), symbol_import("System::Threading", "Tasks")];
+        assert_eq!(library_names_filtered(&cs, "csharp", &local), vec!["System::Threading".to_string()]);
+        // Elixir: `defmodule MyApp.Repo` in ex/repo.ex — the dotted declared
+        // name and its parents are declared namespaces.
+        let local = index_of(&[(node_kind::PACKAGE, "ex::repo::MyApp.Repo"), (node_kind::PACKAGE, "ex::web::MyAppWeb.Router")]);
+        let ex = vec![module_import("MyApp.Repo"), module_import("MyAppWeb"), module_import("Plug.Conn")];
+        assert_eq!(library_names_filtered(&ex, "elixir", &local), vec!["Plug.Conn".to_string()]);
+        // C: `#include "mathutil.h"` next to c/mathutil.h (MODULE `c::mathutil`).
+        let local = index_of(&[(node_kind::MODULE, "c::mathutil"), (node_kind::MODULE, "c::main")]);
+        let c = vec![module_import("mathutil.h"), module_import("zlib.h")];
+        assert_eq!(library_names_filtered(&c, "c_cpp", &local), vec!["zlib.h".to_string()]);
+    }
+
+    #[test]
+    fn symbol_evidence_is_gated_to_namespace_languages() {
+        // A one-app Django project has exactly one `models.py`, so `models` is
+        // uniquely declared — but the `django.db` models import is still a
+        // dependency on django. Same for TS `import { User } from 'firebase/auth'`
+        // beside the repo's own `interface User`.
+        let local = index_of(&[(node_kind::MODULE, "shop::models"), (node_kind::INTERFACE, "src::types::User")]);
+        let py = vec![symbol_import("django.db", "models")];
+        assert_eq!(library_names_filtered(&py, "python", &local), vec!["django".to_string()]);
+        let ts = vec![symbol_import("firebase/auth", "User")];
+        assert_eq!(library_names_filtered(&ts, "typescript", &local), vec!["firebase".to_string()]);
+    }
+
+    #[test]
+    fn filtered_caps_after_filtering() {
+        // Twelve local modules sort before the one real dependency; capping
+        // before filtering would report none of the file's dependencies.
+        let decls: Vec<(NodeKindId, String)> =
+            (0..12).map(|i| (node_kind::MODULE, format!("a{i:02}::m"))).collect();
+        let decl_refs: Vec<(NodeKindId, &str)> = decls.iter().map(|(k, q)| (*k, q.as_str())).collect();
+        let local = index_of(&decl_refs);
+        let mut imports: Vec<ImportStmt> = (0..12).map(|i| module_import(&format!("a{i:02}.m"))).collect();
+        imports.push(module_import("zzz"));
+        assert_eq!(library_names(&imports, "python").len(), 10);
+        assert_eq!(library_names_filtered(&imports, "python", &local), vec!["zzz".to_string()]);
+    }
+
+    #[test]
+    fn attach_filtered_is_idempotent() {
+        let mut fp = decl_parse(
+            &[(node_kind::MODULE, "myapp::auth"), (node_kind::FUNCTION, "myapp::auth::login")],
+            vec![module_import("myapp.users"), module_import("requests")],
+        );
+        let mut local = LocalModuleIndex::default();
+        local.add_parse(&fp);
+        // A POSITION after the raw cell: the rewrite must keep the cell's slot.
+        attach_imports_cell(&mut fp, "python");
+        for n in &mut fp.nodes {
+            n.cells.push(Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{}".into()) });
+        }
+        assert_eq!(imports_payloads(&fp)[0], vec![r#"["myapp","requests"]"#.to_string()], "raw cell");
+
+        assert_eq!(attach_imports_cell_filtered(&mut fp, "python", &local), (1, 1));
+        assert_eq!(attach_imports_cell_filtered(&mut fp, "python", &local), (1, 1));
+        for (n, payloads) in fp.nodes.iter().zip(imports_payloads(&fp)) {
+            assert_eq!(payloads, vec![r#"["requests"]"#.to_string()], "exactly one filtered cell");
+            let kinds: Vec<CellTypeId> = n.cells.iter().map(|c| c.kind).collect();
+            assert_eq!(kinds, vec![cell_type::IMPORTS, cell_type::POSITION], "slot kept");
+        }
+        // A node that never had the cell gains exactly one.
+        let mut bare = decl_parse(&[(node_kind::MODULE, "x")], vec![module_import("requests")]);
+        assert_eq!(attach_imports_cell_filtered(&mut bare, "python", &local), (1, 0));
+        assert_eq!(imports_payloads(&bare), vec![vec![r#"["requests"]"#.to_string()]]);
     }
 
     #[test]

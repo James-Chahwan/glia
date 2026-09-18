@@ -1,0 +1,20 @@
+{
+  "framework": "imports-local-filter",
+  "language": "rust+python+java+php+c_cpp+csharp+elixir+go",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "rs::src::lib", "note": "control: the importing rust file is parsed"},
+    {"kind": "MODULE", "name": "svc::server", "note": "control: the go file is parsed"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "rs::src::lib", "cell": "IMPORTS", "contains": "[]", "note": "`use crate::util::helper` names the sibling module src::util, not a dependency"},
+    {"kind": "MODULE", "node": "myapp::auth", "cell": "IMPORTS", "contains": "[\"yaml\"]", "note": "the repo's own package `myapp` drops; the real dependency stays"},
+    {"kind": "MODULE", "node": "jvm::App", "cell": "IMPORTS", "contains": "[\"org::slf4j\"]", "note": "com.example.util has no PACKAGE node; the uniquely declared class Helper places it in the repo"},
+    {"kind": "MODULE", "node": "php::Http::HomeController", "cell": "IMPORTS", "contains": "[\"GuzzleHttp\"]", "note": "App is the prefix of the declared namespace App\\Services"},
+    {"kind": "MODULE", "node": "c::main", "cell": "IMPORTS", "contains": "[]", "note": "#include \"mathutil.h\" is the repo's own header c/mathutil.h"},
+    {"kind": "MODULE", "node": "cs::Controllers::UsersController", "cell": "IMPORTS", "contains": "[\"System::Threading\"]", "note": "Shop is the prefix of the declared namespace Shop.Services"},
+    {"kind": "MODULE", "node": "ex::controller", "cell": "IMPORTS", "contains": "[\"Plug.Conn\"]", "note": "MyApp.Repo is declared by defmodule in ex/repo.ex"},
+    {"kind": "MODULE", "node": "svc::server", "cell": "IMPORTS", "contains": "[\"github.com/x/y\"]", "note": "control: an external go module path survives the filter"}
+  ],
+  "note": "A16.4 (audit #12): the IMPORTS cell listed the repo's own modules, packages and namespaces as external libraries. A bracketed `contains` pins the WHOLE list: `[\"yaml\"]` does not occur inside `[\"myapp\",\"yaml\"]`, and `[]` occurs only in an empty list."
+}

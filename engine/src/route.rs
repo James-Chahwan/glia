@@ -381,8 +381,12 @@ pub(crate) fn parse_repo_files(
             apply_cross_cutting_extractors(
                 &mut fp, source, path, lang, module_id, repo, &mut stats,
             );
-            // G15: denormalize the file's external library names onto every node
-            // as an IMPORTS cell (one place, all languages).
+            // G15: denormalize the file's library names onto every node as an
+            // IMPORTS cell (one place, all languages). This is the RAW list:
+            // telling a dependency from the repo's own module needs the whole
+            // repo, so `build::filter_imports_cells` rewrites it in place after
+            // the cache (A16.4). The cell also marks a language-parser parse —
+            // synthetic parses above never get one.
             repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
             Ok::<_, String>((fp, stats))
         }));

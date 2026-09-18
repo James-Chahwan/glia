@@ -7,7 +7,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::{
-    FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, di_stats, edge_category, node_kind,
+    FileParse, GRAPH_TYPE, LocalModuleIndex, attach_imports_cell, attach_imports_cell_filtered,
+    cell_type, di_stats, edge_category, node_kind,
 };
 use repo_graph_code_extractors::anchor;
 use repo_graph_code_extractors::constants::ConstTable;
@@ -371,7 +372,8 @@ fn graft_rpc_markers(
     fp.nodes.extend(nodes);
     merge_nav(&mut fp.nav, nav);
     anchor::attach(fp, path, module_id, &mut anchors);
-    // The same G15 IMPORTS cell the router gave every other node in the file.
+    // The same raw G15 IMPORTS cell the router gave every other node in the
+    // file; `filter_imports_cells` rewrites it with the rest of the file's.
     let mut extra = FileParse {
         nodes: fp.nodes.split_off(first_new),
         imports: fp.imports.clone(),
@@ -381,6 +383,52 @@ fn graft_rpc_markers(
     let added = extra.nodes.len();
     fp.nodes.extend(extra.nodes);
     added
+}
+
+/// A16.4 (audit 2026-06-10 #12): rewrite each file's IMPORTS cell without the
+/// names that resolve inside this repo — a sibling module, the repo's own
+/// package or namespace — which are not dependencies.
+///
+/// The router attaches the raw cell to every node of a language-parser parse,
+/// and never to a synthetic one (yaml / proto / graphql / avro / …), so
+/// "carries an IMPORTS cell" selects exactly the parses that take part. That
+/// keeps synthetic parses out on both sides: their file-derived modules
+/// (`config::logging`) must not shadow a real dependency, and their nodes must
+/// not gain a cell they never had. Rewriting in place keeps the cell's slot, so
+/// every node's cell order is unchanged.
+///
+/// fired_on marker, once per repo that holds a language-parser parse:
+///   `[imports] local-filter: kept {k}, dropped {d} intra-repo name(s) across {n} language group(s) repo=<label>`
+/// `kept` / `dropped` sum the per-file library names; `n` counts lang tags.
+fn filter_imports_cells(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    repo_label: &str,
+) {
+    let carries_imports = |fp: &FileParse| {
+        fp.nodes
+            .iter()
+            .any(|n| n.cells.iter().any(|c| c.kind == cell_type::IMPORTS))
+    };
+    let mut local = LocalModuleIndex::default();
+    for fp in parses_by_lang.values().flatten().filter(|fp| carries_imports(fp)) {
+        local.add_parse(fp);
+    }
+    let (mut kept, mut dropped, mut groups) = (0usize, 0usize, 0usize);
+    for (lang, parses) in parses_by_lang.iter_mut() {
+        let mut filtered_any = false;
+        for fp in parses.iter_mut().filter(|fp| carries_imports(fp)) {
+            let (k, d) = attach_imports_cell_filtered(fp, lang, &local);
+            kept += k;
+            dropped += d;
+            filtered_any = true;
+        }
+        groups += usize::from(filtered_any);
+    }
+    if groups > 0 {
+        eprintln!(
+            "[imports] local-filter: kept {kept}, dropped {dropped} intra-repo name(s) across {groups} language group(s) repo={repo_label}"
+        );
+    }
 }
 
 /// The repo-scope name -> literal table (A11.1), built from every walked file
@@ -480,6 +528,12 @@ fn build_graphs_for_repo(
         anchored.add(anchor::census(fp));
     }
     anchor::report(anchored, repo_label);
+
+    // A16.4: drop intra-repo names from every IMPORTS cell. It needs the whole
+    // repo's declarations, so like `apply_rpc_needles` it runs after the parse
+    // cache (cached parses are filtered too) and after the RPC grafts (whose
+    // markers carry the same cell).
+    filter_imports_cells(&mut parses_by_lang, repo_label);
 
     let mut graphs = Vec::new();
     // Deterministic per-language build order: HashMap iteration is seeded per
