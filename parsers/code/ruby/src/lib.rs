@@ -39,6 +39,7 @@ pub fn parse_file(
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
     visit_body(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    flush_ivar_types(&mut acc);
 
     if is_rails_routes_file(file_rel_path) {
         scan_rails_routes(root, src, file_rel_path, module_id, repo, &mut acc);
@@ -91,6 +92,13 @@ struct Acc {
     /// Of those, the ones whose `self.table_name = "…"` put a table cell on
     /// the entity (`[orm-ar]` marker).
     ar_table_cells: usize,
+    /// LA.23b — constructor-typed instance variables per owning CLASS:
+    /// `"@repo"` -> `Some("UserRepo")`, or `None` once two assignments in the
+    /// file disagree. Flushed into `nav.field_types` by [`flush_ivar_types`]
+    /// after the whole file is visited, so a class reopened later in the same
+    /// file still sees every writer before anything is recorded.
+    ivar_types:
+        std::collections::HashMap<NodeId, std::collections::HashMap<String, Option<String>>>,
 }
 
 fn visit_body(
@@ -112,7 +120,7 @@ fn visit_body(
             }
             "call" => {
                 collect_require(child, src, parent_qname, acc);
-                collect_call(child, src, parent_id, acc);
+                collect_call(child, src, parent_id, false, acc);
             }
             _ => {}
         }
@@ -230,10 +238,165 @@ fn visit_method(
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
+    // LA.23b: `@x` inside an instance method (`def m`) is an instance
+    // variable of the receiver. Inside `def self.m` it is the CLASS object's
+    // own ivar, a different variable that shares the spelling, so singleton
+    // methods neither type ivars nor emit ivar call sites.
+    let instance_method = node.kind() == "method";
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, repo, acc);
+        collect_calls_in(body, src, id, repo, instance_method, acc);
         let hits = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
         acc.endpoint_hits += hits;
+        // Only a CLASS owns instance variables: a `module Foo` method's ivars
+        // belong to whatever class mixes it in, and a top-level `def` has no
+        // class at all.
+        if instance_method && acc.nav.kind_by_id.get(&parent_id) == Some(&node_kind::CLASS) {
+            collect_ivar_types(node, body, src, parent_id, acc);
+        }
+    }
+}
+
+// ============================================================================
+// Receiver types for `@ivar.m()` (LA.23b)
+// ============================================================================
+//
+// `@repo.find(id)` is emitted as `ComplexReceiver { receiver: "@repo", .. }`
+// and the ivar's constructor type is recorded under the same `"@repo"` key in
+// `CodeNav::field_types`, so the graph crate's receiver-type pass (A6.2a)
+// binds `find` on `UserRepo`. Three writers type an ivar, in any instance
+// method of a class (memoisation is idiomatic anywhere, not only in
+// `initialize`):
+//
+//   @repo = UserRepo.new            @repo = Repos::UserRepo.new  (-> UserRepo)
+//   @log ||= AuditLog.new
+//   def initialize(repo: UserRepo.new) / (repo = UserRepo.new); @repo = repo
+//
+// Anything else (`@repo = build_repo`, `@repo = nil`) is deliberately untyped
+// and does not count as a writer. An ivar two writers give different types is
+// recorded as nothing.
+
+/// Record the constructor-typed ivar assignments of one instance method of
+/// `class_id` into `acc.ivar_types`. Walks the method body, blocks included,
+/// but not nested `def` / `class` / `module` / `class << self` bodies.
+fn collect_ivar_types(method: TsNode, body: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let param_types = param_default_types(method, src);
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if let Some((field, ty)) = ivar_assignment_type(n, src, &param_types) {
+            note_ivar_type(acc, class_id, field, ty);
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if !matches!(
+                child.kind(),
+                "method" | "singleton_method" | "class" | "module" | "singleton_class"
+            ) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// `(ivar, type)` when `n` is `@x = X.new(...)`, `@x ||= X.new(...)`, or
+/// `@x = p` / `@x ||= p` for a parameter `p` whose default is `X.new(...)`.
+fn ivar_assignment_type(
+    n: TsNode,
+    src: &[u8],
+    param_types: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
+    match n.kind() {
+        "assignment" => {}
+        "operator_assignment" => {
+            let op = n.child_by_field_name("operator")?;
+            if text_of(op, src) != "||=" {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+    let left = n.child_by_field_name("left")?;
+    if left.kind() != "instance_variable" {
+        return None;
+    }
+    let right = n.child_by_field_name("right")?;
+    let ty = match right.kind() {
+        "identifier" => param_types.get(text_of(right, src)).cloned(),
+        _ => ruby_new_type(right, src),
+    }?;
+    Some((text_of(left, src).to_string(), ty))
+}
+
+/// Parameter name -> constructor type, for the keyword (`repo: UserRepo.new`)
+/// and optional (`repo = UserRepo.new`) parameters of `method` whose default
+/// is a constructor call.
+fn param_default_types(method: TsNode, src: &[u8]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(params) = method.child_by_field_name("parameters") else {
+        return out;
+    };
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        if !matches!(p.kind(), "keyword_parameter" | "optional_parameter") {
+            continue;
+        }
+        let (Some(name), Some(value)) = (
+            p.child_by_field_name("name"),
+            p.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if let Some(ty) = ruby_new_type(value, src) {
+            out.insert(text_of(name, src).to_string(), ty);
+        }
+    }
+    out
+}
+
+/// The class a constructor call builds: `X.new(...)` -> `X`, and
+/// `A::B::X.new` / `::X.new` -> `X` (the last `scope_resolution` segment,
+/// since the graph binds a type by its bare name). Anything else -> None.
+fn ruby_new_type(rhs: TsNode, src: &[u8]) -> Option<String> {
+    if rhs.kind() != "call" {
+        return None;
+    }
+    let method = rhs.child_by_field_name("method")?;
+    if text_of(method, src) != "new" {
+        return None;
+    }
+    let recv = rhs.child_by_field_name("receiver")?;
+    let name = match recv.kind() {
+        "constant" => recv,
+        "scope_resolution" => recv.child_by_field_name("name")?,
+        _ => return None,
+    };
+    let name = text_of(name, src);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// First writer types the ivar; a writer with a different type makes it
+/// ambiguous for good (`None`), whatever comes after.
+fn note_ivar_type(acc: &mut Acc, class_id: NodeId, field: String, ty: String) {
+    let slot = acc.ivar_types.entry(class_id).or_default().entry(field);
+    match slot {
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(Some(ty));
+        }
+        std::collections::hash_map::Entry::Occupied(mut o) => {
+            if o.get().as_deref() != Some(ty.as_str()) {
+                o.insert(None);
+            }
+        }
+    }
+}
+
+/// Write every unambiguous ivar type into `nav.field_types` (A6.2a's carrier).
+fn flush_ivar_types(acc: &mut Acc) {
+    for (owner, fields) in std::mem::take(&mut acc.ivar_types) {
+        for (field, ty) in fields {
+            if let Some(ty) = ty {
+                acc.nav.record_field_type(owner, &field, &ty);
+            }
+        }
     }
 }
 
@@ -264,7 +427,10 @@ fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     }
 }
 
-fn collect_call(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+/// Push the CallSite for one `call` node. `ivars` is true only inside an
+/// instance method, where an `@x` receiver is an instance variable whose
+/// type `collect_ivar_types` may know (LA.23b).
+fn collect_call(node: TsNode, src: &[u8], from: NodeId, ivars: bool, acc: &mut Acc) {
     let method_name = node
         .child_by_field_name("method")
         .map(|n| text_of(n, src))
@@ -287,6 +453,19 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                     name: method_name.to_string(),
                 },
             });
+        } else if ivars && recv.kind() == "instance_variable" {
+            // `@repo.find(id)`: the receiver text is the `field_types` key
+            // (`"@repo"`), which A6.2a's `receiver_field` passes through
+            // as-is. ComplexReceiver, not Attribute: it goes straight to the
+            // receiver-type pass instead of the import / unique-global
+            // lookups an Attribute base is tried against first.
+            acc.calls.push(CallSite {
+                from,
+                qualifier: CallQualifier::ComplexReceiver {
+                    receiver: recv_text.to_string(),
+                    name: method_name.to_string(),
+                },
+            });
         }
     } else {
         acc.calls.push(CallSite {
@@ -296,11 +475,18 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     }
 }
 
-fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc: &mut Acc) {
+fn collect_calls_in(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    ivars: bool,
+    acc: &mut Acc,
+) {
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
         if n.kind() == "call" {
-            collect_call(n, src, from, acc);
+            collect_call(n, src, from, ivars, acc);
             try_emit_accesses_data(n, src, from, repo, acc);
         }
         let mut cursor = n.walk();
@@ -2057,6 +2243,262 @@ end
             endpoint_names(&fp).is_empty(),
             "non-URL string args must emit nothing, got {:?}",
             endpoint_names(&fp)
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // LA.23b — `@ivar.m()` call sites and constructor-typed ivars
+    // ------------------------------------------------------------------
+
+    fn ivar_types_of(fp: &FileParse, class_qname: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = fp
+            .nav
+            .field_types
+            .get(&class_id(class_qname))
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn ivar_call_sites(fp: &FileParse) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = fp
+            .calls
+            .iter()
+            .filter_map(|c| match &c.qualifier {
+                CallQualifier::ComplexReceiver { receiver, name } => {
+                    Some((receiver.clone(), name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn ivar_receiver_emits_complex_receiver_call_site() {
+        let source = r#"
+class UserService
+  def get(id)
+    @repo.find(id)
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        let get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "svc::UserService::get");
+        let site = fp
+            .calls
+            .iter()
+            .find(|c| matches!(&c.qualifier, CallQualifier::ComplexReceiver { .. }))
+            .expect("an @ivar receiver must push a CallSite");
+        assert_eq!(site.from, get);
+        assert_eq!(
+            site.qualifier,
+            CallQualifier::ComplexReceiver { receiver: "@repo".into(), name: "find".into() }
+        );
+        // No constructor writer: the call site exists, but nothing is typed.
+        assert!(ivar_types_of(&fp, "svc::UserService").is_empty());
+    }
+
+    #[test]
+    fn ivar_assigned_from_new_records_its_type() {
+        let source = r#"
+class UserService
+  def initialize
+    @repo = UserRepo.new
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::UserService"),
+            vec![("@repo".to_string(), "UserRepo".to_string())]
+        );
+    }
+
+    #[test]
+    fn memoised_ivar_records_its_type_in_any_method() {
+        let source = r#"
+class UserService
+  def audit(x)
+    @log ||= AuditLog.new
+    @log.write(x)
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::UserService"),
+            vec![("@log".to_string(), "AuditLog".to_string())]
+        );
+        assert_eq!(ivar_call_sites(&fp), vec![("@log".to_string(), "write".to_string())]);
+    }
+
+    #[test]
+    fn namespaced_constructor_records_the_last_segment() {
+        let source = r#"
+class UserService
+  def initialize
+    @repo = Repos::UserRepo.new(db)
+    @cache = ::Cache.new
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::UserService"),
+            vec![
+                ("@cache".to_string(), "Cache".to_string()),
+                ("@repo".to_string(), "UserRepo".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn keyword_and_optional_defaults_type_the_ivar_they_feed() {
+        let source = r#"
+class UserService
+  def initialize(repo: UserRepo.new, log = AuditLog.new, name: "x")
+    @repo = repo
+    @log = log
+    @name = name
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::UserService"),
+            vec![
+                ("@log".to_string(), "AuditLog".to_string()),
+                ("@repo".to_string(), "UserRepo".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn conflicting_ivar_types_record_nothing() {
+        // Within one method, across methods, and across a reopened class.
+        let source = r#"
+class UserService
+  def initialize
+    @repo = UserRepo.new
+    @log = AuditLog.new
+  end
+
+  def reset
+    @repo = CachedRepo.new
+    @log = AuditLog.new
+  end
+end
+
+class UserService
+  def swap
+    @log ||= NullLog.new
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert!(
+            ivar_types_of(&fp, "svc::UserService").is_empty(),
+            "got {:?}",
+            ivar_types_of(&fp, "svc::UserService")
+        );
+    }
+
+    #[test]
+    fn untyped_writers_neither_type_nor_conflict() {
+        let source = r#"
+class UserService
+  def initialize
+    @repo = UserRepo.new
+  end
+
+  def reset
+    @repo = nil
+    @other = build_repo
+    @sum += Counter.new
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::UserService"),
+            vec![("@repo".to_string(), "UserRepo".to_string())]
+        );
+    }
+
+    #[test]
+    fn module_and_top_level_methods_record_nothing() {
+        let source = r#"
+module Auditable
+  def audit(x)
+    @log ||= AuditLog.new
+    @log.write(x)
+  end
+end
+
+def helper
+  @repo = UserRepo.new
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert!(fp.nav.field_types.is_empty(), "got {:?}", fp.nav.field_types);
+        // The call site is still visible (unresolved diagnostics), not dropped.
+        assert_eq!(ivar_call_sites(&fp), vec![("@log".to_string(), "write".to_string())]);
+    }
+
+    #[test]
+    fn singleton_methods_neither_type_ivars_nor_emit_ivar_calls() {
+        // `@client` in `def self.x` is the class object's ivar, not an
+        // instance field of UserService.
+        let source = r#"
+class UserService
+  def self.client
+    @client ||= HttpClient.new
+    @client.fetch
+  end
+
+  def run
+    @client.fetch
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert!(fp.nav.field_types.is_empty(), "got {:?}", fp.nav.field_types);
+        let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "svc::UserService::run");
+        let sites: Vec<NodeId> = fp
+            .calls
+            .iter()
+            .filter(|c| matches!(&c.qualifier, CallQualifier::ComplexReceiver { .. }))
+            .map(|c| c.from)
+            .collect();
+        assert_eq!(sites, vec![run]);
+    }
+
+    #[test]
+    fn nested_class_ivars_type_the_nested_class_only() {
+        let source = r#"
+class Outer
+  def initialize
+    @repo = OuterRepo.new
+  end
+
+  class Inner
+    def initialize
+      @repo = InnerRepo.new
+    end
+  end
+end
+"#;
+        let fp = parse_file(source, "svc.rb", "svc", repo()).unwrap();
+        assert_eq!(
+            ivar_types_of(&fp, "svc::Outer"),
+            vec![("@repo".to_string(), "OuterRepo".to_string())]
+        );
+        assert_eq!(
+            ivar_types_of(&fp, "svc::Outer::Inner"),
+            vec![("@repo".to_string(), "InnerRepo".to_string())]
         );
     }
 }

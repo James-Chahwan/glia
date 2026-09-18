@@ -1,0 +1,25 @@
+{
+  "framework": "ruby-ivar-dispatch",
+  "language": "ruby",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "ruby/calls"
+  ],
+  "expect_edges": [
+    {
+      "from": "UserService::get",
+      "to": "UserRepo::find",
+      "category": "CALLS",
+      "note": "@repo = UserRepo.new in initialize"
+    },
+    {
+      "from": "UserService::audit",
+      "to": "AuditLog::write",
+      "category": "CALLS",
+      "note": "@log ||= AuditLog.new (memoised)"
+    }
+  ],
+  "note": "LA.23b. Baseline HEAD: zero CALLS; `@repo.find(id)` produces no CallSite at all (instance_variable receiver)."
+}
