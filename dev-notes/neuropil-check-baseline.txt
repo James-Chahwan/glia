@@ -1,0 +1,5 @@
+# LG.6d neuropil compile-check baseline, written by `bash scripts/check-neuropil.sh --baseline`
+# glia 0.4.18+p5f5c99c3ed6a2465 (HEAD f6f007e, dirty=0)
+# neuropil b140d1ede58ff6e77e8e7326a6a4cf21e822959e dirty=50 src=b690b6b4f6db
+# rustc 1.95.0 (59807616e 2026-04-14)
+# check `cargo check --workspace --all-targets` rc=0, 0 error(s); a normal run diffs on the line minus its :<line>
