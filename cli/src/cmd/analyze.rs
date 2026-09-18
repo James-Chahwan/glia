@@ -36,6 +36,18 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
+    // Per-file panic isolation swallows the message; name every failed file
+    // on stderr so stdout (summary / json / mermaid) stays unchanged. Same
+    // `[parse]` prefix pyo3's `generate` uses.
+    if !result.parse_errors.is_empty() {
+        eprintln!(
+            "[parse] {} file(s) failed to parse",
+            result.parse_errors.len()
+        );
+        for e in &result.parse_errors {
+            eprintln!("[parse] error {e}");
+        }
+    }
     match format {
         AnalyzeFormat::Summary => print_summary_table(&result),
         // A9.4: routed at the A9.2 service map. The old `print_mermaid`

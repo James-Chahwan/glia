@@ -483,7 +483,8 @@ fn scan_beanie_documents(source: &str) -> Vec<String> {
     while let Some(rel) = source[search_from..].find(needle) {
         let pos = search_from + rel;
         let after = pos + needle.len();
-        let win_end = (after + 256).min(source.len());
+        // Snap DOWN: a multibyte char on the cut would panic the slice.
+        let win_end = source.floor_char_boundary((after + 256).min(source.len()));
         let window = &source[after..win_end];
         if let Some(name_idx) = find_word_in(window, "name") {
             let tail = &window[name_idx + "name".len()..];
@@ -543,8 +544,9 @@ fn scan_cypher_labels(source: &str) -> Vec<String> {
             };
             let pos = search_from + rel;
             // Look forward for `(<var>:<Label>)` shapes within the next
-            // ~256 bytes (one statement worth).
-            let win_end = (pos + 256).min(source.len());
+            // ~256 bytes (one statement worth), snapped DOWN to a char
+            // boundary so a multibyte char on the cut can't panic the slice.
+            let win_end = source.floor_char_boundary((pos + 256).min(source.len()));
             let win = &source[pos..win_end];
             for label in extract_cypher_labels_in_window(win) {
                 out.push(label);
@@ -884,5 +886,47 @@ const q2 = "INSERT INTO users (name) VALUES (?)";
             .filter(|q| q.as_str() == "data_entity:sql:users")
             .count();
         assert_eq!(users_count, 1);
+    }
+
+    /// `head` + `'x'` padding + U+1F600 + `tail`, with the 4-byte char starting
+    /// at `anchor + width - 1`, so a `width`-byte window from `anchor` ends on
+    /// the char's 2nd byte — the cut that panicked before LA.25a.
+    fn cut_inside_char(head: &str, anchor: usize, width: usize, tail: &str) -> String {
+        let at = anchor + width - 1;
+        assert!(head.len() <= at, "head too long for the cut");
+        let src = format!("{head}{}\u{1F600}{tail}", "x".repeat(at - head.len()));
+        assert!(!src.is_char_boundary(anchor + width));
+        src
+    }
+
+    #[test]
+    fn beanie_window_cut_inside_a_multibyte_char() {
+        let repo = RepoId(1);
+        let head =
+            "class Order(Document):\n    class Settings:\n        name = 'orders'\n        # ";
+        let after = head.find("class Settings:").unwrap() + "class Settings:".len();
+        let src = cut_inside_char(head, after, 256, "\n");
+        let out = extract_data_entity_nodes(&src, module_id(repo), repo);
+        let qnames = entity_qnames(&out);
+        assert!(
+            qnames.contains(&"data_entity:nosql:orders".to_string()),
+            "{qnames:?}"
+        );
+    }
+
+    #[test]
+    fn cypher_window_cut_inside_a_multibyte_char() {
+        // The statement sits inside a string literal, so this holds for the
+        // window scan and for LA.28's literal-scoped rewrite alike.
+        let repo = RepoId(1);
+        let head = "q = \"MATCH (p:Person) ";
+        let pos = head.find("MATCH").unwrap();
+        let src = cut_inside_char(head, pos, 256, " RETURN p\"\n");
+        let out = extract_data_entity_nodes(&src, module_id(repo), repo);
+        let qnames = entity_qnames(&out);
+        assert!(
+            qnames.contains(&"data_entity:graph:Person".to_string()),
+            "{qnames:?}"
+        );
     }
 }

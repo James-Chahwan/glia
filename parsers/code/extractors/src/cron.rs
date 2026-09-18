@@ -307,8 +307,9 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
         let after = &source[pos + "cronTime:".len()..];
         if let Some(schedule) = first_quoted(after) {
             if looks_like_cron_expr(&schedule) {
-                // Look for `onTick:` within the next ~256 bytes for the target.
-                let win_end = (pos + 256).min(source.len());
+                // Look for `onTick:` within the next ~256 bytes for the target,
+                // snapped DOWN so a multibyte char on the cut can't panic.
+                let win_end = source.floor_char_boundary((pos + 256).min(source.len()));
                 let win = &source[pos..win_end];
                 let target = if let Some(tick) = win.find("onTick:") {
                     let after_tick = &win[tick + "onTick:".len()..];
@@ -343,8 +344,9 @@ fn extract_celery_beat(source: &str) -> Vec<CronJob> {
         let after = &source[pos + "'schedule':".len()..];
         let schedule = celery_schedule_expr(after);
         if !schedule.is_empty() && schedule.len() < 256 {
-            // Walk back ~256 bytes to find the sibling `'task':` value.
-            let look_back_start = pos.saturating_sub(256);
+            // Walk back ~256 bytes to find the sibling `'task':` value; the
+            // start snaps UP so a multibyte char on the cut can't panic.
+            let look_back_start = source.ceil_char_boundary(pos.saturating_sub(256));
             let context = &source[look_back_start..pos];
             let target = celery_task_in(context).unwrap_or_else(|| "anon".to_string());
             out.push(CronJob {
@@ -362,7 +364,7 @@ fn extract_celery_beat(source: &str) -> Vec<CronJob> {
         let after = &source[pos + "\"schedule\":".len()..];
         let schedule = celery_schedule_expr(after);
         if !schedule.is_empty() && schedule.len() < 256 {
-            let look_back_start = pos.saturating_sub(256);
+            let look_back_start = source.ceil_char_boundary(pos.saturating_sub(256));
             let context = &source[look_back_start..pos];
             let target = celery_task_in(context).unwrap_or_else(|| "anon".to_string());
             out.push(CronJob {
@@ -952,5 +954,51 @@ cron.schedule('*/5 * * * *', cleanupSessions);
 "#;
         let out = extract_cron_nodes(src, "src/jobs.ts", module_id(repo), repo);
         assert_eq!(out.nodes.len(), 1, "duplicate (schedule, target) collapses");
+    }
+
+    #[test]
+    fn node_cron_window_cut_inside_a_multibyte_char() {
+        // U+1F600 starts at `cronTime:` + 255, so the 256-byte `onTick:`
+        // window ends on its 2nd byte (panicked before LA.25a).
+        let repo = RepoId(1);
+        let head = "const job = new CronJob({ cronTime: '*/5 * * * *', onTick: tick, /* ";
+        let pos = head.find("cronTime:").unwrap();
+        let at = pos + 255;
+        let src = format!("{head}{}\u{1F600} */ }});\n", "x".repeat(at - head.len()));
+        assert!(!src.is_char_boundary(pos + 256));
+        let out = extract_cron_nodes(&src, "src/jobs.ts", module_id(repo), repo);
+        let qnames = cron_qnames(&out);
+        assert!(
+            qnames.contains(&"cron:*/5 * * * *:tick".to_string()),
+            "{qnames:?}"
+        );
+    }
+
+    #[test]
+    fn celery_lookback_cut_inside_a_multibyte_char() {
+        // U+1F600 starts at `'schedule':` - 257, so the 256-byte look-back
+        // starts on its 2nd byte (panicked before LA.25a). The `'task':`
+        // sibling sits inside the look-back and must still be read.
+        let repo = RepoId(1);
+        for (task, schedule) in [("'task':", "'schedule':"), ("\"task\":", "\"schedule\":")] {
+            let head = "app.conf.beat_schedule = {\n    'cleanup': {  # \u{1F600}";
+            let body = format!(
+                "\n        {task} 'tasks.cleanup',\n        {schedule} crontab(minute=0),\n    }},\n}}\n"
+            );
+            let char_at = head.len() - 4;
+            let pad = (char_at + 257)
+                .checked_sub(head.len() + body.find(schedule).unwrap())
+                .unwrap();
+            let src = format!("{head}{}{body}", "x".repeat(pad));
+            let pos = src.find(schedule).unwrap();
+            assert_eq!(pos - 257, char_at);
+            assert!(!src.is_char_boundary(pos - 256));
+            let out = extract_cron_nodes(&src, "app/celery_config.py", module_id(repo), repo);
+            let qnames = cron_qnames(&out);
+            assert!(
+                qnames.contains(&"cron:crontab(minute=0):tasks.cleanup".to_string()),
+                "{schedule}: {qnames:?}"
+            );
+        }
     }
 }
