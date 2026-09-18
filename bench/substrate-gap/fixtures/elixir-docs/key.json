@@ -1,0 +1,38 @@
+{
+  "framework": "elixir-docs",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "get_user",
+      "cell": "DOC",
+      "contains": "Fetches a user by id.",
+      "note": "@doc heredoc, with @spec between the doc and the def"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "create_user",
+      "cell": "DOC",
+      "contains": "Creates a user.",
+      "note": "@doc single-line string"
+    },
+    {
+      "kind": "PACKAGE",
+      "node": "MyApp.Accounts",
+      "cell": "DOC",
+      "contains": "Account management context.",
+      "note": "@moduledoc on the defmodule PACKAGE"
+    },
+    {
+      "kind": "FUNCTION",
+      "node": "comment_only",
+      "cell": "DOC",
+      "contains": "Plain comment above.",
+      "note": "control: the leading-comment path keeps working"
+    }
+  ],
+  "note": "LA.7a. Baseline HEAD: only `comment_only` carries DOC (via its `#` comment); @doc heredoc, @doc string and @moduledoc produce none. `@doc false` on `internal` must suppress its comment DOC too (unit-tested; key.json cannot forbid a cell)."
+}

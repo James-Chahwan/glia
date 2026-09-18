@@ -45,6 +45,12 @@ pub fn parse_file(
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
 
     scan_phoenix_routes(source, repo, module_id, &mut acc);
+    if acc.doc_attached + acc.doc_moduledoc + acc.doc_hidden > 0 {
+        eprintln!(
+            "[doc] elixir attrs attached={} moduledoc={} hidden={} path={}",
+            acc.doc_attached, acc.doc_moduledoc, acc.doc_hidden, file_rel_path
+        );
+    }
     if acc.endpoint_hits > 0 {
         eprintln!(
             "[elixir-http-client] {} endpoints in {}",
@@ -77,6 +83,12 @@ struct Acc {
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Client HTTP call sites emitted from this file (drives the fired-on marker).
     endpoint_hits: usize,
+    /// `@doc` texts attached to FUNCTION nodes in this file (LA.7a marker).
+    doc_attached: usize,
+    /// `@moduledoc` texts attached to PACKAGE / INTERFACE nodes (LA.7a marker).
+    doc_moduledoc: usize,
+    /// Nodes whose doc an explicit `@doc false` / `@moduledoc false` hid.
+    doc_hidden: usize,
 }
 
 fn visit_top(
@@ -111,7 +123,18 @@ fn visit_node(
 
     match target_name {
         "defmodule" => visit_defmodule(node, src, file_rel, parent_qname, parent_id, repo, acc),
-        "def" | "defp" => visit_def(node, src, file_rel, parent_qname, parent_id, repo, acc),
+        // Outside a `defmodule` body there is no pending `@doc` to carry, so a
+        // top-level `def` only ever gets the leading-comment fallback.
+        "def" | "defp" => visit_def(
+            node,
+            src,
+            file_rel,
+            parent_qname,
+            parent_id,
+            repo,
+            DocChoice::Leading,
+            acc,
+        ),
         "defprotocol" => visit_defprotocol(node, src, file_rel, parent_qname, parent_id, repo, acc),
         "defstruct" => visit_defstruct(node, src, file_rel, parent_qname, parent_id, repo, acc),
         "import" | "alias" | "use" => collect_import(node, src, acc),
@@ -148,11 +171,17 @@ fn visit_defmodule(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
 
+    // Elixir documentation is a module attribute in the body, not a comment
+    // above the node: `@moduledoc` sits INSIDE the `do_block`, after the node
+    // the PACKAGE is built from, so it is pre-scanned before the push.
+    let body = do_block_of(node);
+    let doc = body.map_or(DocChoice::Leading, |b| moduledoc_choice(b, src));
+    acc.count_doc(&doc, true);
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells_with_doc(&node, src, file_rel, doc),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -163,17 +192,83 @@ fn visit_defmodule(
     acc.nav
         .record(id, &short, &qname, node_kind::PACKAGE, Some(parent_id));
 
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if child.kind() == "do_block" {
-            let mut c2 = child.walk();
-            for gc in child.named_children(&mut c2) {
-                visit_node(gc, src, file_rel, &qname, id, repo, acc);
-            }
-        }
+    if let Some(body) = body {
+        visit_module_body(body, src, file_rel, &qname, id, repo, acc);
     }
 }
 
+/// The `do_block` child of a `defmodule` / `defprotocol` call.
+fn do_block_of(node: TsNode) -> Option<TsNode> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .find(|c| c.kind() == "do_block")
+}
+
+/// Walk a module body in source order, carrying a pending `@doc` to the `def`
+/// it documents. A `@doc` sets the pending doc; `def` / `defp` consumes it;
+/// comments and other module attributes (`@spec`, `@impl`, `@decorate`,
+/// `@moduledoc`, `@typedoc`, ...) keep it; any other statement clears it, so a
+/// stray `@doc` never lands on an unrelated function. A nested `defmodule` is
+/// such a statement, and its own body starts with nothing pending.
+///
+/// Multi-clause functions (`def get(1)` / `def get(n)`) share one qname and
+/// `merge_parses` appends cells by id, so once an attribute has decided a
+/// function's doc, its later clauses emit no DOC at all.
+fn visit_module_body(
+    body: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut pending: Option<DocAttr> = None;
+    let mut decided: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() == "comment" {
+            continue;
+        }
+        if let Some(attr) = doc_attr_text(child, src) {
+            if matches!(attr, DocAttr::Doc(_) | DocAttr::Hidden) {
+                pending = Some(attr);
+            }
+            continue;
+        }
+        if module_attribute(child) {
+            continue;
+        }
+        if let Some(name) = def_call_name(child, src) {
+            let doc = match pending.take() {
+                Some(DocAttr::Doc(text)) => {
+                    decided.insert(name);
+                    DocChoice::Text(text)
+                }
+                Some(DocAttr::Hidden) => {
+                    decided.insert(name);
+                    DocChoice::Hidden
+                }
+                Some(DocAttr::ModuleDoc(_) | DocAttr::ModuleHidden) | None => {
+                    if decided.contains(&name) {
+                        DocChoice::Omit
+                    } else {
+                        DocChoice::Leading
+                    }
+                }
+            };
+            visit_def(child, src, file_rel, parent_qname, parent_id, repo, doc, acc);
+            continue;
+        }
+        pending = None;
+        visit_node(child, src, file_rel, parent_qname, parent_id, repo, acc);
+    }
+}
+
+/// `doc` is decided by the caller: a module body passes the pending `@doc`
+/// (authoritative text, or `Hidden` for `@doc false`); everywhere else passes
+/// `Leading`, the comment-above fallback.
+#[allow(clippy::too_many_arguments)]
 fn visit_def(
     node: TsNode,
     src: &[u8],
@@ -181,6 +276,7 @@ fn visit_def(
     parent_qname: &str,
     parent_id: NodeId,
     repo: RepoId,
+    doc: DocChoice,
     acc: &mut Acc,
 ) {
     let Some(args) = find_args(node) else {
@@ -193,11 +289,12 @@ fn visit_def(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
 
+    acc.count_doc(&doc, false);
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells_with_doc(&node, src, file_rel, doc),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -240,11 +337,15 @@ fn visit_defprotocol(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &qname);
 
+    // Same `@moduledoc` pre-scan as `visit_defmodule`; the protocol body's
+    // other children (function heads) are not walked.
+    let doc = do_block_of(node).map_or(DocChoice::Leading, |b| moduledoc_choice(b, src));
+    acc.count_doc(&doc, true);
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
+        cells: entity_cells_with_doc(&node, src, file_rel, doc),
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -760,6 +861,11 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
+    entity_cells_with_doc(node, src, file_rel, DocChoice::Leading)
+}
+
+/// CODE + POSITION, plus the DOC cell `doc` selects.
+fn entity_cells_with_doc(node: &TsNode, src: &[u8], file_rel: &str, doc: DocChoice) -> Vec<Cell> {
     let mut cells = vec![
         Cell {
             kind: cell_type::CODE,
@@ -770,7 +876,12 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
             payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    let text = match doc {
+        DocChoice::Leading => repo_graph_doc::leading_doc(node, src),
+        DocChoice::Text(t) if !t.is_empty() => Some(t),
+        DocChoice::Text(_) | DocChoice::Hidden | DocChoice::Omit => None,
+    };
+    if let Some(doc) = text {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -779,12 +890,446 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
     cells
 }
 
+// ---------------------------------------------------------------------------
+// Documentation attributes (`@doc` / `@moduledoc`) -> DOC cells (LA.7a)
+// ---------------------------------------------------------------------------
+//
+// Elixir documentation is not a comment: it is a module attribute in the body,
+// which `repo_graph_doc::leading_doc` (a preceding-comment walk) never sees.
+// tree-sitter-elixir 0.3 parses `@doc "x"` as
+// `unary_operator(operator: "@", operand: call(target: identifier "doc",
+// arguments(string | sigil | boolean)))`.
+
+/// One documentation attribute, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DocAttr {
+    /// `@doc "..."` / heredoc / `~S"""..."""`, cleaned.
+    Doc(String),
+    /// `@moduledoc "..."`, cleaned.
+    ModuleDoc(String),
+    /// `@doc false`: the author hid the function.
+    Hidden,
+    /// `@moduledoc false`: the author hid the module.
+    ModuleHidden,
+}
+
+/// Where a node's DOC cell comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DocChoice {
+    /// No attribute decided it: the leading-comment walk (comment-only defs).
+    Leading,
+    /// An attribute's text, authoritative over any comment. Empty = no DOC.
+    Text(String),
+    /// `@doc false` / `@moduledoc false`: no DOC, not even from a comment.
+    Hidden,
+    /// A later clause of a function whose doc an attribute already decided on
+    /// the first clause: no DOC, so the merged node carries exactly one.
+    Omit,
+}
+
+impl Acc {
+    /// Tally an attached / hidden doc for the fired-on marker.
+    fn count_doc(&mut self, doc: &DocChoice, module: bool) {
+        match doc {
+            DocChoice::Text(t) if !t.is_empty() => {
+                if module {
+                    self.doc_moduledoc += 1;
+                } else {
+                    self.doc_attached += 1;
+                }
+            }
+            DocChoice::Hidden => self.doc_hidden += 1,
+            DocChoice::Leading | DocChoice::Text(_) | DocChoice::Omit => {}
+        }
+    }
+}
+
+/// The `call` operand of a module attribute (`@name ...`), if `node` is one.
+fn attribute_call(node: TsNode) -> Option<TsNode> {
+    if node.kind() != "unary_operator" {
+        return None;
+    }
+    let op = node.child_by_field_name("operator")?;
+    if op.kind() != "@" {
+        return None;
+    }
+    let operand = node.child_by_field_name("operand")?;
+    (operand.kind() == "call").then_some(operand)
+}
+
+/// Any `@attr ...` statement (`@spec`, `@impl`, `@decorate`, `@typedoc`, ...).
+fn module_attribute(node: TsNode) -> bool {
+    attribute_call(node).is_some()
+}
+
+/// A `@doc` / `@moduledoc` attribute's value. `None` for other attributes and
+/// for doc forms that carry no text (`@doc since: "1.0"` metadata).
+fn doc_attr_text(node: TsNode, src: &[u8]) -> Option<DocAttr> {
+    let call = attribute_call(node)?;
+    let target = call.child_by_field_name("target")?;
+    if target.kind() != "identifier" {
+        return None;
+    }
+    let module = match text_of(target, src) {
+        "doc" => false,
+        "moduledoc" => true,
+        _ => return None,
+    };
+    let args = find_args(call)?;
+    let mut cursor = args.walk();
+    let value = args.named_children(&mut cursor).next()?;
+    match value.kind() {
+        "string" | "sigil" => {
+            let text = clean_doc(&quoted_text(value, src));
+            Some(if module {
+                DocAttr::ModuleDoc(text)
+            } else {
+                DocAttr::Doc(text)
+            })
+        }
+        "boolean" if text_of(value, src) == "false" => Some(if module {
+            DocAttr::ModuleHidden
+        } else {
+            DocAttr::Hidden
+        }),
+        _ => None,
+    }
+}
+
+/// The literal text of a `string` / `sigil` (single-line or `"""` heredoc):
+/// its `quoted_content` runs, escapes decoded, interpolations kept verbatim.
+fn quoted_text(node: TsNode, src: &[u8]) -> String {
+    let mut out = String::new();
+    let mut cursor = node.walk();
+    for part in node.named_children(&mut cursor) {
+        match part.kind() {
+            "quoted_content" | "interpolation" => out.push_str(text_of(part, src)),
+            "escape_sequence" => {
+                let esc = text_of(part, src);
+                match esc {
+                    "\\n" | "\\t" | "\\r" => out.push(' '),
+                    _ => match esc.strip_prefix('\\') {
+                        Some(rest) if rest.chars().count() == 1 => out.push_str(rest),
+                        _ => out.push_str(esc),
+                    },
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Dedent, trim and collapse a doc body to one line (the shape
+/// `repo_graph_doc::leading_doc` produces: lines joined by single spaces), then
+/// cap at [`repo_graph_doc::DOC_MAX`] on a char boundary. Collapsing every
+/// whitespace run subsumes the heredoc dedent: each line's common indent goes
+/// with the rest of its leading whitespace.
+fn clean_doc(raw: &str) -> String {
+    let joined = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.len() <= repo_graph_doc::DOC_MAX {
+        return joined;
+    }
+    let mut end = repo_graph_doc::DOC_MAX;
+    while !joined.is_char_boundary(end) {
+        end -= 1;
+    }
+    joined[..end].trim_end().to_string()
+}
+
+/// The function name of a `def` / `defp` call, if `node` is one.
+fn def_call_name(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() != "call" {
+        return None;
+    }
+    let target = node.child_by_field_name("target")?;
+    if !matches!(text_of(target, src), "def" | "defp") {
+        return None;
+    }
+    let name = extract_def_name(find_args(node)?, src);
+    (!name.is_empty()).then_some(name)
+}
+
+/// The DOC choice for a `defmodule` / `defprotocol` node, from the
+/// `@moduledoc` among its body's direct children (the last one wins, as in
+/// Elixir). No `@moduledoc` keeps the leading-comment fallback. Nested module
+/// bodies are not entered, so their `@moduledoc` never leaks outward.
+fn moduledoc_choice(body: TsNode, src: &[u8]) -> DocChoice {
+    let mut choice = DocChoice::Leading;
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        match doc_attr_text(child, src) {
+            Some(DocAttr::ModuleDoc(text)) => choice = DocChoice::Text(text),
+            Some(DocAttr::ModuleHidden) => choice = DocChoice::Hidden,
+            Some(DocAttr::Doc(_) | DocAttr::Hidden) | None => {}
+        }
+    }
+    choice
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn repo() -> RepoId {
         RepoId(1)
+    }
+
+    /// Every DOC text on the node(s) named `name` of `kind`, across all the
+    /// `Node` entries sharing its id (multi-clause functions push one per clause).
+    fn docs_of(fp: &FileParse, kind: repo_graph_core::NodeKindId, name: &str) -> Vec<String> {
+        let ids: Vec<NodeId> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, n)| n.as_str() == name && fp.nav.kind_by_id.get(*id) == Some(&kind))
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(!ids.is_empty(), "no {kind:?} node named {name}");
+        fp.nodes
+            .iter()
+            .filter(|n| ids.contains(&n.id))
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::DOC)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The LA.7a fixture file (bench/substrate-gap/fixtures/elixir-docs).
+    const ACCOUNTS: &str = r#"defmodule MyApp.Accounts do
+  @moduledoc """
+  Account management context.
+  """
+
+  @doc """
+  Fetches a user by id.
+  """
+  @spec get_user(integer) :: map
+  def get_user(id), do: %{id: id}
+
+  @doc "Creates a user."
+  def create_user(attrs), do: attrs
+
+  # Hidden helper comment.
+  @doc false
+  def internal(x), do: x
+
+  # Plain comment above.
+  def comment_only(x), do: x
+end
+"#;
+
+    #[test]
+    fn doc_heredoc_attaches_through_spec() {
+        let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "get_user"), vec!["Fetches a user by id."]);
+    }
+
+    #[test]
+    fn doc_single_line_string() {
+        let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "create_user"), vec!["Creates a user."]);
+    }
+
+    #[test]
+    fn moduledoc_on_package() {
+        let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert_eq!(
+            docs_of(&fp, node_kind::PACKAGE, "Accounts"),
+            vec!["Account management context."]
+        );
+    }
+
+    #[test]
+    fn doc_false_hides_even_the_comment_above() {
+        let fp = parse_file(ACCOUNTS, "lib/accounts.ex", "lib::accounts", repo()).unwrap();
+        assert!(docs_of(&fp, node_kind::FUNCTION, "internal").is_empty());
+        // Control: the leading-comment path still documents a comment-only def.
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "comment_only"), vec!["Plain comment above."]);
+
+        // A comment BETWEEN `@doc false` and the def is directly above the def,
+        // so `leading_doc` would pick it up; `@doc false` must still win.
+        let source = r#"
+defmodule M do
+  @doc false
+  # Would be picked up by the comment walk.
+  def hidden(x), do: x
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert!(docs_of(&fp, node_kind::FUNCTION, "hidden").is_empty());
+    }
+
+    #[test]
+    fn moduledoc_false_hides_package_comment() {
+        let source = r#"
+# Comment above the module.
+defmodule M do
+  @moduledoc false
+  def f(x), do: x
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert!(docs_of(&fp, node_kind::PACKAGE, "M").is_empty());
+    }
+
+    #[test]
+    fn doc_survives_spec_impl_and_comments() {
+        let source = r#"
+defmodule M do
+  @doc "Handles a call."
+  # a comment between
+  @impl true
+  @spec handle(term) :: :ok
+  def handle(_), do: :ok
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "handle"), vec!["Handles a call."]);
+    }
+
+    #[test]
+    fn stray_doc_before_a_statement_attaches_to_nothing() {
+        let source = r#"
+defmodule M do
+  @doc "Stray."
+  alias Foo.Bar
+  def after_alias(x), do: x
+
+  @doc "Also stray."
+  defmodule Inner do
+    def inner(x), do: x
+  end
+
+  def after_inner(x), do: x
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert!(docs_of(&fp, node_kind::FUNCTION, "after_alias").is_empty());
+        assert!(docs_of(&fp, node_kind::FUNCTION, "inner").is_empty());
+        assert!(docs_of(&fp, node_kind::FUNCTION, "after_inner").is_empty());
+        assert!(docs_of(&fp, node_kind::PACKAGE, "Inner").is_empty());
+    }
+
+    #[test]
+    fn multi_clause_function_gets_one_doc() {
+        let source = r#"
+defmodule M do
+  @doc "Gets a thing."
+  def get(1), do: :one
+  # Second clause comment.
+  def get(n), do: n
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "get"), vec!["Gets a thing."]);
+    }
+
+    #[test]
+    fn nested_module_moduledoc_stays_on_its_own_package() {
+        let source = r#"
+defmodule Outer do
+  defmodule Inner do
+    @moduledoc "Inner docs."
+  end
+end
+"#;
+        let fp = parse_file(source, "lib/o.ex", "lib::o", repo()).unwrap();
+        assert!(docs_of(&fp, node_kind::PACKAGE, "Outer").is_empty());
+        assert_eq!(docs_of(&fp, node_kind::PACKAGE, "Inner"), vec!["Inner docs."]);
+    }
+
+    #[test]
+    fn protocol_moduledoc_on_interface() {
+        let source = r#"
+defprotocol Size do
+  @moduledoc """
+  Computes the size of a data structure.
+  """
+  def size(data)
+end
+"#;
+        let fp = parse_file(source, "lib/size.ex", "lib::size", repo()).unwrap();
+        assert_eq!(
+            docs_of(&fp, node_kind::INTERFACE, "Size"),
+            vec!["Computes the size of a data structure."]
+        );
+    }
+
+    #[test]
+    fn sigil_heredoc_escapes_and_dedent() {
+        let source = r#"
+defmodule M do
+  @doc ~S"""
+      Indented   first line.
+        Deeper second line, café.
+  """
+  def a(x), do: x
+
+  @doc "Say \"hi\" to #{name}."
+  def b(name), do: name
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(
+            docs_of(&fp, node_kind::FUNCTION, "a"),
+            vec!["Indented first line. Deeper second line, café."]
+        );
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "b"), vec!["Say \"hi\" to #{name}."]);
+    }
+
+    #[test]
+    fn long_utf8_doc_capped_on_char_boundary() {
+        let body = "é".repeat(repo_graph_doc::DOC_MAX);
+        let source = format!("defmodule M do\n  @doc \"{body}\"\n  def a(x), do: x\nend\n");
+        let fp = parse_file(&source, "lib/m.ex", "lib::m", repo()).unwrap();
+        let docs = docs_of(&fp, node_kind::FUNCTION, "a");
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].len() <= repo_graph_doc::DOC_MAX);
+        assert!(docs[0].chars().all(|c| c == 'é'));
+        assert_eq!(docs[0].chars().count(), repo_graph_doc::DOC_MAX / 2);
+    }
+
+    #[test]
+    fn doc_metadata_keyword_form_is_not_text() {
+        // `@doc since: "1.0"` carries metadata, not text: it neither documents
+        // the def nor clears the real `@doc` above it.
+        let source = r#"
+defmodule M do
+  @doc "Real doc."
+  @doc since: "1.0"
+  def a(x), do: x
+end
+"#;
+        let fp = parse_file(source, "lib/m.ex", "lib::m", repo()).unwrap();
+        assert_eq!(docs_of(&fp, node_kind::FUNCTION, "a"), vec!["Real doc."]);
+    }
+
+    #[test]
+    fn doc_attr_counters_match_the_fixture_marker() {
+        let lang: tree_sitter::Language = tree_sitter_elixir::LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(ACCOUNTS, None).unwrap();
+        let mut acc = Acc::default();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::accounts");
+        visit_top(
+            tree.root_node(),
+            ACCOUNTS.as_bytes(),
+            "lib/accounts.ex",
+            "lib::accounts",
+            module_id,
+            repo(),
+            &mut acc,
+        );
+        assert_eq!(
+            (acc.doc_attached, acc.doc_moduledoc, acc.doc_hidden),
+            (2, 1, 1),
+            "marker: [doc] elixir attrs attached=2 moduledoc=1 hidden=1"
+        );
     }
 
     #[test]
