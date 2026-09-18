@@ -134,6 +134,37 @@ impl ConstTable {
         self.get(&key)
     }
 
+    /// LA.4 (A11.7): resolve a queue-topic expression written in ANOTHER file
+    /// than its binding. Only a constant-shaped key (dotted, or SCREAMING_CASE)
+    /// is trusted across files — a lower-case `topic` bound as some function's
+    /// local elsewhere must never name a parameter's topic here. The exact key
+    /// resolves strictly, as [`Self::resolve_expr_strict`]; failing that, a
+    /// dotted key whose LAST segment is SCREAMING_CASE resolves that segment
+    /// strictly (Java `Topics.ORDERS`, where the scan bound bare `ORDERS`
+    /// inside `class Topics`). An ambiguous key never resolves, and never
+    /// falls through to its last segment.
+    pub fn resolve_identity(&self, expr: &str) -> Option<&str> {
+        let key = normalise_expr(expr)?;
+        let dotted = key.contains('.');
+        if !dotted && !screaming(&key) {
+            return None;
+        }
+        if self.alternatives.contains_key(&key) {
+            return None;
+        }
+        if let Some(v) = self.get(&key) {
+            return Some(v);
+        }
+        let last = key
+            .rsplit('.')
+            .next()
+            .filter(|seg| dotted && screaming(seg))?;
+        if self.alternatives.contains_key(last) {
+            return None;
+        }
+        self.get(last)
+    }
+
     /// Every distinct value bound to the exact normalised key, first binding
     /// first. `environment.apiUrl` is routinely bound once per deployment file,
     /// so a host-based consumer must treat it as a set.
@@ -1031,5 +1062,45 @@ mod tests {
         assert_eq!(d.get("AFTER"), Some("a"), "depth bail resets the walk");
         let empty = ConstTable::default();
         assert_eq!(fold_interpolations("${}${", &empty), None);
+    }
+
+    #[test]
+    fn resolve_identity_gates_shape_and_ambiguity() {
+        let mut repo = ConstTable::default();
+        repo.merge_from(&scan(
+            "export const ORDERS_TOPIC = 'orders';\n\
+             export const Topics = {\n  PAYMENTS: 'payments',\n};\n\
+             function f() {\n  const topic = 'audit-log';\n}\n\
+             export const DUP = 'a';\n",
+            "typescript",
+        ));
+        repo.merge_from(&scan(
+            "public final class Topics {\n    public static final String ORDERS = \"orders\";\n}\n",
+            "java",
+        ));
+        repo.merge_from(&scan("export const DUP = 'b';\n", "typescript"));
+        // SCREAMING_CASE and dotted keys resolve across files.
+        assert_eq!(repo.resolve_identity("ORDERS_TOPIC"), Some("orders"));
+        assert_eq!(repo.resolve_identity("Topics.PAYMENTS"), Some("payments"));
+        assert_eq!(repo.resolve_identity("this.ORDERS_TOPIC"), Some("orders"));
+        // A dotted key falls back to its SCREAMING_CASE last segment (Java).
+        assert_eq!(repo.resolve_identity("Topics.ORDERS"), Some("orders"));
+        assert_eq!(repo.resolve_identity("Topics::ORDERS"), Some("orders"));
+        // A lower-case binding never crosses files, even though it is bound.
+        assert_eq!(repo.get("topic"), Some("audit-log"));
+        assert_eq!(repo.resolve_identity("topic"), None);
+        assert_eq!(repo.resolve_identity("this.topic"), None);
+        // A lower-case last segment is not a fallback.
+        assert_eq!(repo.resolve_identity("cfg.topic"), None);
+        // Ambiguity refuses, exactly and through the last-segment fallback.
+        assert_eq!(repo.resolve_identity("DUP"), None);
+        assert_eq!(repo.resolve_identity("Consts.DUP"), None);
+        // Env reads and non-identifiers never resolve.
+        assert_eq!(repo.resolve_identity("process.env.ORDERS_TOPIC"), None);
+        assert_eq!(repo.resolve_identity("PREFIX + x"), None);
+        assert_eq!(repo.resolve_identity("UNBOUND"), None);
+        // The lenient resolver still takes the first binding: the reason the
+        // identity path does not use it.
+        assert_eq!(repo.resolve_expr("DUP"), Some("a"));
     }
 }

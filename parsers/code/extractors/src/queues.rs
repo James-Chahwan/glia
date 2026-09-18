@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use repo_graph_code_domain::{
+    CodeNav, FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, node_kind,
+};
+use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
 use crate::queue_topic::{self, TopicForm, TopicRule};
 
@@ -573,6 +576,8 @@ pub fn extract_queue_consumer_nodes(
         CONSUMER_PATTERNS,
         node_kind::QUEUE_CONSUMER,
         "queue_consumer:",
+        None,
+        &mut ConstFoldCounts::default(),
     )
 }
 
@@ -591,7 +596,183 @@ pub fn extract_queue_producer_nodes(
         PRODUCER_PATTERNS,
         node_kind::QUEUE_PRODUCER,
         "queue_producer:",
+        None,
+        &mut ConstFoldCounts::default(),
     )
+}
+
+/// LA.4 (A11.7): turns the identifier in a topic slot into the value it
+/// holds, or `None`. The engine closes it over the file's own const table and
+/// the repo's.
+type TopicResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// LA.4 (A11.7): what the post-cache const fold read in one file.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ConstFoldCounts {
+    /// Occurrences whose identifier expression resolved to a topic.
+    pub folded: usize,
+    /// Occurrences that recorded an identifier expression the resolver could
+    /// not turn into a topic (a parameter, a runtime variable, an env read,
+    /// an ambiguous constant, a lower-case binding in another file).
+    pub unresolved: usize,
+}
+
+/// LA.4: both sides of one file's queue nodes, re-emitted with a resolver.
+pub struct ConstFold {
+    pub consumers: QueueNodes,
+    pub producers: QueueNodes,
+    pub counts: ConstFoldCounts,
+}
+
+/// LA.4 (A11.7): the file's queue nodes, both sides, emitted exactly as
+/// [`extract_queue_consumer_nodes`] + [`extract_queue_producer_nodes`] emit
+/// them, except that an occurrence naming its topic by an identifier becomes
+/// a site when `resolve` turns that identifier into a topic.
+///
+/// Resolution needs the whole repo's const table, which is not a function of
+/// this file, so the engine calls this AFTER the parse cache (never inside the
+/// per-file extractors) and swaps the file's queue nodes with
+/// [`replace_queue_nodes`] only when `counts.folded > 0`.
+pub fn extract_queue_nodes_with_consts(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> ConstFold {
+    let mut counts = ConstFoldCounts::default();
+    let consumers = emit_queue_nodes(
+        source,
+        path,
+        module_id,
+        repo,
+        CONSUMER_PATTERNS,
+        node_kind::QUEUE_CONSUMER,
+        "queue_consumer:",
+        Some(resolve),
+        &mut counts,
+    );
+    let producers = emit_queue_nodes(
+        source,
+        path,
+        module_id,
+        repo,
+        PRODUCER_PATTERNS,
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:",
+        Some(resolve),
+        &mut counts,
+    );
+    ConstFold {
+        consumers,
+        producers,
+        counts,
+    }
+}
+
+/// LA.4: swap every QUEUE_CONSUMER / QUEUE_PRODUCER node of one file's parse
+/// for `fold`'s, consumers then producers. Only this module mints those kinds.
+///
+/// Removed: the nodes, the `module -> node` CONTAINS edges, their name /
+/// qname / kind / parent entries and their ids in `children_of[module_id]`.
+/// The replacements go back IN PLACE — at the index the first removed node,
+/// edge and child id held — so a folded file's parse is laid out exactly as
+/// the per-file pass lays out a literal-topic file.
+///
+/// The router gave every node of a language-parser parse the raw G15 IMPORTS
+/// cell before the cache stored it. When the removed nodes carried it, the new
+/// ones get it too, last, via `attach_imports_cell` on a scratch parse (the
+/// `graft_rpc_markers` precedent), so the A16.4 filter then rewrites them like
+/// every other node. `lang` is the engine's language tag for that cell.
+pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fold: ConstFold) {
+    let is_queue =
+        |k: &NodeKindId| *k == node_kind::QUEUE_CONSUMER || *k == node_kind::QUEUE_PRODUCER;
+    let old: HashSet<NodeId> = fp
+        .nav
+        .kind_by_id
+        .iter()
+        .filter(|(_, k)| is_queue(k))
+        .map(|(id, _)| *id)
+        .collect();
+    let owned_edge = |e: &Edge| {
+        e.from == module_id && e.category == edge_category::CONTAINS && old.contains(&e.to)
+    };
+    let had_imports = fp
+        .nodes
+        .iter()
+        .any(|n| old.contains(&n.id) && n.cells.iter().any(|c| c.kind == cell_type::IMPORTS));
+
+    let node_at = fp
+        .nodes
+        .iter()
+        .position(|n| old.contains(&n.id))
+        .unwrap_or(fp.nodes.len());
+    fp.nodes.retain(|n| !old.contains(&n.id));
+    let edge_at = fp
+        .edges
+        .iter()
+        .position(&owned_edge)
+        .unwrap_or(fp.edges.len());
+    fp.edges.retain(|e| !owned_edge(e));
+    for id in &old {
+        fp.nav.name_by_id.remove(id);
+        fp.nav.qname_by_id.remove(id);
+        fp.nav.kind_by_id.remove(id);
+        fp.nav.parent_of.remove(id);
+    }
+    let child_at = match fp.nav.children_of.get_mut(&module_id) {
+        Some(children) => {
+            let at = children
+                .iter()
+                .position(|c| old.contains(c))
+                .unwrap_or(children.len());
+            children.retain(|c| !old.contains(c));
+            at
+        }
+        None => 0,
+    };
+
+    let ConstFold {
+        consumers,
+        producers,
+        ..
+    } = fold;
+    let mut fresh = FileParse {
+        nodes: consumers.nodes,
+        imports: if had_imports {
+            fp.imports.clone()
+        } else {
+            Vec::new()
+        },
+        ..Default::default()
+    };
+    fresh.nodes.extend(producers.nodes);
+    if had_imports {
+        attach_imports_cell(&mut fresh, lang);
+    }
+    fp.nodes.splice(node_at..node_at, fresh.nodes);
+    fp.edges.splice(
+        edge_at..edge_at,
+        consumers.edges.into_iter().chain(producers.edges),
+    );
+    let mut child_at = child_at;
+    for nav in [consumers.nav, producers.nav] {
+        fp.nav.name_by_id.extend(nav.name_by_id);
+        fp.nav.qname_by_id.extend(nav.qname_by_id);
+        fp.nav.kind_by_id.extend(nav.kind_by_id);
+        fp.nav.parent_of.extend(nav.parent_of);
+        for (parent, ids) in nav.children_of {
+            let dst = fp.nav.children_of.entry(parent).or_default();
+            if parent == module_id {
+                let at = child_at.min(dst.len());
+                let added = ids.len();
+                dst.splice(at..at, ids);
+                child_at = at + added;
+            } else {
+                dst.extend(ids);
+            }
+        }
+    }
 }
 
 /// Shared emit loop for both sides.
@@ -601,6 +782,17 @@ pub fn extract_queue_producer_nodes(
 /// own node, so a file that publishes to `orders` and `payments` stops hiding
 /// one of them. The framework-tag fallback is emitted only when NO occurrence
 /// of that needle named a topic.
+///
+/// LA.4 (A11.7): `resolve` is `None` on the per-file (cached) path, which is
+/// then byte-identical to before. The engine's post-cache const fold passes a
+/// resolver: an occurrence that read no literal but recorded an identifier
+/// expression ([`queue_topic::TopicHit::expr`]) becomes a site when the
+/// resolver names a value AND [`queue_topic::fold_topic`] accepts it — so a
+/// constant holding an SQS URL folds exactly as the literal would. Never on a
+/// generic-verb row (those keep their `literal_leads` guard) and never for
+/// `NoIdentity` or an A2.5 identity rule. `counts` tallies folded and
+/// unresolved expressions.
+#[allow(clippy::too_many_arguments)]
 fn emit_queue_nodes(
     source: &str,
     path: &str,
@@ -609,6 +801,8 @@ fn emit_queue_nodes(
     patterns: &[(&str, QueueFramework, &[&str], TopicRule)],
     kind: repo_graph_core::NodeKindId,
     prefix: &str,
+    resolve: Option<TopicResolver<'_>>,
+    counts: &mut ConstFoldCounts,
 ) -> QueueNodes {
     let mut pending: Vec<Pending> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -646,12 +840,36 @@ fn emit_queue_nodes(
         // A2.6: the literal's shape (url/arn/path) rides along for the
         // `[queues] cloud broker=` marker.
         // A12.1: the byte offset rides along too — it anchors the MESSAGE_TYPE scan.
+        // LA.4: the resolver only ever sees a row that may name a topic by an
+        // identifier; everything else reads exactly as it always has.
+        let folds = resolve.filter(|_| {
+            !is_generic_verb_row(framework)
+                && !is_identity_rule(rule)
+                && !matches!(rule, TopicRule::NoIdentity)
+        });
         let sites: Vec<(String, usize, usize, TopicForm)> = hits
             .iter()
             .filter_map(|h| {
-                h.topic
-                    .clone()
-                    .map(|t| (t, queue_topic::line_of(source, h.offset), h.offset, h.form))
+                let read = match (&h.topic, folds, h.expr.as_deref()) {
+                    (Some(t), _, _) => Some((t.clone(), h.form)),
+                    (None, Some(resolve), Some(expr)) => {
+                        let folded = resolve(expr).and_then(|v| queue_topic::fold_topic(&v));
+                        match &folded {
+                            Some((t, _)) => {
+                                counts.folded += 1;
+                                if debug_enabled() {
+                                    eprintln!(
+                                        "[queues] const-fold expr={expr} topic={t} framework={framework:?} file={path}"
+                                    );
+                                }
+                            }
+                            None => counts.unresolved += 1,
+                        }
+                        folded
+                    }
+                    _ => None,
+                };
+                read.map(|(t, form)| (t, queue_topic::line_of(source, h.offset), h.offset, form))
             })
             .collect();
         if debug_enabled() && !sites.is_empty() {
@@ -2521,5 +2739,327 @@ public class AuditFunction
         for topic in ["orders", "kafka", "nats"] {
             assert!(!is_framework_tag(topic), "{topic}");
         }
+    }
+
+    // ---- LA.4 (A11.7): post-cache const fold ------------------------------
+
+    /// A resolver over a fixed `expr -> value` table, like the engine's closure
+    /// over the file's own table and the repo's.
+    fn resolver(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |e: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == e)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    fn folded(src: &str, pairs: &'static [(&'static str, &'static str)]) -> ConstFold {
+        extract_queue_nodes_with_consts(src, PATH, module_id(), repo(), &resolver(pairs))
+    }
+
+    fn position(n: &Node) -> String {
+        payload(cell_of(n, cell_type::POSITION)).to_string()
+    }
+
+    #[test]
+    fn const_resolver_folds_keyed_positional_and_annotation_sites() {
+        // kafkajs object form, keyed.
+        let ts = "import { Kafka } from 'kafkajs';\n\nawait producer.send({ topic: ORDERS_TOPIC, messages });\n";
+        let f = folded(ts, &[("ORDERS_TOPIC", "orders")]);
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:orders".to_string()]
+        );
+        assert!(f.consumers.nodes.is_empty());
+        assert_eq!(
+            f.counts,
+            ConstFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
+        // The folded node keeps its call-site provenance and a Medium rank.
+        assert!(position(&f.producers.nodes[0]).contains(r#""start_line":2"#));
+        assert_eq!(f.producers.nodes[0].confidence, Confidence::Medium);
+
+        // Spring `kafkaTemplate.send(TOPIC, payload)`, positional.
+        let java = "import org.springframework.kafka.core.KafkaTemplate;\nclass P { void p() { kafkaTemplate.send(TOPIC, payload); } }\n";
+        let f = folded(java, &[("TOPIC", "orders")]);
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:orders".to_string()]
+        );
+
+        // `@KafkaListener(topics = Topics.ORDERS)`, the annotation's keyed slot.
+        let listener = "import org.springframework.kafka.annotation.KafkaListener;\nclass L {\n  @KafkaListener(topics = Topics.ORDERS, groupId = \"billing\")\n  public void on(String p) {}\n}\n";
+        let f = folded(listener, &[("Topics.ORDERS", "orders")]);
+        assert_eq!(
+            qnames(&f.consumers),
+            vec!["queue_consumer:orders".to_string()]
+        );
+        assert!(f.producers.nodes.is_empty());
+
+        // Go NATS `nc.Publish(SubjectOrders, data)`, a same-file PascalCase const.
+        let go =
+            "import \"github.com/nats-io/nats.go\"\nfunc p() { nc.Publish(SubjectOrders, data) }\n";
+        let f = folded(go, &[("SubjectOrders", "orders")]);
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:orders".to_string()]
+        );
+
+        // A constant holding an SQS URL folds exactly as the literal would.
+        let py = "import boto3\nsqs.send_message(QueueUrl=ORDERS_QUEUE_URL, MessageBody=b)\n";
+        let f = folded(
+            py,
+            &[(
+                "ORDERS_QUEUE_URL",
+                "https://sqs.us-east-1.amazonaws.com/123456789012/orders",
+            )],
+        );
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:orders".to_string()]
+        );
+
+        // Every one of these reads as the sentinel on the per-file path.
+        for (src, want) in [
+            (ts, "queue_producer:unresolved:kafka"),
+            (java, "queue_producer:unresolved:kafka"),
+            (go, "queue_producer:unresolved:nats"),
+        ] {
+            assert_eq!(producers(src), vec![want.to_string()], "{src}");
+        }
+        assert_eq!(
+            consumers(listener),
+            vec!["queue_consumer:unresolved:kafka".to_string()]
+        );
+    }
+
+    #[test]
+    fn mixed_literal_and_constant_sites_in_one_file() {
+        let src = "import { Kafka } from 'kafkajs';\nawait producer.send({ topic: 'audit', messages });\nawait producer.send({ topic: ORDERS_TOPIC, messages });\n";
+        // Per-file: the literal site names a topic, so the constant site is
+        // simply lost — no sentinel, no orders.
+        assert_eq!(producers(src), vec!["queue_producer:audit".to_string()]);
+        let f = folded(src, &[("ORDERS_TOPIC", "orders")]);
+        assert_eq!(
+            qnames(&f.producers),
+            vec![
+                "queue_producer:audit".to_string(),
+                "queue_producer:orders".to_string()
+            ]
+        );
+        assert_eq!(
+            f.counts,
+            ConstFoldCounts {
+                folded: 1,
+                unresolved: 0
+            }
+        );
+    }
+
+    #[test]
+    fn generic_verb_rows_never_resolve() {
+        // `.subscribe(` / `.publish(` are shared with Rx and in-process buses;
+        // their topic must LEAD the call as a literal, and a resolver cannot
+        // relax that guard.
+        let src = "const redis = require('redis');\nsub.subscribe(CHANNEL);\npub.publish(CHANNEL, msg);\n";
+        let f = folded(src, &[("CHANNEL", "orders")]);
+        assert_eq!(f.counts, ConstFoldCounts::default());
+        assert!(!qnames(&f.consumers).iter().any(|q| q.ends_with(":orders")));
+        assert!(!qnames(&f.producers).iter().any(|q| q.ends_with(":orders")));
+        assert_eq!(qnames(&f.consumers), consumers(src));
+        assert_eq!(qnames(&f.producers), producers(src));
+    }
+
+    #[test]
+    fn unresolvable_expr_keeps_the_sentinel() {
+        let src =
+            "import { Kafka } from 'kafkajs';\nawait producer.send({ topic: topic, messages });\n";
+        let f = folded(src, &[("OTHER", "orders")]);
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:unresolved:kafka".to_string()]
+        );
+        assert_eq!(
+            f.counts,
+            ConstFoldCounts {
+                folded: 0,
+                unresolved: 1
+            }
+        );
+        assert_eq!(f.producers.nodes[0].confidence, Confidence::Weak);
+        // A value the topic fold rejects (a placeholder queue name) is no topic.
+        let sqs = "import boto3\nsqs.send_message(QueueUrl=QUEUE_URL, MessageBody=b)\n";
+        let f = folded(
+            sqs,
+            &[(
+                "QUEUE_URL",
+                "https://sqs.us-east-1.amazonaws.com/1/${QUEUE}",
+            )],
+        );
+        assert_eq!(
+            qnames(&f.producers),
+            vec!["queue_producer:unresolved:sqs".to_string()]
+        );
+        assert_eq!(
+            f.counts,
+            ConstFoldCounts {
+                folded: 0,
+                unresolved: 1
+            }
+        );
+    }
+
+    /// One file's parse as the engine assembles it: a language-parser MODULE
+    /// and FUNCTION with an edge, then the queue extractors (consumers, then
+    /// producers), then a later extractor's node and edge; with `imports`, the
+    /// router's raw IMPORTS cell on every node.
+    fn file_parse(src: &str, imports: bool) -> FileParse {
+        let module = module_id();
+        let func = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test::publish");
+        let later = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CRON_JOB, "cron:nightly");
+        let bare = |id| Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        };
+        let contains = |to| Edge {
+            from: module,
+            to,
+            category: edge_category::CONTAINS,
+            confidence: Confidence::Strong,
+        };
+        let mut fp = FileParse {
+            nodes: vec![bare(module), bare(func)],
+            edges: vec![contains(func)],
+            ..Default::default()
+        };
+        fp.nav
+            .record(module, "test", "test", node_kind::MODULE, None);
+        fp.nav.record(
+            func,
+            "publish",
+            "test::publish",
+            node_kind::FUNCTION,
+            Some(module),
+        );
+        for out in [
+            extract_queue_consumer_nodes(src, PATH, module, repo()),
+            extract_queue_producer_nodes(src, PATH, module, repo()),
+        ] {
+            fp.nodes.extend(out.nodes);
+            fp.edges.extend(out.edges);
+            merge(&mut fp.nav, out.nav);
+        }
+        fp.nodes.push(bare(later));
+        fp.edges.push(contains(later));
+        fp.nav.record(
+            later,
+            "nightly",
+            "cron:nightly",
+            node_kind::CRON_JOB,
+            Some(module),
+        );
+        if imports {
+            fp.imports.push(repo_graph_code_domain::ImportStmt {
+                from_module: "test".into(),
+                target: repo_graph_code_domain::ImportTarget::Module {
+                    path: "kafkajs".into(),
+                    alias: None,
+                },
+            });
+            attach_imports_cell(&mut fp, "typescript");
+        }
+        fp
+    }
+
+    /// The engine's `merge_nav`, for the test's hand-assembled parse.
+    fn merge(dst: &mut CodeNav, src: CodeNav) {
+        dst.name_by_id.extend(src.name_by_id);
+        dst.qname_by_id.extend(src.qname_by_id);
+        dst.kind_by_id.extend(src.kind_by_id);
+        dst.parent_of.extend(src.parent_of);
+        for (k, v) in src.children_of {
+            dst.children_of.entry(k).or_default().extend(v);
+        }
+    }
+
+    /// The constant spelling and the literal spelling of the same file; the
+    /// lines match, so a fold of one must lay out exactly as the other.
+    const CONST_SRC: &str = "import { Kafka } from 'kafkajs';\nawait consumer.subscribe({ topic: 'payments' });\nawait producer.send({ topic: ORDERS_TOPIC, messages });\n";
+    const LITERAL_SRC: &str = "import { Kafka } from 'kafkajs';\nawait consumer.subscribe({ topic: 'payments' });\nawait producer.send({ topic: 'orders', messages });\n";
+
+    fn fold_in_place(imports: bool) -> (FileParse, FileParse) {
+        let mut fp = file_parse(CONST_SRC, imports);
+        let fold = folded(CONST_SRC, &[("ORDERS_TOPIC", "orders")]);
+        assert_eq!(fold.counts.folded, 1);
+        replace_queue_nodes(&mut fp, module_id(), "typescript", fold);
+        (fp, file_parse(LITERAL_SRC, imports))
+    }
+
+    #[test]
+    fn replace_queue_nodes_swaps_nodes_edges_and_nav() {
+        let before = file_parse(CONST_SRC, false);
+        let sentinel = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::QUEUE_PRODUCER,
+            "queue_producer:unresolved:kafka",
+        );
+        assert!(before.nav.kind_by_id.contains_key(&sentinel));
+
+        let (fp, literal) = fold_in_place(false);
+        // Nodes, edges and child order match the literal-topic parse exactly:
+        // the replacements went back where the removed queue nodes were.
+        assert_eq!(fp.nodes, literal.nodes);
+        assert_eq!(fp.edges, literal.edges);
+        assert_eq!(fp.nav.children_of, literal.nav.children_of);
+        assert_eq!(fp.nav.qname_by_id, literal.nav.qname_by_id);
+        assert_eq!(fp.nav.name_by_id, literal.nav.name_by_id);
+        assert_eq!(fp.nav.kind_by_id, literal.nav.kind_by_id);
+        assert_eq!(fp.nav.parent_of, literal.nav.parent_of);
+        // The sentinel is gone from every index; nothing else was touched.
+        assert!(!fp.nodes.iter().any(|n| n.id == sentinel));
+        assert!(!fp.edges.iter().any(|e| e.to == sentinel));
+        assert!(!fp.nav.parent_of.contains_key(&sentinel));
+        assert_eq!(fp.nodes.first(), before.nodes.first());
+        assert_eq!(fp.nodes.last(), before.nodes.last());
+        assert_eq!(fp.edges.last(), before.edges.last());
+    }
+
+    #[test]
+    fn replace_queue_nodes_keeps_the_imports_cell() {
+        let (fp, literal) = fold_in_place(true);
+        assert_eq!(fp.nodes, literal.nodes);
+        let orders = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::QUEUE_PRODUCER,
+            "queue_producer:orders",
+        );
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == orders)
+            .expect("folded node");
+        let imports: Vec<_> = node
+            .cells
+            .iter()
+            .filter(|c| c.kind == cell_type::IMPORTS)
+            .collect();
+        assert_eq!(imports.len(), 1, "exactly one IMPORTS cell");
+        assert_eq!(node.cells.last().map(|c| c.kind), Some(cell_type::IMPORTS));
+        assert_eq!(payload(imports[0]), r#"["kafkajs"]"#);
+        // A parse that never carried the cell does not gain one.
+        let (bare, _) = fold_in_place(false);
+        assert!(
+            bare.nodes
+                .iter()
+                .all(|n| n.cells.iter().all(|c| c.kind != cell_type::IMPORTS))
+        );
     }
 }

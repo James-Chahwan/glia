@@ -1,0 +1,73 @@
+{
+  "framework": "xcut-queue-const-topic",
+  "language": "typescript",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "note": "LA.4 (programme A11.7). The producer names its topics through constants: a SCREAMING_CASE export imported from topics.ts (cross-file) and a dotted object-literal member Topics.PAYMENTS. Baseline 2026-09-18 (HEAD 7a4883b): every send reads as the unpairable sentinel queue_producer:unresolved:kafka, so neither topic pairs. publishTo(topic) is a parameter and audit.ts binds a function-local lowercase `topic` in ANOTHER file: the cross-file shape gate must keep that binding out, so no producer for audit-log may appear.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "producer.send({ topic: ORDERS_TOPIC }) folded through the repo const table"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:payments",
+      "note": "producer.send({ topic: Topics.PAYMENTS }) — dotted object-literal key"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "literal subscribe, unchanged"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:payments",
+      "note": "literal subscribe, unchanged"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "const-folded producer pairs topic-exact"
+    },
+    {
+      "from": "queue_producer:payments",
+      "to": "queue_consumer:payments",
+      "category": "QUEUE_FLOWS",
+      "note": "const-folded producer pairs topic-exact"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "node": "queue_producer:orders",
+      "cell": "POSITION",
+      "contains": "\"file\":\"publish.ts\",\"start_line\":7",
+      "note": "the folded node keeps its call-site provenance (0-indexed send line)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:audit-log",
+      "note": "PRECISION: a lowercase binding in another file never names a parameter's topic"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:topic",
+      "note": "an identifier is never itself a topic"
+    },
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:payments",
+      "category": "QUEUE_FLOWS",
+      "note": "topics stay apart"
+    }
+  ]
+}

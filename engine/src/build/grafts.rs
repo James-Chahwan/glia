@@ -5,21 +5,24 @@
 //! the per-file extractors. That keeps incremental == clean.
 
 use std::collections::HashMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::{
-    FileParse, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
+    FileParse, GRAPH_TYPE, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
 };
-use repo_graph_code_extractors::anchor;
 use repo_graph_code_extractors::constants::ConstTable;
-use repo_graph_core::RepoId;
+use repo_graph_code_extractors::{anchor, queue_topic, queues};
+use repo_graph_core::{CellPayload, NodeId, RepoId};
 
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
+use crate::extract::{detect_language, path_to_qname};
 
 /// Run every post-cache graft over one repo's parses, in order: the A11.2
-/// endpoint fold, the A5.2 / A5.3 RPC needles with their `[grpc-client]` /
-/// `[grpc-server-impl]` markers, the A5.8 `[marker-anchor]` census, then the
-/// A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1 table.
+/// endpoint fold, the LA.4 queue-topic const fold, the A5.2 / A5.3 RPC needles
+/// with their `[grpc-client]` / `[grpc-server-impl]` markers, the A5.8
+/// `[marker-anchor]` census, then the A16.4 IMPORTS-cell filter. `const_table`
+/// is the repo's A11.1 table.
 pub(super) fn apply_post_cache(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -33,6 +36,11 @@ pub(super) fn apply_post_cache(
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse.
     endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo)
+        .report(repo_label);
+    // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
+    // cache rule as the endpoint fold; runs before the A16.4 filter, which then
+    // rewrites the folded nodes' IMPORTS cell like every other node's.
+    apply_queue_const_topics(parses_by_lang, files, repo, const_table, parse_errors)
         .report(repo_label);
 
     let rpc_added = apply_rpc_needles(parses_by_lang, files, repo, rpc, parse_errors);
@@ -74,6 +82,147 @@ pub(super) fn apply_post_cache(
     // cache (cached parses are filtered too) and after the RPC grafts (whose
     // markers carry the same cell).
     filter_imports_cells(parses_by_lang, repo_label);
+}
+
+/// LA.4 (A11.7): per-repo tallies of the queue-topic const fold.
+#[derive(Debug, Default)]
+struct QueueConstStats {
+    /// Files whose queue nodes were swapped (at least one site folded).
+    files: usize,
+    /// Topic sites an identifier named and the const tables resolved.
+    folded: usize,
+    /// Topic sites an identifier named and nothing resolved.
+    unresolved: usize,
+}
+
+impl QueueConstStats {
+    /// fired_on marker, once per repo where any queue topic slot held an
+    /// identifier:
+    ///   `[queue-const] folded {n} topic sites in {f} files (unresolved={u}) repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.folded + self.unresolved > 0 {
+            eprintln!(
+                "[queue-const] folded {} topic sites in {} files (unresolved={}) repo={repo_label}",
+                self.folded, self.files, self.unresolved
+            );
+        }
+    }
+}
+
+/// LA.4 (A11.7): fold queue topics named by a constant through the const
+/// tables, before the unresolved-sentinel fallback has the last word.
+///
+/// The per-file queue extractor records the identifier in a topic slot
+/// (`queue_topic::TopicHit::expr`) but cannot resolve it: a lookup reads other
+/// files, and the extractor's output is cached by the file's own hash (the
+/// constants.rs cache rule). So this pass re-runs the text-only queue scan —
+/// no tree-sitter — with a resolver, for the files whose parse already holds a
+/// queue node, cached parses included; the cache keeps the pre-fold parse.
+///
+/// Resolution is strict. A SAME-FILE binding resolves at any shape (Go
+/// `const SubjectOrders`, a TS class field read as `this.topic`); a binding
+/// in another file only when the expression is constant-shaped
+/// (`ConstTable::resolve_identity`); an ambiguous key never. A wrong topic
+/// manufactures a false cross-service QUEUE_FLOWS edge; no topic does not.
+///
+/// A file's queue nodes are swapped (`queues::replace_queue_nodes`) only when
+/// at least one site folded, so every other file is untouched. `files` is
+/// walk-sorted and the parse index is keyed by (language, module), so the
+/// result does not depend on HashMap order.
+fn apply_queue_const_topics(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    repo: RepoId,
+    consts: &ConstTable,
+    parse_errors: &mut Vec<String>,
+) -> QueueConstStats {
+    let mut stats = QueueConstStats::default();
+    let is_queue = |k: &repo_graph_core::NodeKindId| {
+        *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER
+    };
+    // (language, module) -> the parses holding a queue node under that module,
+    // in walk order. The module is the queue nodes' parent: the id the router
+    // handed the extractors, whatever the language parser emitted first.
+    let mut holders: HashMap<(&'static str, NodeId), Vec<usize>> = HashMap::new();
+    for (lang, parses) in parses_by_lang.iter() {
+        for (i, fp) in parses.iter().enumerate() {
+            let module = fp
+                .nav
+                .kind_by_id
+                .iter()
+                .find(|(_, k)| is_queue(k))
+                .and_then(|(id, _)| fp.nav.parent_of.get(id));
+            if let Some(module) = module {
+                holders.entry((*lang, *module)).or_default().push(i);
+            }
+        }
+    }
+    if holders.is_empty() {
+        return stats;
+    }
+    for (path, source) in files {
+        let Some(lang) = detect_language(path) else {
+            continue;
+        };
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+        let Some(candidates) = holders.get(&(lang, module_id)) else {
+            continue;
+        };
+        let Some(parses) = parses_by_lang.get_mut(lang) else {
+            continue;
+        };
+        // `a.ts` and `a.js` share a module id; the queue nodes' POSITION names
+        // the file they were read from, so a fold never lands on a sibling.
+        let position = format!(r#"{{"file":"{}","#, queue_topic::escape_json(path));
+        let Some(&at) = candidates.iter().find(|&&i| {
+            parses
+                .get(i)
+                .is_some_and(|fp| queue_nodes_read_from(fp, &position))
+        }) else {
+            continue;
+        };
+        let Some(fp) = parses.get_mut(at) else {
+            continue;
+        };
+        let fold = catch_unwind(AssertUnwindSafe(|| {
+            let local = ConstTable::scan_file(source, lang);
+            let resolve = |expr: &str| {
+                local
+                    .resolve_expr_strict(expr)
+                    .or_else(|| consts.resolve_identity(expr))
+                    .map(str::to_string)
+            };
+            queues::extract_queue_nodes_with_consts(source, path, module_id, repo, &resolve)
+        }));
+        match fold {
+            Ok(fold) => {
+                stats.folded += fold.counts.folded;
+                stats.unresolved += fold.counts.unresolved;
+                if fold.counts.folded > 0 {
+                    stats.files += 1;
+                    queues::replace_queue_nodes(fp, module_id, lang, fold);
+                }
+            }
+            Err(_) => parse_errors.push(format!("{path}: PANIC (queue const fold)")),
+        }
+    }
+    stats
+}
+
+/// Does one of `fp`'s queue nodes carry a POSITION cell opening with
+/// `position` (`{"file":"<escaped path>",`)?
+fn queue_nodes_read_from(fp: &FileParse, position: &str) -> bool {
+    fp.nodes.iter().any(|n| {
+        fp.nav
+            .kind_by_id
+            .get(&n.id)
+            .is_some_and(|k| *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER)
+            && n.cells.iter().any(|c| {
+                c.kind == cell_type::POSITION
+                    && matches!(&c.payload, CellPayload::Json(p) if p.starts_with(position))
+            })
+    })
 }
 
 /// A16.4 (audit 2026-06-10 #12): rewrite each file's IMPORTS cell without the

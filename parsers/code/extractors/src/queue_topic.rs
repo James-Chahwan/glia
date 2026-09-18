@@ -33,6 +33,14 @@ pub struct TopicHit {
     pub form: TopicForm,
     /// Byte index of the needle in the source (stable, for ordering/debug).
     pub offset: usize,
+    /// LA.4 (A11.7): the identifier expression sitting in the rule's topic
+    /// slot when no literal was read there (`ORDERS_TOPIC`, `Topics.ORDERS`,
+    /// `this.topic`, the key of an ES6 shorthand `{ topic }`). `None` whenever
+    /// `topic` is `Some`, for `NoIdentity` and the A2.5 identity rules, and
+    /// for anything that is not a plain identifier chain. Recorded, never
+    /// resolved here: the engine folds it through the repo const table after
+    /// the parse cache (`queues::extract_queue_nodes_with_consts`).
+    pub expr: Option<String>,
 }
 
 /// A2.6: the shape a topic literal had before [`fold_topic`] reduced it to a
@@ -172,14 +180,19 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
             TopicRule::EnclosingSymbol => verbatim(enclosing_symbol(source, offset)),
             _ => topic_at(source, after, needle, rule),
         };
-        let (topic, form) = match read {
-            Some((t, f)) => (Some(t), f),
-            None => (None, TopicForm::Literal),
+        let (topic, form, expr) = match read {
+            Some((t, f)) => (Some(t), f, None),
+            None => (
+                None,
+                TopicForm::Literal,
+                expr_at(source, after, needle, rule),
+            ),
         };
         hits.push(TopicHit {
             topic,
             form,
             offset,
+            expr,
         });
     }
     hits
@@ -320,6 +333,25 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
         }
         // `NoIdentity` and the A2.5 identity rules never read an argument
         // region; `scan` dispatches them before it gets here.
+        _ => None,
+    }
+}
+
+/// LA.4: the identifier expression in the slot [`topic_at`] read no literal
+/// from — the same region, the same argument, the same key, tried in the same
+/// order. `NoIdentity` and the A2.5 identity rules never carry one.
+fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
+    let region = arg_region(source, after, needle);
+    match rule {
+        TopicRule::ArgLiteral => arg_expr(region?, 0),
+        TopicRule::ArgIndex(n) => arg_expr(region?, n),
+        TopicRule::Keyed(keys) => {
+            keyed_expr(region.unwrap_or_else(|| line_region(source, after)), keys)
+        }
+        TopicRule::KeyedOrArg(keys) => {
+            let region = region?;
+            keyed_expr(region, keys).or_else(|| arg_expr(region, 0))
+        }
         _ => None,
     }
 }
@@ -485,6 +517,155 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// LA.4 (A11.7) — the identifier in a topic slot, for the engine's const fold
+// ---------------------------------------------------------------------------
+
+/// Bytes an identifier chain may continue with: `Topics.ORDERS`,
+/// `Topics::ORDERS`, `$this->topic`, `config?.topic`, `cfg!.topic`.
+fn is_expr_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'.' | b':' | b'>' | b'?' | b'!' | b'-')
+}
+
+/// Bytes that may end a keyed value: the next member, the close of the
+/// object / array / call, a statement end, or the end of a paren-less line.
+fn ends_value(c: Option<&u8>) -> bool {
+    matches!(
+        c,
+        None | Some(b',' | b'}' | b']' | b')' | b';' | b'\n' | b'\r')
+    )
+}
+
+/// The identifier chain at the start of `s`, with an optional trailing `()`,
+/// and the byte length it spans. First byte `[A-Za-z_$@]`; a quote, a
+/// whitespace, `+`, `[`, `{` or a `(` that is not exactly `()` ends it, and the
+/// caller decides whether what follows is allowed. At most
+/// [`MAX_TOPIC_LEN`] bytes. Every byte stepped over is ASCII, so the slice
+/// lands on a char boundary.
+fn ident_chain(s: &str) -> Option<(&str, usize)> {
+    let b = s.as_bytes();
+    let first = b.first()?;
+    if !(first.is_ascii_alphabetic() || matches!(first, b'_' | b'$' | b'@')) {
+        return None;
+    }
+    let mut i = 1usize;
+    while matches!(b.get(i), Some(c) if is_expr_byte(*c)) {
+        i += 1;
+    }
+    if b.get(i) == Some(&b'(') && b.get(i + 1) == Some(&b')') {
+        i += 2;
+    }
+    if i > MAX_TOPIC_LEN {
+        return None;
+    }
+    Some((s.get(..i)?, i))
+}
+
+/// The identifier expression that IS positional argument `n` — the slot
+/// [`arg_literal`] reads. The whole trimmed argument must be one chain, so
+/// `PREFIX + id`, `topicFor(a)`, `[TOPIC]` and every literal are `None`.
+fn arg_expr(region: &str, n: usize) -> Option<String> {
+    let arg = split_args(region).get(n)?.trim();
+    let (expr, len) = ident_chain(arg)?;
+    (len == arg.len()).then(|| expr.to_string())
+}
+
+/// The identifier expression after `<key> <sep>`, where [`keyed_literal`]
+/// looks for its literal (same keys, same order, same quoted-key and builder
+/// forms), or the key itself for an ES6 shorthand member (`{ topic, messages }`
+/// — the key is preceded by `{` or `,` and followed by `,` or `}`). The value
+/// must end the member: `topic: PREFIX + id` is `None`.
+fn keyed_expr(region: &str, keys: &[&str]) -> Option<String> {
+    let lower = region.to_ascii_lowercase();
+    if lower.len() != region.len() {
+        return None;
+    }
+    let b = region.as_bytes();
+    for key in keys {
+        let k = key.to_ascii_lowercase();
+        if k.is_empty() {
+            continue;
+        }
+        let mut from = 0usize;
+        while let Some(rel) = lower.get(from..).and_then(|s| s.find(&k)) {
+            let start = from + rel;
+            let end = start + k.len();
+            from = end;
+            if !word_edge(b, start.checked_sub(1)) || !word_edge(b, Some(end)) {
+                continue;
+            }
+            let mut j = end;
+            let quoted_key = matches!(b.get(j), Some(b'\'' | b'"' | b'`'));
+            if quoted_key {
+                j += 1;
+            }
+            j = skip_ws(b, j);
+            let builder = b.get(j) == Some(&b'(') && start > 0 && b.get(start - 1) == Some(&b'.');
+            let Some(sep) = separator_len(b, j).or(builder.then_some(1)) else {
+                if !quoted_key && shorthand_member(b, start, j) {
+                    return region.get(start..end).map(str::to_string);
+                }
+                continue;
+            };
+            let value_at = skip_ws(b, j + sep);
+            let Some(rest) = region.get(value_at..) else {
+                continue;
+            };
+            let Some((expr, len)) = ident_chain(rest) else {
+                continue;
+            };
+            if ends_value(b.get(skip_ws(b, value_at + len))) {
+                return Some(expr.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// An ES6 shorthand member: the key at `start` opens a member (`{` or `,`
+/// before it), `after_ws`, the first byte past it, closes one, and the
+/// innermost bracket open at `start` is a `{` — so a bare positional argument
+/// (`send(a, topic, b)`) is never read as a member.
+fn shorthand_member(b: &[u8], start: usize, after_ws: usize) -> bool {
+    let mut i = start;
+    while i > 0 && b.get(i - 1).is_some_and(u8::is_ascii_whitespace) {
+        i -= 1;
+    }
+    let opens = i > 0 && matches!(b.get(i - 1), Some(b'{' | b','));
+    opens && matches!(b.get(after_ws), Some(b',' | b'}')) && innermost_open(b, start) == Some(b'{')
+}
+
+/// The innermost bracket still open at byte `at`, quotes and `\` escapes
+/// respected (the same walk as [`split_args`]).
+fn innermost_open(b: &[u8], at: usize) -> Option<u8> {
+    let mut open: Vec<u8> = Vec::new();
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < at.min(b.len()) {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'{' | b'[' => open.push(c),
+                b')' | b'}' | b']' => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    open.last().copied()
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,6 +1326,153 @@ mod tests {
         let var = r#"send_message(QueueUrl=f, Body="x")"#;
         assert_eq!(
             one(var, "send_message(", TopicRule::Keyed(&["queueurl"])),
+            None
+        );
+    }
+
+    fn expr(source: &str, needle: &str, rule: TopicRule) -> Option<String> {
+        scan(source, needle, rule).into_iter().next()?.expr
+    }
+
+    #[test]
+    fn expr_is_captured_only_for_identifier_slots() {
+        let keyed = TopicRule::KeyedOrArg(&["topic"]);
+        // Identifier chains in the topic slot, every rule shape.
+        let cases: &[(&str, &str, TopicRule, &str)] = &[
+            (
+                "producer.send({ topic: ORDERS_TOPIC, messages })",
+                "producer.send",
+                keyed,
+                "ORDERS_TOPIC",
+            ),
+            (
+                "producer.send({ topic: Topics.PAYMENTS })",
+                "producer.send",
+                keyed,
+                "Topics.PAYMENTS",
+            ),
+            (
+                "producer.send({ topic, messages: [m] })",
+                "producer.send",
+                keyed,
+                "topic",
+            ),
+            (
+                "producer.send({ topic: this.topic })",
+                "producer.send",
+                keyed,
+                "this.topic",
+            ),
+            (
+                "kafkaTemplate.send(TOPIC, payload)",
+                "Template.send(",
+                TopicRule::ArgLiteral,
+                "TOPIC",
+            ),
+            (
+                "nc.Publish(SubjectOrders, data)",
+                "nc.Publish",
+                TopicRule::ArgLiteral,
+                "SubjectOrders",
+            ),
+            (
+                "@KafkaListener(topics = Topics.ORDERS, groupId = \"billing\")",
+                "@KafkaListener",
+                TopicRule::Keyed(&["topics", "topic"]),
+                "Topics.ORDERS",
+            ),
+            (
+                "ch.basic_publish(EXCHANGE, ROUTING_KEY, b)",
+                "ch.basic_publish",
+                TopicRule::ArgIndex(1),
+                "ROUTING_KEY",
+            ),
+            (
+                "$q->push(['topic' => $this->topic])",
+                "$q->push",
+                TopicRule::Keyed(&["topic"]),
+                "$this->topic",
+            ),
+            (
+                "send(topic: config?.topic())",
+                "send",
+                TopicRule::Keyed(&["topic"]),
+                "config?.topic()",
+            ),
+        ];
+        for (src, needle, rule, want) in cases {
+            let hit = scan(src, needle, *rule)
+                .into_iter()
+                .next()
+                .expect("needle hit");
+            assert_eq!(hit.topic, None, "{src}");
+            assert_eq!(hit.expr.as_deref(), Some(*want), "{src}");
+        }
+        // Not a plain identifier chain, or no slot at all: nothing recorded.
+        let none: &[(&str, &str, TopicRule)] = &[
+            (
+                "producer.send({ topic: PREFIX + suffix })",
+                "producer.send",
+                keyed,
+            ),
+            (
+                "producer.send({ topic: getTopic(a) })",
+                "producer.send",
+                keyed,
+            ),
+            (
+                "producer.send({ topic: topics[0] })",
+                "producer.send",
+                keyed,
+            ),
+            (
+                "nc.Publish(prefix + suffix, data)",
+                "nc.Publish",
+                TopicRule::ArgLiteral,
+            ),
+            (
+                "nc.Publish(topicFor(a), data)",
+                "nc.Publish",
+                TopicRule::ArgLiteral,
+            ),
+            (
+                "nc.Publish([TOPIC], data)",
+                "nc.Publish",
+                TopicRule::ArgLiteral,
+            ),
+            // a bare positional argument is not a shorthand member
+            (
+                "q.push(a, topic, b)",
+                "q.push",
+                TopicRule::Keyed(&["topic"]),
+            ),
+            ("r.ReadMessage(ctx)", "r.ReadMessage", TopicRule::NoIdentity),
+            (
+                "tasks.send_email.delay(user)",
+                ".delay(",
+                TopicRule::Receiver,
+            ),
+        ];
+        for (src, needle, rule) in none {
+            assert_eq!(expr(src, needle, *rule), None, "{src}");
+        }
+        // A literal read leaves no expression behind.
+        let lit = scan("producer.send({ topic: 'orders' })", "producer.send", keyed);
+        assert_eq!(lit[0].topic.as_deref(), Some("orders"));
+        assert_eq!(lit[0].expr, None);
+        // A template literal is never an identifier chain.
+        assert_eq!(arg_expr("`orders.${env}`, payload", 0), None);
+        assert_eq!(keyed_expr("{ topic: `orders.${env}` }", &["topic"]), None);
+        // Over-long chains are refused like an over-long literal.
+        let long = format!("nc.Publish({}, d)", "A".repeat(MAX_TOPIC_LEN + 1));
+        assert_eq!(expr(&long, "nc.Publish", TopicRule::ArgLiteral), None);
+        // Multibyte input around the slot never panics.
+        assert_eq!(
+            expr("nc.Publish(é, d)", "nc.Publish", TopicRule::ArgLiteral),
+            None
+        );
+        assert_eq!(
+            expr("send({ topic: ü })", "send", TopicRule::Keyed(&["topic"])),
             None
         );
     }

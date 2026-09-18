@@ -1,0 +1,42 @@
+{
+  "framework": "xcut-queue-const-topic-java",
+  "language": "java",
+  "dirs": [
+    "orders",
+    "billing"
+  ],
+  "mechanism": "kafka",
+  "note": "LA.4 (programme A11.7), Spring Kafka. The producer sends to a same-class `private static final String TOPIC`; the consumer listens on `@KafkaListener(topics = Topics.ORDERS)`, a constant declared in ANOTHER class of its repo. Baseline 2026-09-18 (HEAD 7a4883b): both sides read as queue_*:unresolved:kafka, so the flow is invisible.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders",
+      "note": "kafkaTemplate.send(TOPIC, payload) — same-class constant"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders",
+      "note": "@KafkaListener(topics = Topics.ORDERS) — dotted cross-class constant, last segment ORDERS is SCREAMING_CASE and unambiguous"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders",
+      "category": "QUEUE_FLOWS",
+      "note": "both ends const-folded"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "note": "the only send names a resolvable constant; no sentinel may survive"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "the only listener names a resolvable constant; no sentinel may survive"
+    }
+  ]
+}

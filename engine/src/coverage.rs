@@ -45,7 +45,9 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "*",
         edge_category: "QUEUE_FLOWS",
-        note: "topics built from variables, constants or env vars are extracted as an unresolved framework tag and never paired",
+        // LA.4 (A11.7): literal constants now fold through the repo const
+        // table after the parse cache; this names what stays blind.
+        note: "topics passed as parameters, runtime variables or env vars - and constants that are ambiguous, or lower-case bindings in another file - are extracted as an unresolved framework tag and never paired; literal constants the repo table resolves are folded",
         verify: "grep the topic constant or env var name",
     },
     CoverageCaveat {
