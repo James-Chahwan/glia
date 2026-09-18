@@ -231,6 +231,10 @@ Resume-by-run-id across sessions is unreliable: after a break, check commits sin
 ## 5. Open work, ranked
 
 ### 5.1 Release (James's decision, not yours)
+> **Superseded 2026-09-18:** there is no interim release. Nothing is pushed, tagged or published until the 0.5.0 bump,
+> which ships this programme together with the next leap — see `dev-notes/next-leap-0.5.0.md` §1. The checks below
+> move to that bump's checklist.
+
 Review 142 commits → push → version bump (0.4.18 → next) → tag → PyPI (`repo-graph-py` wheel builds on `v*` tags)
 → repo-graph session consumes `dev-notes/repo-graph-handoff-programme-2026-09.md`. **Before the repo-graph pin moves:**
 confirm the wrapper decodes node/edge/cell types via `kind_names()` / `category_names()` / `cell_type_names()` (new ids
