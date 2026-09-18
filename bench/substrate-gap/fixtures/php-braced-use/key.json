@@ -1,0 +1,42 @@
+{
+  "framework": "php-braced-use",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.40b: a `use` inside the braced `namespace X { }` form belongs to the file. HEAD: parsers/code/php/src/lib.rs visit_namespace walks the braced body with the namespace qname, visit_children hands it to collect_use as from_module (`App::Http::Controllers`), graph resolve_imports_python finds no MODULE of that qname and drops the statement: 0 IMPORTS, and the `$u = new User(); $u->find()` call that binds through the import never resolves. The statement form (app/Legacy/Report.php) is the control and resolves on HEAD.",
+  "expect_edges": [
+    {
+      "from": "Http::Controllers::UserController",
+      "to": "App::Models::User",
+      "category": "IMPORTS",
+      "note": "braced-namespace use -> the imported class"
+    },
+    {
+      "from": "UserController::show",
+      "to": "User::find",
+      "category": "CALLS",
+      "note": "the `new User()` receiver binds through the import (php local_receiver_types)"
+    },
+    {
+      "from": "Legacy::Report",
+      "to": "App::Models::User",
+      "category": "IMPORTS",
+      "note": "control: the statement form resolves on HEAD"
+    },
+    {
+      "from": "Report::run",
+      "to": "User::find",
+      "category": "CALLS",
+      "note": "control"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "App::Http::Controllers",
+      "to": "App::Models::User",
+      "category": "IMPORTS",
+      "note": "PRECISION: the import belongs to the file MODULE, never to the namespace PACKAGE"
+    }
+  ]
+}

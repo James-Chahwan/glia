@@ -30,6 +30,7 @@ pub fn parse_file(
     // query site resolves its receiver whatever the declaration order.
     let mut acc = Acc {
         eloquent: Eloquent::prescan(root, src),
+        module_qname: module_qname.to_string(),
         ..Acc::default()
     };
 
@@ -68,6 +69,12 @@ pub fn parse_file(
         eprintln!(
             "[qname] php: {} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}",
             acc.dir_scoped_types
+        );
+    }
+    if acc.scoped_uses > 0 && bind_debug_enabled() {
+        eprintln!(
+            "[php-use] {} braced-namespace uses bound to the file module {module_qname} file={file_rel_path}",
+            acc.scoped_uses
         );
     }
 
@@ -148,6 +155,12 @@ struct Acc {
     /// LB.7b: top-level types minted under the directory scope (outside a
     /// braced namespace) — the `[qname] php:` marker's count.
     dir_scoped_types: usize,
+    /// LA.40b: the file MODULE's qname — every `use` is recorded with it as
+    /// `from_module`, whichever namespace form holds the statement.
+    module_qname: String,
+    /// LA.40b: `use` statements found inside a braced `namespace X { }` body
+    /// (bound to the file module, not the namespace) — the `[php-use]` count.
+    scoped_uses: usize,
     /// ENDPOINT ids already minted in THIS file — `push_client_endpoint` dedups
     /// the node through it while still pushing one CALLS edge per call site.
     endpoint_seen: std::collections::HashSet<NodeId>,
@@ -155,10 +168,10 @@ struct Acc {
     eloquent: Eloquent,
 }
 
-/// `parent_qname` scopes functions and `use` statements; `type_scope` scopes
-/// classes / interfaces / enums. At the file root they differ (the file module
-/// vs its directory, LB.7b); inside a braced namespace body both are the
-/// namespace.
+/// `parent_qname` scopes functions; `type_scope` scopes classes / interfaces /
+/// enums. At the file root they differ (the file module vs its directory,
+/// LB.7b); inside a braced namespace body both are the namespace. A `use`
+/// statement always belongs to the file module (`acc.module_qname`, LA.40b).
 #[allow(clippy::too_many_arguments)]
 fn visit_children(
     node: TsNode,
@@ -192,7 +205,12 @@ fn visit_children(
                 false
             }
             "namespace_use_declaration" => {
-                collect_use(child, src, parent_qname, acc);
+                // Below the `program` root means inside a braced namespace
+                // body: the use still binds for the whole file.
+                if node.kind() != "program" {
+                    acc.scoped_uses += 1;
+                }
+                collect_use(child, src, acc);
                 false
             }
             _ => false,
@@ -1272,7 +1290,13 @@ fn extract_laravel_handler(after_path: &str) -> Option<CallQualifier> {
     None
 }
 
-fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+/// Record one `use` statement as imported by the FILE module. PHP scopes a
+/// `use` inside a braced `namespace X { }` to that block, but glia's import
+/// bindings are per file, and the graph resolves `from_module` against MODULE
+/// nodes only: the namespace PACKAGE would drop the statement (and every call
+/// binding through it). Two blocks of one file binding the same name: the later
+/// `use` wins, in source order (LA.40b).
+fn collect_use(node: TsNode, src: &[u8], acc: &mut Acc) {
     let text = text_of(node, src).trim().to_string();
     let path = text.trim_start_matches("use ").trim_end_matches(';').trim();
 
@@ -1280,7 +1304,7 @@ fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         let module_part = &path[..last_bs];
         let name = &path[last_bs + 1..];
         acc.imports.push(ImportStmt {
-            from_module: from_module.to_string(),
+            from_module: acc.module_qname.clone(),
             target: ImportTarget::Symbol {
                 module: module_part.replace('\\', "::"),
                 name: name.to_string(),
@@ -1290,7 +1314,7 @@ fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
         });
     } else {
         acc.imports.push(ImportStmt {
-            from_module: from_module.to_string(),
+            from_module: acc.module_qname.clone(),
             target: ImportTarget::Module {
                 path: path.replace('\\', "::"),
                 alias: None,
@@ -2541,6 +2565,82 @@ use Illuminate\Http\Request;
 "#;
         let fp = parse_file(source, "src/Controller.php", "App::Controller", repo()).unwrap();
         assert_eq!(fp.imports.len(), 2);
+        assert!(
+            fp.imports
+                .iter()
+                .all(|i| i.from_module == "App::Controller"),
+            "statement-form use belongs to the file module: {:?}",
+            fp.imports
+        );
+    }
+
+    /// LA.40b: a `use` inside a braced namespace body is recorded with the FILE
+    /// module as from_module — the namespace PACKAGE is no MODULE, so the graph
+    /// would drop the statement.
+    #[test]
+    fn use_inside_braced_namespace_belongs_to_the_file() {
+        let source = r#"<?php
+namespace App\Http\Controllers {
+    use App\Models\User;
+    class C {}
+}
+"#;
+        let module = "app::Http::Controllers::UserController";
+        let fp = parse_file(
+            source,
+            "app/Http/Controllers/UserController.php",
+            module,
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.imports,
+            vec![ImportStmt {
+                from_module: module.to_string(),
+                target: ImportTarget::Symbol {
+                    module: "App::Models".to_string(),
+                    name: "User".to_string(),
+                    alias: None,
+                    level: 0,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn two_braced_blocks_in_one_file_both_bind_to_the_file() {
+        let source = r#"<?php
+namespace App\One {
+    use App\Models\User;
+    class A {}
+}
+namespace App\Two {
+    use App\Models\Post;
+    use Vendor;
+    class B {}
+}
+"#;
+        let module = "src::Mixed";
+        let fp = parse_file(source, "src/Mixed.php", module, repo()).unwrap();
+        assert_eq!(fp.imports.len(), 3, "{:?}", fp.imports);
+        assert!(
+            fp.imports.iter().all(|i| i.from_module == module),
+            "every braced block's use binds to the file: {:?}",
+            fp.imports
+        );
+        let names: Vec<&str> = fp
+            .imports
+            .iter()
+            .map(|i| match &i.target {
+                ImportTarget::Symbol { name, .. } => name.as_str(),
+                ImportTarget::Module { path, .. } => path.as_str(),
+            })
+            .collect();
+        assert_eq!(names, ["User", "Post", "Vendor"]);
+        // The types stay namespace-scoped (LB.7b's braced rule is untouched).
+        let qnames: Vec<&str> = fp.nav.qname_by_id.values().map(String::as_str).collect();
+        assert!(qnames.contains(&"App::One::A"), "{qnames:?}");
+        assert!(qnames.contains(&"App::Two::B"), "{qnames:?}");
     }
 
     #[test]
