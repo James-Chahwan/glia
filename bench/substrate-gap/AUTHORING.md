@@ -170,14 +170,15 @@ dumps:
 ```
 
 `graphql.rs` lists `"client.subscribe("` among its operation patterns with no
-language or library gate, so an MQTT file mints a phantom GraphQL operation. The
-mqtt fixture therefore carries
+language or library gate, so an MQTT file mints a phantom GraphQL operation.
+Measured at 0.4.18; LA.26 gated the operation needles, so this forbid row now
+guards that fix. The mqtt fixture therefore carries
 
 ```json
 "forbid": [{"kind": "GRAPHQL_OPERATION", "name": "client.subscribe"}]
 ```
 
-and the cell is **correctly capped at partial** until the needle is gated. Note
+and the row stays as the regression guard. Note
 also the `EVENT_HANDLER`: mqtt's vocabulary lists `EVENT_*` before `QUEUE_*`, so
 `resolve_via` records that the eventbus path fired rather than grading it as if
 the intended queue path had.

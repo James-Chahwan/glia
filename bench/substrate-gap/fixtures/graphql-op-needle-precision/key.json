@@ -1,0 +1,16 @@
+{
+  "framework": "graphql-op-needle-precision",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LA.26. OPERATION_PATTERNS in parsers/code/extractors/src/graphql.rs match on any line in any language: `request(` fires on every request(...) call or definition (Guzzle, requests, ureq, handle_request), `graphql-request` fires on the package name in prose, `client.query(` / `client.subscribe(` fire on node-postgres and mqtt.js, and `useQuery(` on TanStack Query. Each mints a fallback-named GRAPHQL_OPERATION. users.ts is the control: a graphql-request client whose op is named by its gql tag. No cells binding: a precision guard, not a language x mechanism cell.",
+  "expect_nodes": [
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:ListUsers", "note": "users.ts gql`query ListUsers` - the control; asserted so the forbids cannot pass vacuously"}
+  ],
+  "forbid": [
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:request", "note": "Guzzle ->request, requests.request, def handle_request, ureq agent.request"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:graphql-request", "note": "the package name in a Rust comment"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:client.query", "note": "node-postgres client.query(\"SELECT ...\")"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:client.subscribe", "note": "mqtt.js client.subscribe(\"sensors/temp\")"},
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:useQuery", "note": "TanStack useQuery({ queryKey, queryFn })"}
+  ]
+}
