@@ -19,6 +19,8 @@ pub mod confluence_rest;
 pub mod filter;
 pub mod markdown;
 pub mod snapshot;
+#[doc(hidden)]
+pub mod stub;
 
 pub use filter::TitleFilter;
 pub use snapshot::{Page, record_from_page, slug, write_snapshot};

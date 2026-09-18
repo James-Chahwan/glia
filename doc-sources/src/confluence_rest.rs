@@ -30,15 +30,54 @@ impl Config {
                 .or_else(|| dot.get(key).cloned())
         };
         let miss = |k: &str| format!("missing {k} (pass --{}, or set it in env / ./.env)", k.to_ascii_lowercase().replace("confluence_", ""));
-        Ok(Config {
+        let cfg = Config {
             site: pick(site, "CONFLUENCE_SITE").ok_or_else(|| miss("CONFLUENCE_SITE"))?,
             email: pick(email, "CONFLUENCE_EMAIL").ok_or_else(|| miss("CONFLUENCE_EMAIL"))?,
             token: pick(token, "CONFLUENCE_TOKEN").ok_or_else(|| miss("CONFLUENCE_TOKEN"))?,
-        })
+        };
+        let origin = cfg.checked_origin()?;
+        let transport = if origin.starts_with("http://") { "plain http, loopback" } else { "https" };
+        eprintln!("[docs] origin={origin} ({transport})");
+        Ok(cfg)
     }
 
-    fn base(&self) -> String {
-        format!("https://{}/wiki/rest/api", self.site)
+    /// The scheme + authority every request and page URL is built on.
+    ///
+    /// `site` (the `--site` flag, or `CONFLUENCE_SITE` from env / `./.env`) is
+    /// read as:
+    /// - a bare host, e.g. `acme.atlassian.net` -> `https://acme.atlassian.net`
+    ///   (unchanged from before origins were accepted);
+    /// - `https://host[:port]` -> itself, minus a trailing `/`;
+    /// - `http://host[:port]` -> itself, minus a trailing `/` — but a request is
+    ///   only ever sent over plain http when the host is loopback (`127.0.0.1`,
+    ///   `localhost` or `[::1]`, optionally with a numeric port). Any other
+    ///   `http://` site is refused by [`Config::resolve`] and by every request,
+    ///   because Basic credentials would travel in cleartext. The loopback
+    ///   form exists for the test stub (`crate::stub`).
+    pub fn origin(&self) -> String {
+        let lower = self.site.to_ascii_lowercase();
+        for scheme in ["https://", "http://"] {
+            if lower.starts_with(scheme) {
+                let rest = self.site[scheme.len()..].trim_end_matches('/');
+                return format!("{scheme}{rest}");
+            }
+        }
+        format!("https://{}", self.site)
+    }
+
+    /// [`Config::origin`], refused when it is plain http to a non-loopback host.
+    fn checked_origin(&self) -> Result<String, String> {
+        let origin = self.origin();
+        match origin.strip_prefix("http://") {
+            Some(authority) if !is_loopback_authority(authority) => Err(format!(
+                "refusing plain http:// to non-loopback host {authority}: Basic credentials would travel in cleartext"
+            )),
+            _ => Ok(origin),
+        }
+    }
+
+    fn base(&self) -> Result<String, String> {
+        Ok(format!("{}/wiki/rest/api", self.checked_origin()?))
     }
     fn auth(&self) -> String {
         format!("Basic {}", b64(format!("{}:{}", self.email, self.token).as_bytes()))
@@ -57,13 +96,14 @@ pub struct PageRef {
 /// `record_from_page`. Paginates the content endpoint (100/page) and expands
 /// `body.storage` inline so there is no per-page round trip.
 pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
+    let base = cfg.base()?;
     let mut out = Vec::new();
     let limit = 100;
     let mut start = 0;
     loop {
         let url = format!(
             "{}/space/{}/content/page?limit={}&start={}&expand=body.storage,version",
-            cfg.base(),
+            base,
             space,
             limit,
             start
@@ -76,7 +116,7 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
             out.push(Page {
                 space: space.to_string(),
                 title: p["title"].as_str().unwrap_or("").to_string(),
-                url: format!("https://{}/wiki{}", cfg.site, webui),
+                url: format!("{}/wiki{}", cfg.origin(), webui),
                 version: p["version"]["number"].as_i64().unwrap_or(1).to_string(),
                 storage: p["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
             });
@@ -91,13 +131,13 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
 
 /// Fetch one page (id, title, current version, storage body).
 pub fn fetch_page(cfg: &Config, id: &str) -> Result<Page, String> {
-    let url = format!("{}/content/{}?expand=body.storage,version,space", cfg.base(), id);
+    let url = format!("{}/content/{}?expand=body.storage,version,space", cfg.base()?, id);
     let v = get_json(cfg, &url)?;
     let webui = v["_links"]["webui"].as_str().unwrap_or("");
     Ok(Page {
         space: v["space"]["key"].as_str().unwrap_or("").to_string(),
         title: v["title"].as_str().unwrap_or("").to_string(),
-        url: format!("https://{}/wiki{}", cfg.site, webui),
+        url: format!("{}/wiki{}", cfg.origin(), webui),
         version: v["version"]["number"].as_i64().unwrap_or(1).to_string(),
         storage: v["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
     })
@@ -111,7 +151,7 @@ pub fn create_page(cfg: &Config, space: &str, title: &str, storage: &str) -> Res
         "space": { "key": space },
         "body": { "storage": { "value": storage, "representation": "storage" } },
     });
-    let v = send_json(cfg, "POST", &format!("{}/content", cfg.base()), body)?;
+    let v = send_json(cfg, "POST", &format!("{}/content", cfg.base()?), body)?;
     page_ref(cfg, &v)
 }
 
@@ -133,7 +173,7 @@ pub fn update_page(
         "body": { "storage": { "value": storage, "representation": "storage" } },
         "version": { "number": next },
     });
-    let v = send_json(cfg, "PUT", &format!("{}/content/{}", cfg.base(), id), body)?;
+    let v = send_json(cfg, "PUT", &format!("{}/content/{}", cfg.base()?, id), body)?;
     page_ref(cfg, &v)
 }
 
@@ -143,8 +183,30 @@ fn page_ref(cfg: &Config, v: &serde_json::Value) -> Result<PageRef, String> {
         id: v["id"].as_str().unwrap_or("").to_string(),
         title: v["title"].as_str().unwrap_or("").to_string(),
         version: v["version"]["number"].as_i64().unwrap_or(0),
-        url: format!("https://{}/wiki{}", cfg.site, webui),
+        url: format!("{}/wiki{}", cfg.origin(), webui),
     })
+}
+
+/// `host[:port]` where host is `127.0.0.1`, `localhost` or `[::1]` (any case)
+/// and the port, when present, is all digits. Anything else — a path, userinfo
+/// (`127.0.0.1:80@evil.example`), a look-alike (`127.0.0.1.evil.example`) — is
+/// not loopback.
+fn is_loopback_authority(authority: &str) -> bool {
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(v6) => match v6.split_once(']') {
+            Some((inner, after)) => (format!("[{inner}]"), after),
+            None => return false,
+        },
+        None => match authority.find(':') {
+            Some(i) => (authority[..i].to_string(), &authority[i..]),
+            None => (authority.to_string(), ""),
+        },
+    };
+    let port_ok = match port.strip_prefix(':') {
+        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
+        None => port.is_empty(),
+    };
+    port_ok && ["127.0.0.1", "localhost", "[::1]"].contains(&host.to_ascii_lowercase().as_str())
 }
 
 // ---- HTTP helpers ---------------------------------------------------------
