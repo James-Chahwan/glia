@@ -155,6 +155,18 @@ pub fn parse_file(
             acc.func_literal_refs
         );
     }
+    let forms = &acc.route_forms;
+    if forms.registrations > 0 {
+        eprintln!(
+            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={}) in {file_rel_path}",
+            forms.registrations,
+            forms.positioned,
+            forms.handle,
+            forms.any,
+            forms.matched,
+            forms.pattern
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -214,6 +226,29 @@ struct Acc {
     func_literal_handlers: std::collections::HashSet<usize>,
     /// LA.18d: HANDLED_BY refs pushed from func-literal handlers in this file.
     func_literal_refs: usize,
+    /// LA.32a: route registrations emitted in this file, the POSITION cells
+    /// pushed for them, and the method-bearing forms among them — the
+    /// `[go-routes] registrations=` marker's counters.
+    route_forms: RouteFormCounts,
+}
+
+/// LA.32a: per-file route registration counters. `registrations` counts
+/// ROUTE_METHOD cells pushed (a Gorilla `.Methods("GET", "POST")` chain or a
+/// `Match([]string{"GET", "POST"}, ..)` is two); `positioned` counts the
+/// POSITION cells pushed with them — equal by construction, the token proves
+/// the POSITION path ran. The form counters count registration CALLS.
+#[derive(Default)]
+struct RouteFormCounts {
+    registrations: usize,
+    positioned: usize,
+    /// `Handle` / `Add` / `Method` / `MethodFunc` with a method literal at arg #0.
+    handle: usize,
+    /// `Any("/path", h)`.
+    any: usize,
+    /// `Match([]string{..}, "/path", h)`.
+    matched: usize,
+    /// Go 1.22 ServeMux `"<VERB> /path"` patterns.
+    pattern: usize,
 }
 
 // ============================================================================
@@ -1290,6 +1325,17 @@ fn canonical_sql_table(raw: &str) -> Option<String> {
 //                                                         → method = ANY
 //   `<recv>.HandleFunc("/path", h).Methods("GET", "POST")`
 //                                                         → one route per method
+//   LA.32a — the method-bearing forms:
+//   `<recv>.Handle("PATCH", "/path", h)` (gin), `<recv>.Add("GET", ..)` (echo),
+//   `<recv>.Method("PUT", ..)` / `.MethodFunc(..)` (chi)  → method = arg #0
+//   `<recv>.Any("/path", h)` (gin / echo)                 → method = ANY
+//   `<recv>.Match([]string{"GET", "POST"}, "/path", h)`   → one route per method
+//   `mux.HandleFunc("GET /items/{id}", h)` (Go 1.22)      → method = GET,
+//                                                           path = `/items/{id}`
+//
+// Every registration pushes a POSITION cell (the call's 0-based rows) before
+// its ROUTE_METHOD cell, so first-POSITION readers place the route at its
+// registration.
 //
 // Routes use path-only NodeIds so that registrations across files in a package
 // (or across methods on the same path) collapse at graph-build time and their
@@ -1308,8 +1354,67 @@ fn normalize_http_method(s: &str) -> Option<&'static str> {
         "OPTIONS" | "Options" => Some("OPTIONS"),
         // Fiber: `app.All("/", h)` — register on every method.
         "All" => Some("ANY"),
+        // LA.32a — gin / echo: `r.Any("/", h)`. Title-case, so the
+        // `first_arg_is_url_path` gate in `try_emit_route` keeps `lo.Any(xs, f)`
+        // out.
+        "Any" => Some("ANY"),
         _ => None,
     }
+}
+
+/// LA.32a: the HTTP verbs a method-ARGUMENT registration may name. Upper-case
+/// only, exactly as `net/http`'s `Method*` constants spell them.
+const HTTP_METHOD_LITERALS: &[&str] = &[
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
+];
+
+/// LA.32a: `Some(verb)` when `node` is a string literal whose content is
+/// exactly one of [`HTTP_METHOD_LITERALS`]. Case-sensitive, so `"get"`, `"k"`
+/// and a non-literal (`wg.Add(1)`) are all `None`.
+fn method_literal(node: TsNode, src: &[u8]) -> Option<&'static str> {
+    let text = string_literal_text(node, src)?;
+    HTTP_METHOD_LITERALS.iter().copied().find(|m| *m == text)
+}
+
+/// LA.32a: a Go 1.22 ServeMux pattern `"<VERB> /path"` split into its verb and
+/// path. `net/http` cuts the method at the first space or tab and trims the
+/// blanks after it; the rest must be a `/path` here, so a host pattern
+/// (`"GET example.com/x"`) and a bare `/path` are both `None`.
+fn method_pattern(node: TsNode, src: &[u8]) -> Option<(&'static str, String)> {
+    let text = string_literal_text(node, src)?;
+    let (verb, rest) = text.split_once([' ', '\t'])?;
+    let verb = HTTP_METHOD_LITERALS.iter().copied().find(|m| *m == verb)?;
+    let path = rest.trim_start_matches([' ', '\t']);
+    path.starts_with('/').then(|| (verb, path.to_string()))
+}
+
+/// True when positional argument `i` of a call's `args` list is a string
+/// literal starting with `/`.
+fn arg_is_url_path(args: TsNode, i: u32, src: &[u8]) -> bool {
+    args.named_child(i)
+        .and_then(|a| string_literal_text(a, src))
+        .is_some_and(|p| p.starts_with('/'))
+}
+
+/// LA.32a: the verbs of `Match([]string{"GET", "POST"}, ..)`'s arg #0, in
+/// source order. `None` unless it is a composite literal whose every element
+/// is a method literal — a variable list or a non-verb element is skipped,
+/// never guessed at.
+fn method_list_literal(node: TsNode, src: &[u8]) -> Option<Vec<&'static str>> {
+    if node.kind() != "composite_literal" {
+        return None;
+    }
+    let body = node.child_by_field_name("body")?;
+    let mut verbs = Vec::new();
+    let mut cursor = body.walk();
+    for el in body.named_children(&mut cursor) {
+        match el.kind() {
+            "comment" => continue,
+            "literal_element" => verbs.push(method_literal(el.named_child(0)?, src)?),
+            _ => return None,
+        }
+    }
+    (!verbs.is_empty()).then_some(verbs)
 }
 
 fn collect_routes_in(
@@ -1439,17 +1544,76 @@ fn try_emit_route(
         return;
     }
 
-    // stdlib + Gorilla Mux: bare `HandleFunc` / `Handle`. Skip when wrapped in
-    // `.Methods(...)` — the wrapping call took the route already. Require the
-    // path to begin with `/` to avoid colliding with stdlib map/method names.
+    // A registration wrapped in `.Methods(...)` — the wrapping call took the
+    // route already.
+    let registration = matches!(
+        method_name,
+        "HandleFunc" | "Handle" | "Add" | "Method" | "MethodFunc"
+    );
+    if registration && is_inner_of_methods_chain(call, src) {
+        return;
+    }
+    let Some(args) = call.child_by_field_name("arguments") else {
+        return;
+    };
+
+    // LA.32a — method at arg #0: gin `Handle("PATCH", "/p", h)`, echo
+    // `Add(..)`, chi `Method(..)` / `MethodFunc(..)`. The upper-case verb
+    // literal, a `/path` at arg #1 and a handler at arg #2 are all required, so
+    // `wg.Add(1)`, `h.Add("k", "/x")` and `q.Add("GET", "/x")` never mint one.
+    if matches!(method_name, "Handle" | "Add" | "Method" | "MethodFunc")
+        && args.named_child_count() >= 3
+        && let Some(verb) = args.named_child(0).and_then(|a| method_literal(a, src))
+        && arg_is_url_path(args, 1, src)
+    {
+        if emit_route_from_call(
+            call, verb, 1, 2, None, src, file_rel, module_id, repo, prefix_map, acc,
+        ) {
+            acc.route_forms.handle += 1;
+        }
+        return;
+    }
+
+    // LA.32a — gin `Match([]string{"GET", "POST"}, "/p", h)`: one registration
+    // per listed verb, in source order, stacking on the path-keyed node (the
+    // Gorilla `.Methods(..)` precedent).
+    if method_name == "Match" {
+        if args.named_child_count() >= 3
+            && let Some(verbs) = args.named_child(0).and_then(|a| method_list_literal(a, src))
+            && arg_is_url_path(args, 1, src)
+        {
+            let mut emitted = false;
+            for verb in verbs {
+                emitted |= emit_route_from_call(
+                    call, verb, 1, 2, None, src, file_rel, module_id, repo, prefix_map, acc,
+                );
+            }
+            if emitted {
+                acc.route_forms.matched += 1;
+            }
+        }
+        return;
+    }
+
+    // stdlib + Gorilla Mux: bare `HandleFunc` / `Handle`. Require the path to
+    // begin with `/` to avoid colliding with stdlib map/method names.
     if method_name == "HandleFunc" || method_name == "Handle" {
-        if is_inner_of_methods_chain(call, src) {
+        // LA.32a — Go 1.22 ServeMux: `"GET /items/{id}"` is a method plus a
+        // path, never a path. A host pattern matches neither arm below.
+        if let Some((verb, path)) = args.named_child(0).and_then(|a| method_pattern(a, src)) {
+            if emit_route_from_call(
+                call, verb, 0, 1, Some(&path), src, file_rel, module_id, repo, prefix_map, acc,
+            ) {
+                acc.route_forms.pattern += 1;
+            }
             return;
         }
         if !first_arg_is_url_path(call, src) {
             return;
         }
-        emit_route_from_call(call, "ANY", src, file_rel, module_id, repo, prefix_map, acc);
+        emit_route_from_call(
+            call, "ANY", 0, 1, None, src, file_rel, module_id, repo, prefix_map, acc,
+        );
         return;
     }
 
@@ -1478,7 +1642,12 @@ fn try_emit_route(
     if is_title_case && !first_arg_is_url_path(call, src) {
         return;
     }
-    emit_route_from_call(call, canonical, src, file_rel, module_id, repo, prefix_map, acc);
+    if emit_route_from_call(
+        call, canonical, 0, 1, None, src, file_rel, module_id, repo, prefix_map, acc,
+    ) && method_name == "Any"
+    {
+        acc.route_forms.any += 1;
+    }
 }
 
 /// True if the call's first positional argument is a string literal beginning
@@ -1560,6 +1729,9 @@ fn try_emit_gorilla_methods_chain(
         emit_route_from_call(
             inner_call,
             &method_upper,
+            0,
+            1,
+            None,
             src,
             file_rel,
             module_id,
@@ -1570,37 +1742,51 @@ fn try_emit_gorilla_methods_chain(
     }
 }
 
-/// Emit a Route node + ROUTE_METHOD cell + HANDLED_BY ref for a registration
-/// call shaped like `<recv>.<METHOD>("/path", handler)`. `method` is the
-/// canonical upper-case verb (or `"ANY"` for unrouted HandleFunc).
+/// Emit a Route node + POSITION cell + ROUTE_METHOD cell + HANDLED_BY ref for
+/// a registration call shaped like `<recv>.<METHOD>("/path", handler)`.
+/// `method` is the canonical upper-case verb (or `"ANY"` for unrouted
+/// HandleFunc). The path is `path_override` when given (a Go 1.22 pattern's
+/// path, already split off its verb), else the string literal at positional
+/// argument `path_arg`; the handler is argument `handler_arg`. Returns whether
+/// a route was emitted.
+#[allow(clippy::too_many_arguments)]
 fn emit_route_from_call(
     call: TsNode,
     method: &str,
+    path_arg: u32,
+    handler_arg: u32,
+    path_override: Option<&str>,
     src: &[u8],
     file_rel: &str,
     module_id: NodeId,
     repo: RepoId,
     prefix_map: &HashMap<String, String>,
     acc: &mut Acc,
-) {
+) -> bool {
     let Some(func) = call.child_by_field_name("function") else {
-        return;
+        return false;
     };
     let Some(operand) = func.child_by_field_name("operand") else {
-        return;
+        return false;
     };
     if operand.kind() != "identifier" {
-        return;
+        return false;
     }
     let receiver = text_of(operand, src);
     let Some(args) = call.child_by_field_name("arguments") else {
-        return;
+        return false;
     };
-    let Some(first) = args.named_child(0) else {
-        return;
-    };
-    let Some(path_literal) = string_literal_text(first, src) else {
-        return;
+    let path_literal = match path_override {
+        Some(p) => p.to_string(),
+        None => {
+            let Some(path_node) = args.named_child(path_arg) else {
+                return false;
+            };
+            let Some(p) = string_literal_text(path_node, src) else {
+                return false;
+            };
+            p
+        }
     };
 
     let prefix = prefix_map.get(receiver).cloned().unwrap_or_default();
@@ -1611,8 +1797,8 @@ fn emit_route_from_call(
     let qname = route_path_qname(&full_path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
 
-    // Second arg — handler. Identifier → Bare; selector `pkg.Name` → Attribute.
-    let handler_arg = args.named_child(1);
+    // The handler argument. Identifier → Bare; selector `pkg.Name` → Attribute.
+    let handler_arg = args.named_child(handler_arg);
     let (handler_display, handler_qualifier): (Option<String>, Option<CallQualifier>) =
         match handler_arg {
             Some(h) if h.kind() == "identifier" => {
@@ -1645,11 +1831,20 @@ fn emit_route_from_call(
         start.column + 1,
     );
 
+    // LA.32a: POSITION first, so a first-POSITION reader places the route at
+    // this registration; one per registration, so a path registered twice
+    // carries both spans.
+    let cells = vec![position_cell(call, file_rel), cell];
+    acc.route_forms.registrations += 1;
+    acc.route_forms.positioned += cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .count();
     acc.nodes.push(Node {
         id: route_id,
         repo,
         confidence: Confidence::Strong,
-        cells: vec![cell],
+        cells,
     });
 
     // Only record nav once per route id per file, else children_of would
@@ -1689,6 +1884,7 @@ fn emit_route_from_call(
             acc.func_literal_refs += 1;
         }
     }
+    true
 }
 
 /// LA.18d: at most this many HANDLED_BY refs per func-literal handler, so a
@@ -2859,6 +3055,233 @@ func hit(client *http.Client) {
         assert_eq!(
             route_methods(&parse, route_id(repo(), "/legacy")),
             vec!["ANY".to_string()],
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // LA.32a: method-bearing registration forms + a POSITION per registration.
+    // ------------------------------------------------------------------------
+
+    /// Every ROUTE qname the parse recorded, sorted.
+    fn route_qnames(parse: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| parse.nav.qname_by_id.get(id).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The POSITION payloads on every emitted copy of `route`, in emit order.
+    fn route_positions(parse: &FileParse, route: NodeId) -> Vec<String> {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == route)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::POSITION)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn handle_with_method_arg_emits_method_route() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine) {
+    r.Handle("PATCH", "/users/:id", patchUser)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        let route = route_id(repo(), "/users/:id");
+        assert_eq!(route_qnames(&parse), vec!["route:/users/:id".to_string()]);
+        assert_eq!(route_methods(&parse, route), vec!["PATCH".to_string()]);
+        assert_eq!(handled_by(&parse, route), vec![bare("patchUser")]);
+    }
+
+    #[test]
+    fn echo_add_and_chi_method_forms() {
+        const SRC: &str = r#"package server
+
+func setup(e *echo.Echo, r chi.Router) {
+    e.Add("DELETE", "/items/:id", deleteItem)
+    r.Method("PUT", "/items/{id}", handlers.PutItem)
+    r.MethodFunc("GET", "/health", health)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "route:/health".to_string(),
+                "route:/items/:id".to_string(),
+                "route:/items/{id}".to_string(),
+            ]
+        );
+        let del = route_id(repo(), "/items/:id");
+        assert_eq!(route_methods(&parse, del), vec!["DELETE".to_string()]);
+        assert_eq!(handled_by(&parse, del), vec![bare("deleteItem")]);
+        let put = route_id(repo(), "/items/{id}");
+        assert_eq!(route_methods(&parse, put), vec!["PUT".to_string()]);
+        assert_eq!(handled_by(&parse, put), vec![attr("handlers", "PutItem")]);
+        let health = route_id(repo(), "/health");
+        assert_eq!(route_methods(&parse, health), vec!["GET".to_string()]);
+        assert_eq!(handled_by(&parse, health), vec![bare("health")]);
+    }
+
+    #[test]
+    fn any_emits_any_method() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine) {
+    r.Any("/ping", anyPing)
+    found := lo.Any(xs, isAdmin)
+    _ = found
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        let ping = route_id(repo(), "/ping");
+        assert_eq!(route_qnames(&parse), vec!["route:/ping".to_string()]);
+        assert_eq!(route_methods(&parse, ping), vec!["ANY".to_string()]);
+        assert_eq!(handled_by(&parse, ping), vec![bare("anyPing")]);
+    }
+
+    #[test]
+    fn match_emits_one_cell_per_listed_method() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine, verbs []string) {
+    r.Match([]string{"GET", "POST"}, "/orders", matchOrders)
+    r.Match(verbs, "/dynamic", dyn)
+    r.Match([]string{"GET", "fetch"}, "/mixed", mixed)
+    ok := cache.Match("/orders")
+    _ = ok
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        // A variable method list and a list with a non-verb are skipped, not
+        // guessed at; a two-argument `Match` is never a registration.
+        assert_eq!(route_qnames(&parse), vec!["route:/orders".to_string()]);
+        let orders = route_id(repo(), "/orders");
+        assert_eq!(
+            route_methods(&parse, orders),
+            vec!["GET".to_string(), "POST".to_string()]
+        );
+        assert_eq!(
+            handled_by(&parse, orders),
+            vec![bare("matchOrders"), bare("matchOrders")]
+        );
+    }
+
+    #[test]
+    fn go122_method_pattern_splits_method_and_path() {
+        const SRC: &str = r#"package main
+
+func main() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /items/{id}", getItem)
+    mux.Handle("POST  /items", createItem)
+    mux.HandleFunc("GET example.com/x", hostScoped)
+    mux.HandleFunc("FETCH /y", notAVerb)
+}
+"#;
+        let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["route:/items".to_string(), "route:/items/{id}".to_string()]
+        );
+        let item = route_id(repo(), "/items/{id}");
+        assert_eq!(route_methods(&parse, item), vec!["GET".to_string()]);
+        assert_eq!(handled_by(&parse, item), vec![bare("getItem")]);
+        let items = route_id(repo(), "/items");
+        assert_eq!(route_methods(&parse, items), vec!["POST".to_string()]);
+        assert_eq!(handled_by(&parse, items), vec![bare("createItem")]);
+    }
+
+    #[test]
+    fn method_literal_rejects_non_verbs() {
+        const SRC: &str = r#"package server
+
+func setup(h http.Header, wg *sync.WaitGroup, q url.Values) {
+    wg.Add(1)
+    h.Add("k", "/x")
+    h.Add("get", "/x", f)
+    q.Add("GET", "/x")
+    r.Handle("PATCH", "users", patchUser)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert!(route_qnames(&parse).is_empty(), "{:?}", route_qnames(&parse));
+        assert!(parse.refs.iter().all(|r| r.category != edge_category::HANDLED_BY));
+    }
+
+    #[test]
+    fn every_registration_has_a_position_cell() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine) {
+    r.GET("/users", List)
+    r.POST("/users", Create)
+    r.HandleFunc("/legacy", Legacy).Methods("GET", "PUT")
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        let users = route_id(repo(), "/users");
+        assert_eq!(
+            route_positions(&parse, users),
+            vec![
+                r#"{"file":"server.go","start_line":3,"end_line":3}"#.to_string(),
+                r#"{"file":"server.go","start_line":4,"end_line":4}"#.to_string(),
+            ]
+        );
+        // The Gorilla chain places both of its registrations at the inner
+        // `HandleFunc` call.
+        let legacy = route_id(repo(), "/legacy");
+        assert_eq!(
+            route_positions(&parse, legacy),
+            vec![r#"{"file":"server.go","start_line":5,"end_line":5}"#.to_string(); 2]
+        );
+        // Each emitted copy is exactly [POSITION, ROUTE_METHOD]: POSITION
+        // first, so a first-POSITION reader sees the registration.
+        for n in parse.nodes.iter().filter(|n| n.id == users || n.id == legacy) {
+            let kinds: Vec<_> = n.cells.iter().map(|c| c.kind).collect();
+            assert_eq!(kinds, vec![cell_type::POSITION, cell_type::ROUTE_METHOD]);
+        }
+        // The ROUTE_METHOD payload keeps its 1-based line.
+        let first = parse.nodes.iter().find(|n| n.id == users).unwrap();
+        match &first.cells[1].payload {
+            CellPayload::Json(j) => assert!(j.contains(r#""line":4,"#), "{j}"),
+            other => panic!("ROUTE_METHOD is not JSON: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_with_a_path_first_is_still_any() {
+        const SRC: &str = r#"package server
+
+func setup(r *mux.Router) {
+    r.Handle("/static", fileServer)
+    http.Handle("/metrics", promhttp.Handler())
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["route:/metrics".to_string(), "route:/static".to_string()]
+        );
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/static")),
+            vec!["ANY".to_string()]
+        );
+        assert_eq!(
+            route_methods(&parse, route_id(repo(), "/metrics")),
+            vec!["ANY".to_string()]
         );
     }
 

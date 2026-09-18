@@ -1,0 +1,31 @@
+{
+  "framework": "go-route-registration-forms",
+  "language": "go",
+  "dirs": ["."],
+  "note": "LA.32a: every method-bearing Go registration form carries its HTTP method into a ROUTE_METHOD cell, and every Go ROUTE gets a POSITION cell (0-based row) at its registration call: gin r.Handle(\"PATCH\", path, h), r.Any, r.Match([]string{..}, path, h) and Go 1.22 ServeMux patterns (\"GET /items/{id}\"). Baseline HEAD f672dcb: none of these four forms emits a ROUTE, and no Go ROUTE carries a POSITION cell (the verb-form route:/users has only ROUTE_METHOD cells).",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "/users/:id"},
+    {"kind": "ROUTE", "name": "/ping"},
+    {"kind": "ROUTE", "name": "/orders"},
+    {"kind": "ROUTE", "name": "/items/{id}"}
+  ],
+  "expect_edges": [
+    {"from": "/users/:id", "to": "patchUser", "category": "HANDLED_BY"},
+    {"from": "/ping", "to": "anyPing", "category": "HANDLED_BY"},
+    {"from": "/orders", "to": "matchOrders", "category": "HANDLED_BY"},
+    {"from": "/items/{id}", "to": "getItem", "category": "HANDLED_BY"}
+  ],
+  "expect_cells": [
+    {"kind": "ROUTE", "node": "/users", "cell": "POSITION", "contains": "\"main.go\",\"start_line\":17", "note": "verb-form r.GET(\"/users\") on row 17: the route exists on HEAD with ROUTE_METHOD only"},
+    {"kind": "ROUTE", "node": "/items/{id}", "cell": "POSITION", "contains": "\"main.go\",\"start_line\":23"},
+    {"kind": "ROUTE", "node": "/users/:id", "cell": "ROUTE_METHOD", "contains": "\"method\":\"patch\""},
+    {"kind": "ROUTE", "node": "/ping", "cell": "ROUTE_METHOD", "contains": "\"method\":\"any\""},
+    {"kind": "ROUTE", "node": "/orders", "cell": "ROUTE_METHOD", "contains": "\"method\":\"post\""},
+    {"kind": "ROUTE", "node": "/items/{id}", "cell": "ROUTE_METHOD", "contains": "\"method\":\"get\""}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "route:/PATCH", "note": "Handle's method string is never read as a path (the qname a misread would mint: canonical_http_path adds the leading /)"},
+    {"kind": "ROUTE", "name": "route:/GET /items/{id}", "note": "a Go 1.22 pattern is split into method and path, never kept verbatim (the qname a verbatim read would mint)"},
+    {"from": "/users", "to": "patchUser", "category": "HANDLED_BY", "note": "the PATCH handler belongs to /users/:id"}
+  ]
+}
