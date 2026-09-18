@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "cafa83e",
-  "after_wave": 16,
+  "measured_at_head": "e8aa695",
+  "after_wave": 17,
   "cargo_test_workspace": {
-    "passed": 1022,
+    "passed": 1033,
     "failed": 0
   },
   "history_passed": [
@@ -23,30 +23,27 @@
     977,
     997,
     1013,
-    1022
+    1022,
+    1033
   ],
   "run_py": {
     "fixtures": 138,
-    "blind_spots": 1,
-    "blind_spot_detail": "blind: ['xcut-grpc-csharp: HANDLED_BY']; missing nodes: [\"xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "blind_spots": 0,
+    "blind_spot_detail": "blind: []; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
-    "blind_list": [
-      "xcut-grpc-csharp: HANDLED_BY"
-    ],
+    "blind_list": [],
     "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],
-    "missing_nodes_list": [
-      "xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'"
-    ]
+    "missing_nodes_list": []
   },
   "matrix_py": {
-    "full": 96,
+    "full": 97,
     "partial": 29,
-    "none": 21,
+    "none": 20,
     "unknown": 334,
     "covered": 146,
     "grid": 480,

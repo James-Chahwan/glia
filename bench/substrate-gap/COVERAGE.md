@@ -72,7 +72,7 @@ python           ●       ●       ●       ◐       ●       ◐       ●
 go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ·       ◐       ●       ●       ●       ●       ●       ?       ◐       ?       ·
 typescript       ●       ●       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ?       ·
 java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ?       ●       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ·
-csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ·       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
+csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ●       ?       ?       ?       ?       ?       ?       ·       ?       ?       ?       ?       ●       ●       ●       ●       ◐       ?       ?
 ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ?       ◐       ?       ?
 php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ◐       ?       ◐       ?       ?
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
@@ -97,7 +97,7 @@ PER-MECHANISM  across 16 languages:
   redis        ● 3   ◐ 0   · 2   ? 11  ! 0
   mqtt         ● 3   ◐ 0   · 0   ? 13  ! 0
   taskq        ● 1   ◐ 1   · 1   ? 13  ! 0
-  grpc         ● 4   ◐ 0   · 1   ? 11  ! 0
+  grpc         ● 5   ◐ 0   · 0   ? 11  ! 0
   graphql      ● 1   ◐ 1   · 1   ? 13  ! 0
   ws           ● 1   ◐ 1   · 1   ? 13  ! 0
   eventbus     ● 3   ◐ 0   · 0   ? 13  ! 0
@@ -122,7 +122,7 @@ PER-LANGUAGE  across 30 mechanisms:
   go           ● 12  ◐ 3   · 5   ? 10  ! 0
   typescript   ● 14  ◐ 5   · 2   ? 9   ! 0
   java         ● 11  ◐ 2   · 4   ? 13  ! 0
-  csharp       ● 9   ◐ 2   · 2   ? 17  ! 0
+  csharp       ● 10  ◐ 2   · 1   ? 17  ! 0
   ruby         ● 6   ◐ 2   · 1   ? 21  ! 0
   php          ● 3   ◐ 2   · 0   ? 25  ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  ! 0
@@ -136,7 +136,7 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 146/480 cells have a fixture (30.4%) — 96 full, 29 partial, 21 none, 334 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 146/480 cells have a fixture (30.4%) — 97 full, 29 partial, 20 none, 334 unknown, 0 error.
 
 `legacy_only` (fixtures with no `cells`, graded by run.py only): 46
 

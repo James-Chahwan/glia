@@ -248,7 +248,7 @@
     },
     "csharp/grpc": {
       "extract": [
-        3,
+        4,
         4
       ],
       "fixtures": [
@@ -259,16 +259,14 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        3,
+        4,
         4
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "grpc"
@@ -3680,9 +3678,9 @@
   "totals": {
     "covered": 146,
     "error": 0,
-    "full": 96,
+    "full": 97,
     "grid": 480,
-    "none": 21,
+    "none": 20,
     "partial": 29,
     "unknown": 334
   },

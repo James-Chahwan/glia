@@ -770,7 +770,7 @@
       "per_category": {
         "DEFINES": 1.0,
         "GRPC_CALLS": 1.0,
-        "HANDLED_BY": 0.0,
+        "HANDLED_BY": 1.0,
         "USES": 1.0
       }
     },
@@ -985,15 +985,11 @@
   },
   "schema": "substrate-gap-legacy/1",
   "summary": {
-    "blind_spots": [
-      "xcut-grpc-csharp: HANDLED_BY"
-    ],
+    "blind_spots": [],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
-    "missing_nodes": [
-      "xcut-grpc-csharp: GRPC_SERVER 'grpc_server:Greeter'"
-    ],
+    "missing_nodes": [],
     "partial_cells": []
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
