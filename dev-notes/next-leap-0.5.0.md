@@ -212,7 +212,7 @@ Specced — see section 7 for the packet counts, the schedule, and the decisions
   to a vulnerability feed, SecurityZone resolver and the `^` security sigil, HTML sitemap-crawl doc adapter, git fetch
   or private-repo auth inside `glia merge`. TeamOwnership stays out ("everything but team ownership", 2026-04-17).
 
-## 7. Specced (2026-09-19) — 207 packets, W0 + 39 waves
+## 7. Specced (2026-09-19) — 229 packets, W0 + 39 waves
 
 Spec run `wf_65413aa0-59f`: 11 spec → adversarial-verify pipelines, 2 Batch C re-verifiers, 1 integration critic
 (25 agents, 0 errors). Every packet has symbol-verified anchors, exhaustive files_touched, a gate with a pre-fix
@@ -221,15 +221,15 @@ baseline measured on HEAD, a fired_on marker and a declared breaking block.
 | phase | packets | LOC |
 |---|---|---|
 | L0 — wave 0: id allocation + god-file splits (engine / graph facades, py, cli, engine build.rs) | 6 | 1,480 |
-| A — extraction depth (incl. 13 programme leftovers) | 44 | 11,290 |
+| A — extraction depth (incl. 13 programme leftovers and run 2's 15 fixes) | 59 | 15,100 |
 | Batch C — re-verified at HEAD: 9 still valid, 25 respecced, 0 obsolete | 34 | 5,045 |
-| B — identity | 9 | 3,080 |
+| B — identity (incl. run 2's LB.7–LB.9) | 16 | 4,760 |
 | C — store format | 16 | 4,600 |
 | D — API + cross-domain prep | 29 | 8,680 |
 | E — new answers | 22 | 6,065 |
 | F — outside inputs + reserved cells | 21 | 6,665 |
 | G — perf, hygiene, Engram v6, handoffs | 26 | 6,455 |
-| **total** | **207** | **~53,400** |
+| **total** | **229** | **~58,850** |
 
 Declared breaks across the packets: api_signature 31, cli_output 27, cell_value 15, edge_removal 13, format 11,
 qname_shape 10, node_id 10, out_of_repo 20 (96 packets break nothing).
@@ -273,19 +273,61 @@ no code has changed since.
    purges nothing; `purge_parse_cache()` is explicit.
 6. **LG.8** diffs exported gmaps, with a dependency on LE.1: confirmed — *"Yeah sure sounds reasonable?"*.
 
-### 7.2 Unowned findings the spec run surfaced (no packet yet)
+### 7.2 Run 2 — the unowned findings, specced
 
-Identity-shaped — should join B so identity churns once: the doubled class segment in Scala / PHP / Swift / Solidity /
-namespace-less C# (LB.2 is Java only); monorepo collapse of QUEUE / WS / GRAPHQL / GRPC nodes (LB.4 is routes only);
-cross-language MODULE qname collisions in one directory.
+Workflow `wf_5cd00d1d-1ff` (6 agents, 0 errors) turned run 1's 14 unowned findings into 22 packets (~5.5k LOC), merged
+into `leap-packets.json` with dependencies wired from the verifiers' notes; the schedule stays W0 + 39 waves.
 
-Precision / crash bugs: a UTF-8 char-boundary panic on '≤' in `parsers/code/extractors/src/config.rs` during the glia
-self-build; the ungated `request(` needle in graphql.rs minting a false GRAPHQL_OPERATION; the GraphQL SDL scanner
-minting a `Query` resolver from a Rust comment (engine/src/route.rs); DATA_ENTITY nodes named after Rust functions
-(`data_entity:graph:pick_primary`); a Python function named `publish` minting an EVENT_EMITTER.
+- **Identity (B):** LB.7a–d stop the doubled class segment in Scala, PHP (directory scope), Swift and namespace-less C#
+  (namespace scope); LB.8 gives queue / WebSocket / GraphQL / gRPC nodes an owner segment in monorepos (LB.4a's
+  mechanism); LB.9a/b give same-stem files in different languages their own MODULE identity.
+- **Precision / crash (A):** LA.25a/b the UTF-8 panic (the real site is `data_entities.rs` `scan_cypher_labels`, plus
+  the same class in the Rust parser) and `[parse]` lines so a caught panic is never silent; LA.26 gates the whole GraphQL
+  operation-needle table; LA.27 SDL only from SDL; LA.28 the Cypher needle; LA.29 event emitters need a real bus.
+- **Coverage (A):** LA.30a–c Java / TS enums (the generic resolver treats ENUM like CLASS, so LA.3 now follows LA.30a);
+  LA.31 tRPC POSITION; LA.32a gin ROUTE method + POSITION; LA.33 kafkajs-style callback consumers; LA.34 Dart bare
+  self-calls; LA.35a/b Rust typed receivers (the LA.1b caveat row is narrowed to what stays blind, not deleted).
 
-Coverage: Java enum constants / methods and TS enums; tRPC nodes and Go gin ROUTEs without POSITION; consumer-callback
-binding (kafkajs `eachMessage`); Dart bare self-calls; Rust typed-receiver method calls (coverage caveat only).
+### 7.4 Open after run 2 — decisions (recommendation first)
+
+1. Solidity keeps `contracts::Token::Token::transfer`: a source unit is Solidity's namespace (solc names it
+   `contracts/Token.sol:Token`, and two files may both declare `contract Token`). **Keep.**
+2. C++ doubles too (`src::Widget::Widget::run`), and a `.h` / `.cpp` pair shares one MODULE. Needs its own design
+   (namespace scope, header/impl split). **Spec it into B.**
+3. PHP goes to directory scope (Laravel / Symfony put everything in `App`), file-scoped C# to namespace scope (.NET
+   namespaces are project-named). **Confirm the split.**
+4. LB.8 covers queue / ws / graphql / grpc; tRPC (RPC_PROCEDURE / RPC_CALL) and the in-process event bus collapse the
+   same way — one table row and one resolver line each. **Add them to B now.**
+5. With LB.9b a file's identity depends on its siblings (adding `api/user.ts` renames `api/user.py`'s symbols); LB.6's
+   move-stable record is unchanged by it. **Accept.**
+6. Run-2 scope beyond the item text: LA.25b, LA.25a's CLI `[parse]` lines, LA.26 gating the whole needle table, LA.29's
+   `.subscribe(` / typed-publish duplicate / AWS SDK `.send(new ...)` cases. **Accept all** (each is a measured false
+   positive or a silent failure).
+7. LA.27 recognises embedded SDL only in `typeDefs` / `type_defs` variables. **Accept**, with a coverage caveat row.
+8. Go ROUTE identity is path-only (`route:/activity/:id` is one node for GET, PATCH and DELETE, so a DELETE client
+   traces into the GET handler); `ts_routes` has the same shape. Identity-shaped (the verifier cut it as LA.32b).
+   **Spec it into B.**
+9. LA.35b narrows LA.1b's Rust caveat row to what stays blind instead of deleting it. **Keep narrowed.**
+10. LA.33 keeps HANDLED_BY on the subscribing setup function and adds the edge to the bound callback. **Keep both.**
+
+### 7.5 Found by run 2, no packet yet
+
+Identity-shaped (B, if done): contract-op DOC_SECTION qnames `contract::<stem>::<op>` drop the directory, so two
+services' `openapi.yaml` ops collide; same-group same-stem files (`Widget.h` + `Widget.cpp`, `util.js` + `util.ts`,
+`core.clj` + `core.cljs`, `Foo.java` + `Foo.kt`) still share a MODULE after LB.9b; two C# `file class X` in one block
+namespace share a node.
+
+Correctness: Swift `navigation_suffix` keeps its leading dot, so zero Swift self-calls resolve; Dart top-level
+function bodies are never walked (no top-level Dart function has an outgoing call); GraphQL decorator nouns
+(`@Query(`, `@Resolver(`, `ObjectType`, strawberry) match anywhere, comments included (every NestJS repo, glia's own
+build); eventbus event names can span newlines; `data_entities.rs` scanners mint entities from their own source
+(`mongoose.model(`, `.collection(`); DOM / Redux verbs (`.on(`, `.dispatch(`, `.trigger(`) mint event nodes; a C#
+`using` inside a block namespace and a PHP `use` inside a braced namespace never resolve (0 IMPORTS); LA.4's post-cache
+queue re-emit loses LE.4c's owner edges.
+
+Coverage: `.graphqls` files (Spring for GraphQL / gqlgen default) are never routed; Go struct-held routers
+(`s.router.GET`) produce no ROUTE; no host narrowing for ws / graphql / grpc clients across owners (LB.4b is HTTP
+only).
 
 ### 7.3 Spec-run hygiene
 
