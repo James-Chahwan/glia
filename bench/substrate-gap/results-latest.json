@@ -247,6 +247,30 @@
       ],
       "via": "call"
     },
+    "csharp/cli_def": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/cli_def"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
     "csharp/grpc": {
       "extract": [
         4,
@@ -471,6 +495,32 @@
       ],
       "via": null
     },
+    "csharp/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "csharp/tests": {
       "extract": [
         3,
@@ -674,6 +724,32 @@
       ],
       "via": "di"
     },
+    "dart/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/dart/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "elixir/calls": {
       "extract": [
         2,
@@ -769,6 +845,32 @@
         1
       ],
       "via": "import"
+    },
+    "elixir/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/elixir/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
     },
     "go/amqp": {
       "extract": [
@@ -1172,6 +1274,32 @@
       ],
       "via": null
     },
+    "go/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/go/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "go/sqs_sns": {
       "extract": [
         0,
@@ -1319,6 +1447,30 @@
         1
       ],
       "via": "call"
+    },
+    "java/cli_def": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/cli_def"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
     },
     "java/db": {
       "extract": [
@@ -1613,6 +1765,32 @@
       ],
       "via": null
     },
+    "java/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/java/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "java/sqs_sns": {
       "extract": [
         2,
@@ -1815,6 +1993,32 @@
       ],
       "via": "di"
     },
+    "php/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "php/tests": {
       "extract": [
         2,
@@ -1893,25 +2097,28 @@
     },
     "python/calls": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
-        "fixtures/py-calls"
+        "fixtures/py-calls",
+        "fixtures/py-field-dispatch"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        1,
-        1
+        5,
+        5
       ],
       "via": "call"
     },
@@ -2386,6 +2593,32 @@
       ],
       "via": "config"
     },
+    "python/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/python/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "python/sqs_sns": {
       "extract": [
         4,
@@ -2659,6 +2892,32 @@
       ],
       "via": null
     },
+    "ruby/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "ruby/taskq": {
       "extract": [
         3,
@@ -2733,6 +2992,30 @@
         5
       ],
       "via": "call"
+    },
+    "rust/cli_def": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/rust/cli_def"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
     },
     "rust/http_client": {
       "extract": [
@@ -2831,6 +3114,32 @@
         1
       ],
       "via": "import"
+    },
+    "rust/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
     },
     "rust/tests": {
       "extract": [
@@ -3006,6 +3315,32 @@
       ],
       "via": "di"
     },
+    "scala/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/scala/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "solidity/calls": {
       "extract": [
         2,
@@ -3104,25 +3439,28 @@
     },
     "swift/calls": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
-        "fixtures/swift-calls"
+        "fixtures/swift-calls",
+        "fixtures/swift-self-calls"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        1,
-        1
+        7,
+        7
       ],
       "via": "call"
     },
@@ -3208,25 +3546,26 @@
     },
     "typescript/calls": {
       "extract": [
-        2,
-        2
+        8,
+        8
       ],
       "fixtures": [
-        "fixtures/ts-calls"
+        "fixtures/ts-calls",
+        "fixtures/ts-field-dispatch"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        8,
+        8
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        5,
+        5
       ],
       "via": "call"
     },
@@ -3611,6 +3950,32 @@
       ],
       "via": "config"
     },
+    "typescript/service": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/typescript/service"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "extract read from ROLE cells naming SERVICE"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "service"
+    },
     "typescript/subproject": {
       "extract": [
         2,
@@ -3723,7 +4088,9 @@
     "fixtures/avro-schema",
     "fixtures/clojure-docs",
     "fixtures/contract-annot-nestjs",
+    "fixtures/contract-annot-rswag",
     "fixtures/contract-annot-springdoc",
+    "fixtures/contract-annot-swaggo",
     "fixtures/contract-annot-swashbuckle",
     "fixtures/contract-asyncapi-nats",
     "fixtures/contract-openapi-json",
@@ -3733,6 +4100,7 @@
     "fixtures/csharp-efcore",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
+    "fixtures/csharp-namespace-qnames",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
@@ -3741,6 +4109,7 @@
     "fixtures/event-publish-precision",
     "fixtures/event-verb-receivers",
     "fixtures/go-closure-handled_by",
+    "fixtures/go-gorm",
     "fixtures/go-route-registration-forms",
     "fixtures/graphql-op-needle-precision",
     "fixtures/graphql-sdl-literal-scope",
@@ -3754,6 +4123,7 @@
     "fixtures/http-relative-paths",
     "fixtures/imports-local-filter",
     "fixtures/java-declarative-clients",
+    "fixtures/java-enum-members",
     "fixtures/java-http-clients",
     "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
@@ -3763,6 +4133,7 @@
     "fixtures/kotlin-ktor",
     "fixtures/kotlin-retrofit",
     "fixtures/kotlin-spring",
+    "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
@@ -3802,20 +4173,21 @@
     "fixtures/xiac-terraform-k8s",
     "fixtures/xpoly-data-entity",
     "fixtures/xschema-csharp-namespace",
+    "fixtures/xschema-jsonschema-shared",
     "fixtures/xstack-host-pairing"
   ],
   "schema": 1,
   "totals": {
-    "covered": 149,
+    "covered": 163,
     "error": 0,
-    "full": 106,
+    "full": 120,
     "grid": 480,
     "none": 14,
     "partial": 29,
-    "unknown": 331
+    "unknown": 317
   },
   "vocabulary": {
-    "digest": "e956998031b0",
+    "digest": "82fbaf1daf5c",
     "languages": 16,
     "mechanisms": 30
   }

@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 189,
+  "fixtures": 199,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -94,9 +94,23 @@
         "DOCUMENTS": 1.0
       }
     },
+    "contract-annot-rswag": {
+      "framework": "contract-annot-rswag",
+      "language": "ruby",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
     "contract-annot-springdoc": {
       "framework": "contract-annot-springdoc",
       "language": "java",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "contract-annot-swaggo": {
+      "framework": "contract-annot-swaggo",
+      "language": "go",
       "per_category": {
         "DOCUMENTS": 1.0
       }
@@ -202,6 +216,13 @@
       "language": "csharp",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-namespace-qnames": {
+      "framework": "csharp-namespace-qnames",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "csharp-primary-ctor": {
@@ -331,6 +352,13 @@
         "HANDLED_BY": 1.0
       }
     },
+    "go-gorm": {
+      "framework": "go-gorm",
+      "language": "go",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "go-handled-by": {
       "framework": "go-handled-by",
       "language": "go",
@@ -453,6 +481,15 @@
       "language": "java",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "java-enum-members": {
+      "framework": "java-enum-members",
+      "language": "java",
+      "per_category": {
+        "CALLS": 1.0,
+        "HAS_ATTRIBUTE": 1.0,
+        "USES": 1.0
       }
     },
     "java-http-clients": {
@@ -583,6 +620,14 @@
         "INJECTS": 0.0
       }
     },
+    "php-braced-use": {
+      "framework": "php-braced-use",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "php-dir-qnames": {
       "framework": "php-dir-qnames",
       "language": "php",
@@ -672,6 +717,13 @@
       "per_category": {
         "HANDLED_BY": 1.0,
         "INJECTS": 1.0
+      }
+    },
+    "py-field-dispatch": {
+      "framework": "py-field-dispatch",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "py-flask-handled": {
@@ -924,6 +976,13 @@
       "language": "swift",
       "per_category": {}
     },
+    "swift-self-calls": {
+      "framework": "swift-self-calls",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "terraform-depends_on": {
       "framework": "terraform",
       "language": "terraform",
@@ -966,6 +1025,14 @@
         "DEFINES": 1.0,
         "HAS_ATTRIBUTE": 1.0,
         "USES": 1.0
+      }
+    },
+    "ts-field-dispatch": {
+      "framework": "ts-field-dispatch",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "ts-http-fetch": {
@@ -1320,6 +1387,14 @@
       "framework": "xschema-csharp-namespace",
       "language": "csharp",
       "per_category": {
+        "SHARES_SCHEMA": 1.0
+      }
+    },
+    "xschema-jsonschema-shared": {
+      "framework": "xschema-jsonschema-shared",
+      "language": "json",
+      "per_category": {
+        "DEFINES": 1.0,
         "SHARES_SCHEMA": 1.0
       }
     },

@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "934ad37",
-  "after_wave": 3,
+  "measured_at_head": "a1a26d3",
+  "after_wave": 4,
   "cargo_test_workspace": {
-    "passed": 1552,
+    "passed": 1651,
     "failed": 0
   },
   "history_passed": [
@@ -30,10 +30,11 @@
     1058,
     1236,
     1429,
-    1552
+    1552,
+    1651
   ],
   "run_py": {
-    "fixtures": 189,
+    "fixtures": 199,
     "blind_spots": 12,
     "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: DEFINES', 'kotlin: IMPLEMENTS', 'kotlin: IMPORTS', 'kotlin: INHERITS_FROM', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-ktor: IMPORTS', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS', 'kotlin-spring: HANDLED_BY', 'kotlin-spring: INJECTS']; missing nodes: [\"kotlin: CLASS 'UserController'\", \"kotlin: CLASS 'UserService'\", \"kotlin: CLASS 'UserDto'\", \"kotlin: METHOD 'getUser'\", \"kotlin: FUNCTION 'topLevelHelper'\", \"kotlin-ktor: FUNCTION 'itemRoutes'\", \"kotlin-ktor: METHOD 'all'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\", \"kotlin-spring: ROUTE 'GET /users'\", \"kotlin-spring: CLASS 'UserController'\", \"kotlin-spring: METHOD 'list'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
@@ -72,16 +73,16 @@
     ]
   },
   "matrix_py": {
-    "full": 106,
+    "full": 120,
     "partial": 29,
     "none": 14,
-    "unknown": 331,
-    "covered": 149,
+    "unknown": 317,
+    "covered": 163,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0
   },
-  "test_matrix_py": "32 passed, 0 skipped, 0 failed (32 tests)",
+  "test_matrix_py": "35 passed, 0 skipped, 0 failed (35 tests)",
   "test_grade_py": "all passed",
   "wheel_current_as_of_head": true
 }
