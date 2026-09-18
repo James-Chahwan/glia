@@ -10,11 +10,9 @@ use crate::merged::MergedGraph;
 
 // ============================================================================
 // PackageResolver — pairs PACKAGE_DEP nodes with the same qname
-// (`package:<ecosystem>:<name>`) across repos. Surfaces the "two services
-// depend on the same package" signal that would otherwise need an external
-// SCA tool. Cross-language reachability (the differentiator vs Endor / Snyk
-// / Socket.dev) lives in v0.5+ — this resolver only emits the dependency
-// substrate; per-symbol reachability layers on top of it.
+// (`package:<ecosystem>:<name>`) across repos: the "two services depend on
+// the same package" signal, as dependency substrate. glia deliberately does
+// not join packages to vulnerability feeds (SECURITY.md).
 // ============================================================================
 
 pub struct PackageResolver;

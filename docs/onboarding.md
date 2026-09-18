@@ -33,7 +33,7 @@ Two threads of active work past the v0.4.x substrate:
 
 Three angles that map to your background:
 
-- **DevOps** — the cross-graph resolver layer is *the* DevOps surface here. HTTP / gRPC / Queue / SharedSchema / EventBus / WebSocket / DB / Cron / Config / IaC / Package — 13 of them, written as `CrossGraphResolver` impls. The first 6 are mature; **Cron and DB-NoSQL/Graph are the meatiest open ones**. IaC currently reads raw Dockerfile + k8s manifests; Kustomize/Helm rendering is explicit non-goal in v0.4.x but a natural v0.5+ ask. See `TODO.md` Day 1 for the locked list.
+- **DevOps** — the cross-graph resolver layer is *the* DevOps surface here. HTTP / gRPC / Queue / SharedSchema / EventBus / WebSocket / DB / Cron / Config / IaC / Package — 13 of them, written as `CrossGraphResolver` impls. The first 6 are mature; **Cron and DB-NoSQL/Graph are the meatiest open ones**. IaC currently reads raw Dockerfile + k8s manifests; Kustomize/Helm rendering is explicit non-goal in v0.4.x but a natural v0.5+ ask. See `TODO.md` (open items outside the 0.5.0 leap) and `dev-notes/next-leap-0.5.0.md`.
 - **LLMs** — `projection-text/` is how a sub-graph becomes context for a 7B-or-larger model. `activation/` is Personalised PageRank (HippoRAG lineage) over the graph: seed nodes → PPR → top-K reachable. `scratch/lens/` is logit-lens over llama.cpp via cb_eval — captures residual streams per layer per ubatch. `scratch/latent/` is the parked candle arm where graph-derived pooled vectors get injected into the embedding stream. Your masters work plugs into the open research question at the end of this doc.
 - **CAD / spatial** — glia itself is non-visual. Your CAD instinct shows up in the rkyv `.gmap` format (sharded by kind, owned-vs-archived discipline, zero-copy mmap), the locked NodeKind/EdgeCategory u32 ID registry, and the deterministic graph build (same input repo → same graph, no randomness). The visual layer is downstream in neuropil.
 
@@ -101,7 +101,8 @@ glia/
 │   └── ...
 ├── CLAUDE.md              architecture rules — load-bearing
 ├── CODE_RULES.md          operational conventions (synth_* bin pattern, kebab-case, append-only files)
-├── TODO.md                v0.4.x ship plan (Day 1 substrate / Day 2 surface)
+├── TODO.md                open items outside the 0.5.0 leap
+├── SECURITY.md            vulnerability reporting + what glia deliberately does not build
 ├── README.md              the public face
 └── LICENSE                Glia Software License v0.1 (PolyForm Noncommercial + worker overlay)
 ```
@@ -151,7 +152,7 @@ What's shipped + maps to things you've shipped before:
 | Database flow | `DbResolver` — SQL `Table` / `Column` nodes from migrations + ORM model classes, joined when N services touch the same table. NoSQL `Collection` + GraphDB `NodeLabel` exist as the umbrella but are thinner. **Real open work: deepen NoSQL + GraphDB tracks.** |
 | Cross-service env vars | `ConfigResolver` — `os.environ` / `process.env` / `std::env::var` reads ↔ Dockerfile `ENV` / k8s `env`/`envFrom` / `.env` files. Same key consumed in N services = cross-edge. |
 | Image / manifest references | `IacResolver` — Dockerfile `FROM`/`EXPOSE`/`CMD` ↔ k8s Deployment/Service/Ingress/ConfigMap/Secret ↔ docker-compose. **Kustomize templating + Helm rendering deliberately out of scope in v0.4.x.** |
-| Dependency graph | `PackageResolver` — manifests (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, …) + lockfiles. Cross-language reachability is the differentiator vs Endor/Snyk/Socket.dev — they stop at manifest match. |
+| Dependency graph | `PackageResolver` — manifests (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, `Gemfile`, `composer.json`); services that depend on the same package are joined. Dependency substrate only: glia does not join packages to vulnerability feeds (`SECURITY.md`). |
 | Cron / scheduled jobs | `CronResolver` — partially shipped. Handles crontab files, k8s CronJob manifests, GH Actions `schedule:`, Celery beat, Sidekiq-cron, node-cron, Quartz. **Corpus-sparse in current eval (0 edges); needs cron-heavy fixtures to validate.** |
 | CLI invocation | `CliInvocationResolver` — invocation site ↔ command definition. Similar corpus-sparse state (0 edges). |
 | Frontend route resolution | extractor-layer: `ts_routes` (Next.js Pages + App Router, SvelteKit, React Router, Angular Router, Vue Router). Feeds HttpStackResolver. |
@@ -165,8 +166,8 @@ Gaps that are explicitly open + ownable (not scoped out, just unbuilt):
 
 What's deliberately out of scope of v0.4.x (don't fight these unless you've read why):
 
-- **No intra-procedural data-flow / taint analysis.** CodeQL territory. v0.5+ refinement.
-- **No vulnerability matching against CVE feeds.** Snyk territory.
+- **No data-flow / taint analysis.** A deliberate non-goal, not a pending refinement: glia maps structure, not exploitability (`SECURITY.md`).
+- **No vulnerability matching against CVE feeds.** Also deliberate (`SECURITY.md`).
 - **No source-level fix suggestions** — glia emits substrate; reasoning over it is downstream.
 - **No Kustomize/Helm rendering.** Raw manifest only.
 - **No daemon (`glia serve`).** Killed. CLI + post-commit hook is the shape.
@@ -284,7 +285,7 @@ Goal: get the workspace green, navigate every crate, pick one small thing that b
 
 Possible free-fixes (each is real and unowned):
 - A typo / off-by-one in any README example.
-- Look in `TODO.md` Day 2 for any item still unchecked that maps to <half-day work (e.g. `--features sweben` gating of synth_composition / synth_key_symbols if `cargo check` flags them).
+- Look in `TODO.md` for an open item outside the 0.5.0 leap that maps to <half-day work (e.g. committed crontab files as `CRON_JOB` sources).
 - Pick any `// TODO:` comment in `graph/src/` younger than 6 weeks and do it.
 - Run `cargo clippy --workspace -- -D warnings` and clear one diagnostic.
 

@@ -163,14 +163,14 @@ Workspace crates:
 |---|---|---|
 | Sourcegraph / ctags | intra-repo symbol search at scale | cross-service edges (HTTP/gRPC/queue/shared-DB), declarative resolver layer |
 | CodeQL / Semgrep | deep semantic per-file analysis, custom rules | wider substrate (more languages, more frameworks, less depth per query), works out of the box |
-| Apiiro / Endor / Snyk | dependency-graph + vuln matching | cross-language reachability via call edges, not just manifest lists; IaC, config, and queue resolvers in one tool |
+| Apiiro / Endor / Snyk | dependency-graph + vuln matching | the dependency graph as one layer of a cross-service graph (shared packages across services, next to IaC, config and queue links); no vulnerability matching by design ([SECURITY.md](./SECURITY.md)) |
 | Codebase-Memory MCP | LLM-targeted graph of one codebase | multi-repo merge + cross-service resolvers, pure-Rust core |
 | SocratiCode | LLM-driven code Q&A | structural index, not LLM-derived; deterministic, repeatable |
 | Backstage / service catalog | curated org-level service registry | derived from source + manifests automatically, no curation step |
 
-What glia does NOT do today:
-- No intra-procedural data-flow / taint analysis (CodeQL territory).
-- No vulnerability matching against CVE feeds (Snyk territory).
+What glia does NOT do:
+- No data-flow / taint analysis. A deliberate non-goal, not a roadmap gap: glia maps structure, not exploitability ([SECURITY.md](./SECURITY.md)).
+- No vulnerability matching against CVE feeds, and no joining package or call reachability to them. Also deliberate ([SECURITY.md](./SECURITY.md)).
 - No source-level fix suggestions (LLM-tier work; we emit substrate).
 - No Kustomize template merging, no Helm rendering. IaC resolver reads raw manifests only.
 
@@ -238,7 +238,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
 
 **v0.5.0:** domain registries for non-code (video, chemistry, policy, climate). Code becomes one of N domains. The activation crate is already domain-agnostic; the parser+extractor layer is what abstracts.
 
-**v0.5+:** Cross-language taint, contract drift, type propagation; node dedupe across repos; manifest format for `glia merge`; org-internal-package routing (sibling-repo imports); query-specific distillation over composition / sage / synth-cells / vectors (the reasoning-layer search direction noted in Experimental notes).
+**v0.5+:** Contract drift, type propagation; node dedupe across repos; manifest format for `glia merge`; org-internal-package routing (sibling-repo imports); query-specific distillation over composition / sage / synth-cells / vectors (the reasoning-layer search direction noted in Experimental notes).
 
 ## License
 

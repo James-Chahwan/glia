@@ -1,62 +1,38 @@
-# glia v0.4.x — 2-day ship plan
+# glia: open items outside the 0.5.0 leap
 
-Locked 2026-05-05. Ship gate: substrate complete + CLI/MCP + G2 refactor + SWE-bench footnote. Reasoning trial optional at end.
+The v0.4.x "2-day ship plan" (locked 2026-05-05) that used to live here is retired. Each of its boxes was
+checked against the code on 2026-09-19. The ones that shipped were removed, and the commit that retired
+the plan records the evidence for each (`git log -- TODO.md`). The open items that remain are below.
 
-## Day 1 — substrate
+- 0.5.0 scope and packets: `dev-notes/next-leap-0.5.0.md`, `dev-notes/leap-packets.json`
+- State of the finished programme: `dev-notes/handoff-2026-09-18-next-session.md`
+- What glia will not build (taint, CVE joins, bulk scanning): `SECURITY.md`
 
-### Frameworks (parsers/code/&lt;lang&gt;/src/lib.rs)
+## Closed by a leap packet
 
-- [ ] **Go HTTP framework extractor** — Gin / Echo / Chi / Fiber / Gorilla Mux / stdlib `http.HandleFunc`. Biggest single gap (grep: zero hits in current Go parser). Pattern: copy shape of `scan_axum_routes`.
-- [ ] **Sinatra (Ruby)** — `get '/path' do ... end`, `post`, `namespace`. Sibling to existing `scan_rails_routes`.
-- [ ] **Symfony + Slim (PHP)** — Symfony: `#[Route('/path')]` attribute or `@Route` annotation. Slim: `$app->get/post('/path', ...)`. Sibling to `scan_laravel_routes`.
-- [ ] **Rust web frameworks** — Warp (`warp::path!(...).and(warp::get())`), Tide (`app.at('/path').get()`), Poem (`#[handler]` + `Route::new()`), Salvo (`Router::with_path`). Extend existing axum/actix/rocket scanner.
-- [ ] **Java verification** — grep for Quarkus / Dropwizard / Javalin. Quarkus/Dropwizard likely covered by existing JAX-RS `@Path` patterns. Javalin uses `app.get('/path', handler)` — different shape, probably a real gap.
+These stay here so each packet can find its line. The packet ticks or removes the box when it lands.
 
-### Cross-graph resolvers (graph/src/lib.rs, CrossGraphResolver impls)
+- [ ] **Synth bins gating.** The four synth bins sit behind the `driver` feature. The hook-trait refactor (`SynthHook` / `FilterPredicate` / `RankingSignal`, one `ActivatedView`) and the rename `driver` → `research` are LD.12a–e. LD.12b marks this box done.
+- [ ] **`glia merge` of pre-built `.gmap`s.** `glia merge` takes repo paths and rebuilds each one. Merging pre-built layouts under a workspace manifest is LC.10b (engine) plus LC.10c (CLI and pyo3).
+- [ ] **`glia impact` from a file or diff.** `impact` takes a qname. Seeding it with changed files or a pasted diff is LE.2 (diff_impact).
+- [ ] **Effect classification.** Reshaped as effects(A): data, config and queue sites anchored to their functions (LE.4a–c), then the effect sinks downstream of a node (LE.4d).
+- [ ] **Cron: framework schedulers.** Quartz outside Spring `@Scheduled`, Hangfire, robfig/gocron and APScheduler are LA.19a. whenever, sidekiq-cron, Laravel `$schedule` and Oban are LA.19b.
+- [ ] **Config: secrets and feature flags as `CONFIG_KEY` flavours.** Vault paths, AWS Secrets Manager ARNs and k8s `Secret` refs are A13.8 (Batch C).
+- [ ] **DB: ORM breadth and migrations.** JPA/Hibernate, EF Core, GORM, ActiveRecord, Eloquent, TypeORM, Prisma and Django implicit tables are A13.10–A13.17. Migration files and DDL are A13.9 (Batch C).
 
-- [ ] **DB resolver** — three flavor tracks under one `DataStore { flavor: sql | nosql | graph }` umbrella:
-    - **SQL:** `Table` / `Column` / `View` nodes. ORM model classes → table edges (SQLAlchemy / Django ORM / ActiveRecord / Eloquent / Sequelize / TypeORM / Prisma / GORM / sqlx / EF Core). Raw SQL strings parsed for table refs. Migrations create/alter tables.
-    - **NoSQL:** `Collection` nodes (MongoDB / DynamoDB / Firestore / CosmosDB). Schema/model classes (Mongoose / Beanie / Pydantic+Motor) → collection edges. Repos / DAOs that wrap collections.
-    - **Graph DB:** `NodeLabel` + `RelationshipType` nodes (Neo4j / ArangoDB / Dgraph). v1 recognizes Cypher MATCH/MERGE label refs; full query parsing punted.
-    - **Cross-service edge:** two services touch same Table/Collection/NodeLabel name → join.
-- [ ] **Cron resolver** — crontab files, k8s CronJob manifests, GH Actions `schedule:`, GitLab CI pipeline schedules, systemd `.timer`, GCP Cloud Scheduler / AWS EventBridge / Azure Logic Apps, framework schedulers (Celery beat, Sidekiq-cron, node-cron, Quartz, Hangfire, Oban, Rails `whenever`, Laravel Scheduler, apscheduler).
-- [ ] **Config resolver** — three flavor tracks emitting `ConfigKey` nodes with `defined_in: <source>` and `read_at: <code-site>` edges:
-    - **Env vars:** `os.environ` / `process.env` / `std::env::var` etc. in code ↔ Dockerfile `ENV`, k8s `env`/`envFrom`, `.env` files, CI variables, docker-compose `environment`.
-    - **Config files:** `application.yml` (Spring), `config/database.yml` (Rails), `appsettings.json` (.NET), `pyproject.toml`, `next.config.js`, etc. ↔ where keys are read in code.
-    - **Secrets / vault refs:** Vault paths, AWS Secrets Manager ARNs, k8s `Secret` envFrom refs. Same key-lookup pattern, different source tag.
-    - **Cross-service edge:** same key consumed in N services.
-- [ ] **IaC resolver** — Dockerfile (`FROM`/`ENV`/`EXPOSE`/`CMD`), k8s (Deployment/Service/Ingress/ConfigMap/Secret), Kustomize overlays, docker-compose.yml. Emit Resource nodes joined to services. Concept from Codebase-Memory MCP.
-- [ ] **Package-deps resolver** — manifests (`package.json`, `go.mod`, `Cargo.toml`, `requirements.txt`/`Pipfile`/`pyproject.toml`, `Gemfile`, `pom.xml`/`build.gradle`, `composer.json`, `*.csproj`) + lockfiles. Join to call edges for per-symbol reachability. Cross-language reachability is the differentiator vs Endor / Snyk / Socket.dev. **Org-internal-package detection (route imports to sibling repo's real defs instead of phantom external nodes) deferred to v0.5+ — depends on workflow/manifest story.**
+## Outside the leap
 
-## Day 2 — surface, refactor, ship
+- [ ] **Warp routes (Rust).** `warp::path!` builds its segments in a macro DSL, so the scanner skips it (see the comment above `scan_at_path_chains` in `parsers/code/rust/src/lib.rs`). Tide, Poem and Salvo are covered.
+- [ ] **`glia analyze` on a pre-built `.gmap`.** `analyze` builds from a repo path. It cannot read a layout that is already on disk.
+- [ ] **Cron sources outside code.** Committed crontab files, systemd `.timer` units, and cloud schedulers declared in IaC (GCP Cloud Scheduler, EventBridge Scheduler). Schedules configured in a UI, such as GitLab pipeline schedules, never appear in the repo.
+- [ ] **Config files as `CONFIG_KEY` sources.** Spring `application.yml` / `.properties`, Rails `config/database.yml`, .NET `appsettings.json`, and CI variable definitions (GitHub Actions `env:`, GitLab CI variables).
+- [ ] **Kustomize overlays and Helm rendering.** The IaC resolver reads raw manifests only.
+- [ ] **More package manifests, and lockfiles.** Maven `pom.xml`, Gradle, .NET `*.csproj`, plus lockfiles (`package-lock.json`, `Cargo.lock`, `go.sum`). PACKAGE_DEP stays dependency substrate (`SECURITY.md`).
+- [ ] **Org-internal package routing.** A shared-lib import should bind to the sibling repo's real definitions, not a phantom external node. This needs the workspace manifest (LC.10b) first.
+- [ ] **DB depth.** Sequelize models, CosmosDB containers, column and view level entities, and graph-DB relationship types. Today DATA_ENTITY resolves only to table, collection or label.
+- [ ] **Cross-repo node dedupe.** MergedGraph joins each repo's nodes with cross-edges, and some duplicate external-package nodes are accepted.
 
-- [ ] **Maturin packaging for `repo-graph-mcp`** — already built; wire wheel matrix alongside existing `repo-graph-py` GHA.
-- [ ] **`glia analyze` CLI** — `glia analyze <repo|.gmap>` → Mermaid service graph + JSON + cross-language call list. Formatter on top of MergedGraph + resolvers.
-- [ ] **`glia impact` CLI** — `glia impact <file|qname>` → reachable nodes across resolver edges; cross-service blast-radius.
-- [ ] **`glia merge` (minimal primitive only)** — `glia merge a.gmap b.gmap c.gmap -o org.gmap` with positional args. No manifest format. No opinion on workflow. MergedGraph is structurally already multi-repo; this is the thinnest possible CLI wrapper.
-    - **Decoupled from fetching:** users clone with their own tooling, run `glia build` per-repo, then `glia merge` to join. No auth/credentials work.
-    - **Dedupe:** don't try. MergedGraph keeps per-repo nodes joined via cross-edges; some external-pkg duplication accepted.
-    - **Manifest format / org-meta-repo pattern / per-repo discovery / shared-internal-lib routing / daemon = v0.5+ or later.** Ship the primitive, observe real usage, design workflow from signal not speculation.
-- [ ] **Synth bins gating (defer real refactor to v0.5)** — leave `synth_composition` / `synth_key_symbols` / `synth_callsite_argflow` / `synth_derived_notes` in place. Run `cargo check`; if any break after Day 1 substrate changes, gate them behind `--features sweben` so default builds skip them. Real hook-trait refactor (`SynthHook` / `FilterPredicate` / `RankingSignal` traits, single `ActivatedView` pass) happens in v0.5.0 when cross-domain work actually needs the seam.
-- [ ] **SWE-bench footnote + candle decision** — README paragraph (3–5 sentences) parking the latent-injection arm with marshmallow-1359 v8 SOLVE as artifact. Candle dep: strip from tree (recommend) or leave dormant.
-- [ ] **README rewrite (do last)** — substrate-as-moat framing. Sections: lead with cross-service code graph claim + counts (verified actuals: 16 base langs + 3 framework parsers, ~13 IPC mechanism resolvers, ~30 frameworks); examples (`glia analyze` / `impact` / `merge` / MCP); **Compared To** (Codebase-Memory MCP / SocratiCode / Sourcegraph / CodeQL / Apiiro with concrete deltas, concede where they win); architecture diagram; experimental notes (effect classification status if shipped, SWE-bench footnote).
+## Decided, not open
 
-## Optional — only if Day 2 has runway
-
-- [ ] **`glia install-hooks` (opt-in git hooks)** — install `.git/hooks/post-commit`, `post-merge`, `post-checkout` that re-run `glia build` to keep `.gmap` fresh. **Opt-in, not default-on** (rebuild latency on big repos would frustrate users). Document the CI pattern in README rather than building a CI integration. Incremental rebuild = v0.5+ (touches `.gmap` format).
-- [ ] **Effect classification reasoning trial** — single static-reasoning pass tagging every node with effect class (pure / read-state / write-state / network / fs / db / time / nondeterministic). Compose along call edges. Visible win: `glia analyze` diagrams gain edge annotations. Ship in v0.4.x only if diagrams visibly improve; otherwise defer to v0.5+.
-
-## Notes
-
-- **G8 release engineering is done** — repo split happened post-v0.4.12; we're rust-only.
-- **Verified framework coverage already shipped:** Flask / FastAPI / Django (Python); Spring / Ktor / WebFlux / Micronaut / JAX-RS (Java); Express / Koa / Hono / Fastify / Next.js / SvelteKit / NestJS (TS); Rails (Ruby); Laravel (PHP); ASP.NET / Minimal API (C#); Axum / Actix / Rocket (Rust); Phoenix (Elixir); React / Angular / Vue. Queues: Celery / BullMQ / Sidekiq / Oban / NATS / RabbitMQ / Kafka. Don't re-build these.
-- **v0.5.0 = cross-domain pivot** (video / chemistry / policy / climate). Code becomes one of N domains. Out of scope for these 2 days.
-- **Cross-language taint, contract drift, type propagation** = v0.5+ refinements. Out of scope.
-- **Node dedupe across repos** = not attempted in v0.4.x. MergedGraph stitches via cross-edges; some external-pkg duplication accepted.
-- **Incremental .gmap rebuild** = v0.5+. v0.4.x rebuilds whole file each time.
-- **Git fetch / private-repo auth in `glia merge`** = explicitly out of scope. Users clone with their own tooling.
-- **Multi-repo manifest format** = deferred. v0.4.x ships positional-args `glia merge` only.
-- **Org-meta-repo workflow pattern** = documented later, not v0.4.x.
-- **Per-repo declarations / `glia discover` (Pattern 2)** = v0.5+ if real demand.
-- **Central daemon / `glia serve` (Pattern 3)** = killed; too much for the project's current shape.
-- **Org-internal-package routing** (shared-lib imports → sibling repo's real defs) = v0.5+ once workflow story lands.
+- `glia merge` does no git fetching and no private-repo auth. Users clone with their own tooling.
+- There is no central daemon (`glia serve`). The shape is the CLI plus a post-commit hook.
