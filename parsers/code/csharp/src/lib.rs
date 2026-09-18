@@ -63,6 +63,15 @@ pub fn parse_file(
         );
     }
 
+    // LB.14 fired_on:
+    // `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] csharp-file-local:'`
+    if acc.block_file_local > 0 && qname_debug() {
+        eprintln!(
+            "[qname] csharp-file-local: {} file-local types in block namespaces scoped to {module_qname} file={file_rel_path}",
+            acc.block_file_local
+        );
+    }
+
     if acc.minimal_api_routes > 0 {
         eprintln!(
             "[csharp-minimal-api] {} top-level Map* routes in {file_rel_path}",
@@ -106,8 +115,12 @@ pub fn parse_file(
 #[derive(Default)]
 struct Acc {
     /// The file's MODULE qname: the `from_module` of every `using` in the
-    /// file, whichever block it was written in (LA.40a).
+    /// file, whichever block it was written in (LA.40a), and the scope of every
+    /// C# 11 `file` type, whichever namespace form holds it (LB.7d, LB.14).
     module_qname: String,
+    /// `file` types declared inside a block namespace and scoped to the file
+    /// module - the `[qname] csharp-file-local:` count (LB.14).
+    block_file_local: usize,
     /// `using` directives written inside a namespace block (StyleCop SA1200's
     /// default placement) and bound to the file module - the `[csharp-using]`
     /// count.
@@ -156,8 +169,9 @@ struct EfCoreStats {
 /// `parent_qname` is the file module at the compilation-unit level and the
 /// namespace inside a block-namespace body. It stays the nav / DEFINES parent
 /// everywhere; only the TYPE scope differs at the root (LB.7d, see
-/// [`type_scope`]). A `using` never takes it: every import belongs to the file
-/// module (LA.40a, see [`collect_using`]).
+/// [`type_scope`]) and for a C# 11 `file` type, which takes the file module
+/// scope at every level (LB.14). A `using` never takes it: every import belongs
+/// to the file module (LA.40a, see [`collect_using`]).
 #[allow(clippy::too_many_arguments)]
 fn visit_children(
     node: TsNode,
@@ -174,7 +188,7 @@ fn visit_children(
     // 0.23 puts the declarations that follow `namespace X;` beside it as
     // compilation_unit siblings, so the root walk adopts the namespace once it
     // passes the declaration. Below the root (block-namespace bodies)
-    // parent_qname is the namespace and nothing changes.
+    // parent_qname is the namespace and is the scope of every non-`file` type.
     let at_root = node.kind() == "compilation_unit";
     let mut scope: String = if at_root {
         type_scope(parent_qname).to_string()
@@ -206,19 +220,28 @@ fn visit_children(
             "class_declaration" | "struct_declaration" | "interface_declaration"
             | "enum_declaration" | "record_declaration" | "record_struct_declaration" => {
                 // A C# 11 `file` type is file-local by the language: two files
-                // of one namespace may each declare `file class Scratch`, so at
-                // the root it keeps the file-module scope that tells them apart.
-                let local = at_root && has_modifier(child, src, "file");
-                let ty_scope = if local { parent_qname } else { scope.as_str() };
+                // of one namespace may each declare `file class Scratch`, so it
+                // takes the file-module scope that tells them apart - at the
+                // root (LB.7d) and inside a block namespace alike (LB.14), so
+                // its qname is one shape in all three namespace forms and a
+                // block -> file-scoped migration keeps its NodeId. The clone
+                // frees `acc` for the `&mut` below; only `file` types pay it.
+                let local = has_modifier(child, src, "file");
+                let file_scope;
+                let ty_scope: &str = if local {
+                    file_scope = acc.module_qname.clone();
+                    &file_scope
+                } else {
+                    &scope
+                };
                 let minted = visit_type_decl(
                     child, src, file_rel, ty_scope, parent_id, module_id, repo, acc,
                 );
-                if minted && at_root {
-                    if local {
-                        file_local += 1;
-                    } else {
-                        rescoped += 1;
-                    }
+                match (minted, at_root, local) {
+                    (true, true, true) => file_local += 1,
+                    (true, true, false) => rescoped += 1,
+                    (true, false, true) => acc.block_file_local += 1,
+                    _ => {}
                 }
             }
             // A4.2: C# 9 top-level statements. `app.MapGet("/health", …)` in a
@@ -364,9 +387,10 @@ fn visit_namespace(
 }
 
 /// `scope` is the type's scope: a namespace, the file's directory, or - for a
-/// nested type or a root-level C# 11 `file` type - its enclosing type / file
-/// module (LB.7d). Returns whether a node was minted (a nameless or unknown
-/// declaration is not), which feeds the `[qname] csharp:` marker.
+/// nested type or a C# 11 `file` type in any namespace form - its enclosing
+/// type / file module (LB.7d, LB.14). Returns whether a node was minted (a
+/// nameless or unknown declaration is not), which feeds the `[qname] csharp:`
+/// and `[qname] csharp-file-local:` markers.
 #[allow(clippy::too_many_arguments)]
 fn visit_type_decl(
     node: TsNode,
@@ -3267,21 +3291,88 @@ public class OrderClient {
             id_of(node_kind::CLASS, "Svc::Other::Scratch")
         );
 
-        // Block form: unchanged, a `file` type inside it included, and the
-        // nav parent is the PACKAGE.
+        // Block form: unchanged, and the nav parent is the PACKAGE. A `file`
+        // type inside it takes the file scope like the other two forms (LB.14;
+        // LB.7d kept it at Shop::Legacy::X).
         let fp = parse_file(legacy, "Svc/Legacy.cs", "Svc::Legacy", repo()).unwrap();
         assert_eq!(
             qnames_of(&fp, node_kind::CLASS),
-            vec!["Shop::Legacy::Legacy", "Shop::Legacy::X"]
+            vec!["Shop::Legacy::Legacy", "Svc::Legacy::X"]
         );
         assert_eq!(
             qnames_of(&fp, node_kind::METHOD),
-            vec!["Shop::Legacy::Legacy::Go", "Shop::Legacy::X::Y"]
+            vec!["Shop::Legacy::Legacy::Go", "Svc::Legacy::X::Y"]
         );
         let package = id_of(node_kind::PACKAGE, "Shop::Legacy");
         let class = id_of(node_kind::CLASS, "Shop::Legacy::Legacy");
         assert_eq!(fp.nav.parent_of.get(&class), Some(&package));
         assert!(defines(&fp, package, class));
+    }
+
+    #[test]
+    fn file_types_in_block_namespaces_are_file_scoped() {
+        // LB.14: the sources of bench/substrate-gap/fixtures/csharp-file-local-types.
+        let helpers = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-file-local-types/Svc/Helpers.cs"
+        );
+        let other = include_str!(
+            "../../../../bench/substrate-gap/fixtures/csharp-file-local-types/Svc/Other.cs"
+        );
+        let h = parse_file(helpers, "Svc/Helpers.cs", "Svc::Helpers", repo()).unwrap();
+        let o = parse_file(other, "Svc/Other.cs", "Svc::Other", repo()).unwrap();
+
+        // Each file's `file class Scratch` takes its file scope (HEAD: both were
+        // CLASS Shop::Core::Scratch); the non-`file` Helpers keeps the namespace.
+        assert_eq!(
+            qnames_of(&h, node_kind::CLASS),
+            vec!["Shop::Core::Helpers", "Svc::Helpers::Scratch"]
+        );
+        assert_eq!(qnames_of(&o, node_kind::CLASS), vec!["Svc::Other::Scratch"]);
+        assert_eq!(qnames_of(&o, node_kind::STRUCT), vec!["Svc::Other::Pair"]);
+        let h_scratch = id_of(node_kind::CLASS, "Svc::Helpers::Scratch");
+        let o_scratch = id_of(node_kind::CLASS, "Svc::Other::Scratch");
+        assert_ne!(h_scratch, o_scratch);
+
+        // Members follow their own file's type, one `Inner` per file.
+        assert_eq!(
+            qnames_of(&h, node_kind::METHOD),
+            vec![
+                "Shop::Core::Helpers::Use",
+                "Svc::Helpers::Scratch::A",
+                "Svc::Helpers::Scratch::Inner",
+            ]
+        );
+        assert_eq!(
+            qnames_of(&o, node_kind::METHOD),
+            vec![
+                "Svc::Other::Pair::Sum",
+                "Svc::Other::Scratch::B",
+                "Svc::Other::Scratch::Inner",
+            ]
+        );
+        let h_inner = id_of(node_kind::METHOD, "Svc::Helpers::Scratch::Inner");
+        assert_eq!(h.nav.parent_of.get(&h_inner), Some(&h_scratch));
+        assert!(defines(&h, h_scratch, h_inner));
+        let o_inner = id_of(node_kind::METHOD, "Svc::Other::Scratch::Inner");
+        assert_eq!(o.nav.parent_of.get(&o_inner), Some(&o_scratch));
+
+        // The nav / DEFINES parent does not move: still the PACKAGE, for the
+        // file type and the control alike.
+        let package = id_of(node_kind::PACKAGE, "Shop::Core");
+        assert_eq!(h.nav.parent_of.get(&h_scratch), Some(&package));
+        assert!(defines(&h, package, h_scratch));
+        let control = id_of(node_kind::CLASS, "Shop::Core::Helpers");
+        assert_eq!(h.nav.parent_of.get(&control), Some(&package));
+        assert_eq!(
+            o.nav.parent_of.get(&id_of(node_kind::STRUCT, "Svc::Other::Pair")),
+            Some(&package)
+        );
+
+        // The self-calls hang off the re-scoped methods.
+        let a = id_of(node_kind::METHOD, "Svc::Helpers::Scratch::A");
+        let b = id_of(node_kind::METHOD, "Svc::Other::Scratch::B");
+        assert!(h.calls.iter().any(|c| c.from == a));
+        assert!(o.calls.iter().any(|c| c.from == b));
     }
 
     #[test]

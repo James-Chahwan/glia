@@ -1,0 +1,64 @@
+{
+  "framework": "csharp-file-local-types",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.14 identity fixture (legacy-only, no matrix cell). A C# 11 `file` type is visible only in its own file, so two files of one block namespace may each declare `file class Scratch`: each keeps the file scope <file module>::<Type>, the qname LB.7d gives `file` types after a file-scoped namespace or with none, so the three namespace forms agree. Non-`file` types in the block namespace keep the namespace scope. HEAD: both are CLASS Shop::Core::Scratch - one node holding A, B and one merged Inner.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "Svc::Helpers::Scratch::A"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Other::Scratch::B"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Helpers::Scratch::Inner"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Other::Scratch::Inner"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Svc::Other::Pair::Sum",
+      "note": "a file struct is file-local too"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Shop::Core::Helpers::Use",
+      "note": "control: a non-file type keeps the namespace scope"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Svc::Helpers::Scratch::A",
+      "to": "Svc::Helpers::Scratch::Inner",
+      "category": "CALLS"
+    },
+    {
+      "from": "Svc::Other::Scratch::B",
+      "to": "Svc::Other::Scratch::Inner",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "Shop::Core::Scratch"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "Shop::Core::Pair"
+    },
+    {
+      "from": "Svc::Helpers::Scratch::A",
+      "to": "Svc::Other::Scratch::Inner",
+      "category": "CALLS",
+      "note": "each file's Scratch calls its own Inner"
+    }
+  ]
+}
