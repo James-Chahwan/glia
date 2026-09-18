@@ -1,0 +1,37 @@
+{
+  "framework": "python-dataclass-service",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "python/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "UserService",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "UserService",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/users",
+      "to": "GET /users",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. services.rs python rule (@dataclass + a def); FastAPI route + requests client."
+}

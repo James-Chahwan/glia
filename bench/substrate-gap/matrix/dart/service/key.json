@@ -1,0 +1,37 @@
+{
+  "framework": "dart-injectable-service",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "dart/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "AuthService",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "AuthService",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:POST:/login",
+      "to": "route:/login",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. LA.21a dart rule (@lazySingleton); the SERVICE lives on the calling side (dio.post) against a chi route."
+}

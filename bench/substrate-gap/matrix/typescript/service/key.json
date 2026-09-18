@@ -1,0 +1,37 @@
+{
+  "framework": "ts-injectable-service",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "typescript/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "UsersService",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "UsersService",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. services.rs TS rule (@Injectable); Express route + requests client."
+}

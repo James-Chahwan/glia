@@ -21,9 +21,15 @@ FOUR GRADED ASSERTIONS per (fixture, cell), all from ONE grade_fixture() call:
            "emitted with the wrong name" from "not emitted at all". When the
            fixture scopes no expect_nodes to this cell, the probe falls back to
            the mechanism's own kind groups: is ANY of them present?
+           A ROLE mechanism (matrix_vocab `role_cells`, e.g. service) is also
+           extracted by a `found` expect_cells row {cell: ROLE, contains: <one
+           of role_cells>}: LB.3's fold leaves the declaration with its own kind
+           plus a ROLE cell, so after the fold the kind group alone matches only
+           standalone overlays. Those rows count beside the kind-scoped rows.
   literal   the identifying literal survived into the node name/qname -- i.e.
            every scoped expect_nodes entry is `found` under grade.py's identity
-           matcher. Vacuously true when the fixture scopes no nodes here, which
+           matcher, plus every scoped ROLE row (its `node` is matched on the same
+           identity). Vacuously true when the fixture scopes no nodes here, which
            is what makes the legacy corpus gradeable at this level with no source
            edits (A15.6 only adds `cells`).
   route     the scoped expect_edges are NON-EMPTY and all `found`. An empty set
@@ -48,8 +54,9 @@ LEVEL:  none    iff not extract
 
 SCOPING. The frozen key.json vocabulary has no per-assertion cell tag, so an
 assertion belongs to a cell when its kind/category is in that mechanism's
-vocabulary (matrix_vocab.MECHANISMS[*].kinds / .categories). A fixture declaring
-two cells whose mechanisms differ therefore splits cleanly; one declaring two
+vocabulary (matrix_vocab.MECHANISMS[*].kinds / .categories), or, for a ROLE
+row, when its `contains` names one of the mechanism's `role_cells`. A fixture
+declaring two cells whose mechanisms differ therefore splits cleanly; one declaring two
 cells on the SAME mechanism in two languages grades both identically, which is
 honest -- one fixture genuinely proves the same thing about both rows.
 
@@ -206,15 +213,31 @@ def derive(mech_id, res, present_kinds):
     edge_rows = [r for r in res.get("edge_recall", []) if r.get("category") in mech_cats]
     forbid_rows = [r for r in res.get("forbid_results", [])
                    if r.get("category") in mech_cats or r.get("kind") in mech_kinds]
+    # A role mechanism (matrix_vocab `role_cells`) is also proven by a ROLE cell
+    # on the declaration LB.3 folded the overlay into. Empty for every other
+    # mechanism, which therefore derives exactly as before.
+    roles = {r.casefold(): r for r in m.get("role_cells", [])}
+    role_rows = [r for r in res.get("cell_recall", [])
+                 if roles and r.get("cell") == vocab.ROLE_CELL
+                 and (r.get("contains") or "").casefold() in roles]
 
     reasons = []
-    if node_rows:
-        extract_n, extract_d = sum(1 for r in node_rows if r["kind"] in present_kinds), len(node_rows)
+    if node_rows or role_rows:
+        extract_n = (sum(1 for r in node_rows if r["kind"] in present_kinds)
+                     + sum(1 for r in role_rows if r["found"]))
+        extract_d = len(node_rows) + len(role_rows)
     else:
         # No node claim scoped here: probe the mechanism's own kind groups.
         extract_n, extract_d = (1 if present_kinds & mech_kinds else 0), 1
         reasons.append("extract probed from mechanism kinds (fixture scopes no nodes)")
-    literal_n, literal_d = sum(1 for r in node_rows if r["found"]), len(node_rows)
+    if role_rows:
+        reasons.append(f"extract read from {vocab.ROLE_CELL} cells naming "
+                       f"{', '.join(sorted(roles.values()))}")
+    # A found ROLE row matched its `node` on identity, so it proves the literal
+    # too; it also counts as the role kind being present when naming `via`.
+    literal_n = sum(1 for r in node_rows if r["found"]) + sum(1 for r in role_rows if r["found"])
+    literal_d = len(node_rows) + len(role_rows)
+    played = {roles[r["contains"].casefold()] for r in role_rows if r["found"]}
     route_n, route_d = sum(1 for r in edge_rows if r["found"]), len(edge_rows)
     forbid_n, forbid_d = sum(1 for r in forbid_rows if not r["violated"]), len(forbid_rows)
 
@@ -252,7 +275,7 @@ def derive(mech_id, res, present_kinds):
 
     return {
         "level": level,
-        "via": vocab.resolve_via(mech_id, present_kinds),
+        "via": vocab.resolve_via(mech_id, set(present_kinds) | played),
         "extract": [extract_n, extract_d], "literal": [literal_n, literal_d],
         "route": [route_n, route_d], "forbid": [forbid_n, forbid_d],
         "reasons": reasons,

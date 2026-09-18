@@ -1,0 +1,37 @@
+{
+  "framework": "elixir-phoenix-controller-service",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "elixir/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PACKAGE",
+      "name": "UserController",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "PACKAGE",
+      "node": "UserController",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/users",
+      "to": "GET /users",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. LA.21a elixir rule (use <App>Web, :controller) on the defmodule PACKAGE; Phoenix route + requests client."
+}

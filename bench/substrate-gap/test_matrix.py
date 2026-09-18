@@ -63,7 +63,7 @@ class Skip(Exception):
 # Canned grade rows
 # ---------------------------------------------------------------------------
 
-def _res(nodes=(), edges=(), forbid=()):
+def _res(nodes=(), edges=(), forbid=(), cells=()):
     """A grade_fixture() return value, trimmed to the keys matrix.py reads."""
     return {
         "node_recall": [{"kind": k, "name": n, "found": f} for k, n, f in nodes],
@@ -71,6 +71,8 @@ def _res(nodes=(), edges=(), forbid=()):
                         for c, a, b, f in edges],
         "forbid_results": [{"kind": k, "matched": m, "violated": v}
                            for k, m, v in forbid],
+        "cell_recall": [{"kind": k, "node": n, "cell": c, "contains": s, "found": f}
+                        for k, n, c, s, f in cells],
     }
 
 
@@ -239,6 +241,92 @@ def test_scaffold_gives_an_anchor_mechanism_no_edge_skeleton():
     nats = scaffold.build_key("go", vocab.mechanism("nats"), ["."], stubs)
     assert [e["category"] for e in nats["expect_edges"]] == ["QUEUE_FLOWS"], nats
     assert nats["forbid"] == [], nats
+
+
+# service is a ROLE mechanism (matrix_vocab `role_cells`): LB.3 folds the
+# SERVICE overlay into its declaration, which keeps its kind (CLASS here) and
+# gains a ROLE cell naming SERVICE. No SERVICE / REGION node is left to count.
+SVC_DECL = ("CLASS", "UserService", True)
+SVC_ROUTE = ("HTTP_CALLS", "endpoint:GET:/users", "GET /users", True)
+
+
+def test_derive_counts_role_cells_for_role_mechanisms():
+    role = ("CLASS", "UserService", "ROLE", "SERVICE", True)
+    got = matrix.derive("service", _res([SVC_DECL], [SVC_ROUTE], cells=[role]),
+                        {"CLASS", "ENDPOINT", "ROUTE"})
+    assert got["level"] == "full", got
+    assert got["extract"] == [1, 1] and got["literal"] == [1, 1], got
+    assert got["route"] == [1, 1], got
+    assert got["via"] == "service", got     # the found role names the path
+    assert "extract read from ROLE cells naming SERVICE" in got["reasons"], got
+    assert not any("probed" in r for r in got["reasons"]), got
+
+    # `contains` is case-folded, as grade.py folds the payload.
+    lower = ("CLASS", "UserService", "ROLE", "service", True)
+    got = matrix.derive("service", _res([SVC_DECL], [SVC_ROUTE], cells=[lower]), {"CLASS"})
+    assert got["level"] == "full", got
+
+    # The same fixture with the ROLE cell missing is a measured blind spot.
+    miss = ("CLASS", "UserService", "ROLE", "SERVICE", False)
+    got = matrix.derive("service", _res([SVC_DECL], [SVC_ROUTE], cells=[miss]),
+                        {"CLASS", "ENDPOINT", "ROUTE"})
+    assert got["level"] == "none", got
+    assert got["extract"] == [0, 1] and got["literal"] == [0, 1], got
+    assert got["via"] is None, got
+
+    # A ROLE row naming another role proves nothing about this column, and a
+    # non-ROLE cell row carrying the word is not a role row either.
+    other = ("CLASS", "UserCard", "ROLE", "COMPONENT", True)
+    doc = ("CLASS", "UserService", "DOC", "SERVICE", True)
+    got = matrix.derive("service", _res([SVC_DECL], [SVC_ROUTE], cells=[other, doc]),
+                        {"CLASS"})
+    assert got["level"] == "none", got
+    assert got["extract"] == [0, 1] and got["literal"] == [0, 0], got
+    assert any("probed" in r for r in got["reasons"]), got
+    assert not any("ROLE" in r for r in got["reasons"]), got
+
+    # A standalone SERVICE overlay (no same-qname declaration to fold into)
+    # still proves the column through the kind group, as before.
+    got = matrix.derive("service", _res([("SERVICE", "Billing", True)], [SVC_ROUTE]),
+                        {"SERVICE"})
+    assert got["level"] == "full" and got["via"] == "service", got
+
+
+def test_role_cells_leave_every_other_mechanism_untouched():
+    # A mechanism without `role_cells` must derive byte-identically whether or
+    # not the fixture also asserts ROLE rows: the role branch is opt-in.
+    roled = [m["id"] for m in vocab.MECHANISMS if m.get("role_cells")]
+    assert roled == ["service"], roled
+    role = ("CLASS", "OrdersService", "ROLE", "SERVICE", True)
+    for mid, res, kinds in (
+        ("nats", _res([PRODUCED, CONSUMED], [FLOWS]), QUEUE_KINDS),
+        ("nats", _res([("CLASS", "Foo", True)]), set()),
+        ("subproject", _res(PROJECTS, forbid=[("PROJECT", 0, False)]), {"PROJECT"}),
+    ):
+        plain = matrix.derive(mid, res, kinds)
+        with_role = matrix.derive(mid, {**res, "cell_recall": [
+            {"kind": role[0], "node": role[1], "cell": role[2],
+             "contains": role[3], "found": role[4]}]}, kinds)
+        assert plain == with_role, (mid, plain, with_role)
+
+
+def test_scaffold_gives_a_role_mechanism_the_folded_shape():
+    import grade
+    import scaffold
+    stubs = [("client", "client.py", "service A"), ("server", "server.py", "service B")]
+    key = scaffold.build_key("python", vocab.mechanism("service"), ["client", "server"], stubs)
+    assert [(n["kind"], n["name"]) for n in key["expect_nodes"]] == [("CLASS", "TODO")], key
+    assert [(c["kind"], c["node"], c["cell"], c["contains"]) for c in key["expect_cells"]] == [
+        ("CLASS", "TODO", "ROLE", "SERVICE")], key
+    assert [e["category"] for e in key["expect_edges"]] == ["HTTP_CALLS"], key
+    assert set(key) <= grade.TOP_FIELDS, set(key) - grade.TOP_FIELDS
+    for c in key["expect_cells"]:
+        assert set(c) <= grade.CELL_FIELDS, c
+    assert _is_scaffold(key), "a role skeleton must still read as unauthored"
+    # A kind-only mechanism keeps its kind skeleton and no ROLE row.
+    nats = scaffold.build_key("go", vocab.mechanism("nats"), ["."], stubs)
+    assert nats["expect_cells"] == [], nats
+    assert [n["kind"] for n in nats["expect_nodes"]] == ["QUEUE_PRODUCER", "QUEUE_CONSUMER"], nats
 
 
 def test_derive_forbid_violation_caps_a_phantom_cell_at_partial():

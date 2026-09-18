@@ -13,6 +13,9 @@ this one. Every fixture needs four decisions the vocabulary ALREADY holds:
                     single-dir too, only SHARES_* need two repos (AUTHORING.md
                     step 1), so a single dir is no negative control.
     which kinds     the FIRST `kinds` group -- the intended extraction path.
+                    A ROLE mechanism (`role_cells`, e.g. service) instead gets
+                    one declaration node plus one ROLE cell row per role: LB.3
+                    folds the role overlay into its declaration.
     which category  `categories[0]` -- the routing proof. An ANCHOR mechanism
                     (`anchor: True`, e.g. subproject) has no routing vocabulary:
                     it gets no expect_edges skeleton and a duplicate-anchor
@@ -38,7 +41,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from matrix_vocab import mechanism, normalize_language  # noqa: E402
+from matrix_vocab import ROLE_CELL, mechanism, normalize_language  # noqa: E402
 
 MATRIX = HERE / "matrix"
 
@@ -118,6 +121,15 @@ EXTRA_CELLS = {
                             "entirely) - assert the PATH via expect_nodes"},
 }
 
+# A ROLE mechanism (matrix_vocab `role_cells`) is asserted in LB.3's folded
+# shape: the DECLARATION keeps its own kind and carries a ROLE cell naming the
+# role, so the skeleton names the declaration, never the overlay kind (which
+# after the fold matches only a standalone overlay). CLASS is the fold's first
+# base (graph/src/roles.rs BASE_PRIORITY); the note lists the others.
+ROLE_BASE_KIND = "CLASS"
+ROLE_BASE_NOTE = ("or STRUCT / PACKAGE / FUNCTION - the declaration LB.3 folds the "
+                  "stereotype into (Go/Rust structs, Elixir defmodule, React function)")
+
 
 def build_key(lang, mech, dirs, stubs):
     """The frozen-vocabulary key.json for one cell, prefilled from the vocab."""
@@ -143,17 +155,33 @@ def build_key(lang, mech, dirs, stubs):
                      + (f" - {mech['note']}" if mech["note"] else "")}
         ]
         forbid = []
+    roles = mech.get("role_cells", [])
+    if roles:
+        expect_nodes = [
+            {"kind": ROLE_BASE_KIND, "name": "TODO",
+             "note": f"TODO: replace 'TODO' with the declaration's name; kind "
+                     f"{ROLE_BASE_KIND} {ROLE_BASE_NOTE}"}
+        ]
+        role_cells = [
+            {"kind": ROLE_BASE_KIND, "node": "TODO", "cell": ROLE_CELL, "contains": r,
+             "note": f"the {r} role, carried as LB.3's ROLE cell - TODO: 'node' and "
+                     f"'kind' match the expect_nodes declaration"}
+            for r in roles
+        ]
+    else:
+        expect_nodes = [
+            {"kind": k, "name": "TODO",
+             "note": f"TODO: replace 'TODO' with the identifying LITERAL - {mech['literal']}"}
+            for k in kinds
+        ]
+        role_cells = []
     key = {
         "framework": f"{lang}-{mech['id']}",
         "language": lang,
         "dirs": dirs,
         "mechanism": mech["id"],
         "cells": [f"{lang}/{mech['id']}"],
-        "expect_nodes": [
-            {"kind": k, "name": "TODO",
-             "note": f"TODO: replace 'TODO' with the identifying LITERAL - {mech['literal']}"}
-            for k in kinds
-        ],
+        "expect_nodes": expect_nodes,
         "expect_edges": expect_edges,
         # NO blanket POSITION gate. MEASURED 2026-09-16 against the installed
         # 0.4.18 wheel: the cross-cutting extractors mint their nodes WITHOUT a
@@ -163,8 +191,9 @@ def build_key(lang, mech, dirs, stubs):
         # gate it can NEVER satisfy, capping it at partial forever and teaching
         # six parallel authors that a permanently-red cell is normal.
         # expect_cells is optional: AUTHORING.md step 5 adds one only where
-        # `grade.py --dump` shows the cell actually exists.
-        "expect_cells": [],
+        # `grade.py --dump` shows the cell actually exists. The ROLE rows of a
+        # role mechanism are the exception: they ARE its extraction proof.
+        "expect_cells": role_cells,
         "forbid": forbid,
         "note": f"SCAFFOLDED, NOT AUTHORED (stubs: {files}). Follow AUTHORING.md: write the source, "
                 "`grade.py <dir> --dump`, write the key against the INTENDED graph, "

@@ -1,0 +1,37 @@
+{
+  "framework": "go-struct-service",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "go/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "STRUCT",
+      "name": "UserService",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "STRUCT",
+      "node": "UserService",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/users",
+      "to": "route:/users",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. services.rs go rule (struct name ends in Service); chi route + requests client."
+}

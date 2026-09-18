@@ -21,6 +21,19 @@ re-invent:
                grades it on extract + literal + forbid, with route not-applicable
                rather than a cap. Opt-in per mechanism: every other column keeps
                the rule that an unrouted cell is not proven.
+  role_cells   optional, default absent. Node-kind NAMES that also prove
+               extraction when a fixture asserts them as a ROLE cell
+               (`expect_cells {cell: ROLE, contains: <name>}`). LB.3's build-time
+               fold removes a framework-role overlay (SERVICE, COMPONENT, ...) and
+               leaves its declaration with its own kind plus a ROLE cell
+               `{"roles":["SERVICE"]}`, so after the fold a role mechanism's kind
+               group matches only standalone overlays. matrix.derive() counts a
+               found ROLE row naming one of these as extraction AND literal (the
+               row's `node` is matched on identity), and treats its role as a
+               present kind when naming `via` -- the graph crate's `roles_in`
+               model: a folded node plays its role kind. Every entry must also
+               sit in one of the mechanism's `kinds` groups, so `via` resolves.
+               Independent of `anchor`: the two flags never interact.
   cross_repo   whether the column is about a cross-service flow. It decides the
                scaffold's `dirs`: True gives ["client", "server"], False gives
                ["."]. It does NOT mean a single dir cannot show the edge: every
@@ -211,13 +224,17 @@ MECHANISMS = [
 
     {"id": "service", "label": "service", "family": "topology",
      "kinds": [["SERVICE", "REGION"]], "via_labels": ["service"],
+     "role_cells": ["SERVICE"],
      "literal": "the service name in the node name/qname",
      "categories": ["HTTP_CALLS", "GRPC_CALLS", "QUEUE_FLOWS", "GRAPHQL_CALLS",
                     "WS_CONNECTS", "EVENT_FLOWS", "SHARES_SCHEMA", "SHARES_DATA_ENTITY",
                     "SHARES_CONFIG", "SHARES_DEPENDENCY", "SHARES_INFRA_REF",
                     "SHARES_CRON_SCHEDULE"],
      "cross_repo": True,
-     "note": "the roll-up column: any cross-service routing edge at all"},
+     "note": "the roll-up column: any cross-service routing edge at all. Extraction "
+             "is a SERVICE/REGION node OR a declaration (CLASS / STRUCT / PACKAGE / "
+             "FUNCTION) carrying LB.3's ROLE cell naming SERVICE: the fold removes "
+             "every SERVICE twin that has a same-qname declaration"},
     {"id": "subproject", "label": "subproj", "family": "topology",
      "kinds": [["PROJECT"]], "via_labels": ["project"],
      "literal": "the sub-project dir in the PROJECT qname `project:<rel_path>`",
@@ -241,6 +258,11 @@ REPO_PAIRWISE_CATEGORIES = frozenset({
     "SHARES_SCHEMA", "SHARES_DATA_ENTITY", "SHARES_DATA_SOURCE", "SHARES_CONFIG",
     "SHARES_INFRA_REF", "SHARES_DEPENDENCY", "SHARES_CRON_SCHEDULE",
 })
+
+# The cell type a `role_cells` mechanism reads (LB.3a, cell_type ROLE). Module
+# level for the same reason as above: the digest covers MECHANISMS only. The
+# self-test holds it to the locked cell_type registry.
+ROLE_CELL = "ROLE"
 
 
 # ---------------------------------------------------------------------------
@@ -314,8 +336,12 @@ def _selftest():
 
     known_kinds = set(dict(rg.kind_names()).values())
     known_cats = set(dict(rg.category_names()).values())
+    known_cells = set(dict(rg.cell_type_names()).values())
+    assert ROLE_CELL in known_cells, (
+        f"ROLE_CELL {ROLE_CELL!r} is not in the locked cell_type registry "
+        f"(repo_graph_py.cell_type_names())")
     kinds_seen, cats_seen = set(), set()
-    anchors = 0
+    anchors = roled = 0
     for m in MECHANISMS:
         assert len(m["via_labels"]) == len(m["kinds"]), (
             f"{m['id']}: {len(m['via_labels'])} via_labels for {len(m['kinds'])} kind groups"
@@ -350,6 +376,22 @@ def _selftest():
                     f"registry (repo_graph_py.category_names())"
                 )
             cats_seen.add(c)
+        roles = m.get("role_cells", [])
+        assert isinstance(roles, list), f"{m['id']}: role_cells must be a list"
+        roled += bool(roles)
+        for r in roles:
+            # ROLE payloads name node kinds (`{"roles":["SERVICE"]}`), so a
+            # role_cells entry is a node-kind NAME, never a free string.
+            if r not in known_kinds:
+                raise ValueError(
+                    f"{m['id']}: role_cells entry {r!r} is not a node kind in the "
+                    f"locked code-domain registry (repo_graph_py.kind_names()); ROLE "
+                    f"payloads name kinds"
+                )
+            assert any(r in group for group in m["kinds"]), (
+                f"{m['id']}: role_cells entry {r!r} is in none of its kinds groups, "
+                f"so a role-proven cell could not name its `via`"
+            )
 
     assert normalize_language("c++") == "c_cpp"
     assert normalize_language("TS") == "typescript"
@@ -373,7 +415,7 @@ def _selftest():
     print(
         f"[matrix] vocab: {len(MECHANISMS)} mechanisms, {len(LANGUAGES)} languages, "
         f"{len(kinds_seen)} kinds referenced, {len(cats_seen)} categories referenced, "
-        f"anchor={anchors}",
+        f"anchor={anchors} role_cells={roled}",
         file=sys.stderr,
     )
 

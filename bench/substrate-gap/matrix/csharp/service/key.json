@@ -1,0 +1,37 @@
+{
+  "framework": "csharp-aspnet-controller-service",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "service",
+  "cells": [
+    "csharp/service"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "UsersController",
+      "note": "the declaration survives LB.3's overlay fold with its own kind"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "UsersController",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the service stereotype, carried as LB.3's ROLE cell"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/api/users",
+      "to": "GET /api/users",
+      "category": "HTTP_CALLS",
+      "note": "the cross-service link the column rolls up"
+    }
+  ],
+  "note": "LA.21b. LA.21a csharp rules ([ApiController] / ControllerBase; IBillingService/BillingService); ASP.NET route + requests client."
+}
