@@ -2,14 +2,17 @@
   "framework": "xcut-trpc",
   "language": "typescript",
   "dirs": ["server", "client"],
-  "note": "A10.9: a T3 tRPC router and the Next.js page that calls it. A10.10: RpcStackResolver pairs the call to its procedure (RPC_CALLS, edge_category 34) by exact procedure path. No matrix column exists for tRPC, so no mechanism/cells binding.",
+  "note": "A10.9: a T3 tRPC router and the Next.js page that calls it. A10.10: RpcStackResolver pairs the call to its procedure (RPC_CALLS, edge_category 34) by exact procedure path. No matrix column exists for tRPC, so no mechanism/cells binding. LA.31: tRPC nodes are located - POSITION at the procedure key / call site and anchor owner edges (the calling component USES rpc_call; a module-level router CONTAINS its procedures). Two-dir build, so module qnames are `router` / `users`.",
   "expect_nodes": [
     {"kind": "RPC_PROCEDURE", "name": "user.list", "note": "userRouter.list procedure -> rpc:user.list"},
     {"kind": "RPC_PROCEDURE", "name": "user.byId", "note": "multi-line .input(...).query(...) chain"},
     {"kind": "RPC_CALL", "name": "user.list", "note": "api.user.list.useQuery() -> rpc_call:user.list"}
   ],
   "expect_edges": [
-    {"from": "rpc_call:user.list", "to": "rpc:user.list", "category": "RPC_CALLS", "note": "api.user.list.useQuery() -> userRouter.list; full qnames pin the direction (call -> procedure)"}
+    {"from": "rpc_call:user.list", "to": "rpc:user.list", "category": "RPC_CALLS", "note": "api.user.list.useQuery() -> userRouter.list; full qnames pin the direction (call -> procedure)"},
+    {"from": "users::Users", "to": "rpc_call:user.list", "category": "USES", "note": "LA.31: the component holding the hook call USES the RPC_CALL (anchor owner edge)"},
+    {"from": "router", "to": "rpc:user.list", "category": "CONTAINS", "note": "LA.31: a module-level router has no enclosing function, so the procedure gets the anchor CONTAINS fallback"},
+    {"from": "router", "to": "rpc:user.byId", "category": "CONTAINS", "note": "LA.31: a module-level router has no enclosing function, so the procedure gets the anchor CONTAINS fallback"}
   ],
   "forbid": [
     {"kind": "GRAPHQL_OPERATION", "max_nodes": 0, "note": "the tRPC hook line must not mint the phantom graphql_op:useQuery"},
@@ -18,5 +21,10 @@
     {"kind": "RPC_PROCEDURE", "name": "user", "note": "the appRouter mount key is a sub-router, not a procedure"},
     {"kind": "RPC_CALL", "max_nodes": 1, "note": "one call site, deduped"},
     {"from": "rpc_call:user.list", "to": "rpc:user.byId", "category": "RPC_CALLS", "note": "exact path match only: a shared `user.` router prefix must not pair the call to a sibling procedure"}
+  ],
+  "expect_cells": [
+    {"kind": "RPC_PROCEDURE", "node": "rpc:user.list", "cell": "POSITION", "contains": "\"router.ts\",\"start_line\":5", "note": "LA.31: one-line POSITION at the procedure key / hook call (0-based row)"},
+    {"kind": "RPC_PROCEDURE", "node": "rpc:user.byId", "cell": "POSITION", "contains": "\"router.ts\",\"start_line\":6", "note": "LA.31: one-line POSITION at the procedure key / hook call (0-based row)"},
+    {"kind": "RPC_CALL", "node": "rpc_call:user.list", "cell": "POSITION", "contains": "\"users.tsx\",\"start_line\":3", "note": "LA.31: one-line POSITION at the procedure key / hook call (0-based row)"}
   ]
 }

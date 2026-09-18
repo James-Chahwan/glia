@@ -227,19 +227,23 @@ pub(crate) fn apply_cross_cutting_extractors(
         merge_nav(&mut fp.nav, routes.nav);
         // A10.9: tRPC routers/procedures (server) and hook/vanilla calls
         // (client). Per-file marker, printed only when the file yielded one —
-        // the aggregation point (route.rs) is a sibling packet's file.
+        // the aggregation point (route.rs) is a sibling packet's file. LA.31:
+        // both are marker kinds now, so their anchors (one per procedure key /
+        // call site) join the A5.8 pass below; `anchors=` is read before
+        // `run_marked!` moves them.
         let procs = trpc::extract_trpc_procedure_nodes(source, module_id, repo);
         let calls = trpc::extract_trpc_call_nodes(source, module_id, repo);
         if !procs.nodes.is_empty() || !calls.nodes.is_empty() {
             eprintln!(
-                "[trpc] routers={} procedures={} calls={} path={path}",
+                "[trpc] routers={} procedures={} calls={} anchors={} path={path}",
                 procs.routers,
                 procs.nodes.len(),
-                calls.nodes.len()
+                calls.nodes.len(),
+                procs.anchors.len() + calls.anchors.len()
             );
         }
-        run!(procs);
-        run!(calls);
+        run_marked!(procs);
+        run_marked!(calls);
     }
     if matches!(lang, "react" | "typescript") {
         let module_qname = fp

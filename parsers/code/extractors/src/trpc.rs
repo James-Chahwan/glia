@@ -22,8 +22,18 @@
 //!   different key (`people: userRouter`) does not, and the pairing resolver
 //!   (A10.10) sees `rpc:user.*` where the client calls `people.*`.
 //! - tRPC v9's string-keyed `createRouter().query("name", {...})` is not read.
-//! - No POSITION cell: this extractor receives no path, so locate falls back to
-//!   the parent module.
+//!
+//! LOCATION (LA.31): the extractor receives no path, so it does not write
+//! POSITION itself. Like every other RPC-family marker it reports an
+//! [`Anchor`] per site in [`TrpcNodes::anchors`], and the engine's A5.8 pass
+//! ([`crate::anchor::attach`]) turns them into a one-line POSITION plus the
+//! owner edge: a procedure is HANDLED_BY the function whose span holds its key
+//! (a module-level router gets the module CONTAINS fallback), and the calling
+//! function USES an `RPC_CALL`. A procedure anchors at its own key — a router
+//! mounted in the same file anchors at its declaration, not at the mount — and
+//! the key offset survives comment stripping and inline-router nesting
+//! ([`Scan::text_mapped`]). Every call site is an anchor (the gRPC-client
+//! density rule), so each calling function gets its own USES edge.
 //!
 //! Client side: a receiver root in [`CLIENT_ROOTS`] followed by 1-3 dotted
 //! identifier segments and a hook in [`CLIENT_HOOKS`] is an `RPC_CALL` node,
@@ -38,6 +48,8 @@ use std::collections::HashSet;
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
+use crate::anchor::{self, Anchor};
+
 #[derive(Default)]
 pub struct TrpcNodes {
     pub nodes: Vec<Node>,
@@ -45,6 +57,9 @@ pub struct TrpcNodes {
     /// Router literals that declared at least one procedure directly — the
     /// `routers=` count of the engine's `[trpc]` marker. Always 0 for calls.
     pub routers: usize,
+    /// LA.31: one per procedure key / call site, for the engine's A5.8 anchor
+    /// pass (POSITION + owner edge). Several anchors may name one node.
+    pub anchors: Vec<Anchor>,
 }
 
 /// Cheap whole-file gate: without one of these the file declares no router.
@@ -82,21 +97,26 @@ pub fn extract_trpc_procedure_nodes(source: &str, module_id: NodeId, repo: RepoI
     let mut seen = HashSet::new();
     for idx in 0..routers.len() {
         for prefix in router_prefixes(&routers, idx, 0) {
-            for proc_path in &routers[idx].procedures {
+            for (proc_path, key_offset) in &routers[idx].procedures {
                 let name = join_path(&prefix, proc_path);
                 let qname = format!("rpc:{name}");
-                if !seen.insert(qname.clone()) {
-                    continue;
-                }
-                push_node(
-                    &mut out,
-                    &name,
-                    &qname,
-                    node_kind::RPC_PROCEDURE,
-                    Confidence::Strong,
-                    module_id,
-                    repo,
-                );
+                let id = if seen.insert(qname.clone()) {
+                    push_node(
+                        &mut out,
+                        &name,
+                        &qname,
+                        node_kind::RPC_PROCEDURE,
+                        Confidence::Strong,
+                        module_id,
+                        repo,
+                    )
+                } else {
+                    NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_PROCEDURE, &qname)
+                };
+                out.anchors.push(Anchor {
+                    node: id,
+                    line: anchor::line_of(source, *key_offset),
+                });
             }
         }
     }
@@ -109,9 +129,9 @@ pub fn extract_trpc_call_nodes(source: &str, module_id: NodeId, repo: RepoId) ->
         return out;
     }
     let mut seen = HashSet::new();
-    for path in scan_client_calls(source) {
+    for (path, root_offset) in scan_client_calls(source) {
         let qname = format!("rpc_call:{path}");
-        if seen.insert(qname.clone()) {
+        let id = if seen.insert(qname.clone()) {
             push_node(
                 &mut out,
                 &path,
@@ -120,8 +140,15 @@ pub fn extract_trpc_call_nodes(source: &str, module_id: NodeId, repo: RepoId) ->
                 Confidence::Medium,
                 module_id,
                 repo,
-            );
-        }
+            )
+        } else {
+            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_CALL, &qname)
+        };
+        // Every site, not just the first: each calling function gets its USES.
+        out.anchors.push(Anchor {
+            node: id,
+            line: anchor::line_of(source, root_offset),
+        });
     }
     out
 }
@@ -133,6 +160,8 @@ pub fn is_trpc_client_line(line: &str) -> bool {
     CLIENT_ROOTS.iter().any(|r| line.contains(r)) && !scan_client_calls(line).is_empty()
 }
 
+/// Push one node (no cells: POSITION comes from the anchor pass) and return
+/// its id.
 fn push_node(
     out: &mut TrpcNodes,
     name: &str,
@@ -141,7 +170,7 @@ fn push_node(
     confidence: Confidence,
     module_id: NodeId,
     repo: RepoId,
-) {
+) -> NodeId {
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
     out.nodes.push(Node {
         id,
@@ -150,6 +179,7 @@ fn push_node(
         cells: vec![],
     });
     out.nav.record(id, name, qname, kind, Some(module_id));
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -262,13 +292,49 @@ impl<'a> Scan<'a> {
         parts
     }
 
-    /// `[s, e)` with comment bytes dropped, trimmed.
-    fn text(&self, s: usize, e: usize) -> String {
-        let bytes: Vec<u8> = (s..e)
-            .filter(|&i| self.cls[i] != Class::Comment)
-            .map(|i| self.src[i])
+    /// `[s, e)` with comment bytes dropped, trimmed — plus, for every byte of
+    /// the returned text, its offset in the ORIGINAL source: `map[i]` is the
+    /// source offset of byte `i` of the text this `Scan` was built over. The
+    /// offsets are recorded per kept byte, never recomputed from the trimmed
+    /// string, so they survive comment stripping and nesting (a nested body is
+    /// a slice of this text, scanned with the matching slice of the result).
+    ///
+    /// Comment ranges start and end on ASCII delimiters, so the kept bytes are
+    /// valid UTF-8 and the result maps 1:1; should an invalid sequence ever
+    /// reach here, its U+FFFD replacement maps to the sequence's first byte.
+    fn text_mapped(&self, s: usize, e: usize, map: &[usize]) -> (String, Vec<usize>) {
+        let kept: Vec<usize> = (s..e)
+            .filter(|&i| self.cls.get(i).is_some_and(|c| *c != Class::Comment))
             .collect();
-        String::from_utf8_lossy(&bytes).trim().to_string()
+        let bytes: Vec<u8> = kept.iter().map(|&i| self.src[i]).collect();
+        // `map` is built 1:1 with the scanned text; the fallback is unreachable
+        // and only keeps a malformed call from panicking.
+        let origin = |i: usize| map.get(i).copied().unwrap_or(i);
+        let mut text = String::with_capacity(bytes.len());
+        let mut offsets = Vec::with_capacity(bytes.len());
+        let mut pos = 0usize;
+        for chunk in bytes.utf8_chunks() {
+            let valid = chunk.valid();
+            text.push_str(valid);
+            let run = kept.get(pos..pos + valid.len()).unwrap_or_default();
+            offsets.extend(run.iter().map(|&i| origin(i)));
+            pos += valid.len();
+            if !chunk.invalid().is_empty() {
+                text.push(char::REPLACEMENT_CHARACTER);
+                let at = kept.get(pos).map_or(0, |&i| origin(i));
+                offsets.extend(std::iter::repeat_n(
+                    at,
+                    char::REPLACEMENT_CHARACTER.len_utf8(),
+                ));
+                pos += chunk.invalid().len();
+            }
+        }
+        let lead = text.len() - text.trim_start().len();
+        let keep = text.trim().len();
+        let trimmed = text[lead..lead + keep].to_string();
+        offsets.truncate(lead + keep);
+        offsets.drain(..lead);
+        (trimmed, offsets)
     }
 
     /// Whether `needle` occurs as code at bracket depth 0.
@@ -299,8 +365,9 @@ impl<'a> Scan<'a> {
 struct RouterDecl {
     ident: String,
     ns: String,
-    /// Procedure paths relative to this router (`list`, `admin.ban`).
-    procedures: Vec<String>,
+    /// Procedure paths relative to this router (`list`, `admin.ban`), each
+    /// with the absolute source byte offset of its key.
+    procedures: Vec<(String, usize)>,
     /// `(relative key path, mounted router ident)`.
     mounts: Vec<(String, String)>,
 }
@@ -333,7 +400,8 @@ fn scan_routers(source: &str) -> Vec<RouterDecl> {
             ns: router_namespace(ident),
             ..RouterDecl::default()
         };
-        parse_router_body(&source[open + 1..close], "", &mut decl, 0);
+        let map: Vec<usize> = (open + 1..close).collect();
+        parse_router_body(&source[open + 1..close], &map, "", &mut decl, 0);
         routers.push(decl);
         resume_at = close;
     }
@@ -384,10 +452,12 @@ fn router_call_open(rhs: &str) -> Option<usize> {
         .then(|| rhs.len() - call_rest.len() + brace)
 }
 
-fn parse_router_body(body: &str, prefix: &str, decl: &mut RouterDecl, depth: usize) {
+/// `map[i]` is the absolute source offset of `body` byte `i` (see
+/// [`Scan::text_mapped`]).
+fn parse_router_body(body: &str, map: &[usize], prefix: &str, decl: &mut RouterDecl, depth: usize) {
     let scan = Scan::new(body);
     for (s, e) in scan.split_top(0, body.len()) {
-        let entry = scan.text(s, e);
+        let (entry, emap) = scan.text_mapped(s, e, map);
         let Some((key, value)) = split_key(&entry) else {
             continue;
         };
@@ -395,16 +465,32 @@ fn parse_router_body(body: &str, prefix: &str, decl: &mut RouterDecl, depth: usi
         let vscan = Scan::new(value);
         if let Some(open) = router_call_open(value) {
             if depth < MAX_DEPTH {
-                if let Some(close) = vscan.close_of(open) {
-                    parse_router_body(&value[open + 1..close], &path, decl, depth + 1);
+                if let (Some(close), Some(vstart)) =
+                    (vscan.close_of(open), offset_in(&entry, value))
+                {
+                    let sub = emap
+                        .get(vstart + open + 1..vstart + close)
+                        .unwrap_or_default();
+                    parse_router_body(&value[open + 1..close], sub, &path, decl, depth + 1);
                 }
             }
         } else if PROCEDURE_NEEDLES.iter().any(|n| vscan.has_top(n)) {
-            decl.procedures.push(path);
+            // The entry is trimmed, so its first byte is the key's (or the
+            // opening quote of a quoted key, on the same line).
+            if let Some(&key_offset) = emap.first() {
+                decl.procedures.push((path, key_offset));
+            }
         } else if ident_prefix_len(value) == value.len() && !value.is_empty() {
             decl.mounts.push((path, value.to_string()));
         }
     }
+}
+
+/// Byte offset of `inner` within `outer` when `inner` is a subslice of it.
+fn offset_in(outer: &str, inner: &str) -> Option<usize> {
+    let base = outer.as_ptr() as usize;
+    let at = inner.as_ptr() as usize;
+    (at >= base && at + inner.len() <= base + outer.len()).then(|| at - base)
 }
 
 /// `list: publicProcedure...` -> `("list", "publicProcedure...")`; a shorthand
@@ -479,7 +565,8 @@ fn join_path(prefix: &str, key: &str) -> String {
 // Client side: `<root>.<seg>(.<seg>){0,2}.<hook>(`.
 // ---------------------------------------------------------------------------
 
-fn scan_client_calls(src: &str) -> Vec<String> {
+/// `(procedure path, byte offset of the root identifier)` per call site.
+fn scan_client_calls(src: &str) -> Vec<(String, usize)> {
     let scan = Scan::new(src);
     let b = src.as_bytes();
     let mut out = Vec::new();
@@ -512,7 +599,7 @@ fn scan_client_calls(src: &str) -> Vec<String> {
                     if CLIENT_HOOKS.contains(hook)
                         && !path.iter().any(|s| CACHE_SEGMENTS.contains(s))
                     {
-                        out.push(path.join("."));
+                        out.push((path.join("."), i));
                     }
                 }
             }
@@ -675,6 +762,161 @@ export const appRouter = t.router({
         assert!(is_trpc_client_line(
             "const m = api.post.create.useMutation();"
         ));
+    }
+
+    /// `(qname, 0-indexed line)` per anchor, in emission order.
+    fn anchor_rows(out: &TrpcNodes) -> Vec<(String, u32)> {
+        out.anchors
+            .iter()
+            .map(|a| {
+                let q = out
+                    .nav
+                    .qname_by_id
+                    .get(&a.node)
+                    .cloned()
+                    .unwrap_or_default();
+                (q, a.line)
+            })
+            .collect()
+    }
+
+    fn rows(pairs: &[(&str, u32)]) -> Vec<(String, u32)> {
+        pairs.iter().map(|(q, l)| (q.to_string(), *l)).collect()
+    }
+
+    /// bench/substrate-gap/fixtures/xcut-trpc/server/router.ts, verbatim.
+    const FIXTURE_ROUTER: &str = r#"import { z } from "zod";
+import { createTRPCRouter, publicProcedure } from "./trpc";
+import { db } from "./db";
+
+export const userRouter = createTRPCRouter({
+  list: publicProcedure.query(() => db.user.findMany()),
+  byId: publicProcedure
+    .input(z.object({ id: z.string() }))
+    .query(({ input }) => {
+      return db.user.findUnique({ where: { id: input.id } });
+    }),
+});
+
+export const appRouter = createTRPCRouter({
+  user: userRouter,
+});
+
+export type AppRouter = typeof appRouter;
+"#;
+
+    #[test]
+    fn procedure_anchors_point_at_their_keys() {
+        // Router at row 4: `list` on row 5, the multi-line `byId` chain's key on
+        // row 6. The appRouter mount re-keys nothing and anchors nothing.
+        let out = extract_trpc_procedure_nodes(FIXTURE_ROUTER, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[("rpc:user.list", 5), ("rpc:user.byId", 6)])
+        );
+        // A line comment between two entries does not shift the next key.
+        let out = extract_trpc_procedure_nodes(T3_ROUTER, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[("rpc:user.list", 4), ("rpc:user.byId", 6)])
+        );
+        assert!(
+            out.nodes.iter().all(|n| n.cells.is_empty()),
+            "POSITION is the anchor pass's job"
+        );
+    }
+
+    #[test]
+    fn nested_inline_router_anchor_uses_source_rows() {
+        let src = r#"const t = initTRPC.create();
+export const appRouter = t.router({
+  health: t.procedure.query(() => "ok"),
+  admin: t.router({
+    // c
+    ban: t.procedure.mutation(() => null),
+    /* two
+       lines */ kick: t.procedure.mutation(() => null),
+  }),
+});
+"#;
+        let out = extract_trpc_procedure_nodes(src, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[
+                ("rpc:health", 2),
+                ("rpc:admin.ban", 5),
+                ("rpc:admin.kick", 7)
+            ])
+        );
+    }
+
+    #[test]
+    fn block_comment_before_a_key_keeps_the_key_row() {
+        // Multi-byte text inside comments and strings must not shift offsets.
+        let src = r#"export const userRouter = createTRPCRouter({
+  /**
+   * Lists users — café ✓.
+   */
+  list: publicProcedure.query(() => "naïve"),
+  /* inline ✓ */ byId: publicProcedure.query(() => null),
+  "quoted": publicProcedure.query(() => null),
+});
+"#;
+        let out = extract_trpc_procedure_nodes(src, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[
+                ("rpc:user.list", 4),
+                ("rpc:user.byId", 5),
+                ("rpc:user.quoted", 6)
+            ])
+        );
+    }
+
+    #[test]
+    fn mounted_router_procedures_anchor_at_their_declaration() {
+        let src = r#"const t = initTRPC.create();
+const userRouter = t.router({
+  list: t.procedure.query(() => []),
+});
+export const appRouter = t.router({
+  people: userRouter,
+});
+"#;
+        let out = extract_trpc_procedure_nodes(src, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[("rpc:people.list", 2)]),
+            "the procedure's own key, not the `people:` mount on row 5"
+        );
+    }
+
+    #[test]
+    fn every_call_site_is_an_anchor() {
+        let src = r#"import { api } from "~/utils/api";
+export function Users() {
+  const { data } = api.user.list.useQuery();
+  return data;
+}
+export function Count() {
+  const q =
+    api.user.list.useQuery({ take: 1 });
+  return q.data?.length;
+}
+"#;
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(
+            qnames(&out),
+            vec!["rpc_call:user.list"],
+            "one node per path"
+        );
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[("rpc_call:user.list", 2), ("rpc_call:user.list", 7)]),
+            "one anchor per site, at the root identifier's row"
+        );
+        let none = extract_trpc_call_nodes("// api.user.list.useQuery();", module_id(), repo());
+        assert!(none.anchors.is_empty() && none.nodes.is_empty());
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! A5.8 — anchor RPC-family marker nodes to the code that owns them.
 //!
 //! The cross-cutting extractors mint marker nodes (GRPC_CLIENT, WS_*, EVENT_*,
-//! GRAPHQL_*) from a needle in the file text. `CodeNav::record` only writes
-//! the nav parent, so until this pass those markers were graph islands: no
-//! structural edge touched them and no POSITION cell located them. A trace from
-//! the function that builds a gRPC stub could not cross into the gRPC hop, and
-//! `locate_node` / `glia arch` could not place the marker in a file.
+//! GRAPHQL_*, and — LA.31 — tRPC's RPC_CALL / RPC_PROCEDURE) from a needle in
+//! the file text. `CodeNav::record` only writes the nav parent, so until this
+//! pass those markers were graph islands: no structural edge touched them and
+//! no POSITION cell located them. A trace from the function that builds a gRPC
+//! stub could not cross into the gRPC hop, and `locate_node` / `glia arch`
+//! could not place the marker in a file.
 //!
 //! Each extractor now reports an [`Anchor`] (marker id + 0-indexed line) for
 //! the needle that minted the node. [`attach`] then:
@@ -21,11 +22,12 @@
 //!   module. CONTAINS is structural, not a carry edge, so blast results do not
 //!   widen.
 //!
-//! Anchor density per extractor: the gRPC client passes and the type-keyed
-//! event needles anchor EVERY site (their name is read from that site); the
-//! string-keyed needles anchor only the site that minted the node, because the
-//! name they read is not per-site (e.g. a GraphQL operation name is the file's
-//! first `gql` tag, whichever `useQuery(` line matched).
+//! Anchor density per extractor: the gRPC client passes, the type-keyed event
+//! needles and tRPC (procedure keys and call sites) anchor EVERY site (their
+//! name is read from that site); the string-keyed needles anchor only the site
+//! that minted the node, because the name they read is not per-site (e.g. a
+//! GraphQL operation name is the file's first `gql` tag, whichever
+//! `useQuery(` line matched).
 //!
 //! Parsers extract, the graph crate resolves: this pass reads only the file's
 //! own parse (spans the language parser already attached), so its output is a
@@ -50,23 +52,32 @@ pub struct Anchor {
 }
 
 /// Marker kinds a method reaches OUT through: the method USES the marker.
+/// RPC_CALL (LA.31) is the tRPC hook / vanilla call, the gRPC-client shape.
 const OUTBOUND: &[NodeKindId] = &[
     node_kind::GRPC_CLIENT,
     node_kind::WS_CLIENT,
     node_kind::EVENT_EMITTER,
     node_kind::GRAPHQL_OPERATION,
+    node_kind::RPC_CALL,
 ];
 
 /// Marker kinds that are an INBOUND contract: the marker is HANDLED_BY the
 /// method, mirroring the HTTP side (`ROUTE --HANDLED_BY--> handler`).
+/// RPC_PROCEDURE (LA.31) is a tRPC procedure key; one declared in a
+/// module-level router has no enclosing function and takes the module
+/// CONTAINS fallback.
 const INBOUND: &[NodeKindId] = &[
     node_kind::WS_HANDLER,
     node_kind::EVENT_HANDLER,
     node_kind::GRAPHQL_RESOLVER,
     node_kind::GRPC_SERVER,
+    node_kind::RPC_PROCEDURE,
 ];
 
-/// True for every kind [`attach`] anchors.
+/// True for every kind [`attach`] anchors. RPC_CALL / RPC_PROCEDURE are shared
+/// with LA.17's Connect / Twirp nodes, which are grafted post-cache with their
+/// own HANDLED_BY / USES / CONTAINS edges in the directions [`owner_edge`]
+/// uses, so [`census`] classifies them as anchored too.
 pub fn is_marker_kind(kind: NodeKindId) -> bool {
     OUTBOUND.contains(&kind) || INBOUND.contains(&kind)
 }
@@ -511,6 +522,28 @@ mod tests {
         ] {
             assert!(owner_edge(kind, id(kind, "x"), owner).is_none(), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn rpc_kinds_are_marker_kinds() {
+        assert!(is_marker_kind(node_kind::RPC_CALL));
+        assert!(is_marker_kind(node_kind::RPC_PROCEDURE));
+        let owner = id(node_kind::FUNCTION, "Users");
+        let call = id(node_kind::RPC_CALL, "rpc_call:user.list");
+        let e = owner_edge(node_kind::RPC_CALL, call, owner).expect("RPC_CALL is outbound");
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (owner, call, edge_category::USES),
+            "the calling function USES the call"
+        );
+        let procedure = id(node_kind::RPC_PROCEDURE, "rpc:user.list");
+        let e = owner_edge(node_kind::RPC_PROCEDURE, procedure, owner)
+            .expect("RPC_PROCEDURE is inbound");
+        assert_eq!(
+            (e.from, e.to, e.category),
+            (procedure, owner, edge_category::HANDLED_BY),
+            "the procedure is HANDLED_BY its enclosing function"
+        );
     }
 
     #[test]
