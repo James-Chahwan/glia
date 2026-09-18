@@ -128,6 +128,9 @@ struct InjectFnCandidate {
     /// `import { inject as i }`).
     callee: String,
     type_name: String,
+    /// A6.2b: `(field name, declared type)` for an unannotated field, recorded
+    /// on `CodeNav::field_types` once the callee passes the `inject` import gate.
+    field_type: Option<(String, String)>,
 }
 
 /// An HTTP-call shape detected during the call walk. Resolved into an Endpoint
@@ -281,6 +284,85 @@ fn visit_class(
     // (class → dependency type); the graph crate binds the bare type name to
     // the target node and forms the edge.
     collect_constructor_injects(n, body, src, module_id, class_id, acc);
+    // A6.2b: every constructor parameter's declared type, decorated class or
+    // not, so `this.api.fetchUser()` binds on `api`'s type.
+    collect_ctor_param_field_types(body, src, class_id, acc);
+}
+
+/// The class body's `constructor` method, if it declares one.
+fn find_constructor<'t>(body: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor).find(|m| {
+        m.kind() == "method_definition" && child_text(*m, "name", src) == Some("constructor")
+    })
+}
+
+/// A6.2b: record each constructor parameter's declared class type as a field
+/// type of `class_id` on `acc.nav.field_types`, so A6.2a's receiver pass in
+/// `resolve_calls` binds `this.api.fetchUser()` (a `ComplexReceiver` with
+/// receiver `this.api`) to `fetchUser` on `api`'s type. Parameter properties
+/// (`private api: ApiService`) are fields by declaration; a plain
+/// `constructor(api: ApiService)` that assigns `this.api = api` has the same
+/// shape, so every param counts, decorated class or not. Destructuring and rest
+/// patterns name no single field; primitive and non-class types have no method
+/// table to bind against (`annotated_class_type`).
+fn collect_ctor_param_field_types(body: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let Some(params) =
+        find_constructor(body, src).and_then(|c| c.child_by_field_name("parameters"))
+    else {
+        return;
+    };
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        let Some(pattern) = param.child_by_field_name("pattern") else {
+            continue;
+        };
+        if pattern.kind() != "identifier" {
+            continue;
+        }
+        if let Some(type_name) = param
+            .child_by_field_name("type")
+            .and_then(|t| annotated_class_type(t, src))
+        {
+            acc.nav
+                .record_field_type(class_id, text(pattern, src), type_name);
+        }
+    }
+}
+
+/// A6.2b: the class-shaped type a `type_annotation` declares, as a simple name
+/// (`ns.Foo` / `Foo<T>` -> `Foo`, via `heritage_type_name`). A nullable union
+/// (`Foo | null`, `Foo | undefined`) is its one non-nullish member. Primitives
+/// (`predefined_type`), arrays, tuples, function / object / literal types and
+/// multi-type unions own no method table, so they return `None`.
+fn annotated_class_type<'a>(ty_ann: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let mut tc = ty_ann.walk();
+    let ty = ty_ann.named_children(&mut tc).next()?;
+    class_type_name(ty, src)
+}
+
+fn class_type_name<'a>(ty: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    match ty.kind() {
+        "type_identifier" | "nested_type_identifier" | "generic_type" => {
+            heritage_type_name(ty, src)
+        }
+        "union_type" => {
+            let mut uc = ty.walk();
+            let mut members = ty.named_children(&mut uc).filter(|m| {
+                !(m.kind() == "literal_type"
+                    && matches!(text(*m, src).trim(), "null" | "undefined"))
+            });
+            let only = members.next()?;
+            if members.next().is_some() {
+                return None;
+            }
+            class_type_name(only, src)
+        }
+        _ => None,
+    }
 }
 
 /// Class decorators that mark an Angular class as an injection consumer.
@@ -309,12 +391,7 @@ fn collect_constructor_injects(
     class_id: NodeId,
     acc: &mut Acc,
 ) {
-    // Find the `constructor` method.
-    let mut cursor = body.walk();
-    let Some(ctor) = body.named_children(&mut cursor).find(|m| {
-        m.kind() == "method_definition"
-            && child_text(*m, "name", src) == Some("constructor")
-    }) else {
+    let Some(ctor) = find_constructor(body, src) else {
         return;
     };
     let Some(params) = ctor.child_by_field_name("parameters") else {
@@ -399,13 +476,27 @@ fn has_di_param_decorator(params: TsNode, src: &[u8]) -> bool {
     })
 }
 
-/// Visit one class field (`public_field_definition`). A7.1: a field
-/// initialised by a bare call with a type-naming argument,
+/// Visit one class field (`public_field_definition`).
+///
+/// A6.2b: a field with a class-shaped type annotation (`private api:
+/// ApiService;`, `api?: ApiService | null`, `#api: ApiService`) records that
+/// type as a field type of `class_id`, like a constructor parameter property.
+///
+/// A7.1: a field initialised by a bare call with a type-naming argument,
 /// `private api = inject(ApiService)` (also `inject<T>(TOKEN)` and
 /// `inject(ns.Foo)`), becomes an [`InjectFnCandidate`]. It is not gated on a
 /// class decorator: `inject()` is only legal in an injection context, and the
-/// import gate in `resolve_intra_file` proves the callee is `inject`.
+/// import gate in `resolve_intra_file` proves the callee is `inject`. An
+/// unannotated one carries its field type (the `<T>` argument, else the
+/// argument) to that gate, which records it (A6.2b).
 fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, acc: &mut Acc) {
+    let field_name = field.child_by_field_name("name").map(|n| text(n, src));
+    let annotated = field
+        .child_by_field_name("type")
+        .and_then(|t| annotated_class_type(t, src));
+    if let (Some(name), Some(type_name)) = (field_name, annotated) {
+        acc.nav.record_field_type(class_id, name, type_name);
+    }
     let Some(value) = field.child_by_field_name("value") else {
         return;
     };
@@ -436,11 +527,27 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
     if type_name == "undefined" {
         return;
     }
+    // `inject<ApiService>(API_TOKEN)` returns the `<T>` (none when `T` is not
+    // class-shaped: `inject<string>(API_URL)`); `inject(ApiService)` returns
+    // the argument's class. An annotation, already recorded, wins.
+    let field_type = match (field_name, annotated) {
+        (Some(name), None) => match value.child_by_field_name("type_arguments") {
+            Some(ta) => {
+                let mut tc = ta.walk();
+                let first = ta.named_children(&mut tc).next();
+                first.and_then(|t| class_type_name(t, src))
+            }
+            None => Some(type_name),
+        }
+        .map(|t| (name.to_string(), t.to_string())),
+        _ => None,
+    };
     acc.inject_fn_candidates.push(InjectFnCandidate {
         class_id,
         module_id,
         callee: text(callee, src).to_string(),
         type_name: type_name.to_string(),
+        field_type,
     });
 }
 
@@ -1575,6 +1682,9 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     for cand in acc.inject_fn_candidates {
         if !inject_bindings.contains(cand.callee.as_str()) {
             continue;
+        }
+        if let Some((field, type_name)) = &cand.field_type {
+            out.nav.record_field_type(cand.class_id, field, type_name);
         }
         out.refs.push(UnresolvedRef {
             from: cand.class_id,
@@ -2889,6 +2999,139 @@ enum Merged { B = 2, C = 3 }
         assert_eq!(
             parse.edges.iter().filter(|e| e.category == edge_category::HAS_ATTRIBUTE).count(),
             3
+        );
+    }
+
+    // ---- A6.2b: declared field types -----------------------------------------
+
+    /// `(field, type)` pairs recorded for `class_qname`, sorted.
+    fn field_types(parse: &FileParse, class_qname: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = parse
+            .nav
+            .field_types
+            .get(&id(node_kind::CLASS, class_qname))
+            .map(|m| m.iter().map(|(f, t)| (f.clone(), t.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter().map(|(f, t)| (f.to_string(), t.to_string())).collect()
+    }
+
+    #[test]
+    fn ctor_param_property_records_field_type() {
+        let src = "export class C { constructor(private api: ApiService) {} }\n";
+        let fp = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        let class_id = id(node_kind::CLASS, "src::c::C");
+        assert_eq!(fp.nav.field_types[&class_id]["api"], "ApiService");
+    }
+
+    #[test]
+    fn typed_class_field_records_field_type() {
+        let src = "export class C {\n  private api: ApiService;\n}\n";
+        let fp = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        let class_id = id(node_kind::CLASS, "src::c::C");
+        assert_eq!(fp.nav.field_types[&class_id]["api"], "ApiService");
+    }
+
+    #[test]
+    fn primitive_ctor_param_records_no_field_type() {
+        let src = "export class C { constructor(private count: number) {} }\n";
+        let fp = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        assert!(
+            fp.nav.field_types.is_empty(),
+            "predefined_type is skipped, got: {:?}",
+            fp.nav.field_types
+        );
+    }
+
+    /// Every param counts (decorated or not, with or without an accessibility
+    /// modifier); only a single identifier with a class-shaped type records,
+    /// and each class keeps its own fields.
+    #[test]
+    fn field_types_cover_param_and_field_shapes() {
+        let src = "\
+export class C {
+  constructor(
+    api: ApiService,
+    readonly b?: ns.Bar,
+    public override c: Repo<User>,
+    @Inject(TOKEN) private g: Gateway,
+    private f: Foo | null,
+    { d }: Opts,
+    private n: string,
+    e = 1,
+    private h: A | B,
+    ...rest: X[]
+  ) {}
+  private x: XService;
+  y!: YService;
+  z?: ZService | undefined;
+  #p: PrivService;
+  static s: StatService;
+  cb: (u: User) => void;
+  list: Item[];
+  obj: { a: number };
+  plain = 3;
+}
+export class D {
+  constructor(private api: OtherApi) {}
+}
+";
+        let fp = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        assert_eq!(
+            field_types(&fp, "src::c::C"),
+            pairs(&[
+                ("#p", "PrivService"),
+                ("api", "ApiService"),
+                ("b", "Bar"),
+                ("c", "Repo"),
+                ("f", "Foo"),
+                ("g", "Gateway"),
+                ("s", "StatService"),
+                ("x", "XService"),
+                ("y", "YService"),
+                ("z", "ZService"),
+            ])
+        );
+        assert_eq!(field_types(&fp, "src::c::D"), pairs(&[("api", "OtherApi")]));
+    }
+
+    /// `x = inject(T)` records `x: T` only once the callee passes A7.1's
+    /// `inject` import gate; `inject<T>(TOKEN)` records the `<T>`, a non-class
+    /// `<T>` records nothing, and an annotation wins over the initialiser.
+    #[test]
+    fn inject_fn_field_records_field_type_behind_import_gate() {
+        let body = "\
+export class Dash {
+  private api = inject(ApiService);
+  private store = inject<Store>(STORE_TOKEN);
+  private url = inject<string>(API_URL);
+  private typed: Typed = inject(TYPED_TOKEN);
+  private nested = inject(models.Repo);
+  private cfg = inject(\"CONFIG\");
+}
+";
+        let with_import = format!("import {{ inject }} from \"@angular/core\";\n{body}");
+        let fp = parse_file(&with_import, "src/dash.ts", "src::dash", repo()).unwrap();
+        assert_eq!(
+            field_types(&fp, "src::dash::Dash"),
+            pairs(&[
+                ("api", "ApiService"),
+                ("nested", "Repo"),
+                ("store", "Store"),
+                ("typed", "Typed"),
+            ])
+        );
+
+        let without = format!("import {{ Component }} from \"@angular/core\";\n{body}");
+        let fp = parse_file(&without, "src/dash.ts", "src::dash", repo()).unwrap();
+        assert_eq!(
+            field_types(&fp, "src::dash::Dash"),
+            pairs(&[("typed", "Typed")]),
+            "an un-imported inject() is a local function: only the annotation records"
         );
     }
 }

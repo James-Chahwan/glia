@@ -1,0 +1,29 @@
+{
+  "framework": "ts-field-dispatch",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/calls"],
+  "note": "A6.2b: `this.<field>.m()` parses as a member_expression whose object is itself a member_expression, so TypeScript member dispatch is always a ComplexReceiver{receiver: \"this.<field>\"}. It binds only through A6.2a's receiver-type pass, fed by the TS parser recording each field's declared type from three sources: constructor parameters (AppComponent), a typed class field and an `inject(T)` initialiser behind the `inject` import gate (AuditPanel). AdminService is @Injectable (its SERVICE overlay folds into the CLASS, LB.3a) and carries a decoy fetchUser: the field's declared type decides the target, not the method name.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "ApiService", "note": "injected dependency, undecorated"},
+    {"kind": "CLASS", "name": "AdminService", "note": "@Injectable dependency, one node after the LB.3a fold"},
+    {"kind": "CLASS", "name": "AuditPanel", "note": "field-declared dependencies"},
+    {"kind": "METHOD", "name": "load", "note": "caller through a ctor parameter property"},
+    {"kind": "METHOD", "name": "wipe", "note": "caller through a ctor parameter property"},
+    {"kind": "METHOD", "name": "show", "note": "caller through an inject() field"},
+    {"kind": "METHOD", "name": "clear", "note": "caller through a typed class field"},
+    {"kind": "METHOD", "name": "fetchUser", "note": "callee on the api field's declared type"},
+    {"kind": "METHOD", "name": "purge", "note": "callee on the admin field's declared type"}
+  ],
+  "expect_edges": [
+    {"from": "app.component", "to": "api.service", "category": "IMPORTS", "note": "relative import, the positive control"},
+    {"from": "AppComponent/load", "to": "ApiService/fetchUser", "category": "CALLS", "note": "this.api.fetchUser(1): ComplexReceiver, the only shape TypeScript emits for member dispatch"},
+    {"from": "AppComponent/wipe", "to": "AdminService/purge", "category": "CALLS", "note": "this.admin.purge(): the declared type is a decorated @Injectable service"},
+    {"from": "AuditPanel/show", "to": "ApiService/fetchUser", "category": "CALLS", "note": "private api = inject(ApiService): the inject() argument is the field type"},
+    {"from": "AuditPanel/clear", "to": "AdminService/purge", "category": "CALLS", "note": "private admin!: AdminService: a typed class field"}
+  ],
+  "forbid": [
+    {"from": "app.component::AppComponent::load", "to": "admin.service::AdminService::fetchUser", "category": "CALLS", "note": "decoy: same method name on a type the api field is not declared as"},
+    {"from": "app.component::AuditPanel::show", "to": "admin.service::AdminService::fetchUser", "category": "CALLS", "note": "decoy, inject() form"}
+  ]
+}
