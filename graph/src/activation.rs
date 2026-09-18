@@ -18,6 +18,7 @@ pub fn code_activation_defaults() -> repo_graph_activation::ActivationConfig {
     weights.insert(edge_category::CALLS, 5.0);
     weights.insert(edge_category::HTTP_CALLS, 5.0);
     weights.insert(edge_category::GRPC_CALLS, 5.0);
+    weights.insert(edge_category::RPC_CALLS, 5.0);
     weights.insert(edge_category::GRAPHQL_CALLS, 5.0);
     weights.insert(edge_category::QUEUE_FLOWS, 4.0);
     weights.insert(edge_category::WS_CONNECTS, 4.0);

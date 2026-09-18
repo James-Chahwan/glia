@@ -16,7 +16,8 @@ use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, DbResolver, EventBusResolver,
     GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver, MergedGraph,
-    PackageResolver, QueueStackResolver, SharedSchemaResolver, WebSocketStackResolver,
+    PackageResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
+    WebSocketStackResolver,
 };
 
 use crate::cache::ParseCache;
@@ -570,6 +571,7 @@ impl Drop for SuppressPanicHook {
 fn run_all_resolvers(merged: &mut MergedGraph) {
     merged.run(&HttpStackResolver);
     merged.run(&GrpcStackResolver);
+    merged.run(&RpcStackResolver);
     merged.run(&QueueStackResolver);
     merged.run(&GraphQLStackResolver);
     merged.run(&WebSocketStackResolver);

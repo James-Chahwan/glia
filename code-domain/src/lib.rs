@@ -358,7 +358,7 @@ pub mod edge_category {
     // categories are allocated here and nowhere else; see the matching block
     // in `node_kind` for the rule. Owning packet per id:
     //   33 SHARES_DATA_SOURCE — A13.3 (LANDED: DbResolver emits it)
-    //   34 RPC_CALLS          — A10.10
+    //   34 RPC_CALLS          — A10.10 (LANDED: RpcStackResolver emits it)
     // ------------------------------------------------------------------
 
     /// Cross-repo pairing: two nodes reach the same external data source
@@ -373,8 +373,11 @@ pub mod edge_category {
     /// blast radius across every service in the stack. (A13.3)
     pub const SHARES_DATA_SOURCE: EdgeCategoryId = EdgeCategoryId(33);
 
-    /// RESERVED (A10.10) — call site → remote procedure. The transport-generic
-    /// counterpart of `GRPC_CALLS`, for tRPC / JSON-RPC / Thrift.
+    /// `RPC_CALL` → `RPC_PROCEDURE`: a client call site to the remote procedure
+    /// it names. The transport-generic counterpart of `GRPC_CALLS`; tRPC today,
+    /// Connect / Twirp when those land. Emitted by `RpcStackResolver` on an
+    /// exact procedure-path match (`rpc_call:<path>` ↔ `rpc:<path>`) — no
+    /// substring fallback. In `blast_carry_edges()`. (A10.10)
     pub const RPC_CALLS: EdgeCategoryId = EdgeCategoryId(34);
 
     /// Canonical id→name for every edge category. Single source of truth for
@@ -415,7 +418,7 @@ pub mod edge_category {
         (IMPLEMENTS, "IMPLEMENTS"),
         // Centrally-allocated ids (see the RESERVED block above).
         (SHARES_DATA_SOURCE, "SHARES_DATA_SOURCE"), // emitted by DbResolver (A13.3)
-        (RPC_CALLS, "RPC_CALLS"),                   // no emitter yet
+        (RPC_CALLS, "RPC_CALLS"),                   // emitted by RpcStackResolver (A10.10)
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.

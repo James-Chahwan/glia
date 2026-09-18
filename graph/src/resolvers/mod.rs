@@ -11,6 +11,7 @@ use crate::types::RepoGraph;
 
 mod http;
 mod grpc;
+mod rpc;
 mod queue;
 mod graphql;
 mod websocket;
@@ -25,6 +26,7 @@ mod cli;
 
 pub use http::HttpStackResolver;
 pub use grpc::GrpcStackResolver;
+pub use rpc::RpcStackResolver;
 pub use queue::QueueStackResolver;
 pub use graphql::GraphQLStackResolver;
 pub use websocket::WebSocketStackResolver;

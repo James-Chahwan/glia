@@ -45,6 +45,7 @@ pub fn blast_carry_edges() -> Vec<EdgeCategoryId> {
         ec::USES,
         ec::HTTP_CALLS,
         ec::GRPC_CALLS,
+        ec::RPC_CALLS,
         ec::GRAPHQL_CALLS,
         ec::QUEUE_FLOWS,
         ec::WS_CONNECTS,
