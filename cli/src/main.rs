@@ -85,8 +85,10 @@ enum Cmd {
     /// `<repo>/.glia/docs-snapshot/`, then `build` ingests that snapshot.
     Docs(cmd::docs::Args),
     /// Install git hooks (`post-commit`, `post-merge`, `post-checkout`) into
-    /// the target repo so its `.gmap` rebuilds automatically on each change.
-    /// Opt-in only — rebuild latency on big repos can be noticeable.
+    /// the directory git reads hooks from (core.hooksPath / the repo's common
+    /// dir) so the `.gmap` rebuilds automatically on each change. Opt-in only —
+    /// rebuild latency on big repos can be noticeable. `--pair <sibling>` adds
+    /// the cross-repo branch-pair lock (`pre-commit` + `commit-msg`, G8 / u151).
     InstallHooks(hooks::InstallArgs),
     #[command(flatten)]
     Query(cmd::query::QueryCmd),

@@ -1,0 +1,10 @@
+# CLI surface of `glia hook`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia hook hidden subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+cmd glia hook commit-msg
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg msg_file pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=MSG_FILE global=false hidden=false
+  arg pair pos=- long=pair short=- required=true num_args=1 action=Set default=- value_names=PAIR global=false hidden=false
+cmd glia hook pre-commit
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg pair pos=- long=pair short=- required=true num_args=1 action=Set default=- value_names=PAIR global=false hidden=false
