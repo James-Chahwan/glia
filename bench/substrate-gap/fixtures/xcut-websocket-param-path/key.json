@@ -1,0 +1,33 @@
+{
+  "framework": "xcut-websocket-param-path",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "note": "LA.18b. A handler path with a template segment (`@ServerEndpoint(\"/chat/{room}\")`) pairs a concrete client path segment-for-segment; a parameter matches exactly ONE segment, so /chat/lobby/feed does not pair. Baseline 2026-09-18 (HEAD 7a4883b): no Java WS needle, so no handler; ws_pair compares segments literally.",
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/chat/{room}",
+      "note": "LA.18a Java needle"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/chat/lobby",
+      "to": "ws:/chat/{room}",
+      "category": "WS_CONNECTS",
+      "note": "{room} matches one segment"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/chat/lobby/feed",
+      "to": "ws:/chat/{room}",
+      "category": "WS_CONNECTS",
+      "note": "PRECISION: a parameter never swallows two segments, and suffix pairing never applies to a templated path"
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "framework": "xcut-websocket-go-route",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "note": "LA.18b/LA.18d. The canonical gorilla chat layout: main.go registers `/ws` with a func-literal that calls serveWs; client.go's serveWs holds `upgrader.Upgrade(`. Plus nhooyr: `mux.HandleFunc(\"/echo\", echo)` where echo calls `websocket.Accept(`. The upgrade marker names no path (generic `ws:ws`); the resolver gives it the paths of the routes whose handler IS its owner function. Baseline 2026-09-18 (HEAD 7a4883b): ws:ws is anchored at the package-level `websocket.Upgrader` var (module CONTAINS, no owner), route:/ws has no HANDLED_BY (func-literal handler), nhooyr has no needle, and the client mints ws_client:ws:// from the concatenation. Only the generic-name coincidence could ever pair /ws.",
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:ws",
+      "note": "gorilla + nhooyr upgrade sites, generic name"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/echo",
+      "note": "literal URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "route:/ws",
+      "to": "client::serveWs",
+      "category": "HANDLED_BY",
+      "note": "LA.18d: a func-literal handler is HANDLED_BY the function its body calls"
+    },
+    {
+      "from": "ws:ws",
+      "to": "client::serveWs",
+      "category": "HANDLED_BY",
+      "note": "LA.18a: anchored at the Upgrade call inside serveWs"
+    },
+    {
+      "from": "ws_client:/echo",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "LA.18b: inherited from route:/echo HANDLED_BY echo, which holds websocket.Accept("
+    },
+    {
+      "from": "ws_client:/ws",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "inherited from route:/ws via the func-literal HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/admin/live",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "PRECISION: no route reaching an upgrade function serves /admin/live"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:ws://",
+      "note": "concatenation reads its static tail"
+    }
+  ]
+}

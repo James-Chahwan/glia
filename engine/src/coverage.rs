@@ -79,6 +79,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.gql` files are read whole.",
         verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .gql files and read the variable that holds it",
     },
+    // LA.18b: a path-less upgrade handler (gorilla, nhooyr, raw ASP.NET) pairs
+    // only through the routes that reach its upgrading function, and a client
+    // whose URL the extractor could not read pairs nothing.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "WS_CONNECTS",
+        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired",
+        verify: "grep the upgrade call and the route registration",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",
@@ -319,6 +328,26 @@ mod tests {
         assert_eq!(
             edge_category::name(edge_category::GRAPHQL_CALLS),
             "GRAPHQL_CALLS"
+        );
+    }
+
+    #[test]
+    fn ws_connects_caveat_is_universal() {
+        // LA.18b: generic upgrade handlers pair only through their routes, so
+        // an unreachable route is a declared recall gap on every repo.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let ws: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "WS_CONNECTS")
+            .collect();
+        assert_eq!(ws.len(), 1);
+        assert_eq!((ws[0].language, ws[0].edges_found), ("*", 0));
+        assert!(ws[0].note.contains("more than one call away"));
+        assert!(ws[0].note.contains("no static path"));
+        assert_eq!(
+            edge_category::name(edge_category::WS_CONNECTS),
+            "WS_CONNECTS",
+            "edges_found is keyed by this spelling"
         );
     }
 

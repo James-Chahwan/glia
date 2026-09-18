@@ -1,0 +1,32 @@
+{
+  "framework": "xcut-websocket-generic-route",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "note": "LA.18b precision + recall pair. The gorilla upgrade names no path, so the extractor falls back to the generic ws:ws; the only route reaching the upgrading function is /live. Baseline 2026-09-18 (HEAD fe23c8d): ws:ws is anchored at the package-level Upgrader var, so /live never pairs, while the /ws client pairs by NAME COINCIDENCE (ws_pair('/ws', 'ws') is Exact). After LA.18a + LA.18b the handler inherits /live from route:/live HANDLED_BY ServeLive and the coincidence is gone.",
+  "expect_edges": [
+    {
+      "from": "ws:ws",
+      "to": "live::ServeLive",
+      "category": "HANDLED_BY",
+      "note": "LA.18a: anchored at the upgrader.Upgrade( call inside ServeLive"
+    },
+    {
+      "from": "ws_client:/live",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "LA.18b: inherited from route:/live HANDLED_BY ServeLive"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/ws",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "PRECISION: the fallback name `ws` is not a path, and no route reaching the upgrade serves /ws"
+    }
+  ]
+}

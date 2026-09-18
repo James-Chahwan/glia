@@ -672,30 +672,48 @@ fn index_route_node<'q>(
     target: RouteTarget,
     prefixes: &[String],
 ) -> Option<&'q str> {
-    if let Some(path) = qname.strip_prefix("route:") {
-        let norm = normalise_http_path(path);
-        for cell in cells {
-            if cell.kind != cell_type::ROUTE_METHOD {
-                continue;
+    let (method, path) = split_route_qname(qname)?;
+    let norm = normalise_http_path(path);
+    match method {
+        Some(method) => push_route(index, stripped, method, &norm, target, prefixes),
+        None => {
+            for cell in cells {
+                if cell.kind != cell_type::ROUTE_METHOD {
+                    continue;
+                }
+                let Some(method) = cell_method(cell) else {
+                    continue;
+                };
+                push_route(index, stripped, &method, &norm, target, prefixes);
             }
-            let Some(method) = cell_method(cell) else {
-                continue;
-            };
-            push_route(index, stripped, &method, &norm, target, prefixes);
         }
-        return Some(path);
+    }
+    Some(path)
+}
+
+/// The one reader of the two ROUTE qname shapes (owner-free):
+/// `route:<path>` -> `(None, path)`, methods on stacked `ROUTE_METHOD` cells;
+/// `<METHOD> <path>` -> `(Some(METHOD), path)`. `None` for neither.
+fn split_route_qname(qname: &str) -> Option<(Option<&str>, &str)> {
+    if let Some(path) = qname.strip_prefix("route:") {
+        return Some((None, path));
     }
     // Legacy shape: "<METHOD> <path>". Split on the first space. Every
     // emitter now builds a canonical path (LB.5, counted by the `[http-qname]`
     // census); the `/` guard stays as the safety net for one that does not.
-    if let Some((method, path)) = qname.split_once(' ')
-        && path.starts_with('/')
-    {
-        let norm = normalise_http_path(path);
-        push_route(index, stripped, method, &norm, target, prefixes);
-        return Some(path);
+    match qname.split_once(' ') {
+        Some((method, path)) if path.starts_with('/') => Some((Some(method), path)),
+        _ => None,
     }
-    None
+}
+
+/// The raw request path a ROUTE qname names, in either shape, with the LB.4a
+/// owner segment split off first: `route:/ws @services/chat` -> `/ws`,
+/// `GET /users/{id}` -> `/users/{id}`. `None` for a qname neither shape
+/// describes. Shared with the WebSocket resolver (LA.18b), which gives a
+/// path-less upgrade handler the paths of the routes that reach it.
+pub(crate) fn route_path(qname: &str) -> Option<&str> {
+    split_route_qname(split_owner(qname).0).map(|(_, path)| path)
 }
 
 /// Register one (method, path) route into the exact index and, for each API
@@ -1396,6 +1414,26 @@ fn retier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_path_reads_both_qname_shapes() {
+        // LA.18b: the one reader of the ROUTE qname shape, shared with the
+        // WebSocket resolver. The LB.4a owner segment never reaches the path.
+        assert_eq!(route_path("route:/ws"), Some("/ws"));
+        assert_eq!(route_path("GET /users/{id}"), Some("/users/{id}"));
+        assert_eq!(route_path("route:/ws @services/chat"), Some("/ws"));
+        assert_eq!(route_path("POST /orders @api"), Some("/orders"));
+        // An `@` inside a segment is not an owner separator.
+        assert_eq!(route_path("route:/pkg/@scope/x"), Some("/pkg/@scope/x"));
+        // Neither shape: a nav page, a method with no path, a bare word.
+        assert_eq!(route_path("page:/users"), None);
+        assert_eq!(route_path("GET users"), None);
+        assert_eq!(route_path("ws"), None);
+        // index_route_node reads the same split: method from the legacy
+        // qname, none (cells carry it) from the per-path one.
+        assert_eq!(split_route_qname("route:/a"), Some((None, "/a")));
+        assert_eq!(split_route_qname("GET /a"), Some((Some("GET"), "/a")));
+    }
 
     #[test]
     fn normalise_http_path_collapses_all_param_syntaxes() {
