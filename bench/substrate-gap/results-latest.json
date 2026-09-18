@@ -3662,6 +3662,8 @@
     "fixtures/walk-project-roots",
     "fixtures/xcut-config-env-value",
     "fixtures/xcut-graphql-precision",
+    "fixtures/xcut-graphql-sdl",
+    "fixtures/xcut-proto-shared",
     "fixtures/xcut-queue-annot-listener",
     "fixtures/xcut-queue-msgtype-go",
     "fixtures/xcut-queue-msgtype-go-mismatch",
