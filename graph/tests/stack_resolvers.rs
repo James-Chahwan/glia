@@ -332,6 +332,97 @@ fn grpc_resolver_package_falls_back_to_the_qname_without_a_cell() {
     assert_eq!(grpc_call_targets(&merged, client_id).len(), 0);
 }
 
+// ---- A5.3: server-impl pairing ---------------------------------------------
+
+/// A GRPC_SERVER marker in `repo` for `svc_name`, with one RPC_PACKAGE
+/// evidence cell per entry of `evidence`.
+fn grpc_server(repo: RepoId, nav: &mut CodeNav, svc_name: &str, evidence: &[&str]) -> (Node, NodeId) {
+    let qname = format!("grpc_server:{svc_name}");
+    let (mut node, id) = make_node(repo, node_kind::GRPC_SERVER, &qname, Confidence::Medium);
+    for json in evidence {
+        node.cells.push(rpc_package_cell(json));
+    }
+    record(nav, id, svc_name, &qname, node_kind::GRPC_SERVER);
+    (node, id)
+}
+
+/// `(from, to)` of every HANDLED_BY cross edge.
+fn handled_by(merged: &MergedGraph) -> Vec<(NodeId, NodeId)> {
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::HANDLED_BY)
+        .map(|e| (e.from, e.to))
+        .collect()
+}
+
+#[test]
+fn grpc_resolver_links_service_to_server_impl() {
+    let mut nav_a = CodeNav::default();
+    let (svc, svc_id) = grpc_service(repo_a(), &mut nav_a, "helloworld", "Greeter", r#"{"package":"helloworld"}"#);
+    let ga = make_graph(repo_a(), vec![svc], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (server, server_id) = grpc_server(repo_b(), &mut nav_b, "Greeter", &[]);
+    let gb = make_graph(repo_b(), vec![server], nav_b);
+
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+
+    // Exactly one edge, contract -> impl, like ROUTE -> handler.
+    assert_eq!(handled_by(&merged), vec![(svc_id, server_id)]);
+    assert_eq!(merged.cross_edges.len(), 1, "a server marker is not a client: no GRPC_CALLS");
+    assert_eq!(merged.cross_edges[0].confidence, Confidence::Medium);
+}
+
+#[test]
+fn grpc_resolver_server_pairing_is_package_aware_and_deduplicated() {
+    // Two `Greeter`s in different packages: the server's own imports pick one.
+    let mut nav_a = CodeNav::default();
+    let (hello, hello_id) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "helloworld",
+        "Greeter",
+        r#"{"package":"helloworld","csharp_namespace":"GreeterApi"}"#,
+    );
+    let (v2, _) = grpc_service(
+        repo_a(),
+        &mut nav_a,
+        "helloworld.v2",
+        "Greeter",
+        r#"{"package":"helloworld.v2","csharp_namespace":"GreeterApi.V2"}"#,
+    );
+    let ga = make_graph(repo_a(), vec![hello, v2], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (server, server_id) =
+        grpc_server(repo_b(), &mut nav_b, "Greeter", &[r#"{"imports":["Grpc.Core","GreeterApi"]}"#]);
+    // The same marker id in a second graph of repo B (two language graphs):
+    // it is still paired once.
+    let (server_again, _) = grpc_server(repo_b(), &mut nav_b.clone(), "Greeter", &[]);
+    let gb = make_graph(repo_b(), vec![server], nav_b.clone());
+    let gb2 = make_graph(repo_b(), vec![server_again], nav_b);
+    // And a marker for a service nobody declares pairs with nothing.
+    let mut nav_c = CodeNav::default();
+    let (orphan, _) = grpc_server(repo_b(), &mut nav_c, "Farewell", &[]);
+    let gc = make_graph(repo_b(), vec![orphan], nav_c);
+
+    let mut merged = MergedGraph::new(vec![ga, gb, gb2, gc]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert_eq!(handled_by(&merged), vec![(hello_id, server_id)]);
+
+    // With no evidence at all the two packages are ambiguous: no edge.
+    let mut nav_a = CodeNav::default();
+    let (p1, _) = grpc_service(repo_a(), &mut nav_a, "billing", "PaymentsService", r#"{"package":"billing"}"#);
+    let (p2, _) = grpc_service(repo_a(), &mut nav_a, "legacy", "PaymentsService", r#"{"package":"legacy"}"#);
+    let ga = make_graph(repo_a(), vec![p1, p2], nav_a);
+    let mut nav_b = CodeNav::default();
+    let (s, _) = grpc_server(repo_b(), &mut nav_b, "PaymentsService", &[]);
+    let gb = make_graph(repo_b(), vec![s], nav_b);
+    let mut merged = MergedGraph::new(vec![ga, gb]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert!(handled_by(&merged).is_empty());
+}
+
 // ============================================================================
 // QueueStackResolver
 // ============================================================================

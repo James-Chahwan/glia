@@ -153,7 +153,7 @@ pub mod node_kind {
     // first emitter lands; nothing emits them yet. Owning packet per id:
     //   45 PROJECT        — A8.4           (emitted since A8.5)
     //   46 MESSAGE_TYPE   — A10.5 / A12.1  (emitted since A10.5)
-    //   47 GRPC_SERVER    — A5.3
+    //   47 GRPC_SERVER    — A5.3           (emitted since A5.3)
     //   48 RPC_PROCEDURE  — A10.9
     //   49 RPC_CALL       — A10.9
     // ------------------------------------------------------------------
@@ -182,9 +182,18 @@ pub mod node_kind {
     /// declared name (`Inner`).
     pub const MESSAGE_TYPE: NodeKindId = NodeKindId(46);
 
-    /// RESERVED (A5.3) — the server-side registration that binds a service
-    /// implementation into a gRPC server. Distinct from `GRPC_SERVICE` (the
+    /// (A5.3) — the code that implements a proto service: a class that extends
+    /// or embeds the generated base (`: Greeter.GreeterBase`,
+    /// `pb.UnimplementedGreeterServer`, `GreeterServicer`, …) or the call that
+    /// registers one into a server (`RegisterGreeterServer(`,
+    /// `add_GreeterServicer_to_server(`). Distinct from `GRPC_SERVICE` (the
     /// declared service) and `GRPC_CLIENT` (the calling stub).
+    ///
+    /// Emitted since A5.3 by `extractors::grpc::extract_grpc_server_nodes`,
+    /// one per (service, file): qname `grpc_server:<Service>`, nav name the bare
+    /// service name. `GrpcStackResolver` pairs it back to its service as
+    /// `grpc:<pkg>.<Service> --HANDLED_BY--> grpc_server:<Service>`, and the
+    /// marker is `HANDLED_BY` each method that implements one of the rpcs.
     pub const GRPC_SERVER: NodeKindId = NodeKindId(47);
 
     /// RESERVED (A10.9) — a single declared remote procedure within a service

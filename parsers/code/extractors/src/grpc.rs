@@ -1,7 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
-use crate::anchor::{Anchor, line_of};
+use crate::anchor::{self, Anchor, line_of};
 
 /// One `rpc` declaration inside a proto `service` block.
 pub struct ProtoRpc {
@@ -703,6 +705,9 @@ pub struct ProtoServiceRef {
     pub go_package: Option<String>,
     pub java_package: Option<String>,
     pub csharp_namespace: Option<String>,
+    /// The service's `rpc` names in declaration order (A5.3): the server pass
+    /// reads them to find the methods that implement the service.
+    pub rpcs: Vec<String>,
 }
 
 /// Every service `source` (a `.proto`) declares, as [`ProtoServiceRef`]s.
@@ -725,6 +730,7 @@ pub fn proto_service_refs(source: &str) -> Vec<ProtoServiceRef> {
             go_package: go_package.clone(),
             java_package: java_package.clone(),
             csharp_namespace: csharp_namespace.clone(),
+            rpcs: svc.methods,
         })
         .collect()
 }
@@ -745,6 +751,9 @@ const GRPC_CONTEXT_NEEDLES: &[&str] = &[
     "Grpc.Net.Client",
     "GrpcChannel",
     "Grpc.Core",
+    // ASP.NET Core client factory: a Program.cs holding only the registration
+    // `AddGrpcClient<Greeter.GreeterClient>(…)` needs no `using Grpc.*` at all.
+    "AddGrpcClient<",
     // Python
     "import grpc",
     "grpc.aio",
@@ -772,6 +781,8 @@ pub fn file_has_grpc_context(source: &str) -> bool {
 const CLIENT_SUFFIXES: &[&str] = &[
     // Go `pb.NewGreeterClient(`, C# `new Greeter.GreeterClient(`, Node, Dart
     "Client(",
+    // C# client factory / DI: `services.AddGrpcClient<Greeter.GreeterClient>(`
+    "Client>(",
     // Python `helloworld_pb2_grpc.GreeterStub(`
     "Stub(",
     // Rust tonic `GreeterClient::new(` / `GreeterClient::connect(`
@@ -857,6 +868,435 @@ pub fn extract_known_grpc_client_nodes(
             let cell = evidence.get_or_insert_with(|| client_evidence_cell(source));
             push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
         }
+    }
+    out
+}
+
+// ---- A5.3: gRPC server-impl detection --------------------------------------
+
+/// How a server needle ties a proto service to the code that serves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerShape {
+    /// The needle sits in the header or body of the type that implements the
+    /// service (`: Greeter.GreeterBase`, Go's embedded
+    /// `pb.UnimplementedGreeterServer`): the implementing type is the innermost
+    /// CLASS / STRUCT whose span holds the needle.
+    Base,
+    /// A registration call that binds some implementation into a server
+    /// (`pb.RegisterGreeterServer(`, `add_GreeterServicer_to_server(`). It
+    /// names no type.
+    Register,
+}
+
+/// One server-side construction shape: `pre` + service name + `post`.
+struct ServerNeedle {
+    /// Literal before the service name. The byte before it must not be an
+    /// identifier byte, so `mustEmbedUnimplementedGreeterServer` is no hit.
+    pre: &'static str,
+    /// Literal after the service name. When it ends in an identifier byte, the
+    /// byte after it must not be one (`GreeterBase` yes, `GreeterBaseline` no).
+    post: &'static str,
+    shape: ServerShape,
+    /// Specific to generated gRPC code, so it stands without the
+    /// [`file_has_grpc_context`] gate. A servicer module whose only import is
+    /// its own generated package still names its base type.
+    strict: bool,
+}
+
+/// Server-side shapes, one or more per gRPC binding. The service name between
+/// `pre` and `post` is never a guess: it must be a service the build's own
+/// `.proto` files declare.
+const SERVER_NEEDLES: &[ServerNeedle] = &[
+    // Go: `type server struct { pb.UnimplementedGreeterServer }`
+    ServerNeedle { pre: "Unimplemented", post: "Server", shape: ServerShape::Base, strict: true },
+    // Java: `class GreeterImpl extends GreeterGrpc.GreeterImplBase`
+    ServerNeedle { pre: "", post: "ImplBase", shape: ServerShape::Base, strict: true },
+    // Kotlin (grpc-kotlin): `: GreeterGrpcKt.GreeterCoroutineImplBase()`
+    ServerNeedle { pre: "", post: "CoroutineImplBase", shape: ServerShape::Base, strict: true },
+    // Python: `class Greeter(greeter_pb2_grpc.GreeterServicer)`
+    ServerNeedle { pre: "", post: "Servicer", shape: ServerShape::Base, strict: true },
+    // C#: `class GreeterService : Greeter.GreeterBase`
+    ServerNeedle { pre: "", post: "Base", shape: ServerShape::Base, strict: false },
+    // C++ `: public Greeter::Service`, Ruby `< Helloworld::Greeter::Service`
+    ServerNeedle { pre: "", post: "::Service", shape: ServerShape::Base, strict: false },
+    // Dart: `class GreeterService extends GreeterServiceBase`
+    ServerNeedle { pre: "", post: "ServiceBase", shape: ServerShape::Base, strict: false },
+    // Go: `pb.RegisterGreeterServer(s, &server{})`
+    ServerNeedle { pre: "Register", post: "Server(", shape: ServerShape::Register, strict: false },
+    // Python: `greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)`
+    ServerNeedle { pre: "add_", post: "Servicer_to_server(", shape: ServerShape::Register, strict: true },
+    // Rust tonic: `.add_service(GreeterServer::new(greeter))`
+    ServerNeedle { pre: "", post: "Server::new(", shape: ServerShape::Register, strict: false },
+    ServerNeedle { pre: "", post: "Server::with_interceptor(", shape: ServerShape::Register, strict: false },
+    // Scala (ScalaPB): `GreeterGrpc.bindService(new GreeterImpl, ec)`
+    ServerNeedle { pre: "", post: "Grpc.bindService(", shape: ServerShape::Register, strict: false },
+];
+
+/// Tokens every strict [`SERVER_NEEDLES`] entry contains. A file with neither
+/// gRPC context nor one of these cannot hold a server: the engine skips it
+/// before looking up its parse.
+const STRICT_SERVER_TOKENS: &[&str] = &["Unimplemented", "ImplBase", "Servicer"];
+
+/// The word before a needle that makes the hit a declaration of the generated
+/// base itself (`type UnimplementedGreeterServer struct`, `class
+/// GreeterServicer(object)`, `def add_GreeterServicer_to_server`), not a use.
+const DECL_KEYWORDS: &[&str] = &[
+    "class", "struct", "type", "func", "def", "interface", "trait", "fn", "enum", "object",
+    "module", "record", "protocol",
+];
+
+/// Head-of-file banners protoc plugins write. Generated gRPC code declares
+/// every base and registration function a server needle keys on, so a file
+/// carrying one is never a server implementation. Matched case-folded.
+const GENERATED_BANNERS: &[&str] = &[
+    "do not edit",
+    "do not modify",
+    "<auto-generated",
+    "@generated",
+    "code generated by",
+    "annotation.generated",
+    "grpcgenerated",
+];
+
+/// How far into a file [`GENERATED_BANNERS`] are looked for.
+const GENERATED_SCAN_LINES: usize = 40;
+
+/// True when `source` carries a code-generator banner near its head.
+pub fn is_generated_source(source: &str) -> bool {
+    source.lines().take(GENERATED_SCAN_LINES).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        GENERATED_BANNERS.iter().any(|b| lower.contains(b))
+    })
+}
+
+/// Cheap pre-check for [`extract_grpc_server_nodes`]: false only when the file
+/// can hold no server needle at all, so the caller may skip looking up its parse.
+pub fn may_hold_grpc_server(source: &str) -> bool {
+    file_has_grpc_context(source) || STRICT_SERVER_TOKENS.iter().any(|t| source.contains(t))
+}
+
+/// Where one server needle fired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerHit {
+    name: String,
+    at: usize,
+    shape: ServerShape,
+    /// Rust `impl Greeter for MyGreeter`: the implementing type, by name. The
+    /// impl block sits outside the struct's span, so the span lookup cannot
+    /// find it.
+    impl_for: Option<String>,
+}
+
+/// Start of the line holding byte `at`.
+fn line_start(source: &str, at: usize) -> usize {
+    source[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// True when the hit at `at` is inside a line comment (the line's code starts
+/// with `//`, `#`, `*` or `/*`).
+fn in_comment_line(source: &str, at: usize) -> bool {
+    let head = source[line_start(source, at)..at].trim_start();
+    head.starts_with("//") || head.starts_with('#') || head.starts_with('*') || head.starts_with("/*")
+}
+
+/// True when the identifier before `at` (whitespace skipped) is a declaration
+/// keyword: the hit names the thing being declared.
+fn follows_decl_keyword(source: &str, at: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == at {
+        return false;
+    }
+    let word = &source[ident_start(bytes, end)..end];
+    DECL_KEYWORDS.contains(&word)
+}
+
+/// Every `pre` + known name + `post` hit of `needle` in `source`, as
+/// (name, byte offset of the needle start).
+fn needle_hits(source: &str, needle: &ServerNeedle, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<(String, usize)> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let post_ident_len = needle.post.bytes().take_while(|b| is_ident_byte(*b)).count();
+    let (post_ident, post_rest) = needle.post.split_at(post_ident_len);
+    let tail_is_ident = needle.post.bytes().last().is_some_and(is_ident_byte);
+    if needle.pre.is_empty() {
+        // Anchor on `post`; the name is the identifier run that ends where it starts.
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(needle.post) {
+            let pos = from + rel;
+            from = pos + needle.post.len();
+            let end = pos + needle.post.len();
+            if tail_is_ident && bytes.get(end).is_some_and(|b| is_ident_byte(*b)) {
+                continue;
+            }
+            let start = ident_start(bytes, pos);
+            let name = &source[start..pos];
+            if !name.is_empty() && known.contains_key(name) {
+                out.push((name.to_string(), start));
+            }
+        }
+    } else {
+        // Anchor on `pre`; the name is the identifier run after it, minus the
+        // identifier head of `post`, and the rest of `post` must follow.
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(needle.pre) {
+            let pos = from + rel;
+            from = pos + needle.pre.len();
+            if pos > 0 && is_ident_byte(bytes[pos - 1]) {
+                continue;
+            }
+            let run_start = pos + needle.pre.len();
+            let mut run_end = run_start;
+            while run_end < bytes.len() && is_ident_byte(bytes[run_end]) {
+                run_end += 1;
+            }
+            let Some(name) = source[run_start..run_end].strip_suffix(post_ident) else { continue };
+            if name.is_empty() || !source[run_end..].starts_with(post_rest) {
+                continue;
+            }
+            if known.contains_key(name) {
+                out.push((name.to_string(), pos));
+            }
+        }
+    }
+    out
+}
+
+/// `RouteGuide` → `route_guide`: the module tonic generates a service's server
+/// trait into (`route_guide_server::RouteGuide`).
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The last `::` segment of a Rust path, minus generic arguments.
+fn last_path_segment(path: &str) -> &str {
+    let seg = path.rsplit("::").next().unwrap_or(path);
+    seg.split('<').next().unwrap_or(seg).trim()
+}
+
+/// Rust tonic `impl Greeter for MyGreeter {` (or `impl greeter_server::Greeter
+/// for …`), only in files that name the generated `greeter_server` module.
+fn rust_trait_impl_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<ServerHit> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let at = offset;
+        offset += line.len();
+        let code = line.trim_start();
+        let Some(rest) = code.strip_prefix("impl") else { continue };
+        if !rest.starts_with([' ', '<']) {
+            continue;
+        }
+        let Some((trait_part, type_part)) = rest.split_once(" for ") else { continue };
+        let name = last_path_segment(trait_part.trim());
+        if !known.contains_key(name) || !source.contains(&format!("{}_server", snake_case(name))) {
+            continue;
+        }
+        let ty = type_part.trim_start().trim_start_matches('&');
+        let end = ty.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':')).unwrap_or(ty.len());
+        let ty = last_path_segment(&ty[..end]);
+        if ty.is_empty() {
+            continue;
+        }
+        out.push(ServerHit {
+            name: name.to_string(),
+            at: at + (line.len() - code.len()),
+            shape: ServerShape::Base,
+            impl_for: Some(ty.to_string()),
+        });
+    }
+    out
+}
+
+/// Node `server.addService(GreeterService, impl)` (grpc-tools / ts-proto) and
+/// `server.addService(helloProto.Greeter.service, impl)` (proto-loader).
+fn node_add_service_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<ServerHit> {
+    const NEEDLE: &str = "addService(";
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(NEEDLE) {
+        let pos = from + rel;
+        from = pos + NEEDLE.len();
+        let args = &source[from..];
+        let end = args.find([',', ')']).unwrap_or(args.len());
+        let segs: Vec<&str> = args[..end].trim().split('.').map(str::trim).collect();
+        let Some(&last) = segs.last() else { continue };
+        let name = if last == "service" && segs.len() >= 2 {
+            // proto-loader: `<pkg>.<Service>.service`
+            segs[segs.len() - 2]
+        } else {
+            // grpc-tools / ts-proto name the definition `<Service>Service`;
+            // a service already called `FooService` gets `FooServiceService`.
+            match last.strip_suffix("Service") {
+                Some(n) if known.contains_key(n) => n,
+                _ => last,
+            }
+        };
+        if known.contains_key(name) {
+            out.push(ServerHit {
+                name: name.to_string(),
+                at: pos,
+                shape: ServerShape::Register,
+                impl_for: None,
+            });
+        }
+    }
+    out
+}
+
+/// Every server needle hit in `source`, in offset order.
+fn server_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<ServerHit> {
+    let ctx = file_has_grpc_context(source);
+    let mut hits: Vec<ServerHit> = Vec::new();
+    for needle in SERVER_NEEDLES {
+        if !needle.strict && !ctx {
+            continue;
+        }
+        for (name, at) in needle_hits(source, needle, known) {
+            hits.push(ServerHit {
+                name,
+                at,
+                shape: needle.shape,
+                impl_for: None,
+            });
+        }
+    }
+    if ctx {
+        hits.extend(rust_trait_impl_hits(source, known));
+        hits.extend(node_add_service_hits(source, known));
+    }
+    hits.retain(|h| !in_comment_line(source, h.at) && !follows_decl_keyword(source, h.at));
+    hits.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
+    hits.dedup_by(|a, b| a.at == b.at && a.name == b.name);
+    hits
+}
+
+/// An rpc or method name folded for comparison across bindings: `SayHello`
+/// (Go, C#, Python), `sayHello` (Java, Node) and `say_hello` (Rust, Ruby) agree.
+fn fold_rpc_name(name: &str) -> String {
+    name.chars().filter(|c| *c != '_').map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// The server pass (A5.3): one GRPC_SERVER per (proto service, file) for every
+/// `known` service this file implements or registers, with anchors that tie it
+/// to the code that serves the service.
+///
+/// `nodes` / `nav` are the file's own parse. They locate:
+/// - the implementing type: the innermost CLASS / STRUCT holding a
+///   [`ServerShape::Base`] needle (via [`anchor::build_span_index`]), or the
+///   type a Rust `impl <Service> for <Type>` names;
+/// - the methods that implement the service's rpcs: methods of that type whose
+///   name folds to an rpc name ([`fold_rpc_name`]). With no implementing type
+///   (a registration-only file such as Node's `addService`), any METHOD /
+///   FUNCTION in the file whose name folds to an rpc counts.
+///
+/// Anchors: every Base needle line (the marker's POSITION lands on the first),
+/// plus each rpc method's first line, so [`anchor::attach`] emits
+/// `grpc_server:<S> --HANDLED_BY--> <method>`. A registration line is anchored
+/// only when no rpc method was found; its enclosing function (`main`,
+/// `serve`) is then the owner, which is what binds the service in.
+///
+/// Generated gRPC code ([`is_generated_source`]) never yields a server: it
+/// declares every base type the needles key on.
+pub fn extract_grpc_server_nodes(
+    source: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    known: &[ProtoServiceRef],
+    nodes: &[Node],
+    nav: &CodeNav,
+) -> GrpcNodes {
+    let mut out = GrpcNodes {
+        nodes: Vec::new(),
+        nav: CodeNav::default(),
+        anchors: Vec::new(),
+    };
+    if known.is_empty() || !may_hold_grpc_server(source) || is_generated_source(source) {
+        return out;
+    }
+    // Service name -> folded rpc names, unioned across same-named services in
+    // different packages (they share one marker, like clients do).
+    let mut by_name: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for svc in known {
+        if svc.name.is_empty() || !svc.name.bytes().all(is_ident_byte) {
+            continue;
+        }
+        by_name
+            .entry(svc.name.as_str())
+            .or_default()
+            .extend(svc.rpcs.iter().map(|r| fold_rpc_name(r)));
+    }
+    let hits = server_hits(source, &by_name);
+    if hits.is_empty() {
+        return out;
+    }
+
+    let types = anchor::build_span_index(nodes, nav, &[node_kind::CLASS, node_kind::STRUCT]);
+    let kind_of = |id: &NodeId| nav.kind_by_id.get(id).copied();
+    let evidence = client_evidence_cell(source);
+    let mut grouped: BTreeMap<&str, Vec<&ServerHit>> = BTreeMap::new();
+    for h in &hits {
+        grouped.entry(h.name.as_str()).or_default().push(h);
+    }
+
+    for (name, hits) in grouped {
+        let rpcs = by_name.get(name).cloned().unwrap_or_default();
+        // The implementing types (membership only, so order is irrelevant).
+        let mut impl_types: Vec<NodeId> = Vec::new();
+        for h in hits.iter().filter(|h| h.shape == ServerShape::Base) {
+            match &h.impl_for {
+                Some(ty) => impl_types.extend(nodes.iter().map(|n| n.id).filter(|id| {
+                    matches!(kind_of(id), Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT)
+                        && nav.name_by_id.get(id).is_some_and(|n| n == ty)
+                })),
+                None => impl_types.extend(anchor::owner_of_line(&types, line_of(source, h.at))),
+            }
+        }
+        let rpc_methods: Vec<u32> = nodes
+            .iter()
+            .filter(|n| {
+                let is_fn = matches!(kind_of(&n.id), Some(k) if k == node_kind::METHOD || k == node_kind::FUNCTION);
+                let parent_ok = impl_types.is_empty()
+                    || nav.parent_of.get(&n.id).is_some_and(|p| impl_types.contains(p));
+                is_fn
+                    && parent_ok
+                    && nav.name_by_id.get(&n.id).is_some_and(|m| rpcs.contains(&fold_rpc_name(m)))
+            })
+            .filter_map(|n| anchor::position_span(n).map(|(start, _)| start))
+            .collect();
+
+        let qname = format!("grpc_server:{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_SERVER, &qname);
+        out.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Medium,
+            cells: evidence.iter().cloned().collect(),
+        });
+        out.nav
+            .record(id, name, &qname, node_kind::GRPC_SERVER, Some(module_id));
+        let mut lines: Vec<u32> = hits
+            .iter()
+            .filter(|h| h.shape == ServerShape::Base || rpc_methods.is_empty())
+            .map(|h| line_of(source, h.at))
+            .collect();
+        lines.extend(rpc_methods);
+        out.anchors
+            .extend(lines.into_iter().map(|line| Anchor { node: id, line }));
     }
     out
 }
@@ -1065,6 +1505,7 @@ let db = makeDbClient(uri);
             go_package: None,
             java_package: None,
             csharp_namespace: None,
+            rpcs: Vec::new(),
         }
     }
 
@@ -1179,6 +1620,243 @@ let db = makeDbClient(uri);
     }
 
     #[test]
+    fn data_driven_needle_matches_the_csharp_client_factory_registration() {
+        // Program.cs of the ASP.NET Core client factory: no `using Grpc.*` at
+        // all, only the registration. `AddGrpcClient<` is the gRPC context.
+        let program = "using Demo;\n\nvar builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddGrpcClient<Greeter.GreeterClient>(o =>\n{\n    o.Address = new Uri(\"https://localhost:5001\");\n});\n";
+        let out = extract_known_grpc_client_nodes(program, module_id(), repo(), &[svc("Greeter")]);
+        assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+        // A generic that is not the generated client is no hit.
+        let other = "builder.Services.AddGrpcClient<Greeter.GreeterClient>(o => {});\nvar x = Get<LegacyGreeterClient>(y);\n";
+        let out = extract_known_grpc_client_nodes(other, module_id(), repo(), &[svc("Greeter")]);
+        assert_eq!(out.anchors.len(), 1, "LegacyGreeterClient is not Greeter");
+    }
+
+    // ---- A5.3: server-impl detection -------------------------------------
+
+    fn greeter() -> ProtoServiceRef {
+        let mut s = svc("Greeter");
+        s.package = Some("helloworld".to_string());
+        s.rpcs = vec!["SayHello".to_string(), "SayHelloStream".to_string()];
+        s
+    }
+
+    /// The server pass over `source` with no parse (no types, no methods).
+    fn servers(source: &str) -> GrpcNodes {
+        extract_grpc_server_nodes(source, module_id(), repo(), &[greeter()], &[], &CodeNav::default())
+    }
+
+    fn server_lines(out: &GrpcNodes) -> Vec<u32> {
+        out.anchors.iter().map(|a| a.line).collect()
+    }
+
+    #[test]
+    fn server_pass_matches_each_binding_shape_exactly_once() {
+        // (source, 0-indexed line of the needle that must anchor the marker)
+        let cases: &[(&str, &str, u32)] = &[
+            (
+                "go",
+                "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/hello/pb\"\n)\n\ntype server struct {\n\tpb.UnimplementedGreeterServer\n}\n",
+                8,
+            ),
+            (
+                "java",
+                "package demo;\n\nimport io.grpc.stub.StreamObserver;\n\npublic class GreeterImpl extends GreeterGrpc.GreeterImplBase {\n}\n",
+                4,
+            ),
+            (
+                "python",
+                "import grpc\nimport helloworld_pb2_grpc\n\n\nclass Svc(helloworld_pb2_grpc.GreeterServicer):\n    pass\n",
+                4,
+            ),
+            (
+                "csharp",
+                "using Grpc.Core;\n\nnamespace GreeterApi.Services\n{\n    public class GreeterService : Greeter.GreeterBase\n    {\n    }\n}\n",
+                4,
+            ),
+            (
+                "kotlin",
+                "import io.grpc.ServerBuilder\n\nclass HelloWorldService : GreeterGrpcKt.GreeterCoroutineImplBase() {\n}\n",
+                2,
+            ),
+            (
+                "cpp",
+                "#include <grpcpp/grpcpp.h>\n\nclass GreeterServiceImpl final : public Greeter::Service {\n};\n",
+                2,
+            ),
+            (
+                "ruby",
+                "require 'grpc'\nrequire 'helloworld_services_pb'\n\nclass GreeterServer < Helloworld::Greeter::Service\nend\n",
+                3,
+            ),
+            (
+                "dart",
+                "import 'package:grpc/grpc.dart';\n\nclass GreeterService extends GreeterServiceBase {\n}\n",
+                2,
+            ),
+            (
+                "rust",
+                "use tonic::{transport::Server, Request};\nuse hello_world::greeter_server::{Greeter, GreeterServer};\n\n#[tonic::async_trait]\nimpl Greeter for MyGreeter {\n}\n",
+                4,
+            ),
+            (
+                "node",
+                "import { Server } from \"@grpc/grpc-js\";\nimport { GreeterService } from \"./gen/greeter_grpc_pb\";\n\nconst server = new Server();\nserver.addService(GreeterService, { sayHello });\n",
+                4,
+            ),
+            (
+                "node proto-loader",
+                "const grpc = require('@grpc/grpc-js');\nconst server = new grpc.Server();\nserver.addService(helloProto.Greeter.service, { sayHello: sayHello });\n",
+                2,
+            ),
+            (
+                "scala",
+                "import io.grpc.ServerBuilder\n\nobject Main {\n  val svc = GreeterGrpc.bindService(new GreeterImpl, ec)\n}\n",
+                3,
+            ),
+        ];
+        for (lang, source, line) in cases {
+            let out = servers(source);
+            assert_eq!(
+                out.nodes
+                    .iter()
+                    .map(|n| out.nav.qname_by_id[&n.id].clone())
+                    .collect::<Vec<_>>(),
+                vec!["grpc_server:Greeter".to_string()],
+                "{lang}: exactly one marker"
+            );
+            let id = out.nodes[0].id;
+            assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_SERVER, "{lang}");
+            assert_eq!(out.nav.name_by_id[&id], "Greeter", "{lang}");
+            assert_eq!(out.nav.parent_of[&id], module_id(), "{lang}");
+            assert_eq!(server_lines(&out), vec![*line], "{lang}: anchored at the needle");
+        }
+    }
+
+    #[test]
+    fn server_pass_registration_lines_join_one_marker_per_file() {
+        // The grpcio tutorial file: base class AND registration, one marker.
+        let source = "import grpc\nimport greeter_pb2_grpc\n\n\nclass Greeter(greeter_pb2_grpc.GreeterServicer):\n    def SayHello(self, request, context):\n        return None\n\n\ndef serve():\n    server = grpc.server(None)\n    greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)\n";
+        let out = servers(source);
+        assert_eq!(out.nodes.len(), 1);
+        // No parse, so no rpc method was found: the registration line anchors too.
+        assert_eq!(server_lines(&out), vec![4, 11]);
+        // Go: embed + `Register…Server(`.
+        let go = "import \"google.golang.org/grpc\"\n\ntype server struct {\n\tpb.UnimplementedGreeterServer\n}\n\nfunc main() {\n\ts := grpc.NewServer()\n\tpb.RegisterGreeterServer(s, &server{})\n}\n";
+        let out = servers(go);
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(server_lines(&out), vec![3, 8]);
+    }
+
+    #[test]
+    fn server_pass_ignores_files_with_no_server_shape() {
+        let negatives: &[(&str, &str)] = &[
+            ("client stub", "using Grpc.Net.Client;\nvar c = new Greeter.GreeterClient(channel);\nawait c.SayHelloAsync(req);\n"),
+            ("prose", "// The Greeter service greets. See GreeterBase docs.\nfn main() {}\n"),
+            ("longer name", "using Grpc.Core;\nclass X : LegacyGreeterBase {}\nclass Y : GreeterBaseline {}\n"),
+            ("no context for a loose needle", "class UserRepo : GreeterBase {}\n"),
+            ("commented out", "import grpc\n# class G(pb2_grpc.GreeterServicer):\n"),
+            ("unknown service", "import grpc\nclass G(pb2_grpc.FarewellServicer):\n    pass\n"),
+            ("tonic trait of another service", "use tonic::Request;\nimpl Greeter for MyGreeter {}\n"),
+        ];
+        for (what, source) in negatives {
+            let out = servers(source);
+            assert!(out.nodes.is_empty() && out.anchors.is_empty(), "{what}: got {:?}", out.nav.qname_by_id);
+        }
+    }
+
+    #[test]
+    fn server_pass_skips_generated_code() {
+        // protoc output declares every base the needles key on; committed
+        // generated files must not look like servers.
+        let go = "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\npackage pb\n\nimport grpc \"google.golang.org/grpc\"\n\n// UnimplementedGreeterServer must be embedded.\ntype UnimplementedGreeterServer struct {\n}\n\nfunc (UnimplementedGreeterServer) SayHello() {}\n\nfunc RegisterGreeterServer(s grpc.ServiceRegistrar, srv GreeterServer) {}\n";
+        let py = "# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!\nimport grpc\n\n\nclass GreeterServicer(object):\n    pass\n\n\ndef add_GreeterServicer_to_server(servicer, server):\n    pass\n";
+        let cs = "// <auto-generated>\n//     Generated by the protocol buffer compiler.\n// </auto-generated>\nusing grpc = global::Grpc.Core;\npublic static partial class Greeter\n{\n  public abstract partial class GreeterBase {}\n  public static grpc::ServerServiceDefinition BindService(GreeterBase serviceImpl) { return null; }\n}\n";
+        for source in [go, py, cs] {
+            assert!(is_generated_source(source));
+            assert!(servers(source).nodes.is_empty(), "generated: {source}");
+        }
+        // Declarations are rejected even without the banner.
+        let bare = "import grpc\n\nclass GreeterServicer(object):\n    pass\n\ndef add_GreeterServicer_to_server(servicer, server):\n    pass\n";
+        assert!(servers(bare).nodes.is_empty());
+    }
+
+    /// A node of `kind` named `name` spanning `start..=end`, recorded in `nav`.
+    fn parse_node(
+        nav: &mut CodeNav,
+        kind: repo_graph_core::NodeKindId,
+        name: &str,
+        qname: &str,
+        span: (u32, u32),
+        parent: NodeId,
+    ) -> Node {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        nav.record(id, name, qname, kind, Some(parent));
+        Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![position_cell("svc.cs", span.0, span.1)],
+        }
+    }
+
+    #[test]
+    fn server_pass_anchors_the_implementing_types_rpc_methods() {
+        let source = "using Grpc.Core;\n\npublic class GreeterService : Greeter.GreeterBase\n{\n    public override Task<HelloReply> SayHello(HelloRequest r, ServerCallContext c)\n    {\n        return Helper();\n    }\n\n    Task<HelloReply> Helper() => null;\n}\n\npublic class Wrapper\n{\n    public void SayHello() {}\n}\n";
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let impl_class = parse_node(&mut nav, node_kind::CLASS, "GreeterService", "svc::GreeterService", (2, 10), m);
+        let say = parse_node(&mut nav, node_kind::METHOD, "SayHello", "svc::GreeterService::SayHello", (4, 7), impl_class.id);
+        let helper = parse_node(&mut nav, node_kind::METHOD, "Helper", "svc::GreeterService::Helper", (9, 9), impl_class.id);
+        let wrapper = parse_node(&mut nav, node_kind::CLASS, "Wrapper", "svc::Wrapper", (12, 15), m);
+        let decoy = parse_node(&mut nav, node_kind::METHOD, "SayHello", "svc::Wrapper::SayHello", (14, 14), wrapper.id);
+        let nodes = vec![impl_class, say, helper, wrapper, decoy];
+        let out = extract_grpc_server_nodes(source, m, repo(), &[greeter()], &nodes, &nav);
+        assert_eq!(out.nodes.len(), 1);
+        // The base line (POSITION) and SayHello's first line; not Helper, and
+        // not the same-named method of a class that does not extend the base.
+        assert_eq!(server_lines(&out), vec![2, 4]);
+
+        // A registration-only file (Node `addService`): no implementing type, so
+        // any function named after an rpc serves it, and the registration line
+        // is not anchored once one is found.
+        let node_src = "import { Server } from \"@grpc/grpc-js\";\n\nfunction sayHello(call, cb) {\n  cb(null, null);\n}\n\nconst server = new Server();\nserver.addService(GreeterService, { sayHello });\n";
+        let mut nav = CodeNav::default();
+        let f = parse_node(&mut nav, node_kind::FUNCTION, "sayHello", "server::sayHello", (2, 4), m);
+        let out = extract_grpc_server_nodes(node_src, m, repo(), &[greeter()], &[f], &nav);
+        assert_eq!(server_lines(&out), vec![2]);
+
+        // Rust: the impl block is outside the struct's span; the type is found
+        // by the name after `for`, and `say_hello` folds to `SayHello`.
+        let rs = "use tonic::Request;\nuse hello::greeter_server::Greeter;\n\npub struct MyGreeter {}\n\nimpl Greeter for MyGreeter {\n    async fn say_hello(&self) {}\n}\n";
+        let mut nav = CodeNav::default();
+        let st = parse_node(&mut nav, node_kind::STRUCT, "MyGreeter", "main::MyGreeter", (3, 3), m);
+        let method = parse_node(&mut nav, node_kind::METHOD, "say_hello", "main::MyGreeter::say_hello", (6, 6), st.id);
+        let out = extract_grpc_server_nodes(rs, m, repo(), &[greeter()], &[st, method], &nav);
+        assert_eq!(server_lines(&out), vec![5, 6]);
+    }
+
+    #[test]
+    fn server_marker_carries_its_files_package_evidence() {
+        let source = "using Grpc.Core;\nusing GreeterApi;\n\npublic class GreeterService : Greeter.GreeterBase {}\n";
+        let out = servers(source);
+        assert_eq!(out.nodes.len(), 1);
+        let evidence: Vec<RpcPackageCell> = out.nodes[0]
+            .cells
+            .iter()
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(j) if c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE => {
+                    RpcPackageCell::parse(j)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].imports, vec!["Grpc.Core", "GreeterApi"]);
+    }
+
+    #[test]
     fn proto_service_refs_carry_package_and_options() {
         let source = "syntax = \"proto3\";\npackage helloworld;\noption csharp_namespace = \"GreeterApi\";\nservice Greeter {\n  rpc SayHello (HelloRequest) returns (HelloReply);\n}\nservice Health {}\n";
         let refs = proto_service_refs(source);
@@ -1187,6 +1865,8 @@ let db = makeDbClient(uri);
         assert!(refs.iter().all(|r| r.package.as_deref() == Some("helloworld")));
         assert!(refs.iter().all(|r| r.csharp_namespace.as_deref() == Some("GreeterApi")));
         assert!(refs.iter().all(|r| r.go_package.is_none() && r.java_package.is_none()));
+        assert_eq!(refs[0].rpcs, vec!["SayHello".to_string()], "A5.3: the rpc names ride along");
+        assert!(refs[1].rpcs.is_empty());
     }
 
     // ---- A5.4: client package evidence -----------------------------------

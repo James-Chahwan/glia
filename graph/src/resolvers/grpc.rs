@@ -9,8 +9,13 @@
 //! `repo_graph_code_extractors::grpc::client_package_evidence`) and DROPS the
 //! pairing when that evidence does not single out one package. Precision first:
 //! in a repo whose client names no package, the right edge goes too.
+//!
+//! A5.3 adds the server half: every GRPC_SERVER marker (`grpc_server:<Service>`,
+//! minted where a class extends / embeds / registers the generated base) is
+//! paired back to its service as `service --HANDLED_BY--> marker`, through the
+//! same index and the same package narrowing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::grpc::RpcPackageCell;
@@ -80,7 +85,65 @@ impl CrossGraphResolver for GrpcStackResolver {
             );
         }
         merged.cross_edges.extend(edges);
+        let served = pair_servers(merged, &index);
+        merged.cross_edges.extend(served);
     }
+}
+
+/// A5.3: `grpc:<Service> --HANDLED_BY--> grpc_server:<Service>` for every
+/// server-impl marker, keyed on the same index and narrowed by the same package
+/// evidence as the client loop. The direction mirrors `ROUTE --HANDLED_BY-->
+/// handler`: the contract is handled by the code that serves it, and
+/// HANDLED_BY is a blast carry edge, so a proto change reaches the impl.
+fn pair_servers(merged: &MergedGraph, index: &GrpcIndex) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut handled: HashSet<NodeId> = HashSet::new();
+    let (mut matched, mut unmatched) = (0usize, 0usize);
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_SERVER) || !seen.insert(n.id) {
+                continue;
+            }
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            let Some(svc_name) = qname.strip_prefix("grpc_server:") else { continue };
+            let found = grpc_candidate_keys(svc_name)
+                .into_iter()
+                .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)));
+            let chosen: Vec<&GrpcTarget> = match found {
+                None => Vec::new(),
+                Some((targets, name_pkg)) => {
+                    match pick_targets(targets, name_pkg.as_deref(), &client_evidence(&n.cells)) {
+                        Pick::All => targets.iter().collect(),
+                        Pick::Narrowed(v) => v,
+                        Pick::Ambiguous => Vec::new(),
+                    }
+                }
+            };
+            if chosen.is_empty() {
+                unmatched += 1;
+                continue;
+            }
+            matched += 1;
+            for t in chosen {
+                handled.insert(t.id);
+                edges.push(Edge {
+                    from: t.id,
+                    to: n.id,
+                    category: edge_category::HANDLED_BY,
+                    confidence: weakest(n.confidence, t.confidence),
+                });
+            }
+        }
+    }
+    // A5.3 fired_on marker, once per resolve that sees a server marker.
+    if !seen.is_empty() {
+        eprintln!(
+            "[grpc-server] {matched} impls matched ({} services, {unmatched} unmatched)",
+            handled.len()
+        );
+    }
+    edges
 }
 
 #[derive(Default)]

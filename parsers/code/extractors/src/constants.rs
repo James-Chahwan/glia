@@ -18,7 +18,7 @@
 //!
 //! CACHE RULE FOR CONSUMERS. A file's parse is cached by its own content hash,
 //! but a table lookup depends on OTHER files. A consumer must therefore run on
-//! the router's output after the cache, like `apply_rpc_client_needles`, never
+//! the router's output after the cache, like `apply_rpc_needles`, never
 //! inside the per-file cross-cutting extractors, or an incremental build replays
 //! folds made against a stale table.
 //!

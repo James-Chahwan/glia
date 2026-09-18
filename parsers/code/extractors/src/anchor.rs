@@ -30,8 +30,9 @@
 //! Parsers extract, the graph crate resolves: this pass reads only the file's
 //! own parse (spans the language parser already attached), so its output is a
 //! function of the file's content and is safe to cache with the `FileParse`.
-//! Queue markers (A2.8) and the reserved GRPC_SERVER (A5.3) should reuse this
-//! module rather than grow a parallel helper.
+//! Queue markers (A2.8) should reuse this module rather than grow a parallel
+//! helper, as GRPC_SERVER (A5.3) does: it finds its implementing type through
+//! [`build_span_index`] and anchors through [`attach`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -96,7 +97,7 @@ struct Span {
 }
 
 /// The first POSITION span on `node`, if it parses.
-fn position_span(node: &Node) -> Option<(u32, u32)> {
+pub fn position_span(node: &Node) -> Option<(u32, u32)> {
     node.cells
         .iter()
         .filter(|c| c.kind == cell_type::POSITION)
@@ -111,13 +112,17 @@ fn position_span(node: &Node) -> Option<(u32, u32)> {
 }
 
 pub fn build_owner_index(nodes: &[Node], nav: &CodeNav) -> OwnerIndex {
+    build_span_index(nodes, nav, &[node_kind::METHOD, node_kind::FUNCTION])
+}
+
+/// [`build_owner_index`] over any set of node kinds, with the same
+/// innermost-wins order, so [`owner_of_line`] answers "which `kinds` node
+/// encloses this line". A5.3 asks it for the CLASS / STRUCT that declares a
+/// gRPC base type, rather than growing a second span helper.
+pub fn build_span_index(nodes: &[Node], nav: &CodeNav, kinds: &[NodeKindId]) -> OwnerIndex {
     let mut spans: Vec<(u32, u32, NodeId)> = nodes
         .iter()
-        .filter(|n| {
-            nav.kind_by_id
-                .get(&n.id)
-                .is_some_and(|k| *k == node_kind::METHOD || *k == node_kind::FUNCTION)
-        })
+        .filter(|n| nav.kind_by_id.get(&n.id).is_some_and(|k| kinds.contains(k)))
         .filter_map(|n| position_span(n).map(|(s, e)| (s, e, n.id)))
         .collect();
     spans.sort_unstable_by(|a, b| {

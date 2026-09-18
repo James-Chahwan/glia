@@ -284,19 +284,27 @@ impl RpcContext {
 /// A5.8: the added clients are anchored here too (POSITION + the owning
 /// method's USES edge), because the per-file anchor pass in
 /// `apply_cross_cutting_extractors` ran before they existed.
-fn apply_rpc_client_needles(
+///
+/// A5.3: the server pass runs in the same loop, for the same reason: its input
+/// (the build's proto services and their rpc names) is not a function of the
+/// file. It mints GRPC_SERVER markers the gRPC resolver pairs to their service
+/// by HANDLED_BY, anchored `marker --HANDLED_BY--> rpc method`.
+fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     repo: RepoId,
     rpc: &RpcContext,
     parse_errors: &mut Vec<String>,
-) -> usize {
+) -> RpcNeedleCounts {
+    let mut added = RpcNeedleCounts::default();
     if rpc.services.is_empty() {
-        return 0;
+        return added;
     }
-    let mut added = 0;
     for (path, source) in files {
-        if !grpc::file_has_grpc_context(source) {
+        let client_side = grpc::file_has_grpc_context(source);
+        // Superset of `client_side`; the cheap text check keeps the parse
+        // lookup below off files that can hold neither half.
+        if !grpc::may_hold_grpc_server(source) {
             continue;
         }
         let Some(lang) = detect_language(path) else { continue };
@@ -306,47 +314,72 @@ fn apply_rpc_client_needles(
         let Some(parses) = parses_by_lang.get_mut(lang) else { continue };
         let module_id =
             NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
-        // No match = the file failed to parse; there is no module to hang a client on.
+        // No match = the file failed to parse; there is no module to hang a marker on.
         let Some(fp) = parses
             .iter_mut()
             .find(|fp| fp.nodes.first().is_some_and(|n| n.id == module_id))
         else {
             continue;
         };
-        let out = match catch_unwind(AssertUnwindSafe(|| {
-            grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
-        })) {
-            Ok(out) => out,
-            Err(_) => {
-                parse_errors.push(format!("{path}: PANIC (grpc client needles)"));
-                continue;
+        if client_side {
+            match catch_unwind(AssertUnwindSafe(|| {
+                grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
+            })) {
+                Ok(out) => added.clients += graft_rpc_markers(fp, out, path, module_id, lang),
+                Err(_) => parse_errors.push(format!("{path}: PANIC (grpc client needles)")),
             }
-        };
-        if out.nodes.is_empty() {
-            continue;
         }
-        let grpc::GrpcNodes {
-            nodes,
-            nav,
-            mut anchors,
-        } = out;
-        // Anchor first, then add the IMPORTS cell, so a data-driven client's
-        // cells come in the same order as a fallback client's (whose POSITION
-        // lands in the extractor pass, before the router's IMPORTS cell).
-        let first_new = fp.nodes.len();
-        fp.nodes.extend(nodes);
-        merge_nav(&mut fp.nav, nav);
-        anchor::attach(fp, path, module_id, &mut anchors);
-        // The same G15 IMPORTS cell the router gave every other node in the file.
-        let mut extra = FileParse {
-            nodes: fp.nodes.split_off(first_new),
-            imports: fp.imports.clone(),
-            ..Default::default()
-        };
-        attach_imports_cell(&mut extra, lang);
-        added += extra.nodes.len();
-        fp.nodes.extend(extra.nodes);
+        match catch_unwind(AssertUnwindSafe(|| {
+            grpc::extract_grpc_server_nodes(source, module_id, repo, &rpc.services, &fp.nodes, &fp.nav)
+        })) {
+            Ok(out) => added.servers += graft_rpc_markers(fp, out, path, module_id, lang),
+            Err(_) => parse_errors.push(format!("{path}: PANIC (grpc server needles)")),
+        }
     }
+    added
+}
+
+/// Markers the post-cache RPC pass added to one repo's parses.
+#[derive(Default)]
+struct RpcNeedleCounts {
+    clients: usize,
+    servers: usize,
+}
+
+/// Graft one post-cache marker batch onto its file's parse: the nodes, their
+/// nav, their anchors (POSITION + owner edge), then the file's IMPORTS cell.
+/// Returns how many nodes it added.
+fn graft_rpc_markers(
+    fp: &mut FileParse,
+    out: grpc::GrpcNodes,
+    path: &str,
+    module_id: NodeId,
+    lang: &str,
+) -> usize {
+    if out.nodes.is_empty() {
+        return 0;
+    }
+    let grpc::GrpcNodes {
+        nodes,
+        nav,
+        mut anchors,
+    } = out;
+    // Anchor first, then add the IMPORTS cell, so a data-driven client's
+    // cells come in the same order as a fallback client's (whose POSITION
+    // lands in the extractor pass, before the router's IMPORTS cell).
+    let first_new = fp.nodes.len();
+    fp.nodes.extend(nodes);
+    merge_nav(&mut fp.nav, nav);
+    anchor::attach(fp, path, module_id, &mut anchors);
+    // The same G15 IMPORTS cell the router gave every other node in the file.
+    let mut extra = FileParse {
+        nodes: fp.nodes.split_off(first_new),
+        imports: fp.imports.clone(),
+        ..Default::default()
+    };
+    attach_imports_cell(&mut extra, lang);
+    let added = extra.nodes.len();
+    fp.nodes.extend(extra.nodes);
     added
 }
 
@@ -355,7 +388,7 @@ fn apply_rpc_client_needles(
 /// cross-file fact the engine gathers, but unlike the go.mod prefix it is NOT
 /// handed to the per-file extractors: their output is cached by the file's own
 /// content hash, and a table lookup depends on other files. A consumer runs
-/// after the cache, as `apply_rpc_client_needles` does, so incremental == clean.
+/// after the cache, as `apply_rpc_needles` does, so incremental == clean.
 ///
 /// `files` is name-sorted by the walk and the table is first-wins, so the
 /// result does not depend on the process. `.env` / yaml / Dockerfile have no
@@ -398,7 +431,7 @@ fn build_graphs_for_repo(
 
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
-    // and sit beside `apply_rpc_client_needles` below.
+    // and sit beside `apply_rpc_needles` below.
     let const_table = build_const_table(files, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
@@ -414,8 +447,7 @@ fn build_graphs_for_repo(
     endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), &const_table, repo)
         .report(repo_label);
 
-    let rpc_added =
-        apply_rpc_client_needles(&mut parses_by_lang, files, repo, rpc, &mut parse_errors);
+    let rpc_added = apply_rpc_needles(&mut parses_by_lang, files, repo, rpc, &mut parse_errors);
     // A5.2 fired_on marker, once per repo. Printed whenever the build knows a
     // proto service or this repo holds a client stub.
     let grpc_clients = parses_by_lang
@@ -426,7 +458,17 @@ fn build_graphs_for_repo(
         .count();
     if grpc_clients > 0 || !rpc.services.is_empty() {
         eprintln!(
-            "[grpc-client] {grpc_clients} stubs from {} known services (proto-needle +{rpc_added}) repo={repo_label}",
+            "[grpc-client] {grpc_clients} stubs from {} known services (proto-needle +{}) repo={repo_label}",
+            rpc.services.len(),
+            rpc_added.clients
+        );
+    }
+    // A5.3 per-repo extraction marker; the resolver's `[grpc-server]` line
+    // reports the pairing.
+    if rpc_added.servers > 0 {
+        eprintln!(
+            "[grpc-server-impl] {} server markers from {} known services repo={repo_label}",
+            rpc_added.servers,
             rpc.services.len()
         );
     }
@@ -968,6 +1010,104 @@ mod rpc_needle_tests {
             .collect();
         out.sort();
         out
+    }
+
+    /// `(qname, node id)` of every GRPC_SERVER in `m`, sorted by qname and
+    /// deduplicated by id (one marker id can sit in several language graphs).
+    fn servers(m: &MergedGraph) -> Vec<(String, NodeId)> {
+        let mut out: Vec<(String, NodeId)> = m
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::GRPC_SERVER))
+                    .map(move |n| (g.nav.qname_by_id[&n.id].clone(), n.id))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
+        out.dedup();
+        out
+    }
+
+    const GO_SERVER: &str = "package main\n\nimport (\n\t\"context\"\n\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/shop/pb\"\n)\n\ntype server struct {\n\tpb.UnimplementedGreeterServer\n}\n\nfunc (s *server) SayHello(ctx context.Context, in *pb.HelloRequest) (*pb.HelloReply, error) {\n\treturn &pb.HelloReply{}, nil\n}\n\nfunc main() {\n\ts := grpc.NewServer()\n\tpb.RegisterGreeterServer(s, &server{})\n}\n";
+
+    #[test]
+    fn server_marker_pairs_to_its_service_and_anchors_to_the_rpc_method() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = tmp.path().join("server");
+        write(&server, "api.proto", PROTO);
+        write(&server, "main.go", GO_SERVER);
+        let merged = generate_one(server.to_str().unwrap()).unwrap().merged;
+
+        let found = servers(&merged);
+        let names: Vec<&str> = found.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(names, vec!["grpc_server:Greeter"], "OrderService has no impl here");
+        let marker = found[0].1;
+        let service = node_id_by_qname(&merged, "grpc:shop.Greeter");
+        let say_hello = node_id_by_qname(&merged, "main::server::SayHello");
+        let main_fn = node_id_by_qname(&merged, "main::main");
+        assert!(has_edge(&merged, service, marker, edge_category::HANDLED_BY));
+        assert!(has_edge(&merged, marker, say_hello, edge_category::HANDLED_BY));
+        // The receiver method serves the rpc; `main` only registers it.
+        assert!(!has_edge(&merged, marker, main_fn, edge_category::HANDLED_BY));
+        // Located at the embedded base, the first needle line.
+        let position = cells_of(&merged, marker)
+            .into_iter()
+            .find(|c| c.kind == cell_type::POSITION)
+            .map(|c| c.payload);
+        assert_eq!(
+            position,
+            Some(repo_graph_core::CellPayload::Json(
+                r#"{"file":"main.go","start_line":10,"end_line":10}"#.to_string()
+            ))
+        );
+        // Package evidence and the file's IMPORTS cell, like a client.
+        let kinds: Vec<_> = cells_of(&merged, marker).iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&cell_type::RPC_PACKAGE) && kinds.contains(&cell_type::IMPORTS));
+    }
+
+    #[test]
+    fn server_markers_follow_the_proto_under_a_warm_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write(
+            &repo,
+            "server.py",
+            "import grpc\nimport hello_pb2_grpc\n\n\nclass Greeter(hello_pb2_grpc.GreeterServicer):\n    def Hi(self, request, context):\n        return None\n",
+        );
+        write(&repo, "api.proto", GREETER_PROTO);
+        let repo_s = repo.to_str().unwrap();
+        let names = |m: &MergedGraph| -> Vec<String> { servers(m).into_iter().map(|(q, _)| q).collect() };
+
+        let mut cache = ParseCache::new();
+        let cold = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(names(&cold.merged), vec!["grpc_server:Greeter".to_string()]);
+        let marker = servers(&cold.merged)[0].1;
+        let hi = node_id_by_qname(&cold.merged, "server::Greeter::Hi");
+        assert!(has_edge(&cold.merged, marker, hi, edge_category::HANDLED_BY));
+
+        // A proto-only edit: server.py comes from the cache and loses its marker.
+        write(&repo, "api.proto", FAREWELL_PROTO);
+        let warm = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(cache.stats.reused, 1, "server.py must come from the cache");
+        assert!(names(&warm.merged).is_empty(), "stale server marker replayed from cache");
+        let clean = generate_one(repo_s).unwrap();
+        assert_eq!(
+            write_store(&warm.merged, &tmp.path().join("warm")),
+            write_store(&clean.merged, &tmp.path().join("clean")),
+            "incremental vs clean after a proto-only edit"
+        );
+
+        write(&repo, "api.proto", GREETER_PROTO);
+        let warm2 = generate_one_with_cache(repo_s, &mut cache).unwrap();
+        assert_eq!(names(&warm2.merged), vec!["grpc_server:Greeter".to_string()]);
+        let clean2 = generate_one(repo_s).unwrap();
+        assert_eq!(
+            write_store(&warm2.merged, &tmp.path().join("warm2")),
+            write_store(&clean2.merged, &tmp.path().join("clean2")),
+            "incremental vs clean with a server marker present"
+        );
     }
 
     const GREETER_PROTO: &str = "package hello;\nservice Greeter {\n  rpc Hi (A) returns (B);\n}\n";
