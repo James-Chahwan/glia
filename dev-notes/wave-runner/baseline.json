@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "a1a26d3",
-  "after_wave": 4,
+  "measured_at_head": "dcae116",
+  "after_wave": 5,
   "cargo_test_workspace": {
-    "passed": 1651,
+    "passed": 1744,
     "failed": 0
   },
   "history_passed": [
@@ -31,25 +31,24 @@
     1236,
     1429,
     1552,
-    1651
+    1651,
+    1744
   ],
   "run_py": {
-    "fixtures": 199,
-    "blind_spots": 12,
-    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: DEFINES', 'kotlin: IMPLEMENTS', 'kotlin: IMPORTS', 'kotlin: INHERITS_FROM', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-ktor: IMPORTS', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS', 'kotlin-spring: HANDLED_BY', 'kotlin-spring: INJECTS']; missing nodes: [\"kotlin: CLASS 'UserController'\", \"kotlin: CLASS 'UserService'\", \"kotlin: CLASS 'UserDto'\", \"kotlin: METHOD 'getUser'\", \"kotlin: FUNCTION 'topLevelHelper'\", \"kotlin-ktor: FUNCTION 'itemRoutes'\", \"kotlin-ktor: METHOD 'all'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\", \"kotlin-spring: ROUTE 'GET /users'\", \"kotlin-spring: CLASS 'UserController'\", \"kotlin-spring: METHOD 'list'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 209,
+    "blind_spots": 10,
+    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS', 'kotlin-spring: HANDLED_BY', 'kotlin-spring: INJECTS']; missing nodes: [\"kotlin-flip-guard: ROUTE 'ANY /api'\", \"kotlin-flip-guard: DATA_ENTITY 'User'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\", \"kotlin-spring: ROUTE 'GET /users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
     "blind_list": [
       "kotlin: CALLS",
-      "kotlin: DEFINES",
       "kotlin: IMPLEMENTS",
-      "kotlin: IMPORTS",
       "kotlin: INHERITS_FROM",
+      "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
       "kotlin-ktor: HANDLED_BY",
-      "kotlin-ktor: IMPORTS",
       "kotlin-retrofit: HTTP_CALLS",
       "kotlin-spring: CALLS",
       "kotlin-spring: HANDLED_BY",
@@ -59,25 +58,20 @@
     "forbid_list": [],
     "missing_cells_list": [],
     "missing_nodes_list": [
-      "kotlin: CLASS 'UserController'",
-      "kotlin: CLASS 'UserService'",
-      "kotlin: CLASS 'UserDto'",
-      "kotlin: METHOD 'getUser'",
-      "kotlin: FUNCTION 'topLevelHelper'",
-      "kotlin-ktor: FUNCTION 'itemRoutes'",
-      "kotlin-ktor: METHOD 'all'",
+      "kotlin-flip-guard: ROUTE 'ANY /api'",
+      "kotlin-flip-guard: DATA_ENTITY 'User'",
+      "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
+      "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
       "kotlin-retrofit: ENDPOINT 'GET /api/users'",
-      "kotlin-spring: ROUTE 'GET /users'",
-      "kotlin-spring: CLASS 'UserController'",
-      "kotlin-spring: METHOD 'list'"
+      "kotlin-spring: ROUTE 'GET /users'"
     ]
   },
   "matrix_py": {
-    "full": 120,
+    "full": 122,
     "partial": 29,
     "none": 14,
-    "unknown": 317,
-    "covered": 163,
+    "unknown": 315,
+    "covered": 165,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0

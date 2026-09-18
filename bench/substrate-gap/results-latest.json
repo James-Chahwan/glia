@@ -224,11 +224,12 @@
     },
     "csharp/calls": {
       "extract": [
-        5,
-        5
+        6,
+        6
       ],
       "fixtures": [
         "fixtures/csharp-aspnet",
+        "fixtures/csharp-di-dispatch",
         "fixtures/csharp-field-dispatch"
       ],
       "forbid": [
@@ -237,13 +238,13 @@
       ],
       "level": "full",
       "literal": [
-        5,
-        5
+        6,
+        6
       ],
       "reasons": [],
       "route": [
-        4,
-        4
+        5,
+        5
       ],
       "via": "call"
     },
@@ -348,11 +349,12 @@
     },
     "csharp/impl": {
       "extract": [
-        3,
-        3
+        4,
+        4
       ],
       "fixtures": [
-        "fixtures/csharp-aspnet"
+        "fixtures/csharp-aspnet",
+        "fixtures/csharp-iface-methods"
       ],
       "forbid": [
         0,
@@ -360,13 +362,13 @@
       ],
       "level": "full",
       "literal": [
-        3,
-        3
+        4,
+        4
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        3,
+        3
       ],
       "via": "type"
     },
@@ -574,10 +576,11 @@
     },
     "dart/calls": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
+        "fixtures/dart-field-dispatch",
         "matrix/dart/calls"
       ],
       "forbid": [
@@ -590,11 +593,12 @@
         2
       ],
       "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)",
         "routing edge missing"
       ],
       "route": [
-        0,
-        1
+        3,
+        4
       ],
       "via": "call"
     },
@@ -898,11 +902,12 @@
     },
     "go/calls": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
-        "fixtures/go-calls"
+        "fixtures/go-calls",
+        "fixtures/go-field-dispatch"
       ],
       "forbid": [
         0,
@@ -913,10 +918,12 @@
         2,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        1,
-        1
+        3,
+        3
       ],
       "via": "call"
     },
@@ -1919,6 +1926,30 @@
       ],
       "via": "call"
     },
+    "php/cli_def": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/php/cli_def"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
     "php/http_client": {
       "extract": [
         2,
@@ -2721,10 +2752,11 @@
     },
     "ruby/calls": {
       "extract": [
-        2,
-        2
+        3,
+        3
       ],
       "fixtures": [
+        "fixtures/ruby-ivar-dispatch",
         "fixtures/ruby-rails-calls"
       ],
       "forbid": [
@@ -2736,12 +2768,38 @@
         2,
         2
       ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        3,
+        3
+      ],
+      "via": "call"
+    },
+    "ruby/cli_def": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/cli_def"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
       "reasons": [],
       "route": [
         1,
         1
       ],
-      "via": "call"
+      "via": "cli"
     },
     "ruby/db": {
       "extract": [
@@ -4085,6 +4143,7 @@
     "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
+    "fixtures/avro-field-drift",
     "fixtures/avro-schema",
     "fixtures/clojure-docs",
     "fixtures/contract-annot-nestjs",
@@ -4097,6 +4156,7 @@
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
     "fixtures/csharp-aspnet-composed",
+    "fixtures/csharp-block-using",
     "fixtures/csharp-efcore",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
@@ -4137,7 +4197,9 @@
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
+    "fixtures/proto-field-drift",
     "fixtures/py-router-prefix",
+    "fixtures/py-typer-argparse-cli",
     "fixtures/react-hook",
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
@@ -4149,6 +4211,7 @@
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
     "fixtures/ts-enum-members",
+    "fixtures/ts-typeorm",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-nested-submodule",
@@ -4178,13 +4241,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 163,
+    "covered": 165,
     "error": 0,
-    "full": 120,
+    "full": 122,
     "grid": 480,
     "none": 14,
     "partial": 29,
-    "unknown": 317
+    "unknown": 315
   },
   "vocabulary": {
     "digest": "82fbaf1daf5c",

@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 199,
+  "fixtures": 209,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -46,6 +46,11 @@
       "per_category": {
         "HTTP_CALLS": 1.0
       }
+    },
+    "avro-field-drift": {
+      "framework": "avro-field-drift",
+      "language": "avro",
+      "per_category": {}
     },
     "avro-schema": {
       "framework": "avro-schema",
@@ -169,11 +174,26 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "csharp-block-using": {
+      "framework": "csharp-block-using",
+      "language": "csharp",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
     "csharp-camel-tests": {
       "framework": "csharp-camel-tests",
       "language": "csharp",
       "per_category": {
         "TESTS": 1.0
+      }
+    },
+    "csharp-di-dispatch": {
+      "framework": "csharp-di-dispatch",
+      "language": "csharp",
+      "per_category": {
+        "CALLS": 1.0,
+        "INJECTS": 1.0
       }
     },
     "csharp-efcore": {
@@ -204,6 +224,13 @@
       "per_category": {
         "CALLS": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "csharp-iface-methods": {
+      "framework": "csharp-iface-methods",
+      "language": "csharp",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "csharp-kafka-msgtype": {
@@ -238,6 +265,13 @@
       "per_category": {
         "CALLS": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "dart-field-dispatch": {
+      "framework": "dart-field-dispatch",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "dart-http-dio": {
@@ -352,6 +386,13 @@
         "HANDLED_BY": 1.0
       }
     },
+    "go-field-dispatch": {
+      "framework": "go-field-dispatch",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "go-gorm": {
       "framework": "go-gorm",
       "language": "go",
@@ -434,7 +475,8 @@
       "framework": "http-monorepo-owner",
       "language": "python+typescript",
       "per_category": {
-        "HANDLED_BY": 1.0
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "http-nav-route-precision": {
@@ -581,9 +623,9 @@
       "language": "kotlin",
       "per_category": {
         "CALLS": 0.0,
-        "DEFINES": 0.0,
+        "DEFINES": 1.0,
         "IMPLEMENTS": 0.0,
-        "IMPORTS": 0.0,
+        "IMPORTS": 1.0,
         "INHERITS_FROM": 0.0
       }
     },
@@ -591,7 +633,7 @@
       "framework": "kotlin-flip-guard",
       "language": "kotlin",
       "per_category": {
-        "CALLS": 1.0
+        "CALLS": 0.0
       }
     },
     "kotlin-ktor": {
@@ -600,7 +642,7 @@
       "per_category": {
         "CALLS": 0.0,
         "HANDLED_BY": 0.0,
-        "IMPORTS": 0.0
+        "IMPORTS": 1.0
       }
     },
     "kotlin-retrofit": {
@@ -689,6 +731,13 @@
         "INJECTS": 1.0
       }
     },
+    "proto-field-drift": {
+      "framework": "proto-field-drift",
+      "language": "proto",
+      "per_category": {
+        "SHARES_SCHEMA": 1.0
+      }
+    },
     "py-accesses-data": {
       "framework": "py-accesses-data",
       "language": "python",
@@ -769,6 +818,13 @@
         "TESTS": 1.0
       }
     },
+    "py-typer-argparse-cli": {
+      "framework": "py-typer-argparse-cli",
+      "language": "python",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "react-hook": {
       "framework": "react-hook",
       "language": "typescript",
@@ -804,6 +860,13 @@
       "per_category": {
         "CALLS": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "ruby-ivar-dispatch": {
+      "framework": "ruby-ivar-dispatch",
+      "language": "ruby",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "ruby-rails-accesses_data": {
@@ -1068,6 +1131,14 @@
       "language": "typescript",
       "per_category": {
         "TESTS": 1.0
+      }
+    },
+    "ts-typeorm": {
+      "framework": "ts-typeorm",
+      "language": "typescript",
+      "per_category": {
+        "ACCESSES_DATA": 1.0,
+        "DEFINES": 1.0
       }
     },
     "vue-http-calls": {
@@ -1425,13 +1496,11 @@
   "summary": {
     "blind_spots": [
       "kotlin: CALLS",
-      "kotlin: DEFINES",
       "kotlin: IMPLEMENTS",
-      "kotlin: IMPORTS",
       "kotlin: INHERITS_FROM",
+      "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
       "kotlin-ktor: HANDLED_BY",
-      "kotlin-ktor: IMPORTS",
       "kotlin-retrofit: HTTP_CALLS",
       "kotlin-spring: CALLS",
       "kotlin-spring: HANDLED_BY",
@@ -1441,17 +1510,12 @@
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [
-      "kotlin: CLASS 'UserController'",
-      "kotlin: CLASS 'UserService'",
-      "kotlin: CLASS 'UserDto'",
-      "kotlin: METHOD 'getUser'",
-      "kotlin: FUNCTION 'topLevelHelper'",
-      "kotlin-ktor: FUNCTION 'itemRoutes'",
-      "kotlin-ktor: METHOD 'all'",
+      "kotlin-flip-guard: ROUTE 'ANY /api'",
+      "kotlin-flip-guard: DATA_ENTITY 'User'",
+      "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
+      "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
       "kotlin-retrofit: ENDPOINT 'GET /api/users'",
-      "kotlin-spring: ROUTE 'GET /users'",
-      "kotlin-spring: CLASS 'UserController'",
-      "kotlin-spring: METHOD 'list'"
+      "kotlin-spring: ROUTE 'GET /users'"
     ],
     "partial_cells": []
   },

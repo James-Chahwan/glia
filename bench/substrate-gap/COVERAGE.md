@@ -73,8 +73,8 @@ go               ●       ●       ◐       ·       ·       ?       ?      
 typescript       ●       ●       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ·       ?       ?       ?       ●       ●       ●       ◐       ●       ●       ●
 java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ●       ●       ●       ·       ?       ?       ?       ?       ●       ?       ●       ●       ●       ●       ◐       ●       ●
 csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ●       ?       ●       ?       ?       ?       ?       ·       ?       ?       ●       ?       ●       ●       ●       ●       ◐       ●       ?
-ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ?       ◐       ●       ?
-php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ●       ?       ◐       ●       ?
+ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ●       ·       ?       ?       ?       ?       ●       ?       ●       ●       ◐       ?       ◐       ●       ?
+php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ●       ?       ●       ?       ◐       ●       ?
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 scala            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ●       ?
@@ -107,7 +107,7 @@ PER-MECHANISM  across 16 languages:
   secrets      ● 2   ◐ 0   · 1   ? 13  ! 0
   flags        ● 0   ◐ 0   · 3   ? 13  ! 0
   cron         ● 0   ◐ 1   · 0   ? 15  ! 0
-  cli_def      ● 4   ◐ 1   · 0   ? 11  ! 0
+  cli_def      ● 6   ◐ 1   · 0   ? 9   ! 0
   cli_inv      ● 1   ◐ 1   · 0   ? 14  ! 0
   calls        ● 14  ◐ 1   · 0   ? 1   ! 0
   imports      ● 13  ◐ 0   · 0   ? 3   ! 0
@@ -123,8 +123,8 @@ PER-LANGUAGE  across 30 mechanisms:
   typescript   ● 16  ◐ 5   · 1   ? 8   ! 0
   java         ● 15  ◐ 2   · 3   ? 10  ! 0
   csharp       ● 13  ◐ 2   · 1   ? 14  ! 0
-  ruby         ● 7   ◐ 2   · 1   ? 20  ! 0
-  php          ● 5   ◐ 1   · 0   ? 24  ! 0
+  ruby         ● 8   ◐ 2   · 1   ? 19  ! 0
+  php          ● 6   ◐ 1   · 0   ? 23  ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  ! 0
   c_cpp        ● 2   ◐ 0   · 1   ? 27  ! 0
   scala        ● 6   ◐ 1   · 0   ? 23  ! 0
@@ -136,9 +136,9 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 163/480 cells have a fixture (34.0%) — 120 full, 29 partial, 14 none, 317 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 165/480 cells have a fixture (34.4%) — 122 full, 29 partial, 14 none, 315 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 93
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 98
 
 ## Cells routed via an alternative mechanism
 
