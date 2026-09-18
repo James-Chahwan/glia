@@ -1,0 +1,20 @@
+{
+  "framework": "ruby-ar-tablename",
+  "language": "ruby",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "LegacyUser", "note": "model-keyed entity; the declaration site and the query site share one id"},
+    {"kind": "METHOD", "name": "active", "note": "controller action issuing the query"}
+  ],
+  "expect_edges": [
+    {"from": "active", "to": "LegacyUser", "category": "ACCESSES_DATA", "note": "LegacyUser.where in another file than the model"},
+    {"from": "LegacyUser", "to": "data_entity:sql:LegacyUser", "category": "DEFINES", "note": "the model CLASS defines its entity at the declaration site"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "LegacyUser", "cell": "CODE", "contains": "app_users", "note": "self.table_name override rides a table cell at the declaration site"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "max_nodes": 1, "note": "declaration and query site are ONE model-keyed node; a table-keyed second id would orphan the query"}
+  ],
+  "note": "A13.13: ActiveRecord model declaration + self.table_name. Ruby stays model-keyed (A13.1 identity rule); the declared table rides a CODE table cell {table, orm: activerecord}."
+}

@@ -1,3 +1,4 @@
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, abs_path, join_path, push_client_endpoint, url_to_path,
 };
@@ -51,6 +52,12 @@ pub fn parse_file(
             acc.endpoint_hits, file_rel_path
         );
     }
+    if acc.ar_models > 0 {
+        eprintln!(
+            "[orm-ar] models={} table_cells={} in {}",
+            acc.ar_models, acc.ar_table_cells, file_rel_path
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -79,6 +86,11 @@ struct Acc {
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Client HTTP call sites emitted in this file (drives the fired_on marker).
     endpoint_hits: usize,
+    /// ActiveRecord model declarations seen in this file (`[orm-ar]` marker).
+    ar_models: usize,
+    /// Of those, the ones whose `self.table_name = "…"` put a table cell on
+    /// the entity (`[orm-ar]` marker).
+    ar_table_cells: usize,
 }
 
 fn visit_body(
@@ -136,6 +148,8 @@ fn visit_class(
         confidence: Confidence::Strong,
     });
     acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+
+    emit_ar_model_entity(node, name, src, id, repo, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         visit_body(body, src, file_rel, &qname, id, repo, acc);
@@ -312,6 +326,15 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc: &
 // `constant` (models are constants) that is not a well-known stdlib/framework
 // namespace, and the method must be an AR query entry point. This keeps
 // `Time.now` / `Math.sqrt` / `JSON.parse` from minting spurious entities.
+//
+// The model DECLARATION (`class User < ApplicationRecord`) mints the same
+// entity plus a DEFINES edge from the model CLASS, so a model no in-repo code
+// queries is still in the graph and joinable from a migration or another
+// service. Identity follows A13.1's ORM rule (`code_domain::data_entity`): the
+// entity is keyed on the MODEL constant at both sites, so a query in any file
+// lands on the declaration's node with no cross-file pre-pass. A declared
+// `self.table_name = "…"` rides a table cell on the declaration only; Rails'
+// default table is the plural of the constant, which `DbResolver`'s fold joins.
 
 /// AR query entry points invoked on a model constant. Kept to finders / query
 /// builders that unambiguously read or write the backing table.
@@ -383,8 +406,7 @@ fn try_emit_accesses_data(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
         return;
     }
 
-    let qname = format!("data_entity:sql:{model}");
-    let entity_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    let (qname, entity_id) = ar_entity(model, repo);
     if acc.data_entities.insert(entity_id) {
         acc.nodes.push(Node {
             id: entity_id,
@@ -403,6 +425,159 @@ fn try_emit_accesses_data(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
             confidence: Confidence::Medium,
         });
     }
+}
+
+/// The model-keyed DATA_ENTITY qname and id for an ActiveRecord model constant.
+/// The one construction site, shared by the query site and the declaration
+/// site so both land on the same node.
+fn ar_entity(model: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{model}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+/// Base classes whose direct subclasses are ActiveRecord models.
+const AR_BASE_CLASSES: &[&str] = &["ApplicationRecord", "ActiveRecord::Base"];
+
+/// What an ActiveRecord model's class body declares about its table.
+#[derive(Default)]
+struct ArClassDecls {
+    /// The string literal of `self.table_name = "…"`, when present.
+    table_name: Option<String>,
+    /// `self.abstract_class = true`: an abstract base with no table.
+    is_abstract: bool,
+}
+
+/// If `class` declares an ActiveRecord model (`class X < ApplicationRecord` /
+/// `class X < ActiveRecord::Base`), emit its model-keyed DATA_ENTITY, a DEFINES
+/// edge from `class_id` to it, and — only for a `self.table_name = "…"`
+/// override — a table cell built by `code_domain::data_entity::table_cell`.
+///
+/// `class_name` is the declared name as written; a namespaced
+/// `class Admin::User` keys on its last segment, the constant a query site
+/// in the same namespace writes. Abstract bases (`ApplicationRecord` itself,
+/// or any class setting `self.abstract_class = true`) own no table and mint
+/// nothing.
+fn emit_ar_model_entity(
+    class: TsNode,
+    class_name: &str,
+    src: &[u8],
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(superclass) = class.child_by_field_name("superclass") else {
+        return;
+    };
+    let Some(base) = superclass.named_child(0) else {
+        return;
+    };
+    let base = text_of(base, src).trim_start_matches("::");
+    if !AR_BASE_CLASSES.contains(&base) {
+        return;
+    }
+    let model = class_name.rsplit("::").next().unwrap_or(class_name);
+    if model.is_empty() || NON_MODEL_CONSTANTS.contains(&model) {
+        return;
+    }
+    let decls = class
+        .child_by_field_name("body")
+        .map(|body| ar_class_decls(body, src))
+        .unwrap_or_default();
+    if decls.is_abstract {
+        return;
+    }
+
+    let (qname, entity_id) = ar_entity(model, repo);
+    let table_cell = decls
+        .table_name
+        .as_deref()
+        .map(|table| data_entity::table_cell(table, data_entity::orm::ACTIVERECORD));
+    if table_cell.is_some() {
+        acc.ar_table_cells += 1;
+    }
+    acc.ar_models += 1;
+
+    if acc.data_entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: table_cell.into_iter().collect(),
+        });
+        acc.nav
+            .record(entity_id, model, &qname, node_kind::DATA_ENTITY, Some(class_id));
+    } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == entity_id) {
+        // A query earlier in this file already minted the entity: the
+        // declaration is the authoritative site, so it lifts the confidence
+        // and carries the table cell onto that same node.
+        existing.confidence = Confidence::Strong;
+        existing.cells.extend(table_cell);
+    }
+    acc.edges.push(Edge {
+        from: class_id,
+        to: entity_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+}
+
+/// Scan an ActiveRecord class body's direct statements for
+/// `self.table_name = "…"` and `self.abstract_class = true`.
+fn ar_class_decls(body: TsNode, src: &[u8]) -> ArClassDecls {
+    let mut decls = ArClassDecls::default();
+    let mut cursor = body.walk();
+    for stmt in body.named_children(&mut cursor) {
+        if stmt.kind() != "assignment" {
+            continue;
+        }
+        let (Some(left), Some(right)) = (
+            stmt.child_by_field_name("left"),
+            stmt.child_by_field_name("right"),
+        ) else {
+            continue;
+        };
+        if left.kind() != "call" {
+            continue;
+        }
+        let Some(recv) = left.child_by_field_name("receiver") else {
+            continue;
+        };
+        if recv.kind() != "self" {
+            continue;
+        }
+        let Some(method) = left.child_by_field_name("method") else {
+            continue;
+        };
+        match text_of(method, src) {
+            "table_name" => {
+                if let Some(table) = plain_string_literal(right, src) {
+                    decls.table_name = Some(table);
+                }
+            }
+            "abstract_class" => decls.is_abstract = right.kind() == "true",
+            _ => {}
+        }
+    }
+    decls
+}
+
+/// The text of a `string` node with no `#{…}` interpolation, or `None` for
+/// any other node, an interpolated string, or a blank literal.
+fn plain_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() != "string" {
+        return None;
+    }
+    let mut out = String::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "string_content" | "escape_sequence" => out.push_str(text_of(child, src)),
+            _ => return None,
+        }
+    }
+    let trimmed = out.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
@@ -1466,6 +1641,189 @@ end
                 .iter()
                 .any(|e| e.category == edge_category::ACCESSES_DATA),
             "no ACCESSES_DATA edges for non-model constant calls"
+        );
+    }
+
+    // ========================================================================
+    // ActiveRecord model declarations (A13.13)
+    // ========================================================================
+
+    fn class_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname)
+    }
+
+    /// The table recorded on `id`'s node, read back through the A13.1 reader.
+    fn table_on(fp: &FileParse, id: NodeId) -> Option<String> {
+        let node = fp.nodes.iter().find(|n| n.id == id)?;
+        data_entity::table_of(&node.cells)
+    }
+
+    fn data_entity_count(fp: &FileParse) -> usize {
+        fp.nav
+            .kind_by_id
+            .values()
+            .filter(|k| **k == node_kind::DATA_ENTITY)
+            .count()
+    }
+
+    #[test]
+    fn ar_table_name_override_rides_a_table_cell() {
+        // The entity stays keyed on the MODEL (A13.1); the declared table
+        // rides the declaration-site cell for DbResolver to join on.
+        let source = r#"
+class LegacyUser < ApplicationRecord
+  self.table_name = "app_users"
+end
+"#;
+        let fp = parse_file(
+            source,
+            "app/models/legacy_user.rb",
+            "app::models::legacy_user",
+            repo(),
+        )
+        .unwrap();
+        let entity_id = data_entity_id("LegacyUser");
+        assert_eq!(table_on(&fp, entity_id), Some("app_users".to_string()));
+        let node = fp.nodes.iter().find(|n| n.id == entity_id).unwrap();
+        let CellPayload::Json(raw) = &node.cells[0].payload else {
+            panic!("table cell must be a Json payload");
+        };
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(v["orm"], data_entity::orm::ACTIVERECORD);
+        assert_eq!(
+            fp.nav.name_by_id.get(&entity_id).map(String::as_str),
+            Some("LegacyUser")
+        );
+    }
+
+    #[test]
+    fn ar_model_declaration_emits_entity_without_a_query() {
+        // No query site anywhere: the declaration alone puts the model in the
+        // graph, CLASS -DEFINES-> DATA_ENTITY, and with no table_name override
+        // it carries no table cell (the plural default is DbResolver's fold).
+        let source = r#"
+class User < ApplicationRecord
+  has_many :posts
+end
+"#;
+        let fp = parse_file(source, "app/models/user.rb", "app::models::user", repo()).unwrap();
+        let entity_id = data_entity_id("User");
+        assert!(fp.nodes.iter().any(|n| n.id == entity_id));
+        assert_eq!(table_on(&fp, entity_id), None);
+        assert!(
+            fp.edges.iter().any(|e| e.from == class_id("app::models::user::User")
+                && e.to == entity_id
+                && e.category == edge_category::DEFINES),
+            "expected User CLASS -DEFINES-> its DATA_ENTITY"
+        );
+        assert_eq!(data_entity_count(&fp), 1);
+    }
+
+    #[test]
+    fn ar_active_record_base_and_namespaced_models_key_on_the_constant() {
+        // `ActiveRecord::Base` (pre-Rails-5 apps) and `::ApplicationRecord`
+        // are AR bases too; `class Admin::Account` keys on `Account`, the
+        // constant a query inside `module Admin` writes.
+        let source = r#"
+class Admin::Account < ActiveRecord::Base
+  self.table_name = 'admin_accounts'
+end
+
+class Invoice < ::ApplicationRecord
+end
+"#;
+        let fp = parse_file(source, "app/models/admin.rb", "app::models::admin", repo()).unwrap();
+        assert_eq!(
+            table_on(&fp, data_entity_id("Account")),
+            Some("admin_accounts".to_string())
+        );
+        assert!(fp.nodes.iter().any(|n| n.id == data_entity_id("Invoice")));
+        assert_eq!(data_entity_count(&fp), 2);
+    }
+
+    #[test]
+    fn ar_abstract_bases_and_plain_classes_mint_no_entity() {
+        // ApplicationRecord itself, a custom abstract base, a non-AR subclass
+        // and a plain class own no table: no entity, no DEFINES to one.
+        let source = r#"
+class ApplicationRecord < ActiveRecord::Base
+  self.abstract_class = true
+end
+
+class TenantRecord < ApplicationRecord
+  self.abstract_class = true
+  self.table_name = "never_used"
+end
+
+class Mailer < ActionMailer::Base
+end
+
+class Report
+end
+"#;
+        let fp = parse_file(
+            source,
+            "app/models/application_record.rb",
+            "app::models::application_record",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(data_entity_count(&fp), 0, "abstract/non-AR classes mint no entity");
+        assert!(
+            !fp.edges.iter().any(|e| e.category == edge_category::DEFINES
+                && fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::DATA_ENTITY)),
+        );
+    }
+
+    #[test]
+    fn ar_interpolated_table_name_gives_no_cell() {
+        // An interpolated table is not a literal; the model entity still
+        // exists, keyed on the constant, but carries no table cell.
+        let source = r#"
+class Shard < ApplicationRecord
+  self.table_name = "shard_#{ENV['N']}"
+end
+"#;
+        let fp = parse_file(source, "app/models/shard.rb", "app::models::shard", repo()).unwrap();
+        let entity_id = data_entity_id("Shard");
+        assert!(fp.nodes.iter().any(|n| n.id == entity_id));
+        assert_eq!(table_on(&fp, entity_id), None);
+    }
+
+    #[test]
+    fn ar_declaration_and_query_share_one_entity() {
+        // A query site before the declaration in the same file mints the
+        // entity first; the declaration lands on that SAME node and adds its
+        // table cell. A query after the declaration adds no second node.
+        let source = r#"
+class Audit
+  def run
+    LegacyUser.where(active: true)
+  end
+end
+
+class LegacyUser < ApplicationRecord
+  self.table_name = "app_users"
+
+  def self.recent
+    LegacyUser.where(recent: true)
+  end
+end
+"#;
+        let fp = parse_file(source, "app/models/mixed.rb", "app::models::mixed", repo()).unwrap();
+        let entity_id = data_entity_id("LegacyUser");
+        let matching: Vec<_> = fp.nodes.iter().filter(|n| n.id == entity_id).collect();
+        assert_eq!(matching.len(), 1, "one entity node per model per file");
+        assert_eq!(matching[0].confidence, Confidence::Strong);
+        assert_eq!(table_on(&fp, entity_id), Some("app_users".to_string()));
+        assert_eq!(data_entity_count(&fp), 1);
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.to == entity_id && e.category == edge_category::ACCESSES_DATA)
+                .count(),
+            2,
+            "both accessors reach the one entity"
         );
     }
 
