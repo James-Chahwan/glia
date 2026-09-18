@@ -1,0 +1,4 @@
+# pyo3 surface of py/src/build.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn generate(repo_path: &str, incremental: bool = true) -> PyResult<PyGraph>
+fn generate_many(repo_paths: Vec<String>, incremental: bool = false) -> PyResult<PyGraph>
+fn parse_file_to_json(source: &str, path: &str, lang: &str) -> PyResult<String>

@@ -1,0 +1,22 @@
+# CLI surface of `glia docs`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia docs subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+cmd glia docs push
+  arg email pos=- long=email short=- required=false num_args=1 action=Set default=- value_names=EMAIL global=false hidden=false
+  arg file pos=- long=file short=- required=true num_args=1 action=Set default=- value_names=FILE global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg markdown pos=- long=markdown short=- required=false num_args=0 action=SetTrue default=false value_names=MARKDOWN global=false hidden=false
+  arg page_id pos=- long=page-id short=- required=false num_args=1 action=Set default=- value_names=PAGE_ID global=false hidden=false
+  arg site pos=- long=site short=- required=false num_args=1 action=Set default=- value_names=SITE global=false hidden=false
+  arg space pos=- long=space short=- required=true num_args=1 action=Set default=- value_names=SPACE global=false hidden=false
+  arg title pos=- long=title short=- required=true num_args=1 action=Set default=- value_names=TITLE global=false hidden=false
+  arg token pos=- long=token short=- required=false num_args=1 action=Set default=- value_names=TOKEN global=false hidden=false
+cmd glia docs sync
+  arg email pos=- long=email short=- required=false num_args=1 action=Set default=- value_names=EMAIL global=false hidden=false
+  arg exclude pos=- long=exclude short=- required=false num_args=1 action=Append default=- value_names=PATTERN global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg include pos=- long=include short=- required=false num_args=1 action=Append default=- value_names=PATTERN global=false hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg site pos=- long=site short=- required=false num_args=1 action=Set default=- value_names=SITE global=false hidden=false
+  arg space pos=- long=space short=- required=true num_args=1 action=Set default=- value_names=SPACE global=false hidden=false
+  arg token pos=- long=token short=- required=false num_args=1 action=Set default=- value_names=TOKEN global=false hidden=false

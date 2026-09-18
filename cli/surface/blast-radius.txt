@@ -1,0 +1,12 @@
+# CLI surface of `glia blast-radius`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia blast-radius
+  arg depth pos=- long=depth short=- required=false num_args=1 action=Set default=4 value_names=DEPTH global=false hidden=false
+  arg direction pos=- long=direction short=- required=false num_args=1 action=Set default=both value_names=DIRECTION global=false hidden=false values=forward,backward,both
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg live_only pos=- long=live-only short=- required=false num_args=0 action=SetTrue default=false value_names=LIVE_ONLY global=false hidden=false
+  arg qname pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=QNAME global=false hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg scope pos=- long=scope short=- required=false num_args=1 action=Set default=- value_names=SCOPE global=false hidden=false
+  arg top_k pos=- long=top-k short=- required=false num_args=1 action=Set default=- value_names=TOP_K global=false hidden=false
+  arg with pos=- long=with short=- required=false num_args=1 action=Append default=- value_names=WITH global=false hidden=false

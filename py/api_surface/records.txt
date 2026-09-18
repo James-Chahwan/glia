@@ -1,0 +1,3 @@
+# pyo3 surface of py/src/records.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.edges_json() -> PyResult<String>
+method PyGraph.nodes_json() -> PyResult<String>

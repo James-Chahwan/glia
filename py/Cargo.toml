@@ -33,3 +33,12 @@ serde_json = "1"
 # same crate backs pyo3's `multiple-pymethods`, so it adds no new class of
 # dependency.
 inventory = "0.3"
+
+[dev-dependencies]
+# `tests/api_surface.rs` (LG.6a) parses every `src/**/*.rs` and pins the
+# Python-visible surface. Source-level only: the test binary never links this
+# cdylib. All three crates (and syn's `full` + `visit`) are already in the
+# workspace build via pyo3-macros-backend / serde_derive — no new download.
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+proc-macro2 = "1"

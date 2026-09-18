@@ -1,0 +1,6 @@
+# pyo3 surface of py/src/text.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.activate(seed_ids: Vec<u64>, top_k: Option<usize> = None, profile: Option<String> = None) -> Vec<(u64, f64)>
+method PyGraph.dense_text() -> String
+method PyGraph.dense_text_full() -> String
+method PyGraph.dense_text_subset(node_ids: Vec<u64>, full: bool = false) -> String
+method PyGraph.prose(node_ids: Vec<u64>) -> String

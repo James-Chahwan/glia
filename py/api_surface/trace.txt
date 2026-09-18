@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/trace.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.cross_stack_trace(feature: &str, depth: usize = 6) -> PyResult<String>

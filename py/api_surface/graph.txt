@@ -1,0 +1,9 @@
+# pyo3 surface of py/src/graph.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+class PyGraph
+method PyGraph.cross_edge_count() -> usize
+method PyGraph.edge_count() -> usize
+method PyGraph.node_cells(node_id: u64) -> Vec<(u32, String)>
+method PyGraph.node_count() -> usize
+getter PyGraph.parse_errors -> Vec<String>
+method PyGraph.save_to(dir: &str) -> PyResult<()>
+method PyGraph.save_to_default(repo_path: &str) -> PyResult<()>
