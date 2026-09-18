@@ -83,11 +83,47 @@ struct CacheEntry {
 }
 
 /// Counters for the build's `[incremental]` marker. Not persisted.
+///
+/// The lengths of the build's [`CacheDiff`] (LA.12), not a separately kept
+/// tally, so the counts and the file lists can never disagree. The diff
+/// describes the build's INPUTS: a file whose reparse fails still counts as
+/// reparsed (its failure is in the build's `parse_errors`), and a cached file
+/// that fails to reparse counts as reparsed, not evicted, although
+/// `retain_paths` still drops it from the sidecar. That is the only way these
+/// numbers differ from the pre-LA.12 loop counters.
 #[derive(Default, Clone, Copy, Debug)]
 pub struct CacheStats {
     pub reused: usize,
     pub reparsed: usize,
     pub evicted: usize,
+}
+
+/// One cached file as [`ParseCache::iter`] yields it, in path order.
+#[derive(Debug, Clone, Copy)]
+pub struct CachedFile<'a> {
+    /// Repo-relative path, the key the build walks under.
+    pub path: &'a str,
+    /// [`content_hash`] of the source this parse was built from.
+    pub content_hash: u64,
+    /// Language tag the file was parsed as (`detect_language`).
+    pub lang: &'a str,
+    /// The cached main-parser output.
+    pub parse: &'a FileParse,
+}
+
+/// File-level delta between what a [`ParseCache`] holds and one build's
+/// inputs ([`ParseCache::diff`]). Each list is sorted by path, and a path is
+/// in exactly one of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CacheDiff {
+    /// In the input with the cached content hash: served from the cache.
+    pub reused: Vec<String>,
+    /// In the input and either absent from the cache (added) or cached under
+    /// another content hash (modified).
+    pub reparsed: Vec<String>,
+    /// Cached but absent from the input (deleted, or no longer a main-parser
+    /// file).
+    pub evicted: Vec<String>,
 }
 
 /// Per-repo cache of main-parser `FileParse`s. Hold one in memory across edits
@@ -116,6 +152,11 @@ pub struct ParseCache {
     entries: BTreeMap<String, CacheEntry>,
     #[serde(skip)]
     pub stats: CacheStats,
+    /// The file-level diff of the last build that used this cache
+    /// ([`ParseCache::last_diff`]). Not persisted: `serde(skip)` keeps the
+    /// sidecar layout unchanged, and a loaded cache starts at `None`.
+    #[serde(skip)]
+    last_diff: Option<CacheDiff>,
 }
 
 impl Default for ParseCache {
@@ -126,6 +167,7 @@ impl Default for ParseCache {
             go_prefix: String::new(),
             entries: BTreeMap::new(),
             stats: CacheStats::default(),
+            last_diff: None,
         }
     }
 }
@@ -177,6 +219,58 @@ impl ParseCache {
         let before = self.entries.len();
         self.entries.retain(|p, _| live.contains(p));
         self.stats.evicted = before.saturating_sub(self.entries.len());
+    }
+
+    /// Every cached file, in path order (the sidecar's `BTreeMap` order).
+    pub fn iter(&self) -> impl Iterator<Item = CachedFile<'_>> + '_ {
+        self.entries.iter().map(|(path, e)| CachedFile {
+            path,
+            content_hash: e.content_hash,
+            lang: &e.lang,
+            parse: &e.parse,
+        })
+    }
+
+    /// Classify one build's inputs (`(path, content_hash)` pairs) against
+    /// what the cache holds. Pure: the cache is not touched. Duplicate paths
+    /// collapse, the last pair winning.
+    ///
+    /// The language is deliberately not compared: a path's language is a
+    /// function of the path, and a change to language detection changes the
+    /// build stamp, which already discards every entry on load.
+    pub fn diff(&self, current: &[(String, u64)]) -> CacheDiff {
+        let now: BTreeMap<&str, u64> = current.iter().map(|(p, h)| (p.as_str(), *h)).collect();
+        let mut d = CacheDiff::default();
+        for (&path, &hash) in &now {
+            match self.entries.get(path) {
+                Some(e) if e.content_hash == hash => d.reused.push(path.to_string()),
+                _ => d.reparsed.push(path.to_string()),
+            }
+        }
+        d.evicted = self
+            .entries
+            .keys()
+            .filter(|p| !now.contains_key(p.as_str()))
+            .cloned()
+            .collect();
+        d
+    }
+
+    /// The file-level diff of the last build that used this cache; `None`
+    /// until one has (a freshly loaded sidecar included).
+    pub fn last_diff(&self) -> Option<&CacheDiff> {
+        self.last_diff.as_ref()
+    }
+
+    /// Record a build's diff and fill `stats` from its lengths. Called by the
+    /// build (`route::parse_repo_files`) after `retain_paths`.
+    pub(crate) fn record_diff(&mut self, d: CacheDiff) {
+        self.stats = CacheStats {
+            reused: d.reused.len(),
+            reparsed: d.reparsed.len(),
+            evicted: d.evicted.len(),
+        };
+        self.last_diff = Some(d);
     }
 
     pub fn len(&self) -> usize {
@@ -277,6 +371,55 @@ mod tests {
             "two caches with identical content serialised to different bytes — \
              `entries` is walking a per-instance hash order"
         );
+    }
+
+    fn owned(pairs: &[(&str, u64)]) -> Vec<(String, u64)> {
+        pairs.iter().map(|(p, h)| ((*p).to_string(), *h)).collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn diff_classifies_reused_reparsed_evicted() {
+        let mut c = ParseCache::new();
+        c.put("a".into(), 1, "python", FileParse::default());
+        c.put("b".into(), 2, "python", FileParse::default());
+        c.put("c".into(), 3, "python", FileParse::default());
+
+        // Unsorted input: a unchanged, b modified, d added, c gone.
+        let d = c.diff(&owned(&[("d", 9), ("b", 20), ("a", 1)]));
+        assert_eq!(
+            d,
+            CacheDiff {
+                reused: strings(&["a"]),
+                reparsed: strings(&["b", "d"]),
+                evicted: strings(&["c"]),
+            }
+        );
+        assert_eq!(c.len(), 3, "diff must not mutate the cache");
+        assert!(c.last_diff().is_none(), "diff is pure; only record_diff stores one");
+
+        // Duplicates collapse, the last pair winning.
+        let dup = c.diff(&owned(&[("a", 7), ("b", 2), ("c", 3), ("a", 1)]));
+        assert_eq!(dup.reused, strings(&["a", "b", "c"]));
+        assert!(dup.reparsed.is_empty() && dup.evicted.is_empty(), "{dup:?}");
+
+        c.record_diff(d.clone());
+        assert_eq!(c.last_diff(), Some(&d));
+        assert_eq!((c.stats.reused, c.stats.reparsed, c.stats.evicted), (1, 2, 1));
+    }
+
+    #[test]
+    fn iter_is_path_ordered() {
+        let mut c = ParseCache::new();
+        for (p, h) in [("src/z.rs", 3), ("a.go", 1), ("src/m.py", 2)] {
+            let lang = p.rsplit('.').next().unwrap_or_default();
+            c.put(p.to_string(), h, lang, FileParse::default());
+        }
+        let rows: Vec<(&str, u64, &str)> = c.iter().map(|f| (f.path, f.content_hash, f.lang)).collect();
+        assert_eq!(rows, [("a.go", 1, "go"), ("src/m.py", 2, "py"), ("src/z.rs", 3, "rs")]);
     }
 
     /// Two builds of the same repo at once (the repo-graph MCP server plus a

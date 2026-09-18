@@ -52,11 +52,16 @@ pub(crate) fn parse_repo_files(
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
-    // WP-D incremental: track which main-parser files we saw so deleted files
-    // get evicted; count reuse vs reparse for the marker.
+    // WP-D incremental: track which main-parser files parsed so deleted (or
+    // no-longer-parseable) files get evicted from the sidecar.
     let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut reused = 0usize;
-    let mut reparsed = 0usize;
+    // LA.12: every main-parser input as (path, content hash), for
+    // `ParseCache::diff`; the marker counts are that diff's lengths. Fresh
+    // parses wait in `pending` (the one clone the cache keeps) until the diff
+    // has been taken against the PRE-build cache — putting them as they come
+    // would make every changed file read as reused.
+    let mut current: Vec<(String, u64)> = Vec::new();
+    let mut pending: Vec<(String, u64, &'static str, FileParse)> = Vec::new();
     // A3.4 `[extract]` marker counter. Only counts files actually reparsed this
     // build — a cache hit replays a FileParse whose ROUTE nodes already carry
     // the mark, so the graph-side `[http]` marker is the complete figure.
@@ -354,12 +359,14 @@ pub(crate) fn parse_repo_files(
         // WP-D incremental: reuse the cached parse if the source is unchanged;
         // only changed / new files pay tree-sitter.
         let hash = cache.is_some().then(|| cache::content_hash(source));
+        if let Some(h) = hash {
+            current.push((path.clone(), h));
+        }
         let cached_fp = match hash {
             Some(h) => cache.as_deref().and_then(|c| c.get(path, h, lang)),
             None => None,
         };
         if let Some(fp) = cached_fp {
-            reused += 1;
             live_paths.insert(path.clone());
             parses_by_lang.entry(lang).or_default().push(fp);
             continue;
@@ -392,11 +399,10 @@ pub(crate) fn parse_repo_files(
         }));
         match parse_result {
             Ok(Ok((fp, stats))) => {
-                reparsed += 1;
                 nav_routes_marked += stats.nav_routes;
                 ts_client_calls_skipped += stats.ts_client_calls_skipped;
-                if let (Some(c), Some(h)) = (cache.as_deref_mut(), hash) {
-                    c.put(path.clone(), h, lang, fp.clone());
+                if let Some(h) = hash {
+                    pending.push((path.clone(), h, lang, fp.clone()));
                 }
                 live_paths.insert(path.clone());
                 parses_by_lang.entry(lang).or_default().push(fp);
@@ -413,18 +419,27 @@ pub(crate) fn parse_repo_files(
         }
     }
 
-    // WP-D: evict cached parses for files gone this build, and emit the
-    // greppable marker so a cycle can confirm the cache engaged.
+    // WP-D: diff the inputs against the pre-build cache (LA.12), store the
+    // fresh parses, evict cached parses for files gone (or no longer
+    // parseable) this build, and emit the greppable marker so a cycle can
+    // confirm the cache engaged.
     if let Some(c) = cache.as_deref_mut() {
+        let diff = c.diff(&current);
+        for (path, h, lang, fp) in pending {
+            c.put(path, h, lang, fp);
+        }
         c.retain_paths(&live_paths);
-        c.stats.reused = reused;
-        c.stats.reparsed = reparsed;
+        c.record_diff(diff);
         // `stamp=` makes the always-on line grep-proof of WHICH code produced
         // these parses — a rebuilt wheel that quietly kept the old .so shows the
         // old stamp here (dev-notes memory: feedback_maturin_stale_wheel). The
         // repo prefix gives a multi-repo build one attributable line per repo.
+        // `source=diff` (LA.12 fired_on): the counts are `ParseCache::diff`'s
+        // list lengths, the same lists `ParseCache::last_diff` hands out.
         eprintln!(
-            "[incremental] {repo_label}: reused {reused}, reparsed {reparsed}, evicted {} (parse cache, stamp={})",
+            "[incremental] {repo_label}: reused {}, reparsed {}, evicted {} (parse cache, stamp={}, source=diff)",
+            c.stats.reused,
+            c.stats.reparsed,
             c.stats.evicted,
             cache::CACHE_VERSION
         );
