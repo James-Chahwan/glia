@@ -20,6 +20,7 @@ repo-graph-parser-go = { path = "../parsers/code/go" }
 repo-graph-parser-typescript = { path = "../parsers/code/typescript" }
 repo-graph-parser-rust = { path = "../parsers/code/rust" }
 repo-graph-parser-java = { path = "../parsers/code/java" }
+repo-graph-parser-kotlin = { path = "../parsers/code/kotlin" }
 repo-graph-parser-csharp = { path = "../parsers/code/csharp" }
 repo-graph-parser-ruby = { path = "../parsers/code/ruby" }
 repo-graph-parser-php = { path = "../parsers/code/php" }

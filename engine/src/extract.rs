@@ -25,7 +25,10 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "js" | "jsx" => Some("typescript"),
         "vue" => Some("vue"),
         "rs" => Some("rust"),
-        "java" | "kt" => Some("java"),
+        "java" => Some("java"),
+        // A14.2: Kotlin has its own parser. It shares ONE graph with Java
+        // (the JVM family, `build::lang_build`), so the tag is only routing.
+        "kt" => Some("kotlin"),
         "cs" => Some("csharp"),
         "rb" => Some("ruby"),
         "php" => Some("php"),
@@ -81,6 +84,8 @@ pub fn parse_one_with(
         "rust" => repo_graph_parser_rust::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "java" => repo_graph_parser_java::parse_file(source, path, &module_qname, repo)
+            .map_err(|e| e.to_string()),
+        "kotlin" => repo_graph_parser_kotlin::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "csharp" => repo_graph_parser_csharp::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
@@ -203,8 +208,13 @@ pub(crate) fn apply_cross_cutting_extractors(
     // builder's `resolve_refs`). Per-file marker, printed only when the file
     // declared a command.
     {
-        let decl = cli::extract_cli_command_nodes(source, lang, module_id, repo);
-        if let Some(marker) = cli::decl_marker(lang, &decl, path) {
+        // A14.2 stopgap: `cli`'s picocli arm admits only the `java` tag, and
+        // Kotlin picocli (`@Command(name = ..) class X : Runnable`) rode it
+        // while `.kt` parsed as Java. Removal: once that arm reads
+        // `"java" | "kotlin"`, pass `lang` straight through again.
+        let cli_lang = if lang == "kotlin" { "java" } else { lang };
+        let decl = cli::extract_cli_command_nodes(source, cli_lang, module_id, repo);
+        if let Some(marker) = cli::decl_marker(cli_lang, &decl, path) {
             eprintln!("{marker}");
         }
         fp.refs.extend(decl.refs);

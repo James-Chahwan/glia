@@ -1016,7 +1016,7 @@ mod tests {
         let t = scan(&src, "typescript");
         assert!(t.is_empty(), "{t:?}");
         assert_eq!(t.files(), 0);
-        let kt = scan("val url = \"$host/api\"\n", "java");
+        let kt = scan("val url = \"$host/api\"\n", "kotlin");
         assert!(kt.is_empty(), "a Kotlin template is not a literal");
     }
 

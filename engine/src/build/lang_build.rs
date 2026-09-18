@@ -18,6 +18,18 @@ use repo_graph_graph::RepoGraph;
 /// order and is built last, so graph/shard order stays deterministic.
 const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
 
+/// A14.2: the JVM family. `.kt` parses under its own `kotlin` tag (its own
+/// parser), but Kotlin and Java share one symbol space — a Kotlin controller
+/// imports and injects a Java service and back — and resolution only happens
+/// inside one graph, so both build as ONE `build_dotted` graph. Not TS_FAMILY's
+/// build-last pattern: the synthetic `json` tag sorts between `java` and
+/// `kotlin`, and building the family after the loop would move every Java
+/// repo's graph to the end of `graphs`, shifting its shard index. The Kotlin
+/// parses join the `java` entry in place instead (a Kotlin-only repo builds at
+/// the `kotlin` slot), so a Java-only repo's graph list is untouched.
+const JVM_HOST: &str = "java";
+const JVM_GUEST: &str = "kotlin";
+
 /// Build one repo's per-language graphs from its finished parses, in sorted
 /// language order with the TS family last. Returns the graphs and the A7.0
 /// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
@@ -36,6 +48,11 @@ pub(super) fn build_language_graphs(
     // shards optimization never fired (audit 2026-06-10 #5).
     let mut parses_by_lang: Vec<(&str, Vec<FileParse>)> = parses_by_lang.into_iter().collect();
     parses_by_lang.sort_unstable_by_key(|(lang, _)| *lang);
+    // A14.2 `[kotlin] entities:` fired_on, counted off the parses so
+    // cache-served files count too; the kotlin crate owns the line.
+    if let Some((_, kotlin)) = parses_by_lang.iter().find(|(lang, _)| *lang == JVM_GUEST) {
+        repo_graph_parser_kotlin::trace(kotlin, repo_label);
+    }
     // A7.0 `[di]` marker input: INJECTS refs per language, counted off the
     // parses themselves so cache-served files count too. The TS-family tags
     // report as `typescript`, their matrix row.
@@ -65,6 +82,9 @@ pub(super) fn build_language_graphs(
             (matrix_row(*lang), n)
         })
         .collect();
+    // The per-language marker inputs above keep `kotlin` as its own row; the
+    // build below sees the JVM family as one graph.
+    join_jvm_family(&mut parses_by_lang);
     let mut recv_bound: Vec<(&str, usize)> = Vec::new();
     recv_stats::reset();
     let mut ts_family: Vec<FileParse> = Vec::new();
@@ -76,7 +96,7 @@ pub(super) fn build_language_graphs(
         let graph = match lang {
             "python" => repo_graph_graph::build_python(repo, parses),
             "go" => repo_graph_graph::build_go(repo, parses),
-            "java" | "csharp" | "php" | "rust" | "scala" | "clojure" | "elixir" => {
+            "java" | "kotlin" | "csharp" | "php" | "rust" | "scala" | "clojure" | "elixir" => {
                 repo_graph_graph::build_dotted(repo, parses)
             }
             "ruby" => repo_graph_graph::build_ruby(repo, parses),
@@ -101,6 +121,21 @@ pub(super) fn build_language_graphs(
     recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
 
     (graphs, di_refs)
+}
+
+/// Move the `kotlin` parses onto the end of the `java` entry when both exist
+/// (see [`JVM_HOST`]). `parses_by_lang` is sorted, so the Java entry keeps its
+/// slot and the Kotlin one disappears; with no Java, nothing moves.
+fn join_jvm_family(parses_by_lang: &mut Vec<(&str, Vec<FileParse>)>) {
+    let Some(guest) = parses_by_lang.iter().position(|(lang, _)| *lang == JVM_GUEST) else {
+        return;
+    };
+    let Some(host) = parses_by_lang.iter().position(|(lang, _)| *lang == JVM_HOST) else {
+        return;
+    };
+    let (_, kotlin) = parses_by_lang.remove(guest);
+    // `host < guest` in sorted order, so the removal left `host` in place.
+    parses_by_lang[host].1.extend(kotlin);
 }
 
 /// The matrix row a parse-language tag reports under: the TS-family tags

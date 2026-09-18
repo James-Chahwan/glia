@@ -27,6 +27,8 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
+  kotlin/  — own parser (tree-sitter-kotlin-ng), but ONE graph with java/:
+             the JVM family joins in engine/src/build/lang_build.rs
   react/   angular/  vue/    — framework parsers stacked on typescript
   extractors/ — cross-cutting: data_sources, cli, grpc, queues, websocket,
                 eventbus, graphql, ts_routes, angular/react/vue route extractors

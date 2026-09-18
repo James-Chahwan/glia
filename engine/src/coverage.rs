@@ -103,40 +103,47 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "dio / http client verbs are extracted; other HTTP libraries are not",
         verify: "grep the HTTP client class name",
     },
-    // A14.1 — the Kotlin rows. `.kt` is routed to the JAVA parser
-    // (`extract::detect_language`), so these describe what the Java grammar
-    // recovers from Kotlin source, measured on bench/substrate-gap/fixtures/
-    // kotlin-{entities,spring,ktor,retrofit,flip-guard}. They go FALSE the
-    // moment a Kotlin parser lands: A14.2 owns rewriting all five together.
+    // A14.1 / A14.2 — the Kotlin rows. `.kt` has its own parser since A14.2
+    // (`parsers/code/kotlin`, one JVM graph with Java), so these describe the
+    // residual that parser leaves, measured on bench/substrate-gap/fixtures/
+    // kotlin-{entities,spring,ktor,retrofit,flip-guard}. The Kotlin packets
+    // after A14.2 (calls + heritage, Spring / JPA annotations, Ktor handlers,
+    // HTTP clients) each rewrite the row they close.
     CoverageCaveat {
         language: "kotlin",
         edge_category: "*",
-        note: "no Kotlin parser: .kt files are parsed with the Java grammar and survive only through its error recovery. Declarations whose header is also valid Java (`interface X {`, `class X {`, `open class X {`) and the block-bodied `fun`s inside them usually survive; expression-body and top-level `fun`s and classes with a primary constructor usually do not; a header the grammar cannot close can swallow the rest of the file, nesting later declarations under it with wrong qnames. `.kts` scripts (Gradle KTS) are never parsed. Treat the Kotlin surface as ungraphed.",
-        verify: "grep the Kotlin symbol directly; an empty blast_radius / impact for a .kt symbol means NOT-EXTRACTED, not dead code",
+        note: "Kotlin declarations are extracted by a dedicated parser: classes, interfaces, enums, objects (companion members attach to their class), member and top-level / extension functions, non-trivial properties and imports. Framework needles are the gap: Spring stereotype and mapping annotations, constructor / field INJECTS, JPA `@Entity` DATA_ENTITY and repository ACCESSES_DATA are not read from Kotlin. `.kts` scripts (Gradle KTS) are never parsed.",
+        verify: "grep the annotation (@RestController, @GetMapping, @Entity, @Autowired) across *.kt",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "CALLS",
-        note: "Kotlin CALLS come only from block-bodied `fun`s the Java grammar recovered inside a class (self-calls, HTTP-client calls to an ENDPOINT); calls in expression-body, top-level or extension `fun`s and in Ktor route lambdas are never extracted",
+        note: "no CALLS are extracted from Kotlin yet: its functions and methods are nodes, but no call site inside them is recorded, so a Kotlin caller never appears in a blast radius or trace",
         verify: "grep the callee name across *.kt",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "IMPORTS",
-        note: "Kotlin `import a.b.C` resolves only when the target class happened to survive the Java grammar; treat Kotlin import edges as best-effort",
+        note: "Kotlin `import a.b.C` / `a.b.C as D` binds to the in-repo declaration only when its simple name is unique in the repo's Java + Kotlin graph (or the file layout mirrors the package); a simple name declared twice leaves the import unbound. `import a.b.*` binds only a file module named for the package's last segment (`b.kt`), and only when that name is unique",
         verify: "grep '^import' in the .kt file",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "INHERITS_FROM",
-        note: "Kotlin `: Base()` / `: Iface` supertype lists are never extracted — no INHERITS_FROM or IMPLEMENTS edge exists for any Kotlin type",
+        note: "Kotlin `: Base()` / `: Iface` supertype lists are not extracted yet — no INHERITS_FROM or IMPLEMENTS edge exists for any Kotlin type",
         verify: "grep the supertype name across *.kt",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "HANDLED_BY",
-        note: "Ktor `get(\"/path\") { }` ROUTE nodes ARE emitted by a text scan, but with no handler and no HANDLED_BY edge; a Spring `@GetMapping` is lost when its `fun` has an expression body or its controller has a primary constructor (the usual Kotlin shape)",
-        verify: "grep for routing { / @GetMapping in *.kt",
+        note: "Ktor `get(\"/path\") { }`, Javalin `app.get(\"/path\", h)` and WebFlux `.GET(\"/path\", h)` ROUTE nodes are emitted by a text scan with no handler and no HANDLED_BY edge; Spring `@RequestMapping` / `@GetMapping` ROUTEs are not extracted from Kotlin at all",
+        verify: "grep for routing { / @GetMapping / .get(\" in *.kt",
+    },
+    CoverageCaveat {
+        language: "kotlin",
+        edge_category: "HTTP_CALLS",
+        note: "Kotlin HTTP clients (RestTemplate, WebClient, Retrofit interfaces) emit no ENDPOINT, so a Kotlin caller never pairs to the route it calls",
+        verify: "grep getForObject / .uri( / @GET( across *.kt",
     },
 ];
 
@@ -162,7 +169,7 @@ pub struct CoverageNote {
 pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     let langs = languages_present(merged);
     if langs.contains("kotlin") {
-        eprintln!("[coverage] kotlin: no parser — .kt routed through the java grammar");
+        eprintln!("[coverage] kotlin: parser is new — calls/heritage/framework needles may be partial");
     }
     notes(merged, |c| c.language == "*" || langs.contains(c.language))
 }
@@ -348,16 +355,22 @@ mod tests {
 
     #[test]
     fn kotlin_reports_as_blind_spot() {
-        // A14.1: `.kt` is parsed by the Java grammar, so a Kotlin repo must
-        // SAY it is ungraphed rather than answer an empty blast radius.
+        // A14.1 / A14.2: Kotlin has a parser now, but its calls, heritage and
+        // framework needles are still missing, so a Kotlin repo must SAY which
+        // dimensions to grep rather than answer an empty blast radius.
         let report = coverage_report(&graph_with_file("src/Sample.kt"));
         let kotlin: Vec<_> = report.iter().filter(|n| n.language == "kotlin").collect();
         let mut cats: Vec<_> = kotlin.iter().map(|n| n.edge_category).collect();
         cats.sort_unstable();
         assert_eq!(
             cats,
-            ["*", "CALLS", "HANDLED_BY", "IMPORTS", "INHERITS_FROM"],
-            "the five Kotlin rows, one per category"
+            ["*", "CALLS", "HANDLED_BY", "HTTP_CALLS", "IMPORTS", "INHERITS_FROM"],
+            "the Kotlin residual rows, one per category"
+        );
+        let star = kotlin.iter().find(|n| n.edge_category == "*").map(|n| n.note);
+        assert!(
+            star.is_some_and(|n| !n.contains("no Kotlin parser") && !n.contains("ungraphed")),
+            "the parser landed: the `*` row describes its residual, not a missing parser"
         );
         assert!(kotlin.iter().all(|n| n.edges_found == 0));
         // Every non-`*` row names a category that exists, so edges_found can count it.

@@ -145,7 +145,7 @@ pub fn extract_service_nodes(
         "go" => detect_go_services(source),
         "python" => detect_python_services(source),
         "rust" => detect_rust_services(source),
-        "java" => detect_java_services(source),
+        "java" | "kotlin" => detect_java_services(source),
         "typescript" | "react" | "angular" | "vue" => detect_ts_services(source),
         _ => hit_names(&hits),
     };

@@ -31,6 +31,7 @@ members = [
     "activation",
     "parsers/code/rust",
     "parsers/code/java",
+    "parsers/code/kotlin",
     "parsers/code/csharp",
     "parsers/code/ruby",
     "parsers/code/php",
