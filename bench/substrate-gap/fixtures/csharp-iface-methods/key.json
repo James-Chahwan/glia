@@ -1,0 +1,15 @@
+{
+  "framework": "csharp-iface-methods",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/impl"],
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "IUserService", "note": "declares GetById"},
+    {"kind": "METHOD", "name": "IUserService/GetById", "note": "interface method node: a METHOD child of the INTERFACE, indexed in no method table before A6.6"},
+    {"kind": "METHOD", "name": "UserService/GetById", "note": "implementation method"}
+  ],
+  "expect_edges": [
+    {"from": "UserService", "to": "IUserService", "category": "IMPLEMENTS", "note": "class-level heritage, the positive control"},
+    {"from": "Services/UserService/GetById", "to": "Services/IUserService/GetById", "category": "IMPLEMENTS", "note": "method-level pairing (A6.6 emit_method_level_implements): impl method -> interface method, same direction as the class-level edge. Namespace-qualified patterns so `from` cannot substring-match the interface method (userservice/getbyid is a substring of iuserservice/getbyid)"}
+  ]
+}

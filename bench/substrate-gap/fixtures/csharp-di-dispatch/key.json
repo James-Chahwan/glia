@@ -1,0 +1,14 @@
+{
+  "framework": "csharp-di-dispatch",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/calls"],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "GetUser", "note": "controller action"},
+    {"kind": "INTERFACE", "name": "IUserService", "note": "the field's declared type"}
+  ],
+  "expect_edges": [
+    {"from": "UsersController", "to": "IUserService", "category": "INJECTS", "note": "ctor DI, the positive control"},
+    {"from": "UsersController/GetUser", "to": "Services/IUserService/GetById", "category": "CALLS", "note": "_userService.GetById(id): an interface-typed field receiver. Binds through the field's declared type (A6.2a) into the INTERFACE's method table (A6.6 interface_methods); the implementation is one method-level IMPLEMENTS hop further"}
+  ]
+}

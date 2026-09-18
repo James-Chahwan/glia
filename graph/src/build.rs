@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use repo_graph_code_domain::{CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, node_kind};
 use repo_graph_core::{Cell, NodeId, RepoId};
 
-use crate::calls::{resolve_calls, resolve_refs};
+use crate::calls::{emit_method_level_implements, resolve_calls, resolve_refs};
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
@@ -23,6 +23,7 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     resolve_imports_python(&mut g, &all_imports);
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
     Ok(g)
 }
 
@@ -34,6 +35,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     resolve_imports_go(&mut g, &all_imports);
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
     Ok(g)
 }
 
@@ -53,6 +55,7 @@ where
     resolve_imports_ts(&mut g, &all_imports, &resolve_source);
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
     Ok(g)
 }
 
@@ -66,6 +69,7 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     resolve_imports_python(&mut g, &all_imports);
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
     Ok(g)
 }
 
@@ -78,6 +82,7 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
     resolve_imports_slash(&mut g, &all_imports);
     resolve_calls(&mut g, &all_calls, |_, _| None);
     resolve_refs(&mut g, &all_refs);
+    emit_method_level_implements(&mut g);
     Ok(g)
 }
 
@@ -207,6 +212,24 @@ fn build_symbol_table(g: &mut RepoGraph) {
                     entry.insert(name.clone(), *child);
                 }
             }
+        } else if parent_kind == Some(node_kind::INTERFACE) {
+            // A6.6: an INTERFACE's METHOD children (C# / Java interface
+            // members, Rust trait fns) go in their OWN table, never
+            // `class_methods`: `unique_global_method` scans `class_methods`
+            // for the HANDLED_BY fallback, and a second `GetById` there would
+            // make a previously-unique handler ambiguous and delete its edge.
+            // An interface with no METHOD child gets no entry.
+            for child in children {
+                if let Some(name) = g.nav.name_by_id.get(child)
+                    && g.nav.kind_by_id.get(child) == Some(&node_kind::METHOD)
+                {
+                    g.symbols
+                        .interface_methods
+                        .entry(*parent)
+                        .or_default()
+                        .insert(name.clone(), *child);
+                }
+            }
         }
     }
 }
@@ -323,5 +346,179 @@ mod tests {
             ),
             "expected IMPORTS edge from app to foo::bar (slash → ::)"
         );
+    }
+
+    // ---- A6.6: interface method table + method-level IMPLEMENTS -------------
+
+    /// C# shape: `interface IUserService { GetById(); }` +
+    /// `class UserService : IUserService { GetById(); Load(); }`, the class-level
+    /// heritage arriving as a Bare IMPLEMENTS ref (bound by resolve_refs).
+    /// Returns (file, iface, iface_get, impl_cls, impl_get, impl_load).
+    fn iface_and_impl() -> (FileParse, [NodeId; 5]) {
+        let r = repo();
+        let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "svc");
+        let iface = NodeId::from_parts(GRAPH_TYPE, r, node_kind::INTERFACE, "svc::IUserService");
+        let iface_get =
+            NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::IUserService::GetById");
+        let cls = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "svc::UserService");
+        let cls_get =
+            NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::UserService::GetById");
+        let cls_load =
+            NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "svc::UserService::Load");
+        let mut nav = CodeNav::default();
+        nav.record(m, "svc", "svc", node_kind::MODULE, None);
+        nav.record(iface, "IUserService", "svc::IUserService", node_kind::INTERFACE, Some(m));
+        nav.record(iface_get, "GetById", "svc::IUserService::GetById", node_kind::METHOD, Some(iface));
+        nav.record(cls, "UserService", "svc::UserService", node_kind::CLASS, Some(m));
+        nav.record(cls_get, "GetById", "svc::UserService::GetById", node_kind::METHOD, Some(cls));
+        nav.record(cls_load, "Load", "svc::UserService::Load", node_kind::METHOD, Some(cls));
+        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let file = FileParse {
+            nodes: [m, iface, iface_get, cls, cls_get, cls_load].into_iter().map(node).collect(),
+            edges: vec![],
+            imports: vec![],
+            calls: vec![],
+            refs: vec![UnresolvedRef {
+                from: cls,
+                from_module: m,
+                qualifier: repo_graph_code_domain::CallQualifier::Bare("IUserService".to_string()),
+                category: edge_category::IMPLEMENTS,
+            }],
+            nav,
+            properties: HashSet::new(),
+        };
+        (file, [iface, iface_get, cls, cls_get, cls_load])
+    }
+
+    fn implements(g: &RepoGraph) -> Vec<(NodeId, NodeId)> {
+        g.edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .map(|e| (e.from, e.to))
+            .collect()
+    }
+
+    /// The INTERFACE's methods land in their own table and never in
+    /// `class_methods`, which `unique_global_method` scans for HANDLED_BY.
+    #[test]
+    fn interface_methods_are_not_in_class_methods() {
+        let (file, [iface, iface_get, cls, cls_get, _]) = iface_and_impl();
+        let g = build_dotted(repo(), vec![file]).unwrap();
+        assert!(!g.symbols.class_methods.contains_key(&iface));
+        assert_eq!(g.symbols.interface_methods[&iface].get("GetById").copied(), Some(iface_get));
+        assert_eq!(g.symbols.class_methods[&cls].get("GetById").copied(), Some(cls_get));
+        assert!(!g.symbols.interface_methods.contains_key(&cls));
+    }
+
+    /// Class-level `UserService -> IUserService` pairs the same-named method:
+    /// `UserService::GetById -> IUserService::GetById`. `Load` has no interface
+    /// counterpart and pairs with nothing.
+    #[test]
+    fn method_level_implements_pairs_same_named_methods() {
+        let (file, [iface, iface_get, cls, cls_get, _]) = iface_and_impl();
+        let g = build_dotted(repo(), vec![file]).unwrap();
+        assert_eq!(implements(&g), vec![(cls, iface), (cls_get, iface_get)]);
+    }
+
+    /// Every builder runs the pass, and a second run adds nothing: an
+    /// IMPLEMENTS pair already present is never pushed twice.
+    #[test]
+    fn method_level_implements_is_idempotent_and_runs_in_every_builder() {
+        for build in [build_python, build_go, build_dotted, build_ruby] {
+            let (file, [_, iface_get, _, cls_get, _]) = iface_and_impl();
+            let mut g = build(repo(), vec![file]).unwrap();
+            assert!(implements(&g).contains(&(cls_get, iface_get)));
+            let before = g.edges.len();
+            crate::calls::emit_method_level_implements(&mut g);
+            assert_eq!(g.edges.len(), before, "re-running the pass must not duplicate");
+        }
+        let (file, [_, iface_get, _, cls_get, _]) = iface_and_impl();
+        let g = build_typescript(repo(), vec![file], |_, _| None).unwrap();
+        assert!(implements(&g).contains(&(cls_get, iface_get)));
+    }
+
+    /// Two implementors of one interface, several methods: the emitted edge
+    /// order is a pure function of the ids (sorted), not of HashMap seeds.
+    #[test]
+    fn method_level_implements_order_is_sorted() {
+        let r = repo();
+        let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "svc");
+        let iface = NodeId::from_parts(GRAPH_TYPE, r, node_kind::INTERFACE, "svc::I");
+        let mut nav = CodeNav::default();
+        nav.record(m, "svc", "svc", node_kind::MODULE, None);
+        nav.record(iface, "I", "svc::I", node_kind::INTERFACE, Some(m));
+        let mut ids = vec![m, iface];
+        let mut edges = vec![];
+        for name in ["a", "b", "c", "d"] {
+            let q = format!("svc::I::{name}");
+            let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, &q);
+            nav.record(id, name, &q, node_kind::METHOD, Some(iface));
+            ids.push(id);
+        }
+        for cls_name in ["X", "Y"] {
+            let cq = format!("svc::{cls_name}");
+            let cls = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, &cq);
+            nav.record(cls, cls_name, &cq, node_kind::CLASS, Some(m));
+            ids.push(cls);
+            edges.push(repo_graph_core::Edge {
+                from: cls,
+                to: iface,
+                category: edge_category::IMPLEMENTS,
+                confidence: Confidence::Strong,
+            });
+            for name in ["a", "b", "c", "d"] {
+                let q = format!("{cq}::{name}");
+                let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, &q);
+                nav.record(id, name, &q, node_kind::METHOD, Some(cls));
+                ids.push(id);
+            }
+        }
+        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let file = FileParse {
+            nodes: ids.into_iter().map(node).collect(),
+            edges,
+            imports: vec![],
+            calls: vec![],
+            refs: vec![],
+            nav,
+            properties: HashSet::new(),
+        };
+        let g = build_dotted(r, vec![file]).unwrap();
+        let method_level: Vec<_> = implements(&g).into_iter().filter(|(_, to)| *to != iface).collect();
+        assert_eq!(method_level.len(), 8, "2 implementors x 4 methods");
+        let mut sorted = method_level.clone();
+        sorted.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+        assert_eq!(method_level, sorted);
+    }
+
+    /// The HANDLED_BY guard: a route handler `h.GetById` is unique among
+    /// CLASS / STRUCT methods even though the interface declares `GetById`
+    /// too. Were interface methods merged into `class_methods`, the lookup
+    /// would turn ambiguous and the HANDLED_BY edge would vanish.
+    #[test]
+    fn interface_method_does_not_make_handled_by_ambiguous() {
+        let (mut file, [_, _, _, cls_get, _]) = iface_and_impl();
+        let r = repo();
+        let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::MODULE, "svc");
+        let route = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, "svc::GET /users/{id}");
+        file.nav.record(route, "GET /users/{id}", "svc::GET /users/{id}", node_kind::ROUTE, Some(m));
+        file.nodes.push(Node { id: route, repo: r, confidence: Confidence::Strong, cells: vec![] });
+        file.refs.push(UnresolvedRef {
+            from: route,
+            from_module: m,
+            qualifier: repo_graph_code_domain::CallQualifier::Attribute {
+                base: "h".to_string(),
+                name: "GetById".to_string(),
+            },
+            category: edge_category::HANDLED_BY,
+        });
+        let g = build_dotted(r, vec![file]).unwrap();
+        let handled: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY)
+            .map(|e| (e.from, e.to))
+            .collect();
+        assert_eq!(handled, vec![(route, cls_get)]);
     }
 }

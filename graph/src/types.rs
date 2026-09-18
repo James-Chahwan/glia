@@ -42,6 +42,14 @@ pub struct SymbolTable {
     pub module_symbols: HashMap<NodeId, HashMap<String, NodeId>>,
     /// Class node id → (method name → method node id).
     pub class_methods: HashMap<NodeId, HashMap<String, NodeId>>,
+    /// INTERFACE node id → (method name → METHOD node id). Kept apart from
+    /// `class_methods` on purpose: the HANDLED_BY global fallback
+    /// (`unique_global_method`) scans `class_methods`, and an interface method
+    /// sharing its implementation's name would turn every such lookup
+    /// ambiguous and silently drop the route's HANDLED_BY edge (A6.6).
+    /// Build-time only: the store does not persist it, so a graph loaded from
+    /// a `.gmap` carries an empty table (resolution is finished before write).
+    pub interface_methods: HashMap<NodeId, HashMap<String, NodeId>>,
     /// Module node id → (bound name in that module → target node id).
     /// Populated from resolved imports. Powers cross-file call resolution.
     pub module_import_bindings: HashMap<NodeId, HashMap<String, NodeId>>,

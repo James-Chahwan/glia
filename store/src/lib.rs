@@ -244,11 +244,15 @@ impl SymbolTableStore {
                 })
                 .collect()
         };
+        // Starts from Default for the build-time-only tables this store does
+        // not persist (`interface_methods`, A6.6): a loaded graph has already
+        // been resolved, so they stay empty and the archived layout is unchanged.
         SymbolTable {
             module_by_qname,
             module_symbols: to_map(&self.module_symbols),
             class_methods: to_map(&self.class_methods),
             module_import_bindings: to_map(&self.module_import_bindings),
+            ..Default::default()
         }
     }
 }

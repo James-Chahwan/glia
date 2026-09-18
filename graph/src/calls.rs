@@ -26,6 +26,10 @@ where
 {
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
+    let mut gate = BareFieldGate::default();
+    // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
+    // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
+    let (mut iface_recv, mut iface_static) = (0usize, 0usize);
     for site in calls {
         let Some(from_module) = enclosing_module(&g.nav, site.from) else {
             g.unresolved_calls.push(site.clone());
@@ -61,6 +65,7 @@ where
                             enum_hits.attribute += 1;
                             enum_hits.enums.push(base_id);
                         }
+                        Some((_, k)) if k == node_kind::INTERFACE => iface_static += 1,
                         _ => {}
                     }
                 }
@@ -97,9 +102,12 @@ where
         // above, so an import binding or module symbol that shares the
         // field's name keeps today's target.
         let resolved = resolved.or_else(|| {
-            let hit = resolve_via_receiver_type(g, site, from_module);
-            if hit.is_some() {
+            let hit = resolve_via_receiver_type(g, site, from_module, &mut gate);
+            if let Some(to) = hit {
                 recv_stats::record();
+                if is_interface_method(&g.nav, to) {
+                    iface_recv += 1;
+                }
             }
             hit
         });
@@ -122,6 +130,23 @@ where
             enum_hits.ext(g)
         );
     }
+    if iface_recv + iface_static > 0 {
+        eprintln!(
+            "[iface] interface-method calls bound: {} (receiver={iface_recv} static={iface_static})",
+            iface_recv + iface_static
+        );
+    }
+    if let Some(line) = gate.marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// True when `id` is a METHOD owned directly by an INTERFACE.
+fn is_interface_method(nav: &CodeNav, id: NodeId) -> bool {
+    nav.parent_of
+        .get(&id)
+        .and_then(|p| nav.kind_by_id.get(p))
+        == Some(&node_kind::INTERFACE)
 }
 
 /// Per-build tally of resolutions that only bind because an ENUM owns methods
@@ -313,6 +338,12 @@ fn resolve_attribute_target(
         Some(k) if k == node_kind::CLASS || k == node_kind::STRUCT || k == node_kind::ENUM => {
             g.symbols.class_methods.get(&base_id).and_then(|m| m.get(name).copied())
         }
+        // A6.6: a statically-qualified interface call (`IFoo.Of()`, a Java
+        // static interface method, a Rust `Trait::f`) binds the interface's
+        // own METHOD through its separate table.
+        Some(k) if k == node_kind::INTERFACE => {
+            g.symbols.interface_methods.get(&base_id).and_then(|m| m.get(name).copied())
+        }
         _ => None,
     }
 }
@@ -355,6 +386,8 @@ fn enum_member(g: &RepoGraph, enum_id: NodeId, name: &str) -> Option<NodeId> {
 /// skipped: `class_methods` indexes them since LA.30a, and a route handler
 /// binding must not turn ambiguous (or change target) because an enum happens
 /// to own a same-named method — this pool stays CLASS / STRUCT only.
+/// INTERFACE methods are never in the pool: they live in the separate
+/// `interface_methods` table (A6.6) precisely so this scan cannot see them.
 fn unique_global_method(g: &RepoGraph, name: &str) -> Option<NodeId> {
     let mut hit: Option<NodeId> = None;
     for (owner, methods) in &g.symbols.class_methods {
@@ -489,14 +522,29 @@ fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<N
 
 /// `<field>.m()` where `<field>` is a declared field of the innermost
 /// enclosing CLASS / STRUCT / ENUM: bind `m` on the field's declared type.
-/// Needs an exact declared type and an exact method name on it; an INTERFACE
-/// type owns no `class_methods` entry, so interface-typed fields stay
-/// unresolved (A6.6).
-fn resolve_via_receiver_type(g: &RepoGraph, site: &CallSite, from_module: NodeId) -> Option<NodeId> {
-    let (field, method) = match &site.qualifier {
-        CallQualifier::Attribute { base, name } => (base.as_str(), name.as_str()),
+/// Needs an exact declared type and an exact method name on it. An
+/// INTERFACE-typed field (the canonical DI shape, `IUserService _svc`) binds
+/// the interface's own METHOD through `interface_methods` (A6.6); the
+/// implementation is one method-level IMPLEMENTS hop further
+/// (`emit_method_level_implements`), never guessed here.
+///
+/// A bare `x.m()` (the `Attribute` arm) names the field only where the
+/// language lets a field be read unqualified. In TypeScript / JavaScript and
+/// Python it is a parameter, local or global unless it runs inside the
+/// constructor, whose same-named parameter has the field's declared type
+/// (`constructor(private api: Api)`, `def __init__(self, api: Api)`); the
+/// `this.x` / `self.x` form arrives as `ComplexReceiver` and is unaffected.
+/// `gate` resolves the caller's language and tallies what it skips.
+fn resolve_via_receiver_type(
+    g: &RepoGraph,
+    site: &CallSite,
+    from_module: NodeId,
+    gate: &mut BareFieldGate,
+) -> Option<NodeId> {
+    let (field, method, bare) = match &site.qualifier {
+        CallQualifier::Attribute { base, name } => (base.as_str(), name.as_str(), true),
         CallQualifier::ComplexReceiver { receiver, name } => {
-            (receiver_field(receiver)?, name.as_str())
+            (receiver_field(receiver)?, name.as_str(), false)
         }
         _ => return None,
     };
@@ -506,7 +554,125 @@ fn resolve_via_receiver_type(g: &RepoGraph, site: &CallSite, from_module: NodeId
     let owner = enclosing_class_or_struct(&g.nav, site.from)?;
     let type_name = g.nav.field_types.get(&owner)?.get(field)?;
     let type_id = resolve_type_name(g, from_module, type_name)?;
-    g.symbols.class_methods.get(&type_id)?.get(method).copied()
+    let hit = g
+        .symbols
+        .class_methods
+        .get(&type_id)
+        .and_then(|m| m.get(method).copied())
+        .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))?;
+    if bare && !gate.admits(g, site.from) {
+        return None;
+    }
+    Some(hit)
+}
+
+/// Where a bare identifier can name an instance field (A6.6, the A6.2b
+/// handoff). Keyed by the caller's source-file extension, read off its
+/// POSITION cell: the generic pass builds several languages through one
+/// builder (`build_typescript` is also the fallback for Kotlin, Swift, Dart),
+/// so the builder cannot say which language a call site is in.
+#[derive(Default)]
+struct BareFieldGate {
+    /// NodeId -> index into `g.nodes`, built on the first bare-field hit only.
+    /// `resolve_calls` pushes edges, never nodes, so the indices stay valid.
+    index: Option<HashMap<NodeId, usize>>,
+    /// Bare-field binds skipped outside a constructor, by file extension.
+    skipped: HashMap<String, usize>,
+}
+
+impl BareFieldGate {
+    /// True when a bare `x.m()` in `caller` may bind through `x`'s field type.
+    fn admits(&mut self, g: &RepoGraph, caller: NodeId) -> bool {
+        let index = self
+            .index
+            .get_or_insert_with(|| g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect());
+        let Some(ext) = index
+            .get(&caller)
+            .and_then(|&i| position_file(&g.nodes[i]))
+            .and_then(|file| {
+                let base = file.rsplit('/').next().unwrap_or(&file);
+                base.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
+            })
+        else {
+            // No POSITION: keep A6.2a's behaviour rather than guess a language.
+            return true;
+        };
+        let ctor = match ext.as_str() {
+            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" => "constructor",
+            "py" | "pyi" => "__init__",
+            _ => return true,
+        };
+        if g.nav.name_by_id.get(&caller).map(String::as_str) == Some(ctor) {
+            return true;
+        }
+        *self.skipped.entry(ext).or_default() += 1;
+        false
+    }
+
+    /// `[recv] bare field receivers skipped outside constructor: N (ext=a:1,b:2)`,
+    /// extensions sorted so the line is stable across runs.
+    fn marker(&self) -> Option<String> {
+        let total: usize = self.skipped.values().sum();
+        if total == 0 {
+            return None;
+        }
+        let mut by_ext: Vec<_> = self.skipped.iter().collect();
+        by_ext.sort();
+        let exts: Vec<String> = by_ext.iter().map(|(e, n)| format!("{e}:{n}")).collect();
+        Some(format!(
+            "[recv] bare field receivers skipped outside constructor: {total} (ext={})",
+            exts.join(",")
+        ))
+    }
+}
+
+/// A6.6: pair each class-level `impl -> interface` IMPLEMENTS edge's
+/// same-named methods into a method-level `impl_method -> iface_method`
+/// IMPLEMENTS edge (same direction as the class-level edge), so a trace that
+/// lands on an interface method has a hop to every implementation. Runs after
+/// `resolve_refs`, which binds the class-level heritage refs. Pairing is by
+/// name only (the symbol table has no signatures, as for `class_methods`), so
+/// overloads that differ in arity still pair.
+///
+/// The pairs are sorted and deduped before any edge is pushed: both method
+/// tables are HashMaps with a per-process seed, and edge order feeds the
+/// store's shard content hashes (engine `byte_identical`). An edge already
+/// present is not pushed twice.
+pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
+    let mut existing: std::collections::HashSet<(NodeId, NodeId)> = std::collections::HashSet::new();
+    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    for e in &g.edges {
+        if e.category != edge_category::IMPLEMENTS {
+            continue;
+        }
+        existing.insert((e.from, e.to));
+        if g.nav.kind_by_id.get(&e.to) != Some(&node_kind::INTERFACE) {
+            continue;
+        }
+        let (Some(impl_ms), Some(iface_ms)) =
+            (g.symbols.class_methods.get(&e.from), g.symbols.interface_methods.get(&e.to))
+        else {
+            continue;
+        };
+        for (name, &iface_mid) in iface_ms {
+            if let Some(&impl_mid) = impl_ms.get(name) {
+                pairs.push((impl_mid, iface_mid));
+            }
+        }
+    }
+    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+    pairs.dedup();
+    pairs.retain(|p| !existing.contains(p));
+    for &(from, to) in &pairs {
+        push_edge(g, from, to, edge_category::IMPLEMENTS);
+    }
+    if !pairs.is_empty() {
+        eprintln!(
+            "[iface] method-level implements: {} (interfaces={})",
+            pairs.len(),
+            g.symbols.interface_methods.len()
+        );
+    }
 }
 
 pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) {
@@ -521,7 +687,7 @@ pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: E
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build::build_dotted;
+    use crate::build::{build_dotted, build_python, build_typescript};
     use crate::test_support::repo;
     use repo_graph_code_domain::{FileParse, GRAPH_TYPE, ImportStmt, ImportTarget};
     use repo_graph_core::Node;
@@ -920,18 +1086,157 @@ mod tests {
         assert_eq!(g.unresolved_calls.len(), 1);
     }
 
-    /// An INTERFACE-typed field owns no `class_methods`, so it stays
-    /// unresolved until interface dispatch (A6.6) lands.
+    /// `m2`: `interface UserRepo { find() }` — an INTERFACE-typed field's
+    /// declared type (A6.6).
+    fn iface_module() -> (FileParse, NodeId, NodeId) {
+        let mut s = Shape::new();
+        let m2 = s.add(node_kind::MODULE, "m2", None);
+        let iface = s.add(node_kind::INTERFACE, "m2::UserRepo", Some(m2));
+        let find = s.add(node_kind::METHOD, "m2::UserRepo::find", Some(iface));
+        (s.file(vec![], vec![], vec![]), iface, find)
+    }
+
+    /// A6.6: an INTERFACE-typed field (`IUserRepo _repo; _repo.find()`)
+    /// binds the interface's own METHOD through `interface_methods`. Before
+    /// A6.6 the INTERFACE owned no method table and the call stayed unresolved.
     #[test]
-    fn interface_typed_field_stays_unresolved() {
-        let mut s2 = Shape::new();
-        let m2 = s2.add(node_kind::MODULE, "m2", None);
-        let iface = s2.add(node_kind::INTERFACE, "m2::UserRepo", Some(m2));
-        s2.add(node_kind::METHOD, "m2::UserRepo::find", Some(iface));
-        let (caller, _, _) = caller_module(attr("repo", "find"), vec![]);
-        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+    fn interface_typed_field_binds_the_interface_method() {
+        let (iface_file, _, find) = iface_module();
+        let (caller, _, get) = caller_module(attr("repo", "find"), vec![]);
+        let g = build_dotted(repo(), vec![iface_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// An unknown method on an interface-typed field never binds.
+    #[test]
+    fn interface_typed_field_needs_an_exact_method() {
+        let (iface_file, _, _) = iface_module();
+        let (caller, _, _) = caller_module(attr("repo", "missing"), vec![]);
+        let g = build_dotted(repo(), vec![iface_file, caller]).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// `import m2.UserRepo` + `UserRepo.find()`: a statically-qualified call on
+    /// an imported INTERFACE binds through `resolve_attribute_target`'s
+    /// INTERFACE arm.
+    #[test]
+    fn attribute_call_binds_interface_base() {
+        let (iface_file, _, find) = iface_module();
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let caller = s.file(
+            vec![import_symbol("m1", "m2", "UserRepo")],
+            vec![CallSite { from: f, qualifier: attr("UserRepo", "find") }],
+            vec![],
+        );
+        let g = build_dotted(repo(), vec![iface_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(f, find)]);
+    }
+
+    // ---- A6.6: the bare-field gate (handoff from A6.2b) ----------------------
+
+    /// Give the node `id` a POSITION cell in `file`.
+    fn place(file: &mut FileParse, id: NodeId, path: &str) {
+        let node = file.nodes.iter_mut().find(|n| n.id == id).expect("node in file");
+        node.cells.push(repo_graph_core::Cell {
+            kind: cell_type::POSITION,
+            payload: repo_graph_core::CellPayload::Json(format!(
+                "{{\"file\":\"{path}\",\"start_line\":1,\"end_line\":2}}"
+            )),
+        });
+    }
+
+    /// `m1`: `class A { repo: UserRepo; <method>() { <qualifier> } }` where the
+    /// caller lives in `path` and is named `method`.
+    fn placed_caller(
+        qualifier: CallQualifier,
+        method: &str,
+        path: &str,
+    ) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
+        let caller = s.add(node_kind::METHOD, &format!("m1::A::{method}"), Some(a));
+        s.nav.record_field_type(a, "repo", "UserRepo");
+        let mut file = s.file(vec![], vec![CallSite { from: caller, qualifier }], vec![]);
+        place(&mut file, caller, path);
+        (file, caller)
+    }
+
+    /// TypeScript: `shadow(repo: Other) { repo.find() }` names the PARAMETER —
+    /// a field is only reachable as `this.repo` — so the bare form must not
+    /// bind through the field's type (the A6.2b-measured false positive).
+    #[test]
+    fn bare_receiver_outside_constructor_does_not_bind_in_typescript() {
+        let (repo_file, _, _) = repo_module();
+        let (caller, _) = placed_caller(attr("repo", "find"), "shadow", "src/a.service.ts");
+        let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// Inside the constructor the bare name is the parameter property, whose
+    /// type IS the field's: `constructor(private repo: UserRepo) { repo.find() }`.
+    #[test]
+    fn bare_receiver_inside_constructor_binds_in_typescript() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, ctor) =
+            placed_caller(attr("repo", "find"), "constructor", "src/a.service.ts");
+        let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(ctor, find)]);
+    }
+
+    /// `this.repo.find()` is a ComplexReceiver: never gated, in any method.
+    #[test]
+    fn this_qualified_receiver_is_not_gated_in_typescript() {
+        let (repo_file, _, find) = repo_module();
+        let qualifier = CallQualifier::ComplexReceiver {
+            receiver: "this.repo".to_string(),
+            name: "find".to_string(),
+        };
+        let (caller, get) = placed_caller(qualifier, "get", "src/a.service.ts");
+        let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+    }
+
+    /// Python: bare `repo.find()` outside `__init__` does not bind; inside
+    /// `__init__` it is the annotated parameter and does.
+    #[test]
+    fn bare_receiver_is_gated_to_init_in_python() {
+        let (repo_file, _, find) = repo_module();
+        let (outside, _) = placed_caller(attr("repo", "find"), "run", "svc/a.py");
+        let g = build_python(repo(), vec![repo_file, outside]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+
+        let (repo_file, _, _) = repo_module();
+        let (inside, init) = placed_caller(attr("repo", "find"), "__init__", "svc/a.py");
+        let g = build_python(repo(), vec![repo_file, inside]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(init, find)]);
+    }
+
+    /// C#: a field is readable unqualified, so `_repo.Find()` in any method
+    /// keeps binding (A6.2a's csharp-field-dispatch shape).
+    #[test]
+    fn bare_receiver_binds_in_any_method_in_csharp() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, get) = placed_caller(attr("repo", "find"), "Get", "Services/A.cs");
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+    }
+
+    #[test]
+    fn bare_field_gate_marker_counts_by_extension() {
+        let mut gate = BareFieldGate::default();
+        assert_eq!(gate.marker(), None);
+        gate.skipped.insert("ts".to_string(), 2);
+        gate.skipped.insert("py".to_string(), 1);
+        assert_eq!(
+            gate.marker().as_deref(),
+            Some("[recv] bare field receivers skipped outside constructor: 3 (ext=py:1,ts:2)")
+        );
     }
 
     /// Two files contributing fields to one owner (a C# `partial class`) keep
