@@ -1,0 +1,20 @@
+{
+  "framework": "ts-typeorm",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "model-keyed data_entity:sql:User; the @Entity file and the getRepository file share one id"},
+    {"kind": "FUNCTION", "name": "listUsers", "note": "repository accessor"}
+  ],
+  "expect_edges": [
+    {"from": "listUsers", "to": "User", "category": "ACCESSES_DATA", "note": "getRepository(User) in service/UserService.ts, a different file from the model"},
+    {"from": "User", "to": "data_entity:sql:User", "category": "DEFINES", "note": "the @Entity CLASS defines its entity at the declaration site"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "app_users", "note": "@Entity(\"app_users\") rides a table cell {table, orm: typeorm} at the declaration site"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "max_nodes": 1, "note": "declaration and query site are ONE model-keyed node; a table-keyed app_users id would orphan the query"}
+  ],
+  "note": "A13.15: TypeORM @Entity('table') + getRepository(User). Identity follows A13.1: the entity is keyed on the MODEL (data_entity:sql:User) at the declaration and at the query site in another file; the declared table rides a CODE table cell {table, orm: typeorm} at the declaration only. Both sites are gated on a typeorm import."
+}

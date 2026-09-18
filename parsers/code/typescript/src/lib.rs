@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
@@ -63,9 +64,21 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
+    // A13.15: ES imports are hoisted, so a `typeorm` import below the first
+    // `@Entity` class still gates it; read them all before any visit.
+    (acc.typeorm.import, acc.typeorm.access) = typeorm_imports(root, src);
+
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         visit_top(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    }
+
+    let orm = &acc.typeorm;
+    if orm.declared > 0 || orm.repo_calls > 0 {
+        eprintln!(
+            "[orm-typeorm] entities={} table_cells={} repo_calls={} file={file_rel_path}",
+            orm.declared, orm.table_cells, orm.repo_calls
+        );
     }
 
     resolve_intra_file(acc)
@@ -109,6 +122,29 @@ struct Acc {
     /// cells without threading `file_rel` through every call_collection helper.
     file_rel: String,
     repo: Option<RepoId>,
+    /// A13.15: this file's TypeORM evidence and the `[orm-typeorm]` counters.
+    typeorm: TypeOrmFile,
+}
+
+/// A13.15: what one file shows of TypeORM. The two import flags gate the
+/// detectors, because `@Entity` is also a Mikro-ORM / Nest decorator and
+/// `getRepository` / `manager.find` are generic names elsewhere.
+#[derive(Default)]
+struct TypeOrmFile {
+    /// The file imports `typeorm` (or a `typeorm/…` subpath): gates `@Entity`.
+    import: bool,
+    /// The file imports `typeorm` or `@nestjs/typeorm`: gates the query sites.
+    access: bool,
+    /// Entity ids this file has pushed a node for, so each is pushed once.
+    entities: std::collections::HashSet<NodeId>,
+    /// `(from, entity)` ACCESSES_DATA edges already emitted.
+    access_seen: std::collections::HashSet<(NodeId, NodeId)>,
+    /// `@Entity` classes declared here (`entities=`).
+    declared: usize,
+    /// Declarations whose decorator names the table (`table_cells=`).
+    table_cells: usize,
+    /// Repository / manager / `@InjectRepository` sites (`repo_calls=`).
+    repo_calls: usize,
 }
 
 struct UnresolvedCall {
@@ -262,6 +298,8 @@ fn visit_class(
     // IMPLEMENTS (class → interface). The superclass / interfaces are cross-file
     // references resolved later, so we record them as Inherits/Implements refs.
     collect_class_heritage(n, src, module_qname, class_id, repo, acc);
+    // A13.15: `@Entity(…) class User` -> the model-keyed entity it defines.
+    emit_typeorm_entity(n, name, class_id, src, repo, acc);
 
     let Some(body) = n.child_by_field_name("body") else {
         return;
@@ -441,19 +479,10 @@ fn collect_constructor_injects(
 /// (`@Injectable() class Foo {}`) or to the parent `export_statement`
 /// (`@Component({...}) export class Foo {}`).
 fn class_di_shape(class_node: TsNode, src: &[u8]) -> Option<DiShape> {
-    let mut names: Vec<&str> = Vec::new();
-    let mut collect = |node: TsNode| {
-        let mut c = node.walk();
-        names.extend(
-            node.named_children(&mut c)
-                .filter(|ch| ch.kind() == "decorator")
-                .filter_map(|dec| decorator_name(dec, src)),
-        );
-    };
-    collect(class_node);
-    if let Some(parent) = class_node.parent() {
-        collect(parent);
-    }
+    let names: Vec<&str> = class_decorators(class_node)
+        .into_iter()
+        .filter_map(|dec| decorator_name(dec, src))
+        .collect();
     if names.iter().any(|n| NEST_DI_DECORATORS.contains(n)) {
         Some(DiShape::TsNestCtor)
     } else if names.iter().any(|n| DI_DECORATORS.contains(n)) {
@@ -461,6 +490,25 @@ fn class_di_shape(class_node: TsNode, src: &[u8]) -> Option<DiShape> {
     } else {
         None
     }
+}
+
+/// A class's decorators, which attach either directly to the
+/// `class_declaration` (`@Injectable() class Foo {}`) or to the parent
+/// `export_statement` (`@Component({...}) export class Foo {}`).
+fn class_decorators<'t>(class_node: TsNode<'t>) -> Vec<TsNode<'t>> {
+    let mut decorators = Vec::new();
+    let mut collect = |node: TsNode<'t>| {
+        let mut c = node.walk();
+        decorators.extend(
+            node.named_children(&mut c)
+                .filter(|ch| ch.kind() == "decorator"),
+        );
+    };
+    collect(class_node);
+    if let Some(parent) = class_node.parent() {
+        collect(parent);
+    }
+    decorators
 }
 
 /// True if any constructor parameter carries a DI parameter decorator
@@ -490,6 +538,9 @@ fn has_di_param_decorator(params: TsNode, src: &[u8]) -> bool {
 /// unannotated one carries its field type (the `<T>` argument, else the
 /// argument) to that gate, which records it (A6.2b).
 fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, acc: &mut Acc) {
+    // A13.15: property injection, `@InjectRepository(User) repo: Repository<User>`.
+    // No method encloses a field, so the access is the class's.
+    collect_inject_repository(field, src, class_id, acc);
     let field_name = field.child_by_field_name("name").map(|n| text(n, src));
     let annotated = field
         .child_by_field_name("type")
@@ -826,6 +877,14 @@ fn visit_method(
         node_kind::METHOD,
         Some(class_id),
     );
+
+    // A13.15: `constructor(@InjectRepository(User) private repo: …)`.
+    if let Some(params) = n.child_by_field_name("parameters") {
+        let mut pc = params.walk();
+        for param in params.named_children(&mut pc) {
+            collect_inject_repository(param, src, method_id, acc);
+        }
+    }
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
@@ -1205,6 +1264,7 @@ fn collect_calls_in(
                 });
             }
             try_detect_endpoint(node, src, from, acc);
+            try_detect_typeorm_access(node, src, from, acc);
         }
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
@@ -1580,6 +1640,359 @@ fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
             }
         }
         _ => None,
+    }
+}
+
+// ============================================================================
+// TypeORM (A13.15)
+// ============================================================================
+//
+// A TypeORM service issues no SQL strings, so TypeScript's only DATA_ENTITY
+// paths (the language-blind mongoose / collection scans) see none of its data
+// access. Per A13.1's ORM identity rule an entity is keyed on its MODEL name,
+// `data_entity:sql:User`: the one token every query site in any file names
+// (`getRepository(User)`, `dataSource.getRepository(User)`,
+// `@InjectRepository(User)`, `manager.find(User, …)`). The `@Entity(…)` class
+// DEFINES that entity, and a table its decorator names rides a table cell at
+// the declaration only. The cell stacks onto the query sites' node at graph
+// build and DbResolver joins through it. `@Entity()` names no table: TypeORM's
+// default naming strategy (snake_case of the class name) is what DbResolver's
+// own fold derives from the model name. TypeORM on the MongoDB driver
+// (`@ObjectIdColumn`, `MongoRepository<T>`, `getMongoRepository`, a
+// `mongo…Manager`) maps collections, not tables, and is left out rather than
+// minted under the `sql` flavor.
+
+/// Callees whose argument #0 is the entity a repository is fetched for, bare
+/// (`getRepository(User)`, the pre-0.3 global) or on any receiver
+/// (`dataSource.getRepository(User)`, `manager.getTreeRepository(User)`).
+/// `getMongoRepository` is left out: its entity is a Mongo collection.
+const TYPEORM_REPOSITORY_FNS: &[&str] = &["getRepository", "getTreeRepository"];
+
+/// `EntityManager` methods whose argument #0 is the entity class and that read
+/// or write the database (`manager.find(User, { … })`). `create` and `merge`
+/// only build instances in memory and are left out.
+const TYPEORM_MANAGER_METHODS: &[&str] = &[
+    "find",
+    "findBy",
+    "findOne",
+    "findOneBy",
+    "findOneOrFail",
+    "findOneByOrFail",
+    "findAndCount",
+    "findAndCountBy",
+    "count",
+    "countBy",
+    "exists",
+    "existsBy",
+    "sum",
+    "average",
+    "minimum",
+    "maximum",
+    "save",
+    "insert",
+    "update",
+    "upsert",
+    "delete",
+    "softDelete",
+    "restore",
+    "remove",
+    "increment",
+    "decrement",
+    "preload",
+    "clear",
+    "createQueryBuilder",
+];
+
+/// Whether the file imports TypeORM, as `(entity gate, query-site gate)`. The
+/// entity gate takes `typeorm` or a `typeorm/…` subpath; the query-site gate
+/// also takes `@nestjs/typeorm`, where `@InjectRepository` comes from.
+fn typeorm_imports(root: TsNode, src: &[u8]) -> (bool, bool) {
+    let mut typeorm = false;
+    let mut nest = false;
+    let mut cursor = root.walk();
+    for stmt in root.named_children(&mut cursor) {
+        if stmt.kind() != "import_statement" {
+            continue;
+        }
+        let Some(source) = stmt.child_by_field_name("source") else {
+            continue;
+        };
+        let source = strip_string_quotes(text(source, src));
+        if source == "typeorm" || source.starts_with("typeorm/") {
+            typeorm = true;
+        } else if source == "@nestjs/typeorm" {
+            nest = true;
+        }
+    }
+    (typeorm, typeorm || nest)
+}
+
+/// The model-keyed `data_entity:sql:<Model>` qname and id: the one
+/// construction site shared by the declaration and every query site.
+fn typeorm_entity(model: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("data_entity:sql:{model}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+    (qname, id)
+}
+
+/// `@Entity(…) class User` in a file importing `typeorm`: push the model-keyed
+/// entity owned by the class, a DEFINES edge from the class, and a
+/// `data_entity::table_cell` when the decorator names the table. A query site
+/// earlier in the file may have pushed the node already; the declaration then
+/// carries the cell onto that same node.
+fn emit_typeorm_entity(
+    class_node: TsNode,
+    class_name: &str,
+    class_id: NodeId,
+    src: &[u8],
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    if !acc.typeorm.import {
+        return;
+    }
+    let Some(decorator) = class_decorators(class_node)
+        .into_iter()
+        .find(|dec| decorator_name(*dec, src) == Some("Entity"))
+    else {
+        return;
+    };
+    if is_typeorm_mongo_entity(class_node, src) {
+        return;
+    }
+    let table_cell = entity_decorator_table(decorator, src)
+        .map(|table| data_entity::table_cell(&table, data_entity::orm::TYPEORM));
+    acc.typeorm.declared += 1;
+    if table_cell.is_some() {
+        acc.typeorm.table_cells += 1;
+    }
+    let (qname, entity_id) = typeorm_entity(class_name, repo);
+    if acc.typeorm.entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: table_cell.into_iter().collect(),
+        });
+    } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == entity_id) {
+        existing.cells.extend(table_cell);
+    }
+    acc.nav.record(
+        entity_id,
+        class_name,
+        &qname,
+        node_kind::DATA_ENTITY,
+        Some(class_id),
+    );
+    acc.edges.push(Edge {
+        from: class_id,
+        to: entity_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+}
+
+/// True for a TypeORM entity on the MongoDB driver: a field carries
+/// `@ObjectIdColumn`, a decorator only that driver accepts. Its entity is a
+/// Mongo collection, so minting `data_entity:sql:` for it would join it to SQL
+/// tables of the same name.
+fn is_typeorm_mongo_entity(class_node: TsNode, src: &[u8]) -> bool {
+    let Some(body) = class_node.child_by_field_name("body") else {
+        return false;
+    };
+    let mut bc = body.walk();
+    body.named_children(&mut bc).any(|member| {
+        let mut mc = member.walk();
+        member.named_children(&mut mc).any(|dec| {
+            dec.kind() == "decorator" && decorator_name(dec, src) == Some("ObjectIdColumn")
+        })
+    })
+}
+
+/// The table an `@Entity(…)` decorator names: `@Entity("app_users")`,
+/// `@Entity("app_users", { schema })` or `@Entity({ name: "app_users" })`.
+/// `@Entity()`, a non-literal argument, or an options object without a literal
+/// `name` names none.
+fn entity_decorator_table(decorator: TsNode, src: &[u8]) -> Option<String> {
+    let mut dc = decorator.walk();
+    let call = decorator.named_children(&mut dc).next()?;
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut ac = args.walk();
+    let first = args
+        .named_children(&mut ac)
+        .find(|a| a.kind() != "comment")?;
+    let table = match first.kind() {
+        "object" => object_string_prop(first, "name", src)?,
+        _ => literal_string(first, src)?,
+    };
+    let table = table.trim();
+    (!table.is_empty()).then(|| table.to_string())
+}
+
+/// A string literal's contents: `"x"`, `'x'`, or a template with no `${…}`.
+fn literal_string(node: TsNode, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "string" => Some(strip_string_quotes(text(node, src))),
+        "template_string" => {
+            let mut c = node.walk();
+            let substituted = node
+                .named_children(&mut c)
+                .any(|ch| ch.kind() == "template_substitution");
+            (!substituted).then(|| strip_string_quotes(text(node, src)))
+        }
+        _ => None,
+    }
+}
+
+/// The literal string value of property `key` in an object literal:
+/// `{ name: "x" }` or `{ "name": 'x' }`.
+fn object_string_prop(obj: TsNode, key: &str, src: &[u8]) -> Option<String> {
+    let mut c = obj.walk();
+    let pair = obj.named_children(&mut c).find(|p| {
+        p.kind() == "pair"
+            && p.child_by_field_name("key")
+                .is_some_and(|k| match k.kind() {
+                    "property_identifier" => text(k, src) == key,
+                    "string" => strip_string_quotes(text(k, src)) == key,
+                    _ => false,
+                })
+    })?;
+    literal_string(pair.child_by_field_name("value")?, src)
+}
+
+/// A TypeORM query site in a file importing TypeORM: `getRepository(User)`,
+/// `<any>.getRepository(User)` / `.getTreeRepository(User)`, or an
+/// `EntityManager` method on a receiver named `…manager` with the entity class
+/// at argument #0. Emits ACCESSES_DATA from `from`, the enclosing fn / method.
+fn try_detect_typeorm_access(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    if !acc.typeorm.access {
+        return;
+    }
+    let (Some(func), Some(args)) = (
+        call.child_by_field_name("function"),
+        call.child_by_field_name("arguments"),
+    ) else {
+        return;
+    };
+    let names_entity = match func.kind() {
+        "identifier" => TYPEORM_REPOSITORY_FNS.contains(&text(func, src)),
+        "member_expression" => {
+            let (Some(object), Some(prop)) = (
+                func.child_by_field_name("object"),
+                func.child_by_field_name("property"),
+            ) else {
+                return;
+            };
+            let method = text(prop, src);
+            TYPEORM_REPOSITORY_FNS.contains(&method)
+                || (TYPEORM_MANAGER_METHODS.contains(&method) && is_entity_manager(object, src))
+        }
+        _ => false,
+    };
+    if !names_entity {
+        return;
+    }
+    if let Some(model) = typeorm_model_arg(args, src) {
+        emit_typeorm_access(model, from, acc);
+    }
+}
+
+/// A receiver naming a SQL `EntityManager`: its trailing name ends in
+/// `manager` (`manager`, `entityManager`, `this.manager`,
+/// `queryRunner.manager`, `transactionalEntityManager`) and does not name
+/// Mongo (`mongoManager` is a `MongoEntityManager`, whose entities are
+/// collections).
+fn is_entity_manager(receiver: TsNode, src: &[u8]) -> bool {
+    let name = match receiver.kind() {
+        "identifier" => Some(text(receiver, src)),
+        "member_expression" => receiver
+            .child_by_field_name("property")
+            .map(|p| text(p, src)),
+        _ => None,
+    };
+    name.map(str::to_ascii_lowercase)
+        .is_some_and(|n| n.ends_with("manager") && !n.contains("mongo"))
+}
+
+/// The entity class a call's argument #0 names: `User`, or `models.User` ->
+/// `User`, Upper-initial. A string entity name, a variable or an instance
+/// names none.
+fn typeorm_model_arg<'a>(args: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let mut c = args.walk();
+    let first = args
+        .named_children(&mut c)
+        .find(|a| a.kind() != "comment")?;
+    let name = match first.kind() {
+        "identifier" => text(first, src),
+        "member_expression" => text(first.child_by_field_name("property")?, src),
+        _ => return None,
+    };
+    name.starts_with(|ch: char| ch.is_ascii_uppercase())
+        .then_some(name)
+}
+
+/// `@InjectRepository(User)` on `owner` (a constructor parameter or a class
+/// field) in a file importing TypeORM or `@nestjs/typeorm`: ACCESSES_DATA from
+/// `from` (the constructor, or the class for a field) to the entity. A
+/// `MongoRepository<T>`-typed owner injects a Mongo collection and is skipped.
+fn collect_inject_repository(owner: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    if !acc.typeorm.access {
+        return;
+    }
+    let declared = owner
+        .child_by_field_name("type")
+        .and_then(|t| annotated_class_type(t, src));
+    if declared == Some("MongoRepository") {
+        return;
+    }
+    let mut c = owner.walk();
+    let decorators: Vec<TsNode> = owner
+        .named_children(&mut c)
+        .filter(|d| d.kind() == "decorator" && decorator_name(*d, src) == Some("InjectRepository"))
+        .collect();
+    for dec in decorators {
+        let mut dc = dec.walk();
+        let args = dec
+            .named_children(&mut dc)
+            .next()
+            .filter(|call| call.kind() == "call_expression")
+            .and_then(|call| call.child_by_field_name("arguments"));
+        if let Some(model) = args.and_then(|a| typeorm_model_arg(a, src)) {
+            emit_typeorm_access(model, from, acc);
+        }
+    }
+}
+
+/// Emit (once per `from` × entity) ACCESSES_DATA to the model-keyed entity,
+/// pushing its node when this file has not. The query-site node records no nav
+/// parent, so the `@Entity` class stays the entity's only owner whatever the
+/// file order.
+fn emit_typeorm_access(model: &str, from: NodeId, acc: &mut Acc) {
+    let Some(repo) = acc.repo else {
+        return;
+    };
+    acc.typeorm.repo_calls += 1;
+    let (qname, entity_id) = typeorm_entity(model, repo);
+    if acc.typeorm.entities.insert(entity_id) {
+        acc.nodes.push(Node {
+            id: entity_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(entity_id, model, &qname, node_kind::DATA_ENTITY, None);
+    }
+    if acc.typeorm.access_seen.insert((from, entity_id)) {
+        acc.edges.push(Edge {
+            from,
+            to: entity_id,
+            category: edge_category::ACCESSES_DATA,
+            confidence: Confidence::Strong,
+        });
     }
 }
 
@@ -3132,6 +3545,344 @@ export class Dash {
             field_types(&fp, "src::dash::Dash"),
             pairs(&[("typed", "Typed")]),
             "an un-imported inject() is a local function: only the annotation records"
+        );
+    }
+
+    // ---- A13.15: TypeORM ----
+
+    fn typeorm_entity_id(model: &str) -> NodeId {
+        let qname = format!("data_entity:sql:{model}");
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, &qname)
+    }
+
+    fn typeorm_entity_nodes<'p>(parse: &'p FileParse, model: &str) -> Vec<&'p Node> {
+        let id = typeorm_entity_id(model);
+        parse.nodes.iter().filter(|n| n.id == id).collect()
+    }
+
+    fn data_entity_count(parse: &FileParse) -> usize {
+        parse
+            .nav
+            .kind_by_id
+            .values()
+            .filter(|k| **k == node_kind::DATA_ENTITY)
+            .count()
+    }
+
+    fn accesses(parse: &FileParse, from: NodeId, model: &str) -> usize {
+        let to = typeorm_entity_id(model);
+        parse
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.to == to && e.category == edge_category::ACCESSES_DATA)
+            .count()
+    }
+
+    #[test]
+    fn typeorm_entity_decorator_arg_is_table() {
+        let src = "\
+import { Entity, PrimaryGeneratedColumn, Column } from \"typeorm\";
+
+@Entity(\"app_users\")
+export class User {
+  @PrimaryGeneratedColumn() id!: number;
+  @Column() email!: string;
+}
+
+@Entity({ name: 'shop_orders', schema: 'shop' })
+export class Order {}
+
+@Entity(`audit_log`, { schema: \"ops\" })
+class Audit {}
+";
+        let fp = parse_file(src, "entity/User.ts", "entity::User", repo()).unwrap();
+        for (model, table) in [
+            ("User", "app_users"),
+            ("Order", "shop_orders"),
+            ("Audit", "audit_log"),
+        ] {
+            let nodes = typeorm_entity_nodes(&fp, model);
+            assert_eq!(nodes.len(), 1, "{model}: one model-keyed entity node");
+            assert_eq!(
+                data_entity::table_of(&nodes[0].cells).as_deref(),
+                Some(table),
+                "{model}: the decorator's table rides a table cell"
+            );
+            let class_id = id(node_kind::CLASS, &format!("entity::User::{model}"));
+            let entity = typeorm_entity_id(model);
+            assert!(has_edge(&fp, class_id, entity, edge_category::DEFINES));
+            assert_eq!(fp.nav.parent_of.get(&entity), Some(&class_id));
+            assert_eq!(
+                fp.nav.name_by_id.get(&entity).map(String::as_str),
+                Some(model)
+            );
+        }
+        let CellPayload::Json(payload) = &typeorm_entity_nodes(&fp, "User")[0].cells[0].payload
+        else {
+            panic!("table cell is JSON");
+        };
+        assert!(payload.contains("\"orm\":\"typeorm\""), "{payload}");
+        assert_eq!(data_entity_count(&fp), 3);
+    }
+
+    #[test]
+    fn typeorm_entity_without_arg_uses_class_name() {
+        let src = "\
+import { Entity, Column } from \"typeorm\";
+
+@Entity()
+export class UserProfile {
+  @Column() bio!: string;
+}
+
+@Entity({ schema: \"ops\" })
+export class Setting {}
+
+@Entity(TABLE_NAME)
+export class Dynamic {}
+";
+        let fp = parse_file(src, "entity/profile.ts", "entity::profile", repo()).unwrap();
+        for model in ["UserProfile", "Setting", "Dynamic"] {
+            let nodes = typeorm_entity_nodes(&fp, model);
+            assert_eq!(nodes.len(), 1, "{model}: keyed on the class name");
+            assert_eq!(
+                data_entity::table_of(&nodes[0].cells),
+                None,
+                "{model}: no literal table, so no table cell"
+            );
+            let class_id = id(node_kind::CLASS, &format!("entity::profile::{model}"));
+            assert!(has_edge(
+                &fp,
+                class_id,
+                typeorm_entity_id(model),
+                edge_category::DEFINES
+            ));
+        }
+    }
+
+    #[test]
+    fn entity_decorator_without_typeorm_import_is_ignored() {
+        let src = "\
+import { Entity, PrimaryKey } from \"@mikro-orm/core\";
+import { getRepository } from \"./db\";
+
+@Entity({ tableName: \"users\" })
+export class User {
+  @PrimaryKey() id!: number;
+}
+
+export function listUsers(manager: Manager) {
+  manager.find(User, {});
+  return getRepository(User).find();
+}
+";
+        let fp = parse_file(src, "src/user.ts", "src::user", repo()).unwrap();
+        assert_eq!(data_entity_count(&fp), 0, "no typeorm import: no entity");
+        assert!(typeorm_entity_nodes(&fp, "User").is_empty());
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA),
+            "no typeorm import: query-shaped calls emit nothing"
+        );
+    }
+
+    #[test]
+    fn typeorm_repository_sites_emit_accesses_data() {
+        let src = "\
+import { DataSource, EntityManager, Repository } from \"typeorm\";
+import { InjectRepository } from \"@nestjs/typeorm\";
+import { User } from \"../entity/User\";
+import * as models from \"../entity\";
+
+export async function listUsers() {
+  return getRepository(User).find();
+}
+
+export class UserService {
+  constructor(
+    @InjectRepository(User) private repo: Repository<User>,
+    private dataSource: DataSource,
+    private entityManager: EntityManager,
+  ) {}
+  async orders() { return this.dataSource.getRepository(models.Order).find(); }
+  async invoices(qr: QueryRunner) { return qr.manager.count(Invoice, {}); }
+  async twice() { await getRepository(User).find(); return getRepository(User).count(); }
+  async cached() { return this.cache.find(User); }
+  async instance(user: User) { return this.entityManager.save(user); }
+  async build() { return this.entityManager.create(User, {}); }
+}
+";
+        let fp = parse_file(
+            src,
+            "service/UserService.ts",
+            "service::UserService",
+            repo(),
+        )
+        .unwrap();
+        let svc = "service::UserService::UserService";
+        let method = |m: &str| id(node_kind::METHOD, &format!("{svc}::{m}"));
+        let list = id(node_kind::FUNCTION, "service::UserService::listUsers");
+        assert_eq!(accesses(&fp, list, "User"), 1, "getRepository(User)");
+        assert_eq!(
+            accesses(&fp, method("constructor"), "User"),
+            1,
+            "@InjectRepository(User)"
+        );
+        assert_eq!(
+            accesses(&fp, method("orders"), "Order"),
+            1,
+            "dataSource.getRepository(models.Order)"
+        );
+        assert_eq!(
+            accesses(&fp, method("invoices"), "Invoice"),
+            1,
+            "qr.manager.count(Invoice)"
+        );
+        assert_eq!(
+            accesses(&fp, method("twice"), "User"),
+            1,
+            "one edge per fn x entity"
+        );
+        for m in ["cached", "instance", "build"] {
+            assert!(
+                !fp.edges
+                    .iter()
+                    .any(|e| e.from == method(m) && e.category == edge_category::ACCESSES_DATA),
+                "{m}: not a repository or manager query naming an entity class"
+            );
+        }
+        for model in ["User", "Order", "Invoice"] {
+            let nodes = typeorm_entity_nodes(&fp, model);
+            assert_eq!(nodes.len(), 1, "{model}: pushed once");
+            assert!(
+                nodes[0].cells.is_empty(),
+                "{model}: a query site carries no table"
+            );
+            assert_eq!(fp.nav.parent_of.get(&typeorm_entity_id(model)), None);
+        }
+        assert_eq!(data_entity_count(&fp), 3);
+    }
+
+    #[test]
+    fn nestjs_typeorm_import_gates_inject_repository_but_not_entity() {
+        let src = "\
+import { InjectRepository } from \"@nestjs/typeorm\";
+import { Entity } from \"./decorators\";
+
+@Entity(\"widgets\")
+export class Widget {}
+
+export class WidgetService {
+  @InjectRepository(Widget) private readonly repo: WidgetRepo;
+}
+";
+        let fp = parse_file(src, "src/widget.ts", "src::widget", repo()).unwrap();
+        let service = id(node_kind::CLASS, "src::widget::WidgetService");
+        assert_eq!(
+            accesses(&fp, service, "Widget"),
+            1,
+            "field @InjectRepository -> class"
+        );
+        let class_id = id(node_kind::CLASS, "src::widget::Widget");
+        assert!(
+            !has_edge(
+                &fp,
+                class_id,
+                typeorm_entity_id("Widget"),
+                edge_category::DEFINES
+            ),
+            "@Entity needs a typeorm import, not @nestjs/typeorm"
+        );
+        let nodes = typeorm_entity_nodes(&fp, "Widget");
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].cells.is_empty());
+    }
+
+    #[test]
+    fn typeorm_query_before_declaration_shares_one_node() {
+        let src = "\
+import { Entity, getRepository } from \"typeorm\";
+
+export function first() {
+  return getRepository(User).findOneBy({ id: 1 });
+}
+
+@Entity(\"app_users\")
+export class User {
+  static all() { return getRepository(User).find(); }
+}
+";
+        let fp = parse_file(src, "src/user.ts", "src::user", repo()).unwrap();
+        let nodes = typeorm_entity_nodes(&fp, "User");
+        assert_eq!(nodes.len(), 1, "query site and declaration: one node");
+        assert_eq!(
+            data_entity::table_of(&nodes[0].cells).as_deref(),
+            Some("app_users")
+        );
+        let class_id = id(node_kind::CLASS, "src::user::User");
+        let entity = typeorm_entity_id("User");
+        assert_eq!(fp.nav.parent_of.get(&entity), Some(&class_id));
+        assert_eq!(
+            accesses(&fp, id(node_kind::FUNCTION, "src::user::first"), "User"),
+            1
+        );
+        assert_eq!(
+            accesses(&fp, id(node_kind::METHOD, "src::user::User::all"), "User"),
+            1
+        );
+    }
+
+    #[test]
+    fn typeorm_mongo_entities_are_not_sql() {
+        let entity = "\
+import { Column, Entity, ObjectId, ObjectIdColumn } from 'typeorm';
+
+@Entity()
+export class Photo {
+  @ObjectIdColumn()
+  id: ObjectId;
+
+  @Column()
+  name: string;
+}
+";
+        let fp = parse_file(entity, "src/photo.entity.ts", "src::photo_entity", repo()).unwrap();
+        assert_eq!(
+            data_entity_count(&fp),
+            0,
+            "an @ObjectIdColumn entity is a Mongo collection"
+        );
+
+        let service = "\
+import { InjectRepository } from '@nestjs/typeorm';
+import { MongoRepository, MongoEntityManager } from 'typeorm';
+
+export class PhotoService {
+  constructor(
+    @InjectRepository(Photo) private readonly photos: MongoRepository<Photo>,
+    private mongoManager: MongoEntityManager,
+  ) {}
+  async all() { return this.mongoManager.find(Photo, {}); }
+  async viaMongo() { return getMongoRepository(Photo).find(); }
+}
+";
+        let fp = parse_file(
+            service,
+            "src/photo.service.ts",
+            "src::photo_service",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            data_entity_count(&fp),
+            0,
+            "Mongo repositories and managers mint no sql entity"
+        );
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.category == edge_category::ACCESSES_DATA)
         );
     }
 }
