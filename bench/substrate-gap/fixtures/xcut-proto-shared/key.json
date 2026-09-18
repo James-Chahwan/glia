@@ -1,0 +1,12 @@
+{
+  "framework": "xcut-proto-shared",
+  "language": "proto",
+  "dirs": ["svc-a", "svc-b"],
+  "note": "A10.7 — two services vendoring the same .proto. The two MESSAGE_TYPE nodes are per-repo islands until MessageSchemaResolver joins them on the full qname message:proto:shop.OrderPlaced.",
+  "expect_nodes": [
+    {"kind": "MESSAGE_TYPE", "name": "OrderPlaced", "note": "declared in both services"}
+  ],
+  "expect_edges": [
+    {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SHARES_SCHEMA", "note": "same message:proto:shop.OrderPlaced in two repos"}
+  ]
+}

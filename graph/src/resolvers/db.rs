@@ -4,9 +4,9 @@
 use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
 
-use super::{CrossGraphResolver, weakest};
+use super::{CrossGraphResolver, emit_cross_repo_pairs};
 use crate::merged::MergedGraph;
 
 /// The five provider kinds `extractors::data_sources` emits, one per
@@ -27,33 +27,6 @@ const DATA_SOURCE_KINDS: [NodeKindId; 5] = [
 /// would emit ~800 all-to-all edges of near-zero information. Above the cap we
 /// emit NOTHING for that provider rather than a fan-out nobody can use.
 const MAX_DATA_SOURCE_FANOUT: usize = 8;
-
-/// Emit one edge per cross-repo pair in `refs`, returning how many were added.
-/// `confidence: None` means `weakest(a, b)`; `Some(c)` forces `c` (the
-/// provider pass forces `Weak` — see [`DbResolver::resolve`]).
-fn emit_cross_repo_pairs(
-    refs: &[(NodeId, RepoId, Confidence)],
-    category: EdgeCategoryId,
-    confidence: Option<Confidence>,
-    out: &mut Vec<Edge>,
-) -> usize {
-    let mut emitted = 0;
-    for i in 0..refs.len() {
-        for j in (i + 1)..refs.len() {
-            if refs[i].1 == refs[j].1 {
-                continue;
-            }
-            out.push(Edge {
-                from: refs[i].0,
-                to: refs[j].0,
-                category,
-                confidence: confidence.unwrap_or_else(|| weakest(refs[i].2, refs[j].2)),
-            });
-            emitted += 1;
-        }
-    }
-    emitted
-}
 
 // ============================================================================
 // DbResolver — joins services that touch the same Table / Collection /

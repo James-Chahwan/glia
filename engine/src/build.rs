@@ -16,8 +16,8 @@ use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, DbResolver, EventBusResolver,
     GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver, MergedGraph,
-    PackageResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
-    WebSocketStackResolver,
+    MessageSchemaResolver, PackageResolver, QueueStackResolver, RpcStackResolver,
+    SharedSchemaResolver, WebSocketStackResolver,
 };
 
 use crate::cache::ParseCache;
@@ -577,6 +577,8 @@ fn run_all_resolvers(merged: &mut MergedGraph) {
     merged.run(&WebSocketStackResolver);
     merged.run(&EventBusResolver);
     merged.run(&SharedSchemaResolver);
+    // A10.7 — MESSAGE_TYPE nodes joined across repos on the exact qname.
+    merged.run(&MessageSchemaResolver);
     merged.run(&CliInvocationResolver);
     merged.run(&DbResolver);
     merged.run(&CronResolver);

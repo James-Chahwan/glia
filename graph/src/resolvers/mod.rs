@@ -1,10 +1,11 @@
 //! Cross-graph resolvers — one module per mechanism. Each owns its own
 //! matching rule and emits the cross-repo edges for that mechanism; the
-//! shared index builder, target type, and confidence helper live here.
+//! shared index builder, target type, confidence helper and cross-repo pair
+//! emitter live here.
 
 use std::collections::HashMap;
 
-use repo_graph_core::{Confidence, NodeId, NodeKindId};
+use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -18,6 +19,7 @@ mod websocket;
 mod eventbus;
 mod shared_schema;
 mod db;
+mod message_schema;
 mod cron;
 mod config;
 mod iac;
@@ -33,6 +35,7 @@ pub use websocket::WebSocketStackResolver;
 pub use eventbus::EventBusResolver;
 pub use shared_schema::SharedSchemaResolver;
 pub use db::DbResolver;
+pub use message_schema::MessageSchemaResolver;
 pub use cron::CronResolver;
 pub use config::ConfigResolver;
 pub use iac::IacResolver;
@@ -100,6 +103,35 @@ pub(crate) fn weakest(a: Confidence, b: Confidence) -> Confidence {
         }
     }
     if rank(a) <= rank(b) { a } else { b }
+}
+
+/// Emit one edge per cross-repo pair in `refs`, returning how many were added.
+/// Same-repo pairs are skipped: a repo's own duplicates are not a cross-service
+/// join. `confidence: None` means `weakest(a, b)`; `Some(c)` forces `c` (the
+/// DB provider pass forces `Weak` — see [`DbResolver::resolve`]). Shared by
+/// the exact-qname pairwise resolvers (`DbResolver`, `MessageSchemaResolver`).
+fn emit_cross_repo_pairs(
+    refs: &[(NodeId, RepoId, Confidence)],
+    category: EdgeCategoryId,
+    confidence: Option<Confidence>,
+    out: &mut Vec<Edge>,
+) -> usize {
+    let mut emitted = 0;
+    for i in 0..refs.len() {
+        for j in (i + 1)..refs.len() {
+            if refs[i].1 == refs[j].1 {
+                continue;
+            }
+            out.push(Edge {
+                from: refs[i].0,
+                to: refs[j].0,
+                category,
+                confidence: confidence.unwrap_or_else(|| weakest(refs[i].2, refs[j].2)),
+            });
+            emitted += 1;
+        }
+    }
+    emitted
 }
 
 #[cfg(test)]

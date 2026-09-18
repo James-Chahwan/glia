@@ -36,8 +36,8 @@ pub use merged::{CrossLink, MergedGraph, channel_of, cluster_key_for, cross_link
 pub use resolvers::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
-    PackageResolver, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
-    WebSocketStackResolver, normalise_http_path,
+    MessageSchemaResolver, PackageResolver, QueueStackResolver, RpcStackResolver,
+    SharedSchemaResolver, WebSocketStackResolver, normalise_http_path,
 };
 // A10.2 — the HTTP route index + match ladder, for passes that pair a declared
 // path (a contract operation) with the ROUTE that serves it.

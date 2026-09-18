@@ -1,0 +1,10 @@
+// Vendored contract: svc-a and svc-b each carry a byte-identical copy of the
+// shared message definitions, the way generated-client repos usually do.
+syntax = "proto3";
+
+package shop;
+
+message OrderPlaced {
+  string id = 1;
+  int64 total_cents = 2;
+}
