@@ -719,13 +719,14 @@ fn visit_type_decl(
         }
     }
 
-    // Persistence substrate: a JPA `@Entity` class is also a DATA_ENTITY; a Spring
-    // Data repository (`extends JpaRepository<Entity, Id>`) ACCESSES_DATA the
-    // parameterised entity. Both link through a name-derived DATA_ENTITY id so the
-    // repository (which sees only the bare entity type name, possibly cross-file)
-    // and the entity emitter agree on the same target node.
-    if is_data_entity(&node, src) {
-        emit_data_entity(name, id, repo, acc);
+    // Persistence substrate: a JPA `@Entity` / Mongo `@Document` class is also a
+    // DATA_ENTITY; a Spring Data repository (`extends JpaRepository<Entity, Id>`)
+    // ACCESSES_DATA the parameterised entity. Both link through a name-derived,
+    // flavor-prefixed DATA_ENTITY id so the repository (which sees only the bare
+    // entity type name, possibly cross-file) and the entity emitter agree on the
+    // same target node.
+    if let Some(flavor) = data_entity_flavor(&node, src) {
+        emit_data_entity(flavor, name, id, repo, acc);
     }
     emit_repository_access(&node, src, id, repo, acc);
 
@@ -1087,29 +1088,55 @@ fn emit_heritage_ref(
     });
 }
 
-/// Class-level annotations that mark a persistent data model → DATA_ENTITY.
-/// `@Entity` is JPA; `@Document` is Spring Data Mongo.
-const DATA_ENTITY_ANNOTATIONS: &[&str] = &["@Entity", "@Document"];
+/// DATA_ENTITY flavor of a relational model (JPA `@Entity`) — the `<flavor>`
+/// segment of `data_entity:<flavor>:<name>`, the vocabulary every DATA_ENTITY
+/// emitter shares and DbResolver buckets on.
+const SQL_FLAVOR: &str = "sql";
+/// DATA_ENTITY flavor of a document model (Spring Data Mongo `@Document`).
+const NOSQL_FLAVOR: &str = "nosql";
 
-/// True if the class carries a persistence annotation (→ DATA_ENTITY projection).
-fn is_data_entity(node: &TsNode, src: &[u8]) -> bool {
-    modifiers_text(node, src)
-        .map(|m| DATA_ENTITY_ANNOTATIONS.iter().any(|a| has_annotation(m, a)))
-        .unwrap_or(false)
+/// Class-level annotations that mark a persistent data model → DATA_ENTITY, with
+/// the flavor each implies. Checked in order: `@Document` first, so a class
+/// carrying both is a Mongo document.
+const DATA_ENTITY_ANNOTATIONS: &[(&str, &str)] =
+    &[("@Document", NOSQL_FLAVOR), ("@Entity", SQL_FLAVOR)];
+
+/// The DATA_ENTITY flavor of a class carrying a persistence annotation, or
+/// `None` when it carries none (no DATA_ENTITY projection).
+fn data_entity_flavor(node: &TsNode, src: &[u8]) -> Option<&'static str> {
+    let mods = modifiers_text(node, src)?;
+    DATA_ENTITY_ANNOTATIONS
+        .iter()
+        .find(|(ann, _)| has_annotation(mods, ann))
+        .map(|(_, flavor)| *flavor)
 }
 
-/// Stable, name-derived DATA_ENTITY id. Keyed on the entity's simple name only so
-/// a repository referencing the bare type name (possibly from another file) and
-/// the `@Entity` class that emits it resolve to the same node without needing the
-/// entity's fully-qualified module path.
-fn data_entity_id(simple_name: &str, repo: RepoId) -> NodeId {
-    NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, simple_name)
+/// The DATA_ENTITY qname `data_entity:<flavor>:<simple_name>`. The SURFACE name
+/// is kept verbatim — DbResolver folds it to its canonical form at index time.
+fn data_entity_qname(flavor: &str, simple_name: &str) -> String {
+    format!("data_entity:{flavor}:{simple_name}")
 }
 
-/// Emit the DATA_ENTITY node projected from an `@Entity` class, plus a DEFINES
-/// edge class→entity so the model is reachable from its declaring type.
-fn emit_data_entity(name: &str, class_id: NodeId, repo: RepoId, acc: &mut Acc) {
-    let entity_id = data_entity_id(name, repo);
+/// Stable, name-derived DATA_ENTITY id — the one constructor both the entity
+/// emitter and the repository edge use. Keyed on the flavor and the entity's
+/// simple name only, so a repository referencing the bare type name (possibly
+/// from another file) and the annotated class that emits it resolve to the same
+/// node without needing the entity's fully-qualified module path.
+fn data_entity_id(flavor: &str, simple_name: &str, repo: RepoId) -> NodeId {
+    NodeId::from_parts(
+        GRAPH_TYPE,
+        repo,
+        node_kind::DATA_ENTITY,
+        &data_entity_qname(flavor, simple_name),
+    )
+}
+
+/// Emit the DATA_ENTITY node projected from an `@Entity` / `@Document` class,
+/// plus a DEFINES edge class→entity so the model is reachable from its declaring
+/// type. The node's name is the class's simple name; its qname carries the flavor.
+fn emit_data_entity(flavor: &str, name: &str, class_id: NodeId, repo: RepoId, acc: &mut Acc) {
+    let entity_id = data_entity_id(flavor, name, repo);
+    let qname = data_entity_qname(flavor, name);
     acc.nodes.push(Node {
         id: entity_id,
         repo,
@@ -1126,28 +1153,34 @@ fn emit_data_entity(name: &str, class_id: NodeId, repo: RepoId, acc: &mut Acc) {
         confidence: Confidence::Strong,
     });
     acc.nav
-        .record(entity_id, name, name, node_kind::DATA_ENTITY, Some(class_id));
+        .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
 }
 
 /// Spring Data repository base interfaces whose first type parameter is the
-/// managed entity (`interface FooRepo extends JpaRepository<Foo, Long>`).
-const REPOSITORY_BASES: &[&str] = &[
-    "Repository",
-    "CrudRepository",
-    "JpaRepository",
-    "PagingAndSortingRepository",
-    "JpaSpecificationExecutor",
-    "ReactiveCrudRepository",
-    "ReactiveSortingRepository",
-    "R2dbcRepository",
-    "MongoRepository",
-    "ReactiveMongoRepository",
+/// managed entity (`interface FooRepo extends JpaRepository<Foo, Long>`), with
+/// the DATA_ENTITY flavor of that entity. The Mongo bases manage `@Document`s
+/// (`nosql`); every other base is read as managing a JPA `@Entity` (`sql`). The
+/// store-agnostic bases (`Repository`, `CrudRepository`, …) carry no store of
+/// their own, so over a `@Document` declared in another file they name the `sql`
+/// id and the edge does not reach the `nosql` node.
+const REPOSITORY_BASES: &[(&str, &str)] = &[
+    ("Repository", SQL_FLAVOR),
+    ("CrudRepository", SQL_FLAVOR),
+    ("JpaRepository", SQL_FLAVOR),
+    ("PagingAndSortingRepository", SQL_FLAVOR),
+    ("JpaSpecificationExecutor", SQL_FLAVOR),
+    ("ReactiveCrudRepository", SQL_FLAVOR),
+    ("ReactiveSortingRepository", SQL_FLAVOR),
+    ("R2dbcRepository", SQL_FLAVOR),
+    ("MongoRepository", NOSQL_FLAVOR),
+    ("ReactiveMongoRepository", NOSQL_FLAVOR),
 ];
 
 /// Detect `extends <RepositoryBase>< Entity, … >` on a class or interface and emit
 /// an ACCESSES_DATA edge from the repository to the entity's DATA_ENTITY node.
 /// `resolve_refs` does not fall back for ACCESSES_DATA, so we wire a direct edge
-/// to the name-derived DATA_ENTITY id (matched by `emit_data_entity`).
+/// to the name-derived, flavor-prefixed DATA_ENTITY id (matched by
+/// `emit_data_entity`), the flavor read off the repository base.
 fn emit_repository_access(node: &TsNode, src: &[u8], from_id: NodeId, repo: RepoId, acc: &mut Acc) {
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
@@ -1174,11 +1207,11 @@ fn scan_repository_generics(
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
         if n.kind() == "generic_type"
-            && let Some(entity) = repository_entity(n, src)
+            && let Some((entity, flavor)) = repository_entity(n, src)
         {
             acc.edges.push(Edge {
                 from: from_id,
-                to: data_entity_id(&entity, repo),
+                to: data_entity_id(flavor, &entity, repo),
                 category: edge_category::ACCESSES_DATA,
                 confidence: Confidence::Medium,
             });
@@ -1190,8 +1223,9 @@ fn scan_repository_generics(
     }
 }
 
-/// If `gen` is `RepositoryBase<Entity, …>`, return the entity's simple name.
-fn repository_entity(generic: TsNode, src: &[u8]) -> Option<String> {
+/// If `gen` is `RepositoryBase<Entity, …>`, return the entity's simple name and
+/// the DATA_ENTITY flavor the base implies.
+fn repository_entity(generic: TsNode, src: &[u8]) -> Option<(String, &'static str)> {
     let mut base: Option<&str> = None;
     let mut targs: Option<TsNode> = None;
     let mut c = generic.walk();
@@ -1206,9 +1240,7 @@ fn repository_entity(generic: TsNode, src: &[u8]) -> Option<String> {
     }
     let base = base?;
     let base_simple = base.rsplit(['.', ':']).next().unwrap_or(base).trim();
-    if !REPOSITORY_BASES.contains(&base_simple) {
-        return None;
-    }
+    let &(_, flavor) = REPOSITORY_BASES.iter().find(|(b, _)| *b == base_simple)?;
     let targs = targs?;
     let mut tc = targs.walk();
     for arg in targs.named_children(&mut tc) {
@@ -1222,7 +1254,7 @@ fn repository_entity(generic: TsNode, src: &[u8]) -> Option<String> {
             .unwrap_or(t)
             .trim();
         if !simple.is_empty() {
-            return Some(simple.to_string());
+            return Some((simple.to_string(), flavor));
         }
     }
     None
@@ -3003,11 +3035,21 @@ interface UserRepository extends JpaRepository<User, Long> {
 "#;
         let fp = parse_file(source, "UserRepository.java", "com::example::UserRepository", repo()).unwrap();
 
-        // @Entity → DATA_ENTITY node named User.
-        let entity_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "User");
+        // @Entity → DATA_ENTITY node named User, qname carrying the `sql` flavor.
+        let entity_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:User",
+        );
         assert!(
             fp.nodes.iter().any(|n| n.id == entity_id),
-            "expected DATA_ENTITY User node"
+            "expected DATA_ENTITY data_entity:sql:User node"
+        );
+        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("User"));
+        assert_eq!(
+            fp.nav.qname_by_id.get(&entity_id).map(String::as_str),
+            Some("data_entity:sql:User")
         );
         assert_eq!(
             fp.nav
@@ -3032,6 +3074,77 @@ interface UserRepository extends JpaRepository<User, Long> {
                 && e.category == edge_category::ACCESSES_DATA),
             "expected ACCESSES_DATA UserRepository -> User: {:?}",
             fp.edges
+        );
+    }
+
+    #[test]
+    fn document_annotation_uses_nosql_flavor() {
+        // A13.2: a Spring Data Mongo `@Document` is a `nosql` entity, and a
+        // `MongoRepository<Session, …>` must target the SAME id the entity
+        // emitter minted — else the ACCESSES_DATA edge dangles.
+        let source = r#"
+package com.example;
+
+import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.repository.MongoRepository;
+
+@Document
+class Session {
+    private String id;
+}
+
+interface SessionRepo extends MongoRepository<Session, String> {
+}
+"#;
+        let fp = parse_file(source, "SessionRepo.java", "com::example::SessionRepo", repo()).unwrap();
+        let entity_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::DATA_ENTITY,
+            "data_entity:nosql:Session",
+        );
+        let entities: Vec<&NodeId> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::DATA_ENTITY)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(entities, vec![&entity_id], "exactly one DATA_ENTITY, nosql-flavored");
+        assert!(fp.nodes.iter().any(|n| n.id == entity_id));
+        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("Session"));
+        let repo_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::INTERFACE,
+            "com::example::SessionRepo",
+        );
+        let access: Vec<&Edge> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::ACCESSES_DATA)
+            .collect();
+        assert_eq!(access.len(), 1, "one ACCESSES_DATA edge: {access:?}");
+        assert!(
+            access[0].from == repo_id && access[0].to == entity_id,
+            "expected ACCESSES_DATA SessionRepo -> data_entity:nosql:Session: {access:?}"
+        );
+
+        // A class carrying both annotations is a Mongo document.
+        let both = r#"
+package com.example;
+
+@Entity
+@Document
+class Audit {
+}
+"#;
+        let fp = parse_file(both, "Audit.java", "com::example::Audit", repo()).unwrap();
+        let audit_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "data_entity:nosql:Audit");
+        assert!(
+            fp.nodes.iter().any(|n| n.id == audit_id),
+            "@Entity + @Document must mint the nosql id"
         );
     }
 
