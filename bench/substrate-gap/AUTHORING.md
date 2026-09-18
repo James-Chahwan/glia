@@ -32,7 +32,7 @@ are made for you, so you never re-derive them:
 |---|---|---|
 | how many dirs | `cross_repo` | `grade.py` calls `generate()` for one dir and `generate_many()` for several. A single-repo run only ever has **one `RepoId`**, so a cross-repo resolver has nothing to pair against and its edge can never appear. `cross_repo: true` ⇒ `dirs: ["client","server"]`; `false` ⇒ `dirs: ["."]`, where a second dir is pure noise. |
 | which node kinds | `kinds[0]` | the *intended* extraction path. Later groups are the alternative registries (see **via**, below). |
-| which edge category | `categories[0]` | the routing proof. |
+| which edge category | `categories[0]` | the routing proof. An ANCHOR mechanism (matrix_vocab `anchor: True`, today only subproject) has no routing vocabulary; its cell is graded on the anchor node, the literal and the forbid guards. The scaffold gives it `expect_edges: []` and a `max_nodes: 1` duplicate-anchor forbid instead. |
 | which literal | `literal` | the identifying string that must survive into the node name/qname. Extraction without it is `partial`, not `full`. |
 
 The scaffolder **refuses to overwrite** an existing cell without `--force`,

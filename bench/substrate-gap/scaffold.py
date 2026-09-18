@@ -11,7 +11,10 @@ this one. Every fixture needs four decisions the vocabulary ALREADY holds:
                     (grade.py calls generate_many() at 2+), so cross_repo True
                     means dirs ["client", "server"] and False means dirs ["."].
     which kinds     the FIRST `kinds` group -- the intended extraction path.
-    which category  `categories[0]` -- the routing proof.
+    which category  `categories[0]` -- the routing proof. An ANCHOR mechanism
+                    (`anchor: True`, e.g. subproject) has no routing vocabulary:
+                    it gets no expect_edges skeleton and a duplicate-anchor
+                    forbid guard instead.
     which literal   `literal` -- the identifying string that must survive into
                     the node name/qname. Extraction without it is PARTIAL.
 
@@ -117,8 +120,27 @@ EXTRA_CELLS = {
 def build_key(lang, mech, dirs, stubs):
     """The frozen-vocabulary key.json for one cell, prefilled from the vocab."""
     kinds = mech["kinds"][0]          # the INTENDED extraction path
-    cat = mech["categories"][0]       # the routing proof
+    # the routing proof; None for an ANCHOR mechanism, which has no routing
+    # vocabulary by definition (matrix_vocab `anchor: True`)
+    cat = mech["categories"][0] if mech["categories"] else None
     files = ", ".join(f for _, f, _ in stubs)
+    if cat is None:
+        expect_edges = []
+        # The anchor's precision guard: one node per anchor, never duplicated.
+        # Forbid matches EXACTLY, so 'TODO' must become the anchor's full qname.
+        forbid = [
+            {"kind": k, "name": "TODO", "max_nodes": 1,
+             "note": "TODO: replace 'TODO' with the anchor's full qname (forbid "
+                     "matches exactly) - one anchor per root, never duplicated"}
+            for k in kinds
+        ]
+    else:
+        expect_edges = [
+            {"from": "TODO", "to": "TODO", "category": cat,
+             "note": "routing proof"
+                     + (f" - {mech['note']}" if mech["note"] else "")}
+        ]
+        forbid = []
     key = {
         "framework": f"{lang}-{mech['id']}",
         "language": lang,
@@ -130,11 +152,7 @@ def build_key(lang, mech, dirs, stubs):
              "note": f"TODO: replace 'TODO' with the identifying LITERAL - {mech['literal']}"}
             for k in kinds
         ],
-        "expect_edges": [
-            {"from": "TODO", "to": "TODO", "category": cat,
-             "note": "routing proof"
-                     + (f" - {mech['note']}" if mech["note"] else "")}
-        ],
+        "expect_edges": expect_edges,
         # NO blanket POSITION gate. MEASURED 2026-09-16 against the installed
         # 0.4.18 wheel: the cross-cutting extractors mint their nodes WITHOUT a
         # span -- QUEUE_CONSUMER, QUEUE_PRODUCER, ROUTE and ENDPOINT all dump
@@ -145,7 +163,7 @@ def build_key(lang, mech, dirs, stubs):
         # expect_cells is optional: AUTHORING.md step 5 adds one only where
         # `grade.py --dump` shows the cell actually exists.
         "expect_cells": [],
-        "forbid": [],
+        "forbid": forbid,
         "note": f"SCAFFOLDED, NOT AUTHORED (stubs: {files}). Follow AUTHORING.md: write the source, "
                 "`grade.py <dir> --dump`, write the key against the INTENDED graph, "
                 "record the failing baseline, add `expect_cells` for any cell "

@@ -5,23 +5,25 @@
   "mechanism": "subproject",
   "cells": ["typescript/subproject"],
   "expect_nodes": [
-    {"kind": "REGION", "name": "apps/web",
-     "note": "INTENDED: a sub-project anchor per manifest root (apps/web/package.json). EXPECTED to miss — review section 2 #2: 'No sub-project notion anywhere (grep = 0)'."},
-    {"kind": "REGION", "name": "apps/admin",
-     "note": "INTENDED: the second manifest root. EXPECTED to miss."}
+    {"kind": "PROJECT", "name": "project:apps/web",
+     "note": "one PROJECT anchor per package.json root (A8.5); qname `project:<rel_path>` is the mechanism literal"},
+    {"kind": "PROJECT", "name": "project:apps/admin",
+     "note": "the second manifest root"}
   ],
-  "expect_edges": [
-    {"from": "apps/web", "to": "apps/web/src/index", "category": "CONTAINS",
-     "note": "INTENDED: the sub-project region contains its own modules — the scoping merged-plan item 8 (walker scoping -> project_roots) has to produce."}
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "PROJECT", "node": "project:apps/web", "cell": "ORIGIN", "contains": "\"ecosystem\":\"npm\"",
+     "note": "the anchor records which manifest rooted it"}
   ],
-  "expect_cells": [],
   "forbid": [
-    {"from": "apps/admin", "to": "apps/web/src/index", "category": "CONTAINS",
-     "note": "PRECISION half: when regions land, one sub-project must not contain the other's modules. Vacuously clean today (no REGION nodes at all) — it is the gate the fix must not break."},
+    {"kind": "PROJECT", "name": "project:apps/web/vendor/left-pad",
+     "note": "PRECISION: a vendored package.json is collapsed to a REGION before root detection and must never become a project"},
+    {"kind": "PROJECT", "name": "project:apps/web", "max_nodes": 1,
+     "note": "one anchor per root, never duplicated"},
     {"kind": "MODULE", "name": "apps/web/src/index", "max_nodes": 1,
-     "note": "MEASURED: module qnames ARE path-qualified (apps::web::src::index), so the two index.ts files do NOT collide on identity. Deliberately NOT forbidding on the bare NAME 'index' — both modules are named 'index' and that is correct, not a precision defect."},
+     "note": "MEASURED: module qnames ARE path-qualified (apps::web::src::index), so the two index.ts files do NOT collide on identity."},
     {"from": "apps/web/src/index", "to": "apps/admin/src/helper", "category": "IMPORTS",
-     "note": "MEASURED CLEAN, and it contradicts the packet spec: `./helper` resolves inside its own sub-project, so the predicted basename cross-binding does NOT fire. Unscoped to this cell (IMPORTS is not a subproject category) — it documents the measurement, graded by grade.py."}
+     "note": "MEASURED CLEAN: `./helper` resolves inside its own sub-project. Unscoped to this cell (IMPORTS is not a subproject category)."}
   ],
-  "note": "ZERO-EVERYWHERE PROBE (A15.11). Two manifest-rooted sub-projects in ONE walked dir, with a deliberate apps/web vs apps/admin basename collision on index.ts AND helper.ts. Baseline 2026-09-16 on the installed 0.4.18 wheel: 8 nodes / 8 edges, REGION 0. The walker's region collapse does nothing surprising with two manifest roots — it simply does not notice them. Six files rather than the AUTHORING budget of two per dir: the collision IS the fixture."
+  "note": "Re-authored for LA.9 against the PROJECT kind (45). Two manifest-rooted sub-projects in ONE walked dir with an apps/web vs apps/admin basename collision on index.ts and helper.ts, plus a vendored package.json under apps/web/vendor. Was a REGION/CONTAINS probe written before PROJECT existed (A15.11), which read `none` though both roots were detected."
 }

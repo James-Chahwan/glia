@@ -4,7 +4,8 @@
 The review (dev-notes/review-2026-09-15-coverage-and-issues.md:127-143) states the
 matrix as a markdown code block: a human reads a fixture, judges it, and writes a
 glyph. This module exists so a cell verdict is DERIVED instead. For each mechanism
-it pins down four things a fixture author would otherwise re-invent:
+it pins down four things (plus one opt-in flag) a fixture author would otherwise
+re-invent:
 
   kinds        which node kinds count as EXTRACTION, as ordered any-of groups.
                The first group with any node present wins and names `via`, so a
@@ -14,6 +15,12 @@ it pins down four things a fixture author would otherwise re-invent:
   literal      the identifying literal that must survive into the node name/qname.
                Extraction without the literal is the review's `partial`, not `full`.
   categories   which edge categories count as ROUTING (any-of).
+  anchor       optional, default False. True marks an ANCHOR mechanism: its node
+               is an edge-less anchor by design (PROJECT, like REGION), so it has
+               no routing vocabulary (`categories` is empty) and matrix.derive()
+               grades it on extract + literal + forbid, with route not-applicable
+               rather than a cap. Opt-in per mechanism: every other column keeps
+               the rule that an unrouted cell is not proven.
   cross_repo   whether the routing edge is emitted by a cross-repo resolver.
                This decides the fixture's `dirs`: grade.py:122-126 calls
                rg.generate() for a single dir and rg.generate_many() for several,
@@ -26,8 +33,8 @@ it pins down four things a fixture author would otherwise re-invent:
 Every kind and category name here is checked against the LOCKED code-domain
 registries via repo_graph_py's decode tables (`--selftest`), so the vocabulary
 cannot drift from code-domain/src/lib.rs. Only SHIPPED registry entries may be
-named: reserved-but-unemitted ids (node_kind 45-49) are absent from the installed
-wheel's tables and will fail the self-test.
+named: a reserved-but-unemitted id is absent from the installed wheel's tables and
+will fail the self-test.
 
 DELIBERATE NON-DECISION -- there is NO not-applicable list. Cells like
 terraform x calls or solidity x grpc are not enumerated as n/a. `unknown` already
@@ -210,11 +217,12 @@ MECHANISMS = [
      "cross_repo": True,
      "note": "the roll-up column: any cross-service routing edge at all"},
     {"id": "subproject", "label": "subproj", "family": "topology",
-     "kinds": [["REGION", "MODULE"]], "via_labels": ["contain"],
-     "literal": "the sub-project directory name in the REGION qname (`region:<path>`)",
-     "categories": ["CONTAINS"], "cross_repo": False,
-     "note": "no sub-project notion exists (review section 2 #2, grep=0) -- a fixture "
-             "here is EXPECTED to read none until walker scoping lands"},
+     "kinds": [["PROJECT"]], "via_labels": ["project"],
+     "literal": "the sub-project dir in the PROJECT qname `project:<rel_path>`",
+     "categories": [], "anchor": True, "cross_repo": False,
+     "note": "PROJECT (A8.5) is an edge-less anchor; membership is by longest path "
+             "prefix (glia arch / --scope), so the column grades on the anchor, its "
+             "literal and its precision guards"},
 ]
 
 _BY_ID = {m["id"]: m for m in MECHANISMS}
@@ -293,11 +301,23 @@ def _selftest():
     known_kinds = set(dict(rg.kind_names()).values())
     known_cats = set(dict(rg.category_names()).values())
     kinds_seen, cats_seen = set(), set()
+    anchors = 0
     for m in MECHANISMS:
         assert len(m["via_labels"]) == len(m["kinds"]), (
             f"{m['id']}: {len(m['via_labels'])} via_labels for {len(m['kinds'])} kind groups"
         )
-        assert m["kinds"] and m["categories"], f"{m['id']}: empty kinds or categories"
+        anchor = m.get("anchor", False)
+        assert isinstance(anchor, bool), f"{m['id']}: anchor must be a bool"
+        # An anchor mechanism has no routing vocabulary BY DEFINITION; every other
+        # mechanism must name at least one routing category.
+        assert m["kinds"] and (m["categories"] or anchor), (
+            f"{m['id']}: empty kinds, or empty categories on a non-anchor mechanism"
+        )
+        assert not (anchor and m["categories"]), (
+            f"{m['id']}: an anchor mechanism grades route as not-applicable, so it "
+            f"must not also declare routing categories"
+        )
+        anchors += anchor
         assert m["literal"], f"{m['id']}: no identifying literal declared"
         assert isinstance(m["cross_repo"], bool), f"{m['id']}: cross_repo must be a bool"
         for group in m["kinds"]:
@@ -338,7 +358,8 @@ def _selftest():
 
     print(
         f"[matrix] vocab: {len(MECHANISMS)} mechanisms, {len(LANGUAGES)} languages, "
-        f"{len(kinds_seen)} kinds referenced, {len(cats_seen)} categories referenced",
+        f"{len(kinds_seen)} kinds referenced, {len(cats_seen)} categories referenced, "
+        f"anchor={anchors}",
         file=sys.stderr,
     )
 

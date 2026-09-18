@@ -9,11 +9,13 @@ Two halves, deliberately kept apart:
   never swallowed" rule are proven without building a single graph. They cannot
   flap when a sibling packet lands a fixture.
 
-  ANCHOR tests measure four real cells whose levels the packet spec names:
+  ANCHOR tests measure real cells whose levels the packet spec names:
       go/nats      => full via=queue
       python/kafka => partial
       csharp/kafka => none
       clojure/kafka => unknown
+      go/subproject => full via=project   (LA.9: an ANCHOR mechanism, graded
+                                           with route not-applicable)
   The first three need fixtures that later corpus packets (A15.6 legacy `cells`
   tags, A15.7 matrix/ authoring) still have to land. Until then each SKIPS with
   a line naming exactly what is missing — never a silent pass, and never a
@@ -44,6 +46,8 @@ ANCHOR_SOURCE = {
                      "the scaffold's TODO placeholders are not a fixture"),
     "csharp/kafka": ("fixtures/xcut-queue-csharp-kafka — declares the "
                      "non-vocabulary cell 'csharp/queue' today, so it scores nothing"),
+    "go/subproject": ("matrix/go/subproject — LA.9 re-authored it against the "
+                      "PROJECT anchor (node_kind 45)"),
 }
 
 
@@ -183,6 +187,54 @@ def test_derive_caps_at_partial_when_no_routing_is_expected():
     got = matrix.derive("nats", _res([PRODUCED, CONSUMED]), QUEUE_KINDS)
     assert got["level"] == "partial", got
     assert "no routing expected" in got["reasons"], got
+
+
+# subproject is an ANCHOR mechanism (matrix_vocab `anchor: True`): PROJECT is an
+# edge-less anchor by design, so routing is not-applicable rather than a cap. The
+# nats cap test above is the proof the rule did NOT loosen for routed mechanisms.
+PROJECTS = [("PROJECT", "project:svc-a", True), ("PROJECT", "project:svc-b", True)]
+
+
+def test_derive_anchor_mechanism_is_full_without_routing():
+    res = _res(PROJECTS, forbid=[("PROJECT", 0, False), ("PROJECT", 1, False)])
+    got = matrix.derive("subproject", res, {"PROJECT", "MODULE"})
+    assert got["level"] == "full", got
+    assert got["via"] == "project", got
+    assert got["route"] == [0, 0] and got["forbid"] == [2, 2], got
+    assert "anchor mechanism: routing not applicable" in got["reasons"], got
+    assert "no routing expected" not in got["reasons"], got
+
+
+def test_derive_anchor_still_fails_on_a_forbid():
+    # e.g. a vendored manifest minted its own PROJECT: precision still caps.
+    res = _res(PROJECTS, forbid=[("PROJECT", 1, True), ("PROJECT", 1, False)])
+    got = matrix.derive("subproject", res, {"PROJECT"})
+    assert got["level"] == "partial" and "forbid violated" in got["reasons"], got
+    assert got["forbid"] == [1, 2], got
+
+
+def test_derive_anchor_is_none_without_the_anchor_node():
+    # route not-applicable must not paper over extraction: no PROJECT, no cell.
+    got = matrix.derive("subproject", _res(PROJECTS), {"MODULE", "REGION"})
+    assert got["level"] == "none" and got["via"] is None, got
+
+
+def test_scaffold_gives_an_anchor_mechanism_no_edge_skeleton():
+    import grade
+    import scaffold
+    stubs = [(".", "client.go", "caller"), (".", "server.go", "callee")]
+    key = scaffold.build_key("go", vocab.mechanism("subproject"), ["."], stubs)
+    assert key["expect_edges"] == [], key
+    assert key["forbid"] == [{"kind": "PROJECT", "name": "TODO", "max_nodes": 1,
+                              "note": key["forbid"][0]["note"]}], key
+    # Every field stays inside the frozen key.json vocabulary grade.py enforces.
+    assert set(key) <= grade.TOP_FIELDS, set(key) - grade.TOP_FIELDS
+    for f in key["forbid"]:
+        assert set(f) <= grade.FORBID_NODE_FIELDS, f
+    # A routed mechanism is untouched: one routing-proof edge, no forbid.
+    nats = scaffold.build_key("go", vocab.mechanism("nats"), ["."], stubs)
+    assert [e["category"] for e in nats["expect_edges"]] == ["QUEUE_FLOWS"], nats
+    assert nats["forbid"] == [], nats
 
 
 def test_derive_forbid_violation_caps_a_phantom_cell_at_partial():
@@ -466,6 +518,14 @@ def test_anchor_csharp_kafka_is_none():
     # on fixtures/xcut-queue-csharp-kafka. The anchor moves with the fix; the
     # name is kept so the history of the cell stays greppable.
     _anchor("csharp/kafka", "full", "queue")
+
+
+def test_anchor_go_subproject_is_full():
+    # Read `none via=contain` before LA.9: the column measured REGION/CONTAINS,
+    # written before PROJECT (A8.5) shipped, while `glia projects` listed both
+    # go.mod roots. Re-authored against PROJECT; the vendored go.mod under
+    # svc-a/vendor is the forbid that keeps the cell honest.
+    _anchor("go/subproject", "full", "project")
 
 
 def test_anchor_clojure_kafka_is_unknown():

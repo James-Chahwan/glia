@@ -5,21 +5,23 @@
   "mechanism": "subproject",
   "cells": ["go/subproject"],
   "expect_nodes": [
-    {"kind": "REGION", "name": "svc-a",
-     "note": "INTENDED: a sub-project anchor per go.mod root. EXPECTED to miss — no sub-project notion exists."},
-    {"kind": "REGION", "name": "svc-b",
-     "note": "INTENDED: the second go.mod root. EXPECTED to miss."}
+    {"kind": "PROJECT", "name": "project:svc-a",
+     "note": "one PROJECT anchor per go.mod root (A8.5); qname `project:<rel_path>` is the mechanism literal"},
+    {"kind": "PROJECT", "name": "project:svc-b",
+     "note": "the second go.mod root"}
   ],
-  "expect_edges": [
-    {"from": "svc-a", "to": "svc-a/util", "category": "CONTAINS",
-     "note": "INTENDED: the module region contains its own package files."}
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "PROJECT", "node": "project:svc-a", "cell": "ORIGIN", "contains": "example.com/svc-a",
+     "note": "the label is the go.mod module path"}
   ],
-  "expect_cells": [],
   "forbid": [
-    {"from": "svc-b", "to": "svc-a/util", "category": "CONTAINS",
-     "note": "PRECISION half: one go module must not contain the other's files. Vacuously clean today (no REGION nodes)."},
+    {"kind": "PROJECT", "name": "project:svc-a/vendor/example.com/dep",
+     "note": "PRECISION: a vendored go.mod is collapsed to a REGION before root detection and must never become a project"},
+    {"kind": "PROJECT", "name": "project:svc-a", "max_nodes": 1,
+     "note": "one anchor per root, never duplicated"},
     {"kind": "MODULE", "name": "svc-a/util", "max_nodes": 1,
      "note": "MEASURED: qnames are path-qualified (svc-a::util vs svc-b::util), so the two util.go files do not collide on identity."}
   ],
-  "note": "ZERO-EVERYWHERE PROBE (A15.11). Two go.mod roots in one walked dir with colliding util.go basenames. Baseline 2026-09-16 on the installed 0.4.18 wheel: 4 nodes / 2 edges, REGION 0 — and neither go.mod contributed a node of any kind, so the module boundary is invisible even at manifest level."
+  "note": "Re-authored for LA.9 against the PROJECT kind (45). Two go.mod roots in one walked dir with colliding util.go basenames plus a vendored go.mod under svc-a/vendor. Was a REGION/CONTAINS probe written before PROJECT existed (A15.11), which read `none` though both roots were detected."
 }

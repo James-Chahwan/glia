@@ -5,21 +5,23 @@
   "mechanism": "subproject",
   "cells": ["java/subproject"],
   "expect_nodes": [
-    {"kind": "REGION", "name": "mod-a",
-     "note": "INTENDED: a sub-project anchor per pom.xml root. EXPECTED to miss — no sub-project notion exists."},
-    {"kind": "REGION", "name": "mod-b",
-     "note": "INTENDED: the second pom.xml root. EXPECTED to miss."}
+    {"kind": "PROJECT", "name": "project:mod-a",
+     "note": "one PROJECT anchor per pom.xml root (A8.5); qname `project:<rel_path>` is the mechanism literal"},
+    {"kind": "PROJECT", "name": "project:mod-b",
+     "note": "the second pom.xml root"}
   ],
-  "expect_edges": [
-    {"from": "mod-a", "to": "mod-a/src/main/java/Util", "category": "CONTAINS",
-     "note": "INTENDED: the maven module region contains its own sources."}
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "PROJECT", "node": "project:mod-a", "cell": "ORIGIN", "contains": "\"label\":\"mod-a\"",
+     "note": "the label is the pom's artifactId"}
   ],
-  "expect_cells": [],
   "forbid": [
-    {"from": "mod-b", "to": "mod-a/src/main/java/Util", "category": "CONTAINS",
-     "note": "PRECISION half: one maven module must not contain the other's sources. Vacuously clean today (no REGION nodes)."},
+    {"kind": "PROJECT", "name": "project:mod-a/vendor/lib",
+     "note": "PRECISION: a vendored pom.xml is collapsed to a REGION before root detection and must never become a project"},
+    {"kind": "PROJECT", "name": "project:mod-a", "max_nodes": 1,
+     "note": "one anchor per root, never duplicated"},
     {"kind": "MODULE", "name": "mod-a/src/main/java/Util", "max_nodes": 1,
      "note": "MEASURED: qnames are path-qualified (mod-a::src::main::java::Util), so the two Util.java files do not collide on identity."}
   ],
-  "note": "ZERO-EVERYWHERE PROBE (A15.11). Two pom.xml roots in one walked dir with colliding Util.java basenames. Baseline 2026-09-16 on the installed 0.4.18 wheel: 6 nodes / 4 edges, REGION 0 — and neither pom.xml contributed a node, so the maven module boundary is invisible at manifest level too."
+  "note": "Re-authored for LA.9 against the PROJECT kind (45). Two pom.xml roots in one walked dir with colliding Util.java basenames plus a vendored pom.xml under mod-a/vendor. Was a REGION/CONTAINS probe written before PROJECT existed (A15.11), which read `none` though both roots were detected."
 }

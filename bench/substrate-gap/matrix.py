@@ -29,12 +29,17 @@ FOUR GRADED ASSERTIONS per (fixture, cell), all from ONE grade_fixture() call:
   route     the scoped expect_edges are NON-EMPTY and all `found`. An empty set
            is not-applicable, not a pass: the cell then caps at `partial` and
            records the reason, because a mechanism nobody routed is not proven.
+           The one exception is an ANCHOR mechanism (matrix_vocab `anchor: True`,
+           e.g. subproject): its node is edge-less by design, so it has no
+           routing vocabulary and route is not-applicable BY DEFINITION -- which
+           is different from "nobody routed it", so it does not cap the cell.
   forbid    zero violations among the scoped `forbid` entries. This is what caps
            a phantom-emitting cell at `partial`; the review's matrix was
            recall-only and could not express precision at all.
 
 LEVEL:  none    iff not extract
         full    iff extract and literal and route and forbid
+                (anchor mechanism: iff extract and literal and forbid)
         partial otherwise
         error   if grade_fixture RAISED. Deliberately NOT swallowed the way
                 run.py does -- an unbuildable matrix fixture that quietly read
@@ -215,10 +220,16 @@ def derive(mech_id, res, present_kinds):
 
     extract_ok = extract_n == extract_d
     literal_ok = literal_n == literal_d          # vacuously true when nothing scoped
-    route_ok = route_d > 0 and route_n == route_d
+    # Opt-in per mechanism: an ANCHOR mechanism has no routing vocabulary, so
+    # route is not-applicable rather than a cap. Every other mechanism keeps the
+    # rule that an unrouted cell is not proven.
+    anchor = m.get("anchor", False)
+    route_ok = True if anchor else (route_d > 0 and route_n == route_d)
     forbid_ok = forbid_n == forbid_d
 
-    if route_d == 0:
+    if anchor:
+        reasons.append("anchor mechanism: routing not applicable")
+    elif route_d == 0:
         reasons.append("no routing expected")
     if not extract_ok:
         level = "none"
