@@ -8,6 +8,10 @@
 //! Rust `match`. This test drives every needle through `generate_one`, so it
 //! runs exactly what `apply_cross_cutting_extractors` runs, whatever that
 //! becomes, instead of coupling to each extractor's signature.
+//!
+//! LA.22c adds a `.clj` arm: every needle is also written as Clojure, plus
+//! [`CLJ_NEEDLES`] for the Clojure parser's own text scan, whose reitit
+//! look-back sliced `&source[i - 32..i]` before every `"`.
 
 use std::path::Path;
 
@@ -73,8 +77,16 @@ const NEEDLES: &[&str] = &[
     "@router.get('/x')",
 ];
 
+/// The Clojure parser's own route / client needles (LA.22c), written as
+/// `.clj` only: a reitit route vector, a compojure route and a clj-http call.
+const CLJ_NEEDLES: &[&str] = &[
+    "[\"/users\" {:get list-users}]",
+    "(GET \"/users\" [] h)",
+    "(client/get \"http://api/users\" {:headers {}})",
+];
+
 const WIDTHS: [usize; 5] = [32, 64, 128, 256, 512];
-const EXTS: [&str; 2] = ["ts", "py"];
+const EXTS: [&str; 3] = ["ts", "py", "clj"];
 const WIDE: char = '\u{1F600}';
 
 /// Pads `k` for which a `W`-wide window anchored at the needle's start or end
@@ -97,10 +109,21 @@ fn cut_pads(needle_len: usize) -> Vec<usize> {
 
 /// Writes the sweep tree under `root`; returns the file count.
 fn write_sweep(root: &Path) -> usize {
+    let arms: [(&str, &[&str], &[&str]); 2] =
+        [("n", NEEDLES, &EXTS), ("c", CLJ_NEEDLES, &["clj"])];
     let mut files = 0;
-    for (i, needle) in NEEDLES.iter().enumerate() {
-        for ext in EXTS {
-            let dir = root.join(format!("n{i}_{ext}"));
+    for (tag, needles, exts) in arms {
+        files += write_arm(root, tag, needles, exts);
+    }
+    files
+}
+
+/// One arm of the sweep: every needle in `needles`, as every ext in `exts`.
+fn write_arm(root: &Path, tag: &str, needles: &[&str], exts: &[&str]) -> usize {
+    let mut files = 0;
+    for (i, needle) in needles.iter().enumerate() {
+        for ext in exts {
+            let dir = root.join(format!("{tag}{i}_{ext}"));
             std::fs::create_dir_all(&dir).unwrap();
             for k in cut_pads(needle.len()) {
                 let pad = "x".repeat(k);
@@ -130,9 +153,11 @@ fn extractor_windows_never_cut_a_multibyte_char() {
 
     let r = generate_one(repo.to_str().unwrap()).unwrap();
     eprintln!(
-        "[multibyte-sweep] files={files} needles={} widths=32,64,128,256,512 parse_errors={}",
+        "[multibyte-sweep] files={files} needles={} widths=32,64,128,256,512 parse_errors={} clj_needles={} exts={}",
         NEEDLES.len(),
-        r.parse_errors.len()
+        r.parse_errors.len(),
+        CLJ_NEEDLES.len(),
+        EXTS.join(","),
     );
     assert!(
         r.parse_errors.is_empty(),

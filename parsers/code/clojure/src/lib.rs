@@ -1,4 +1,9 @@
-use repo_graph_code_domain::endpoint::{canonical_http_path, route_qname};
+use std::collections::{HashMap, HashSet};
+
+use repo_graph_code_domain::endpoint::{
+    ClientEndpoint, HitExtras, canonical_http_path, client_url_split, push_client_endpoint_with,
+    route_qname,
+};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -37,6 +42,13 @@ pub fn parse_file(
 
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
     scan_clojure_routes(source, repo, &mut acc);
+    let endpoints = acc.clj_http_hits + acc.hato_hits;
+    if endpoints > 0 {
+        eprintln!(
+            "[clj-http] endpoints={endpoints} (clj-http={} hato={}) path={file_rel_path}",
+            acc.clj_http_hits, acc.hato_hits
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -57,6 +69,16 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
+    /// LA.22c: `alias -> namespace` from this file's require vectors
+    /// (`[clj-http.client :as client]`). An `Acc` lives for one `parse_file`,
+    /// so two files that alias `client` differently never see each other's.
+    ns_aliases: HashMap<String, String>,
+    /// LA.22c: dedups ENDPOINT nodes across the file (the sink's `seen`).
+    endpoint_seen: HashSet<NodeId>,
+    /// LA.22c: client call sites that emitted an ENDPOINT, per library, for
+    /// the `[clj-http]` marker.
+    clj_http_hits: usize,
+    hato_hits: usize,
 }
 
 fn visit_top(
@@ -171,6 +193,7 @@ fn visit_defn(
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
 
     collect_calls_in(node, src, id, acc);
+    collect_client_endpoints_in(node, src, id, repo, file_rel, acc);
 }
 
 fn visit_defprotocol(
@@ -294,7 +317,16 @@ fn extract_require_from_vec<'a>(vec_node: TsNode<'a>, src: &'a [u8]) -> String {
 fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        if child.kind() == "quoting_lit" {
+            // `(require '[clj-http.client :as client])`: the alias only. The
+            // quoted form has never emitted an import, and LA.22c does not
+            // change that.
+            if let Some(vec) = values(child).find(|v| v.kind() == "vec_lit") {
+                record_alias(vec, src, acc);
+            }
+        }
         if child.kind() == "vec_lit" {
+            record_alias(child, src, acc);
             let req = extract_require_from_vec(child, src);
             if !req.is_empty() {
                 acc.imports.push(ImportStmt {
@@ -360,6 +392,279 @@ fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
+/// The `value` children of a form: its elements, without comments or `#_`
+/// discarded forms (tree-sitter-clojure leaves those unlabelled).
+fn values<'a>(node: TsNode<'a>) -> impl Iterator<Item = TsNode<'a>> {
+    let mut cursor = node.walk();
+    node.children_by_field_name("value", &mut cursor)
+        .collect::<Vec<_>>()
+        .into_iter()
+}
+
+/// `[clj-http.client :as client]` records `client -> clj-http.client`.
+fn record_alias(vec: TsNode, src: &[u8], acc: &mut Acc) {
+    let vals: Vec<TsNode> = values(vec).collect();
+    let Some(ns) = vals.first().filter(|n| n.kind() == "sym_lit") else {
+        return;
+    };
+    for pair in vals.windows(2) {
+        if pair[0].kind() == "kwd_lit"
+            && text_of(pair[0], src) == ":as"
+            && pair[1].kind() == "sym_lit"
+        {
+            acc.ns_aliases.insert(
+                text_of(pair[1], src).to_string(),
+                text_of(*ns, src).to_string(),
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Clojure HTTP clients (LA.22c): clj-http, hato
+// ============================================================================
+//
+// `(client/get "http://api/users" opts)` with `client` bound to
+// `clj-http.client` (or `hato.client`) by the file's require, the
+// fully-qualified `(clj-http.client/get ...)`, and the map form
+// `(client/request {:method :get :url "..."})` become ENDPOINT nodes through
+// the shared code-domain sink, with a CALLS edge from the enclosing
+// top-level form's node. A `client/get` whose alias is not bound to one of
+// these namespaces stays a plain call.
+
+#[derive(Clone, Copy)]
+enum CljClient {
+    CljHttp,
+    Hato,
+}
+
+/// The client library a namespace names. clj-http-lite is clj-http's
+/// drop-in fork (same functions, same arguments), so it counts as clj-http.
+fn clj_client(ns: &str) -> Option<CljClient> {
+    match ns {
+        "clj-http.client" | "clj-http.lite.client" => Some(CljClient::CljHttp),
+        "hato.client" => Some(CljClient::Hato),
+        _ => None,
+    }
+}
+
+/// Upper-case verb for a client function / `:method` keyword name.
+fn clj_http_verb(name: &str) -> Option<&'static str> {
+    match name {
+        "get" => Some("GET"),
+        "post" => Some("POST"),
+        "put" => Some("PUT"),
+        "patch" => Some("PATCH"),
+        "delete" => Some("DELETE"),
+        "head" => Some("HEAD"),
+        "options" => Some("OPTIONS"),
+        _ => None,
+    }
+}
+
+/// `(namespace, name)` of a form's head symbol, read from the symbol's own
+/// `namespace` / `name` fields so reader metadata on it never leaks in:
+/// `(client/get ...)` -> `(Some("client"), "get")`, `(str ...)` ->
+/// `(None, "str")`. None when the head is not a symbol.
+fn head_sym<'a>(list: TsNode<'a>, src: &'a [u8]) -> Option<(Option<&'a str>, &'a str)> {
+    let head = list
+        .child_by_field_name("value")
+        .filter(|h| h.kind() == "sym_lit")?;
+    let name = text_of(head.child_by_field_name("name")?, src);
+    let ns = head
+        .child_by_field_name("namespace")
+        .map(|n| text_of(n, src));
+    Some((ns, name))
+}
+
+/// Walk one top-level form for client calls. Pre-order, so the first call
+/// site of a `(method, path)` owns the ENDPOINT_HIT cell. A call is a
+/// `(...)` list or a `#(...)` anonymous fn, whose head is its first element
+/// too. Descends into anonymous `(fn ...)` / `#(...)` bodies (they run as
+/// part of the enclosing form), but never into `(comment ...)` or a quoted
+/// `'(...)`, which are not evaluated.
+fn collect_client_endpoints_in(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "quoting_lit" {
+            continue;
+        }
+        if matches!(n.kind(), "list_lit" | "anon_fn_lit")
+            && let Some((ns, name)) = head_sym(n, src)
+        {
+            if ns.is_none() && name == "comment" {
+                continue;
+            }
+            if let Some(lib) =
+                ns.and_then(|ns| clj_client(acc.ns_aliases.get(ns).map_or(ns, String::as_str)))
+            {
+                try_detect_clj_endpoint(n, src, lib, name, from, repo, file_rel, acc);
+            }
+        }
+        let children: Vec<TsNode> = values(n).collect();
+        stack.extend(children.into_iter().rev());
+    }
+}
+
+/// One clj-http / hato call: `(verb url opts?)` or `(request {:method ..
+/// :url ..})`. Emits nothing when the URL is not a literal the sink can split
+/// into a path (a bare var, or a `(str base "/x")` whose base is unknown).
+#[allow(clippy::too_many_arguments)]
+fn try_detect_clj_endpoint(
+    list: TsNode,
+    src: &[u8],
+    lib: CljClient,
+    name: &str,
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> Option<()> {
+    let args: Vec<TsNode> = values(list).skip(1).collect();
+    let (verb, url) = if name == "request" {
+        let map = args.first().filter(|a| a.kind() == "map_lit")?;
+        let kv: Vec<TsNode> = values(*map).collect();
+        let (mut verb, mut url) = (None, None);
+        for pair in kv.chunks_exact(2) {
+            match text_of(pair[0], src) {
+                ":method" | ":request-method" if pair[1].kind() == "kwd_lit" => {
+                    verb = clj_http_verb(text_of(pair[1], src).trim_start_matches(':'));
+                }
+                ":url" => url = Some(pair[1]),
+                _ => {}
+            }
+        }
+        (verb?, url?)
+    } else {
+        (clj_http_verb(name)?, *args.first()?)
+    };
+    let (raw, interpolated) = clj_url_arg(url, src)?;
+    let (host, path) = client_url_split(&raw);
+    let pos = list.start_position();
+    let ep = ClientEndpoint {
+        method: verb.to_string(),
+        path: path?,
+        file: file_rel.to_string(),
+        line: pos.row + 1,
+        col: pos.column + 1,
+        confidence: if interpolated {
+            Confidence::Medium
+        } else {
+            Confidence::Strong
+        },
+    };
+    let extras = HitExtras {
+        host: host.as_deref(),
+        ..HitExtras::default()
+    };
+    push_client_endpoint_with(
+        repo,
+        &ep,
+        extras,
+        from,
+        &mut acc.nodes,
+        &mut acc.edges,
+        &mut acc.nav,
+        &mut acc.endpoint_seen,
+    );
+    match lib {
+        CljClient::CljHttp => acc.clj_http_hits += 1,
+        CljClient::Hato => acc.hato_hits += 1,
+    }
+    Some(())
+}
+
+/// The placeholder every parser writes for an interpolated URL segment, so
+/// `normalise_http_path` collapses it the same way it does a TS template.
+const INTERP: &str = "${…}";
+
+/// Reconstruct a URL argument: a string literal is itself (Strong);
+/// `(str "http://api/users/" id)` is `http://api/users/${…}` and
+/// `(format "http://api/users/%s" id)` the same (Medium). Returns
+/// `(text, interpolated)`; None for anything else (a var, a call).
+fn clj_url_arg(node: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    match node.kind() {
+        "str_lit" => Some((str_content(node, src)?.to_string(), false)),
+        "list_lit" => {
+            let (ns, name) = head_sym(node, src)?;
+            if ns.is_some_and(|ns| ns != "clojure.core") {
+                return None;
+            }
+            match name {
+                "str" => Some(str_concat(node, src)),
+                "format" => {
+                    let fmt = values(node).nth(1).filter(|f| f.kind() == "str_lit")?;
+                    Some(format_template(str_content(fmt, src)?))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// A `str_lit`'s text without its quotes.
+fn str_content<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    text_of(node, src).strip_prefix('"')?.strip_suffix('"')
+}
+
+/// `(str a "/x" b)`: literal strings and numbers verbatim, anything else one
+/// `${…}` (adjacent ones collapse, `(str host port "/x")` is `${…}/x`).
+fn str_concat(list: TsNode, src: &[u8]) -> (String, bool) {
+    let mut out = String::new();
+    let mut interpolated = false;
+    for arg in values(list).skip(1) {
+        match arg.kind() {
+            "str_lit" => out.push_str(str_content(arg, src).unwrap_or("")),
+            "num_lit" => out.push_str(text_of(arg, src)),
+            _ => {
+                if !out.ends_with(INTERP) {
+                    out.push_str(INTERP);
+                }
+                interpolated = true;
+            }
+        }
+    }
+    (out, interpolated)
+}
+
+/// A `format` template with every conversion (`%s`, `%d`, `%05d`, `%1$s`)
+/// as `${…}`; `%%` is a literal `%`.
+fn format_template(fmt: &str) -> (String, bool) {
+    let mut out = String::with_capacity(fmt.len());
+    let mut interpolated = false;
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+        // flags, width, precision, argument index, then the conversion letter
+        while chars.peek().is_some_and(|c| {
+            c.is_ascii_digit() || matches!(c, '-' | '#' | '+' | ' ' | ',' | '(' | '.' | '$')
+        }) {
+            chars.next();
+        }
+        if chars.next().is_some() {
+            out.push_str(INTERP);
+            interpolated = true;
+        }
+    }
+    (out, interpolated)
+}
+
 // ============================================================================
 // Clojure route extraction (v0.4.11a R-clojure)
 // ============================================================================
@@ -393,56 +698,80 @@ fn scan_clojure_routes(source: &str, repo: RepoId, acc: &mut Acc) {
         }
     }
 
-    // Reitit: `["/path" {:get ... :post ...}]` (may span lines).
-    // Strategy: find each `"/..."` preceded by `[`, then within the next
-    // `{...}` block, find any `:<method>` keyword tokens.
+    // Reitit: `["/path" {:get ... :post ...}]` (may span lines). LA.22c: the
+    // string is route data only when `[` is the nearest non-whitespace byte
+    // before it and `{` the nearest after its closing quote, and a method
+    // counts only as a whole `:<method>` keyword, so a client call
+    // `[r (client/get (str base "/users") {:headers ...})]` is not a route.
+    // Every probe is a byte read, never a str slice at a computed offset, so
+    // multibyte text anywhere in the file cannot panic the scan.
     let bytes = source.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'"' {
-            // Look backwards for '[' on the same line-ish to detect reitit form.
-            let start_back = i.saturating_sub(32);
-            let context = &source[start_back..i];
-            let opened = context
-                .chars()
-                .rev()
-                .take_while(|c| !matches!(c, ']' | ')' | '\n'))
-                .any(|c| c == '[');
-            if opened {
-                // Extract path literal.
-                let after = &source[i + 1..];
-                if let Some(end) = after.find('"') {
-                    let path = &after[..end];
-                    if path.starts_with('/') {
-                        // Find the nearest `{...}` block following.
-                        let tail = &after[end + 1..];
-                        if let Some(open_brace) = tail.find('{') {
-                            let block_start = end + 1 + open_brace + 1;
-                            let block_tail = &after[block_start..];
-                            if let Some(close_brace) = block_tail.find('}') {
-                                let block = &block_tail[..close_brace];
-                                for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
-                                    let kw = format!(":{method}");
-                                    if block.contains(&kw) {
-                                        emit_clojure_route(
-                                            &method.to_ascii_uppercase(),
-                                            path,
-                                            repo,
-                                            acc,
-                                            &mut seen,
-                                        );
-                                    }
-                                }
-                            }
-                        }
+        if bytes[i] == b'"'
+            && prev_non_ws(bytes, i) == Some(b'[')
+            && let Some(end) = source[i + 1..].find('"')
+        {
+            let close = i + 1 + end;
+            let path = &source[i + 1..close];
+            if path.starts_with('/')
+                && let Some(open) = next_non_ws(bytes, close + 1).filter(|&j| bytes[j] == b'{')
+                && let Some(len) = source[open + 1..].find('}')
+            {
+                let block = &source[open + 1..open + 1 + len];
+                for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
+                    if has_keyword(block, method) {
+                        emit_clojure_route(
+                            &method.to_ascii_uppercase(),
+                            path,
+                            repo,
+                            acc,
+                            &mut seen,
+                        );
                     }
-                    i += 1 + end + 1;
-                    continue;
                 }
             }
+            i = close + 1;
+            continue;
         }
         i += 1;
     }
+}
+
+/// Clojure whitespace: ASCII whitespace and `,`.
+fn is_clj_ws(b: u8) -> bool {
+    b.is_ascii_whitespace() || b == b','
+}
+
+/// The nearest non-whitespace byte before `i` (crossing newlines).
+fn prev_non_ws(bytes: &[u8], i: usize) -> Option<u8> {
+    bytes[..i].iter().rev().copied().find(|&b| !is_clj_ws(b))
+}
+
+/// Index of the nearest non-whitespace byte at or after `i`.
+fn next_non_ws(bytes: &[u8], i: usize) -> Option<usize> {
+    bytes
+        .get(i..)?
+        .iter()
+        .position(|&b| !is_clj_ws(b))
+        .map(|p| i + p)
+}
+
+/// A byte that continues a Clojure symbol / keyword token.
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b >= 0x80 || b"-_?!*+<>=.'/:#$%&|".contains(&b)
+}
+
+/// `block` holds the keyword `:<name>` as a whole token: `:head` matches in
+/// `{:head h}` but not in `:headers`, `::head` or `:x/head`.
+fn has_keyword(block: &str, name: &str) -> bool {
+    let bytes = block.as_bytes();
+    let kw = format!(":{name}");
+    block.match_indices(&kw).any(|(p, _)| {
+        let before_ok = p == 0 || !is_token_byte(bytes[p - 1]);
+        let after_ok = bytes.get(p + kw.len()).is_none_or(|&b| !is_token_byte(b));
+        before_ok && after_ok
+    })
 }
 
 fn emit_clojure_route(
@@ -637,5 +966,275 @@ mod tests {
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users/:id")));
+    }
+
+    // ---- LA.22c: clj-http / hato clients, reitit boundary rules ----
+
+    /// The matrix probe's client file (matrix/clojure/http_client).
+    const PROBE: &str = r#"(ns app.api-client
+  (:require [clj-http.client :as client]))
+
+(def base "http://api")
+
+(defn list-users []
+  (:body (client/get "http://api/users" {:as :json})))
+
+(defn create-user [user]
+  (client/post "http://api/users" {:form-params user :content-type :json}))
+
+(defn user-count [token]
+  (let [r (client/get (str base "/users") {:headers {"Authorization" token}})]
+    (count (:body r))))
+"#;
+
+    fn kind_count(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> usize {
+        fp.nav.kind_by_id.values().filter(|k| **k == kind).count()
+    }
+
+    fn endpoint_names(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn fn_id(module: &str, name: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, &format!("{module}::{name}"))
+    }
+
+    fn ep_id(method: &str, path: &str) -> NodeId {
+        repo_graph_code_domain::endpoint::endpoint_id(repo(), method, path)
+    }
+
+    fn has_calls(fp: &FileParse, from: NodeId, to: NodeId) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+    }
+
+    fn hit_json(fp: &FileParse, id: NodeId) -> String {
+        fp.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .find_map(|c| match (&c.payload, c.kind == cell_type::ENDPOINT_HIT) {
+                (CellPayload::Json(s), true) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn clj_http_calls_emit_endpoints() {
+        let fp = parse_file(PROBE, "api_client.clj", "api_client", repo()).unwrap();
+        // user-count's `(str base "/users")` is `${…}/users`: no scheme, no
+        // leading `/`, so client_url_split yields no path and no third node.
+        assert_eq!(endpoint_names(&fp), vec!["GET /users", "POST /users"]);
+        let get = ep_id("GET", "/users");
+        let post = ep_id("POST", "/users");
+        assert!(has_calls(&fp, fn_id("api_client", "list-users"), get));
+        assert!(has_calls(&fp, fn_id("api_client", "create-user"), post));
+        assert!(!fp.edges.iter().any(|e| e.from == fn_id("api_client", "user-count")
+            && e.category == edge_category::CALLS));
+        let hit = hit_json(&fp, get);
+        assert!(hit.contains(r#""method":"GET""#), "{hit}");
+        assert!(hit.contains(r#""file":"api_client.clj""#), "{hit}");
+        assert!(hit.contains(r#""line":7"#), "{hit}");
+        assert!(hit.contains(r#""host":"api""#), "{hit}");
+        assert!(hit.contains(r#""confidence":"strong""#), "{hit}");
+        assert!(hit_json(&fp, post).contains(r#""method":"POST""#));
+    }
+
+    #[test]
+    fn client_call_with_headers_is_not_a_route() {
+        let fp = parse_file(PROBE, "api_client.clj", "api_client", repo()).unwrap();
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("HEAD", "/users")));
+    }
+
+    #[test]
+    fn hato_verbs_and_request_map_emit_endpoints() {
+        let source = r#"
+(ns app.items
+  (:require [hato.client :as hc]))
+
+(defn put-item [id body]
+  (hc/put (str "http://svc:8080/items/" id) {:body body}))
+
+(defn drop-items []
+  (hc/request {:method :delete :url "https://api.example.com/items"}))
+
+(defn probe []
+  (hc/head "/health"))
+"#;
+        let fp = parse_file(source, "src/items.clj", "src::items", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec!["DELETE /items", "HEAD /health", "PUT /items/${…}"]
+        );
+        let put = ep_id("PUT", "/items/${…}");
+        assert!(has_calls(&fp, fn_id("src::items", "put-item"), put));
+        let hit = hit_json(&fp, put);
+        assert!(hit.contains(r#""confidence":"medium""#), "{hit}");
+        assert!(hit.contains(r#""host":"svc:8080""#), "{hit}");
+        let del = hit_json(&fp, ep_id("DELETE", "/items"));
+        assert!(del.contains(r#""host":"api.example.com""#), "{del}");
+        assert!(has_calls(&fp, fn_id("src::items", "drop-items"), ep_id("DELETE", "/items")));
+    }
+
+    #[test]
+    fn clj_http_request_map_and_format_url() {
+        let source = r#"
+(ns app.users
+  (:require [clj-http.client :as http]))
+
+(defn patch-user [id m]
+  (http/request {:url (format "http://api/users/%s" id)
+                 :request-method :patch
+                 :form-params m}))
+
+(defn all-users [ids]
+  (mapv (fn [id] (http/get (str "http://api/users/" id "/profile"))) ids))
+
+(defn pinged []
+  (run! #(http/put (str "http://api/ping/" %)) [1 2])
+  @(http/options "http://api/ping" {:async? true}))
+"#;
+        let fp = parse_file(source, "src/users.clj", "src::users", repo()).unwrap();
+        assert_eq!(
+            endpoint_names(&fp),
+            vec![
+                "GET /users/${…}/profile",
+                "OPTIONS /ping",
+                "PATCH /users/${…}",
+                "PUT /ping/${…}"
+            ]
+        );
+        // An anonymous `(fn ...)` belongs to its enclosing defn.
+        assert!(has_calls(
+            &fp,
+            fn_id("src::users", "all-users"),
+            ep_id("GET", "/users/${…}/profile")
+        ));
+    }
+
+    #[test]
+    fn fully_qualified_and_quoted_require_forms() {
+        let source = r#"
+(require '[hato.client :as hc])
+
+(defn a [] (clj-http.client/get "http://api/a"))
+(defn b [] (hc/post "http://api/b" {}))
+"#;
+        let fp = parse_file(source, "src/fq.clj", "src::fq", repo()).unwrap();
+        assert_eq!(endpoint_names(&fp), vec!["GET /a", "POST /b"]);
+    }
+
+    #[test]
+    fn unbound_client_alias_stays_a_plain_call() {
+        // `client` is not bound to clj-http / hato here: a plain call, no ENDPOINT.
+        let source = r#"
+(ns app.other
+  (:require [app.client :as client]))
+
+(defn f [] (client/get "http://api/users"))
+(defn g [] (svc/post "http://api/users" {}))
+"#;
+        let fp = parse_file(source, "src/other.clj", "src::other", repo()).unwrap();
+        assert!(endpoint_names(&fp).is_empty(), "{:?}", endpoint_names(&fp));
+        assert!(fp.calls.iter().any(|c| matches!(&c.qualifier,
+            CallQualifier::Attribute { base, name } if base == "client" && name == "get")));
+    }
+
+    #[test]
+    fn client_alias_is_per_file() {
+        let a = r#"(ns a (:require [clj-http.client :as client]))
+(defn f [] (client/get "http://api/users"))
+"#;
+        let b = r#"(ns b (:require [my.rpc :as client]))
+(defn f [] (client/get "http://api/users"))
+"#;
+        let fa = parse_file(a, "a.clj", "a", repo()).unwrap();
+        let fb = parse_file(b, "b.clj", "b", repo()).unwrap();
+        assert_eq!(endpoint_names(&fa), vec!["GET /users"]);
+        assert!(endpoint_names(&fb).is_empty());
+    }
+
+    #[test]
+    fn discarded_and_comment_forms_emit_nothing() {
+        let source = r#"
+(ns app.scratch (:require [clj-http.client :as client]))
+
+(defn f []
+  #_(client/get "http://api/a")
+  (comment (client/get "http://api/b"))
+  (client/get base-url))
+"#;
+        let fp = parse_file(source, "src/scratch.clj", "src::scratch", repo()).unwrap();
+        assert!(endpoint_names(&fp).is_empty(), "{:?}", endpoint_names(&fp));
+    }
+
+    #[test]
+    fn reitit_multiline_route_vector_still_emits() {
+        // `nearest non-whitespace byte` crosses newlines and Clojure's `,`.
+        let source = r#"(def routes
+  [
+   "/users"
+   {:get list-users
+    :post create-user}]
+  ["/ping" ,
+   {:head ping}]
+  ["/items"
+   {:put put-item}])
+"#;
+        let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("HEAD", "/ping")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("PUT", "/items")));
+    }
+
+    #[test]
+    fn reitit_method_keyword_needs_a_token_boundary() {
+        let source = r#"
+(def routes
+  [["/a" {:headers x :getter y :post? z :put! w :delete-all v}]
+   ["/b" {:ns/get x ::get y}]])
+"#;
+        let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+    }
+
+    #[test]
+    fn reitit_needs_bracket_before_and_brace_after_the_path() {
+        let source = r#"
+(def xs [(f "/a") {:get x}])
+(def ys [x "/b" {:get x}])
+(def zs ["/c" :name {:get x}])
+"#;
+        let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 0, "{:?}", fp.nav.name_by_id);
+    }
+
+    #[test]
+    fn route_scan_survives_multibyte_text_before_a_string() {
+        // HEAD sliced `&source[i - 32..i]` before every `"`; put a multibyte
+        // char across that cut, for a plain string and for a route vector.
+        let head = "(def s \"é…\")\n";
+        let tail = "[\"/users\" {:get list-users}]";
+        let ell = head.find('…').unwrap();
+        let q = head.len() + 1; // the `"` after `[`
+        let pad = " ".repeat(ell + 1 + 32 - q);
+        let source = format!("{head}{pad}{tail}\n(def t \"é…\")\n");
+        let quote = source.find("\"/users").unwrap();
+        assert!(!source.is_char_boundary(quote - 32), "cut must land inside `…`");
+        let fp = parse_file(&source, "src/api.clj", "src::api", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 1);
     }
 }
