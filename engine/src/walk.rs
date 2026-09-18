@@ -7,6 +7,7 @@ use repo_graph_code_domain::project_roots::{self, ProjectRoot};
 use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use repo_graph_code_extractors::contracts::sniff_json_contract;
+use repo_graph_code_extractors::schemas::sniff_json_schema;
 use repo_graph_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::extract::detect_language;
@@ -52,8 +53,9 @@ fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
 const JSON_CONTRACT_CAP: u64 = 512_000;
 
 /// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
-/// `.json` the walk reached, `admitted` is the ones queued as contracts, and
-/// `over_cap` is the ones never read because they exceed [`JSON_CONTRACT_CAP`].
+/// `.json` the walk reached, `admitted` is the ones queued as contracts or
+/// (LA.16) as JSON Schemas, and `over_cap` is the ones never read because
+/// they exceed [`JSON_CONTRACT_CAP`].
 #[derive(Default)]
 struct JsonAdmission {
     sniffed: usize,
@@ -200,18 +202,19 @@ fn walk_dir(
                 continue;
             }
             // A10.8: a `.json` is read only to be sniffed, and queued only when
-            // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact). Lock
-            // files, tsconfig and test data are read once, dropped here, and
-            // never kept. `package.json` / `composer.json` are manifests
-            // (`is_bypass_path`) and keep their own route below. Anything under
-            // a collapsed region (node_modules, dist, ...) is never reached.
+            // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact) or, since
+            // LA.16 (A10.12), a JSON Schema. Lock files, tsconfig and test data
+            // are read once, dropped here, and never kept. `package.json` /
+            // `composer.json` are manifests (`is_bypass_path`) and keep their
+            // own route below. Anything under a collapsed region (node_modules,
+            // dist, ...) is never reached.
             if rel_str.to_ascii_lowercase().ends_with(".json") && !is_bypass_path(&rel_str) {
                 json.sniffed += 1;
                 match std::fs::metadata(&path) {
                     Ok(m) if m.len() > JSON_CONTRACT_CAP => json.over_cap += 1,
                     Ok(_) => {
                         if let Ok(text) = std::fs::read_to_string(&path)
-                            && sniff_json_contract(&text).is_some()
+                            && (sniff_json_contract(&text).is_some() || sniff_json_schema(&text))
                         {
                             json.admitted += 1;
                             files.push((rel_str, text));
@@ -615,6 +618,66 @@ mod walk_tests {
             })
             .collect();
         assert_eq!(docs, ["contract::openapi::GET:/users"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LA.16 (A10.12): a JSON Schema is admitted beside the contracts. The
+    /// sniff is only a gate, so a data file whose NESTED object looks like a
+    /// schema is admitted too, and the build then mints nothing from it; data
+    /// that does not even look schema-shaped is dropped at the walk.
+    #[test]
+    fn walk_admits_json_schema_and_rejects_lookalike_data() {
+        let root = walk_tmp("jsonschema");
+        for d in ["schemas", "testdata", "config", "data"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let files_in = [
+            (
+                "schemas/user.schema.json",
+                r##"{"$schema":"http://json-schema.org/draft-07/schema#","title":"User","type":"object",
+ "properties":{"address":{"$ref":"#/definitions/Address"}},
+ "definitions":{"Address":{"type":"object","properties":{"street":{"type":"string"}}}}}"##,
+            ),
+            ("schemas/refund.json", r#"{"type":"object","properties":{"refundId":{"type":"string"}}}"#),
+            (
+                "testdata/settings.json",
+                r#"{"name":"billing","config":{"type":"object","properties":{"retries":3}}}"#,
+            ),
+            ("config/app.json", r#"{"$schema":"https://json.schemastore.org/app","type":"module"}"#),
+            ("data/event.json", r#"{"type":"object","id":7}"#),
+        ];
+        for (rel, body) in files_in {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+
+        let (files, ..) = walk_source_files(&root);
+        let json: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            json,
+            ["schemas/refund.json", "schemas/user.schema.json", "testdata/settings.json"],
+            "the two schemas and the nested look-alike pass the gate; the rest never do"
+        );
+
+        let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        let mut types: Vec<String> = Vec::new();
+        let mut settings_nodes = 0usize;
+        for g in &r.merged.graphs {
+            for n in &g.nodes {
+                let q = g.nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+                if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MESSAGE_TYPE) {
+                    types.push(q.to_string());
+                }
+                if q.contains("settings") {
+                    settings_nodes += 1;
+                }
+            }
+        }
+        types.sort_unstable();
+        assert_eq!(
+            types,
+            ["message:jsonschema:User", "message:jsonschema:User.Address", "message:jsonschema:refund"]
+        );
+        assert_eq!(settings_nodes, 0, "the look-alike mints no MESSAGE_TYPE and no MODULE");
         let _ = std::fs::remove_dir_all(&root);
     }
 

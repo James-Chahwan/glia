@@ -7,12 +7,14 @@
 //! `node_kind::MESSAGE_TYPE` nodes, so a polyglot stack has one node per
 //! declared type to share.
 //!
-//! qname convention: `message:<flavor>:<qualified name>`, flavor `proto` or
-//! `avro` (A10.6; `jsonschema` reserved for A10.12). Each qualified name is
+//! qname convention: `message:<flavor>:<qualified name>`, flavor `proto`,
+//! `avro` (A10.6) or `jsonschema` (A10.12 / LA.16). Each qualified name is
 //! written the way its own format writes it: protobuf's
 //! `<package>.<Outer>.<Inner>`, and Avro's fullname `<namespace>.<Name>`, where
 //! a nested named type inherits the enclosing namespace rather than nesting
-//! under the outer record (the name Avro codegen and other schemas use).
+//! under the outer record (the name Avro codegen and other schemas use). A
+//! JSON Schema has no namespace: its root is named by `title`, `$id` or the
+//! file stem, and each `$defs` / `definitions` member is `<root>.<def>`.
 
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
@@ -24,14 +26,19 @@ pub struct SchemaNodes {
     /// Outer message / record DEFINES each nested declaration.
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
-    /// proto `message` / Avro `record` declarations emitted (nested included).
+    /// proto `message` / Avro `record` declarations emitted (nested included);
+    /// for a JSON Schema, the root type (0 or 1).
     pub message_count: usize,
     /// `enum` declarations emitted (nested ones included).
     pub enum_count: usize,
     /// Avro `fixed` declarations emitted. Always 0 for proto.
     pub fixed_count: usize,
-    /// Cells for the file's own MODULE node: an `.avsc`'s whole-file POSITION.
-    /// Empty for proto, whose module POSITION comes from `grpc.rs`.
+    /// JSON Schema `$defs` / `definitions` members emitted. Always 0 for proto
+    /// and Avro.
+    pub def_count: usize,
+    /// Cells for the file's own MODULE node: an `.avsc`'s or a JSON Schema's
+    /// whole-file POSITION. Empty for proto, whose module POSITION comes from
+    /// `grpc.rs`.
     pub module_cells: Vec<Cell>,
 }
 
@@ -594,6 +601,233 @@ pub fn extract_avro_records(
     out
 }
 
+// ---------------------------------------------------------------------------
+// JSON Schema `.json` (A10.12 / LA.16)
+// ---------------------------------------------------------------------------
+
+/// How much of a `.json` [`sniff_json_schema`] scans for its markers.
+const JSON_SCHEMA_SNIFF_BYTES: usize = 8 * 1024;
+/// Most MESSAGE_TYPE nodes (the root plus `$defs` members) taken from one file.
+const JSON_SCHEMA_MAX_TYPES: usize = 256;
+/// Root keys that make a document an API contract rather than a JSON Schema.
+/// A Swagger document's `definitions` belong to the contract route
+/// (`contracts.rs`), never to this one, whatever order the router checks in.
+const CONTRACT_ROOT_KEYS: [&str; 3] = ["openapi", "swagger", "asyncapi"];
+
+/// The largest char boundary at or below `at`, so a byte cap never splits a
+/// multi-byte char.
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    let mut i = at.min(s.len());
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// What follows each occurrence of `quoted` in KEY position (the quoted key,
+/// optional whitespace, then `:`), leading whitespace trimmed. The key rule of
+/// `contracts::key_pos`, kept local: this gate reads a different file family.
+fn key_values<'a>(hay: &'a str, quoted: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+    hay.match_indices(quoted).filter_map(move |(i, _)| {
+        let rest = hay.get(i + quoted.len()..)?.trim_start();
+        rest.strip_prefix(':').map(str::trim_start)
+    })
+}
+
+/// Cheap content gate for a `.json`: could it be a JSON Schema? No parse.
+/// Within the first [`JSON_SCHEMA_SNIFF_BYTES`] of an object document, either
+/// a `"$schema"` key whose string value names `json-schema.org`, or a
+/// `"type": "object"` key together with a `"properties"` key.
+///
+/// A gate, not a validator: a data file whose NESTED object happens to look
+/// like a schema is admitted, and [`extract_json_schema_types`], which reads
+/// only the root and its `$defs`, then emits nothing. A false admit costs one
+/// parse, never a wrong node.
+pub fn sniff_json_schema(text: &str) -> bool {
+    let body = text.trim_start_matches('\u{feff}');
+    if !body.trim_start().starts_with('{') {
+        return false; // an array, JSONL or a comment header is never a schema
+    }
+    let head = &body[..floor_char_boundary(body, JSON_SCHEMA_SNIFF_BYTES)];
+    let names_meta_schema = key_values(head, "\"$schema\"").any(|v| {
+        v.strip_prefix('"')
+            .and_then(|s| s.split('"').next())
+            .is_some_and(|url| url.contains("json-schema.org"))
+    });
+    names_meta_schema
+        || (key_values(head, "\"type\"").any(|v| v.starts_with("\"object\""))
+            && key_values(head, "\"properties\"").next().is_some())
+}
+
+/// A declared type name: `[A-Za-z_][A-Za-z0-9_.-]{0,127}`. A `title` such as
+/// "Order created" fails it and falls through to `$id` / the file stem rather
+/// than minting a qname with a space in it.
+fn is_type_name(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes.next().is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+        && s.len() <= 128
+        && bytes.all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-'))
+}
+
+/// `s` without a trailing `suffix`, compared ASCII case-insensitively.
+fn strip_suffix_ci<'a>(s: &'a str, suffix: &str) -> &'a str {
+    s.len()
+        .checked_sub(suffix.len())
+        .and_then(|cut| Some((s.get(..cut)?, s.get(cut..)?)))
+        .filter(|(_, tail)| tail.eq_ignore_ascii_case(suffix))
+        .map_or(s, |(head, _)| head)
+}
+
+/// `order-created.schema.json` -> `order-created`: `.json`, then `.schema`.
+fn schema_stem(s: &str) -> &str {
+    strip_suffix_ci(strip_suffix_ci(s, ".json"), ".schema")
+}
+
+/// The root's name, first match wins: a valid `title`; else the last path
+/// segment of `$id` (fragment and query dropped, `.schema.json` / `.json`
+/// stripped) when it is a valid name; else the file stem, `.schema` stripped.
+fn json_schema_root_name(root: &Json, path: &str) -> Option<String> {
+    if let Some(title) = root.get("title").and_then(Json::as_str)
+        && is_type_name(title)
+    {
+        return Some(title.to_string());
+    }
+    if let Some(id) = root.get("$id").and_then(Json::as_str) {
+        let id = id.split(['#', '?']).next().unwrap_or(id).trim_end_matches('/');
+        let seg = schema_stem(id.rsplit('/').next().unwrap_or(id));
+        if is_type_name(seg) {
+            return Some(seg.to_string());
+        }
+    }
+    let stem = schema_stem(path.rsplit(['/', '\\']).next().unwrap_or(path));
+    (!stem.is_empty()).then(|| stem.to_string())
+}
+
+/// A schema that declares an object type: `"type": "object"`, or an
+/// object-valued `"properties"`.
+fn is_object_type(v: &Json) -> bool {
+    matches!(v, Json::Obj { .. })
+        && (v.get("type").and_then(Json::as_str) == Some("object")
+            || matches!(v.get("properties"), Some(Json::Obj { .. })))
+}
+
+/// POSITION (the object's own braces) + ORIGIN for one JSON Schema type.
+fn json_schema_node(v: &Json, id: NodeId, repo: RepoId, path: &str, decl: &str) -> Node {
+    let (start_line, end_line) = match v {
+        Json::Obj { start_line, end_line, .. } => (*start_line, *end_line),
+        _ => (0, 0),
+    };
+    // serde_json escapes control characters too, which `json_str` does not.
+    let id_field = v
+        .get("$id")
+        .and_then(Json::as_str)
+        .and_then(|s| serde_json::to_string(s).ok())
+        .map(|s| format!(r#","id":{s}"#))
+        .unwrap_or_default();
+    Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: vec![
+            position_cell(path, start_line, end_line),
+            Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"provenance":"contract","source":"jsonschema","decl":"{decl}"{id_field}}}"#
+                )),
+            },
+        ],
+    }
+}
+
+/// One MESSAGE_TYPE node per object type a JSON Schema file declares: the
+/// root, when it is an object schema, as `message:jsonschema:<root>`, and each
+/// object-schema member of its `$defs` / `definitions` (one level, document
+/// order) as `message:jsonschema:<root>.<def>`. Same shape as
+/// [`extract_avro_records`]: POSITION spanning the object's braces, an ORIGIN
+/// `provenance: contract` cell, the root DEFINES each def and parents it in
+/// nav (a def under a non-type root is parented to the file's MODULE), and the
+/// MODULE gets a whole-file POSITION. Only the root and its `$defs` are read,
+/// so a data file whose nested object looks like a schema yields nothing;
+/// malformed JSON and API contracts yield nothing either. `message_count`
+/// counts the root, `def_count` the defs; a repeated qname keeps the first.
+pub fn extract_json_schema_types(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> SchemaNodes {
+    let mut out = SchemaNodes::default();
+    // A BOM sits before the opening brace on line 0, so trimming it moves no line.
+    let body = source.trim_start_matches('\u{feff}');
+    if serde_json::from_str::<serde::de::IgnoredAny>(body).is_err() {
+        return out;
+    }
+    let mut reader = JsonReader { src: body, i: 0, line: 0 };
+    let Some(root @ Json::Obj { .. }) = reader.value(0) else {
+        return out;
+    };
+    if CONTRACT_ROOT_KEYS.iter().any(|k| root.get(k).is_some()) {
+        return out;
+    }
+    let Some(root_name) = json_schema_root_name(&root, path) else {
+        return out;
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let root_id = if is_object_type(&root) {
+        let qname = format!("message:jsonschema:{root_name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, &qname);
+        out.nodes.push(json_schema_node(&root, id, repo, path, "object"));
+        out.nav.record(id, &root_name, &qname, node_kind::MESSAGE_TYPE, Some(module_id));
+        out.message_count += 1;
+        seen.insert(qname);
+        Some(id)
+    } else {
+        None
+    };
+
+    let Json::Obj { members, .. } = &root else {
+        return out;
+    };
+    let def_blocks = members
+        .iter()
+        .filter(|(k, _)| k == "$defs" || k == "definitions")
+        .filter_map(|(_, v)| match v {
+            Json::Obj { members, .. } => Some(members),
+            _ => None,
+        });
+    for (name, def) in def_blocks.flatten() {
+        if out.nodes.len() >= JSON_SCHEMA_MAX_TYPES {
+            break;
+        }
+        if !is_type_name(name) || !is_object_type(def) {
+            continue;
+        }
+        let qname = format!("message:jsonschema:{root_name}.{name}");
+        if !seen.insert(qname.clone()) {
+            continue;
+        }
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, &qname);
+        out.nodes.push(json_schema_node(def, id, repo, path, "def"));
+        if let Some(r) = root_id {
+            out.edges.push(Edge {
+                from: r,
+                to: id,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            });
+        }
+        out.nav.record(id, name, &qname, node_kind::MESSAGE_TYPE, Some(root_id.unwrap_or(module_id)));
+        out.def_count += 1;
+    }
+    if !out.nodes.is_empty() {
+        let last = u32::try_from(source.lines().count().saturating_sub(1)).unwrap_or(u32::MAX);
+        out.module_cells.push(position_cell(path, 0, last));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -855,5 +1089,215 @@ mod tests {
             cell(&out.nodes[1], cell_type::POSITION),
             r#"{"file":"user.avsc","start_line":10,"end_line":17}"#
         );
+    }
+
+    // ---- JSON Schema (A10.12 / LA.16) ----
+
+    /// The exact bytes of the substrate fixture's shared schema, so its
+    /// POSITION / ORIGIN assertions are pinned here too.
+    const ORDER_CREATED: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/xschema-jsonschema-shared/orders/schemas/order-created.schema.json"
+    );
+    const REFUND: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/xschema-jsonschema-shared/orders/schemas/refund.json"
+    );
+    const SETTINGS: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/xschema-jsonschema-shared/billing/testdata/settings.json"
+    );
+    const FIXTURE_KEY: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/xschema-jsonschema-shared/key.json");
+
+    fn jsonschema(src: &str, path: &str) -> SchemaNodes {
+        extract_json_schema_types(src, path, module_id(), repo())
+    }
+
+    #[test]
+    fn sniff_json_schema_accepts_draft_and_object_shapes() {
+        for (what, src) in [
+            (
+                "draft-07 $schema, not even an object type",
+                r##"{"$schema": "http://json-schema.org/draft-07/schema#", "type": "string"}"##,
+            ),
+            ("2020-12 $schema", ORDER_CREATED),
+            ("type object + properties, no $schema", REFUND),
+            ("BOM and leading whitespace", "\u{feff}\n  {\"type\" : \"object\", \"properties\" : {}}"),
+            ("escaped slashes in the meta-schema URL", r#"{"$schema":"https:\/\/json-schema.org\/draft\/2019-09\/schema"}"#),
+        ] {
+            assert!(sniff_json_schema(src), "{what}: {src:?}");
+        }
+        // The walk test's rejected candidates, the fixture's own key.json and
+        // the near misses.
+        for (what, src) in [
+            ("openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
+            ("tsconfig.json", r#"{"compilerOptions":{"paths":{"@app/*":["src/app/*"]}}}"#),
+            (
+                "package-lock.json",
+                r#"{"name":"shop","lockfileVersion":3,"packages":{"":{"dependencies":{"swagger-ui":"5"}}}}"#,
+            ),
+            ("a JSON array", r#"[{"type":"object","properties":{}}]"#),
+            ("the substrate key.json", FIXTURE_KEY),
+            ("schemastore $schema", r#"{"$schema":"https://json.schemastore.org/tsconfig","compilerOptions":{}}"#),
+            ("type object without properties", r#"{"type":"object","required":[]}"#),
+            ("the keys only as values", r#"{"kind":"type","note":"properties","t":"object"}"#),
+            ("type not object", r#"{"type":"module","properties":{"a":1}}"#),
+            ("empty", ""),
+        ] {
+            assert!(!sniff_json_schema(src), "{what}: {src:?}");
+        }
+        // The markers past the 8 KiB head are not read, and the cut never
+        // splits the multi-byte char it lands in.
+        let pad = "é".repeat(JSON_SCHEMA_SNIFF_BYTES);
+        // `{"pa":"` is 7 bytes, so the 8 KiB cut lands inside an `é`.
+        let late = format!(r#"{{"pa":"{pad}","type":"object","properties":{{}}}}"#);
+        assert!(!sniff_json_schema(&late));
+    }
+
+    #[test]
+    fn json_schema_root_and_defs_are_message_types() {
+        let path = "schemas/order-created.schema.json";
+        let out = jsonschema(ORDER_CREATED, path);
+        assert_eq!(
+            qnames(&out),
+            vec!["message:jsonschema:OrderCreated", "message:jsonschema:OrderCreated.Address"],
+            "the root and its one $defs entry; properties are not declared types"
+        );
+        let (root, address) = (&out.nodes[0], &out.nodes[1]);
+        assert_eq!(out.nav.name_by_id[&root.id], "OrderCreated");
+        assert_eq!(out.nav.name_by_id[&address.id], "Address", "nav name is the bare def name");
+        assert_eq!(out.nav.kind_by_id[&address.id], node_kind::MESSAGE_TYPE);
+        assert_eq!(out.nav.parent_of[&root.id], module_id());
+        assert_eq!(out.nav.parent_of[&address.id], root.id);
+        assert_eq!(out.edges.len(), 1);
+        assert_eq!((out.edges[0].from, out.edges[0].to), (root.id, address.id));
+        assert_eq!(out.edges[0].category, edge_category::DEFINES);
+        assert_eq!(
+            cell(root, cell_type::POSITION),
+            r#"{"file":"schemas/order-created.schema.json","start_line":0,"end_line":17}"#
+        );
+        assert_eq!(
+            cell(address, cell_type::POSITION),
+            r#"{"file":"schemas/order-created.schema.json","start_line":12,"end_line":15}"#
+        );
+        assert_eq!(
+            cell(root, cell_type::ORIGIN),
+            r#"{"provenance":"contract","source":"jsonschema","decl":"object","id":"https://schemas.example.com/order-created.schema.json"}"#
+        );
+        assert_eq!(
+            cell(address, cell_type::ORIGIN),
+            r#"{"provenance":"contract","source":"jsonschema","decl":"def"}"#,
+            "a def without its own $id carries no id"
+        );
+        assert_eq!((out.message_count, out.def_count), (1, 1));
+        assert_eq!((out.enum_count, out.fixed_count), (0, 0));
+        assert_eq!(out.module_cells.len(), 1, "the schema file's MODULE gets a whole-file POSITION");
+        assert!(matches!(&out.module_cells[0].payload,
+            CellPayload::Json(j) if j == r#"{"file":"schemas/order-created.schema.json","start_line":0,"end_line":17}"#));
+
+        let refund = jsonschema(REFUND, "schemas/refund.json");
+        assert_eq!(qnames(&refund), vec!["message:jsonschema:RefundIssued"]);
+        assert_eq!((refund.message_count, refund.def_count), (1, 0));
+    }
+
+    #[test]
+    fn title_id_stem_naming_precedence() {
+        let name = |src: &str, path: &str| qnames(&jsonschema(src, path));
+        assert_eq!(
+            name(r#"{"title":"Order","$id":"https://x/y/other.json","type":"object"}"#, "a/b.json"),
+            ["message:jsonschema:Order"],
+            "a valid title wins"
+        );
+        assert_eq!(
+            name(r##"{"title":"Order placed","$id":"https://x/y/order-placed.schema.json#","type":"object"}"##, "a/b.json"),
+            ["message:jsonschema:order-placed"],
+            "a spaced title falls to the $id's last segment, suffix and fragment dropped"
+        );
+        assert_eq!(
+            name(r#"{"$id":"urn:example:order","properties":{"a":{}}}"#, "schemas/Refund.Schema.JSON"),
+            ["message:jsonschema:Refund"],
+            "an $id with no valid segment falls to the file stem, suffixes case-insensitive"
+        );
+        assert_eq!(
+            name(r#"{"type":"object"}"#, "schemas/user.schema.json"),
+            ["message:jsonschema:user"],
+            "no title, no $id: the stem without .schema"
+        );
+        assert_eq!(
+            name(r#"{"title":"9lives","type":"object"}"#, "cat.json"),
+            ["message:jsonschema:cat"],
+            "a title starting with a digit is not a name"
+        );
+    }
+
+    #[test]
+    fn nested_lookalike_yields_nothing() {
+        for (what, src) in [
+            ("the fixture's settings.json", SETTINGS),
+            ("an array of schemas", r#"[{"type":"object","properties":{}}]"#),
+            (
+                "a Swagger document's definitions are the contract route's",
+                r#"{"swagger":"2.0","definitions":{"User":{"type":"object","properties":{}}}}"#,
+            ),
+            (
+                "an OpenAPI document's component schemas",
+                r#"{"openapi":"3.1.0","type":"object","properties":{},"components":{"schemas":{}}}"#,
+            ),
+            ("a root that is not an object type", r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"string"}"#),
+            (
+                "a def that is not an object schema, or not a name",
+                r##"{"$defs":{"Id":{"type":"string"},"bad name":{"type":"object"},"Ref":{"$ref":"#/x"}}}"##,
+            ),
+        ] {
+            let out = jsonschema(src, "testdata/settings.json");
+            assert!(out.nodes.is_empty(), "{what}: {:?}", qnames(&out));
+            assert!(out.module_cells.is_empty(), "{what}");
+        }
+    }
+
+    #[test]
+    fn defs_bundle_parents_to_the_module_first_wins_and_is_capped() {
+        // draft-07 `definitions` and 2020-12 `$defs` in one bundle whose root
+        // declares no type of its own: each def parents to the MODULE, no
+        // DEFINES, and a name repeated across the two blocks keeps the first.
+        let src = "{\n  \"definitions\": {\n    \"Money\": {\"type\": \"object\"}\n  },\n  \"$defs\": {\n    \"Money\": {\"properties\": {}},\n    \"Sku\": {\"properties\": {}}\n  }\n}\n";
+        let out = jsonschema(src, "schemas/common.schema.json");
+        assert_eq!(qnames(&out), vec!["message:jsonschema:common.Money", "message:jsonschema:common.Sku"]);
+        assert!(out.edges.is_empty(), "no root type, no DEFINES");
+        for n in &out.nodes {
+            assert_eq!(out.nav.parent_of[&n.id], module_id());
+        }
+        assert_eq!(
+            cell(&out.nodes[0], cell_type::POSITION),
+            r#"{"file":"schemas/common.schema.json","start_line":2,"end_line":2}"#,
+            "the first Money, not the redeclared one"
+        );
+        assert_eq!((out.message_count, out.def_count), (0, 2));
+
+        let defs: Vec<String> = (0..300).map(|i| format!(r#""T{i}":{{"type":"object"}}"#)).collect();
+        let big = format!(r#"{{"type":"object","$defs":{{{}}}}}"#, defs.join(","));
+        let out = jsonschema(&big, "big.json");
+        assert_eq!(out.nodes.len(), JSON_SCHEMA_MAX_TYPES, "the root plus 255 defs");
+        assert_eq!((out.message_count, out.def_count), (1, JSON_SCHEMA_MAX_TYPES - 1));
+    }
+
+    #[test]
+    fn malformed_json_yields_nothing_and_does_not_panic() {
+        for src in [
+            "{\"type\": \"object\", \"properties\": {",
+            "{\"type\": \"object\" \"properties\": {}}",
+            "{\"type\": \"object\", \"properties\": {}} trailing",
+            "",
+            "\u{feff}",
+            "{\"title\": \"\\u00e9\\\"x",
+            "{\"type\":\"object\",\"title\":\"é\u{1F600}\",\"properties\":{}",
+        ] {
+            let out = jsonschema(src, "x.json");
+            assert!(out.nodes.is_empty(), "{src:?}");
+            assert!(out.module_cells.is_empty(), "{src:?}");
+        }
+        // Control characters in a decoded $id stay valid JSON in the ORIGIN.
+        let out = jsonschema(r#"{"$id":"a\nb\"c","title":"T","type":"object"}"#, "t.json");
+        let origin = cell(&out.nodes[0], cell_type::ORIGIN);
+        assert!(serde_json::from_str::<serde::de::IgnoredAny>(origin).is_ok(), "{origin}");
+        assert!(origin.ends_with(r#","id":"a\nb\"c"}"#), "{origin}");
     }
 }

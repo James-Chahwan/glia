@@ -1,0 +1,7 @@
+{
+  "name": "billing",
+  "config": {
+    "type": "object",
+    "properties": { "retries": 3 }
+  }
+}

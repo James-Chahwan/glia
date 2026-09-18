@@ -1,0 +1,24 @@
+{
+  "framework": "xschema-jsonschema-shared",
+  "language": "json",
+  "dirs": ["orders", "billing"],
+  "note": "LA.16 (programme A10.12). Two services vendor the same JSON Schema (draft 2020-12, title OrderCreated, one $defs entry); orders also holds a schema-less object schema (refund.json: top-level type object + properties + title) and billing a data file whose NESTED object merely looks schema-shaped. Baseline 2026-09-18 (HEAD 7a4883b): `[contract] json sniffed=2 admitted=0` per repo, no MESSAGE_TYPE, no SHARES_SCHEMA.",
+  "expect_nodes": [
+    {"kind": "MESSAGE_TYPE", "name": "message:jsonschema:OrderCreated", "note": "root schema, named by its title"},
+    {"kind": "MESSAGE_TYPE", "name": "message:jsonschema:OrderCreated.Address", "note": "$defs entry, qualified by its root"},
+    {"kind": "MESSAGE_TYPE", "name": "message:jsonschema:RefundIssued", "note": "no $schema, but top-level type object + properties"}
+  ],
+  "expect_edges": [
+    {"from": "message:jsonschema:OrderCreated", "to": "message:jsonschema:OrderCreated", "category": "SHARES_SCHEMA", "note": "same qname in two repos, joined by MessageSchemaResolver"},
+    {"from": "message:jsonschema:OrderCreated", "to": "message:jsonschema:OrderCreated.Address", "category": "DEFINES", "note": "root DEFINES its $defs entry, as proto/avro nesting does"}
+  ],
+  "expect_cells": [
+    {"kind": "MESSAGE_TYPE", "node": "message:jsonschema:OrderCreated", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"jsonschema\"", "note": "same ORIGIN shape as proto/avro, source jsonschema"},
+    {"kind": "MESSAGE_TYPE", "node": "message:jsonschema:OrderCreated", "cell": "POSITION", "contains": "\"file\":\"schemas/order-created.schema.json\",\"start_line\":0", "note": "0-indexed, root object from its opening brace"}
+  ],
+  "forbid": [
+    {"kind": "MESSAGE_TYPE", "name": "message:jsonschema:settings", "note": "PRECISION: a data file whose nested object is schema-shaped is not a schema"},
+    {"kind": "MESSAGE_TYPE", "name": "message:jsonschema:orderId", "note": "a property is not a declared type"},
+    {"kind": "MESSAGE_TYPE", "max_nodes": 5, "note": "exactly OrderCreated + OrderCreated.Address in each repo plus RefundIssued"}
+  ]
+}

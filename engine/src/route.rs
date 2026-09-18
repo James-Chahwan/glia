@@ -1,8 +1,8 @@
 //! Per-file routing: which extractor or language parser sees which file.
 //! Holds the non-source branches (yaml / Dockerfile / package manifest /
-//! dotenv / contract JSON / `.proto` / `.graphql`), the WP-D incremental parse-cache
-//! lookup, and the per-file panic isolation. Split out of
-//! `build_graphs_for_repo`.
+//! dotenv / contract and JSON Schema `.json` / `.proto` / `.graphql`), the
+//! WP-D incremental parse-cache lookup, and the per-file panic isolation.
+//! Split out of `build_graphs_for_repo`.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -49,6 +49,10 @@ pub(crate) fn parse_repo_files(
     let mut avro_records = 0usize;
     let mut avro_enums = 0usize;
     let mut avro_fixed = 0usize;
+    // LA.16 (A10.12) `[jsonschema]` marker counters.
+    let mut jsonschema_files = 0usize;
+    let mut jsonschema_types = 0usize;
+    let mut jsonschema_defs = 0usize;
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
@@ -201,8 +205,9 @@ pub(crate) fn parse_repo_files(
         }
 
         // A10.8: the walker queues a `.json` only when it sniffed as an API
-        // contract. After the manifest branch, so package.json / composer.json
-        // never land here; before detect_language, which has no json arm.
+        // contract or (LA.16) a JSON Schema. After the manifest branch, so
+        // package.json / composer.json never land here; before detect_language,
+        // which has no json arm.
         let json_ext = std::path::Path::new(path)
             .extension()
             .and_then(|e| e.to_str())
@@ -214,6 +219,34 @@ pub(crate) fn parse_repo_files(
                 node_kind::MODULE,
                 &path_to_qname(path),
             );
+            // LA.16 (A10.12): a JSON Schema that is not an API contract
+            // declares MESSAGE_TYPEs, the shape a `.proto` message or an
+            // `.avsc` record gets, so MessageSchemaResolver can pair them
+            // across repos. A contract keeps the A10.8 path below.
+            if repo_graph_code_extractors::contracts::sniff_json_contract(source).is_none()
+                && repo_graph_code_extractors::schemas::sniff_json_schema(source)
+            {
+                let recs = repo_graph_code_extractors::schemas::extract_json_schema_types(
+                    source, path, module_id, repo,
+                );
+                jsonschema_files += 1;
+                jsonschema_types += recs.nodes.len();
+                jsonschema_defs += recs.def_count;
+                if !recs.nodes.is_empty() {
+                    stash_synthetic_parse(
+                        "json",
+                        path,
+                        module_id,
+                        repo,
+                        vec![recs.nodes],
+                        vec![recs.edges],
+                        vec![recs.nav],
+                        recs.module_cells,
+                        &mut parses_by_lang,
+                    );
+                }
+                continue;
+            }
             let out = repo_graph_code_extractors::contracts::extract_json_contract(
                 source, path, module_id, repo,
             );
@@ -506,6 +539,15 @@ pub(crate) fn parse_repo_files(
         );
     }
 
+    // LA.16 (A10.12) fired_on marker: sniffed JSON Schema files are routed and
+    // their root / `$defs` object types are MESSAGE_TYPE nodes. `files` counts
+    // every file routed, so `types=0` flags an admitted look-alike.
+    if jsonschema_files > 0 {
+        eprintln!(
+            "[jsonschema] files={jsonschema_files} types={jsonschema_types} defs={jsonschema_defs}"
+        );
+    }
+
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
     let contract_ops = contracts.openapi + contracts.asyncapi + contracts.pact;
@@ -673,6 +715,41 @@ mod tests {
         assert_eq!(fp.nav.parent_of.get(&user), Some(&module_id));
 
         assert!(route("schemas/broken.avsc", "{\"type\": ").is_empty(), "malformed: no MODULE");
+    }
+
+    /// LA.16 (A10.12): a JSON Schema reaches the MESSAGE_TYPE scan in the
+    /// existing "json" group, while an OpenAPI document whose component
+    /// schemas also sniff as schema-shaped stays on the contract path.
+    #[test]
+    fn json_schema_files_route_to_the_message_type_scan() {
+        let schema = "{\n  \"title\": \"Refund\",\n  \"type\": \"object\",\n  \"properties\": {}\n}\n";
+        let parses = route("schemas/refund.schema.json", schema);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["json"]);
+        let fp = &parses["json"][0];
+        let module_id = fp.nodes[0].id;
+        assert_eq!(fp.nav.kind_by_id.get(&module_id), Some(&node_kind::MODULE));
+        assert!(
+            matches!(fp.nodes[0].cells.first().map(|c| &c.payload), Some(CellPayload::Json(s))
+                if s == r#"{"file":"schemas/refund.schema.json","start_line":0,"end_line":4}"#),
+            "the schema file's MODULE carries its whole-file POSITION"
+        );
+        let refund =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:jsonschema:Refund");
+        assert_eq!(fp.nav.kind_by_id.get(&refund), Some(&node_kind::MESSAGE_TYPE));
+        assert_eq!(fp.nav.parent_of.get(&refund), Some(&module_id));
+
+        let openapi = r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}},
+            "components":{"schemas":{"User":{"type":"object","properties":{}}}}}"#;
+        let parses = route("openapi.json", openapi);
+        let fp = &parses["json"][0];
+        let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
+        assert!(kinds.contains(&node_kind::DOC_SECTION), "still a contract op");
+        assert!(!kinds.contains(&node_kind::MESSAGE_TYPE), "a contract is never a JSON Schema");
+
+        assert!(
+            route("testdata/settings.json", r#"{"config":{"type":"object","properties":{}}}"#).is_empty(),
+            "a nested look-alike stashes nothing, not even a MODULE"
+        );
     }
 
     #[test]
