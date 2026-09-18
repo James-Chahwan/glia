@@ -1,0 +1,57 @@
+{
+  "framework": "java-declarative-clients",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /feign/users/{id}",
+      "note": "@FeignClient interface + @GetMapping"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /exchange/users/{id}",
+      "note": "@HttpExchange(\"/exchange\") + @GetExchange(\"/users/{id}\")"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /repos",
+      "note": "Retrofit @POST(\"repos\"), relative path made absolute"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/feign/users",
+      "to": "route:/feign/users/{id}",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/exchange/users",
+      "to": "route:/exchange/users/{id}",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:POST:/repos",
+      "to": "route:/repos",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /feign/users/{id}",
+      "max_nodes": 0,
+      "note": "THE BUG: a Feign client method is not a server route"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /users/{id}",
+      "max_nodes": 0,
+      "note": "an exchange method without its interface prefix must not become a route either"
+    }
+  ],
+  "note": "LA.22b. Feign, Spring @HttpExchange and Retrofit interfaces are CLIENTS. Baseline HEAD: the Feign @GetMapping is minted as a server ROUTE `GET /feign/users/{id}`; @GetExchange and Retrofit emit nothing."
+}

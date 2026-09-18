@@ -82,6 +82,14 @@ pub fn parse_file(
             c.jdk, c.okhttp, c.apache
         );
     }
+    // LA.22b fired_on: `glia analyze <repo> 2>&1 | grep '\[java-http\] declarative'`.
+    if acc.declarative.ifaces > 0 {
+        let d = acc.declarative;
+        eprintln!(
+            "[java-http] declarative feign={} exchange={} microprofile={} retrofit={} routes_suppressed={} path={file_rel_path}",
+            d.feign, d.exchange, d.microprofile, d.retrofit, d.routes_suppressed
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -142,6 +150,9 @@ struct Acc {
     /// LA.22a: imperative-client call sites that became an ENDPOINT, per
     /// library, for the `[java-http] clients` marker.
     http_clients: JavaHttpClientCounts,
+    /// LA.22b: declarative client interfaces, for the `[java-http]
+    /// declarative` marker.
+    declarative: DeclarativeCounts,
 }
 
 /// LA.22a: the imperative HTTP client libraries whose request shapes the
@@ -165,6 +176,12 @@ struct JavaHttpLibs {
     jdk: bool,
     okhttp: bool,
     apache: bool,
+    /// LA.22b: `retrofit2.http` — the gate for a Retrofit interface, whose
+    /// `@GET("…")` would otherwise read as a JAX-RS marker.
+    retrofit: bool,
+    /// LA.22b: `feign.*` — the gate for a Feign-native interface
+    /// (`@RequestLine`, no `@FeignClient`).
+    feign: bool,
 }
 
 impl JavaHttpLibs {
@@ -173,6 +190,8 @@ impl JavaHttpLibs {
         self.jdk |= path.starts_with("java.net.http.");
         self.okhttp |= path.starts_with("okhttp3.");
         self.apache |= is_apache_http_package(path);
+        self.retrofit |= path.starts_with("retrofit2.http.");
+        self.feign |= path.starts_with("feign.");
     }
 
     fn has(&self, client: JavaHttpClient) -> bool {
@@ -209,6 +228,381 @@ impl JavaHttpClientCounts {
 /// `org.apache.http.…` (HttpClient 4) or `org.apache.hc.…` (HttpClient 5).
 fn is_apache_http_package(path: &str) -> bool {
     path.starts_with("org.apache.http.") || path.starts_with("org.apache.hc.")
+}
+
+/// LA.22b: the declarative HTTP client framework an interface is written for.
+/// Its mapping annotations describe requests the interface SENDS, so they
+/// become client ENDPOINTs, never server ROUTEs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClientFlavour {
+    /// Spring Cloud OpenFeign `@FeignClient` (Spring MVC mapping annotations),
+    /// or Feign-native `@RequestLine` in a file importing `feign.*`.
+    Feign,
+    /// Spring 6 HTTP interface: `@HttpExchange` / `@GetExchange` & co.
+    Exchange,
+    /// MicroProfile Rest Client: `@RegisterRestClient` + JAX-RS `@GET`/`@Path`.
+    MicroProfile,
+    /// Retrofit: `retrofit2.http` `@GET("…")` & co, path in the annotation.
+    Retrofit,
+}
+
+/// LA.22b: a declarative client interface, read once from its own annotations
+/// by [`client_iface_of`]. Every method mapping composes onto `prefix`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClientIface {
+    /// The path every method's template hangs off: the base URL's path, then
+    /// Feign's `path` / `@RequestMapping`, `@HttpExchange`'s url, or JAX-RS
+    /// `@Path`, joined in that order. Empty for Retrofit (its base URL lives
+    /// on the `Retrofit.Builder`, not the interface).
+    prefix: String,
+    /// The literal authority of the base URL (`@FeignClient(url)`,
+    /// `@RegisterRestClient(baseUri)`, an absolute `@HttpExchange` url), for
+    /// ENDPOINT_HIT's `host`.
+    host: Option<String>,
+    flavour: ClientFlavour,
+}
+
+/// LA.22b: per-file tallies for the `[java-http] declarative` marker.
+#[derive(Default, Clone, Copy)]
+struct DeclarativeCounts {
+    /// Client interfaces found (the marker prints when this is non-zero).
+    ifaces: usize,
+    /// Client ENDPOINT emissions, per [`ClientFlavour`].
+    feign: usize,
+    exchange: usize,
+    microprofile: usize,
+    retrofit: usize,
+    /// Mappings `check_route_annotations` would have minted as server ROUTEs
+    /// on these interfaces (and now does not).
+    routes_suppressed: usize,
+}
+
+impl DeclarativeCounts {
+    fn bump(&mut self, flavour: ClientFlavour, n: usize) {
+        match flavour {
+            ClientFlavour::Feign => self.feign += n,
+            ClientFlavour::Exchange => self.exchange += n,
+            ClientFlavour::MicroProfile => self.microprofile += n,
+            ClientFlavour::Retrofit => self.retrofit += n,
+        }
+    }
+}
+
+/// Spring 6 HTTP-interface verb annotations. Kept apart from [`mapping_verb`]
+/// so the server path (`check_route_annotations`) never reads them.
+fn exchange_verb(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "GetExchange" => "GET",
+        "PostExchange" => "POST",
+        "PutExchange" => "PUT",
+        "PatchExchange" => "PATCH",
+        "DeleteExchange" => "DELETE",
+        _ => return None,
+    })
+}
+
+/// The upper-case verb annotations JAX-RS (`@GET`) and Retrofit
+/// (`@GET("users")`) share. The two are told apart by the argument, which
+/// Retrofit's carries and JAX-RS's never does.
+fn upper_verb_annotation(name: &str) -> Option<&'static str> {
+    HTTP_VERBS.iter().copied().find(|v| *v == name)
+}
+
+/// The first HTTP verb named in `text`, case-insensitively, as a whole word:
+/// `RequestMethod.POST`, `{RequestMethod.GET}`, `"get"`.
+fn verb_in_text(text: &str) -> Option<&'static str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|tok| HTTP_VERBS.iter().copied().find(|v| v.eq_ignore_ascii_case(tok)))
+}
+
+/// Methods declared directly in a type body.
+fn body_methods<'a>(type_node: TsNode<'a>) -> Vec<TsNode<'a>> {
+    let Some(body) = type_node.child_by_field_name("body") else {
+        return Vec::new();
+    };
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|c| c.kind() == "method_declaration")
+        .collect()
+}
+
+/// A base-URL attribute (`@FeignClient(url)`, `@RegisterRestClient(baseUri)`)
+/// as `(host, path)`. Feign accepts a bare `host:port` with no scheme, so a
+/// scheme-less value is read as an authority, not as a path. A `${…}`
+/// property placeholder names neither: `client_url_split` drops the
+/// non-literal authority, and it has no path.
+fn base_url_parts(raw: &str) -> (Option<String>, String) {
+    let raw = raw.trim();
+    let full = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let (host, path) = endpoint::client_url_split(&full);
+    (host, path.unwrap_or_default())
+}
+
+/// A path-prefix attribute (Feign `path`, `@HttpExchange` url, `@Path`,
+/// `@RequestMapping`) as `(host, path)`. An absolute URL splits like a base
+/// URL; a `${…}` / `#{…}` placeholder contributes nothing; anything else is
+/// the path itself.
+fn prefix_parts(raw: &str) -> (Option<String>, String) {
+    let raw = raw.trim();
+    if raw.contains("://") {
+        return base_url_parts(raw);
+    }
+    if raw.contains("${") || raw.contains("#{") {
+        return (None, String::new());
+    }
+    (None, raw.to_string())
+}
+
+/// LA.22b: whether `node` is a declarative HTTP client interface, and its
+/// base. Keys on explicit CLIENT markers only — `@FeignClient`,
+/// `@HttpExchange` (on the type or, since Spring allows omitting it there, an
+/// `*Exchange` on any method), `@RegisterRestClient`, a Retrofit verb WITH a
+/// path argument in a file importing `retrofit2.http`, or a Feign-native
+/// `@RequestLine` in a file importing `feign.*`. Never on "is an interface":
+/// an OpenAPI `interfaceOnly` server contract (`interface UsersApi {
+/// @GetMapping(…) }` implemented by a `@RestController`) is a real route.
+fn client_iface_of(node: TsNode, src: &[u8], libs: JavaHttpLibs) -> Option<ClientIface> {
+    if node.kind() != "interface_declaration" {
+        return None;
+    }
+    let anns = own_annotation_nodes(node, src);
+    let find = |want: &str| anns.iter().find(|(n, _)| n == want).map(|(_, a)| *a);
+    let arg = |want: &str| find(want).and_then(|a| ann_path(a, &["value", "path"], src));
+    let join = |a: String, b: String| endpoint::join_path(&a, &b);
+
+    if let Some(feign) = find("FeignClient") {
+        let (host, url_path) = ann_pair(feign, "url", src)
+            .map(|u| base_url_parts(&u))
+            .unwrap_or_default();
+        let path = ann_pair(feign, "path", src).map(|p| prefix_parts(&p).1).unwrap_or_default();
+        // Feign honours a type-level Spring `@RequestMapping` as a prefix too.
+        let mapping = arg("RequestMapping").map(|p| prefix_parts(&p).1).unwrap_or_default();
+        return Some(ClientIface {
+            prefix: join(join(url_path, path), mapping),
+            host,
+            flavour: ClientFlavour::Feign,
+        });
+    }
+
+    let methods = body_methods(node);
+    let any_method = |pred: &dyn Fn(&str, TsNode) -> bool| {
+        methods.iter().any(|m| {
+            own_annotation_nodes(*m, src)
+                .into_iter()
+                .any(|(n, a)| pred(&n, a))
+        })
+    };
+
+    let type_exchange = find("HttpExchange");
+    if type_exchange.is_some()
+        || any_method(&|n, _| n == "HttpExchange" || exchange_verb(n).is_some())
+    {
+        let (host, prefix) = type_exchange
+            .and_then(|a| ann_path(a, &["value", "url"], src))
+            .map(|p| prefix_parts(&p))
+            .unwrap_or_default();
+        return Some(ClientIface {
+            prefix,
+            host,
+            flavour: ClientFlavour::Exchange,
+        });
+    }
+
+    if let Some(rest_client) = find("RegisterRestClient") {
+        let (host, base_path) = ann_pair(rest_client, "baseUri", src)
+            .map(|u| base_url_parts(&u))
+            .unwrap_or_default();
+        let path = arg("Path").map(|p| prefix_parts(&p).1).unwrap_or_default();
+        return Some(ClientIface {
+            prefix: join(base_path, path),
+            host,
+            flavour: ClientFlavour::MicroProfile,
+        });
+    }
+
+    if libs.retrofit
+        && any_method(&|n, a| {
+            (upper_verb_annotation(n).is_some() && ann_path(a, &["value"], src).is_some())
+                || (n == "HTTP" && ann_pair(a, "method", src).is_some())
+        })
+    {
+        return Some(ClientIface {
+            prefix: String::new(),
+            host: None,
+            flavour: ClientFlavour::Retrofit,
+        });
+    }
+
+    if libs.feign && any_method(&|n, _| n == "RequestLine") {
+        return Some(ClientIface {
+            prefix: String::new(),
+            host: None,
+            flavour: ClientFlavour::Feign,
+        });
+    }
+    None
+}
+
+/// LA.22b: `(verb, template, annotation)` for every request mapping a client
+/// interface method declares, read the way `iface`'s framework reads it.
+/// `template` is `None` for a marker annotation that maps the prefix itself.
+fn client_mappings<'a>(
+    method: TsNode<'a>,
+    src: &[u8],
+    flavour: ClientFlavour,
+) -> Vec<(String, Option<String>, TsNode<'a>)> {
+    let anns = own_annotation_nodes(method, src);
+    let mut out = Vec::new();
+    match flavour {
+        ClientFlavour::Feign => {
+            for (name, ann) in &anns {
+                if name.ends_with("Mapping")
+                    && let Some(verb) = mapping_verb(name)
+                {
+                    out.push((verb.to_string(), ann_path(*ann, &["value", "path"], src), *ann));
+                } else if name == "RequestMapping" {
+                    // Feign's SpringMvcContract defaults a method-less
+                    // `@RequestMapping` to GET.
+                    let verb = ann_pair_text(*ann, "method", src)
+                        .and_then(verb_in_text)
+                        .unwrap_or("GET");
+                    out.push((verb.to_string(), ann_path(*ann, &["value", "path"], src), *ann));
+                } else if name == "RequestLine"
+                    && let Some(line) = ann_path(*ann, &["value"], src)
+                {
+                    // Feign-native: `@RequestLine("GET /users/{id}")`.
+                    let mut parts = line.split_whitespace();
+                    if let (Some(verb), Some(path)) = (parts.next(), parts.next())
+                        && let Some(verb) = verb_in_text(verb)
+                    {
+                        out.push((verb.to_string(), Some(path.to_string()), *ann));
+                    }
+                }
+            }
+        }
+        ClientFlavour::Exchange => {
+            for (name, ann) in &anns {
+                if let Some(verb) = exchange_verb(name) {
+                    out.push((verb.to_string(), ann_path(*ann, &["value", "url"], src), *ann));
+                } else if name == "HttpExchange"
+                    && let Some(verb) = ann_pair_text(*ann, "method", src).and_then(verb_in_text)
+                {
+                    out.push((verb.to_string(), ann_path(*ann, &["value", "url"], src), *ann));
+                }
+            }
+        }
+        ClientFlavour::MicroProfile => {
+            let verb = anns.iter().find_map(|(n, a)| {
+                let verb = upper_verb_annotation(n)?;
+                Some((verb, *a))
+            });
+            if let Some((verb, ann)) = verb {
+                let path = anns
+                    .iter()
+                    .find(|(n, _)| n == "Path")
+                    .and_then(|(_, a)| ann_path(*a, &["value"], src));
+                out.push((verb.to_string(), path, ann));
+            }
+        }
+        ClientFlavour::Retrofit => {
+            for (name, ann) in &anns {
+                if let Some(verb) = upper_verb_annotation(name) {
+                    // `@GET` with no path is a dynamic `@Url` call: nothing
+                    // to name.
+                    if let Some(path) = ann_path(*ann, &["value"], src) {
+                        out.push((verb.to_string(), Some(path), *ann));
+                    }
+                } else if name == "HTTP"
+                    && let Some(verb) = ann_pair_text(*ann, "method", src).and_then(verb_in_text)
+                    && let Some(path) = ann_pair(*ann, "path", src)
+                {
+                    out.push((verb.to_string(), Some(path), *ann));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// LA.22b: emit the client ENDPOINTs a declarative interface method maps
+/// (+ CALLS from the method `from`), composed onto the interface prefix. No
+/// ROUTE and no HANDLED_BY. Returns how many endpoints were emitted.
+fn emit_client_mappings(
+    method: TsNode,
+    src: &[u8],
+    iface: &ClientIface,
+    from: NodeId,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) -> usize {
+    let mut emitted = 0usize;
+    for (verb, tmpl, ann) in client_mappings(method, src, iface.flavour) {
+        // A marker annotation with no prefix names nothing (the same rule the
+        // server path applies).
+        if tmpl.is_none() && iface.prefix.is_empty() {
+            continue;
+        }
+        let tmpl = tmpl.unwrap_or_default();
+        let (host, raw) = if tmpl.contains("://") {
+            // An absolute template (Retrofit `@GET("https://…")`) replaces
+            // the base URL outright.
+            base_url_parts(&tmpl)
+        } else {
+            (
+                iface.host.clone(),
+                compose_route_path(&iface.prefix, &tmpl),
+            )
+        };
+        // Drops a query / fragment (`users?sort=desc`); `raw` is absolute.
+        let Some(path) = endpoint::url_to_path(&raw) else {
+            continue;
+        };
+        let pos = ann.start_position();
+        let ep = ClientEndpoint {
+            method: verb,
+            path,
+            file: file_rel.to_string(),
+            line: pos.row + 1,
+            col: pos.column + 1,
+            confidence: Confidence::Strong,
+        };
+        let extras = HitExtras {
+            host: host.as_deref(),
+            ..HitExtras::default()
+        };
+        push_client_endpoint_with(
+            repo,
+            &ep,
+            extras,
+            from,
+            &mut acc.nodes,
+            &mut acc.edges,
+            &mut acc.nav,
+            &mut acc.endpoint_seen,
+        );
+        emitted += 1;
+    }
+    acc.declarative.bump(iface.flavour, emitted);
+    emitted
+}
+
+/// How many ROUTEs `check_route_annotations` would mint for `node`, without
+/// minting them: the `routes_suppressed` tally of a client interface.
+fn would_mint_routes(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    handler_id: NodeId,
+    repo: RepoId,
+    class_prefix: &str,
+) -> usize {
+    let mut scratch = Acc::default();
+    check_route_annotations(node, src, file_rel, handler_id, repo, class_prefix, &mut scratch)
 }
 
 /// Emit one type declaration and everything under it. `scope` is the qname the
@@ -297,18 +691,45 @@ fn visit_type_decl(
     // on the class is a PREFIX for every action method below, not a route the
     // methods own. Read it once here and compose it per method.
     let class_prefix = class_route_prefix(node, src);
+    // LA.22b: a declarative CLIENT interface (Feign, Spring HTTP interface,
+    // MicroProfile, Retrofit) maps requests it SENDS: its methods emit
+    // ENDPOINTs, and neither they nor the type itself mint ROUTEs.
+    let client = client_iface_of(node, src, acc.http_libs);
+    if client.is_some() {
+        acc.declarative.ifaces += 1;
+    }
     let mut composed = 0usize;
     let mut cursor = body.walk();
     for child in body.named_children(&mut cursor) {
         match child.kind() {
             "constructor_declaration" => {
-                composed += visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
+                composed += visit_method(
+                    child,
+                    src,
+                    file_rel,
+                    &qname,
+                    id,
+                    repo,
+                    &class_prefix,
+                    client.as_ref(),
+                    acc,
+                );
                 if is_bean {
                     emit_constructor_injects(child, src, id, module_id, acc);
                 }
             }
             "method_declaration" => {
-                composed += visit_method(child, src, file_rel, &qname, id, repo, &class_prefix, acc);
+                composed += visit_method(
+                    child,
+                    src,
+                    file_rel,
+                    &qname,
+                    id,
+                    repo,
+                    &class_prefix,
+                    client.as_ref(),
+                    acc,
+                );
             }
             "field_declaration" => {
                 visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
@@ -323,8 +744,13 @@ fn visit_type_decl(
     }
 
     // The class's OWN annotations (its base route), with no prefix to compose
-    // against — the prefix IS this annotation.
-    check_route_annotations(node, src, file_rel, id, repo, "", acc);
+    // against — the prefix IS this annotation. A client interface's type-level
+    // `@RequestMapping` / `@Path` is its request prefix, not a route.
+    if client.is_some() {
+        acc.declarative.routes_suppressed += would_mint_routes(node, src, file_rel, id, repo, "");
+    } else {
+        check_route_annotations(node, src, file_rel, id, repo, "", acc);
+    }
     if composed > 0 && !class_prefix.is_empty() {
         eprintln!(
             "[java-routes] composed {composed} action routes under '{class_prefix}' in {file_rel}"
@@ -333,6 +759,7 @@ fn visit_type_decl(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn visit_method(
     node: TsNode,
     src: &[u8],
@@ -341,6 +768,7 @@ fn visit_method(
     parent_id: NodeId,
     repo: RepoId,
     class_prefix: &str,
+    client: Option<&ClientIface>,
     acc: &mut Acc,
 ) -> usize {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -367,6 +795,15 @@ fn visit_method(
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, repo, file_rel, acc);
+    }
+
+    // LA.22b: on a client interface the mappings are requests this method
+    // sends — ENDPOINTs with a CALLS edge from it, never ROUTEs.
+    if let Some(iface) = client {
+        acc.declarative.routes_suppressed +=
+            would_mint_routes(node, src, file_rel, id, repo, class_prefix);
+        emit_client_mappings(node, src, iface, id, repo, file_rel, acc);
+        return 0;
     }
 
     // Route annotations on the method, composed onto the enclosing class prefix.
@@ -771,16 +1208,42 @@ fn emit_field_inject(
 /// (`@jakarta.ws.rs.Path`) is reduced to its last segment, and the marker form
 /// (`@PostMapping`, no arguments) yields `None` for the argument.
 fn own_annotations<'a>(node: TsNode<'a>, src: &'a [u8]) -> Vec<(String, Option<String>)> {
+    own_annotation_nodes(node, src)
+        .into_iter()
+        .map(|(name, ann)| {
+            let arg = ann
+                .child_by_field_name("arguments")
+                .and_then(|args| annotation_string_arg(args, src));
+            (name, arg)
+        })
+        .collect()
+}
+
+/// A declaration's own annotations as `(simple name, annotation node)`, in
+/// source order — the walk [`own_annotations`] reads, for callers (LA.22b)
+/// that need a named element (`url = …`, `method = …`) rather than the path.
+fn own_annotation_nodes<'a>(node: TsNode<'a>, src: &[u8]) -> Vec<(String, TsNode<'a>)> {
     let mut out = Vec::new();
+    let mut push = |ann: TsNode<'a>| {
+        if let Some(name_node) = ann.child_by_field_name("name") {
+            let name = text_of(name_node, src)
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            out.push((name, ann));
+        }
+    };
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "annotation" | "marker_annotation" => push_annotation(child, src, &mut out),
+            "annotation" | "marker_annotation" => push(child),
             "modifiers" => {
                 let mut inner = child.walk();
                 for ann in child.named_children(&mut inner) {
                     if matches!(ann.kind(), "annotation" | "marker_annotation") {
-                        push_annotation(ann, src, &mut out);
+                        push(ann);
                     }
                 }
             }
@@ -790,20 +1253,55 @@ fn own_annotations<'a>(node: TsNode<'a>, src: &'a [u8]) -> Vec<(String, Option<S
     out
 }
 
-fn push_annotation<'a>(ann: TsNode<'a>, src: &'a [u8], out: &mut Vec<(String, Option<String>)>) {
-    let Some(name_node) = ann.child_by_field_name("name") else {
-        return;
-    };
-    let name = text_of(name_node, src)
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let arg = ann
-        .child_by_field_name("arguments")
-        .and_then(|args| annotation_string_arg(args, src));
-    out.push((name, arg));
+/// The first string literal of an annotation element value: a plain
+/// `"…"`, or the first entry of a `{"…", …}` array.
+fn element_string(value: TsNode, src: &[u8]) -> Option<String> {
+    match value.kind() {
+        "string_literal" => Some(java_string_inner(value, src)),
+        "element_value_array_initializer" => {
+            let mut cursor = value.walk();
+            value
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "string_literal")
+                .map(|c| java_string_inner(c, src))
+        }
+        _ => None,
+    }
+}
+
+/// The value node of `key = …` in an annotation's argument list.
+fn ann_pair_value<'a>(ann: TsNode<'a>, key: &str, src: &[u8]) -> Option<TsNode<'a>> {
+    let args = ann.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .filter(|c| c.kind() == "element_value_pair")
+        .find(|c| c.child_by_field_name("key").is_some_and(|k| text_of(k, src) == key))
+        .and_then(|c| c.child_by_field_name("value"))
+}
+
+/// The string of `key = "…"` in an annotation's argument list.
+fn ann_pair(ann: TsNode, key: &str, src: &[u8]) -> Option<String> {
+    ann_pair_value(ann, key, src).and_then(|v| element_string(v, src))
+}
+
+/// The source text of `key = …` (`RequestMethod.POST`, `"GET"`).
+fn ann_pair_text<'a>(ann: TsNode<'a>, key: &str, src: &'a [u8]) -> Option<&'a str> {
+    ann_pair_value(ann, key, src).map(|v| text_of(v, src))
+}
+
+/// An annotation's path argument: the first of `keys` spelled out
+/// (`url = "/x"`), else the bare positional value (`@GetExchange("/x")`).
+/// Unlike [`annotation_string_arg`] there is no text-scan fallback, so
+/// `@FeignClient(name = "users")` yields no path.
+fn ann_path(ann: TsNode, keys: &[&str], src: &[u8]) -> Option<String> {
+    if let Some(v) = keys.iter().find_map(|k| ann_pair(ann, k, src)) {
+        return Some(v);
+    }
+    let args = ann.child_by_field_name("arguments")?;
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "string_literal" | "element_value_array_initializer"))
+        .and_then(|c| element_string(c, src))
 }
 
 /// The path literal of an `annotation_argument_list`. Prefers an
@@ -2895,5 +3393,357 @@ public class Service {
             .filter(|c| matches!(&c.qualifier, CallQualifier::Attribute { .. }))
             .collect();
         assert_eq!(attr_calls.len(), 1);
+    }
+
+    // ---- LA.22b: declarative HTTP client interfaces ------------------------
+
+    /// Whether a CALLS edge runs from the METHOD `method_qname` to the
+    /// ENDPOINT `endpoint_qname`.
+    fn method_calls_endpoint(fp: &FileParse, method_qname: &str, endpoint_qname: &str) -> bool {
+        let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, method_qname);
+        let to = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, endpoint_qname);
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+    }
+
+    fn no_routes_or_handled_by(fp: &FileParse) {
+        assert_eq!(
+            qnames_of(fp, node_kind::ROUTE),
+            Vec::<&str>::new(),
+            "a client interface must mint no server ROUTE"
+        );
+        assert!(
+            !fp.edges.iter().any(|e| e.category == edge_category::HANDLED_BY),
+            "a client interface method handles no route"
+        );
+    }
+
+    /// The fixture's `UserClient.java`: the Feign `@GetMapping` is a request
+    /// the interface sends, and the `@HttpExchange` prefix composes onto
+    /// `@GetExchange`.
+    #[test]
+    fn feign_and_exchange_interfaces_emit_endpoints_not_routes() {
+        let source = r#"
+package com.example.client;
+
+import org.springframework.cloud.openfeign.FeignClient;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.service.annotation.GetExchange;
+import org.springframework.web.service.annotation.HttpExchange;
+
+@FeignClient(name = "users", url = "http://users-svc")
+public interface UserClient {
+    @GetMapping("/feign/users/{id}")
+    String getUser(@PathVariable("id") long id);
+}
+
+@HttpExchange("/exchange")
+interface ExchangeClient {
+    @GetExchange("/users/{id}")
+    String get(@PathVariable long id);
+}
+"#;
+        let fp = parse_file(source, "UserClient.java", "UserClient", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec!["endpoint:GET:/exchange/users/{id}", "endpoint:GET:/feign/users/{id}"]
+        );
+        no_routes_or_handled_by(&fp);
+        assert!(method_calls_endpoint(&fp, "UserClient::getUser", "endpoint:GET:/feign/users/{id}"));
+        assert!(method_calls_endpoint(&fp, "ExchangeClient::get", "endpoint:GET:/exchange/users/{id}"));
+        let feign = endpoint_hit(&fp, "endpoint:GET:/feign/users/{id}");
+        assert!(feign.ends_with(r#","host":"users-svc"}"#), "{feign}");
+        assert!(feign.contains(r#""line":12,"col":5"#), "positioned at the annotation: {feign}");
+        let exchange = endpoint_hit(&fp, "endpoint:GET:/exchange/users/{id}");
+        assert!(!exchange.contains("host"), "{exchange}");
+    }
+
+    /// Feign composes url path + `path` + type-level `@RequestMapping` +
+    /// the method mapping; a method-less `@RequestMapping` is GET, and
+    /// `method = RequestMethod.X` is read. A `${…}` url names no host.
+    #[test]
+    fn feign_client_composes_url_path_and_request_mapping() {
+        let source = r#"
+package com.example.client;
+
+@FeignClient(name = "users", url = "http://users-svc:8080/base", path = "/api")
+@RequestMapping("/v1")
+public interface UserClient {
+    @GetMapping("/users/{id}")
+    String getUser(@PathVariable("id") long id);
+
+    @PostMapping(value = "/users", consumes = "application/json")
+    String create(String body);
+
+    @RequestMapping(value = "/users/{id}", method = RequestMethod.DELETE)
+    void remove(long id);
+
+    @RequestMapping(path = "/users")
+    List<String> all();
+}
+
+@FeignClient(name = "orders", url = "${orders.url}")
+interface OrderClient {
+    @PutMapping("/orders/{id}")
+    void put(long id);
+}
+"#;
+        let fp = parse_file(source, "UserClient.java", "UserClient", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec![
+                "endpoint:DELETE:/base/api/v1/users/{id}",
+                "endpoint:GET:/base/api/v1/users",
+                "endpoint:GET:/base/api/v1/users/{id}",
+                "endpoint:POST:/base/api/v1/users",
+                "endpoint:PUT:/orders/{id}",
+            ]
+        );
+        no_routes_or_handled_by(&fp);
+        let hit = endpoint_hit(&fp, "endpoint:POST:/base/api/v1/users");
+        assert!(hit.ends_with(r#","host":"users-svc:8080"}"#), "{hit}");
+        let orders = endpoint_hit(&fp, "endpoint:PUT:/orders/{id}");
+        assert!(!orders.contains("host"), "a property placeholder names no host: {orders}");
+    }
+
+    /// Feign-native `@RequestLine("VERB /path")`, with no `@FeignClient`, in a
+    /// file importing `feign.*`; the query template is dropped. Without the
+    /// import the same interface is left alone.
+    #[test]
+    fn feign_request_line_emits_endpoints() {
+        let source = r#"
+import feign.Param;
+import feign.RequestLine;
+
+interface GitHub {
+    @RequestLine("GET /repos/{owner}/{repo}/contributors")
+    List<Contributor> contributors(@Param("owner") String owner, @Param("repo") String repo);
+
+    @RequestLine("POST /repos/{owner}/{repo}/issues?draft={draft}")
+    void createIssue(Issue issue, @Param("owner") String owner, @Param("repo") String repo);
+}
+"#;
+        let fp = parse_file(source, "GitHub.java", "GitHub", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec![
+                "endpoint:GET:/repos/{owner}/{repo}/contributors",
+                "endpoint:POST:/repos/{owner}/{repo}/issues",
+            ]
+        );
+        assert!(method_calls_endpoint(
+            &fp,
+            "GitHub::contributors",
+            "endpoint:GET:/repos/{owner}/{repo}/contributors"
+        ));
+        no_routes_or_handled_by(&fp);
+
+        let unimported = source.replace("import feign.Param;\nimport feign.RequestLine;\n", "");
+        let fp = parse_file(&unimported, "GitHub.java", "GitHub", repo()).unwrap();
+        assert!(qnames_of(&fp, node_kind::ENDPOINT).is_empty());
+    }
+
+    /// Spring HTTP interface: the type-level `@HttpExchange(url = …)` prefixes
+    /// every `*Exchange`; a marker `@PostExchange` maps the prefix itself; a
+    /// method-level `@HttpExchange(method = …)` is read; and an interface
+    /// with no type-level `@HttpExchange` is still a client.
+    #[test]
+    fn http_exchange_interface_composes_its_prefix() {
+        let source = r#"
+@HttpExchange(url = "/api", accept = "application/json")
+public interface ExchangeClient {
+    @GetExchange("/users/{id}")
+    String get(@PathVariable long id);
+
+    @PostExchange
+    String create(@RequestBody String body);
+
+    @HttpExchange(method = "PUT", url = "/users/{id}")
+    void put(@PathVariable long id, @RequestBody String body);
+}
+
+interface ItemClient {
+    @DeleteExchange(url = "/items/{id}")
+    void remove(@PathVariable long id);
+}
+"#;
+        let fp = parse_file(source, "ExchangeClient.java", "ExchangeClient", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec![
+                "endpoint:DELETE:/items/{id}",
+                "endpoint:GET:/api/users/{id}",
+                "endpoint:POST:/api",
+                "endpoint:PUT:/api/users/{id}",
+            ]
+        );
+        assert!(method_calls_endpoint(&fp, "ItemClient::remove", "endpoint:DELETE:/items/{id}"));
+        no_routes_or_handled_by(&fp);
+    }
+
+    /// Retrofit: relative paths become absolute, the query is dropped,
+    /// `@HTTP(method, path)` is read, an absolute URL carries its host, and a
+    /// dynamic `@GET` + `@Url` names nothing.
+    #[test]
+    fn retrofit_interface_relative_paths_become_absolute() {
+        let source = r#"
+package com.example.client;
+
+import retrofit2.Call;
+import retrofit2.http.*;
+
+public interface RepoApi {
+    @POST("repos")
+    Call<Void> create(@Body Object b);
+
+    @GET("users/{user}/repos?sort=desc")
+    Call<List<Repo>> list(@Path("user") String user);
+
+    @HTTP(method = "DELETE", path = "repos/{id}", hasBody = true)
+    Call<Void> remove(@Path("id") long id, @Body Object reason);
+
+    @GET("https://api.github.com/meta")
+    Call<Meta> meta();
+
+    @GET
+    Call<String> fetch(@Url String url);
+}
+"#;
+        let fp = parse_file(source, "RepoApi.java", "RepoApi", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec![
+                "endpoint:DELETE:/repos/{id}",
+                "endpoint:GET:/meta",
+                "endpoint:GET:/users/{user}/repos",
+                "endpoint:POST:/repos",
+            ]
+        );
+        assert!(method_calls_endpoint(&fp, "RepoApi::create", "endpoint:POST:/repos"));
+        let meta = endpoint_hit(&fp, "endpoint:GET:/meta");
+        assert!(meta.ends_with(r#","host":"api.github.com"}"#), "{meta}");
+        no_routes_or_handled_by(&fp);
+
+        // The same interface without the retrofit2.http import is not a client.
+        let unimported = source.replace("import retrofit2.http.*;\n", "");
+        let fp = parse_file(&unimported, "RepoApi.java", "RepoApi", repo()).unwrap();
+        assert!(qnames_of(&fp, node_kind::ENDPOINT).is_empty());
+    }
+
+    /// MicroProfile Rest Client: `@RegisterRestClient` + the interface's JAX-RS
+    /// `@Path` prefix every `@GET` / `@POST`; `baseUri` contributes its path
+    /// and its host.
+    #[test]
+    fn microprofile_register_rest_client_emits_endpoints() {
+        let source = r#"
+@RegisterRestClient(configKey = "users-api")
+@Path("/users")
+public interface UsersClient {
+    @GET
+    @Path("/{id}")
+    User get(@PathParam("id") long id);
+
+    @POST
+    User create(User u);
+}
+
+@RegisterRestClient(baseUri = "http://orders:9000/api")
+@Path("/orders")
+interface OrdersClient {
+    @GET
+    List<Order> all();
+}
+"#;
+        let fp = parse_file(source, "UsersClient.java", "UsersClient", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ENDPOINT),
+            vec![
+                "endpoint:GET:/api/orders",
+                "endpoint:GET:/users/{id}",
+                "endpoint:POST:/users",
+            ]
+        );
+        assert!(method_calls_endpoint(&fp, "UsersClient::get", "endpoint:GET:/users/{id}"));
+        let orders = endpoint_hit(&fp, "endpoint:GET:/api/orders");
+        assert!(orders.ends_with(r#","host":"orders:9000"}"#), "{orders}");
+        no_routes_or_handled_by(&fp);
+    }
+
+    /// Regression guard: an OpenAPI-generator `interfaceOnly` server contract
+    /// (Spring or JAX-RS mappings on an interface a controller implements)
+    /// carries NO client marker, so it keeps its ROUTEs and mints no ENDPOINT.
+    #[test]
+    fn interface_only_server_controller_still_emits_routes() {
+        let source = r#"
+package com.example.api;
+
+@RequestMapping("/api")
+public interface UsersApi {
+    @GetMapping("/users")
+    List<User> list();
+}
+
+@Path("/items")
+interface ItemsResource {
+    @GET
+    @Path("/{id}")
+    Item get(@PathParam("id") long id);
+}
+
+@RestController
+public class UsersController implements UsersApi {
+    public List<User> list() { return List.of(); }
+}
+"#;
+        let fp = parse_file(source, "UsersApi.java", "com::example::api::UsersApi", repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::ROUTE),
+            vec!["ANY /api", "ANY /items", "GET /api/users", "GET /items/{id}"]
+        );
+        assert!(qnames_of(&fp, node_kind::ENDPOINT).is_empty());
+        let route = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /api/users");
+        let handler =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "com::example::api::UsersApi::list");
+        assert!(fp.edges.iter().any(|e| e.from == route
+            && e.to == handler
+            && e.category == edge_category::HANDLED_BY));
+    }
+
+    /// The `routes_suppressed` tally is exactly what the server path would
+    /// have minted: the type-level `@RequestMapping` plus each method mapping.
+    #[test]
+    fn suppressed_routes_are_what_the_server_path_would_mint() {
+        let source = r#"
+@FeignClient(name = "users")
+@RequestMapping("/v1")
+interface UserClient {
+    @GetMapping("/users")
+    List<String> all();
+
+    @PostMapping("/users")
+    String create(String body);
+}
+"#;
+        let tree = {
+            let mut parser = Parser::new();
+            let lang: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+            parser.set_language(&lang).unwrap();
+            parser.parse(source, None).unwrap()
+        };
+        let src = source.as_bytes();
+        let iface = tree.root_node().named_child(0).unwrap();
+        let client = client_iface_of(iface, src, JavaHttpLibs::default()).unwrap();
+        assert_eq!(client.flavour, ClientFlavour::Feign);
+        assert_eq!(client.prefix, "/v1");
+        assert_eq!(client.host, None);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "UserClient");
+        let type_level = would_mint_routes(iface, src, "U.java", id, repo(), "");
+        let methods: usize = body_methods(iface)
+            .into_iter()
+            .map(|m| would_mint_routes(m, src, "U.java", id, repo(), "/v1"))
+            .sum();
+        assert_eq!((type_level, methods), (1, 2));
     }
 }
