@@ -26,7 +26,8 @@ pub use repo_graph_code_domain::{
 };
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
-    ClientEndpoint, HitExtras, client_url_split, join_path, push_client_endpoint_with,
+    ClientEndpoint, HitExtras, canonical_http_path, client_url_split, join_path,
+    push_client_endpoint_with, route_path_qname,
 };
 
 // ============================================================================
@@ -1521,9 +1522,11 @@ fn emit_route_from_call(
     };
 
     let prefix = prefix_map.get(receiver).cloned().unwrap_or_default();
-    let full_path = join_path(&prefix, &path_literal);
+    // LB.5: `join_path` deliberately keeps an unprefixed relative literal
+    // relative; the qname builder adds the one canonical leading `/`.
+    let full_path = canonical_http_path(&join_path(&prefix, &path_literal)).into_owned();
 
-    let qname = format!("route:{full_path}");
+    let qname = route_path_qname(&full_path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
 
     // Second arg — handler. Identifier → Bare; selector `pkg.Name` → Attribute.
@@ -2047,6 +2050,42 @@ func setupRoutes(r *gin.Engine) {
         // Each route has exactly one ROUTE_METHOD cell in this fixture.
         assert_eq!(route_methods(&parse, health), vec!["GET".to_string()]);
         assert_eq!(route_methods(&parse, login), vec!["POST".to_string()]);
+    }
+
+    /// LB.5 — an unprefixed relative literal gets the one canonical leading
+    /// `/`: `r.GET("items", h)` and `e.GET("/parts", h)` alike are
+    /// `route:/<path>`, the nav name is the canonical path, and the handler
+    /// ref hangs off that same node. A relative group prefix is canonical too.
+    #[test]
+    fn relative_route_literal_gets_one_leading_slash() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine) {
+    r.GET("items", listItems)
+    r.GET("/parts", listParts)
+    g := r.Group("api")
+    g.GET("users", listUsers)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        let qnames: Vec<&str> = parse
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| parse.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        for q in ["route:/items", "route:/parts", "route:/api/users"] {
+            assert!(qnames.contains(&q), "missing {q}: {qnames:?}");
+        }
+        assert!(!qnames.contains(&"route:items"), "{qnames:?}");
+        let items = route_id(repo(), "/items");
+        assert_eq!(
+            parse.nav.name_by_id.get(&items).map(String::as_str),
+            Some("/items")
+        );
+        assert!(parse.refs.iter().any(|r| r.from == items
+            && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "listItems")));
     }
 
     #[test]

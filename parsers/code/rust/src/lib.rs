@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint, url_to_path};
+use repo_graph_code_domain::endpoint::{
+    ClientEndpoint, push_client_endpoint, route_qname, url_to_path,
+};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -397,9 +399,8 @@ fn visit_route_attr(
         {
             let path = &rest[..end];
             let method_upper = method.to_uppercase();
-            let route_name = format!("{method_upper} {path}");
-            let route_id =
-                NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+            let route_name = route_qname(&method_upper, path);
+            let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
             acc.nodes.push(Node {
                 id: route_id,
                 repo,
@@ -461,7 +462,7 @@ fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
             let pat = format!("{method}(");
             if contains_method_call(args_text, &pat) {
                 let mu = method.to_ascii_uppercase();
-                let route_name = format!("{mu} {path}");
+                let route_name = route_qname(&mu, path);
                 if seen.insert(route_name.clone()) {
                     emit_axum_route(&mu, path, repo, acc);
                     // `get(handler)` names the handler fn — link ROUTE→handler
@@ -671,7 +672,7 @@ fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Ac
             // before the bare form so it doesn't match `target(` etc.
             if window.contains(&pat_dotted) || contains_method_call(window, &pat_bare) {
                 let mu = verb.to_ascii_uppercase();
-                let key = format!("{mu} {path}");
+                let key = route_qname(&mu, path);
                 if seen.insert(key.clone()) {
                     emit_axum_route(&mu, path, repo, acc);
                 }
@@ -681,8 +682,11 @@ fn scan_path_anchor_chain(source: &str, needle: &str, repo: RepoId, acc: &mut Ac
     }
 }
 
+/// Emit one legacy-shape ROUTE. The qname goes through the shared builder
+/// (LB.5), so a relative `.route("widgets", …)` is `GET /widgets` — the key
+/// every caller's `seen` set and HANDLED_BY ref id are built from too.
 fn emit_axum_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
-    let route_name = format!("{method} {path}");
+    let route_name = route_qname(method, path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
         id: route_id,
@@ -1221,6 +1225,42 @@ fn app() -> Router {
             .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
             .map(|(_, n)| n.as_str())
             .collect()
+    }
+
+    /// LB.5 — relative axum / actix path literals get the one canonical
+    /// leading `/`, the HANDLED_BY ref hangs off that canonical node, and a
+    /// relative + slashed registration of one path is one node.
+    #[test]
+    fn relative_route_literals_are_canonical() {
+        let source = r#"
+use axum::{Router, routing::get};
+
+pub fn app() -> Router {
+    Router::new()
+        .route("widgets", get(list_widgets))
+        .route("/widgets", get(list_widgets))
+}
+
+#[post("gadgets")]
+async fn make_gadget() {}
+"#;
+        let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
+        let mut names = route_names(&fp);
+        names.sort_unstable();
+        assert_eq!(names, vec!["GET /widgets", "POST /gadgets"]);
+        let widgets = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /widgets");
+        assert_eq!(
+            fp.nodes.iter().filter(|n| n.id == widgets).count(),
+            1,
+            "relative and slashed registrations are one node"
+        );
+        assert!(
+            fp.refs
+                .iter()
+                .any(|r| r.category == edge_category::HANDLED_BY
+                    && r.from == widgets
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "list_widgets"))
+        );
     }
 
     #[test]

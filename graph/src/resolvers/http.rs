@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use repo_graph_code_domain::endpoint::is_canonical_http_path;
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
@@ -50,6 +51,7 @@ impl CrossGraphResolver for HttpStackResolver {
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                     continue;
                 };
+                stats.qnames.endpoint(qname);
                 let Some((method, raw_path)) = parse_endpoint_qname(qname) else {
                     continue;
                 };
@@ -84,6 +86,7 @@ impl CrossGraphResolver for HttpStackResolver {
             }
         }
         stats.report();
+        stats.qnames.report();
         stats.report_placeholder_folds();
         stats.report_client_normalised();
         stats.report_host_narrowed(aliases.len());
@@ -170,6 +173,66 @@ struct HttpMatchStats {
     normalised_query: usize,
     /// A11.4: ENDPOINT nodes whose target list host narrowing actually cut.
     host_narrowed: usize,
+    /// LB.5: the `[http-qname]` census.
+    qnames: QnameCensus,
+}
+
+/// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
+/// in the one canonical form (`code_domain::endpoint::canonical_http_path` —
+/// a single leading `/`, or an exempt placeholder). Every emitter builds its
+/// qname through that module's builders, so a non-zero count names a parser
+/// that bypasses them.
+///
+/// ROUTEs are counted where the route index sees them, so client-router NAV
+/// routes (A3.4) are out of scope exactly as they are out of the index; a
+/// qname in neither route shape has no path part to judge and is counted
+/// but never flagged.
+#[derive(Default)]
+struct QnameCensus {
+    routes: usize,
+    endpoints: usize,
+    offenders: Vec<String>,
+}
+
+impl QnameCensus {
+    fn route(&mut self, qname: &str) {
+        self.routes += 1;
+        let path = qname
+            .strip_prefix("route:")
+            .or_else(|| qname.split_once(' ').map(|(_, p)| p));
+        self.judge(qname, path);
+    }
+
+    fn endpoint(&mut self, qname: &str) {
+        self.endpoints += 1;
+        self.judge(qname, parse_endpoint_qname(qname).map(|(_, p)| p));
+    }
+
+    fn judge(&mut self, qname: &str, path: Option<&str>) {
+        if path.is_some_and(|p| !is_canonical_http_path(p)) {
+            self.offenders.push(qname.to_string());
+        }
+    }
+
+    /// LB.5 fired_on marker, silent on a build with no HTTP surface (like
+    /// `[http]`). With offenders it names the first three, sorted, so a
+    /// regressing parser is identified without a rerun.
+    fn report(&mut self) {
+        if self.routes + self.endpoints == 0 {
+            return;
+        }
+        eprintln!(
+            "[http-qname] routes={} endpoints={} noncanonical={}",
+            self.routes,
+            self.endpoints,
+            self.offenders.len(),
+        );
+        if !self.offenders.is_empty() {
+            self.offenders.sort_unstable();
+            let first = &self.offenders[..self.offenders.len().min(3)];
+            eprintln!("[http-qname] noncanonical first {}: {first:?}", first.len());
+        }
+    }
 }
 
 impl HttpMatchStats {
@@ -329,6 +392,7 @@ fn build_route_index(
                 continue;
             }
             stats.routes += 1;
+            stats.qnames.route(qname);
             let target = RouteTarget {
                 route_id: n.id,
                 confidence: n.confidence,
@@ -458,7 +522,9 @@ fn index_route_node<'q>(
         }
         return Some(path);
     }
-    // Legacy shape: "<METHOD> <path>". Split on the first space.
+    // Legacy shape: "<METHOD> <path>". Split on the first space. Every
+    // emitter now builds a canonical path (LB.5, counted by the `[http-qname]`
+    // census); the `/` guard stays as the safety net for one that does not.
     if let Some((method, path)) = qname.split_once(' ')
         && path.starts_with('/')
     {
@@ -1606,5 +1672,38 @@ mod tests {
             },
         ]);
         assert_eq!((stats.normalised_host, stats.normalised_query), (2, 2));
+    }
+
+    /// LB.5 — the `[http-qname]` census judges the path part of all three
+    /// qname shapes, exempts the placeholder shapes, and never flags a qname
+    /// it cannot split.
+    #[test]
+    fn qname_census_flags_only_relative_paths() {
+        let mut c = QnameCensus::default();
+        for q in [
+            "GET /users",
+            "route:/items",
+            "ANY /",
+            "GET widgets",
+            "route:items",
+            "odd",
+        ] {
+            c.route(q);
+        }
+        for q in [
+            "endpoint:GET:/users",
+            "endpoint:GET:${…}/users",
+            "endpoint:POST:<unresolved>",
+            "endpoint:DELETE:protected/x",
+        ] {
+            c.endpoint(q);
+        }
+        assert_eq!((c.routes, c.endpoints), (6, 4));
+        let mut got = c.offenders.clone();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec!["GET widgets", "endpoint:DELETE:protected/x", "route:items"]
+        );
     }
 }

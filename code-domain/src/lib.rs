@@ -1220,7 +1220,10 @@ pub mod endpoint {
     /// where the engine's endpoint fold appends it (`Fields::set` on a payload
     /// that has no `host` yet), so a parser that pre-sets it produces the
     /// same folded bytes as one that leaves it to the fold.
-    fn endpoint_hit_json(ep: &ClientEndpoint, extras: HitExtras<'_>) -> String {
+    ///
+    /// `path` is written in place of `ep.path`: the caller passes the
+    /// canonical form (LB.5), so the cell and the qname agree.
+    fn endpoint_hit_json(ep: &ClientEndpoint, path: &str, extras: HitExtras<'_>) -> String {
         let conf = match ep.confidence {
             Confidence::Strong => "strong",
             Confidence::Medium => "medium",
@@ -1237,7 +1240,7 @@ pub mod endpoint {
         format!(
             r#"{{"method":"{}","path":"{}","file":"{}","line":{},"col":{},"confidence":"{}"{}{}}}"#,
             esc(&ep.method),
-            esc(&ep.path),
+            esc(path),
             esc(&ep.file),
             ep.line,
             ep.col,
@@ -1340,6 +1343,58 @@ pub mod endpoint {
             return "/".to_string();
         }
         format!("/{body}")
+    }
+
+    /// The ONE canonical path form for ROUTE / ENDPOINT qnames (LB.5): exactly
+    /// one leading `/`.
+    ///
+    /// Returned byte-identical when [`is_canonical_http_path`] already holds —
+    /// it starts with `/`, starts with a `${` base placeholder (the resolver's
+    /// BaseFold tier and the engine's endpoint fold read that shape), is empty,
+    /// or is the `<unresolved>` placeholder. Anything else goes through
+    /// [`abs_path`]. The early return is load-bearing: `abs_path` trims
+    /// whitespace and collapses `//x`, and neither may move a qname that was
+    /// already correct.
+    ///
+    /// ```text
+    /// canonical_http_path("api/users") == "/api/users"
+    /// canonical_http_path("  a ")      == "/a"
+    /// canonical_http_path("/x")        == "/x"
+    /// canonical_http_path("//x")       == "//x"
+    /// canonical_http_path("${…}/u")    == "${…}/u"
+    /// canonical_http_path("")          == ""
+    /// ```
+    pub fn canonical_http_path(p: &str) -> std::borrow::Cow<'_, str> {
+        if is_canonical_http_path(p) {
+            std::borrow::Cow::Borrowed(p)
+        } else {
+            std::borrow::Cow::Owned(abs_path(p))
+        }
+    }
+
+    /// True when `p` is already in [`canonical_http_path`]'s form, i.e. that
+    /// function would return it unchanged. The `[http-qname]` census in the
+    /// HTTP resolver uses it to name any emitter that bypasses the builders.
+    pub fn is_canonical_http_path(p: &str) -> bool {
+        p.is_empty() || p == "<unresolved>" || p.starts_with('/') || p.starts_with("${")
+    }
+
+    /// Legacy ROUTE qname shape `<METHOD> <path>` (java, csharp, rust, php,
+    /// clojure, ...), with the path canonical.
+    pub fn route_qname(method: &str, path: &str) -> String {
+        format!("{method} {}", canonical_http_path(path))
+    }
+
+    /// Per-path ROUTE qname shape `route:<path>` (go, ts_routes), with the
+    /// path canonical. Methods ride on stacked ROUTE_METHOD cells.
+    pub fn route_path_qname(path: &str) -> String {
+        format!("route:{}", canonical_http_path(path))
+    }
+
+    /// ENDPOINT qname `endpoint:<METHOD>:<path>`, with the path canonical —
+    /// the shape `HttpStackResolver::parse_endpoint_qname` reads.
+    pub fn endpoint_qname(method: &str, path: &str) -> String {
+        format!("endpoint:{method}:{}", canonical_http_path(path))
     }
 
     /// True if `name` names an HTTP *client* receiver — `dio`, `http`,
@@ -1541,7 +1596,9 @@ pub mod endpoint {
     /// ```
     ///
     /// Returns `(path, changed)` so the caller can record the original literal
-    /// as provenance (`"raw"` on ENDPOINT_HIT).
+    /// as provenance (`"raw"` on ENDPOINT_HIT). A relative hint gains its
+    /// leading `/` later, where the qname is built ([`canonical_http_path`],
+    /// LB.5), not here.
     ///
     /// The query is cut BEFORE the host is looked for, so a `://` that only
     /// appears in a query value (`/login?next=https://x/y`) is never mistaken
@@ -1560,10 +1617,12 @@ pub mod endpoint {
         (path.to_string(), path != raw)
     }
 
-    /// Stable ENDPOINT node id for a `(method, path)` — `endpoint:<METHOD>:<path>`,
+    /// Stable ENDPOINT node id for a `(method, path)` — [`endpoint_qname`],
     /// the qname convention `HttpStackResolver::parse_endpoint_qname` reads.
+    /// The path is canonicalised, so this is the id
+    /// [`push_client_endpoint_with`] mints for the same `(method, path)`.
     pub fn endpoint_id(repo: RepoId, method: &str, path: &str) -> NodeId {
-        let qname = format!("endpoint:{method}:{path}");
+        let qname = endpoint_qname(method, path);
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname)
     }
 
@@ -1612,6 +1671,13 @@ pub mod endpoint {
     /// fewer extras. The extras are written on the node's single cell, so
     /// the call site that first emits a `(method, path)` in a file decides
     /// them, the same as `file`/`line`/`col`.
+    ///
+    /// LB.5: `ep.path` is canonicalised ([`canonical_http_path`]) before the
+    /// qname, the display name and the cell's `path` are built, so a relative
+    /// `api/users` and a slashed `/api/users` are ONE node. When that rewrote
+    /// the path and the caller recorded no `raw` of its own, the original is
+    /// written as `raw` (A3.3's meaning: the literal the path was normalised
+    /// from).
     #[allow(clippy::too_many_arguments)]
     pub fn push_client_endpoint_with(
         repo: RepoId,
@@ -1623,19 +1689,26 @@ pub mod endpoint {
         nav: &mut CodeNav,
         seen: &mut HashSet<NodeId>,
     ) -> NodeId {
-        let qname = format!("endpoint:{}:{}", ep.method, ep.path);
+        let path = canonical_http_path(&ep.path);
+        let qname = endpoint_qname(&ep.method, &path);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
         if seen.insert(id) {
+            let extras = HitExtras {
+                raw: extras
+                    .raw
+                    .or_else(|| (path != ep.path.as_str()).then_some(ep.path.as_str())),
+                ..extras
+            };
             nodes.push(Node {
                 id,
                 repo,
                 confidence: ep.confidence,
                 cells: vec![Cell {
                     kind: cell_type::ENDPOINT_HIT,
-                    payload: CellPayload::Json(endpoint_hit_json(ep, extras)),
+                    payload: CellPayload::Json(endpoint_hit_json(ep, &path, extras)),
                 }],
             });
-            let display = format!("{} {}", ep.method, ep.path);
+            let display = format!("{} {}", ep.method, path);
             nav.record(id, &display, &qname, node_kind::ENDPOINT, None);
         }
         edges.push(Edge {
@@ -2439,6 +2512,139 @@ mod tests {
         assert_eq!(endpoint::abs_path("api/"), "/api/");
         // Surrounding whitespace is trimmed.
         assert_eq!(endpoint::abs_path("  /api  "), "/api");
+    }
+
+    /// LB.5 — the canonical HTTP qname path: one leading `/` added to a
+    /// relative literal; every shape that is already canonical, or is a
+    /// placeholder, comes back byte-identical (borrowed, not rebuilt).
+    #[test]
+    fn canonical_http_path_adds_one_slash_and_never_moves_a_correct_path() {
+        use std::borrow::Cow;
+        let c = endpoint::canonical_http_path;
+        assert_eq!(c("api"), "/api");
+        assert_eq!(c("api/users"), "/api/users");
+        assert_eq!(c("  a "), "/a");
+        assert_eq!(c("protected/x/"), "/protected/x/");
+        // Already canonical or exempt: untouched — `abs_path` would have
+        // collapsed `//x` and trimmed ` /x `'s trailing space.
+        for same in [
+            "/x",
+            "//x",
+            "/x ",
+            "/",
+            "${…}/u",
+            "${…}",
+            "",
+            "<unresolved>",
+        ] {
+            assert!(
+                matches!(c(same), Cow::Borrowed(s) if s == same),
+                "{same:?} moved"
+            );
+            assert!(endpoint::is_canonical_http_path(same), "{same:?}");
+        }
+        for rel in ["api", "  a ", "users/${…}", ":id", "?page=2"] {
+            assert!(!endpoint::is_canonical_http_path(rel), "{rel:?}");
+            assert!(endpoint::is_canonical_http_path(&c(rel)), "{rel:?}");
+        }
+    }
+
+    /// LB.5 — the three qname builders share `canonical_http_path`, so a
+    /// relative and a slashed literal build the SAME qname in every shape.
+    #[test]
+    fn http_qname_builders_canonicalise_the_path() {
+        assert_eq!(endpoint::route_qname("GET", "widgets"), "GET /widgets");
+        assert_eq!(endpoint::route_qname("GET", "/widgets"), "GET /widgets");
+        assert_eq!(endpoint::route_path_qname("items"), "route:/items");
+        assert_eq!(endpoint::route_path_qname("/items"), "route:/items");
+        assert_eq!(
+            endpoint::endpoint_qname("GET", "auth/login"),
+            "endpoint:GET:/auth/login"
+        );
+        assert_eq!(
+            endpoint::endpoint_qname("GET", "${…}/users"),
+            "endpoint:GET:${…}/users"
+        );
+        assert_eq!(
+            endpoint::endpoint_qname("GET", "<unresolved>"),
+            "endpoint:GET:<unresolved>"
+        );
+        assert_eq!(
+            endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "x"),
+            endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "/x"),
+        );
+    }
+
+    /// LB.5 — a relative client path becomes the canonical node, carries the
+    /// original literal as `raw`, and merges with the slashed call to the same
+    /// path; a caller's own `raw` wins over the relative literal.
+    #[test]
+    fn client_endpoint_relative_path_is_canonical_with_raw() {
+        use endpoint::HitExtras;
+        use repo_graph_core::{Confidence, RepoId};
+        let ep = |path: &str| endpoint::ClientEndpoint {
+            method: "DELETE".into(),
+            path: path.into(),
+            file: "a.ts".into(),
+            line: 1,
+            col: 1,
+            confidence: Confidence::Strong,
+        };
+        let from = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::METHOD, "m");
+        let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+        let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+        let mut push = |e: &endpoint::ClientEndpoint, extras: HitExtras<'_>| {
+            endpoint::push_client_endpoint_with(
+                RepoId(1),
+                e,
+                extras,
+                from,
+                &mut nodes,
+                &mut edges,
+                &mut nav,
+                &mut seen,
+            )
+        };
+        let rel = push(&ep("protected/x"), HitExtras::default());
+        let abs = push(&ep("/protected/x"), HitExtras::default());
+        assert_eq!(rel, abs, "relative and slashed calls are one ENDPOINT");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(edges.len(), 2, "one CALLS edge per call site");
+        assert_eq!(
+            nodes[0].cells[0].payload,
+            CellPayload::Json(
+                r#"{"method":"DELETE","path":"/protected/x","file":"a.ts","line":1,"col":1,"confidence":"strong","raw":"protected/x"}"#
+                    .into()
+            )
+        );
+        assert_eq!(
+            nav.qname_by_id.get(&rel).map(String::as_str),
+            Some("endpoint:DELETE:/protected/x")
+        );
+        assert_eq!(
+            nav.name_by_id.get(&rel).map(String::as_str),
+            Some("DELETE /protected/x")
+        );
+
+        let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+        let (mut nav, mut seen) = (CodeNav::default(), Default::default());
+        endpoint::push_client_endpoint_with(
+            RepoId(1),
+            &ep("users?x=1"),
+            HitExtras {
+                raw: Some("http://h/users?x=1"),
+                host: None,
+            },
+            from,
+            &mut nodes,
+            &mut edges,
+            &mut nav,
+            &mut seen,
+        );
+        match &nodes[0].cells[0].payload {
+            CellPayload::Json(j) => assert!(j.contains(r#""raw":"http://h/users?x=1""#), "{j}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A3.3 — the client-path normaliser drops scheme+host and query+fragment

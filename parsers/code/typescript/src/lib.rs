@@ -113,8 +113,8 @@ struct EndpointCandidate {
     /// `this.x.method()` and shape 3 `fetch()`).
     requires_import_alias: Option<String>,
     /// A3.3: the call-site literal `path` was normalised from, set only when
-    /// `normalise_client_path` actually changed it. Serialised as `"raw"` on
-    /// ENDPOINT_HIT.
+    /// `normalise_client_path` or LB.5's leading-`/` canonicalisation actually
+    /// changed it. Serialised as `"raw"` on ENDPOINT_HIT.
     raw_path: Option<String>,
     /// A11.2: the template literal with every `${expr}` substitution kept
     /// VERBATIM (`${environment.apiUrl}/users`), set only when the argument was
@@ -1016,10 +1016,15 @@ fn push_endpoint(
         confidence,
     } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
-    // stripping happens once. A normaliser, never a filter: relative hints
-    // (`auth/login`) and interpolated bases (`${…}/users`) come back as-is.
+    // stripping happens once. A normaliser, never a filter: interpolated bases
+    // (`${…}/users`) come back as-is.
     let (norm, changed) = endpoint::normalise_client_path(&path);
-    let raw_path = changed.then_some(path);
+    // LB.5: a relative hint (`auth/login`) gains its one canonical leading
+    // `/`, so `this.http.delete('protected/x')` and `…('/protected/x')` are
+    // one ENDPOINT. The literal it was rewritten from rides along as `raw`.
+    let canonical = endpoint::canonical_http_path(&norm).into_owned();
+    let raw_path = (changed || canonical != norm).then_some(path);
+    let norm = canonical;
     acc.endpoints.push(EndpointCandidate {
         from,
         method,
@@ -1273,7 +1278,9 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         {
             continue;
         }
-        let qname = format!("endpoint:{}:{}", cand.method, cand.path);
+        // `cand.path` is already canonical (`push_endpoint`); the shared
+        // builder keeps ONE definition of the qname shape.
+        let qname = endpoint::endpoint_qname(&cand.method, &cand.path);
         let endpoint_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
         let cell = endpoint_hit_cell(&cand);
         out.nodes.push(Node {
@@ -1844,8 +1851,9 @@ export class AuthService {
 ";
         let parse = parse_file(src, "src/auth.ts", "src::auth", repo()).unwrap();
 
-        // Inner literal 'auth/login' becomes the path hint, Weak confidence.
-        let ep = endpoint_id(repo(), "POST", "auth/login");
+        // Inner literal 'auth/login' becomes the path hint, Weak confidence,
+        // with its one canonical leading `/` (LB.5).
+        let ep = endpoint_id(repo(), "POST", "/auth/login");
         assert!(
             parse.nodes.iter().any(|n| n.id == ep),
             "URL-builder wrapped endpoint missing"
@@ -1901,8 +1909,10 @@ export class UserService {
     }
 
     /// A3.3 regression guard — the normaliser must never touch a path it
-    /// cannot improve: a relative URL-builder hint, a plain path and an
-    /// interpolated base all keep their qname AND a payload with no `raw` key.
+    /// cannot improve: a plain path and an interpolated base keep their qname
+    /// AND a payload with no `raw` key. LB.5: a relative URL-builder hint is
+    /// the one rewrite — it gains a leading `/` and records the literal as
+    /// `raw`.
     #[test]
     fn relative_builder_hint_is_untouched() {
         let src = "\
@@ -1916,7 +1926,15 @@ export class AuthService {
 }
 ";
         let parse = parse_file(src, "src/auth.ts", "src::auth", repo()).unwrap();
-        for (method, path) in [("POST", "auth/login"), ("GET", "/api/users"), ("GET", "${…}/users")] {
+        let hint = endpoint_payloads(&parse, endpoint_id(repo(), "POST", "/auth/login"));
+        assert_eq!(hint.len(), 1, "relative hint must be keyed on /auth/login");
+        assert_eq!(hint[0]["path"], "/auth/login");
+        assert_eq!(hint[0]["raw"], "auth/login");
+        assert!(
+            !parse.nodes.iter().any(|n| n.id == endpoint_id(repo(), "POST", "auth/login")),
+            "the unslashed id must be gone"
+        );
+        for (method, path) in [("GET", "/api/users"), ("GET", "${…}/users")] {
             let ep = endpoint_id(repo(), method, path);
             let payloads = endpoint_payloads(&parse, ep);
             assert_eq!(payloads.len(), 1, "missing endpoint:{method}:{path}");
@@ -1926,6 +1944,55 @@ export class AuthService {
                 payloads[0]
             );
         }
+    }
+
+    /// LB.5 — a relative and a slashed call to one path are ONE ENDPOINT id
+    /// (one nav entry, one ENDPOINT_HIT per call site), and the relative call's
+    /// hit records the literal it was rewritten from.
+    #[test]
+    fn relative_and_slashed_calls_share_one_endpoint() {
+        let src = "\
+export class SettingsService {
+    constructor(private readonly http: any) {}
+    remove(): void {
+        this.http.delete('protected/settings/account');
+    }
+    removeAgain(): void {
+        this.http.delete('/protected/settings/account');
+    }
+}
+";
+        let parse = parse_file(src, "src/settings.ts", "src::settings", repo()).unwrap();
+        let ep = endpoint_id(repo(), "DELETE", "/protected/settings/account");
+        let payloads = endpoint_payloads(&parse, ep);
+        assert_eq!(payloads.len(), 2, "both call sites hit the canonical node");
+        assert!(
+            payloads
+                .iter()
+                .all(|p| p["path"] == "/protected/settings/account")
+        );
+        assert_eq!(
+            payloads
+                .iter()
+                .filter(|p| p["raw"] == "protected/settings/account")
+                .count(),
+            1
+        );
+        let endpoints: Vec<&str> = parse
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .filter_map(|(id, _)| parse.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        assert_eq!(
+            endpoints,
+            vec!["endpoint:DELETE:/protected/settings/account"]
+        );
+        assert_eq!(
+            parse.nav.name_by_id.get(&ep).map(String::as_str),
+            Some("DELETE /protected/settings/account")
+        );
     }
 
     /// A11.2 — a template argument keeps its substitution SOURCE on the cell as

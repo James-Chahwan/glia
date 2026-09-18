@@ -1,3 +1,4 @@
+use repo_graph_code_domain::endpoint::{canonical_http_path, route_qname};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -451,11 +452,14 @@ fn emit_clojure_route(
     acc: &mut Acc,
     seen: &mut std::collections::HashSet<(String, String)>,
 ) {
+    // LB.5: keyed on the canonical path, so compojure's relative `"bolts"` and
+    // a slashed `"/bolts"` for the same verb are one node, `GET /bolts`.
+    let path = canonical_http_path(path);
     let key = (method.to_string(), path.to_string());
     if !seen.insert(key) {
         return;
     }
-    let route_name = format!("{method} {path}");
+    let route_name = route_qname(method, &path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
     acc.nodes.push(Node {
         id: route_id,
@@ -599,6 +603,27 @@ mod tests {
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
         assert!(fp.nodes.iter().any(|n| n.id == route_id("DELETE", "/users/:id")));
+    }
+
+    /// LB.5 — compojure's relative `"bolts"` is `GET /bolts`, and a relative
+    /// plus a slashed registration of one verb+path is one node.
+    #[test]
+    fn relative_compojure_path_is_canonical() {
+        let source = r#"
+(defroutes app-routes
+  (GET "bolts" [] (list-bolts))
+  (GET "/bolts" [] (list-bolts))
+  (POST "bolts" [] (make-bolt)))
+"#;
+        let fp = parse_file(source, "src/routes.clj", "src::routes", repo()).unwrap();
+        let get = route_id("GET", "/bolts");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == get).count(), 1);
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("POST", "/bolts")));
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("GET", "bolts")));
+        assert_eq!(
+            fp.nav.name_by_id.get(&get).map(String::as_str),
+            Some("GET /bolts")
+        );
     }
 
     #[test]

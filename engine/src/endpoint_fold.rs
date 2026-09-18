@@ -47,7 +47,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use repo_graph_code_domain::endpoint::url_split;
+use repo_graph_code_domain::endpoint::{endpoint_qname, url_split};
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_code_extractors::constants::{ConstTable, fold_interpolations};
 use repo_graph_core::{CellPayload, Node, NodeId, RepoId};
@@ -238,7 +238,9 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         fields.set("hosts", Value::from(hosts));
     }
     let payload = serde_json::to_string(&fields).ok()?;
-    let new_qname = format!("endpoint:{method}:{path}");
+    // `url_split` only ever returns a path starting with `/`, so this is
+    // byte-identical to the literal shape; it keeps ONE qname builder (LB.5).
+    let new_qname = endpoint_qname(method, &path);
     let id = if moved {
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &new_qname)
     } else {

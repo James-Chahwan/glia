@@ -1,0 +1,61 @@
+{
+  "framework": "http-relative-paths",
+  "language": "rust+clojure+go+typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.5 (legacy-only, no matrix cell). Relative route/client path literals get one canonical leading slash in their ROUTE / ENDPOINT qname, then pair. Baseline 2026-09-19, debug CLI at 94ac6c5 on these sources: [http] routes=3 endpoints=3 paired=1; ROUTE `GET widgets` (rust axum), `GET bolts` (clojure compojure), `route:items` (go gin); ENDPOINT `endpoint:GET:widgets`, `endpoint:GET:/bolts`, `endpoint:GET:items`; only `endpoint:GET:items -> route:items` pairs, because http.rs index_route_node indexes the legacy `<METHOD> <path>` shape only when the path starts with '/'.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /widgets"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /bolts"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "route:/items"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/widgets"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/widgets",
+      "to": "GET /widgets",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/bolts",
+      "to": "GET /bolts",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/items",
+      "to": "route:/items",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET widgets"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET bolts"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "route:items"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:widgets"
+    }
+  ]
+}

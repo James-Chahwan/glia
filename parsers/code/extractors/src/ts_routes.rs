@@ -146,7 +146,9 @@ pub fn extract_ts_backend_routes(
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     for (route, methods) in by_path {
-        let qname = format!("route:{route}");
+        // LB.5: the shared builder. Every `by_path` key is already canonical
+        // (`add_method`), so this is the key with `route:` in front.
+        let qname = endpoint::route_path_qname(&route);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
         let cells = methods
             .into_iter()
@@ -172,7 +174,7 @@ pub fn extract_ts_backend_routes(
     let refs = handled_by
         .into_iter()
         .map(|(route, handler)| {
-            let qname = format!("route:{route}");
+            let qname = endpoint::route_path_qname(&route);
             let qualifier = match handler.split_once('.') {
                 Some((base, name)) => CallQualifier::Attribute {
                     base: base.to_string(),
@@ -207,7 +209,12 @@ fn add_method(
     if route.contains("${") {
         return false;
     }
-    let entry = by_path.entry(route.to_string()).or_default();
+    // LB.5: keyed on the canonical path, so a relative and a slashed spelling
+    // of one route can never become two nodes with one id. Every shape above
+    // hands in a slashed path today; this is the guarantee, not a rewrite.
+    let entry = by_path
+        .entry(endpoint::canonical_http_path(route).into_owned())
+        .or_default();
     let m = method.to_ascii_lowercase();
     match entry.iter_mut().find(|(existing, _)| existing == &m) {
         Some((_, h)) if h.is_empty() => *h = handler.to_string(),
@@ -1025,6 +1032,19 @@ export class UsersController {
         let r = extract_ts_backend_routes(src, "src/routes/api/users/[id]/+server.ts", module_id(), repo());
         let qnames: Vec<&str> = r.nav.qname_by_id.values().map(|s| s.as_str()).collect();
         assert!(qnames.iter().any(|q| q.contains("/api/users/:id")));
+    }
+
+    /// LB.5 — `add_method` keys routes on the canonical path, so a relative
+    /// and a slashed spelling of one route are one `by_path` entry (and so one
+    /// `route:/…` node), with both methods stacked on it.
+    #[test]
+    fn add_method_keys_on_the_canonical_path() {
+        let mut by_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+        assert!(add_method(&mut by_path, "users", "get", "listUsers"));
+        assert!(add_method(&mut by_path, "/users", "post", ""));
+        assert_eq!(by_path.keys().collect::<Vec<_>>(), vec!["/users"]);
+        assert_eq!(by_path["/users"].len(), 2);
+        assert_eq!(endpoint::route_path_qname("/users"), "route:/users");
     }
 
     fn route_methods(r: &RouteNodes, path: &str) -> Vec<String> {
