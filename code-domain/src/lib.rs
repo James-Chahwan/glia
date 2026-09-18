@@ -1009,6 +1009,70 @@ pub mod endpoint {
         format!("/{body}")
     }
 
+    /// True if `name` names an HTTP *client* receiver — `dio`, `http`,
+    /// `httpClient`, `apiClient`, `api`, `userApi`, `restClient`, `_client`. A
+    /// `.get('/x')` on one of these is an OUTBOUND call (an ENDPOINT), never a
+    /// server route registration. A leading `_` is stripped (Dart private
+    /// fields) and the comparison is case-folded.
+    ///
+    /// Shared by the two route scanners that see both shapes in one textual
+    /// form (A3.5): Dart's shelf scan (lifted verbatim from there, so its
+    /// behaviour is unchanged) and ts_routes' Express/Koa/Hono scan, where
+    /// Angular's `this.http.get('/users')` used to mint a phantom server ROUTE
+    /// that the service's own ENDPOINT then paired to.
+    ///
+    /// The false negatives are DELIBERATE — do not "fix" them here:
+    /// - a server router named `api` / `*Api` / `*client` registering a NAMED
+    ///   handler (`api.get('/users', getUsers)`) reads as a client and its
+    ///   route is lost — it is indistinguishable from `api.post('/users',
+    ///   body)`. (ts_routes keeps the registration when the last argument is
+    ///   an INLINE function, which no HTTP client takes: Hono's `const api =
+    ///   new Hono()` routers.)
+    /// - `dio` is a substring test, so `audioRouter` / `studioRouter` count as
+    ///   clients too.
+    ///
+    /// Server routers are conventionally `app` / `router` / `server`, and a
+    /// lost route is recoverable from the Next.js / NestJS / Hapi / Bun shapes,
+    /// whereas a phantom route poisons every downstream primitive (the service
+    /// is reported as calling itself over HTTP). Not covered: NestJS's
+    /// `httpService` (no `client`/`api` suffix) — widening this changes Dart.
+    pub fn is_http_client_receiver(name: &str) -> bool {
+        let n = name.trim_start_matches('_').to_ascii_lowercase();
+        n == "dio"
+            || n.contains("dio")
+            || n == "http"
+            || n.ends_with("client")
+            || n == "api"
+            || n.ends_with("api")
+    }
+
+    /// The identifier immediately preceding byte index `at` — the receiver of
+    /// a `.method(` call: `http` in `this.http.get(`, `app` in `app.get(`.
+    /// Whitespace between the identifier and `at` is skipped. Empty for
+    /// cascades (`..get`), call results (`request(app).get(`) and other
+    /// non-identifier prefixes. Identifier bytes are `[A-Za-z0-9_]`, so a JS
+    /// `$http` yields `http`.
+    ///
+    /// Never panics: an `at` past the end is clamped, and an `at` that is not
+    /// on a char boundary yields `""`.
+    pub fn ident_before(source: &str, at: usize) -> &str {
+        let bytes = source.as_bytes();
+        let mut end = at.min(bytes.len());
+        while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let mut start = end;
+        while start > 0 {
+            let ch = bytes[start - 1];
+            if ch.is_ascii_alphanumeric() || ch == b'_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        source.get(start..end).unwrap_or("")
+    }
+
     /// Drop a `?query` / `#fragment` and everything after it.
     fn cut_query(s: &str) -> &str {
         &s[..s.find(['?', '#']).unwrap_or(s.len())]
@@ -1681,6 +1745,43 @@ mod tests {
     // later route-composition packets build on, so the edge cases are pinned
     // here rather than re-derived per parser.
     // ------------------------------------------------------------------
+
+    /// A3.5 — the receiver test both route scanners (Dart shelf, ts_routes)
+    /// share. Server routers stay routes; client receivers do not, including
+    /// the documented false negatives (`api` router, `audio*` substring).
+    #[test]
+    fn http_client_receiver_classifies_client_and_server_names() {
+        for client in ["http", "dio", "_dio", "httpClient", "apiClient", "_client", "restClient", "api", "userApi", "HTTP"] {
+            assert!(endpoint::is_http_client_receiver(client), "{client} is a client");
+        }
+        for server in ["app", "router", "server", "r", "v1", "fastify", "hono", "koaRouter", ""] {
+            assert!(!endpoint::is_http_client_receiver(server), "{server} is not a client");
+        }
+        // Deliberate false negatives, pinned so nobody "fixes" one silently.
+        assert!(endpoint::is_http_client_receiver("audioRouter"));
+        assert!(!endpoint::is_http_client_receiver("httpService"));
+    }
+
+    #[test]
+    fn ident_before_reads_the_call_receiver() {
+        let at = |s: &str, needle: &str| s.find(needle).unwrap_or(0);
+        let s = "return this.http.get('/users');";
+        assert_eq!(endpoint::ident_before(s, at(s, ".get(")), "http");
+        let s = "app.get('/x', h)";
+        assert_eq!(endpoint::ident_before(s, at(s, ".get(")), "app");
+        let s = "$http.get('/x')";
+        assert_eq!(endpoint::ident_before(s, at(s, ".get(")), "http");
+        let s = "request(app).get('/x')";
+        assert_eq!(endpoint::ident_before(s, at(s, ".get(")), "");
+        let s = "router\n  ..get('/x')";
+        assert_eq!(endpoint::ident_before(s, at(s, ".get(")), "");
+        let s = "_dio .post('/x')";
+        assert_eq!(endpoint::ident_before(s, at(s, ".post(")), "_dio");
+        // Out-of-range and mid-char offsets never panic.
+        assert_eq!(endpoint::ident_before("app", 99), "app");
+        assert_eq!(endpoint::ident_before("é.get(", 1), "");
+        assert_eq!(endpoint::ident_before("", 0), "");
+    }
 
     /// An empty prefix is a pure pass-through: `join_path` must NOT force a
     /// leading `/`, or go's chi/gin route qnames move (graph/tests/

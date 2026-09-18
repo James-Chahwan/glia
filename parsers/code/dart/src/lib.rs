@@ -7,8 +7,13 @@ pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
+// A3.5: `is_http_client_receiver` / `ident_before` were defined here first and
+// now live in code_domain::endpoint, shared with ts_routes' Express scan. An
+// empty receiver (a `..get` cascade) is not a client, so it still falls
+// through to ROUTE emission in `scan_dart_routes`.
 use repo_graph_code_domain::endpoint::{
-    ClientEndpoint, HitExtras, client_url_split, normalise_client_path, push_client_endpoint_with,
+    ClientEndpoint, HitExtras, client_url_split, ident_before, is_http_client_receiver,
+    normalise_client_path, push_client_endpoint_with,
 };
 
 pub fn parse_file(
@@ -616,16 +621,6 @@ fn is_dart_request_path(path: &str) -> bool {
     path.starts_with('/') || path.starts_with("${…}/")
 }
 
-fn is_http_client_receiver(name: &str) -> bool {
-    let n = name.trim_start_matches('_').to_ascii_lowercase();
-    n == "dio"
-        || n.contains("dio")
-        || n == "http"
-        || n.ends_with("client")
-        || n == "api"
-        || n.ends_with("api")
-}
-
 /// First descendant `identifier` text, depth-first.
 fn first_identifier_text(node: TsNode, src: &[u8]) -> Option<String> {
     if node.kind() == "identifier" {
@@ -731,27 +726,6 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
             idx = dot_at + needle.len();
         }
     }
-}
-
-/// The identifier immediately preceding byte index `at` (the receiver of a
-/// `.method(` call). Empty for cascades (`..get`) or non-identifier prefixes,
-/// which then fall through to ROUTE emission.
-fn ident_before(source: &str, at: usize) -> &str {
-    let bytes = source.as_bytes();
-    let mut end = at;
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    let mut start = end;
-    while start > 0 {
-        let ch = bytes[start - 1];
-        if ch.is_ascii_alphanumeric() || ch == b'_' {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    &source[start..end]
 }
 
 fn extract_kwarg_string(s: &str, key: &str) -> Option<String> {

@@ -12,15 +12,33 @@
 //!
 //! Like the other cross-cutting extractors, this is pattern-based. Only called
 //! by the pipeline for JS/TS-family languages.
+//!
+//! A3.5: the Express scan skips `.get('/x')` on an HTTP-client receiver
+//! (`this.http.get` is an outbound ENDPOINT, not a server route), and a route
+//! registered with a NAMED handler (`app.get('/users/:id', getUser)`) carries a
+//! HANDLED_BY `UnresolvedRef` for the graph builder to bind.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use repo_graph_code_domain::{
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, endpoint,
+    node_kind,
+};
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
 pub struct RouteNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
+    /// A3.5: `route --HANDLED_BY--> handler` refs for Express-style routes
+    /// registered with a named handler. Parsers extract, the graph resolves:
+    /// `resolve_refs` binds the name through the module's imports, then its
+    /// own top-level defs, then a repo-unique function.
+    pub refs: Vec<UnresolvedRef>,
+    /// A3.5: Shape-1 matches dropped because the receiver is an HTTP client
+    /// (`this.http.get('/users')`) — each one a phantom server ROUTE that is
+    /// no longer minted. Feeds the `[extract] ts-routes client-calls skipped`
+    /// build marker.
+    pub skipped_client_calls: usize,
 }
 
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head", "all"];
@@ -31,8 +49,12 @@ pub fn extract_ts_backend_routes(
     module_id: NodeId,
     repo: RepoId,
 ) -> RouteNodes {
-    // path → set of methods (BTreeMap gives stable ordering for deterministic output).
-    let mut by_path: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // path → (method, handler) pairs (BTreeMap gives stable ordering for
+    // deterministic output). `handler` is "" when the shape names none.
+    let mut by_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    // (route, handler) pairs for the HANDLED_BY refs, deduped and ordered.
+    let mut handled_by: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut skipped_client_calls = 0usize;
 
     // Shape 1: Express-style `<x>.<method>('/...', ...)` and Hono/Koa routers.
     for line in source.lines() {
@@ -57,10 +79,30 @@ pub fn extract_ts_backend_routes(
             if !route.starts_with('/') || route.len() > 256 {
                 continue;
             }
+            let after_literal = &rest[end + quote.len_utf8()..];
+            // A3.5: `this.http.get('/users')` has exactly this shape but is an
+            // OUTBOUND call — the receiver names an HTTP client. Rejected here
+            // so it is not also minted as a phantom server ROUTE that the
+            // service's own ENDPOINT then pairs to. An inline function handler
+            // overrides the name: HTTP clients never take one, and Hono's
+            // `const api = new Hono(); api.get('/posts', async (c) => …)` is a
+            // server router named like a client. `looks_like_http_client`
+            // stays as the second line for the receiverless shapes.
+            if endpoint::is_http_client_receiver(endpoint::ident_before(t, idx))
+                && !has_inline_handler(after_literal)
+            {
+                skipped_client_calls += 1;
+                continue;
+            }
             if looks_like_http_client(t) {
                 continue;
             }
-            add_method(&mut by_path, route, method);
+            let handler = named_handler(after_literal);
+            if add_method(&mut by_path, route, method, handler.unwrap_or(""))
+                && let Some(h) = handler
+            {
+                handled_by.insert((route.to_string(), h.to_string()));
+            }
         }
     }
 
@@ -68,7 +110,7 @@ pub fn extract_ts_backend_routes(
     // gives us the method(s).
     if let Some(route) = nextjs_route_from_path(path) {
         for method in nextjs_methods_from_source(source) {
-            add_method(&mut by_path, &route, method);
+            add_method(&mut by_path, &route, method, "");
         }
     }
 
@@ -76,21 +118,21 @@ pub fn extract_ts_backend_routes(
     // named exports (same shape as Next.js App Router).
     if let Some(route) = sveltekit_route_from_path(path) {
         for method in nextjs_methods_from_source(source) {
-            add_method(&mut by_path, &route, method);
+            add_method(&mut by_path, &route, method, "");
         }
     }
 
     // Shape 4: NestJS controllers — combine @Controller(prefix) with method
     // decorators @Get/@Post/...(suffix).
     for (method, route) in nestjs_routes(source) {
-        add_method(&mut by_path, &route, method);
+        add_method(&mut by_path, &route, method, "");
     }
 
     // Shape 5: Hapi.js — `server.route({ method: 'GET', path: '/x', handler })`
     // and array form `server.route([{ ... }, { ... }])`. Method may be a string
     // ('GET') or array of strings (['GET', 'POST']).
     for (method, route) in hapi_routes(source) {
-        add_method(&mut by_path, &route, method);
+        add_method(&mut by_path, &route, method, "");
     }
 
     // Shape 6: Bun.serve `routes:` object —
@@ -98,7 +140,7 @@ pub fn extract_ts_backend_routes(
     // Bun 1.2+ syntax. Single-handler `fetch(req)` style is intentionally
     // skipped (routing is internal to user code).
     for (method, route) in bun_serve_routes(source) {
-        add_method(&mut by_path, &route, method);
+        add_method(&mut by_path, &route, method, "");
     }
 
     let mut nodes = Vec::new();
@@ -108,11 +150,12 @@ pub fn extract_ts_backend_routes(
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
         let cells = methods
             .into_iter()
-            .map(|m| Cell {
+            .map(|(m, handler)| Cell {
                 kind: cell_type::ROUTE_METHOD,
                 payload: CellPayload::Json(format!(
-                    r#"{{"method":"{}","handler":"","file":"{}","line":0,"col":0}}"#,
+                    r#"{{"method":"{}","handler":"{}","file":"{}","line":0,"col":0}}"#,
                     m.to_ascii_uppercase(),
+                    escape_json(&handler),
                     escape_json(path),
                 )),
             })
@@ -126,19 +169,168 @@ pub fn extract_ts_backend_routes(
         nav.record(id, &route, &qname, node_kind::ROUTE, Some(module_id));
     }
 
-    RouteNodes { nodes, nav }
+    let refs = handled_by
+        .into_iter()
+        .map(|(route, handler)| {
+            let qname = format!("route:{route}");
+            let qualifier = match handler.split_once('.') {
+                Some((base, name)) => CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                },
+                None => CallQualifier::Bare(handler),
+            };
+            UnresolvedRef {
+                from: NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname),
+                from_module: module_id,
+                qualifier,
+                category: edge_category::HANDLED_BY,
+            }
+        })
+        .collect();
+
+    RouteNodes { nodes, nav, refs, skipped_client_calls }
 }
 
-fn add_method(by_path: &mut BTreeMap<String, Vec<String>>, route: &str, method: &str) {
+/// Record `method` (with its `handler`, "" when none is named) on `route`.
+/// Returns false when the route is dropped, so the caller emits no ref for it.
+/// A repeated method keeps its first entry, filling in a handler the first
+/// registration did not name.
+fn add_method(
+    by_path: &mut BTreeMap<String, Vec<(String, String)>>,
+    route: &str,
+    method: &str,
+    handler: &str,
+) -> bool {
     // Drop template-source expressions captured from framework internals
     // (`/${this.routeConfig.path}`) — not literal routes. (glia-v2 G8)
     if route.contains("${") {
-        return;
+        return false;
     }
     let entry = by_path.entry(route.to_string()).or_default();
     let m = method.to_ascii_lowercase();
-    if !entry.iter().any(|existing| existing == &m) {
-        entry.push(m);
+    match entry.iter_mut().find(|(existing, _)| existing == &m) {
+        Some((_, h)) if h.is_empty() => *h = handler.to_string(),
+        Some(_) => {}
+        None => entry.push((m, handler.to_string())),
+    }
+    true
+}
+
+/// The top-level arguments that follow the route literal on this line, and
+/// whether the call's closing `)` was seen there. None when the literal is not
+/// followed by `,` (the call has no further arguments) or the text is not a
+/// well-formed argument list. When the call does not close on this line, the
+/// last entry runs to the end of the line.
+fn trailing_args(after_literal: &str) -> Option<(Vec<&str>, bool)> {
+    let rest = after_literal.trim_start().strip_prefix(',')?;
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    let mut seg_start = 0usize;
+    let mut args: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                let delim = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != delim {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    if bytes[i] != b')' {
+                        return None;
+                    }
+                    args.push(rest.get(seg_start..i)?);
+                    return Some((args, true));
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => {
+                args.push(rest.get(seg_start..i)?);
+                seg_start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    args.push(rest.get(seg_start..).unwrap_or(""));
+    Some((args, false))
+}
+
+/// The last non-empty argument — a trailing comma (`app.get('/x', h,)`)
+/// leaves an empty final segment.
+fn last_arg<'a>(args: &[&'a str]) -> Option<&'a str> {
+    args.iter().map(|a| a.trim()).rev().find(|a| !a.is_empty())
+}
+
+/// The NAMED handler of an Express-style registration, read from the text
+/// that follows the route literal's closing quote on the same line: the LAST
+/// top-level argument, when it is a plain identifier (`getUser`) or a one-dot
+/// member (`users.list`). Middleware ahead of it is skipped, so
+/// `app.get('/x', auth, getUser)` names `getUser`.
+///
+/// None for inline handlers (`(req, res) => …`, `function (…) {…}`), wrapper
+/// calls (`asyncHandler(getUser)`), `this.x` members (a route has no enclosing
+/// class to bind `this` to), and when the call does not close on this line —
+/// a multi-line registration's last argument is not visible here, and a
+/// middleware mistaken for the handler would be a wrong edge.
+fn named_handler(after_literal: &str) -> Option<&str> {
+    let (args, closed) = trailing_args(after_literal)?;
+    if !closed {
+        return None;
+    }
+    let last = last_arg(&args)?;
+    is_handler_reference(last).then_some(last)
+}
+
+/// True when the registration's last argument is an inline function —
+/// `(c) => …`, `async (req, res) => {`, `c => …`, `function (req, res) {`.
+/// Read even when the call does not close on this line, since an inline
+/// handler's body usually spans several. The server-side signal that
+/// overrides a client-looking receiver name: Angular's HttpClient, axios, ky
+/// and fetch wrappers take a path and data/options, never a handler.
+fn has_inline_handler(after_literal: &str) -> bool {
+    trailing_args(after_literal)
+        .and_then(|(args, _)| last_arg(&args))
+        .is_some_and(is_inline_function)
+}
+
+fn is_inline_function(arg: &str) -> bool {
+    let keyword = |s: &str, kw: &str| -> bool {
+        s.strip_prefix(kw).is_some_and(|r| {
+            r.starts_with(|c: char| c.is_whitespace() || c == '(' || c == '*')
+        })
+    };
+    let a = if keyword(arg, "async") { arg["async".len()..].trim_start() } else { arg };
+    if keyword(a, "function") {
+        return true;
+    }
+    // An arrow: `=>` after a parameter list (`(req, res)`, typed or not) or
+    // after a single bare parameter (`c`). An options object `{ f: x => x }`
+    // starts with `{`, so it is not one.
+    a.find("=>").is_some_and(|i| {
+        let head = a[..i].trim();
+        head.starts_with('(') || (is_handler_reference(head) && !head.contains('.'))
+    })
+}
+
+/// `name` or `base.name`, each a JS identifier, and not a literal keyword or a
+/// `this.` member.
+fn is_handler_reference(s: &str) -> bool {
+    fn ident(p: &str) -> bool {
+        let mut cs = p.chars();
+        cs.next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            && !matches!(p, "this" | "null" | "undefined" | "true" | "false" | "function" | "async" | "new")
+    }
+    match s.split_once('.') {
+        Some((base, name)) => ident(base) && ident(name),
+        None => ident(s),
     }
 }
 
@@ -1001,5 +1193,147 @@ Bun.serve({
             .collect();
         assert!(payloads.iter().any(|p| p.contains("\"method\":\"GET\"")));
         assert!(payloads.iter().any(|p| p.contains("\"method\":\"POST\"")));
+    }
+
+    fn handled_by(r: &RouteNodes) -> Vec<(String, CallQualifier)> {
+        r.refs
+            .iter()
+            .map(|x| {
+                assert_eq!(x.category, edge_category::HANDLED_BY);
+                assert_eq!(x.from_module, module_id());
+                let q = r.nav.qname_by_id.get(&x.from).cloned().unwrap_or_default();
+                (q, x.qualifier.clone())
+            })
+            .collect()
+    }
+
+    /// A3.5: Angular's `this.http.get('/users')` is an OUTBOUND call. Before
+    /// A3.5 it minted a phantom server `route:/users` in the client repo.
+    #[test]
+    fn client_receiver_calls_are_not_routes() {
+        let src = "class S { constructor(private http: any) {} f() { return this.http.get('/users'); } }";
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        assert!(r.nodes.is_empty(), "no ROUTE from a client call");
+        assert!(r.refs.is_empty());
+        assert_eq!(r.skipped_client_calls, 1);
+
+        let src = "this.httpClient.post('/a', b);\napiClient.put('/b', b);\n_client.delete('/c');\n$http.get('/d');\nthis.api.patch('/e', x);\nuserApi.get('/f');";
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        assert!(r.nodes.is_empty(), "every client receiver is rejected");
+        assert_eq!(r.skipped_client_calls, 6);
+    }
+
+    /// A router NAMED like a client but registering an inline handler is a
+    /// server: Hono's `const api = new Hono()` (glia-eval hono/blog lost all
+    /// five of its /posts registrations to the bare name test). An options
+    /// object that merely contains an arrow is not a handler.
+    #[test]
+    fn inline_handler_overrides_client_receiver_name() {
+        let src = "api.get('/posts', async (c) => {\napi.post('/posts', (c) => c.json({}));\napi.delete('/posts/:id', c => c.body(null));\napiClient.get('/legacy', function (err, res) {";
+        let r = extract_ts_backend_routes(src, "src/api.ts", module_id(), repo());
+        assert_eq!(r.skipped_client_calls, 0);
+        let posts = route_methods(&r, "/posts");
+        assert!(posts.contains(&"GET".to_string()) && posts.contains(&"POST".to_string()), "{posts:?}");
+        assert_eq!(route_methods(&r, "/posts/:id"), vec!["DELETE".to_string()]);
+        assert_eq!(route_methods(&r, "/legacy"), vec!["GET".to_string()]);
+
+        let src = "this.http.get('/x', { transform: (d) => d });\nthis.http.get('/y').pipe(map((r) => r));\nthis.http.post('/z', body).subscribe(() => done());";
+        let r = extract_ts_backend_routes(src, "s.ts", module_id(), repo());
+        assert!(r.nodes.is_empty(), "arrows outside the argument list are not handlers");
+        assert_eq!(r.skipped_client_calls, 3);
+    }
+
+    #[test]
+    fn inline_function_shapes() {
+        for yes in ["(req, res) => res.end()", "async (c) => {", "c => c.text('x')", "async c => 1",
+                    "function (req, res) {", "async function(req, res) {", "function* gen() {",
+                    "(req: Request, res: Response): Promise<void> => {"] {
+            assert!(is_inline_function(yes), "{yes}");
+        }
+        for no in ["getUser", "users.list", "{ transform: (d) => d }", "body", "asyncHandler(fn)",
+                   "functionsConfig", "a.b => 1", ""] {
+            assert!(!is_inline_function(no), "{no}");
+        }
+    }
+
+    /// The server routers the guard must leave alone — including class-based
+    /// Express (`this.app` / `this.router`), which the TS parser's own
+    /// `this.<x>.<verb>(` endpoint shape would also claim.
+    #[test]
+    fn express_router_calls_are_still_routes() {
+        let src = "app.get('/x', h);\nrouter.post('/y', h);\nserver.put('/z', h);\nthis.app.delete('/w', h);\nthis.router.patch('/v', h);";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(r.skipped_client_calls, 0);
+        assert_eq!(route_methods(&r, "/x"), vec!["GET".to_string()]);
+        assert_eq!(route_methods(&r, "/y"), vec!["POST".to_string()]);
+        assert_eq!(route_methods(&r, "/z"), vec!["PUT".to_string()]);
+        assert_eq!(route_methods(&r, "/w"), vec!["DELETE".to_string()]);
+        assert_eq!(route_methods(&r, "/v"), vec!["PATCH".to_string()]);
+    }
+
+    /// A3.5 (A15.10's gap): a route registered with a NAMED handler carries a
+    /// HANDLED_BY ref for the graph to bind, and the handler on its cell.
+    #[test]
+    fn named_express_handler_emits_handled_by_ref() {
+        let src = "app.get(\"/users/:id\", getUser);\napp.post(\"/users\", auth, createUser);\nrouter.put('/users/:id', users.update);";
+        let r = extract_ts_backend_routes(src, "server/app.ts", module_id(), repo());
+        let mut refs = handled_by(&r);
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            refs,
+            vec![
+                ("route:/users".to_string(), CallQualifier::Bare("createUser".into())),
+                ("route:/users/:id".to_string(), CallQualifier::Bare("getUser".into())),
+                (
+                    "route:/users/:id".to_string(),
+                    CallQualifier::Attribute { base: "users".into(), name: "update".into() }
+                ),
+            ]
+        );
+        let payloads: Vec<String> = r
+            .nodes
+            .iter()
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(payloads.iter().any(|p| p.contains("\"handler\":\"getUser\"")), "{payloads:?}");
+        assert!(payloads.iter().any(|p| p.contains("\"handler\":\"createUser\"")), "{payloads:?}");
+    }
+
+    /// Inline and wrapped handlers keep their route and name no handler: there
+    /// is no identifier to bind, and guessing one would be a wrong edge.
+    #[test]
+    fn inline_and_unreadable_handlers_emit_route_without_ref() {
+        let src = r#"
+app.get("/a", (req, res) => { res.json({}); });
+app.get("/b", async (req, res) => res.send("ok"));
+app.post("/c", function (req, res) {
+app.put("/d", asyncHandler(update));
+app.delete("/e", this.remove);
+app.patch("/f", auth,
+  patchIt);
+"#;
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        for p in ["/a", "/b", "/c", "/d", "/e", "/f"] {
+            assert_eq!(route_methods(&r, p).len(), 1, "route {p} still emitted");
+        }
+        assert!(r.refs.is_empty(), "no handler ref: {:?}", handled_by(&r));
+    }
+
+    #[test]
+    fn named_handler_reads_the_last_argument() {
+        assert_eq!(named_handler(", getUser);"), Some("getUser"));
+        assert_eq!(named_handler(" , auth, rateLimit({ max: 5, window: '1,2' }), getUser)"), Some("getUser"));
+        assert_eq!(named_handler(", h,)"), Some("h"));
+        assert_eq!(named_handler(", ctrl.list)"), Some("ctrl.list"));
+        assert_eq!(named_handler(", a.b.c)"), None);
+        assert_eq!(named_handler(", (req, res) => res.end())"), None);
+        assert_eq!(named_handler(", null)"), None);
+        assert_eq!(named_handler(")"), None);
+        assert_eq!(named_handler(", h"), None);
+        assert_eq!(named_handler(", h]"), None);
     }
 }

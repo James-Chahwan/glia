@@ -1,0 +1,22 @@
+{
+  "framework": "http-client-not-route",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "A3.5. Deliberately legacy-only (no `cells`): the precision twin of angular-http-calls/client, which measures typescript/http_client. One Angular service with two OUTBOUND calls and no server anywhere. ts_routes' Shape-1 Express scan matched any `.get(`/`.post(` whose first argument is a `/` literal, so `this.http.get('/users')` also minted a server `route:/users` (ROUTE_METHOD `handler \"\"`, `file users.service.ts`, `line 0`), and HttpStackResolver then paired the service's own ENDPOINTs to that phantom: the graph reported a service calling itself over HTTP. A3.5 rejects `.get(`/`.post(` on an HTTP-client receiver (`http`, `*client`, `*api`, `dio` — code_domain::endpoint::is_http_client_receiver, shared with the Dart route scan). The ENDPOINTs and their CALLS edges must survive; only the phantom ROUTE and its pairings must die.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /users", "note": "this.http.get('/users') is an OUTBOUND call"},
+    {"kind": "ENDPOINT", "name": "POST /users", "note": "...and so is this.http.post"}
+  ],
+  "expect_edges": [
+    {"from": "getUsers", "to": "GET /users", "category": "CALLS", "note": "the client call site still owns its ENDPOINT"},
+    {"from": "addUser", "to": "POST /users", "category": "CALLS", "note": "the client call site still owns its ENDPOINT"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "/users",
+     "note": "THE BUG: ts_routes must not mint a server ROUTE from a client call — there is no server in this repo"},
+    {"from": "GET /users", "to": "/users", "category": "HTTP_CALLS",
+     "note": "nothing to pair with; before A3.5 the service's GET paired to its own phantom route"},
+    {"from": "POST /users", "to": "/users", "category": "HTTP_CALLS",
+     "note": "same for the POST: a client call is never its own server"}
+  ]
+}

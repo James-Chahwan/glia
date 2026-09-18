@@ -13,5 +13,9 @@
   ],
   "expect_edges": [
     {"from": "/users", "to": "/users", "category": "HTTP_CALLS", "note": "Angular HttpClient -> Go route cross-edge"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "/users", "max_nodes": 1,
+     "note": "A3.5: the Go chi route is the ONLY /users route. Before A3.5 ts_routes also minted a phantom server route:/users in the CLIENT repo from `this.http.get(\"/users\")`, which the service's own ENDPOINT then paired to (a second HTTP_CALLS edge). The two ROUTEs share name and qname, so the count is the only thing that tells them apart."}
   ]
 }

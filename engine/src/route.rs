@@ -56,6 +56,8 @@ pub(crate) fn parse_repo_files(
     // build — a cache hit replays a FileParse whose ROUTE nodes already carry
     // the mark, so the graph-side `[http]` marker is the complete figure.
     let mut nav_routes_marked = 0usize;
+    // A3.5 `[extract] ts-routes` marker counter, same reparsed-only caveat.
+    let mut ts_client_calls_skipped = 0usize;
 
     for (path, source) in files {
         let yaml_ext = matches!(
@@ -350,6 +352,7 @@ pub(crate) fn parse_repo_files(
             Ok(Ok((fp, stats))) => {
                 reparsed += 1;
                 nav_routes_marked += stats.nav_routes;
+                ts_client_calls_skipped += stats.ts_client_calls_skipped;
                 if let (Some(c), Some(h)) = (cache.as_deref_mut(), hash) {
                     c.put(path.clone(), h, lang, fp.clone());
                 }
@@ -390,6 +393,11 @@ pub(crate) fn parse_repo_files(
     // printed when a build actually marked one.
     if nav_routes_marked > 0 {
         eprintln!("[extract] nav-routes marked: {nav_routes_marked}");
+    }
+    // A3.5 fired_on marker: ts_routes declined to mint a server ROUTE from an
+    // HTTP-client call (`this.http.get('/users')`). Only printed when it did.
+    if ts_client_calls_skipped > 0 {
+        eprintln!("[extract] ts-routes client-calls skipped: {ts_client_calls_skipped}");
     }
 
     // A5.1 fired_on marker: a `.proto` is now a first-class parsed file, not a

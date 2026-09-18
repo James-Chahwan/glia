@@ -125,6 +125,10 @@ pub(crate) struct ExtractStats {
     /// A3.4: ROUTE nodes marked `provenance: nav_route` (client-router browser
     /// navigation targets, excluded from the HTTP pairing index downstream).
     pub nav_routes: usize,
+    /// A3.5: ts_routes Express-scan matches rejected because the receiver is
+    /// an HTTP client (`this.http.get('/users')`) — phantom server ROUTEs no
+    /// longer minted.
+    pub ts_client_calls_skipped: usize,
 }
 
 pub(crate) fn apply_cross_cutting_extractors(
@@ -210,9 +214,14 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_with_edges!(config::extract_config_reads(source, module_id, repo));
 
     if matches!(lang, "typescript" | "react" | "angular" | "vue") {
-        run!(ts_routes::extract_ts_backend_routes(
-            source, path, module_id, repo
-        ));
+        // A3.5: not `run!` — the routes also carry HANDLED_BY refs for named
+        // Express handlers (bound by the graph builder's `resolve_refs`) and
+        // a count of client calls the scan declined to mint as routes.
+        let routes = ts_routes::extract_ts_backend_routes(source, path, module_id, repo);
+        stats.ts_client_calls_skipped += routes.skipped_client_calls;
+        fp.refs.extend(routes.refs);
+        fp.nodes.extend(routes.nodes);
+        merge_nav(&mut fp.nav, routes.nav);
         // A10.9: tRPC routers/procedures (server) and hook/vanilla calls
         // (client). Per-file marker, printed only when the file yielded one —
         // the aggregation point (route.rs) is a sibling packet's file.
