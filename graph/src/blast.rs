@@ -64,6 +64,9 @@ pub fn blast_carry_edges() -> Vec<EdgeCategoryId> {
         ec::WS_CONNECTS,
         ec::EVENT_FLOWS,
         ec::CLI_INVOKES,
+        // LA.6a: renaming or removing a route breaks every page that links to
+        // it, and page flow becomes traceable end to end.
+        ec::NAVIGATES_TO,
         ec::HANDLED_BY,
         ec::INJECTS,
         ec::ACCESSES_DATA,

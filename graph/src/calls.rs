@@ -158,8 +158,9 @@ impl EnumHits {
     }
 }
 
-/// The `file` field of a node's POSITION cell (JSON `{"file":"…",…}`).
-fn position_file(node: &repo_graph_core::Node) -> Option<String> {
+/// The `file` field of a node's POSITION cell (JSON `{"file":"…",…}`). Also
+/// read by `nav` to place a linking file under its LB.4a project owner.
+pub(crate) fn position_file(node: &repo_graph_core::Node) -> Option<String> {
     node.cells.iter().find_map(|c| {
         if c.kind != cell_type::POSITION {
             return None;
@@ -182,7 +183,16 @@ fn position_file(node: &repo_graph_core::Node) -> Option<String> {
 /// Today's only producer is parser-go's route extraction, where `category` is
 /// `HANDLED_BY` and the qualifier shape is either `Bare(name)` (handler is a
 /// same-package fn) or `Attribute { base, name }` (handler is `pkg.Name`).
+///
+/// `NAVIGATES_TO` refs (LA.6a) are not symbol references: they name a URL
+/// path, so they are split off here and bound against the nav-route table by
+/// `nav::resolve_nav_links` after every other ref, then `nav::lift_nav_endpoints`
+/// moves file-level page-flow endpoints onto their page component. The
+/// partition keeps the other refs in their original order, so every other
+/// edge list is unchanged.
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
+    let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) =
+        refs.iter().partition(|r| r.category == edge_category::NAVIGATES_TO);
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
     for r in refs {
@@ -275,6 +285,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     }
     if enum_hits.uses > 0 {
         eprintln!("[resolve] enum member uses bound: {} ext={}", enum_hits.uses, enum_hits.ext(g));
+    }
+    let mut nav = crate::nav::resolve_nav_links(g, &nav_refs);
+    nav.lifted = crate::nav::lift_nav_endpoints(g);
+    if nav.fired() {
+        eprintln!("{}", nav.marker());
     }
 }
 

@@ -403,7 +403,7 @@ RouterModule.forRoot(routes);
         assert_eq!(qnames, ["page:/", "page:/users", "page:/users/:id"]);
         assert_eq!(r.nav_routes, 3, "A3.4: every client-router ROUTE counted");
         // A3.4: each one carries the `provenance: nav_route` ORIGIN mark, which
-        // is what `graph::resolvers::http::is_nav_route` reads to keep it out of
+        // is what `graph::nav::is_nav_route` reads to keep it out of
         // the HTTP pairing index.
         let route_ids: Vec<_> = r
             .nav

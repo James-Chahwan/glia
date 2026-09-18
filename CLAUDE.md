@@ -102,8 +102,10 @@ graph/src/    lib.rs        facade (rules above)
                             websocket, eventbus, shared_schema, db, cron, config,
                             iac, package, cli) + mod.rs
   public slots (repo_graph_graph::<slot>::<item>):
-              rust_paths LA.1a (+LA.1b, LA.3)   nav LA.6a   roles LB.3a (+LA.21a)
+              rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
+              nav LA.6a   is_nav_route / nav_route_path, and the NAVIGATES_TO resolver
+                          + page-component lift that calls::resolve_refs runs last
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots

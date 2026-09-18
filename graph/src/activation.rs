@@ -24,6 +24,7 @@ pub fn code_activation_defaults() -> repo_graph_activation::ActivationConfig {
     weights.insert(edge_category::WS_CONNECTS, 4.0);
     weights.insert(edge_category::EVENT_FLOWS, 4.0);
     weights.insert(edge_category::CLI_INVOKES, 3.0);
+    weights.insert(edge_category::NAVIGATES_TO, 3.0);
     weights.insert(edge_category::HANDLED_BY, 4.0);
     weights.insert(edge_category::IMPORTS, 3.0);
     weights.insert(edge_category::USES, 3.0);

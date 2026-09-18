@@ -9,6 +9,7 @@ use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
 use crate::merged::MergedGraph;
+use crate::nav::is_nav_route;
 use crate::types::RepoGraph;
 
 /// Pairs frontend HTTP Endpoints with backend HTTP Routes by (method,
@@ -28,7 +29,7 @@ use crate::types::RepoGraph;
 /// Collisions (multiple Routes with the same method+path across repos) emit
 /// one edge per target, UNLESS the endpoint's recorded host names a service
 /// that some of those repos declare: then only their routes are kept (A11.4,
-/// [`narrow_by_host`], which falls back to every target on any doubt).
+/// `narrow_by_host`, which falls back to every target on any doubt).
 pub struct HttpStackResolver;
 
 impl CrossGraphResolver for HttpStackResolver {
@@ -442,7 +443,8 @@ fn build_route_index(
             };
             // A3.4: a client-router ROUTE is a browser navigation target, not a
             // server endpoint. It stays a node (it answers "where is /dashboard
-            // rendered?"), but it must never be an HTTP_CALLS target.
+            // rendered?", and LA.6a's NAVIGATES_TO links bind to it), but it
+            // must never be an HTTP_CALLS target.
             //
             // A3.1 depends on this: go_router / react-router / Angular Router
             // all mint their nav entries with the method string "ANY", so the
@@ -532,23 +534,6 @@ impl HttpRouteMatcher {
             })
             .collect()
     }
-}
-
-/// A ROUTE node tagged `provenance: nav_route` by a client-router extractor
-/// (react-router / Angular Router / vue-router / go_router). It is a browser
-/// navigation target, not a server endpoint, so it must never be an
-/// `HTTP_CALLS` target.
-///
-/// Cheap substring test — the payload is written by us (the extractors crate's
-/// `nav_route_origin_cell`), not by user JSON, matching `extract_method_field`'s
-/// existing tight scan and keeping serde_json out of the graph crate. Both
-/// payload spellings are accepted so a future Text-payload emitter still marks.
-fn is_nav_route(cells: &[Cell]) -> bool {
-    cells.iter().any(|c| {
-        c.kind == cell_type::ORIGIN
-            && matches!(&c.payload, CellPayload::Json(j) | CellPayload::Text(j)
-                        if j.contains("\"provenance\":\"nav_route\""))
-    })
 }
 
 /// Register a ROUTE node into the (METHOD, path) index. Handles both qname

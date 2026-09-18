@@ -52,7 +52,7 @@ fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: repo_gra
 /// The ORIGIN cell a client-router extractor stamps on a browser navigation
 /// ROUTE (A3.4). Spelled here as a literal rather than imported, so this test
 /// fails loudly if the payload the extractors write ever drifts away from the
-/// one `graph::resolvers::http::is_nav_route` matches.
+/// one `graph::nav::is_nav_route` matches.
 fn nav_route_cell() -> Cell {
     Cell {
         kind: cell_type::ORIGIN,
