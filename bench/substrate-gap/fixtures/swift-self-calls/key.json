@@ -1,0 +1,57 @@
+{
+  "framework": "swift-self-calls",
+  "language": "swift",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "swift/calls"
+  ],
+  "note": "LA.36a: Swift calls on self (`self.m()`, `self?.m()` in a closure, `Self.m()`) resolve against the enclosing type. HEAD: tree-sitter-swift's navigation_suffix node text keeps its leading dot, so parsers/code/swift/src/lib.rs classify_call emits SelfMethod(\".helper\") and nothing binds. Class, struct and enum (ENUM owns methods after LA.30a). The top-level `helper` is a same-name decoy: a self call must never bind a free function.",
+  "expect_edges": [
+    {
+      "from": "Widget::run",
+      "to": "Widget::helper",
+      "category": "CALLS",
+      "note": "self.helper() in a class"
+    },
+    {
+      "from": "Widget::later",
+      "to": "Widget::refresh",
+      "category": "CALLS",
+      "note": "self?.refresh() inside a [weak self] closure, attributed to the enclosing method"
+    },
+    {
+      "from": "Widget::build",
+      "to": "Widget::make",
+      "category": "CALLS",
+      "note": "Self.make(): a static member of the enclosing type"
+    },
+    {
+      "from": "Part::weight",
+      "to": "Part::base",
+      "category": "CALLS",
+      "note": "self.base() in a struct"
+    },
+    {
+      "from": "Mode::label",
+      "to": "Mode::describe",
+      "category": "CALLS",
+      "note": "self.describe() in an enum (LA.30a: an ENUM owns its methods)"
+    },
+    {
+      "from": "Widget::later",
+      "to": "Shapes::schedule",
+      "category": "CALLS",
+      "note": "control: a bare call to a free function binds on HEAD (Bare arm, same-module symbol)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Sources::Shop::Widget::run",
+      "to": "Sources::Shop::Shapes::helper",
+      "category": "CALLS",
+      "note": "PRECISION: self.helper() is the method, never the same-named free function (qnames in LB.7c's module-scoped shape)"
+    }
+  ]
+}

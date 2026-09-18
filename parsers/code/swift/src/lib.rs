@@ -51,6 +51,13 @@ pub fn parse_file(
         );
     }
 
+    if acc.self_calls + acc.super_calls > 0 && swift_debug() {
+        eprintln!(
+            "[swift-calls] self={} super={} file={file_rel_path}",
+            acc.self_calls, acc.super_calls
+        );
+    }
+
     scan_vapor_routes(source, repo, &mut acc);
 
     Ok(FileParse {
@@ -79,6 +86,10 @@ struct Acc {
     /// `extension T` folds onto `T`'s node instead of pushing a second node,
     /// a second DEFINES edge and a second `children_of` entry. Lookup only.
     type_seen: HashSet<NodeId>,
+    /// LA.36a: `self.m()` / `self?.m()` / `Self.m()` and `super.m()` call
+    /// sites of this file, for the `[swift-calls]` marker only.
+    self_calls: usize,
+    super_calls: usize,
 }
 
 /// LB.7c: a Swift type belongs to its MODULE (the target directory), not its
@@ -111,6 +122,17 @@ fn qname_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG.get_or_init(|| {
         std::env::var("GLIA_QNAME_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
+    })
+}
+
+/// `GLIA_SWIFT_DEBUG=1` turns on the per-file `[swift-calls]` marker (self /
+/// super call sites), read once. Off by default: nearly every Swift file has
+/// self calls.
+///   `GLIA_SWIFT_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[swift-calls\]'`
+fn swift_debug() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| {
+        std::env::var("GLIA_SWIFT_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0")
     })
 }
 
@@ -414,6 +436,11 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             && let Some(func) = n.named_child(0)
         {
             let qualifier = classify_call(func, src);
+            match qualifier {
+                CallQualifier::SelfMethod(_) => acc.self_calls += 1,
+                CallQualifier::SuperMethod(_) => acc.super_calls += 1,
+                _ => {}
+            }
             acc.calls.push(CallSite { from, qualifier });
         }
         let mut cursor = n.walk();
@@ -428,34 +455,59 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     }
 }
 
+/// LA.36a: a navigation callee is classified by the KIND of its target node,
+/// and every qualifier carries the bare member name (`helper`, never
+/// `.helper`):
+/// - `self.m()` / `self?.m()` (a `self_expression` target; the `?` is an
+///   anonymous sibling, not part of it) and `Self.m()` (the enclosing type, so
+///   a static member of it) -> `SelfMethod(m)`, bound by the graph against the
+///   enclosing CLASS / STRUCT / ENUM's methods;
+/// - `super.m()` -> `SuperMethod(m)` (left unresolved by the graph);
+/// - `x.m()` -> `Attribute { x, m }`; any other receiver -> `ComplexReceiver`.
+///
+/// A suffix with no readable name falls back to the whole-callee
+/// `ComplexReceiver`, as a non-navigation callee does.
 fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
+    let whole_callee = || CallQualifier::ComplexReceiver {
+        receiver: text_of(func_node, src).to_string(),
+        name: String::new(),
+    };
     match func_node.kind() {
         "simple_identifier" => CallQualifier::Bare(text_of(func_node, src).to_string()),
         "navigation_expression" => {
-            let target = func_node.named_child(0).map(|n| text_of(n, src)).unwrap_or("");
-            let suffix = func_node
-                .child_by_field_name("suffix")
-                .map(|n| text_of(n, src))
-                .unwrap_or("");
-            if target == "self" {
-                CallQualifier::SelfMethod(suffix.to_string())
-            } else if func_node.named_child(0).is_some_and(|v| v.kind() == "simple_identifier") {
-                CallQualifier::Attribute {
-                    base: target.to_string(),
-                    name: suffix.to_string(),
-                }
-            } else {
-                CallQualifier::ComplexReceiver {
-                    receiver: target.to_string(),
-                    name: suffix.to_string(),
-                }
+            let name = nav_member_name(func_node, src);
+            let Some(target) = func_node.named_child(0).filter(|_| !name.is_empty()) else {
+                return whole_callee();
+            };
+            let name = name.to_string();
+            let target_text = text_of(target, src);
+            match target.kind() {
+                "self_expression" => CallQualifier::SelfMethod(name),
+                "super_expression" => CallQualifier::SuperMethod(name),
+                "simple_identifier" if target_text == "Self" => CallQualifier::SelfMethod(name),
+                "simple_identifier" => CallQualifier::Attribute {
+                    base: target_text.to_string(),
+                    name,
+                },
+                _ => CallQualifier::ComplexReceiver {
+                    receiver: target_text.to_string(),
+                    name,
+                },
             }
         }
-        _ => CallQualifier::ComplexReceiver {
-            receiver: text_of(func_node, src).to_string(),
-            name: String::new(),
-        },
+        _ => whole_callee(),
     }
+}
+
+/// tree-sitter-swift's `navigation_suffix` spans the dot (`.helper`); the
+/// member name is its own `suffix` field (a `simple_identifier`, or an
+/// `integer_literal` for a tuple index). `""` when either is absent.
+fn nav_member_name<'a>(nav_expr: TsNode<'a>, src: &'a [u8]) -> &'a str {
+    nav_expr
+        .child_by_field_name("suffix")
+        .and_then(|s| s.child_by_field_name("suffix"))
+        .map(|n| text_of(n, src))
+        .unwrap_or("")
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
@@ -1110,5 +1162,64 @@ func listOrders(base: String) {
         );
         let orders = hit("endpoint:GET:/orders");
         assert!(!orders.contains("host"), "{orders}");
+    }
+
+    /// LA.36a: the call qualifiers emitted from the method `method` of type
+    /// `W` in `source` (a repo-root file, so the type's qname is `W`).
+    fn calls_from(source: &str, method: &str) -> Vec<CallQualifier> {
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let from = id(node_kind::METHOD, &format!("W::{method}"));
+        fp.calls
+            .into_iter()
+            .filter(|c| c.from == from)
+            .map(|c| c.qualifier)
+            .collect()
+    }
+
+    #[test]
+    fn self_call_name_drops_the_navigation_dot() {
+        let calls = calls_from("class W {\n func a() { self.b() }\n func b() {}\n}\n", "a");
+        assert_eq!(calls, vec![CallQualifier::SelfMethod("b".into())]);
+    }
+
+    #[test]
+    fn optional_self_in_a_closure_is_self_method() {
+        let source = "class W {\n func a() {\n  schedule { [weak self] in\n   self?.g()\n  }\n }\n func g() {}\n}\n";
+        let calls = calls_from(source, "a");
+        assert!(calls.contains(&CallQualifier::SelfMethod("g".into())), "{calls:?}");
+        assert!(calls.contains(&CallQualifier::Bare("schedule".into())), "{calls:?}");
+    }
+
+    #[test]
+    fn upper_self_is_self_method() {
+        let source = "class W {\n func a() -> W { return Self.make() }\n static func make() -> W { return W() }\n}\n";
+        assert_eq!(calls_from(source, "a"), vec![CallQualifier::SelfMethod("make".into())]);
+    }
+
+    #[test]
+    fn super_call_is_super_method() {
+        let source = "class W: Base {\n override func k() { super.k() }\n}\n";
+        assert_eq!(calls_from(source, "k"), vec![CallQualifier::SuperMethod("k".into())]);
+    }
+
+    #[test]
+    fn identifier_receiver_is_attribute_without_dot() {
+        let source = "class W {\n func a() { repo.find() }\n}\n";
+        assert_eq!(
+            calls_from(source, "a"),
+            vec![CallQualifier::Attribute { base: "repo".into(), name: "find".into() }]
+        );
+    }
+
+    #[test]
+    fn chained_receiver_is_complex_without_dot() {
+        let source = "class W {\n func a() { self.items.map { } }\n}\n";
+        assert_eq!(
+            calls_from(source, "a"),
+            vec![CallQualifier::ComplexReceiver {
+                receiver: "self.items".into(),
+                name: "map".into()
+            }]
+        );
     }
 }
