@@ -1,0 +1,13 @@
+{
+  "framework": "csharp-primary-ctor",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/injects"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "OrdersController", "note": "C# 12 primary constructor"},
+    {"kind": "INTERFACE", "name": "IOrderService", "note": "DI service interface"}
+  ],
+  "expect_edges": [
+    {"from": "OrdersController", "to": "IOrderService", "category": "INJECTS", "note": "primary-ctor parameter_list is a named child of class_declaration, not a constructor_declaration in the body; `int pageSize` is a predefined_type and must not inject"}
+  ]
+}

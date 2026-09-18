@@ -1,0 +1,13 @@
+{
+  "framework": "csharp-fromservices",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/injects"],
+  "expect_nodes": [
+    {"kind": "METHOD", "name": "ReportsController::Get", "note": "action method with [FromServices]"},
+    {"kind": "INTERFACE", "name": "IReportService", "note": "per-request injected service"}
+  ],
+  "expect_edges": [
+    {"from": "ReportsController::Get", "to": "IReportService", "category": "INJECTS", "note": "[FromServices] per-action injection hangs off the METHOD; visit_method never read parameters"}
+  ]
+}

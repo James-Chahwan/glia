@@ -13,6 +13,8 @@ use repo_graph_code_domain::endpoint;
 // per-parser, so HttpStackResolver pairs a C# caller to a route from ANY
 // language exactly as it does a TS `fetch`.
 use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint};
+// A7: every INJECTS ref is counted by shape for the `[di]` fired-on line.
+use repo_graph_code_domain::di_stats::{self, DiShape};
 
 pub fn parse_file(
     source: &str,
@@ -235,6 +237,32 @@ fn visit_type_decl(
     // plain data class with a constructor doesn't emit spurious INJECTS edges.
     let is_di = is_di_class(name, text_of(node, src));
 
+    // C# 12 primary constructor: `class UsersController(IUserService svc) : Base`.
+    // The parameter_list is a NAMED CHILD of class_declaration /
+    // record_declaration / struct_declaration (it is not exposed as a field), so
+    // it never reaches the constructor_declaration arm of the body walk below —
+    // and a bodyless `record OrderService(IRepo repo);` returns before that walk
+    // at all, which is why this scan sits ahead of the `body` early return. The
+    // `: Base(svc)` forwarding arguments live in base_list's argument_list,
+    // which the heritage walk above already skips, so the two never overlap.
+    if is_di {
+        let mut pc = node.walk();
+        let primary = node
+            .named_children(&mut pc)
+            .find(|c| c.kind() == "parameter_list");
+        if let Some(params) = primary {
+            emit_param_injects(
+                params,
+                src,
+                id,
+                module_id,
+                DiShape::CsPrimaryCtor,
+                false,
+                acc,
+            );
+        }
+    }
+
     // ASP.NET attribute routing. The controller's OWN `[Route(...)]` is the
     // prefix every relative action template composes onto; reading it from this
     // node's own `attribute_list` children (never a text scan of the body) is
@@ -268,7 +296,7 @@ fn visit_type_decl(
                     acc,
                 );
                 if is_di && child.kind() == "constructor_declaration" {
-                    emit_ctor_injects(child, src, id, module_id, repo, acc);
+                    emit_ctor_injects(child, src, id, module_id, acc);
                 }
             }
             "field_declaration" => {
@@ -322,24 +350,48 @@ fn is_di_class(name: &str, node_text: &str) -> bool {
         || head.contains("[Injectable")
 }
 
-/// Pattern E: for each constructor parameter whose type is a class/interface
-/// (not a primitive), push an INJECTS `UnresolvedRef` from the consumer class
-/// to that dependency type. The graph resolver binds the bare type name to the
-/// uniquely-named class/interface node and forms the edge.
-fn emit_ctor_injects(
-    ctor: TsNode,
-    src: &[u8],
-    class_id: NodeId,
-    module_id: NodeId,
-    _repo: RepoId,
-    acc: &mut Acc,
-) {
+/// Pattern E: an explicit `constructor_declaration` in the class body. Its
+/// parameters are the class's injected dependencies.
+fn emit_ctor_injects(ctor: TsNode, src: &[u8], class_id: NodeId, module_id: NodeId, acc: &mut Acc) {
     let Some(params) = ctor.child_by_field_name("parameters") else {
         return;
     };
+    emit_param_injects(
+        params,
+        src,
+        class_id,
+        module_id,
+        DiShape::CsCtor,
+        false,
+        acc,
+    );
+}
+
+/// The single INJECTS funnel for every C# DI shape. For each `parameter` in
+/// `params` (a `parameter_list`) whose type is a class/interface (not a
+/// primitive), push an INJECTS `UnresolvedRef` from `from` to that dependency
+/// type; the graph resolver binds the bare type name to the uniquely-named
+/// class/interface node and forms the edge.
+///
+/// `from` is the CLASS for an explicit or primary constructor, and the METHOD
+/// for `[FromServices]` action injection. `require_from_services` restricts
+/// the scan to parameters carrying that attribute: an action method's other
+/// parameters are request-bound (route, query, body), never services.
+fn emit_param_injects(
+    params: TsNode,
+    src: &[u8],
+    from: NodeId,
+    module_id: NodeId,
+    shape: DiShape,
+    require_from_services: bool,
+    acc: &mut Acc,
+) {
     let mut cursor = params.walk();
     for param in params.named_children(&mut cursor) {
         if param.kind() != "parameter" {
+            continue;
+        }
+        if require_from_services && !has_from_services_attr(param, src) {
             continue;
         }
         let Some(type_node) = param.child_by_field_name("type") else {
@@ -349,12 +401,24 @@ fn emit_ctor_injects(
             continue;
         };
         acc.refs.push(UnresolvedRef {
-            from: class_id,
+            from,
             from_module: module_id,
             qualifier: CallQualifier::Bare(type_name),
             category: edge_category::INJECTS,
         });
+        di_stats::record(shape);
     }
+}
+
+/// Does this `parameter` carry ASP.NET's per-request service-injection
+/// attribute? `[FromServices]`, or .NET 8's keyed form `[FromKeyedServices("k")]`
+/// — both resolve the parameter from the DI container. Matched on the
+/// attribute's simple name (`own_attributes` strips the namespace and the
+/// optional `Attribute` suffix), never a substring of the source text.
+fn has_from_services_attr(param: TsNode, src: &[u8]) -> bool {
+    own_attributes(param, src)
+        .iter()
+        .any(|(name, _)| name == "FromServices" || name == "FromKeyedServices")
 }
 
 /// Extract the bare dependency type name from a parameter `type` node, or
@@ -426,6 +490,23 @@ fn visit_method(
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+
+    // ASP.NET `[FromServices] IReportService svc` on an action method: the
+    // service is injected per request into the METHOD, not the class, so the
+    // INJECTS ref hangs off the method id. The attribute IS the gate (no
+    // `is_di` check). A constructor parameter carrying it is equally an
+    // injection, so constructor_declaration takes the same path.
+    if let Some(params) = node.child_by_field_name("parameters") {
+        emit_param_injects(
+            params,
+            src,
+            id,
+            module_id,
+            DiShape::CsFromServices,
+            true,
+            acc,
+        );
+    }
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
@@ -1785,6 +1866,143 @@ namespace Shop.Models
                 .filter(|r| r.category == edge_category::INJECTS)
                 .count(),
             0
+        );
+    }
+
+    /// Every INJECTS ref as `(from, bare type name)`.
+    fn injects_of(fp: &FileParse) -> Vec<(NodeId, String)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .map(|r| {
+                let name = match &r.qualifier {
+                    CallQualifier::Bare(n) => n.clone(),
+                    other => format!("{other:?}"),
+                };
+                (r.from, name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn primary_ctor_emits_injects_ref() {
+        // A7.3: the C# 12 primary-constructor template shape. The
+        // parameter_list is a named child of class_declaration, never a
+        // constructor_declaration in the body. `int pageSize` is a
+        // predefined_type and must not inject.
+        let source = r#"
+using Shop.Services;
+
+namespace Shop.Controllers
+{
+    [ApiController]
+    [Route("api/orders")]
+    public class OrdersController(IOrderService orders, int pageSize) : ControllerBase
+    {
+        [HttpGet]
+        public string Place() { return orders.Place(); }
+    }
+}
+"#;
+        let fp = parse_file(source, "OrdersController.cs", "Shop::Controllers", repo()).unwrap();
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "Shop::Controllers::OrdersController",
+        );
+        assert_eq!(
+            injects_of(&fp),
+            vec![(class_id, "IOrderService".to_string())],
+            "exactly one INJECTS ref, from the CLASS, primitive skipped"
+        );
+    }
+
+    #[test]
+    fn bodyless_primary_ctor_record_emits_injects_ref() {
+        // A7.3: a positional record has no `body`, and `visit_type_decl`
+        // returns at the `body` lookup — the primary-ctor scan must run first.
+        // A positional DTO record (no DI-shaped name, primitive params) and a
+        // non-DI record with a class-typed param stay silent: the `is_di` gate
+        // covers primary constructors exactly as it covers explicit ones.
+        let source = r#"
+namespace Shop.Services
+{
+    public record OrderService(IOrderRepository repo, ILogger<OrderService>? log);
+    public record OrderDto(int Id, string Name);
+    public record OrderLine(Product product);
+}
+"#;
+        let fp = parse_file(source, "OrderService.cs", "Shop::Services", repo()).unwrap();
+        let record_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "Shop::Services::OrderService",
+        );
+        assert_eq!(
+            injects_of(&fp),
+            vec![
+                (record_id, "IOrderRepository".to_string()),
+                (record_id, "ILogger".to_string()),
+            ],
+            "only the DI-named record injects; generics and `?` stripped"
+        );
+    }
+
+    #[test]
+    fn from_services_param_emits_injects_from_method() {
+        // A7.3: `[FromServices]` per-action injection. The ref hangs off the
+        // action METHOD (not the controller CLASS), and only the attributed
+        // parameters inject — `int page` and the unattributed `[FromQuery]`
+        // `Filter filter` are request-bound. The fully-qualified attribute
+        // spelling and .NET 8's `[FromKeyedServices("k")]` count too.
+        let source = r#"
+using Microsoft.AspNetCore.Mvc;
+using Shop.Services;
+
+namespace Shop.Controllers
+{
+    [ApiController]
+    public class ReportsController : ControllerBase
+    {
+        [HttpGet("reports")]
+        public string Get([FromServices] IReportService reports, int page, [FromQuery] Filter filter)
+        {
+            return reports.Build();
+        }
+
+        [HttpGet("audit")]
+        public string Audit(
+            [Microsoft.AspNetCore.Mvc.FromServicesAttribute] IAuditLog audit,
+            [FromKeyedServices("fast")] ICache cache)
+        {
+            return "";
+        }
+    }
+}
+"#;
+        let fp = parse_file(source, "ReportsController.cs", "Shop::Controllers", repo()).unwrap();
+        let get_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "Shop::Controllers::ReportsController::Get",
+        );
+        let audit_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            "Shop::Controllers::ReportsController::Audit",
+        );
+        assert_eq!(
+            injects_of(&fp),
+            vec![
+                (get_id, "IReportService".to_string()),
+                (audit_id, "IAuditLog".to_string()),
+                (audit_id, "ICache".to_string()),
+            ],
+            "INJECTS from each action METHOD, attributed params only"
         );
     }
 
