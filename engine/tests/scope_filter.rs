@@ -19,7 +19,7 @@ use std::path::Path;
 
 use repo_graph_engine::{
     GenerateResult, blast_radius_by_qname, generate_one, governing_docs, locate_node,
-    node_in_scope, project_roots, resolve_scope, resolve_signal_located,
+    node_in_scope, project_roots, resolve_scope, resolve_seed, resolve_signal_located,
 };
 
 /// A three-subproject monorepo. `services/api` calls both into `shared` and
@@ -447,4 +447,130 @@ fn a_label_scope_equals_its_path_scope() {
         "only apps/web seeds survive; got {res_path:?}"
     );
     assert_eq!(res_label, res_path, "label scope == path scope, scores included");
+}
+
+// ============================================================================
+// LA.14 — scope is a PREFERENCE for the seed of an ambiguous name, never a
+// filter on it.
+// ============================================================================
+
+/// Two `handle`s: the api one calls one helper, the web one three, so by
+/// degree the unscoped pick is the web `handle`. `shared_fn` lives outside
+/// `services/api` and is called from both services; a second, uncalled
+/// `shared_fn` in `legacy/` makes it ambiguous with NO in-scope candidate.
+fn ambiguous_fixture() -> (tempfile::TempDir, GenerateResult) {
+    let td = tempfile::tempdir().unwrap();
+    let d = td.path();
+    for sub in ["services/api", "services/web", "shared", "legacy"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    std::fs::write(
+        d.join("services/api/handler.py"),
+        "from shared.util import shared_fn\n\n\n\
+         def api_helper():\n    return 1\n\n\n\
+         def handle():\n    return api_helper()\n\n\n\
+         def api_user():\n    return shared_fn()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("services/web/views.py"),
+        "from shared.util import shared_fn\n\n\n\
+         def w1():\n    return 1\n\n\n\
+         def w2():\n    return 2\n\n\n\
+         def w3():\n    return 3\n\n\n\
+         def handle():\n    return w1() + w2() + w3()\n\n\n\
+         def web_user():\n    return shared_fn()\n",
+    )
+    .unwrap();
+    std::fs::write(d.join("shared/util.py"), "def shared_fn():\n    return 0\n").unwrap();
+    std::fs::write(d.join("legacy/old.py"), "def shared_fn():\n    return -1\n").unwrap();
+    let result = generate_one(d.to_str().unwrap()).expect("generate_one");
+    (td, result)
+}
+
+#[test]
+fn ambiguous_seed_prefers_the_in_scope_candidate() {
+    let (_td, result) = ambiguous_fixture();
+    let m = &result.merged;
+    let scoped = blast_radius_by_qname(m, "handle", "both", 4, None, false, Some(SCOPE)).unwrap();
+    assert_eq!(
+        qnames(&scoped, |a| &a.qname),
+        ["services::api::handler::api_helper"],
+        "the bare name must seed the services/api `handle`, not the busier web one \
+         whose whole radius the scope then filters away"
+    );
+    // A label-free path scope and the qname seed agree.
+    let by_qname = blast_radius_by_qname(
+        m,
+        "services::api::handler::handle",
+        "both",
+        4,
+        None,
+        false,
+        Some(SCOPE),
+    )
+    .unwrap();
+    assert_eq!(qnames(&by_qname, |a| &a.qname), qnames(&scoped, |a| &a.qname));
+    // Scope never overrides an explicit qname: the web `handle` stays the seed
+    // and its (web-only) radius is filtered to nothing.
+    let pinned =
+        blast_radius_by_qname(m, "services::web::views::handle", "both", 4, None, false, Some(SCOPE))
+            .unwrap();
+    assert!(
+        pinned.is_empty(),
+        "an explicit qname is never re-seeded; got {:?}",
+        qnames(&pinned, |a| &a.qname)
+    );
+    // The primitive under the pyo3 `find_node(name, scope)` picks the same
+    // api `handle`.
+    let seed = resolve_seed(m, "handle", Some(SCOPE)).expect("in-scope seed");
+    assert_eq!(locate_node(m, seed).qname, "services::api::handler::handle");
+}
+
+#[test]
+fn out_of_scope_seed_still_answers() {
+    let (_td, result) = ambiguous_fixture();
+    let m = &result.merged;
+    // No `shared_fn` lives under services/api: the seed falls back to the
+    // unscoped pick (the called one in shared/), and the scoped radius is its
+    // in-scope callers — the cross-service question A8.3 exists to answer.
+    let seed = resolve_seed(m, "shared_fn", Some(SCOPE)).expect("out-of-scope seed kept");
+    assert_eq!(resolve_seed(m, "shared_fn", None), Some(seed));
+    assert_eq!(locate_node(m, seed).qname, "shared::util::shared_fn");
+    let scoped =
+        blast_radius_by_qname(m, "shared_fn", "backward", 4, None, false, Some(SCOPE)).unwrap();
+    assert_eq!(qnames(&scoped, |a| &a.qname), ["services::api::handler::api_user"]);
+    let all = blast_radius_by_qname(m, "shared_fn", "backward", 4, None, false, None).unwrap();
+    let all_q = qnames(&all, |a| &a.qname);
+    assert!(
+        all_q.contains(&"services::api::handler::api_user".to_string())
+            && all_q.contains(&"services::web::views::web_user".to_string()),
+        "precondition: unscoped, both services call the seed; got {all_q:?}"
+    );
+}
+
+#[test]
+fn unscoped_seed_is_unchanged() {
+    let (_td, result) = ambiguous_fixture();
+    let m = &result.merged;
+    let all = blast_radius_by_qname(m, "handle", "both", 4, None, false, None).unwrap();
+    assert_eq!(
+        qnames(&all, |a| &a.qname),
+        [
+            "services::web::views::w1",
+            "services::web::views::w2",
+            "services::web::views::w3"
+        ],
+        "scope None keeps the degree pick: the web `handle`"
+    );
+    // `scope = None` is exactly HEAD's rule: qname first, then the bare name.
+    for q in ["handle", "shared_fn", "services::api::handler::handle", "w1", "nope"] {
+        assert_eq!(
+            resolve_seed(m, q, None),
+            m.node_id_by_qname(q).or_else(|| m.resolve_name(q)),
+            "{q}"
+        );
+    }
+    // A scope that matches a single candidate's name changes nothing either.
+    assert_eq!(resolve_seed(m, "w1", Some(SCOPE)), m.resolve_name("w1"));
 }

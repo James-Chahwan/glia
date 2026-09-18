@@ -148,15 +148,25 @@ impl MergedGraph {
     /// beats a container, then the highest-degree one wins (see
     /// [`Self::pick_primary`]). `None` if no node carries it.
     pub fn resolve_name(&self, name: &str) -> Option<NodeId> {
-        let mut matches = Vec::new();
+        self.pick_primary(&self.names_exact(name))
+    }
+
+    /// Every node whose simple name is exactly `name`, sorted by `NodeId` — the
+    /// [`Self::qnames_exact`] twin. Use when the candidate set matters (the
+    /// engine's scoped seed prefers the in-scope ones before
+    /// [`Self::pick_primary`]); use [`Self::resolve_name`] for the single
+    /// primary node.
+    pub fn names_exact(&self, name: &str) -> Vec<NodeId> {
+        let mut out = Vec::new();
         for g in &self.graphs {
             for (id, n) in &g.nav.name_by_id {
                 if n == name {
-                    matches.push(*id);
+                    out.push(*id);
                 }
             }
         }
-        self.pick_primary(&matches)
+        out.sort_by_key(|id| id.0);
+        out
     }
 
     /// G22 — resolve a full qualified name to a single `NodeId` across every

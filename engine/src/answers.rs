@@ -143,6 +143,47 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
     live
 }
 
+/// The node a user-supplied qname or bare name means (LA.14). Candidates are
+/// the nodes whose qname is exactly `q`, or — only when none is — whose simple
+/// name is. With a `scope` (a path or a project label, see [`resolve_scope`])
+/// and more than one candidate, the ones LOCATED under the scope are preferred:
+/// `blast-radius handle --scope services/api` means the api `handle`, not the
+/// busier web one whose whole radius the scope would then filter away.
+///
+/// Scope is a preference, never a filter: when no candidate is located under
+/// it, the pick is the unscoped one, so `blast-radius shared_fn --scope
+/// services/api` still answers "what in services/api uses this shared fn".
+/// An unlocatable candidate does not count as in scope here — the
+/// keep-unlocatable rule of [`node_in_scope`] is about not DROPPING answers,
+/// and preferring a node nobody can place over one placed in scope would undo
+/// the preference. Ties inside either set go through
+/// [`MergedGraph::pick_primary`]. `scope = None` is exactly
+/// `node_id_by_qname(q).or_else(|| resolve_name(q))`.
+pub fn resolve_seed(merged: &MergedGraph, q: &str, scope: Option<&str>) -> Option<NodeId> {
+    let by_qname = merged.qnames_exact(q);
+    let candidates = if by_qname.is_empty() { merged.names_exact(q) } else { by_qname };
+    let primary = merged.pick_primary(&candidates);
+    let Some(raw) = scope.filter(|_| candidates.len() > 1) else { return primary };
+    let path = resolve_scope(merged, raw);
+    let loc = Locator::new(merged);
+    let inside: Vec<NodeId> = candidates
+        .iter()
+        .copied()
+        .filter(|&id| scope_file_of(&loc, id).is_some_and(|f| in_scope(&f, &path)))
+        .collect();
+    let pick = merged.pick_primary(&inside).or(primary);
+    if let Some(id) = pick.filter(|&id| Some(id) != primary) {
+        // fired_on marker (LA.14): only when the scope changed the pick.
+        eprintln!(
+            "[scope] seed '{q}' -> {} ({} of {} candidates in scope {path})",
+            loc.locate(id).qname,
+            inside.len(),
+            candidates.len()
+        );
+    }
+    pick
+}
+
 /// `blast_radius`, resolved from a qname/name and fully located — the P3 answer
 /// that `find`→`impact`→`activate`→`read×N` collapses to. `direction` ∈
 /// {`forward`, `backward`, `both`}. Err on an unknown qname or bad direction.
@@ -154,7 +195,8 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
 /// [`node_in_scope`]) is KEPT, never dropped. ENDPOINT / ROUTE nodes are
 /// located (A3.6) and scoped by where they are defined. `scope` narrows
 /// WITHIN a repo — under a multi-repo merge each repo's POSITION paths are
-/// relative to its OWN root.
+/// relative to its OWN root. The seed is [`resolve_seed`] under the same
+/// `scope` (LA.14): an ambiguous bare name starts from its in-scope candidate.
 pub fn blast_radius_by_qname(
     merged: &MergedGraph,
     qname: &str,
@@ -164,9 +206,7 @@ pub fn blast_radius_by_qname(
     live_only: bool,
     scope: Option<&str>,
 ) -> Result<Vec<BlastAnswer>, String> {
-    let seed = merged
-        .node_id_by_qname(qname)
-        .or_else(|| merged.resolve_name(qname))
+    let seed = resolve_seed(merged, qname, scope)
         .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
     let reach = match direction {
         "forward" => Reach::Forward,

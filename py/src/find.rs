@@ -49,8 +49,15 @@ impl PyGraph {
     /// `impact`/`trace` intermittently returning empty. A framework role
     /// (component, service, ...) is no longer a same-name twin: LB.3a folds it
     /// into its declaration as a ROLE cell, listed in `nodes_json`'s `roles`.
-    fn find_node(&self, name: &str) -> Option<u64> {
-        self.merged.resolve_name(name).map(|id| id.0)
+    ///
+    /// LA.14: a `name` that is a full qname resolves to that node first, then
+    /// falls back to the simple name. `scope` (optional, a path or a project
+    /// label) is a PREFERENCE among several candidates — the one located under
+    /// it wins — never a filter: with no candidate in scope the answer is the
+    /// unscoped one, and `scope=None` changes nothing for a bare name.
+    #[pyo3(signature = (name, scope=None))]
+    fn find_node(&self, name: &str, scope: Option<&str>) -> Option<u64> {
+        repo_graph_engine::resolve_seed(&self.merged, name, scope).map(|id| id.0)
     }
 
     /// Substring search over qnames, returned sorted by node id so repeated

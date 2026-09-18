@@ -161,11 +161,15 @@ impl MergedGraph {
     }
 
     /// Resolve test ids (pytest-style `path::Class::test_name`, Go
-    /// `pkg::TestName`, etc.). Matches a node whose qname ends with the
-    /// `::`-joined non-path segments; falls back to the bare test name.
+    /// `pkg::TestName`, etc.) and pasted qnames. Tiers, each through
+    /// `pick_primary`: a node whose qname IS the `::`-joined non-path segments
+    /// (LA.14 — `engine::src::arch::service_map` is that function, not the
+    /// busiest node named `service_map`); then one whose qname ends with them;
+    /// then the bare test name.
     fn resolve_test_ids(&self, text: &str) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
+        let mut exact_hits = 0usize;
         for tok in text.split_whitespace() {
             if !tok.contains("::") {
                 continue;
@@ -178,26 +182,38 @@ impl MergedGraph {
                 .filter(|s| !s.is_empty() && !s.contains('.') && !s.contains('/'))
                 .collect();
             let Some(last) = name_segs.last() else { continue };
-            let suffix = format!("::{}", name_segs.join("::"));
-            // Prefer a qname ending with the full ::-suffix; else the bare
-            // name. Collect ALL matches and pick_primary — first-match over
-            // qname_by_id (a HashMap, per-process seed) flapped the resolved
-            // seed across processes, the same bug class pick_primary fixed
-            // for resolve_name/resolve_span (audit 2026-06-10 #7).
+            let joined = name_segs.join("::");
+            let suffix = format!("::{joined}");
+            // Prefer the exact qname, then a qname ending with the full
+            // ::-suffix, else the bare name. Collect ALL matches and
+            // pick_primary — first-match over qname_by_id (a HashMap,
+            // per-process seed) flapped the resolved seed across processes,
+            // the same bug class pick_primary fixed for
+            // resolve_name/resolve_span (audit 2026-06-10 #7).
+            let mut exact: Vec<NodeId> = Vec::new();
             let mut suffix_matches: Vec<NodeId> = Vec::new();
             let mut name_matches: Vec<NodeId> = Vec::new();
             for g in &self.graphs {
                 for n in &g.nodes {
                     let Some(qn) = g.nav.qname_by_id.get(&n.id) else { continue };
-                    if qn.ends_with(&suffix) {
+                    // One segment is a bare name, not a qname: it keeps its
+                    // old last-resort tier below, so `file.py::test_b` still
+                    // prefers a module-qualified `…::test_b`.
+                    if name_segs.len() > 1 && *qn == joined {
+                        exact.push(n.id);
+                    } else if qn.ends_with(&suffix) {
                         suffix_matches.push(n.id);
                     } else if qn.as_str() == *last {
                         name_matches.push(n.id);
                     }
                 }
             }
+            if !exact.is_empty() {
+                exact_hits += 1;
+            }
             let id = self
-                .pick_primary(&suffix_matches)
+                .pick_primary(&exact)
+                .or_else(|| self.pick_primary(&suffix_matches))
                 .or_else(|| self.pick_primary(&name_matches))
                 .or_else(|| self.resolve_name(last));
             if let Some(id) = id {
@@ -205,6 +221,11 @@ impl MergedGraph {
                     out.push(id);
                 }
             }
+        }
+        // fired_on marker (LA.14): only when a token was a full qname, so a
+        // plain test-id signal stays silent.
+        if exact_hits > 0 {
+            eprintln!("[resolve] test-id exact-qname tokens={exact_hits}");
         }
         out
     }
@@ -495,6 +516,67 @@ mod tests {
         // A prefix that disagrees with every stored POSITION prefix falls back
         // to the basename pass rather than resolving to nothing.
         assert_eq!(m.resolve_signal("src/utils.py\n", "diff"), both);
+    }
+
+    /// A `::` token that IS a node's full qname (what an agent pastes from a
+    /// `find` row) must resolve to that node. The `::`-suffix tier can never
+    /// match it (no leading `::`), so before the exact tier it fell through to
+    /// the bare last segment, where a busier same-named declaration and a
+    /// same-named test MODULE both outrank the node that was actually named.
+    fn graph_with_three_fs() -> (MergedGraph, NodeId) {
+        let r = repo();
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        let mut id_of = |kind, qname: &str, name: &str| {
+            let id = NodeId::from_parts(GRAPH_TYPE, r, kind, qname);
+            nav.record(id, name, qname, kind, None);
+            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            id
+        };
+        let exact = id_of(node_kind::FUNCTION, "m::a::f", "f");
+        let busier = id_of(node_kind::FUNCTION, "m::b::f", "f");
+        let module = id_of(node_kind::MODULE, "m::tests::f", "f");
+        let callers: Vec<NodeId> = (0..3)
+            .map(|i| id_of(node_kind::FUNCTION, &format!("m::b::c{i}"), &format!("c{i}")))
+            .collect();
+        let edge = |from, to, category| repo_graph_core::Edge {
+            from,
+            to,
+            category,
+            confidence: Confidence::Strong,
+        };
+        let mut edges: Vec<repo_graph_core::Edge> = callers
+            .iter()
+            .map(|&c| edge(c, busier, repo_graph_code_domain::edge_category::CALLS))
+            .collect();
+        edges.extend(
+            callers.iter().map(|&c| edge(module, c, repo_graph_code_domain::edge_category::IMPORTS)),
+        );
+        let g = RepoGraph {
+            repo: r,
+            nodes,
+            edges,
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        };
+        (MergedGraph::new(vec![g]), exact)
+    }
+
+    #[test]
+    fn exact_qname_token_resolves_to_itself() {
+        let (m, exact) = graph_with_three_fs();
+        // Precondition: by bare name the busier declaration wins.
+        assert_ne!(m.resolve_name("f"), Some(exact));
+        // `auto` sniffs a lone `::` token as a test id; both routes land on the
+        // node whose qname the token is.
+        assert_eq!(m.resolve_signal("m::a::f", "auto"), vec![exact]);
+        assert_eq!(m.resolve_signal("m::a::f", "test"), vec![exact]);
+        // A pytest id is unaffected: its path segment is dropped, so the
+        // remaining `a::f` equals no qname and the `::`-suffix tier answers.
+        assert_eq!(m.resolve_signal("tests/test_x.py::a::f", "test"), vec![exact]);
     }
 
     #[test]
