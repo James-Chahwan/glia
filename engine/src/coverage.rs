@@ -141,8 +141,9 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
 ];
 
 /// One coverage note surfaced for a repo: a caveat that applies because the repo
-/// contains that language.
-#[derive(serde::Serialize)]
+/// contains that language. `Clone` so an absence answer (LD.8a,
+/// `crate::absence::Absence::caveats`) can carry the rows it depended on.
+#[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct CoverageNote {
     pub language: &'static str,
@@ -163,10 +164,42 @@ pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     if langs.contains("kotlin") {
         eprintln!("[coverage] kotlin: no parser — .kt routed through the java grammar");
     }
+    notes(merged, |c| c.language == "*" || langs.contains(c.language))
+}
+
+/// The caveat rows an answer that depended on `mechanisms` must carry (LD.8a
+/// absence answers): the [`COVERAGE_CAVEATS`] rows whose `edge_category` is one
+/// of `mechanisms` — or `*`, a row that declares every category of its
+/// language partial — and whose `language` is `*` or one of `languages`.
+/// `languages = None` means every language present in the graph, the same
+/// inference [`coverage_report`] makes. Table order is kept; `edges_found` is
+/// counted as in [`coverage_report`]. An answer that depended on no edge
+/// (`mechanisms` empty) carries no caveat row.
+pub(crate) fn caveats_for(
+    merged: &MergedGraph,
+    mechanisms: &[&str],
+    languages: Option<&[&str]>,
+) -> Vec<CoverageNote> {
+    if mechanisms.is_empty() {
+        return Vec::new();
+    }
+    let langs: std::collections::HashSet<&str> = match languages {
+        Some(l) => l.iter().copied().collect(),
+        None => languages_present(merged),
+    };
+    notes(merged, |c| {
+        (c.language == "*" || langs.contains(c.language))
+            && (c.edge_category == "*" || mechanisms.contains(&c.edge_category))
+    })
+}
+
+/// The [`COVERAGE_CAVEATS`] rows `keep` admits, in table order, each with its
+/// category's edge count.
+fn notes(merged: &MergedGraph, keep: impl Fn(&CoverageCaveat) -> bool) -> Vec<CoverageNote> {
     let counts = edge_category_counts(merged);
     COVERAGE_CAVEATS
         .iter()
-        .filter(|c| c.language == "*" || langs.contains(c.language))
+        .filter(|c| keep(c))
         .map(|c| CoverageNote {
             language: c.language,
             edge_category: c.edge_category,

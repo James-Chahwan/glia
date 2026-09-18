@@ -1,6 +1,8 @@
 //! `glia docs-for` (tier-4 P3 payoff) — the doc sections that DOCUMENTS
-//! <qname>, located.
+//! <qname>, located. An unknown qname is an absence answer (exit 0, with
+//! suggestions), not an error.
 
+use crate::cmd::resolve::print_absence;
 use crate::common::generate_for;
 
 #[derive(clap::Args, Debug)]
@@ -38,27 +40,24 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let docs = match repo_graph_engine::governing_docs(&result.merged, qname, scope) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("error: {e}");
-            eprintln!("hint: use `glia analyze {repo} --format json` to list qnames.");
-            return 3;
-        }
-    };
+    let mut docs = repo_graph_engine::governing_docs(&result.merged, qname, scope);
+    if let Some(a) = docs.absence.as_mut() {
+        a.unparsed_files = result.parse_errors.len();
+    }
     if json {
         println!("{}", serde_json::to_string(&docs).unwrap_or_default());
         return 0;
     }
     println!("# glia docs-for `{qname}`");
     println!();
-    if docs.is_empty() {
+    if let Some(a) = &docs.absence {
         println!("_(no governing docs)_");
+        print_absence(a);
         return 0;
     }
     println!("| kind | doc section | location |");
     println!("|---|---|---|");
-    for d in &docs {
+    for d in &docs.results {
         let loc = match (&d.file, d.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),

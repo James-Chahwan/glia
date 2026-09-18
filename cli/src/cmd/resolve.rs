@@ -1,6 +1,8 @@
 //! `glia resolve` (P3) — a failure/change signal (stacktrace, diff, test id)
 //! → the ranked, located nodes it points at.
 
+use repo_graph_engine::absence::Absence;
+
 use crate::common::generate_for;
 
 #[derive(clap::Args, Debug)]
@@ -47,21 +49,25 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let answer =
+    let mut answer =
         repo_graph_engine::resolve_signal_located(&result.merged, signal, kind, top_k, scope);
+    if let Some(a) = answer.absence.as_mut() {
+        a.unparsed_files = result.parse_errors.len();
+    }
     if json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
         return 0;
     }
     println!("# glia resolve ({kind})");
     println!();
-    if answer.is_empty() {
+    if let Some(a) = &answer.absence {
         println!("_(nothing resolved)_");
+        print_absence(a);
         return 0;
     }
     println!("| score | kind | qname | location |");
     println!("|--:|---|---|---|");
-    for a in &answer {
+    for a in &answer.results {
         let loc = match (&a.file, a.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
@@ -70,4 +76,26 @@ pub(crate) fn run(args: Args) -> i32 {
         println!("| {:.4} | {} | `{}` | {} |", a.score, a.kind, a.qname, loc);
     }
     0
+}
+
+/// The LD.8a absence block, printed under an empty answer's `_(...)_` line
+/// by `resolve`, `docs-for` and `find`: the FACT, one line per coverage
+/// caveat, the unparsed-file count when there is one, and the suggestions.
+pub(crate) fn print_absence(a: &Absence) {
+    println!("> FACT: {}", a.note);
+    for c in &a.caveats {
+        println!(
+            "> caveat ({}, {}): {} - verify: {}",
+            c.language, c.edge_category, c.note, c.verify
+        );
+    }
+    if a.unparsed_files > 0 {
+        println!(
+            "> {} file(s) failed to parse, so the graph may be missing what they hold",
+            a.unparsed_files
+        );
+    }
+    if !a.suggestions.is_empty() {
+        println!("> did you mean: {}", a.suggestions.join(", "));
+    }
 }

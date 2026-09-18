@@ -66,9 +66,12 @@ fn ok(args: &[&str]) -> Output {
     out
 }
 
+/// The `results` rows of the LD.8a `{results, absence}` envelope; a found
+/// answer's `absence` is `null`.
 fn rows(out: &Output) -> Vec<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    v.as_array().expect("a JSON array").clone()
+    assert!(v["absence"].is_null(), "a found answer carries no absence: {v}");
+    v["results"].as_array().expect("a `results` array").clone()
 }
 
 #[test]
@@ -88,7 +91,7 @@ fn json_equals_the_engine_order_across_processes() {
     let merged = repo_graph_engine::generate_many(&[api.clone(), web.clone()])
         .expect("generate_many")
         .merged;
-    let engine = find_nodes(&merged, "user", &FindOptions::default());
+    let engine = find_nodes(&merged, "user", &FindOptions::default()).results;
     let engine = serde_json::to_value(&engine).expect("serialises");
     assert_eq!(serde_json::Value::Array(cli.clone()), engine);
 

@@ -43,7 +43,7 @@ fn opts(top_k: usize) -> FindOptions {
 }
 
 fn find(m: &MergedGraph, q: &str) -> Vec<FoundNode> {
-    find_nodes(m, q, &FindOptions::default())
+    find_nodes(m, q, &FindOptions::default()).results
 }
 
 fn degree(m: &MergedGraph, id: u64) -> usize {
@@ -177,12 +177,12 @@ fn top_row_is_the_single_node_resolution_on_an_exact_match() {
     let dir = tempfile::tempdir().unwrap();
     let m = two_repo_build(dir.path());
     for q in ["get_user", "load", "UserService", "getUser"] {
-        let top = find_nodes(&m, q, &opts(1));
+        let top = find_nodes(&m, q, &opts(1)).results;
         assert_eq!(top.len(), 1, "{q}");
         assert_eq!(Some(NodeId(top[0].id)), m.resolve_name(q), "{q}: {top:?}");
     }
     // Two MODULEs share the qname `users`: node_id_by_qname's pick is ours.
-    let top = find_nodes(&m, "users", &opts(1));
+    let top = find_nodes(&m, "users", &opts(1)).results;
     assert_eq!(top[0].r#match, "exact_qname");
     assert_eq!(Some(NodeId(top[0].id)), m.node_id_by_qname("users"));
 }
@@ -246,15 +246,15 @@ fn kinds_filter_before_ranking_and_top_k_truncates_after() {
     let m = two_repo_build(dir.path());
     let mut o = FindOptions::default();
     o.kinds = Some(vec![repo_graph_code_domain::node_kind::FUNCTION]);
-    let rows = find_nodes(&m, "user", &o);
+    let rows = find_nodes(&m, "user", &o).results;
     assert!(!rows.is_empty());
     assert!(rows.iter().all(|r| r.kind == "FUNCTION"), "{rows:#?}");
     assert_eq!(rows[0].qname, "users::user_service_helper", "{rows:#?}");
 
     let all = find(&m, "user");
-    let two = find_nodes(&m, "user", &opts(2));
+    let two = find_nodes(&m, "user", &opts(2)).results;
     assert_eq!(two.as_slice(), &all[..2]);
-    let uncapped = find_nodes(&m, "user", &opts(0));
+    let uncapped = find_nodes(&m, "user", &opts(0)).results;
     assert_eq!(uncapped, all);
 }
 
@@ -266,7 +266,7 @@ fn scope_narrows_within_one_repo_before_top_k() {
     let m = generate_one(&dir.path().to_string_lossy()).expect("generate_one").merged;
     let mut o = opts(3);
     o.scope = Some("web".to_string());
-    let rows = find_nodes(&m, "user", &o);
+    let rows = find_nodes(&m, "user", &o).results;
     assert_eq!(rows.len(), 3, "{rows:#?}");
     for r in &rows {
         assert!(

@@ -11,8 +11,13 @@ impl PyGraph {
     /// **resolve** (P3, handoff v6): a failure/change signal (stacktrace, diff,
     /// test id, or `auto`-sniffed) → the ranked, LOCATED nodes it points at, in
     /// one call — the answer that `resolve_signal`→`activate`→`read×N` collapses
-    /// to. Resolution order preserved; each record
-    /// `{id, qname, name, kind, score, file, line}`. Returns a JSON array.
+    /// to. Resolution order preserved. Returns a JSON object `{results,
+    /// absence}` (LD.8a): `results` is the records
+    /// `{id, qname, name, kind, score, file, line}`; `absence` is `null` when
+    /// there are results, else the FACT-tier reason — `no_signal_match` (the
+    /// signal resolved to no node; the note counts what it held) or `no_match`
+    /// (`scope` or `top_k=0` removed every node) — with `unparsed_files` set to
+    /// `len(parse_errors)`.
     ///
     /// `scope` (optional, default `None` = no-op; a path or a project label —
     /// see `project_roots`) filters the SEEDS before the
@@ -28,8 +33,11 @@ impl PyGraph {
         top_k: Option<usize>,
         scope: Option<&str>,
     ) -> PyResult<String> {
-        let answer =
+        let mut answer =
             repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k, scope);
+        if let Some(a) = answer.absence.as_mut() {
+            a.unparsed_files = self.parse_errors.len();
+        }
         serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
     }
 

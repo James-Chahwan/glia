@@ -10,6 +10,9 @@ use repo_graph_code_extractors::queues::is_framework_tag;
 use repo_graph_core::{Cell, CellPayload, Edge, Node, NodeId};
 use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
+use crate::absence::{self, Answer};
+use crate::find::{self, FindOptions};
+
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
 /// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
 /// Produced by [`blast_radius_by_qname`], never built by a struct literal
@@ -286,7 +289,7 @@ pub fn cross_stack_trace(
 
 /// One located node in a `resolve` answer: identity + kind + PPR relevance +
 /// `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it doesn't walk.)
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct LocatedNode {
     pub id: u64,
@@ -311,19 +314,38 @@ pub struct LocatedNode {
 /// `utils.py` in the monorepo and those bogus seeds then shape the ranking of
 /// the real one. A node with no locatable file is KEPT (see [`node_in_scope`]).
 /// Any golden-output test on this function must pass `scope = None`.
+///
+/// LD.8a: an empty answer carries its [`Absence`](crate::absence::Absence).
+/// `no_signal_match` when the signal resolved to no node — its note counts
+/// the frames / added lines / paths / test ids the signal held, and it names
+/// no mechanism, because resolution is by POSITION file and line or by name,
+/// not by edges. `no_match` when `scope` (or `top_k = Some(0)`) removed every
+/// resolved node.
 pub fn resolve_signal_located(
     merged: &MergedGraph,
     text: &str,
     kind: &str,
     top_k: Option<usize>,
     scope: Option<&str>,
-) -> Vec<LocatedNode> {
+) -> Answer<LocatedNode> {
     let seeds = merged.resolve_signal(text, kind);
+    let resolved = seeds.len();
     let loc = Locator::new(merged);
     // Pre-PPR: `activate` below must only see in-scope seeds.
     let seeds = apply_scope(&loc, seeds, scope, |id| *id, "resolve");
     if seeds.is_empty() {
-        return Vec::new();
+        return Answer::from_results(Vec::new(), || match scope {
+            Some(s) if resolved > 0 => absence::scope_emptied(merged, "resolve", text, resolved, s),
+            _ => absence::empty(
+                merged,
+                "resolve",
+                text,
+                "no_signal_match",
+                signal_note(text, kind),
+                &[],
+                None,
+            ),
+        });
     }
     let mut config = repo_graph_graph::code_activation_defaults();
     config.direction = repo_graph_activation::Direction::Undirected;
@@ -345,10 +367,123 @@ pub fn resolve_signal_located(
             }
         })
         .collect();
+    let kept = out.len();
     if let Some(k) = top_k {
         out.truncate(k);
     }
-    out
+    Answer::from_results(out, || {
+        let note = format!(
+            "top_k 0 kept none of the {kept} resolved {}",
+            absence::plural(kept, "node", "nodes")
+        );
+        absence::empty(merged, "resolve", text, "no_match", note, &[], None)
+    })
+}
+
+/// The `no_signal_match` note: what the signal held, counted with the shapes
+/// the graph crate's resolver reads.
+///
+/// MIRRORS `graph/src/signal.rs` (`sniff_signal_kind`, `parse_stack_frames`,
+/// `parse_diff_frames` and the plain changed-file-list fallback), which are
+/// private there, while `MergedGraph::resolve_signal` returns node ids only
+/// and reports no input count. Removal: when the graph crate exposes a signal
+/// inventory, call it and delete this, [`sniff_kind`], [`frames_in_line`] and
+/// [`added_lines`].
+fn signal_note(text: &str, kind: &str) -> String {
+    let (kind, auto) = if kind == "auto" {
+        (sniff_kind(text), " (auto-detected)")
+    } else {
+        (kind, "")
+    };
+    let (n, one, many) = match kind {
+        "stacktrace" => (
+            text.lines().map(frames_in_line).sum(),
+            "stack frame",
+            "stack frames",
+        ),
+        "diff" => match added_lines(text) {
+            0 => (
+                text.lines()
+                    .filter(|l| !l.trim().is_empty() && l.contains('.'))
+                    .count(),
+                "path",
+                "paths",
+            ),
+            n => (n, "added line", "added lines"),
+        },
+        "test" => (
+            text.split_whitespace().filter(|t| t.contains("::")).count(),
+            "test id",
+            "test ids",
+        ),
+        other => {
+            return format!(
+                "`{other}` is not a signal kind (stacktrace, test, diff or auto), so nothing was resolved"
+            );
+        }
+    };
+    format!(
+        "the {kind} signal{auto} held {n} {}; none resolved to a node in this graph",
+        absence::plural(n, one, many)
+    )
+}
+
+/// MIRRORS `sniff_signal_kind` (see [`signal_note`]).
+fn sniff_kind(text: &str) -> &'static str {
+    if text.contains("+++ ") || text.contains("--- a/") || text.contains("\n@@ ") {
+        return "diff";
+    }
+    if (text.contains("File \"") && text.contains("line "))
+        || text.contains(".go:")
+        || text.contains("\n  at ")
+    {
+        return "stacktrace";
+    }
+    let t = text.trim();
+    if t.contains("::") && !t.chars().any(char::is_whitespace) {
+        return "test";
+    }
+    "stacktrace"
+}
+
+/// Frames `parse_stack_frames` reads from one line: a Python `File "x", line
+/// N` frame, else every `path.ext:N` token (see [`signal_note`]).
+fn frames_in_line(line: &str) -> usize {
+    if let Some(rest) = line.trim_start().strip_prefix("File \"")
+        && let Some(end) = rest.find('"')
+        && let Some(at) = rest[end..].find("line ")
+        && rest[end + at + 5..].starts_with(|c: char| c.is_ascii_digit())
+    {
+        return 1;
+    }
+    line.split(|c: char| c.is_whitespace() || c == '(' || c == ')' || c == ',')
+        .filter(|tok| {
+            let mut parts = tok.split(':');
+            let path = parts.next().unwrap_or("");
+            !path.is_empty()
+                && path.contains('.')
+                && !path.ends_with('.')
+                && parts
+                    .next()
+                    .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .count()
+}
+
+/// Added lines `parse_diff_frames` turns into frames: `+` lines under a
+/// `+++ ` header that names a file, not `/dev/null` (see [`signal_note`]).
+fn added_lines(text: &str) -> usize {
+    let mut in_file = false;
+    let mut n = 0;
+    for line in text.lines() {
+        if let Some(p) = line.strip_prefix("+++ ") {
+            let p = p.split('\t').next().unwrap_or(p).trim();
+            in_file = p != "/dev/null";
+        } else if in_file && line.starts_with('+') {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// **governing_docs** (P3 payoff, tier-4): the doc sections that DOCUMENTS a
@@ -359,15 +494,39 @@ pub fn resolve_signal_located(
 /// `scope` (A8.3) keeps only the doc sections whose own POSITION file lives
 /// under that repo-relative path. A section with no locatable file is KEPT (see
 /// [`node_in_scope`]).
+///
+/// The symbol resolves through find's search (the LD.3b handoff): its first
+/// row, when that row is an exact match (`exact_qname` / `exact_name`). Those
+/// tiers are ordered by `pick_primary`'s key, so it is the node
+/// `node_id_by_qname` / `resolve_name` return; a dotted or slashed query
+/// (`app.helper`) also finds its `::` qname, as find does.
+///
+/// LD.8a: never an error. An empty answer's absence is `unknown_symbol`
+/// (find's nearest qnames as suggestions), `no_edges` (no DOCUMENTS edge
+/// reaches the symbol; caveats narrowed to the symbol's language), or
+/// `no_match` (`scope` removed every section).
 pub fn governing_docs(
     merged: &MergedGraph,
     qname: &str,
     scope: Option<&str>,
-) -> Result<Vec<LocatedNode>, String> {
-    let target = merged
-        .node_id_by_qname(qname)
-        .or_else(|| merged.resolve_name(qname))
-        .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
+) -> Answer<LocatedNode> {
+    // The rows are DOC_SECTIONs; the table names the edge a section reaches a
+    // symbol through.
+    let mechanisms = absence::mechanisms_for_kind(node_kind::DOC_SECTION);
+    let near_opts = FindOptions {
+        top_k: absence::SUGGESTIONS,
+        ..FindOptions::default()
+    };
+    let near = find::search(merged, qname, &near_opts).rows;
+    let Some(target) = near
+        .first()
+        .filter(|r| find::is_exact(r))
+        .map(|r| NodeId(r.id))
+    else {
+        return Answer::from_results(Vec::new(), || {
+            absence::unknown_symbol(merged, "governing_docs", qname, mechanisms, &near)
+        });
+    };
     let loc = Locator::new(merged);
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -388,8 +547,26 @@ pub fn governing_docs(
             });
         }
     }
+    let documented = out.len();
     let out = apply_scope(&loc, out, scope, |d| NodeId(d.id), "governing_docs");
-    Ok(out)
+    Answer::from_results(out, || match scope {
+        Some(s) if documented > 0 => {
+            absence::scope_emptied(merged, "governing_docs", qname, documented, s)
+        }
+        _ => {
+            let at = loc.locate(target);
+            let note = format!("no DOCUMENTS edge reaches `{}` in this graph", at.qname);
+            absence::empty(
+                merged,
+                "governing_docs",
+                qname,
+                "no_edges",
+                note,
+                mechanisms,
+                at.file.as_deref(),
+            )
+        }
+    })
 }
 
 /// Identity + location of one node, shared by every answer record.
@@ -645,7 +822,7 @@ fn scope_file_of(loc: &Locator<'_>, id: NodeId) -> Option<String> {
 /// sides are normalised by trimming a leading `./` or `/` and a trailing `/`;
 /// an empty scope matches everything, and so does `.` — the path the ROOT
 /// project resolves to (A8.6), which otherwise matched nothing at all.
-fn in_scope(file: &str, scope: &str) -> bool {
+pub(crate) fn in_scope(file: &str, scope: &str) -> bool {
     let f = file.trim_start_matches("./").trim_start_matches('/');
     let s = scope.trim_start_matches("./").trim_matches('/');
     if s.is_empty() || s == "." {

@@ -44,7 +44,8 @@ use repo_graph_code_domain::node_kind;
 use repo_graph_core::{NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
-use crate::answers::{Locator, resolve_scope};
+use crate::absence::{self, Answer};
+use crate::answers::{Locator, in_scope, resolve_scope};
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -92,16 +93,59 @@ impl Default for FindOptions {
 }
 
 /// The ranked, located nodes `query` names — see the module doc for the tiers
-/// and the order. An empty (or all-whitespace) query matches nothing.
+/// and the order — as an LD.8a [`Answer`]: when nothing matches, `absence` is
+/// `no_match`, and its note says whether no tier matched at all or `scope`
+/// removed every match. It carries no suggestions (the subsequence tier
+/// already ran) and no mechanisms (a name search follows no edge). An empty
+/// (or all-whitespace) query matches nothing.
 ///
 /// Cost: one O(V) pass of string checks, one O(V) [`Locator`] build, and one
 /// O(E) degree pass, run only when more than one candidate survives the
-/// filters. Prints one `[find] query=...` line per call.
-pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Vec<FoundNode> {
+/// filters. Prints one `[find] query=...` line per call, and one
+/// `[absence] primitive=find` line when the answer is empty.
+pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Answer<FoundNode> {
+    let found = search(merged, query, opts);
+    Answer::from_results(found.rows, || {
+        if found.out_of_scope > 0
+            && let Some(scope) = opts.scope.as_deref()
+        {
+            return absence::scope_emptied(merged, "find", query, found.out_of_scope, scope);
+        }
+        let q = query.trim();
+        let what = match &opts.kinds {
+            Some(kinds) => {
+                let names: Vec<&str> = kinds.iter().map(|k| node_kind::name(*k)).collect();
+                format!("no {} node", names.join(" / "))
+            }
+            None => "no node".to_string(),
+        };
+        let note = if q.is_empty() {
+            "the query is empty, so it matches nothing".to_string()
+        } else {
+            format!("{what} matches `{q}` by name or qname in any find tier")
+        };
+        absence::empty(merged, "find", query, "no_match", note, &[], None)
+    })
+}
+
+/// [`find_nodes`]' rows, plus how many matches `opts.scope` removed.
+pub(crate) struct Found {
+    pub(crate) rows: Vec<FoundNode>,
+    /// Matches `opts.scope` filtered out (0 without a scope).
+    pub(crate) out_of_scope: usize,
+}
+
+/// The search itself, without the envelope: what an answer that resolves its
+/// seed through find (`governing_docs`) calls, so the rows it did not take
+/// become its suggestions without a second pass.
+pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Found {
     let q = Query::new(query);
     if q.raw.is_empty() {
         log_marker(&q.raw, &[], opts.top_k);
-        return Vec::new();
+        return Found {
+            rows: Vec::new(),
+            out_of_scope: 0,
+        };
     }
 
     let mut seen: HashSet<NodeId> = HashSet::new();
@@ -135,6 +179,7 @@ pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Vec<
     }
 
     let loc = Locator::new(merged);
+    let mut out_of_scope = 0usize;
     if let Some(raw) = opts.scope.as_deref() {
         let scope = resolve_scope(merged, raw);
         let before = cands.len();
@@ -146,6 +191,7 @@ pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Vec<
                 true
             }
         });
+        out_of_scope = before - cands.len();
         eprintln!(
             "[scope] find scope={scope}: {before} -> {} (unlocatable={unlocatable})",
             cands.len()
@@ -179,7 +225,7 @@ pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Vec<
     log_marker(&q.raw, &cands, opts.top_k);
 
     let keep = if opts.top_k == 0 { cands.len() } else { opts.top_k };
-    cands
+    let rows = cands
         .iter()
         .take(keep)
         .map(|c| {
@@ -194,7 +240,16 @@ pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Vec<
                 r#match: c.tier.label(),
             }
         })
-        .collect()
+        .collect();
+    Found { rows, out_of_scope }
+}
+
+/// Is `row` an exact match (`exact_qname` / `exact_name`)? Those two tiers are
+/// ordered by `pick_primary`'s key, so the first exact row of an answer is the
+/// node `node_id_by_qname` / `resolve_name` return — the one a primitive that
+/// resolves its seed through find takes.
+pub(crate) fn is_exact(row: &FoundNode) -> bool {
+    row.r#match == Tier::ExactQname.label() || row.r#match == Tier::ExactName.label()
 }
 
 /// A matched node, before ranking.
@@ -401,20 +456,6 @@ fn degrees(merged: &MergedGraph, cands: &[Candidate]) -> HashMap<NodeId, usize> 
     deg
 }
 
-/// MIRRORS the A8.3 `in_scope` rule in `answers.rs` (private there, and that
-/// file is outside LD.3b): `file` lives under `scope` on a `/` boundary; a
-/// leading `./` or `/` and a trailing `/` are trimmed; an empty scope and `.`
-/// match everything. Removal: when `answers::in_scope` is widened to
-/// `pub(crate)`, call it and delete this.
-fn in_scope(file: &str, scope: &str) -> bool {
-    let f = file.trim_start_matches("./").trim_start_matches('/');
-    let s = scope.trim_start_matches("./").trim_matches('/');
-    if s.is_empty() || s == "." {
-        return true;
-    }
-    f == s || f.starts_with(&format!("{s}/"))
-}
-
 /// The LD.3b fired_on marker, one line per call:
 /// `[find] query='<q>' matched=<n> tiers=<tier:count,...> top_k=<k>`, the
 /// tiers listed in tier order, non-zero only (`-` when nothing matched).
@@ -483,14 +524,5 @@ mod tests {
         assert_eq!(tier("GRÖSSE", "größe", "m::größe"), None);
         assert_eq!(tier("ΣΟΦΊΑ", "σοφία", "m::σοφία"), Some("exact_ci"));
         assert!(!starts_a_word("", &['a']));
-    }
-
-    #[test]
-    fn in_scope_mirrors_the_a83_rule() {
-        assert!(in_scope("services/api/h.py", "services/api"));
-        assert!(!in_scope("services/api/h.py", "services/ap"));
-        assert!(in_scope("./a/b.py", "/a/"));
-        assert!(in_scope("x.py", "."));
-        assert!(in_scope("x.py", ""));
     }
 }

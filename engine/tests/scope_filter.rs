@@ -153,7 +153,7 @@ fn resolve_scope_filters_seeds_before_ppr() {
         File \"web/client.py\", line 5, in web_entry\n    \
         return requests.get(\"http://api/v1/items\")\n";
 
-    let unscoped = resolve_signal_located(m, trace, "stacktrace", None, None);
+    let unscoped = resolve_signal_located(m, trace, "stacktrace", None, None).results;
     assert_eq!(
         unscoped.len(),
         2,
@@ -164,7 +164,7 @@ fn resolve_scope_filters_seeds_before_ppr() {
     // (d) scoped: only the handler frame survives, AND its PPR score changes,
     // because the seed set handed to `activate` shrank — proof the filter ran
     // pre-PPR rather than on the rendered result.
-    let scoped = resolve_signal_located(m, trace, "stacktrace", None, Some(SCOPE));
+    let scoped = resolve_signal_located(m, trace, "stacktrace", None, Some(SCOPE)).results;
     assert_eq!(scoped.len(), 1, "only the in-scope frame should survive");
     assert_eq!(scoped[0].file.as_deref(), Some("services/api/handler.py"));
     let before = unscoped
@@ -183,7 +183,7 @@ fn resolve_scope_filters_seeds_before_ppr() {
 fn governing_docs_scope_drops_out_of_tree_sections() {
     let (_td, result) = fixture();
     let m = &result.merged;
-    let all = governing_docs(m, "handle", None).unwrap();
+    let all = governing_docs(m, "handle", None).results;
     for want in ["README.md", "docs/rules.md"] {
         assert!(
             all.iter().any(|d| d.file.as_deref() == Some(want)),
@@ -192,7 +192,7 @@ fn governing_docs_scope_drops_out_of_tree_sections() {
         );
     }
     // (e) scoped to docs/ drops the README-derived DOC_SECTION.
-    let scoped = governing_docs(m, "handle", Some("docs")).unwrap();
+    let scoped = governing_docs(m, "handle", Some("docs")).results;
     assert!(
         scoped.iter().all(|d| d.file.as_deref() != Some("README.md")),
         "scope=docs must drop the README section; got {:?}",
@@ -436,6 +436,7 @@ fn a_label_scope_equals_its_path_scope() {
     let diff = "apps/web/helper.ts\ntools/run.ts\n";
     let located = |scope: &str| {
         resolve_signal_located(m, diff, "diff", None, Some(scope))
+            .results
             .iter()
             .map(|n| (n.qname.clone(), n.score.to_bits()))
             .collect::<Vec<_>>()

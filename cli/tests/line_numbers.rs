@@ -8,6 +8,12 @@
 //!
 //! Drives the real binary. The `[locate] locator built:` stderr line is the
 //! LD.1 fired_on marker; asserting it here makes it a tested contract.
+//!
+//! LD.8a rides on the same fixture: `resolve`, `docs-for` and `find` answer
+//! `{results, absence}` in `--json`, an empty table is followed by the
+//! `> FACT:` absence block, and `docs-for` on an unknown qname is an absence
+//! (exit 0) instead of exit 3. The `[absence] primitive=` stderr line is the
+//! LD.8a fired_on marker.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -108,9 +114,10 @@ fn answers_report_1_based_lines() {
     // resolve --kind diff: every node of the changed file, 1-based; the
     // MODULE row is line 1, never 0.
     let v = json(&glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--json"]));
-    let mut got: Vec<(String, i64)> = v
+    assert!(v["absence"].is_null(), "a found answer carries no absence: {v}");
+    let mut got: Vec<(String, i64)> = v["results"]
         .as_array()
-        .expect("a JSON array")
+        .expect("a `results` array")
         .iter()
         .map(|r| {
             (
@@ -129,4 +136,76 @@ fn answers_report_1_based_lines() {
         ],
         "{v}"
     );
+}
+
+/// The LD.8a marker lines in `out`'s stderr, relayed so
+/// `-- --nocapture 2>&1 | grep '\[absence\] primitive='` sees them.
+fn absence_markers(out: &Output) -> Vec<String> {
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.starts_with("[absence] primitive="))
+        .map(String::from)
+        .collect();
+    for l in &lines {
+        eprintln!("{l}");
+    }
+    lines
+}
+
+#[test]
+fn empty_answers_carry_their_absence() {
+    let repo = TempRepo::new("absence");
+    let d = repo.path();
+
+    // docs-for on an unknown qname: exit 0 and an absence (before LD.8a:
+    // exit 3, `error: no node with qname/name `nope``).
+    let out = glia(&repo.0, &["docs-for", d, "nope", "--json"]);
+    let v = json(&out);
+    assert_eq!(v["results"], serde_json::json!([]), "{v}");
+    assert_eq!(v["absence"]["tier"], "FACT", "{v}");
+    assert_eq!(v["absence"]["reason"], "unknown_symbol", "{v}");
+    assert_eq!(v["absence"]["mechanisms"], serde_json::json!(["DOCUMENTS"]), "{v}");
+    assert_eq!(v["absence"]["unparsed_files"], 0, "{v}");
+    assert_eq!(
+        absence_markers(&out),
+        [
+            "[absence] primitive=governing_docs reason=unknown_symbol mechanisms=DOCUMENTS caveats=1 suggestions=0"
+        ]
+    );
+
+    // A known symbol nothing documents: the table's empty line, then the FACT
+    // and the DOCUMENTS caveat row.
+    let out = glia(&repo.0, &["docs-for", d, "app::helper"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(
+            "_(no governing docs)_\n> FACT: no DOCUMENTS edge reaches `app::helper` in this graph\n> caveat (*, DOCUMENTS): "
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        absence_markers(&out),
+        [
+            "[absence] primitive=governing_docs reason=no_edges mechanisms=DOCUMENTS caveats=1 suggestions=0"
+        ]
+    );
+
+    // A near miss is suggested.
+    let out = glia(&repo.0, &["docs-for", d, "helpr"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("> did you mean: app::helper"), "{text}");
+
+    // resolve and find: the same envelope, their own reasons.
+    let v = json(&glia(&repo.0, &["resolve", d, "zzz.py", "--kind", "diff", "--json"]));
+    assert_eq!(v["results"], serde_json::json!([]), "{v}");
+    assert_eq!(v["absence"]["reason"], "no_signal_match", "{v}");
+    let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--scope", "nowhere"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("_(nothing resolved)_\n> FACT: 3 results outside scope `nowhere`"),
+        "{text}"
+    );
+    let v = json(&glia(&repo.0, &["find", d, "qqqq", "--json"]));
+    assert_eq!(v["results"], serde_json::json!([]), "{v}");
+    assert_eq!(v["absence"]["reason"], "no_match", "{v}");
 }
