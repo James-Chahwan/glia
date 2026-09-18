@@ -1,0 +1,28 @@
+{
+  "framework": "ts-enum-members",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LA.30c: a TypeScript `enum` / `const enum` becomes an ENUM node (DEFINES from its module) with one ATTRIBUTE per member (HAS_ATTRIBUTE), and `Enum.Member` references become USES edges - resolved in-parse for a same-file enum, and through an UnresolvedRef + LA.30a's ENUM member lookup for an imported one.",
+  "expect_nodes": [
+    {"kind": "ENUM", "name": "src/color/Color"},
+    {"kind": "ENUM", "name": "src/color/Dir"},
+    {"kind": "ENUM", "name": "src/color/Local"},
+    {"kind": "ATTRIBUTE", "name": "src/color/Color/Red"},
+    {"kind": "ATTRIBUTE", "name": "src/color/Color/Blue"},
+    {"kind": "ATTRIBUTE", "name": "src/color/Dir/Down"},
+    {"kind": "ATTRIBUTE", "name": "src/color/Local/B"}
+  ],
+  "expect_edges": [
+    {"from": "src/color", "to": "src/color/Color", "category": "DEFINES"},
+    {"from": "src/color/Color", "to": "src/color/Color/Green", "category": "HAS_ATTRIBUTE"},
+    {"from": "src/color/warm", "to": "src/color/Color/Red", "category": "USES", "note": "same-file member reference, resolved in-parse"},
+    {"from": "src/color/firstLocal", "to": "src/color/Local/A", "category": "USES", "note": "non-exported enum"},
+    {"from": "src/paint/pick", "to": "src/color/Color/Green", "category": "USES", "note": "imported enum member through LA.30a"},
+    {"from": "src/paint/up", "to": "src/color/Dir/Up", "category": "USES", "note": "const enum"}
+  ],
+  "forbid": [
+    {"from": "src/color/warm", "to": "src/color/Color/Green", "category": "USES", "note": "only the member actually named is used"},
+    {"from": "src/paint/pick", "to": "src/color/Color/Red", "category": "USES"},
+    {"kind": "ATTRIBUTE", "name": "src/color/Color/Color", "note": "the enum name is not one of its own members"}
+  ]
+}

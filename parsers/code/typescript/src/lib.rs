@@ -52,6 +52,7 @@ pub fn parse_file(
     let root = tree.root_node();
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
+    acc.module_id = Some(module_id);
     acc.nodes.push(Node {
         id: module_id,
         repo,
@@ -91,6 +92,18 @@ struct Acc {
     inject_fn_candidates: Vec<InjectFnCandidate>,
     module_functions: HashMap<String, NodeId>,
     class_methods: HashMap<(NodeId, String), NodeId>,
+    /// LA.30c: this file's enums by bare name. A second declaration of the
+    /// same name (TS declaration merging) reuses the entry.
+    enums: HashMap<String, NodeId>,
+    /// LA.30c: `(enum name, member name)` -> the member's ATTRIBUTE node.
+    enum_members: HashMap<(String, String), NodeId>,
+    /// LA.30c: `X.Y` reads that are not a call's callee, as
+    /// `(from, X, Y)`, deduped per triple in walk order. Resolved into USES
+    /// edges / refs in `resolve_intra_file` once every enum is known.
+    member_refs: Vec<(NodeId, String, String)>,
+    member_ref_seen: std::collections::HashSet<(NodeId, String, String)>,
+    /// The file's MODULE node: `from_module` of the member USES refs.
+    module_id: Option<NodeId>,
     nav: CodeNav,
     /// Stashed at parse_file entry so endpoint emission can stamp position
     /// cells without threading `file_rel` through every call_collection helper.
@@ -186,6 +199,12 @@ fn visit_top(
         }
         "interface_declaration" => {
             visit_interface(n, src, file_rel, module_qname, module_id, repo, acc);
+        }
+        // `enum` and `const enum` share this node; `export enum` arrives
+        // through the export_statement recursion above. `declare enum` is an
+        // `ambient_declaration` and deliberately falls through to `_`.
+        "enum_declaration" => {
+            visit_enum(n, src, file_rel, module_qname, module_id, repo, acc);
         }
         "function_declaration" => {
             visit_function_decl(n, src, file_rel, module_qname, module_id, repo, acc);
@@ -565,6 +584,103 @@ fn visit_interface(
         node_kind::INTERFACE,
         Some(module_id),
     );
+}
+
+/// LA.30c: `enum E { … }` / `const enum E { … }` → an ENUM node (DEFINES from
+/// the module) with one ATTRIBUTE per member (HAS_ATTRIBUTE). Kind choice
+/// follows LA.3 / Python: no new id.
+///
+/// Members are the `enum_body`'s `_property_name` children and its
+/// `enum_assignment`s' `name`: a `property_identifier` by its text, a `string`
+/// unquoted (`'my-key' = 1` → `my-key`). `number` and `computed_property_name`
+/// names are skipped. A second declaration of the same enum in this file (TS
+/// declaration merging) reuses the ENUM id and skips members already recorded,
+/// so `nav.children_of` never lists one member twice.
+#[allow(clippy::too_many_arguments)]
+fn visit_enum(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_qname: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name) = child_text(n, "name", src) else {
+        return;
+    };
+    let enum_qname = format!("{module_qname}::{name}");
+    let enum_id = match acc.enums.get(name) {
+        Some(id) => *id,
+        None => {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENUM, &enum_qname);
+            acc.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Strong,
+                cells: build_cells(&n, src, file_rel),
+            });
+            acc.edges.push(Edge {
+                from: module_id,
+                to: id,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            });
+            acc.nav
+                .record(id, name, &enum_qname, node_kind::ENUM, Some(module_id));
+            acc.enums.insert(name.to_string(), id);
+            id
+        }
+    };
+
+    let Some(body) = n.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for m in body.named_children(&mut cursor) {
+        let name_node = match m.kind() {
+            "enum_assignment" => match m.child_by_field_name("name") {
+                Some(nn) => nn,
+                None => continue,
+            },
+            _ => m,
+        };
+        let member = match name_node.kind() {
+            "property_identifier" => text(name_node, src).to_string(),
+            "string" => strip_string_quotes(text(name_node, src)),
+            // number / computed_property_name / comment: no member name.
+            _ => continue,
+        };
+        if member.is_empty() {
+            continue;
+        }
+        let key = (name.to_string(), member);
+        if acc.enum_members.contains_key(&key) {
+            continue;
+        }
+        let member_qname = format!("{enum_qname}::{}", key.1);
+        let member_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &member_qname);
+        acc.nodes.push(Node {
+            id: member_id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: build_cells(&m, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: enum_id,
+            to: member_id,
+            category: edge_category::HAS_ATTRIBUTE,
+            confidence: Confidence::Strong,
+        });
+        acc.nav.record(
+            member_id,
+            &key.1,
+            &member_qname,
+            node_kind::ATTRIBUTE,
+            Some(enum_id),
+        );
+        acc.enum_members.insert(key, member_id);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -983,10 +1099,40 @@ fn collect_calls_in(
             }
             try_detect_endpoint(node, src, from, acc);
         }
+        if kind == "member_expression" {
+            record_member_ref(node, src, from, acc);
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
             stack.push(child);
         }
+    }
+}
+
+/// LA.30c: record `X.Y` — object an `identifier`, property a
+/// `property_identifier` — as a candidate enum-member read, unless it is the
+/// callee of its parent call (`Api.load()` is a CallSite, never a member use).
+/// Which reads become USES is decided in `resolve_intra_file`, once the file's
+/// enums and imports are all known.
+fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    if let Some(parent) = node.parent()
+        && parent.kind() == "call_expression"
+        && parent.child_by_field_name("function") == Some(node)
+    {
+        return;
+    }
+    let (Some(object), Some(property)) = (
+        node.child_by_field_name("object"),
+        node.child_by_field_name("property"),
+    ) else {
+        return;
+    };
+    if object.kind() != "identifier" || property.kind() != "property_identifier" {
+        return;
+    }
+    let key = (from, text(object, src).to_string(), text(property, src).to_string());
+    if acc.member_ref_seen.insert(key.clone()) {
+        acc.member_refs.push(key);
     }
 }
 
@@ -1370,6 +1516,56 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // shape-2 candidates (`axios.get(url)`) can be filtered to only those
     // whose base is a real module-level binding.
     let alias_set = build_alias_set(&out.imports);
+
+    // LA.30c: `X.Y` member reads, in walk order. A member of a same-file enum
+    // is a USES edge now. An import-bound base with an Upper-initial base AND
+    // member becomes a USES `Attribute` ref for the graph crate's
+    // `resolve_refs`: an ENUM base binds its ATTRIBUTE member (LA.30a); a
+    // namespace-import MODULE base or a CLASS base binds through the generic
+    // attribute lookup like any other ref (`Models.User` -> the class,
+    // `User.Build` read as a value -> the static method). Everything else
+    // (`environment.apiUrl`, `Math.PI`, a same-file enum's non-member) is
+    // dropped, so it never reaches the persisted unresolved refs.
+    let mut member_uses = 0usize;
+    let mut member_ref_count = 0usize;
+    for (from, base, name) in std::mem::take(&mut acc.member_refs) {
+        if let Some(&member) = acc.enum_members.get(&(base.clone(), name.clone())) {
+            out.edges.push(Edge {
+                from,
+                to: member,
+                category: edge_category::USES,
+                confidence: Confidence::Strong,
+            });
+            member_uses += 1;
+            continue;
+        }
+        if acc.enums.contains_key(&base) {
+            continue;
+        }
+        let Some(module_id) = acc.module_id else {
+            continue;
+        };
+        let upper = |s: &str| s.starts_with(|c: char| c.is_ascii_uppercase());
+        if alias_set.contains(base.as_str()) && upper(&base) && upper(&name) {
+            out.refs.push(UnresolvedRef {
+                from,
+                from_module: module_id,
+                qualifier: CallQualifier::Attribute { base, name },
+                category: edge_category::USES,
+            });
+            member_ref_count += 1;
+        }
+    }
+    if !acc.enums.is_empty() || member_uses > 0 || member_ref_count > 0 {
+        eprintln!(
+            "[ts-enums] enums={} members={} member_uses={} member_refs={} file={}",
+            acc.enums.len(),
+            acc.enum_members.len(),
+            member_uses,
+            member_ref_count,
+            acc.file_rel
+        );
+    }
 
     // A7.1: `x = inject(T)` class fields. The callee must be the local binding
     // of a named `inject` import (`import { inject }`, or `{ inject as i }`),
@@ -2437,6 +2633,262 @@ class X extends Base implements IFoo {}
         assert!(
             has_edge(&parse, class_id, base_id, edge_category::INHERITS_FROM),
             "expected X --INHERITS_FROM--> Base"
+        );
+    }
+
+    // ---- LA.30c: enums -------------------------------------------------------
+
+    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn has_node(parse: &FileParse, id: NodeId) -> bool {
+        parse.nodes.iter().any(|n| n.id == id)
+    }
+
+    /// Every `(base, name)` of a USES `Attribute` ref emitted from `from`.
+    fn uses_refs(parse: &FileParse, from: NodeId) -> Vec<(String, String)> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES && r.from == from)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, name } => Some((base.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn uses_edges(parse: &FileParse) -> Vec<(NodeId, NodeId)> {
+        parse
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .map(|e| (e.from, e.to))
+            .collect()
+    }
+
+    #[test]
+    fn enum_declaration_emits_enum_and_member_attributes() {
+        let src = "\
+export enum Color {
+  Red = 'red',
+  /** The calm one. */
+  Green = 'green',
+  Blue = 'blue',
+}
+";
+        let parse = parse_file(src, "src/color.ts", "src::color", repo()).unwrap();
+        let module = id(node_kind::MODULE, "src::color");
+        let color = id(node_kind::ENUM, "src::color::Color");
+        assert!(has_node(&parse, color), "ENUM Color missing: {:?}", parse.nodes);
+        assert!(has_edge(&parse, module, color, edge_category::DEFINES));
+        let members: Vec<NodeId> = ["Red", "Green", "Blue"]
+            .iter()
+            .map(|m| id(node_kind::ATTRIBUTE, &format!("src::color::Color::{m}")))
+            .collect();
+        for (m, name) in members.iter().zip(["Red", "Green", "Blue"]) {
+            assert!(has_node(&parse, *m), "ATTRIBUTE {name} missing");
+            assert!(has_edge(&parse, color, *m, edge_category::HAS_ATTRIBUTE), "{name}");
+            assert_eq!(parse.nav.parent_of.get(m), Some(&color), "{name} nav parent");
+            assert_eq!(parse.nav.name_by_id.get(m).map(String::as_str), Some(name));
+        }
+        let attr_count = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ATTRIBUTE))
+            .count();
+        assert_eq!(attr_count, 3, "one ATTRIBUTE per member, the enum name is not one");
+
+        // POSITION of a member is its own line (0-based); DOC from its JSDoc.
+        let green = parse.nodes.iter().find(|n| n.id == members[1]).unwrap();
+        let pos = green
+            .cells
+            .iter()
+            .find_map(|c| match (&c.payload, c.kind == cell_type::POSITION) {
+                (CellPayload::Json(j), true) => Some(j.clone()),
+                _ => None,
+            })
+            .expect("member POSITION cell");
+        assert!(pos.contains("\"start_line\":3,"), "Green sits on row 3: {pos}");
+        assert!(
+            green.cells.iter().any(|c| c.kind == cell_type::DOC
+                && matches!(&c.payload, CellPayload::Text(t) if t.contains("calm"))),
+            "member JSDoc: {:?}",
+            green.cells
+        );
+        assert!(
+            green.cells.iter().any(|c| c.kind == cell_type::CODE
+                && matches!(&c.payload, CellPayload::Text(t) if t == "Green = 'green'")),
+            "member CODE carries its initialiser: {:?}",
+            green.cells
+        );
+    }
+
+    #[test]
+    fn const_and_non_exported_enums_are_emitted() {
+        let src = "\
+export const enum Dir {
+  Up,
+  Down,
+}
+
+enum Local {
+  A = 1,
+  B,
+}
+";
+        let parse = parse_file(src, "src/dir.ts", "src::dir", repo()).unwrap();
+        for (e, members) in [("Dir", ["Up", "Down"]), ("Local", ["A", "B"])] {
+            let enum_id = id(node_kind::ENUM, &format!("src::dir::{e}"));
+            assert!(has_node(&parse, enum_id), "ENUM {e} missing");
+            for m in members {
+                let m_id = id(node_kind::ATTRIBUTE, &format!("src::dir::{e}::{m}"));
+                assert!(has_edge(&parse, enum_id, m_id, edge_category::HAS_ATTRIBUTE), "{e}::{m}");
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_member_name_is_unquoted() {
+        let src = "enum E { 'my-key' = 1, \"other\" = 2, 3 = 4 }\n";
+        let parse = parse_file(src, "src/e.ts", "src::e", repo()).unwrap();
+        let e = id(node_kind::ENUM, "src::e::E");
+        for m in ["my-key", "other"] {
+            let m_id = id(node_kind::ATTRIBUTE, &format!("src::e::E::{m}"));
+            assert!(has_edge(&parse, e, m_id, edge_category::HAS_ATTRIBUTE), "{m}");
+        }
+        assert_eq!(
+            parse.nav.children_of.get(&e).map(Vec::len),
+            Some(2),
+            "a numeric member name is skipped"
+        );
+    }
+
+    #[test]
+    fn same_file_member_reference_is_a_uses_edge() {
+        let src = "\
+export enum Color { Red = 'red', Green = 'green' }
+
+export function warm(c: Color): boolean {
+  return c === Color.Red || c === Color.Red;
+}
+
+export function other(): string {
+  return Color.Missing;
+}
+";
+        let parse = parse_file(src, "src/color.ts", "src::color", repo()).unwrap();
+        let warm = id(node_kind::FUNCTION, "src::color::warm");
+        let red = id(node_kind::ATTRIBUTE, "src::color::Color::Red");
+        assert_eq!(uses_edges(&parse), vec![(warm, red)], "one deduped USES, the named member only");
+        assert!(
+            parse.refs.iter().all(|r| r.category != edge_category::USES),
+            "a same-file enum never emits a USES ref (Color.Missing is dropped): {:?}",
+            parse.refs
+        );
+    }
+
+    #[test]
+    fn imported_enum_member_reference_is_a_uses_ref() {
+        let src = "\
+import { Color } from './color';
+
+export function pick(): Color {
+  return Color.Green;
+}
+";
+        let parse = parse_file(src, "src/paint.ts", "src::paint", repo()).unwrap();
+        let pick = id(node_kind::FUNCTION, "src::paint::pick");
+        assert_eq!(uses_refs(&parse, pick), vec![("Color".to_string(), "Green".to_string())]);
+        let r = parse.refs.iter().find(|r| r.category == edge_category::USES).unwrap();
+        assert_eq!(r.from_module, id(node_kind::MODULE, "src::paint"));
+        assert!(uses_edges(&parse).is_empty(), "the imported member binds in the graph crate");
+    }
+
+    #[test]
+    fn lowercase_base_emits_nothing() {
+        let src = "\
+import { environment } from './env';
+import { Color } from './color';
+
+export function url(): string {
+  const p = Math.PI;
+  const c = Color.green;
+  return environment.apiUrl;
+}
+";
+        let parse = parse_file(src, "src/url.ts", "src::url", repo()).unwrap();
+        assert!(
+            parse.refs.iter().all(|r| r.category != edge_category::USES),
+            "lower-case base or member, or an un-imported base, emits no USES ref: {:?}",
+            parse.refs
+        );
+        assert!(uses_edges(&parse).is_empty());
+    }
+
+    #[test]
+    fn call_callee_member_expression_is_not_a_member_ref() {
+        let src = "\
+import { Api } from './api';
+
+export function load() {
+  return Api.Load();
+}
+";
+        let parse = parse_file(src, "src/load.ts", "src::load", repo()).unwrap();
+        let load = id(node_kind::FUNCTION, "src::load::load");
+        assert!(uses_refs(&parse, load).is_empty(), "a callee is a CallSite, not a USES ref");
+        assert!(
+            parse.calls.iter().any(|c| c.from == load
+                && c.qualifier
+                    == CallQualifier::Attribute { base: "Api".into(), name: "Load".into() }),
+            "Api.Load() stays a CallSite: {:?}",
+            parse.calls
+        );
+    }
+
+    #[test]
+    fn declare_enum_is_skipped() {
+        let src = "\
+declare enum Ambient { A, B }
+export declare const enum AmbientExported { C }
+";
+        let parse = parse_file(src, "src/types.d.ts", "src::types", repo()).unwrap();
+        assert!(
+            !parse
+                .nodes
+                .iter()
+                .any(|n| matches!(parse.nav.kind_by_id.get(&n.id), Some(k) if *k == node_kind::ENUM || *k == node_kind::ATTRIBUTE)),
+            "an ambient enum describes an external shape and mints nothing: {:?}",
+            parse.nav.qname_by_id
+        );
+    }
+
+    #[test]
+    fn merged_enum_declarations_do_not_duplicate_members() {
+        let src = "\
+enum Merged { A = 1, B = 2 }
+enum Merged { B = 2, C = 3 }
+";
+        let parse = parse_file(src, "src/m.ts", "src::m", repo()).unwrap();
+        let merged = id(node_kind::ENUM, "src::m::Merged");
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == merged).count(), 1, "one ENUM node");
+        let module = id(node_kind::MODULE, "src::m");
+        assert_eq!(
+            parse.nav.children_of.get(&module).map(|c| c.iter().filter(|x| **x == merged).count()),
+            Some(1),
+            "the module lists the enum once"
+        );
+        let children = parse.nav.children_of.get(&merged).cloned().unwrap_or_default();
+        let expect: Vec<NodeId> = ["A", "B", "C"]
+            .iter()
+            .map(|m| id(node_kind::ATTRIBUTE, &format!("src::m::Merged::{m}")))
+            .collect();
+        assert_eq!(children, expect, "A, B, C once each, in declaration order");
+        assert_eq!(
+            parse.edges.iter().filter(|e| e.category == edge_category::HAS_ATTRIBUTE).count(),
+            3
         );
     }
 }
