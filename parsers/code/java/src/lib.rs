@@ -1,5 +1,5 @@
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -68,6 +68,17 @@ pub fn parse_file(
     if top_level_types > 0 && qname_debug() {
         eprintln!(
             "[qname] java: {top_level_types} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}"
+        );
+    }
+
+    // LA.30b fired_on: `glia analyze <repo> 2>&1 | grep '\[java-enums\]'` — per
+    // file that declares an enum or produced a constant reference.
+    let (member_uses, member_refs) = resolve_member_refs(module_id, &mut acc);
+    if acc.enums.enums > 0 || member_uses + member_refs > 0 {
+        let e = acc.enums;
+        eprintln!(
+            "[java-enums] enums={} constants={} methods={} const_bodies={} member_uses={member_uses} member_refs={member_refs} file={file_rel_path}",
+            e.enums, e.constants, e.methods, e.const_bodies
         );
     }
 
@@ -153,6 +164,46 @@ struct Acc {
     /// LA.22b: declarative client interfaces, for the `[java-http]
     /// declarative` marker.
     declarative: DeclarativeCounts,
+    /// LA.30b: the constants of every enum declared in this file, by enum
+    /// qname: constant name -> its ATTRIBUTE id. Filled by a pre-scan of the
+    /// enum body before any member is walked, so a constant body or method
+    /// may name a constant declared after it. Lookup only, never iterated.
+    enum_consts: HashMap<String, HashMap<String, NodeId>>,
+    /// LA.30b: simple name -> qnames of the enums declared in this file (two
+    /// nested enums may share a simple name; such a base is ambiguous).
+    enum_names: HashMap<String, Vec<String>>,
+    /// LA.30b: constant / member references recorded in method bodies, in
+    /// walk order, deduped per `(from, base, name)`; resolved by
+    /// [`resolve_member_refs`] once every type of the file is visited.
+    member_refs: Vec<MemberRef>,
+    member_ref_seen: HashSet<(NodeId, Option<String>, String)>,
+    /// LA.30b: per-file tallies for the `[java-enums]` marker.
+    enums: EnumCounts,
+}
+
+/// LA.30b: a reference to a (possibly) enum constant, recorded while a method
+/// body is walked and resolved at the end of [`parse_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberRef {
+    /// The METHOD whose body holds the reference.
+    from: NodeId,
+    /// `X` of `X.Y`; `None` for a bare constant name inside its own enum.
+    base: Option<String>,
+    name: String,
+    /// The enclosing enum's qname, for a bare reference.
+    enum_ctx: Option<String>,
+}
+
+/// LA.30b: per-file tallies for the `[java-enums]` marker.
+#[derive(Default, Clone, Copy)]
+struct EnumCounts {
+    enums: usize,
+    constants: usize,
+    /// METHOD emissions inside an enum: body methods, constructors (every
+    /// overload counts) and constant-body methods.
+    methods: usize,
+    /// Constants that carry a class body.
+    const_bodies: usize,
 }
 
 /// LA.22a: the imperative HTTP client libraries whose request shapes the
@@ -698,50 +749,42 @@ fn visit_type_decl(
     if client.is_some() {
         acc.declarative.ifaces += 1;
     }
-    let mut composed = 0usize;
-    let mut cursor = body.walk();
-    for child in body.named_children(&mut cursor) {
-        match child.kind() {
-            "constructor_declaration" => {
-                composed += visit_method(
-                    child,
-                    src,
-                    file_rel,
-                    &qname,
-                    id,
-                    repo,
-                    &class_prefix,
-                    client.as_ref(),
-                    acc,
-                );
-                if is_bean {
-                    emit_constructor_injects(child, src, id, module_id, acc);
-                }
-            }
-            "method_declaration" => {
-                composed += visit_method(
-                    child,
-                    src,
-                    file_rel,
-                    &qname,
-                    id,
-                    repo,
-                    &class_prefix,
-                    client.as_ref(),
-                    acc,
-                );
-            }
-            "field_declaration" => {
-                visit_field_decl(child, src, file_rel, &qname, id, repo, acc);
-                emit_field_inject(child, src, id, module_id, acc);
-            }
-            "class_declaration" | "interface_declaration" | "enum_declaration"
-            | "record_declaration" => {
-                visit_type_decl(child, src, file_rel, &qname, id, module_id, repo, acc);
-            }
-            _ => {}
+    let owner = MemberOwner {
+        qname: &qname,
+        id,
+        module_id,
+        class_prefix: &class_prefix,
+        client: client.as_ref(),
+        is_bean,
+        enum_ctx: None,
+    };
+    let composed = if node.kind() == "enum_declaration" {
+        // LA.30b: an enum body is `enum_body` (constants, then an optional
+        // `enum_body_declarations`), not a `class_body`.
+        acc.enums.enums += 1;
+        acc.enum_names
+            .entry(name.to_string())
+            .or_default()
+            .push(qname.clone());
+        visit_enum_body(
+            body,
+            src,
+            file_rel,
+            repo,
+            &MemberOwner {
+                enum_ctx: Some(&qname),
+                ..owner
+            },
+            acc,
+        )
+    } else {
+        let mut composed = 0usize;
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            composed += visit_type_member(child, src, file_rel, repo, &owner, acc);
         }
-    }
+        composed
+    };
 
     // The class's OWN annotations (its base route), with no prefix to compose
     // against — the prefix IS this annotation. A client interface's type-level
@@ -759,6 +802,198 @@ fn visit_type_decl(
     true
 }
 
+/// The type whose body members [`visit_type_member`] walks: everything a
+/// member needs from its owner, read once per type by [`visit_type_decl`].
+#[derive(Clone, Copy)]
+struct MemberOwner<'a> {
+    qname: &'a str,
+    id: NodeId,
+    module_id: NodeId,
+    /// A4.4: the class-level route prefix every action method composes onto.
+    class_prefix: &'a str,
+    /// LA.22b: the declarative client interface this type is, if any.
+    client: Option<&'a ClientIface>,
+    /// Pattern E: a Spring stereotype, so constructor params are injected.
+    is_bean: bool,
+    /// LA.30b: the enclosing enum's qname when the owner IS an enum, so its
+    /// methods record bare references to its constants.
+    enum_ctx: Option<&'a str>,
+}
+
+/// One member of a type body: a constructor or method (METHOD), a field
+/// (STATE_VAR / INJECTS) or a nested type. Returns the action routes composed
+/// under the owner's class prefix. A class / interface / record body calls it
+/// per `class_body` child; an enum per `enum_body_declarations` child (LA.30b).
+fn visit_type_member(
+    child: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    owner: &MemberOwner,
+    acc: &mut Acc,
+) -> usize {
+    match child.kind() {
+        "constructor_declaration" => {
+            let composed = visit_method(
+                child,
+                src,
+                file_rel,
+                owner.qname,
+                owner.id,
+                repo,
+                owner.class_prefix,
+                owner.client,
+                owner.enum_ctx,
+                acc,
+            );
+            if owner.is_bean {
+                emit_constructor_injects(child, src, owner.id, owner.module_id, acc);
+            }
+            composed
+        }
+        "method_declaration" => visit_method(
+            child,
+            src,
+            file_rel,
+            owner.qname,
+            owner.id,
+            repo,
+            owner.class_prefix,
+            owner.client,
+            owner.enum_ctx,
+            acc,
+        ),
+        "field_declaration" => {
+            visit_field_decl(child, src, file_rel, owner.qname, owner.id, repo, acc);
+            emit_field_inject(child, src, owner.id, owner.module_id, acc);
+            0
+        }
+        "class_declaration"
+        | "interface_declaration"
+        | "enum_declaration"
+        | "record_declaration" => {
+            visit_type_decl(
+                child,
+                src,
+                file_rel,
+                owner.qname,
+                owner.id,
+                owner.module_id,
+                repo,
+                acc,
+            );
+            0
+        }
+        _ => 0,
+    }
+}
+
+/// LA.30b: walk an `enum_body` (tree-sitter-java: `'{' commaSep(enum_constant)
+/// ','? enum_body_declarations? '}'`). Every constant is registered first, so
+/// a constant body or a method may name a constant declared after it; then
+/// each constant is emitted ([`visit_enum_constant`]) and every
+/// `enum_body_declarations` member is walked exactly like a class member.
+fn visit_enum_body(
+    body: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    owner: &MemberOwner,
+    acc: &mut Acc,
+) -> usize {
+    let mut cursor = body.walk();
+    let children: Vec<TsNode> = body.named_children(&mut cursor).collect();
+    for c in children.iter().filter(|c| c.kind() == "enum_constant") {
+        if let Some(n) = c.child_by_field_name("name") {
+            let name = text_of(n, src);
+            let (_, id) = enum_constant_id(owner.qname, name, repo);
+            acc.enum_consts
+                .entry(owner.qname.to_string())
+                .or_default()
+                .insert(name.to_string(), id);
+        }
+    }
+    let mut composed = 0usize;
+    for child in children {
+        match child.kind() {
+            "enum_constant" => visit_enum_constant(child, src, file_rel, owner, repo, acc),
+            "enum_body_declarations" => {
+                let mut dc = child.walk();
+                for member in child.named_children(&mut dc) {
+                    composed += visit_type_member(member, src, file_rel, repo, owner, acc);
+                }
+            }
+            _ => {}
+        }
+    }
+    composed
+}
+
+/// `{enum}::{NAME}` and its ATTRIBUTE id.
+fn enum_constant_id(enum_qname: &str, name: &str, repo: RepoId) -> (String, NodeId) {
+    let qname = format!("{enum_qname}::{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &qname);
+    (qname, id)
+}
+
+/// LA.30b: one enum constant -> an ATTRIBUTE under its ENUM (HAS_ATTRIBUTE),
+/// the Python / Rust-variant (LA.3) shape. A constant with a class body
+/// (`GREEN { @Override String label() {..} }`) is an anonymous subclass: its
+/// methods hang under the constant, never under the ENUM, where they would
+/// shadow the enum's own same-named method in `class_methods`. The
+/// constant's `arguments` select a constructor; they are not calls.
+fn visit_enum_constant(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    owner: &MemberOwner,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text_of(name_node, src);
+    let (qname, id) = enum_constant_id(owner.qname, name, repo);
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: entity_cells(&node, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: owner.id,
+        to: id,
+        category: edge_category::HAS_ATTRIBUTE,
+        confidence: Confidence::Strong,
+    });
+    acc.nav
+        .record(id, name, &qname, node_kind::ATTRIBUTE, Some(owner.id));
+    acc.enums.constants += 1;
+
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+    acc.enums.const_bodies += 1;
+    let mut cursor = body.walk();
+    for child in body.named_children(&mut cursor) {
+        if child.kind() == "method_declaration" {
+            visit_method(
+                child,
+                src,
+                file_rel,
+                &qname,
+                id,
+                repo,
+                "",
+                None,
+                owner.enum_ctx,
+                acc,
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit_method(
     node: TsNode,
@@ -769,6 +1004,7 @@ fn visit_method(
     repo: RepoId,
     class_prefix: &str,
     client: Option<&ClientIface>,
+    enum_ctx: Option<&str>,
     acc: &mut Acc,
 ) -> usize {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -777,6 +1013,9 @@ fn visit_method(
     let name = text_of(name_node, src);
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+    if enum_ctx.is_some() {
+        acc.enums.methods += 1;
+    }
 
     acc.nodes.push(Node {
         id,
@@ -794,7 +1033,18 @@ fn visit_method(
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, repo, file_rel, acc);
+        // LA.30b: inside an enum, a bare name that is one of its constants is
+        // a reference to it, unless the method declares a same-named local.
+        let scope = enum_ctx.map(|eq| EnumRefScope {
+            enum_qname: eq,
+            consts: acc
+                .enum_consts
+                .get(eq)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default(),
+            shadowed: declared_names(node, src),
+        });
+        collect_calls_in(body, src, id, repo, file_rel, scope.as_ref(), acc);
     }
 
     // LA.22b: on a client interface the mappings are requests this method
@@ -1696,6 +1946,7 @@ fn collect_calls_in(
     from: NodeId,
     repo: RepoId,
     file_rel: &str,
+    enum_scope: Option<&EnumRefScope>,
     acc: &mut Acc,
 ) {
     let mut stack = vec![node];
@@ -1710,6 +1961,49 @@ fn collect_calls_in(
         } else if n.kind() == "object_creation_expression" {
             // LA.22a: Apache `new HttpGet(url)` is a request, not a call.
             try_detect_java_request_object(n, src, from, repo, file_rel, acc);
+        } else if n.kind() == "field_access" {
+            // LA.30b: `X.Y` with an identifier object and an Upper-initial
+            // field is a candidate constant reference (`Color.GREEN`);
+            // `resolve_member_refs` keeps it only for an enum of this file or
+            // a single-type-imported base.
+            if let (Some(obj), Some(field)) = (
+                n.child_by_field_name("object"),
+                n.child_by_field_name("field"),
+            ) && obj.kind() == "identifier"
+                && field.kind() == "identifier"
+                && text_of(field, src).starts_with(|c: char| c.is_ascii_uppercase())
+            {
+                push_member_ref(
+                    acc,
+                    MemberRef {
+                        from,
+                        base: Some(text_of(obj, src).to_string()),
+                        name: text_of(field, src).to_string(),
+                        enum_ctx: None,
+                    },
+                );
+            }
+        } else if n.kind() == "identifier"
+            && let Some(scope) = enum_scope
+        {
+            // LA.30b: a bare constant name inside its own enum (`return RED;`,
+            // `this == RED`, `case BLUE:`), in value position and not
+            // shadowed by a local of the method.
+            let text = text_of(n, src);
+            if scope.consts.contains(text)
+                && !scope.shadowed.contains(text)
+                && is_value_identifier(n)
+            {
+                push_member_ref(
+                    acc,
+                    MemberRef {
+                        from,
+                        base: None,
+                        name: text.to_string(),
+                        enum_ctx: Some(scope.enum_qname.to_string()),
+                    },
+                );
+            }
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -1724,6 +2018,162 @@ fn collect_calls_in(
             }
         }
     }
+}
+
+/// LA.30b: what a method body inside an enum needs to record bare references
+/// to that enum's constants.
+struct EnumRefScope<'a> {
+    enum_qname: &'a str,
+    /// The enum's constant names (registered before any member is walked).
+    consts: HashSet<String>,
+    /// Names the method declares (parameters, locals, lambda / catch / for /
+    /// pattern variables): a same-named identifier is the local, not the
+    /// constant, so the whole name is suppressed for this method.
+    shadowed: HashSet<String>,
+}
+
+/// Record `r` once per `(from, base, name)`, in walk order.
+fn push_member_ref(acc: &mut Acc, r: MemberRef) {
+    if acc
+        .member_ref_seen
+        .insert((r.from, r.base.clone(), r.name.clone()))
+    {
+        acc.member_refs.push(r);
+    }
+}
+
+/// LA.30b: every name `method` declares: formal / catch / spread parameters,
+/// local variables, enhanced-for, resource, lambda and pattern variables. One
+/// pre-walk of the whole method (parameters included), so a declaration after
+/// the use still shadows it — a conservative suppression, never a false edge.
+fn declared_names(method: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack = vec![method];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "identifier"
+            && let Some(p) = n.parent()
+        {
+            let declares = match p.kind() {
+                "variable_declarator"
+                | "formal_parameter"
+                | "catch_formal_parameter"
+                | "enhanced_for_statement"
+                | "resource"
+                | "instanceof_expression" => p.child_by_field_name("name") == Some(n),
+                "lambda_expression" => p.child_by_field_name("parameters") == Some(n),
+                "inferred_parameters" | "type_pattern" | "record_pattern_component" => true,
+                _ => false,
+            };
+            if declares {
+                out.insert(text_of(n, src).to_string());
+            }
+        }
+        let mut c = n.walk();
+        for ch in n.named_children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    out
+}
+
+/// LA.30b: is this `identifier` read as a value? Not when it names something
+/// instead: a method (`name` of a method_invocation), a field (`field` of a
+/// field_access), a declaration (`name` of a declarator / parameter), a
+/// label, an annotation or annotation key, or a method reference's method.
+/// A `switch_label` constant (`case RED:`) IS a value.
+fn is_value_identifier(n: TsNode) -> bool {
+    let Some(p) = n.parent() else {
+        return false;
+    };
+    match p.kind() {
+        "field_access" | "method_invocation" => p.child_by_field_name("object") == Some(n),
+        "labeled_statement"
+        | "break_statement"
+        | "continue_statement"
+        | "scoped_identifier"
+        | "inferred_parameters"
+        | "type_pattern"
+        | "record_pattern_component"
+        | "record_pattern" => false,
+        "element_value_pair" => p.child_by_field_name("key") != Some(n),
+        "method_reference" => p.named_child(0) == Some(n),
+        "lambda_expression" => p.child_by_field_name("parameters") != Some(n),
+        _ => p.child_by_field_name("name") != Some(n),
+    }
+}
+
+/// LA.30b: turn the recorded [`MemberRef`]s into edges once every type of the
+/// file is visited (so a reference to an enum declared further down binds):
+///   - bare `RED` inside its enum -> direct USES to that constant;
+///   - `X.Y` with `X` the simple name of exactly one enum of this file -> a
+///     direct USES to its constant `Y` (dropped when `Y` is not a constant);
+///   - `X.Y` with `X` a single-type import of this file -> an UnresolvedRef
+///     USES `Attribute{X, Y}`, which the graph crate binds when `X` resolves
+///     to an ENUM with an ATTRIBUTE `Y` (LA.30a); a CLASS base stays in
+///     `unresolved_refs`;
+///   - anything else (`Integer.MAX_VALUE`, a wildcard-imported or same-package
+///     unimported type) is dropped, keeping it out of the persisted refs.
+///
+/// Returns `(direct USES edges, UnresolvedRefs)` for the `[java-enums]` marker.
+fn resolve_member_refs(module_id: NodeId, acc: &mut Acc) -> (usize, usize) {
+    let imported: HashSet<String> = acc
+        .imports
+        .iter()
+        .filter_map(|i| match &i.target {
+            ImportTarget::Symbol { name, .. } => Some(name.clone()),
+            ImportTarget::Module { .. } => None,
+        })
+        .collect();
+    let refs = std::mem::take(&mut acc.member_refs);
+    let mut edge_seen: HashSet<(NodeId, NodeId)> = HashSet::new();
+    let (mut uses, mut unresolved) = (0usize, 0usize);
+    for r in refs {
+        let target = match (&r.base, &r.enum_ctx) {
+            (None, Some(eq)) => acc
+                .enum_consts
+                .get(eq)
+                .and_then(|m| m.get(&r.name))
+                .copied(),
+            (Some(base), _) => match acc.enum_names.get(base).map(Vec::as_slice) {
+                Some([eq]) => acc
+                    .enum_consts
+                    .get(eq)
+                    .and_then(|m| m.get(&r.name))
+                    .copied(),
+                // A same-file enum name (or an ambiguous one) never falls
+                // through to the import table.
+                Some(_) => None,
+                None => {
+                    if imported.contains(base) {
+                        acc.refs.push(UnresolvedRef {
+                            from: r.from,
+                            from_module: module_id,
+                            qualifier: CallQualifier::Attribute {
+                                base: base.clone(),
+                                name: r.name.clone(),
+                            },
+                            category: edge_category::USES,
+                        });
+                        unresolved += 1;
+                    }
+                    None
+                }
+            },
+            (None, None) => None,
+        };
+        if let Some(to) = target
+            && edge_seen.insert((r.from, to))
+        {
+            acc.edges.push(Edge {
+                from: r.from,
+                to,
+                category: edge_category::USES,
+                confidence: Confidence::Strong,
+            });
+            uses += 1;
+        }
+    }
+    (uses, unresolved)
 }
 
 fn classify_method_invocation(node: TsNode, src: &[u8]) -> CallQualifier {
@@ -2454,6 +2904,15 @@ public enum Color {
         let fp = parse_file(source, "src/main/java/Types.java", "com::example::Types", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
+        // LA.30b: one ATTRIBUTE per constant.
+        assert_eq!(
+            fp.nav
+                .kind_by_id
+                .values()
+                .filter(|k| **k == node_kind::ATTRIBUTE)
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -3745,5 +4204,340 @@ interface UserClient {
             .map(|m| would_mint_routes(m, src, "U.java", id, repo(), "/v1"))
             .sum();
         assert_eq!((type_level, methods), (1, 2));
+    }
+
+    // ---- LA.30b: enum constants, enum-body members, constant references ----
+
+    const COLOR_SRC: &str = r#"
+package com.shop;
+
+public enum Color {
+    RED,
+    GREEN("g") {
+        @Override
+        public String label() { return "green!"; }
+    },
+    BLUE;
+
+    /** The colour a caller gets when it names none. */
+    public static final Color DEFAULT = RED;
+
+    private final String code;
+
+    Color() { this.code = ""; }
+
+    Color(String c) { this.code = c; }
+
+    public String label() { return code; }
+
+    public static Color pick() { return RED; }
+
+    public boolean warm() { return isRed(); }
+
+    private boolean isRed() { return this == RED; }
+
+    public int rank() {
+        switch (this) {
+            case BLUE: return 2;
+            default: return 0;
+        }
+    }
+}
+"#;
+    /// LB.2: the public enum of `Color.java` shares the file MODULE's qname.
+    const COLOR: &str = "src::main::java::com::shop::Color";
+
+    fn parse_color() -> FileParse {
+        parse_file(
+            COLOR_SRC,
+            "src/main/java/com/shop/Color.java",
+            COLOR,
+            repo(),
+        )
+        .unwrap()
+    }
+
+    fn nid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn has_edge(
+        fp: &FileParse,
+        from: NodeId,
+        to: NodeId,
+        cat: repo_graph_core::EdgeCategoryId,
+    ) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == cat)
+    }
+
+    /// Every in-parse USES edge as `(from qname, to qname)`, sorted.
+    fn uses_edges(fp: &FileParse) -> Vec<(String, String)> {
+        let q = |id: &NodeId| fp.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .map(|e| (q(&e.from), q(&e.to)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn uses_refs(fp: &FileParse) -> Vec<&UnresolvedRef> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .collect()
+    }
+
+    #[test]
+    fn enum_constants_are_attributes() {
+        let fp = parse_color();
+        let enum_id = nid(node_kind::ENUM, COLOR);
+        assert_eq!(
+            qnames_of(&fp, node_kind::ATTRIBUTE),
+            vec![
+                format!("{COLOR}::BLUE"),
+                format!("{COLOR}::GREEN"),
+                format!("{COLOR}::RED")
+            ]
+        );
+        for c in ["RED", "GREEN", "BLUE"] {
+            let cid = nid(node_kind::ATTRIBUTE, &format!("{COLOR}::{c}"));
+            assert!(
+                has_edge(&fp, enum_id, cid, edge_category::HAS_ATTRIBUTE),
+                "HAS_ATTRIBUTE {c}"
+            );
+            assert_eq!(
+                fp.nav.parent_of.get(&cid),
+                Some(&enum_id),
+                "{c} hangs off the ENUM"
+            );
+            let node = fp
+                .nodes
+                .iter()
+                .find(|n| n.id == cid)
+                .expect("constant node");
+            assert!(
+                node.cells.iter().any(|c| c.kind == cell_type::POSITION),
+                "{c} has a POSITION"
+            );
+        }
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.category == edge_category::HAS_ATTRIBUTE)
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn enum_body_declarations_are_walked() {
+        let fp = parse_color();
+        let enum_id = nid(node_kind::ENUM, COLOR);
+        for m in ["Color", "label", "pick", "warm", "isRed", "rank"] {
+            let mid = nid(node_kind::METHOD, &format!("{COLOR}::{m}"));
+            assert!(fp.nodes.iter().any(|n| n.id == mid), "METHOD {m} missing");
+            assert_eq!(
+                fp.nav.parent_of.get(&mid),
+                Some(&enum_id),
+                "{m} is a member of the ENUM"
+            );
+            assert!(
+                has_edge(&fp, enum_id, mid, edge_category::DEFINES),
+                "DEFINES {m}"
+            );
+        }
+        // The documented `static final` field is a STATE_VAR of the enum.
+        assert_eq!(
+            qnames_of(&fp, node_kind::STATE_VAR),
+            vec![format!("{COLOR}::DEFAULT")]
+        );
+        // `warm` calls `isRed` unqualified: a SelfMethod the graph binds
+        // against the ENUM (LA.30a).
+        let warm = nid(node_kind::METHOD, &format!("{COLOR}::warm"));
+        assert!(fp.calls.iter().any(
+            |c| c.from == warm && c.qualifier == CallQualifier::SelfMethod("isRed".to_string())
+        ));
+    }
+
+    #[test]
+    fn constant_body_methods_hang_off_the_constant() {
+        let fp = parse_color();
+        let enum_id = nid(node_kind::ENUM, COLOR);
+        let green = nid(node_kind::ATTRIBUTE, &format!("{COLOR}::GREEN"));
+        let body_label = nid(node_kind::METHOD, &format!("{COLOR}::GREEN::label"));
+        assert!(
+            fp.nodes.iter().any(|n| n.id == body_label),
+            "the override is a METHOD"
+        );
+        assert_eq!(fp.nav.parent_of.get(&body_label), Some(&green));
+        assert!(has_edge(&fp, green, body_label, edge_category::DEFINES));
+        assert!(!has_edge(&fp, enum_id, body_label, edge_category::DEFINES));
+        // The enum's own `label` stays the ENUM's member; the override never
+        // replaces it.
+        let own_label = nid(node_kind::METHOD, &format!("{COLOR}::label"));
+        assert_eq!(fp.nav.parent_of.get(&own_label), Some(&enum_id));
+        // `GREEN("g")` selects a constructor; it is not a call.
+        assert!(!fp.calls.iter().any(|c| matches!(&c.qualifier,
+            CallQualifier::Bare(n) | CallQualifier::SelfMethod(n) if n == "Color")));
+    }
+
+    #[test]
+    fn bare_constant_reference_is_a_uses_edge() {
+        let fp = parse_color();
+        assert_eq!(
+            uses_edges(&fp),
+            vec![
+                (format!("{COLOR}::isRed"), format!("{COLOR}::RED")),
+                (format!("{COLOR}::pick"), format!("{COLOR}::RED")),
+                (format!("{COLOR}::rank"), format!("{COLOR}::BLUE")),
+            ],
+            "exactly the constants each method names: `return RED`, `this == RED`, `case BLUE:`"
+        );
+        assert!(
+            uses_refs(&fp).is_empty(),
+            "same-file constants resolve in the parse"
+        );
+    }
+
+    #[test]
+    fn local_named_like_a_constant_is_not_a_reference() {
+        let source = r#"
+package com.shop;
+
+enum Level {
+    LOW, HIGH;
+
+    int param(int HIGH) { return HIGH; }
+
+    int local() { int LOW = 3; return LOW; }
+
+    int lambda() { return java.util.List.of(1).stream().mapToInt(LOW -> LOW).sum(); }
+
+    void label() { LOW: for (;;) { break LOW; } }
+
+    int named() { return HIGH.ordinal(); }
+}
+"#;
+        let module = "src::main::java::com::shop::Level";
+        let fp = parse_file(source, "src/main/java/com/shop/Level.java", module, repo()).unwrap();
+        assert_eq!(
+            uses_edges(&fp),
+            vec![(format!("{module}::named"), format!("{module}::HIGH"))],
+            "a parameter, a local, a lambda parameter and a label shadow the constant; \
+             `HIGH.ordinal()` reads it"
+        );
+    }
+
+    #[test]
+    fn qualified_reference_to_imported_enum_is_a_uses_ref() {
+        let source = r#"
+package com.shop.web;
+
+import com.shop.Color;
+
+public class Picker {
+    public Color choose() { return Color.pick(); }
+
+    public Color green() { return Color.GREEN; }
+
+    public String lbl(Color c) { return c.label(); }
+}
+"#;
+        let module = "src::main::java::com::shop::web::Picker";
+        let fp = parse_file(
+            source,
+            "src/main/java/com/shop/web/Picker.java",
+            module,
+            repo(),
+        )
+        .unwrap();
+        let green = nid(node_kind::METHOD, &format!("{module}::green"));
+        let refs = uses_refs(&fp);
+        assert_eq!(refs.len(), 1, "only `Color.GREEN`: {refs:?}");
+        assert_eq!(refs[0].from, green);
+        assert_eq!(refs[0].from_module, nid(node_kind::MODULE, module));
+        assert_eq!(
+            refs[0].qualifier,
+            CallQualifier::Attribute {
+                base: "Color".to_string(),
+                name: "GREEN".to_string()
+            }
+        );
+        assert!(
+            uses_edges(&fp).is_empty(),
+            "an imported enum is bound by the graph crate"
+        );
+        // `Color.pick()` stays a call site (LA.30a binds it), never a member ref.
+        let choose = nid(node_kind::METHOD, &format!("{module}::choose"));
+        assert!(fp.calls.iter().any(|c| c.from == choose
+            && c.qualifier
+                == CallQualifier::Attribute {
+                    base: "Color".to_string(),
+                    name: "pick".to_string()
+                }));
+    }
+
+    #[test]
+    fn qualified_reference_to_same_file_enum_is_a_direct_edge() {
+        let source = r#"
+package com.shop;
+
+public class Shop {
+    enum Size { S, M }
+
+    Size small() { return Size.S; }
+
+    Size missing() { return Size.XL; }
+
+    Tier gold() { return Tier.GOLD; }
+}
+
+enum Tier { GOLD, SILVER }
+"#;
+        let module = "src::main::java::com::shop::Shop";
+        let fp = parse_file(source, "src/main/java/com/shop/Shop.java", module, repo()).unwrap();
+        assert_eq!(
+            uses_edges(&fp),
+            vec![
+                (
+                    format!("{module}::gold"),
+                    "src::main::java::com::shop::Tier::GOLD".to_string()
+                ),
+                (format!("{module}::small"), format!("{module}::Size::S")),
+            ],
+            "a nested enum and one declared further down the file both bind in the parse; \
+             `Size.XL` names no constant and is dropped"
+        );
+        assert!(uses_refs(&fp).is_empty());
+    }
+
+    #[test]
+    fn unimported_uppercase_field_access_emits_nothing() {
+        let source = r#"
+package com.shop;
+
+import org.springframework.http.*;
+
+public class Limits {
+    int max() { return Integer.MAX_VALUE; }
+
+    Object ok() { return HttpStatus.OK; }
+
+    Object out() { return System.out; }
+}
+"#;
+        let module = "src::main::java::com::shop::Limits";
+        let fp = parse_file(source, "src/main/java/com/shop/Limits.java", module, repo()).unwrap();
+        assert!(
+            uses_refs(&fp).is_empty(),
+            "no import binds Integer / HttpStatus: {:?}",
+            fp.refs
+        );
+        assert!(uses_edges(&fp).is_empty());
     }
 }

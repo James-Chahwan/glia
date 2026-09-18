@@ -1,0 +1,27 @@
+{
+  "framework": "java-enum-members",
+  "language": "java",
+  "dirs": ["."],
+  "note": "LA.30b: Java enum constants become ATTRIBUTE nodes (HAS_ATTRIBUTE from the ENUM, the Python / LA.3 shape), enum_body_declarations members (methods, constructors, fields, nested types) are walked like a class body, a constant's class body contributes METHOD nodes under that constant, and constant references become USES edges. Resolution of the imported `Color.pick()` / `Color.GREEN` rides LA.30a (ENUM as a member-owning type). Known unlinked: a `case RED:` label in ANOTHER class needs the switch expression's type, and `Color.RED` from a same-package class with no import is dropped by the parser's ref gate.",
+  "expect_nodes": [
+    {"kind": "ATTRIBUTE", "name": "Color/RED"},
+    {"kind": "ATTRIBUTE", "name": "Color/GREEN"},
+    {"kind": "ATTRIBUTE", "name": "Color/BLUE"},
+    {"kind": "METHOD", "name": "Color/pick"},
+    {"kind": "METHOD", "name": "Color/warm"},
+    {"kind": "METHOD", "name": "Color/isRed"},
+    {"kind": "METHOD", "name": "Color/GREEN/label", "note": "method of the GREEN constant's class body"}
+  ],
+  "expect_edges": [
+    {"from": "Color", "to": "Color/RED", "category": "HAS_ATTRIBUTE"},
+    {"from": "Color/warm", "to": "Color/isRed", "category": "CALLS", "note": "unqualified call inside an enum method: SelfMethod against the ENUM (LA.30a)"},
+    {"from": "Color/pick", "to": "Color/RED", "category": "USES", "note": "bare constant reference inside the enum, resolved in-parse"},
+    {"from": "Color/isRed", "to": "Color/RED", "category": "USES"},
+    {"from": "Picker/choose", "to": "Color/pick", "category": "CALLS", "note": "static call through the imported enum (LA.30a attribute base ENUM)"},
+    {"from": "Picker/green", "to": "Color/GREEN", "category": "USES", "note": "qualified constant through the imported enum (UnresolvedRef USES, LA.30a member lookup)"}
+  ],
+  "forbid": [
+    {"from": "src/main/java/com/shop/Color/pick", "to": "src/main/java/com/shop/Color/GREEN", "category": "USES", "note": "only the constant actually named is used (LB.2 qnames)"},
+    {"from": "src/main/java/com/shop/web/Picker/lbl", "to": "src/main/java/com/shop/Color/GREEN/label", "category": "CALLS", "note": "a constant-body override is never the static target of `c.label()`"}
+  ]
+}
