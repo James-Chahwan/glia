@@ -1,0 +1,1 @@
+{"name": "catalog", "dependencies": {"@nestjs/graphql": "12.0.0"}}

@@ -36,6 +36,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, NodeId};
 
@@ -117,11 +118,13 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
             {
                 continue;
             }
+            // LB.8: the owner segment names the connecting project, not the
+            // path; a client pairs every same-path handler, whoever owns it.
             let Some(key) = g
                 .nav
                 .qname_by_id
                 .get(&n.id)
-                .and_then(|q| q.strip_prefix("ws_client:"))
+                .and_then(|q| split_owner(q).0.strip_prefix("ws_client:"))
             else {
                 continue;
             };
@@ -179,7 +182,7 @@ fn collect_handlers(graphs: &[RepoGraph]) -> Vec<Handler> {
                 .nav
                 .qname_by_id
                 .get(&n.id)
-                .and_then(|q| q.strip_prefix("ws:"))
+                .and_then(|q| split_owner(q).0.strip_prefix("ws:"))
             {
                 found.push((n.id, n.confidence, key));
             }

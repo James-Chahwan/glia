@@ -362,15 +362,17 @@ pub struct CrossLink {
 /// crate. `strip_prefix` rather than `split_once` throughout, so a topic or
 /// schedule that itself contains `:` survives intact.
 ///
-/// HTTP qnames carry an LB.4a owner segment (` @<project path>`) when their
-/// node sits under a nested project root. The channel is the literal the link
-/// travels over, which the owner is not, so it is stripped: the endpoint
-/// branch through `parse_endpoint_qname`, the `route:` branch here, and a
-/// legacy `<METHOD> <path>` route through its display name, which never
-/// carried one.
+/// HTTP qnames (LB.4a) and channel-side qnames (LB.8: queue producer /
+/// consumer, ws handler / client, graphql resolver / operation, grpc client /
+/// server) carry an owner segment (` @<project path>`) when their node sits
+/// under a nested project root. The channel is the literal the link travels
+/// over, which the owner is not, so it is stripped first, for every prefix: a
+/// legacy `<METHOD> <path>` route then falls through to its display name,
+/// which never carried one.
 ///
 /// Total: falls back to `name`, then to `qname`, so there is no failure mode.
 pub fn channel_of(qname: &str, name: &str) -> String {
+    let (qname, _) = split_owner(qname);
     if let Some((method, path)) = parse_endpoint_qname(qname) {
         return format!("{method} {path}");
     }
@@ -394,9 +396,6 @@ pub fn channel_of(qname: &str, name: &str) -> String {
     ];
     for p in SUFFIX_PREFIXES {
         if let Some(rest) = qname.strip_prefix(p) {
-            if *p == "route:" {
-                return split_owner(rest).0.to_string();
-            }
             return rest.to_string();
         }
     }
@@ -836,6 +835,28 @@ mod tests {
         assert_eq!(channel_of("route:/users @services/api", "/users"), "/users");
         assert_eq!(channel_of("endpoint:POST:/users @web", "POST /users"), "POST /users");
         assert_eq!(channel_of("GET /users @api", "GET /users"), "GET /users");
+        // LB.8: channel sides carry the same segment; the channel is bare.
+        for (q, want) in [
+            ("queue_producer:orders.created @services/orders", "orders.created"),
+            ("queue_consumer:orders.created @services/audit", "orders.created"),
+            ("grpc_client:UserService @services/gateway", "UserService"),
+            ("graphql_op:getUser @web", "getUser"),
+            ("graphql_resolver:getUser @services/users", "getUser"),
+            ("ws_client:/ws @web", "/ws"),
+            ("event_emit:user.created @svc", "user.created"),
+            ("cli_invoke:terraform @ops", "terraform"),
+            ("data_entity:sql:users @db", "sql:users"),
+            ("config:env:DATABASE_URL @api", "env:DATABASE_URL"),
+            ("cron:0 4 * * *:cleanup @jobs", "0 4 * * *:cleanup"),
+            ("infra:image:api @deploy", "image:api"),
+        ] {
+            assert_eq!(channel_of(q, "x"), want, "{q}");
+        }
+        // No owner-shaped tail, no change: an `@` without a space before it,
+        // and a ` @` followed by whitespace, are part of the channel.
+        assert_eq!(channel_of("queue_producer:jobs@v2", "x"), "jobs@v2");
+        assert_eq!(channel_of("cron:@daily:sweep", "sweep"), "@daily:sweep");
+        assert_eq!(channel_of("cron:x @ 10:00:sweep", "sweep"), "x @ 10:00:sweep");
         // strip_prefix, not split_once — a schedule full of colons survives.
         assert_eq!(channel_of("cron:0 4 * * *:cleanup", "cleanup"), "0 4 * * *:cleanup");
         // Fallbacks: name, then qname.

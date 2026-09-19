@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::Edge;
 
@@ -50,7 +51,11 @@ impl CrossGraphResolver for GraphQLStackResolver {
                     continue;
                 }
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(op_name) = qname.strip_prefix("graphql_op:") else { continue };
+                // LB.8: the owner segment names the calling project, not the
+                // field. The resolver index is owner-free (`build_kind_index`).
+                let Some(op_name) = split_owner(qname).0.strip_prefix("graphql_op:") else {
+                    continue;
+                };
                 let Some(key) = gql_key(op_name) else {
                     unkeyable += 1;
                     continue;

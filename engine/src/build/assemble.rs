@@ -4,6 +4,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{cell_type, di_stats, node_kind};
 use repo_graph_code_extractors::constants::ConstTable;
@@ -76,8 +77,8 @@ pub(super) fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
-    // A11.2, LA.6d, LB.4a, LA.4, A5.2 / A5.3, A5.8, A16.4: the post-cache
-    // grafts, in that order.
+    // A11.2, LA.6d, LA.4, A5.2 / A5.3, A5.8, LB.4a / LB.8, A16.4: the
+    // post-cache grafts, in that order.
     grafts::apply_post_cache(
         &mut parses_by_lang,
         files,
@@ -124,8 +125,9 @@ fn msgtype_marker(graphs: &[repo_graph_graph::RepoGraph], repo_label: &str) {
             if n.cells.iter().any(|c| c.kind == cell_type::MESSAGE_TYPE) {
                 typed += 1;
             }
+            // The LB.8 owner segment is not part of the topic.
             if let Some(q) = g.nav.qname_by_id.get(&n.id)
-                && let Some((_, topic)) = q.split_once(':')
+                && let Some((_, topic)) = split_owner(q).0.split_once(':')
                 && repo_graph_code_extractors::queues::is_framework_tag(topic)
             {
                 tags += 1;

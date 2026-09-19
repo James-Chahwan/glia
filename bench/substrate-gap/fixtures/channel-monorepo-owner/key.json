@@ -1,0 +1,124 @@
+{
+  "framework": "channel-monorepo-owner",
+  "language": "python+typescript+go+proto",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.8 (legacy-only). One repo, eleven manifest-rooted services. Each channel SIDE (queue producer / consumer, ws handler / client, graphql resolver / operation, grpc client) is owned by the project its file sits in and carries the LB.4a ` @<project path>` owner suffix; the channel itself (topic, ws path, graphql field, proto service) stays the pairing key, and the proto GRPC_SERVICE contract stays one shared node (proto/ sits under no project root). Before LB.8: one QUEUE_PRODUCER / one QUEUE_CONSUMER for orders.created, one GRPC_CLIENT, one GRAPHQL_RESOLVER getUser HANDLED_BY both services' methods, one WS_HANDLER for both FastAPI apps, and `glia arch` attributed each collapsed side to one project. After: every producer pairs every consumer (2 x 2 QUEUE_FLOWS), each grpc client calls the shared service, the web op reaches both resolvers and the web client both handlers (no host narrowing outside HTTP).",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders.created @services/orders"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders.created @services/returns"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders.created @services/billing"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders.created @services/audit"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:getUser @services/users"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:getUser @services/catalog"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "graphql_op:getUser @web"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:UserService @services/gateway"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:UserService @services/admin"
+    },
+    {
+      "kind": "GRPC_SERVICE",
+      "name": "grpc:user.UserService",
+      "note": "control: the proto contract is one shared node (proto/ sits outside every project)"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/ws @services/chat"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/ws @services/notify"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/ws @web"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders.created @services/returns",
+      "to": "queue_consumer:orders.created @services/audit",
+      "category": "QUEUE_FLOWS",
+      "note": "every producer pairs every consumer of the topic: 2 x 2"
+    },
+    {
+      "from": "queue_producer:orders.created @services/orders",
+      "to": "queue_consumer:orders.created @services/billing",
+      "category": "QUEUE_FLOWS"
+    },
+    {
+      "from": "graphql_resolver:getUser @services/users",
+      "to": "services::users::resolver::MeResolver::getUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "graphql_op:getUser @web",
+      "to": "graphql_resolver:getUser @services/catalog",
+      "category": "GRAPHQL_CALLS"
+    },
+    {
+      "from": "grpc_client:UserService @services/admin",
+      "to": "grpc:user.UserService",
+      "category": "GRPC_CALLS"
+    },
+    {
+      "from": "ws_client:/ws @web",
+      "to": "ws:/ws @services/notify",
+      "category": "WS_CONNECTS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "graphql_resolver:getUser @services/users",
+      "to": "services::catalog::resolver::MeResolver::getUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "graphql_resolver:getUser @services/catalog",
+      "to": "services::users::resolver::MeResolver::getUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders.created"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders.created"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:UserService"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:getUser"
+    }
+  ]
+}

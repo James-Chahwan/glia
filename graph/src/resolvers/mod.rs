@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::merged::MergedGraph;
@@ -69,6 +70,10 @@ struct ServiceTarget {
 // Shared index builder
 // ============================================================================
 
+/// `kind` nodes keyed by their qname minus `prefix` and minus the LB.8 owner
+/// segment (`graphql_resolver:getUser @services/users` keys as `getUser`), so
+/// every owner of one channel lands under the channel's key. Kinds that are
+/// never owned carry no segment and key exactly as before.
 fn build_kind_index(
     graphs: &[RepoGraph],
     kind: NodeKindId,
@@ -81,7 +86,8 @@ fn build_kind_index(
                 continue;
             }
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(key) = qname.strip_prefix(prefix) else { continue };
+            let Some(stripped) = qname.strip_prefix(prefix) else { continue };
+            let key = split_owner(stripped).0;
             index
                 .entry(key.to_string())
                 .or_default()
@@ -137,7 +143,65 @@ fn emit_cross_repo_pairs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::Confidence;
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+    use repo_graph_core::{Confidence, Node};
+
+    /// One `RepoGraph` of bare nodes `(kind, qname)` in repo `tag`, display
+    /// name = qname. For the resolver modules' owner-segment tests.
+    pub(super) fn channel_graph(tag: &str, nodes: &[(NodeKindId, &str)]) -> RepoGraph {
+        let repo = RepoId::from_canonical(&format!("test://{tag}"));
+        let mut nav = CodeNav::default();
+        let mut out = Vec::new();
+        for (kind, q) in nodes {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, *kind, q);
+            nav.record(id, q, q, *kind, None);
+            out.push(Node { id, repo, confidence: Confidence::Strong, cells: vec![] });
+        }
+        RepoGraph {
+            repo,
+            nodes: out,
+            edges: vec![],
+            symbols: Default::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        }
+    }
+
+    /// `(from qname, to qname)` of every `category` cross edge, sorted.
+    pub(super) fn cross_pairs(m: &MergedGraph, category: EdgeCategoryId) -> Vec<(String, String)> {
+        let q = |id: NodeId| {
+            m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+        };
+        let mut out: Vec<(String, String)> = m
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == category)
+            .map(|e| (q(e.from), q(e.to)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// LB.8: an owner-qualified qname keys under its bare channel, so both
+    /// owners of `getUser` share one index entry; an owner-free one is as
+    /// before.
+    #[test]
+    fn build_kind_index_keys_by_the_owner_free_name() {
+        let g = channel_graph(
+            "kind-index",
+            &[
+                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/users"),
+                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/catalog"),
+                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:listUsers"),
+            ],
+        );
+        let index = build_kind_index(&[g], node_kind::GRAPHQL_RESOLVER, "graphql_resolver:");
+        let mut keys: Vec<(&str, usize)> = index.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
+        keys.sort();
+        assert_eq!(keys, [("getUser", 2), ("listUsers", 1)]);
+    }
 
     #[test]
     fn weakest_confidence_is_min_rank() {

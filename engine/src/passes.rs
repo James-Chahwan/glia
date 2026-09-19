@@ -298,11 +298,14 @@ fn norm_channel(s: &str) -> &str {
 }
 
 impl<'a> QueueSides<'a> {
-    /// Index every QUEUE_PRODUCER / QUEUE_CONSUMER by the topic in its qname.
-    /// A framework-tag node (`queue_producer:unresolved:kafka`) names no topic
-    /// and is left out, so a channel literally called `kafka` cannot pair
-    /// with every Kafka file whose topic failed to parse.
+    /// Index every QUEUE_PRODUCER / QUEUE_CONSUMER by the topic in its qname,
+    /// minus the LB.8 owner segment (every owner of a topic documents under
+    /// its one channel). A framework-tag node
+    /// (`queue_producer:unresolved:kafka`) names no topic and is left out, so
+    /// a channel literally called `kafka` cannot pair with every Kafka file
+    /// whose topic failed to parse.
     fn build(merged: &'a MergedGraph) -> Self {
+        use repo_graph_code_domain::endpoint::split_owner;
         use repo_graph_code_extractors::queues::UNRESOLVED_PREFIX;
 
         let mut ix = QueueSides::default();
@@ -317,7 +320,7 @@ impl<'a> QueueSides<'a> {
                     .nav
                     .qname_by_id
                     .get(&n.id)
-                    .and_then(|q| q.strip_prefix(prefix))
+                    .and_then(|q| split_owner(q).0.strip_prefix(prefix))
                 else {
                     continue;
                 };

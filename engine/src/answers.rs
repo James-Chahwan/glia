@@ -1245,7 +1245,10 @@ pub struct MessageContractRow {
 struct QueueNodeAcc<'a> {
     producer: bool,
     repo: u64,
+    /// The full qname, LB.8 owner segment included, so a side still says
+    /// which project it is.
     qname: &'a str,
+    /// The bare topic: the owner segment is not part of the channel.
     topic: &'a str,
     parent: Option<NodeId>,
     types: Vec<&'a Cell>,
@@ -1290,7 +1293,7 @@ fn collect_queue_nodes(merged: &MergedGraph) -> BTreeMap<u64, QueueNodeAcc<'_>> 
                 _ => continue,
             };
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(topic) = qname.strip_prefix(prefix) else { continue };
+            let Some(topic) = endpoint::split_owner(qname).0.strip_prefix(prefix) else { continue };
             let acc = out.entry(n.id.0).or_insert_with(|| QueueNodeAcc {
                 producer,
                 repo: n.repo.0,

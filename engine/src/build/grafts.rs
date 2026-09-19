@@ -22,11 +22,20 @@ use crate::extract::{detect_language, merge_nav, path_to_qname};
 use crate::http_owner;
 
 /// Run every post-cache graft over one repo's parses, in order: the A11.2
-/// endpoint fold, the LA.6d Next.js page graft, the LB.4a HTTP owner segment,
-/// the LA.4 queue-topic const fold, the A5.2 / A5.3 / LA.17 RPC needles with
-/// their `[grpc-client]` / `[grpc-server-impl]` / `[proto-rpc]` markers, the
-/// A5.8 `[marker-anchor]` census, then the A16.4 IMPORTS-cell filter. `const_table` is the repo's
-/// A11.1 table; `roots` are the walk's project roots (A8.4).
+/// endpoint fold, the LA.6d Next.js page graft, the LA.4 queue-topic const
+/// fold, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
+/// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
+/// census, the LB.4a / LB.8 owner segment, then the A16.4 IMPORTS-cell
+/// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
+/// project roots (A8.4).
+///
+/// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
+/// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
+/// nodes and the channel sides (QUEUE_PRODUCER / QUEUE_CONSUMER, WS_HANDLER /
+/// WS_CLIENT, GRAPHQL_RESOLVER / GRAPHQL_OPERATION, GRPC_CLIENT /
+/// GRPC_SERVER). Any graft that mints one of those goes ABOVE it: a node
+/// minted after it stays owner-free and pairs all-to-all with the qualified
+/// ones. The `[http-owner]` / `[channel-owner]` counts make a miss visible.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_post_cache(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
@@ -43,15 +52,9 @@ pub(super) fn apply_post_cache(
     // cache keeps the pre-fold parse.
     endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo)
         .report(repo_label);
-    // LA.6d: Next.js file-system pages. Before LB.4a, so a grafted page is
-    // owner-qualified like every other nav ROUTE.
+    // LA.6d: Next.js file-system pages. Before the owner pass, so a grafted
+    // page is owner-qualified like every other nav ROUTE.
     graft_next_pages(parses_by_lang, files, repo, parse_errors).report(repo_label);
-    // LB.4a: qualify ROUTE / ENDPOINT / page nodes under a nested project root
-    // with ` @<project path>`. After the fold, which keys endpoints by their
-    // owner-free path; per parse, so HashMap order cannot reach the ids.
-    let owners = http_owner::OwnerIndex::from_roots(roots);
-    http_owner::qualify_repo(parses_by_lang.values_mut().flatten(), &owners, repo)
-        .report(repo_label);
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
@@ -105,6 +108,16 @@ pub(super) fn apply_post_cache(
         anchored.add(anchor::census(fp));
     }
     anchor::report(anchored, repo_label);
+
+    // LB.4a / LB.8: qualify every owned node under a nested project root with
+    // ` @<project path>` (see the ordering rule above). After the endpoint
+    // fold, which keys endpoints by their owner-free path, the queue const
+    // fold and the RPC needles, which mint queue nodes and GRPC_CLIENT /
+    // GRPC_SERVER markers by owner-free name; per parse, so HashMap order
+    // cannot reach the ids.
+    let owners = http_owner::OwnerIndex::from_roots(roots);
+    http_owner::qualify_repo(parses_by_lang.values_mut().flatten(), &owners, repo)
+        .report(repo_label);
 
     // A16.4: drop intra-repo names from every IMPORTS cell. It needs the whole
     // repo's declarations, so like `apply_rpc_needles` it runs after the parse
@@ -542,8 +555,9 @@ mod next_page_tests {
 
     #[test]
     fn a_nested_next_app_is_owner_qualified() {
-        // LB.4a runs after the graft, so a page under a nested project root
-        // carries the ` @<project>` owner like every other nav ROUTE.
+        // The owner pass runs after the graft, so a page under a nested
+        // project root carries the ` @<project>` owner like every other nav
+        // ROUTE.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         write(&repo, "package.json", r#"{"name":"mono","private":true}"#);

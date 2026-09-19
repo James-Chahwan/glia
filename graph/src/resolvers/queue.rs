@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::str::Split;
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
@@ -53,7 +54,11 @@ impl CrossGraphResolver for QueueStackResolver {
                     continue;
                 }
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(topic) = qname.strip_prefix("queue_producer:") else { continue };
+                // LB.8: the owner segment names the producing project, not the
+                // topic; every owner of a topic pairs every consumer of it.
+                let Some(topic) = split_owner(qname).0.strip_prefix("queue_producer:") else {
+                    continue;
+                };
                 if topic.starts_with(UNRESOLVED_PREFIX) {
                     skipped_unresolved += 1;
                     continue;
@@ -150,7 +155,9 @@ fn build_queue_index(graphs: &[RepoGraph]) -> QueueIndex<'_> {
                 continue;
             }
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(topic) = qname.strip_prefix("queue_consumer:") else { continue };
+            let Some(topic) = split_owner(qname).0.strip_prefix("queue_consumer:") else {
+                continue;
+            };
             if topic.starts_with(UNRESOLVED_PREFIX) {
                 ix.skipped_unresolved += 1;
                 continue;
@@ -354,4 +361,38 @@ fn seg_walk(mut t: Split<'_, char>, mut p: Split<'_, char>, syn: Segmented) -> b
         }
     }
     t.next().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use repo_graph_code_domain::{edge_category, node_kind};
+
+    use super::super::tests::{channel_graph, cross_pairs};
+    use super::*;
+
+    /// LB.8: two owners on each side of one topic pair all-to-all (2 x 2), and
+    /// an owner-qualified framework tag stays unpairable.
+    #[test]
+    fn owner_qualified_sides_pair_by_the_bare_topic() {
+        let g = channel_graph(
+            "queue-owner",
+            &[
+                (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created @services/orders"),
+                (node_kind::QUEUE_PRODUCER, "queue_producer:orders.created @services/returns"),
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created @services/billing"),
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.created @services/audit"),
+                (node_kind::QUEUE_PRODUCER, "queue_producer:unresolved:kafka @services/orders"),
+                (node_kind::QUEUE_CONSUMER, "queue_consumer:unresolved:kafka @services/audit"),
+            ],
+        );
+        let mut m = MergedGraph::new(vec![g]);
+        QueueStackResolver.resolve(&mut m);
+        let p = |a: &str, b: &str| {
+            (format!("queue_producer:orders.created @services/{a}"), format!("queue_consumer:orders.created @services/{b}"))
+        };
+        assert_eq!(
+            cross_pairs(&m, edge_category::QUEUE_FLOWS),
+            [p("orders", "audit"), p("orders", "billing"), p("returns", "audit"), p("returns", "billing")]
+        );
+    }
 }

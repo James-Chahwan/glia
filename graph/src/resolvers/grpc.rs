@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::grpc::RpcPackageCell;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
@@ -42,7 +43,11 @@ impl CrossGraphResolver for GrpcStackResolver {
                     continue;
                 }
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(svc_name) = qname.strip_prefix("grpc_client:") else { continue };
+                // LB.8: a client stub is one project's side of the service; the
+                // owner segment is stripped, the `grpc:` contract is never owned.
+                let Some(svc_name) = split_owner(qname).0.strip_prefix("grpc_client:") else {
+                    continue;
+                };
                 stats.clients += 1;
                 let Some((targets, name_pkg)) = grpc_candidate_keys(svc_name)
                     .into_iter()
@@ -106,7 +111,9 @@ fn pair_servers(merged: &MergedGraph, index: &GrpcIndex) -> Vec<Edge> {
                 continue;
             }
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            let Some(svc_name) = qname.strip_prefix("grpc_server:") else { continue };
+            let Some(svc_name) = split_owner(qname).0.strip_prefix("grpc_server:") else {
+                continue;
+            };
             let found = grpc_candidate_keys(svc_name)
                 .into_iter()
                 .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)));
@@ -393,7 +400,37 @@ fn pick_targets<'a>(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{channel_graph, cross_pairs};
     use super::*;
+
+    /// LB.8: each project's client stub (and server marker) pairs the one
+    /// shared, never-owned `grpc:` contract through its bare service name.
+    #[test]
+    fn owner_qualified_clients_and_servers_pair_the_shared_service() {
+        let g = channel_graph(
+            "grpc-owner",
+            &[
+                (node_kind::GRPC_SERVICE, "grpc:user.UserService"),
+                (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/gateway"),
+                (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/admin"),
+                (node_kind::GRPC_SERVER, "grpc_server:UserService @services/users"),
+            ],
+        );
+        let mut m = MergedGraph::new(vec![g]);
+        GrpcStackResolver.resolve(&mut m);
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            cross_pairs(&m, edge_category::GRPC_CALLS),
+            [
+                s("grpc_client:UserService @services/admin", "grpc:user.UserService"),
+                s("grpc_client:UserService @services/gateway", "grpc:user.UserService"),
+            ]
+        );
+        assert_eq!(
+            cross_pairs(&m, edge_category::HANDLED_BY),
+            [s("grpc:user.UserService", "grpc_server:UserService @services/users")]
+        );
+    }
 
     fn keys(name: &str) -> Vec<(String, Option<String>)> {
         grpc_candidate_keys(name)
