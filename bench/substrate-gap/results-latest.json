@@ -4535,6 +4535,7 @@
     "fixtures/walk-user-config",
     "fixtures/xcli-invokes",
     "fixtures/xcut-config-env-value",
+    "fixtures/xcut-config-read-fn",
     "fixtures/xcut-connect-rpc",
     "fixtures/xcut-data-access-fn",
     "fixtures/xcut-graphql-precision",

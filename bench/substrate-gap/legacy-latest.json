@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 284,
+  "fixtures": 285,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1649,6 +1649,13 @@
       "language": "yaml",
       "per_category": {
         "DEFINES_CONFIG": 1.0,
+        "READS_CONFIG": 1.0
+      }
+    },
+    "xcut-config-read-fn": {
+      "framework": "xcut-config-read-fn",
+      "language": "typescript",
+      "per_category": {
         "READS_CONFIG": 1.0
       }
     },
