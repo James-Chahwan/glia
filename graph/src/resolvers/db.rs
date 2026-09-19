@@ -7,7 +7,7 @@ use repo_graph_code_domain::data_entity::table_of;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{Cell, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
-use super::{CrossGraphResolver, emit_cross_repo_pairs};
+use super::{CrossGraphResolver, RuleTally, emit_cross_repo_pairs, rule_evidence};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -49,6 +49,14 @@ const ENTITY_PREFIX: &str = "data_entity:";
 /// (Mongo) is misread as `sql` here until A13.2 gives Java a flavored prefix.
 const PREFIXLESS_FLAVOR: &str = "sql";
 
+/// LC.3c: the DB evidence rules, in `[evidence-rules]` order. The rule is a
+/// function of the pass that paired the edge, never of HashMap order:
+/// `entity` — the entity pass's exact half (one verbatim DATA_ENTITY qname in
+/// two repos); `entity_fold` — its fold half (two spellings, one
+/// `(flavor, canonical name)` key, forced Weak); `provider` — the A13.3
+/// provider pass (one `data_source:<provider>` qname, forced Weak).
+const DB_RULES: [&str; 3] = ["entity", "entity_fold", "provider"];
+
 // ============================================================================
 // DbResolver — joins services that touch the same Table / Collection /
 // NodeLabel. Mirrors SharedSchemaResolver's pairwise-pair shape.
@@ -68,7 +76,10 @@ pub struct DbResolver;
 
 impl CrossGraphResolver for DbResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
+        let mut rules = RuleTally::new("db", &DB_RULES);
         let entities = entity_pass(&merged.graphs);
+        rules.add("entity", entities.stats.exact_paired);
+        rules.add("entity_fold", entities.stats.folded_paired);
         if entities.stats.entities > 0 {
             let s = &entities.stats;
             eprintln!(
@@ -108,6 +119,7 @@ impl CrossGraphResolver for DbResolver {
         let mut paired = 0usize;
         let mut skipped_fanout = 0usize;
         let mut emitted: Vec<Edge> = Vec::new();
+        let provider_ev = rules.evidence("provider");
         for refs in source_index.values() {
             if refs.len() < 2 {
                 continue;
@@ -128,6 +140,7 @@ impl CrossGraphResolver for DbResolver {
                 refs,
                 edge_category::SHARES_DATA_SOURCE,
                 Some(Confidence::Weak),
+                Some(&provider_ev),
                 &mut emitted,
             );
         }
@@ -141,6 +154,8 @@ impl CrossGraphResolver for DbResolver {
             );
         }
         merged.cross_edges.extend(emitted);
+        rules.add("provider", paired);
+        rules.report();
     }
 }
 
@@ -331,6 +346,7 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
     stats.prefixless = prefixless_keys.len();
 
     let mut edges: Vec<Edge> = Vec::new();
+    let exact_ev = rule_evidence("db", "entity");
     for refs in exact_index.values() {
         if refs.len() < 2 {
             continue;
@@ -339,10 +355,16 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
         if repos.len() < 2 {
             continue;
         }
-        stats.exact_paired +=
-            emit_cross_repo_pairs(refs, edge_category::SHARES_DATA_ENTITY, None, &mut edges);
+        stats.exact_paired += emit_cross_repo_pairs(
+            refs,
+            edge_category::SHARES_DATA_ENTITY,
+            None,
+            Some(&exact_ev),
+            &mut edges,
+        );
     }
 
+    let fold_cell = rule_evidence("db", "entity_fold").to_cell();
     for groups in buckets.values() {
         if groups.len() < 2 {
             continue;
@@ -363,13 +385,15 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
                         if a.1 == b.1 {
                             continue;
                         }
-                        edges.push(Edge {
-                            from: a.0,
-                            to: b.0,
-                            category: edge_category::SHARES_DATA_ENTITY,
-                            confidence: Confidence::Weak,
-                            cells: Vec::new(),
-                        });
+                        edges.push(
+                            Edge::new(
+                                a.0,
+                                b.0,
+                                edge_category::SHARES_DATA_ENTITY,
+                                Confidence::Weak,
+                            )
+                            .with_cell(fold_cell.clone()),
+                        );
                         stats.folded_paired += 1;
                     }
                 }

@@ -9,7 +9,7 @@ use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
-use super::{CrossGraphResolver, weakest};
+use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -48,6 +48,9 @@ impl CrossGraphResolver for QueueStackResolver {
         let index = build_queue_index(&merged.graphs);
         let mut skipped_unresolved = index.skipped_unresolved;
         let (mut paired, mut family_mismatch, mut wildcard) = (0usize, 0usize, 0usize);
+        // LC.3c: `exact` for a consumer keyed on the producer's topic,
+        // `pattern` for a compiled wildcard subscription that covers it.
+        let mut rules = RuleTally::new("queue", &["exact", "pattern"]);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::QUEUE_PRODUCER) {
@@ -69,13 +72,11 @@ impl CrossGraphResolver for QueueStackResolver {
                         family_mismatch += 1;
                         continue;
                     }
-                    merged.cross_edges.push(Edge {
-                        from: n.id,
-                        to: t.id,
-                        category: edge_category::QUEUE_FLOWS,
-                        confidence: weakest(n.confidence, t.confidence),
-                        cells: Vec::new(),
-                    });
+                    let confidence = weakest(n.confidence, t.confidence);
+                    merged.cross_edges.push(
+                        Edge::new(n.id, t.id, edge_category::QUEUE_FLOWS, confidence)
+                            .with_cell(rules.cell("exact")),
+                    );
                     paired += 1;
                 }
                 // Rare path: O(producers × wildcard consumers). A consumer whose
@@ -89,13 +90,10 @@ impl CrossGraphResolver for QueueStackResolver {
                         family_mismatch += 1;
                         continue;
                     }
-                    merged.cross_edges.push(Edge {
-                        from: n.id,
-                        to: w.id,
-                        category: edge_category::QUEUE_FLOWS,
-                        confidence: Confidence::Weak,
-                        cells: Vec::new(),
-                    });
+                    merged.cross_edges.push(
+                        Edge::new(n.id, w.id, edge_category::QUEUE_FLOWS, Confidence::Weak)
+                            .with_cell(rules.cell("pattern")),
+                    );
                     paired += 1;
                     wildcard += 1;
                 }
@@ -112,6 +110,7 @@ impl CrossGraphResolver for QueueStackResolver {
                  skipped_catchall={skipped_catchall}"
             );
         }
+        rules.report();
     }
 }
 

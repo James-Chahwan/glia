@@ -22,7 +22,7 @@ use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::grpc::RpcPackageCell;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
-use super::{CrossGraphResolver, weakest};
+use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -36,6 +36,7 @@ impl CrossGraphResolver for GrpcStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
         let index = build_grpc_service_index(&merged.graphs);
         let mut stats = PairStats::default();
+        let mut rules = RuleTally::new("grpc", &GRPC_RULES);
         let mut edges = Vec::new();
         for g in &merged.graphs {
             for n in &g.nodes {
@@ -55,12 +56,13 @@ impl CrossGraphResolver for GrpcStackResolver {
                 else {
                     continue;
                 };
-                let chosen: Vec<&GrpcTarget> =
+                // LC.3c: the rule is the Pick that chose the targets.
+                let (chosen, rule): (Vec<&GrpcTarget>, &'static str) =
                     match pick_targets(targets, name_pkg.as_deref(), &client_evidence(&n.cells)) {
-                        Pick::All => targets.iter().collect(),
+                        Pick::All => (targets.iter().collect(), "all"),
                         Pick::Narrowed(v) => {
                             stats.narrowed += 1;
-                            v
+                            (v, "narrowed")
                         }
                         Pick::Ambiguous => {
                             stats.ambiguous += 1;
@@ -68,13 +70,11 @@ impl CrossGraphResolver for GrpcStackResolver {
                         }
                     };
                 for t in chosen {
-                    edges.push(Edge {
-                        from: n.id,
-                        to: t.id,
-                        category: edge_category::GRPC_CALLS,
-                        confidence: weakest(n.confidence, t.confidence),
-                        cells: Vec::new(),
-                    });
+                    let confidence = weakest(n.confidence, t.confidence);
+                    edges.push(
+                        Edge::new(n.id, t.id, edge_category::GRPC_CALLS, confidence)
+                            .with_cell(rules.cell(rule)),
+                    );
                 }
             }
         }
@@ -91,17 +91,22 @@ impl CrossGraphResolver for GrpcStackResolver {
             );
         }
         merged.cross_edges.extend(edges);
-        let served = pair_servers(merged, &index);
+        let served = pair_servers(merged, &index, &mut rules);
         merged.cross_edges.extend(served);
+        rules.report();
     }
 }
+
+/// LC.3c: the gRPC evidence rules, in `[evidence-rules]` order — the client
+/// half's [`Pick`] (`all` / `narrowed`), then the server half's.
+const GRPC_RULES: [&str; 4] = ["all", "narrowed", "server_all", "server_narrowed"];
 
 /// A5.3: `grpc:<Service> --HANDLED_BY--> grpc_server:<Service>` for every
 /// server-impl marker, keyed on the same index and narrowed by the same package
 /// evidence as the client loop. The direction mirrors `ROUTE --HANDLED_BY-->
 /// handler`: the contract is handled by the code that serves it, and
 /// HANDLED_BY is a blast carry edge, so a proto change reaches the impl.
-fn pair_servers(merged: &MergedGraph, index: &GrpcIndex) -> Vec<Edge> {
+fn pair_servers(merged: &MergedGraph, index: &GrpcIndex, rules: &mut RuleTally) -> Vec<Edge> {
     let mut edges = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut handled: HashSet<NodeId> = HashSet::new();
@@ -118,30 +123,27 @@ fn pair_servers(merged: &MergedGraph, index: &GrpcIndex) -> Vec<Edge> {
             let found = grpc_candidate_keys(svc_name)
                 .into_iter()
                 .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)));
-            let chosen: Vec<&GrpcTarget> = match found {
-                None => Vec::new(),
-                Some((targets, name_pkg)) => {
+            // LC.3c: the rule is the Pick that chose the targets.
+            let picked: Option<(Vec<&GrpcTarget>, &'static str)> =
+                found.and_then(|(targets, name_pkg)| {
                     match pick_targets(targets, name_pkg.as_deref(), &client_evidence(&n.cells)) {
-                        Pick::All => targets.iter().collect(),
-                        Pick::Narrowed(v) => v,
-                        Pick::Ambiguous => Vec::new(),
+                        Pick::All => Some((targets.iter().collect(), "server_all")),
+                        Pick::Narrowed(v) => Some((v, "server_narrowed")),
+                        Pick::Ambiguous => None,
                     }
-                }
-            };
-            if chosen.is_empty() {
+                });
+            let Some((chosen, rule)) = picked.filter(|(v, _)| !v.is_empty()) else {
                 unmatched += 1;
                 continue;
-            }
+            };
             matched += 1;
             for t in chosen {
                 handled.insert(t.id);
-                edges.push(Edge {
-                    from: t.id,
-                    to: n.id,
-                    category: edge_category::HANDLED_BY,
-                    confidence: weakest(n.confidence, t.confidence),
-                    cells: Vec::new(),
-                });
+                let confidence = weakest(n.confidence, t.confidence);
+                edges.push(
+                    Edge::new(t.id, n.id, edge_category::HANDLED_BY, confidence)
+                        .with_cell(rules.cell(rule)),
+                );
             }
         }
     }

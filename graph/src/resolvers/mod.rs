@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use repo_graph_code_domain::evidence::Evidence;
+use repo_graph_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -116,29 +117,149 @@ pub(crate) fn weakest(a: Confidence, b: Confidence) -> Confidence {
 /// join. `confidence: None` means `weakest(a, b)`; `Some(c)` forces `c` (the
 /// DB provider pass forces `Weak` — see [`DbResolver::resolve`]). Shared by
 /// the exact-qname pairwise resolvers (`DbResolver`, `MessageSchemaResolver`).
+///
+/// LC.3c: `ev` is the rule evidence every emitted edge carries (the DB entity
+/// and provider passes); `None` leaves the edges bare for LC.3a's
+/// emitter-only stamp in the engine (`MessageSchemaResolver`, one rule).
 fn emit_cross_repo_pairs(
     refs: &[(NodeId, RepoId, Confidence)],
     category: EdgeCategoryId,
     confidence: Option<Confidence>,
+    ev: Option<&Evidence>,
     out: &mut Vec<Edge>,
 ) -> usize {
+    let cell = ev.map(Evidence::to_cell);
     let mut emitted = 0;
     for i in 0..refs.len() {
         for j in (i + 1)..refs.len() {
             if refs[i].1 == refs[j].1 {
                 continue;
             }
-            out.push(Edge {
-                from: refs[i].0,
-                to: refs[j].0,
-                category,
-                confidence: confidence.unwrap_or_else(|| weakest(refs[i].2, refs[j].2)),
-                cells: Vec::new(),
-            });
+            let conf = confidence.unwrap_or_else(|| weakest(refs[i].2, refs[j].2));
+            let mut edge = Edge::new(refs[i].0, refs[j].0, category, conf);
+            if let Some(c) = &cell {
+                edge = edge.with_cell(c.clone());
+            }
+            out.push(edge);
             emitted += 1;
         }
     }
     emitted
+}
+
+// ============================================================================
+// LC.3c — rule evidence
+// ============================================================================
+
+/// The evidence a tiered resolver attaches to a cross edge it emitted:
+/// `resolver:<resolver>` plus the rule (tier, pass or branch) that paired it.
+/// `resolver` is the name the engine's `run_all_resolvers` stamps
+/// (`engine/src/build/resolvers.rs` `run!`), so an edge reads the same
+/// emitter whether the resolver or the stamp attached it; the stamp never
+/// overrides an evidence already present. No location: the engine's fill
+/// pass places it from the edge's endpoints.
+pub(crate) fn rule_evidence(resolver: &str, rule: &str) -> Evidence {
+    Evidence::emitter(format!("resolver:{resolver}")).rule(rule)
+}
+
+/// One rule of a [`RuleTally`]: how many edges it paired, and its EVIDENCE
+/// cell, serialised once.
+struct RuleCount {
+    rule: &'static str,
+    n: usize,
+    cell: Option<Cell>,
+}
+
+/// Per-resolve tally behind the `[evidence-rules]` fired_on marker, and the
+/// source of each edge's rule evidence cell.
+///
+/// The marker is one line per resolve, printed only when the resolver emitted
+/// at least one edge, rules in the resolver's fixed order:
+///   `[evidence-rules] resolver=http exact=3 endpoint_prefix=0 any=1 route_prefix=0 base_fold=0 suffix=1`
+/// grep: `... 2>&1 | grep '^\[evidence-rules\] resolver='`
+pub(crate) struct RuleTally {
+    resolver: &'static str,
+    rules: Vec<RuleCount>,
+}
+
+impl RuleTally {
+    /// A zeroed tally for `resolver`, reporting `order` in that order.
+    pub(crate) fn new(resolver: &'static str, order: &[&'static str]) -> Self {
+        Self {
+            resolver,
+            rules: order
+                .iter()
+                .map(|&rule| RuleCount {
+                    rule,
+                    n: 0,
+                    cell: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// The slot of `rule`. A rule outside the declared order is appended
+    /// rather than lost, so the marker still accounts for every edge.
+    fn slot(&mut self, rule: &'static str) -> &mut RuleCount {
+        let i = match self.rules.iter().position(|r| r.rule == rule) {
+            Some(i) => i,
+            None => {
+                self.rules.push(RuleCount {
+                    rule,
+                    n: 0,
+                    cell: None,
+                });
+                self.rules.len() - 1
+            }
+        };
+        &mut self.rules[i]
+    }
+
+    /// Count one edge paired by `rule`, returning the EVIDENCE cell it
+    /// carries ([`rule_evidence`]).
+    pub(crate) fn cell(&mut self, rule: &'static str) -> Cell {
+        let resolver = self.resolver;
+        let slot = self.slot(rule);
+        slot.n += 1;
+        slot.cell
+            .get_or_insert_with(|| rule_evidence(resolver, rule).to_cell())
+            .clone()
+    }
+
+    /// The evidence for `rule`, for a helper that stamps edges itself
+    /// ([`emit_cross_repo_pairs`]); count them with [`RuleTally::add`].
+    pub(crate) fn evidence(&self, rule: &'static str) -> Evidence {
+        rule_evidence(self.resolver, rule)
+    }
+
+    /// Count `n` edges paired by `rule` and stamped elsewhere.
+    pub(crate) fn add(&mut self, rule: &'static str, n: usize) {
+        self.slot(rule).n += n;
+    }
+
+    /// The `[evidence-rules]` line, or `None` when no edge was emitted.
+    fn line(&self) -> Option<String> {
+        if self.rules.iter().all(|r| r.n == 0) {
+            return None;
+        }
+        let counts: Vec<String> = self
+            .rules
+            .iter()
+            .map(|r| format!("{}={}", r.rule, r.n))
+            .collect();
+        Some(format!(
+            "[evidence-rules] resolver={} {}",
+            self.resolver,
+            counts.join(" ")
+        ))
+    }
+
+    /// Print the marker (see [`RuleTally`]); silent with no edge.
+    pub(crate) fn report(&self) {
+        if let Some(line) = self.line() {
+            eprintln!("{line}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,6 +323,40 @@ mod tests {
         let mut keys: Vec<(&str, usize)> = index.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
         keys.sort();
         assert_eq!(keys, [("getUser", 2), ("listUsers", 1)]);
+    }
+
+    /// LC.3c: the marker is silent with no edge, lists every rule in the
+    /// declared order (zeroes included), and never loses an undeclared rule.
+    #[test]
+    fn rule_tally_marker_and_cells() {
+        let mut t = RuleTally::new("http", &["exact", "suffix"]);
+        assert_eq!(t.line(), None, "silent with no edge");
+        t.add("exact", 0);
+        assert_eq!(t.line(), None, "a zero add is still no edge");
+
+        let cell = t.cell("suffix");
+        assert_eq!(
+            cell.payload,
+            repo_graph_core::CellPayload::Json(
+                r#"{"emitter":"resolver:http","rule":"suffix","basis":"none"}"#.to_string()
+            )
+        );
+        assert_eq!(t.cell("suffix"), cell, "one cell per rule, reused");
+        t.add("exact", 3);
+        assert_eq!(
+            t.line().as_deref(),
+            Some("[evidence-rules] resolver=http exact=3 suffix=2")
+        );
+        t.add("other", 1);
+        assert_eq!(
+            t.line().as_deref(),
+            Some("[evidence-rules] resolver=http exact=3 suffix=2 other=1")
+        );
+        assert_eq!(t.evidence("exact"), rule_evidence("http", "exact"));
+        assert_eq!(
+            rule_evidence("db", "provider"),
+            Evidence::emitter("resolver:db").rule("provider")
+        );
     }
 
     #[test]

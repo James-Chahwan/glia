@@ -24,7 +24,7 @@ use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{CodeNav, cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 
-use super::{CrossGraphResolver, ServiceTarget, weakest};
+use super::{CrossGraphResolver, RuleTally, ServiceTarget, weakest};
 use crate::merged::MergedGraph;
 
 // ============================================================================
@@ -183,6 +183,9 @@ impl CrossGraphResolver for EventBusResolver {
 
         let mut exact = 0usize;
         let mut folded = 0usize;
+        // LC.3c: `exact` when the emitter's raw key is its normalised key,
+        // `folded` when the type-name fold made it (the counters' branch).
+        let mut rules = RuleTally::new("eventbus", &["exact", "folded"]);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::EVENT_EMITTER) {
@@ -214,22 +217,23 @@ impl CrossGraphResolver for EventBusResolver {
                             continue;
                         }
                     }
-                    if key == raw {
+                    let rule = if key == raw {
                         exact += 1;
+                        "exact"
                     } else {
                         folded += 1;
-                    }
-                    merged.cross_edges.push(Edge {
-                        from: n.id,
-                        to: h.target.id,
-                        category: edge_category::EVENT_FLOWS,
-                        confidence: weakest(n.confidence, h.target.confidence),
-                        cells: Vec::new(),
-                    });
+                        "folded"
+                    };
+                    let confidence = weakest(n.confidence, h.target.confidence);
+                    merged.cross_edges.push(
+                        Edge::new(n.id, h.target.id, edge_category::EVENT_FLOWS, confidence)
+                            .with_cell(rules.cell(rule)),
+                    );
                 }
             }
         }
 
+        rules.report();
         // One line per BUILD, and only when this resolver had anything to say —
         // the `[ws-resolve]` house style. `pairs` counts PUSHED edges.
         let pairs = exact + folded;

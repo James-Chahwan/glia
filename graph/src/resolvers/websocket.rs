@@ -41,7 +41,7 @@ use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, NodeId};
 
 use super::http::route_path;
-use super::{CrossGraphResolver, weakest};
+use super::{CrossGraphResolver, RuleTally, rule_evidence, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -55,6 +55,7 @@ impl CrossGraphResolver for WebSocketStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
         let (edges, stats) = pair_all(&merged.graphs);
         merged.cross_edges.extend(edges);
+        stats.rules().report();
         let pairs = stats.pairs();
         if pairs > 0 || stats.dropped_generic > 0 {
             eprintln!(
@@ -86,7 +87,44 @@ impl WsStats {
     fn pairs(&self) -> usize {
         self.exact + self.suffix + self.param + self.inherited + self.wildcard
     }
+
+    /// Count one pair under its tier and return its evidence rule (LC.3c):
+    /// `inherited` for a generic handler whatever tier its inherited route
+    /// path matched at, the tier's own name otherwise. `None`, counting
+    /// nothing, for a dropped pair.
+    fn record(&mut self, generic: bool, tier: WsPair) -> Option<&'static str> {
+        let (counter, rule) = match (generic, tier) {
+            (_, WsPair::No) => return None,
+            (true, _) => (&mut self.inherited, "inherited"),
+            (false, WsPair::Exact) => (&mut self.exact, "exact"),
+            (false, WsPair::Suffix) => (&mut self.suffix, "suffix"),
+            (false, WsPair::Param) => (&mut self.param, "param"),
+            (false, WsPair::Wildcard) => (&mut self.wildcard, "wildcard"),
+        };
+        *counter += 1;
+        Some(rule)
+    }
+
+    /// LC.3c: the `[evidence-rules]` tally, rules in the `[ws-resolve]`
+    /// order. Every WS_CONNECTS edge's rule is the tier it counts under
+    /// ([`WsStats::record`]), so the tiers' counters are the rules' counts.
+    fn rules(&self) -> RuleTally {
+        let mut t = RuleTally::new("websocket", &WS_RULES);
+        for (rule, n) in WS_RULES.into_iter().zip([
+            self.exact,
+            self.suffix,
+            self.param,
+            self.inherited,
+            self.wildcard,
+        ]) {
+            t.add(rule, n);
+        }
+        t
+    }
 }
+
+/// LC.3c: the WS_CONNECTS evidence rules, in `[ws-resolve]` order.
+const WS_RULES: [&str; 5] = ["exact", "suffix", "param", "inherited", "wildcard"];
 
 /// One WS_HANDLER node, with the path(s) clients are paired against.
 struct Handler {
@@ -147,21 +185,15 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
                     }
                     continue;
                 };
-                match (h.generic, tier) {
-                    (true, _) => stats.inherited += 1,
-                    (false, WsPair::Exact) => stats.exact += 1,
-                    (false, WsPair::Suffix) => stats.suffix += 1,
-                    (false, WsPair::Param) => stats.param += 1,
-                    (false, WsPair::Wildcard) => stats.wildcard += 1,
-                    (false, WsPair::No) => continue,
-                }
-                edges.push(Edge {
-                    from: n.id,
-                    to: h.id,
-                    category: edge_category::WS_CONNECTS,
-                    confidence: weakest(n.confidence, h.confidence),
-                    cells: Vec::new(),
-                });
+                let Some(rule) = stats.record(h.generic, tier) else {
+                    continue;
+                };
+                // LC.3c: the edge's evidence names the tier it counted under.
+                let confidence = weakest(n.confidence, h.confidence);
+                edges.push(
+                    Edge::new(n.id, h.id, edge_category::WS_CONNECTS, confidence)
+                        .with_cell(rule_evidence("websocket", rule).to_cell()),
+                );
             }
         }
     }

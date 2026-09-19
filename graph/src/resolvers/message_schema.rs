@@ -55,9 +55,12 @@ impl CrossGraphResolver for MessageSchemaResolver {
                 continue;
             }
             shared += 1;
+            // One rule (exact qname): no evidence of its own, so LC.3a's
+            // engine stamp `resolver:message_schema` is the whole story.
             pairs += emit_cross_repo_pairs(
                 refs,
                 edge_category::SHARES_SCHEMA,
+                None,
                 None,
                 &mut merged.cross_edges,
             );

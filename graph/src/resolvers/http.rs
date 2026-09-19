@@ -8,7 +8,7 @@ use repo_graph_code_domain::endpoint::{is_canonical_http_path, split_owner};
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
-use super::{CrossGraphResolver, weakest};
+use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
 use crate::nav::is_nav_route;
 use crate::types::RepoGraph;
@@ -47,6 +47,7 @@ impl CrossGraphResolver for HttpStackResolver {
         // fixtures and tests) must stay a pure function of its argument.
         let prefixes = api_prefixes();
         let mut stats = HttpMatchStats::default();
+        let mut rules = RuleTally::new("http", &MatchTier::RULES);
         let (index, stripped, owners) = build_route_index(&merged.graphs, &prefixes, &mut stats);
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
@@ -78,20 +79,20 @@ impl CrossGraphResolver for HttpStackResolver {
             }
             for (target, tier) in hits {
                 stats.record(tier);
-                edges.push(Edge {
-                    from: ep.id,
-                    to: target.route_id,
-                    category: edge_category::HTTP_CALLS,
-                    // Tiers 1-3 reproduce pre-A3.1 confidence exactly
-                    // (`weakest(_, Strong)` is the identity); the fuzzy
-                    // tiers floor it so a consumer can tell a principled
-                    // pairing from a guessed one.
-                    confidence: weakest(weakest(ep.confidence, target.confidence), tier.ceiling()),
-                    cells: Vec::new(),
-                });
+                // Tiers 1-3 reproduce pre-A3.1 confidence exactly
+                // (`weakest(_, Strong)` is the identity); the fuzzy tiers
+                // floor it so a consumer can tell a principled pairing from a
+                // guessed one. LC.3c: the edge's evidence names the tier.
+                let confidence =
+                    weakest(weakest(ep.confidence, target.confidence), tier.ceiling());
+                edges.push(
+                    Edge::new(ep.id, target.route_id, edge_category::HTTP_CALLS, confidence)
+                        .with_cell(rules.cell(tier.rule())),
+                );
             }
         }
         merged.cross_edges.extend(edges);
+        rules.report();
         stats.report();
         stats.qnames.report();
         stats.report_placeholder_folds();
@@ -196,6 +197,30 @@ enum MatchTier {
 }
 
 impl MatchTier {
+    /// Every tier's evidence rule, in ladder order: the `[evidence-rules]`
+    /// order for `resolver=http`.
+    const RULES: [&'static str; 6] = [
+        "exact",
+        "endpoint_prefix",
+        "any",
+        "route_prefix",
+        "base_fold",
+        "suffix",
+    ];
+
+    /// LC.3c: the rule an HTTP_CALLS edge's evidence names for this tier —
+    /// the variant's snake_case name.
+    fn rule(self) -> &'static str {
+        match self {
+            MatchTier::Exact => "exact",
+            MatchTier::EndpointPrefix => "endpoint_prefix",
+            MatchTier::Any => "any",
+            MatchTier::RoutePrefix => "route_prefix",
+            MatchTier::BaseFold => "base_fold",
+            MatchTier::Suffix => "suffix",
+        }
+    }
+
     /// Confidence ceiling for the tier.
     fn ceiling(self) -> Confidence {
         match self {
@@ -1705,6 +1730,21 @@ mod tests {
         assert_eq!(MatchTier::RoutePrefix.ceiling(), Confidence::Medium);
         assert_eq!(MatchTier::BaseFold.ceiling(), Confidence::Medium);
         assert_eq!(MatchTier::Suffix.ceiling(), Confidence::Weak);
+    }
+
+    #[test]
+    fn match_tier_rules_follow_the_ladder() {
+        // LC.3c: the `[evidence-rules]` order is the ladder order, and each
+        // rule is its variant's snake_case name.
+        let ladder = [
+            MatchTier::Exact,
+            MatchTier::EndpointPrefix,
+            MatchTier::Any,
+            MatchTier::RoutePrefix,
+            MatchTier::BaseFold,
+            MatchTier::Suffix,
+        ];
+        assert_eq!(ladder.map(MatchTier::rule), MatchTier::RULES);
     }
 
     /// A10.2 — one RepoGraph holding both ROUTE qname shapes, a NAV route and
