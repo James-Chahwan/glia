@@ -223,42 +223,48 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     for r in refs {
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
         let resolved: Option<NodeId> = match &r.qualifier {
-            CallQualifier::Bare(name) => bindings
-                .and_then(|b| b.get(name).copied())
-                .or_else(|| {
-                    g.symbols
-                        .module_symbols
-                        .get(&r.from_module)
-                        .and_then(|s| s.get(name).copied())
-                })
-                // Global fallback for HANDLED_BY refs: a route registers
-                // `r.GET("/p", handler)` where `handler` is a top-level fn
-                // in the same package — but `bindings` doesn't see local
-                // package symbols. Scan all module_symbols for a unique
-                // match. Same-name collisions across the repo skip
-                // (better unresolved than wrong).
-                .or_else(|| {
-                    // Global-by-name fallback. HANDLED_BY: route handler is a
-                    // same-package fn (import binding can't see it). INJECTS
-                    // (Pattern E): the injected service TYPE is resolved by its
-                    // unique class name across the repo — DI param types are
-                    // often unresolvable via imports (TS/dotted imports are a
-                    // separate gap), and `module_symbols` registers top-level
-                    // classes by name, so a uniquely-named service binds here.
-                    if r.category == edge_category::HANDLED_BY
-                        || r.category == edge_category::INJECTS
-                        || r.category == edge_category::INHERITS_FROM
-                        || r.category == edge_category::IMPLEMENTS
-                    {
-                        // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
-                        // type by its bare name; resolve to the uniquely-named class/
-                        // interface across the repo (module_symbols indexes them,
-                        // incl. namespace/PACKAGE members). Ambiguity → None.
-                        unique_global_function(g, name)
-                    } else {
-                        None
-                    }
-                }),
+            CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
+                // A6.3: a supertype is a type, never a file. A TS default
+                // import (`import Base from "./base"`) binds its local name to
+                // the MODULE; heritage looks through it to that module's
+                // same-named def. The name is import-bound, so a miss stays
+                // unresolved instead of falling back to a repo-wide lookup.
+                Some(id) if is_heritage(r.category) => heritage_through_module(g, id, name),
+                Some(id) => Some(id),
+                None => g
+                    .symbols
+                    .module_symbols
+                    .get(&r.from_module)
+                    .and_then(|s| s.get(name).copied())
+                    // Global fallback for HANDLED_BY refs: a route registers
+                    // `r.GET("/p", handler)` where `handler` is a top-level fn
+                    // in the same package — but `bindings` doesn't see local
+                    // package symbols. Scan all module_symbols for a unique
+                    // match. Same-name collisions across the repo skip
+                    // (better unresolved than wrong).
+                    .or_else(|| {
+                        // Global-by-name fallback. HANDLED_BY: route handler is a
+                        // same-package fn (import binding can't see it). INJECTS
+                        // (Pattern E): the injected service TYPE is resolved by its
+                        // unique class name across the repo — DI param types are
+                        // often unresolvable via imports (TS/dotted imports are a
+                        // separate gap), and `module_symbols` registers top-level
+                        // classes by name, so a uniquely-named service binds here.
+                        if r.category == edge_category::HANDLED_BY
+                            || r.category == edge_category::INJECTS
+                            || r.category == edge_category::INHERITS_FROM
+                            || r.category == edge_category::IMPLEMENTS
+                        {
+                            // Heritage (INHERITS_FROM/IMPLEMENTS) and DI (INJECTS) name a
+                            // type by its bare name; resolve to the uniquely-named class/
+                            // interface across the repo (module_symbols indexes them,
+                            // incl. namespace/PACKAGE members). Ambiguity → None.
+                            unique_global_function(g, name)
+                        } else {
+                            None
+                        }
+                    }),
+            },
             CallQualifier::Attribute { base, name } => {
                 let bound_base = attribute_base(g, bindings, base);
                 let hit = resolve_attribute_target(g, bindings, base, name);
@@ -316,6 +322,20 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     if nav.fired() {
         eprintln!("{}", nav.marker());
     }
+}
+
+fn is_heritage(category: EdgeCategoryId) -> bool {
+    category == edge_category::INHERITS_FROM || category == edge_category::IMPLEMENTS
+}
+
+/// The heritage target an import binding names (A6.3): the bound node itself,
+/// unless it is a MODULE (a TS default import binds the file), in which case
+/// the module's own top-level def named `name`, or None.
+fn heritage_through_module(g: &RepoGraph, bound: NodeId, name: &str) -> Option<NodeId> {
+    if g.nav.kind_by_id.get(&bound) != Some(&node_kind::MODULE) {
+        return Some(bound);
+    }
+    g.symbols.module_symbols.get(&bound).and_then(|s| s.get(name).copied())
 }
 
 /// Resolve `base.name()` where `base` is a plain identifier already bound in
@@ -1237,6 +1257,158 @@ mod tests {
             gate.marker().as_deref(),
             Some("[recv] bare field receivers skipped outside constructor: 3 (ext=py:1,ts:2)")
         );
+    }
+
+    // ---- A6.3: TypeScript heritage through UnresolvedRef ---------------------
+
+    /// `class <from> extends|implements <name>` as the parser emits it since A6.3.
+    fn heritage_ref(
+        from: NodeId,
+        module: NodeId,
+        name: &str,
+        cat: EdgeCategoryId,
+    ) -> UnresolvedRef {
+        UnresolvedRef {
+            from,
+            from_module: module,
+            qualifier: CallQualifier::Bare(name.to_string()),
+            category: cat,
+        }
+    }
+
+    fn heritage_edges(g: &RepoGraph) -> Vec<(NodeId, NodeId, EdgeCategoryId, Confidence)> {
+        g.edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::INHERITS_FROM
+                    || e.category == edge_category::IMPLEMENTS
+            })
+            .map(|e| (e.from, e.to, e.category, e.confidence))
+            .collect()
+    }
+
+    /// The one regression A6.3 can cause: `class X extends Base implements
+    /// IFoo` with both supertypes in the SAME file used to bind through the
+    /// parser's name-derived id. It must still bind, now through the module's
+    /// own symbols. A second `Base` / `IFoo` in another file makes the
+    /// repo-wide unique-name fallback ambiguous, so only the same-module step
+    /// can produce these edges.
+    #[test]
+    fn same_file_heritage_still_binds() {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "src::a", None);
+        let x = s.add(node_kind::CLASS, "src::a::X", Some(m1));
+        let base = s.add(node_kind::CLASS, "src::a::Base", Some(m1));
+        let ifoo = s.add(node_kind::INTERFACE, "src::a::IFoo", Some(m1));
+        let file = s.file(
+            vec![],
+            vec![],
+            vec![
+                heritage_ref(x, m1, "Base", edge_category::INHERITS_FROM),
+                heritage_ref(x, m1, "IFoo", edge_category::IMPLEMENTS),
+            ],
+        );
+        let mut other = Shape::new();
+        let m2 = other.add(node_kind::MODULE, "src::b", None);
+        other.add(node_kind::CLASS, "src::b::Base", Some(m2));
+        other.add(node_kind::INTERFACE, "src::b::IFoo", Some(m2));
+        let g =
+            build_typescript(repo(), vec![file, other.file(vec![], vec![], vec![])], |_, _| None)
+                .unwrap();
+        assert_eq!(
+            heritage_edges(&g),
+            vec![
+                (x, base, edge_category::INHERITS_FROM, Confidence::Strong),
+                (x, ifoo, edge_category::IMPLEMENTS, Confidence::Strong),
+            ]
+        );
+        assert!(g.unresolved_refs.is_empty());
+    }
+
+    /// Cross-file: `import { Base } from "./base"` binds the heritage name to
+    /// the imported class even when another `Base` exists elsewhere; an
+    /// external base (`extends Component` from a package) stays an unresolved
+    /// ref instead of an edge into a fabricated id.
+    #[test]
+    fn imported_heritage_binds_and_external_base_stays_unresolved() {
+        let mut b = Shape::new();
+        let mb = b.add(node_kind::MODULE, "src::base", None);
+        let base = b.add(node_kind::CLASS, "src::base::Base", Some(mb));
+        let mut dup = Shape::new();
+        let md = dup.add(node_kind::MODULE, "src::legacy", None);
+        dup.add(node_kind::CLASS, "src::legacy::Base", Some(md));
+        let mut c = Shape::new();
+        let mc = c.add(node_kind::MODULE, "src::child", None);
+        let child = c.add(node_kind::CLASS, "src::child::Child", Some(mc));
+        let widget = c.add(node_kind::CLASS, "src::child::Widget", Some(mc));
+        let child_file = c.file(
+            vec![import_symbol("src::child", "./base", "Base")],
+            vec![],
+            vec![
+                heritage_ref(child, mc, "Base", edge_category::INHERITS_FROM),
+                heritage_ref(widget, mc, "Component", edge_category::INHERITS_FROM),
+            ],
+        );
+        let g = build_typescript(
+            repo(),
+            vec![b.file(vec![], vec![], vec![]), dup.file(vec![], vec![], vec![]), child_file],
+            |_, spec| (spec == "./base").then(|| "src::base".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            heritage_edges(&g),
+            vec![(child, base, edge_category::INHERITS_FROM, Confidence::Strong)]
+        );
+        assert_eq!(g.unresolved_refs.len(), 1);
+        assert_eq!(g.unresolved_refs[0].qualifier, CallQualifier::Bare("Component".to_string()));
+    }
+
+    /// A TS default import binds its local name to the MODULE. Heritage must
+    /// not become CLASS -> MODULE: it looks through to the module's same-named
+    /// class, and a default import whose local name matches nothing there
+    /// stays unresolved even when a same-named class exists elsewhere (the
+    /// name is import-bound, so the repo-wide fallback would guess).
+    #[test]
+    fn default_imported_heritage_looks_through_the_module() {
+        let mut b = Shape::new();
+        let mb = b.add(node_kind::MODULE, "src::base", None);
+        let base = b.add(node_kind::CLASS, "src::base::Base", Some(mb));
+        let mut o = Shape::new();
+        let mo = o.add(node_kind::MODULE, "src::other", None);
+        o.add(node_kind::CLASS, "src::other::Renamed", Some(mo));
+        let mut c = Shape::new();
+        let mc = c.add(node_kind::MODULE, "src::child", None);
+        let child = c.add(node_kind::CLASS, "src::child::Child", Some(mc));
+        let alias = c.add(node_kind::CLASS, "src::child::Aliased", Some(mc));
+        let default_import = |local: &str| ImportStmt {
+            from_module: "src::child".to_string(),
+            target: ImportTarget::Symbol {
+                module: "./base".to_string(),
+                name: "default".to_string(),
+                alias: Some(local.to_string()),
+                level: 0,
+            },
+        };
+        let child_file = c.file(
+            vec![default_import("Base"), default_import("Renamed")],
+            vec![],
+            vec![
+                heritage_ref(child, mc, "Base", edge_category::INHERITS_FROM),
+                heritage_ref(alias, mc, "Renamed", edge_category::INHERITS_FROM),
+            ],
+        );
+        let g = build_typescript(
+            repo(),
+            vec![b.file(vec![], vec![], vec![]), o.file(vec![], vec![], vec![]), child_file],
+            |_, spec| (spec == "./base").then(|| "src::base".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            heritage_edges(&g),
+            vec![(child, base, edge_category::INHERITS_FROM, Confidence::Strong)]
+        );
+        assert_eq!(g.unresolved_refs.len(), 1);
+        assert_eq!(g.unresolved_refs[0].from, alias);
     }
 
     /// Two files contributing fields to one owner (a C# `partial class`) keep

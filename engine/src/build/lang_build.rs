@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{FileParse, edge_category, recv_stats};
+use repo_graph_code_domain::{FileParse, edge_category, node_kind, recv_stats};
 use repo_graph_core::RepoId;
 use repo_graph_graph::RepoGraph;
 use repo_graph_graph::rust_paths::RustCrate;
@@ -37,7 +37,8 @@ const JVM_GUEST: &str = "kotlin";
 /// Build one repo's per-language graphs from its finished parses, in sorted
 /// language order with the TS family last. Returns the graphs and the A7.0
 /// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
-/// to `parse_errors`. Prints the A6.2a `[recv]` marker for `repo_label`.
+/// to `parse_errors`. Prints the A6.2a `[recv]` and A6.3 `[heritage]` markers
+/// for `repo_label`.
 /// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a).
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
@@ -92,6 +93,7 @@ pub(super) fn build_language_graphs(
     // build below sees the JVM family as one graph.
     join_jvm_family(&mut parses_by_lang);
     let mut recv_bound: Vec<(&str, usize)> = Vec::new();
+    let mut heritage: Vec<HeritageTally> = Vec::new();
     recv_stats::reset();
     let mut ts_family: Vec<FileParse> = Vec::new();
     for (lang, parses) in parses_by_lang {
@@ -111,7 +113,10 @@ pub(super) fn build_language_graphs(
         };
         recv_bound.push((lang, recv_stats::take()));
         match graph {
-            Ok(g) => graphs.push(g),
+            Ok(g) => {
+                heritage.push(HeritageTally::of(lang, &g));
+                graphs.push(g);
+            }
             Err(e) => parse_errors.push(format!("{lang} graph: {e}")),
         }
     }
@@ -119,15 +124,76 @@ pub(super) fn build_language_graphs(
         let graph = repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source);
         recv_bound.push(("typescript", recv_stats::take()));
         match graph {
-            Ok(g) => graphs.push(g),
+            Ok(g) => {
+                heritage.push(HeritageTally::of("typescript", &g));
+                graphs.push(g);
+            }
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
     }
     // A6.2a fired_on marker, once per repo:
     //   `[recv] receiver-typed calls bound: csharp=N … (fields: csharp=F …) repo=<label>`
     recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
+    // A6.3 fired_on marker, once per repo (A6.4 / A6.5 read their rows here):
+    //   `[heritage] refs bound: dart=N … typescript=N unresolved: dart=M … repo=<label>`
+    if let Some(line) = heritage_marker(&mut heritage, repo_label) {
+        eprintln!("{line}");
+    }
 
     (graphs, di_refs)
+}
+
+/// One built language graph's A6.3 `[heritage]` marker input.
+///
+/// `bound` counts TYPE-level INHERITS_FROM / IMPLEMENTS edges whose target is
+/// a node of the graph: an edge into a parser-fabricated id (the pre-A6.3 TS
+/// shape, `-> '?'`) counts nowhere, and the METHOD -> METHOD IMPLEMENTS edges
+/// `emit_method_level_implements` derives from a bound pair are not refs.
+/// `unresolved` counts the heritage refs `resolve_refs` left unbound (an
+/// external base: `extends Component`, `implements OnInit`). The graph build
+/// does not know its language, hence the tally per build here.
+struct HeritageTally {
+    lang: &'static str,
+    bound: usize,
+    unresolved: usize,
+}
+
+impl HeritageTally {
+    fn of(lang: &'static str, g: &RepoGraph) -> Self {
+        let bound = g
+            .edges
+            .iter()
+            .filter(|e| {
+                is_heritage(e.category)
+                    && g.nav.kind_by_id.contains_key(&e.to)
+                    && g.nav.kind_by_id.get(&e.from) != Some(&node_kind::METHOD)
+            })
+            .count();
+        let unresolved = g.unresolved_refs.iter().filter(|r| is_heritage(r.category)).count();
+        HeritageTally { lang, bound, unresolved }
+    }
+}
+
+fn is_heritage(category: repo_graph_core::EdgeCategoryId) -> bool {
+    category == edge_category::INHERITS_FROM || category == edge_category::IMPLEMENTS
+}
+
+/// `[heritage] refs bound: <lang>=N … unresolved: <lang>=M … repo=<label>`:
+/// one token per language graph built, sorted by name, in both halves. None
+/// when no graph holds a bound heritage edge or an unbound heritage ref.
+fn heritage_marker(tallies: &mut [HeritageTally], repo_label: &str) -> Option<String> {
+    if tallies.iter().all(|t| t.bound == 0 && t.unresolved == 0) {
+        return None;
+    }
+    tallies.sort_by_key(|t| t.lang);
+    let bound: Vec<String> = tallies.iter().map(|t| format!("{}={}", t.lang, t.bound)).collect();
+    let unresolved: Vec<String> =
+        tallies.iter().map(|t| format!("{}={}", t.lang, t.unresolved)).collect();
+    Some(format!(
+        "[heritage] refs bound: {} unresolved: {} repo={repo_label}",
+        bound.join(" "),
+        unresolved.join(" ")
+    ))
 }
 
 /// The Cargo packages among the walk's project roots, as `build_rust` reads
@@ -279,4 +345,35 @@ fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String>
         return None;
     }
     Some(segs.join("::"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tally(lang: &'static str, bound: usize, unresolved: usize) -> HeritageTally {
+        HeritageTally { lang, bound, unresolved }
+    }
+
+    /// Every language graph built gets one token per half, sorted by name
+    /// (the TS family is built last but sorts in place), so A6.4 / A6.5 grep
+    /// ` solidity=` / ` dart=` off the same line.
+    #[test]
+    fn heritage_marker_lists_every_built_language_sorted() {
+        let mut t = vec![tally("solidity", 0, 1), tally("dart", 0, 0), tally("typescript", 2, 0)];
+        assert_eq!(
+            heritage_marker(&mut t, "fx").as_deref(),
+            Some(
+                "[heritage] refs bound: dart=0 solidity=0 typescript=2 \
+                 unresolved: dart=0 solidity=1 typescript=0 repo=fx"
+            )
+        );
+    }
+
+    #[test]
+    fn heritage_marker_is_silent_without_heritage() {
+        let mut t = vec![tally("go", 0, 0), tally("python", 0, 0)];
+        assert_eq!(heritage_marker(&mut t, "fx"), None);
+        assert_eq!(heritage_marker(&mut [], "fx"), None);
+    }
 }

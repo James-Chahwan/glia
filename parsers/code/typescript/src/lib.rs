@@ -295,9 +295,9 @@ fn visit_class(
 
     // Class heritage: `class X extends Y implements I, J`.
     // `extends_clause` → INHERITS_FROM, each type in `implements_clause` →
-    // IMPLEMENTS (class → interface). The superclass / interfaces are cross-file
-    // references resolved later, so we record them as Inherits/Implements refs.
-    collect_class_heritage(n, src, module_qname, class_id, repo, acc);
+    // IMPLEMENTS (class → interface). The superclass / interfaces are usually
+    // cross-file, so they are recorded as refs and bound by the graph crate.
+    collect_class_heritage(n, src, class_id, module_id, acc);
     // A13.15: `@Entity(…) class User` -> the model-keyed entity it defines.
     emit_typeorm_entity(n, name, class_id, src, repo, acc);
 
@@ -621,16 +621,19 @@ fn decorator_name<'a>(dec: TsNode, src: &'a [u8]) -> Option<&'a str> {
 /// Parse `class X extends Y implements I, J` heritage.
 ///
 /// `extends_clause` → INHERITS_FROM (class → superclass), each type in
-/// `implements_clause` → IMPLEMENTS (class → interface). The referenced types
-/// are typically cross-file; we emit best-effort same-module target NodeIds
-/// (qname = `<module_qname>::<TypeName>`) for the graph crate's cross-file
-/// resolver to reconcile.
+/// `implements_clause` → IMPLEMENTS (class → interface). The parser only
+/// EXTRACTS: each supertype becomes an `UnresolvedRef` with a
+/// `Bare(<simple name>)` qualifier, and the graph crate's `resolve_refs` binds
+/// it — through the module's import bindings (`import { Base } from "./base"`),
+/// then the module's own symbols (a same-file base), then a unique repo-wide
+/// type name. An unbindable base (`extends Component` from a package) stays in
+/// `unresolved_refs` instead of becoming an edge into a fabricated NodeId.
+/// Same shape as parser-java's `emit_heritage_ref`.
 fn collect_class_heritage(
     class_node: TsNode,
     src: &[u8],
-    module_qname: &str,
     class_id: NodeId,
-    repo: RepoId,
+    module_id: NodeId,
     acc: &mut Acc,
 ) {
     let mut cursor = class_node.walk();
@@ -643,42 +646,28 @@ fn collect_class_heritage(
 
     let mut hc = heritage.walk();
     for clause in heritage.named_children(&mut hc) {
-        match clause.kind() {
-            "extends_clause" => {
-                // The superclass expression(s) live under field `value`; sibling
-                // `type_arguments` nodes are skipped by selecting the field.
-                let mut ec = clause.walk();
-                for ty in clause.children_by_field_name("value", &mut ec) {
-                    if let Some(base) = heritage_type_name(ty, src) {
-                        let to_qname = format!("{module_qname}::{base}");
-                        let to_id =
-                            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &to_qname);
-                        acc.edges.push(Edge {
-                            from: class_id,
-                            to: to_id,
-                            category: edge_category::INHERITS_FROM,
-                            confidence: Confidence::Weak,
-                        });
-                    }
-                }
-            }
+        let mut tc = clause.walk();
+        let (category, types): (_, Vec<TsNode>) = match clause.kind() {
+            // The superclass expression(s) live under field `value`; sibling
+            // `type_arguments` nodes are skipped by selecting the field.
+            "extends_clause" => (
+                edge_category::INHERITS_FROM,
+                clause.children_by_field_name("value", &mut tc).collect(),
+            ),
             "implements_clause" => {
-                let mut ic = clause.walk();
-                for ty in clause.named_children(&mut ic) {
-                    if let Some(iface) = heritage_type_name(ty, src) {
-                        let to_qname = format!("{module_qname}::{iface}");
-                        let to_id =
-                            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::INTERFACE, &to_qname);
-                        acc.edges.push(Edge {
-                            from: class_id,
-                            to: to_id,
-                            category: edge_category::IMPLEMENTS,
-                            confidence: Confidence::Weak,
-                        });
-                    }
-                }
+                (edge_category::IMPLEMENTS, clause.named_children(&mut tc).collect())
             }
-            _ => {}
+            _ => continue,
+        };
+        for ty in types {
+            if let Some(base) = heritage_type_name(ty, src) {
+                acc.refs.push(UnresolvedRef {
+                    from: class_id,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Bare(base.to_string()),
+                    category,
+                });
+            }
         }
     }
 }
@@ -3101,7 +3090,8 @@ export function UserList() {
     #[test]
     fn g195_exported_const_state_var_and_implements_edge() {
         // G19: documented exported const → STATE_VAR node with a DOC cell.
-        // G12.5: `implements I` → IMPLEMENTS edge; `extends Y` → INHERITS_FROM.
+        // G12.5 / A6.3: `implements I` → an IMPLEMENTS ref; `extends Y` → an
+        // INHERITS_FROM ref. The graph crate binds both (resolve_refs).
         let src = "\
 /** Fee. */
 export const FEE_BPS = 250;
@@ -3143,19 +3133,35 @@ class X extends Base implements IFoo {}
             "undocumented numeric const should be suppressed by the noise gate"
         );
 
-        // G12.5: class X implements IFoo → IMPLEMENTS; extends Base → INHERITS_FROM.
+        // G12.5 / A6.3: class X implements IFoo → an IMPLEMENTS ref; extends
+        // Base → an INHERITS_FROM ref. Both carry the bare supertype name and
+        // the file module; no heritage EDGE is minted by the parser (a
+        // name-derived target id dangles whenever the base is imported).
         let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::fees::X");
-        let iface_id =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "src::fees::IFoo");
-        let base_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::fees::Base");
+        let has_ref = |name: &str, cat: EdgeCategoryId| {
+            parse.refs.iter().any(|r| {
+                r.from == class_id
+                    && r.from_module == mod_id
+                    && r.qualifier == CallQualifier::Bare(name.to_string())
+                    && r.category == cat
+            })
+        };
         assert!(
-            has_edge(&parse, class_id, iface_id, edge_category::IMPLEMENTS),
-            "expected X --IMPLEMENTS--> IFoo, edges: {:?}",
-            parse.edges
+            has_ref("IFoo", edge_category::IMPLEMENTS),
+            "expected X --IMPLEMENTS--> Bare(IFoo) ref, refs: {:?}",
+            parse.refs
         );
         assert!(
-            has_edge(&parse, class_id, base_id, edge_category::INHERITS_FROM),
-            "expected X --INHERITS_FROM--> Base"
+            has_ref("Base", edge_category::INHERITS_FROM),
+            "expected X --INHERITS_FROM--> Bare(Base) ref, refs: {:?}",
+            parse.refs
+        );
+        assert!(
+            !parse.edges.iter().any(|e| e.from == class_id
+                && (e.category == edge_category::IMPLEMENTS
+                    || e.category == edge_category::INHERITS_FROM)),
+            "the parser must not mint heritage edges, edges: {:?}",
+            parse.edges
         );
     }
 

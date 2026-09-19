@@ -10,7 +10,7 @@
   ],
   "expect_edges": [
     {"from": "SqlRepo", "to": "Repo", "category": "IMPLEMENTS",
-     "note": "INTENDED: the `implements` clause routes to the INTERFACE node. MEASURED 2026-09-16 (installed 0.4.18 wheel): an IMPLEMENTS edge IS emitted but its TARGET is a fabricated NodeId — `--dump` prints `[IMPLEMENTS] 'SqlRepo' -> '?'`, i.e. the `to` id resolves to no node in the graph. This is the review §3 'TS/Solidity/Rust heritage edges target fabricated NodeIds' claim, CONFIRMED for TypeScript. grade.py skips an edge whose endpoint is unresolvable (it requires `by_id.get(e['to'])`), so recall is 0/1 — the cell is capped at partial until the heritage target is bound to the real INTERFACE node."}
+     "note": "INTENDED: the `implements` clause routes to the INTERFACE node. MEASURED 2026-09-16 (installed 0.4.18 wheel): an IMPLEMENTS edge IS emitted but its TARGET is a fabricated NodeId — `--dump` prints `[IMPLEMENTS] 'SqlRepo' -> '?'`, i.e. the `to` id resolves to no node in the graph. This is the review §3 'TS/Solidity/Rust heritage edges target fabricated NodeIds' claim, CONFIRMED for TypeScript. grade.py skips an edge whose endpoint is unresolvable (it requires `by_id.get(e['to'])`), so recall is 0/1 — the cell is capped at partial until the heritage target is bound to the real INTERFACE node. MEASURED 2026-09-19 after A6.3 (debug CLI, grade.py's grade_fixture over `glia analyze --format json`): the parser emits an UnresolvedRef(Bare(\"Repo\")) and resolve_refs binds it through the `import { Repo }` binding — `[IMPLEMENTS] 'SqlRepo' -> 'Repo'`, recall 1/1, stderr `[heritage] refs bound: typescript=1 unresolved: typescript=0`."}
   ],
   "expect_cells": [],
   "forbid": [],

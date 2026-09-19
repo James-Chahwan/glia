@@ -1,0 +1,20 @@
+{
+  "framework": "ts-heritage-xfile",
+  "language": "typescript",
+  "dirs": ["."],
+  "mechanism": "impl",
+  "cells": ["typescript/impl"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Child", "note": "derived, in child.ts"},
+    {"kind": "CLASS", "name": "Base", "note": "base, in base.ts"},
+    {"kind": "INTERFACE", "name": "IFoo", "note": "interface, in base.ts"}
+  ],
+  "expect_edges": [
+    {"from": "child", "to": "base", "category": "IMPORTS", "note": "already 1.00 - proves the import binding heritage resolution needs"},
+    {"from": "Child", "to": "Base", "category": "INHERITS_FROM", "note": "extends across files - before A6.3 the parser minted `child::Base`, a phantom id (`-> '?'`); after, an UnresolvedRef(Bare) binds through the import"},
+    {"from": "Child", "to": "IFoo", "category": "IMPLEMENTS", "note": "implements across files - same phantom before A6.3, bound through the import after"}
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "A6.3: the existing heritage fixtures are single-file, which hid the TS fabricated heritage target. Base and interface live in base.ts, the derived class in child.ts."
+}
