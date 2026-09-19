@@ -27,12 +27,21 @@ pub const DOC_MAX: usize = 500;
 /// **0-indexed** tree-sitter rows (matching the line-start array the engram
 /// exporter indexes for byte spans). Use this for every node's POSITION cell.
 pub fn position_json(node: &Node, file_rel: &str) -> String {
+    position_json_span(node, node, file_rel)
+}
+
+/// [`position_json`] for an entity that spans several sibling nodes: the start
+/// row of `first`, the end row of `last`, same JSON and escaping. For grammars
+/// that put a declaration's body BESIDE its signature (tree-sitter-dart's
+/// top-level `function_signature` + `function_body`, LA.37a), so the POSITION
+/// covers both.
+pub fn position_json_span(first: &Node, last: &Node, file_rel: &str) -> String {
     let f = file_rel.replace('\\', "\\\\").replace('"', "\\\"");
     format!(
         r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
         f,
-        node.start_position().row,
-        node.end_position().row
+        first.start_position().row,
+        last.end_position().row
     )
 }
 
@@ -393,6 +402,29 @@ mod tests {
         assert_eq!(
             position_json(&b, "src/x.rs"),
             r#"{"file":"src/x.rs","start_line":1,"end_line":1}"#
+        );
+    }
+
+    /// LA.37a: a span over two sibling nodes starts at the first's row and
+    /// ends at the second's; the file name is escaped as in `position_json`.
+    #[test]
+    fn position_json_span_covers_both_nodes() {
+        let src = "fn a() {}\n\nfn b() {\n}\n";
+        let tree = rust_tree(src);
+        let fns: Vec<Node> = {
+            let mut cur = tree.root_node().walk();
+            tree.root_node()
+                .children(&mut cur)
+                .filter(|n| n.kind() == "function_item")
+                .collect()
+        };
+        assert_eq!(
+            position_json_span(&fns[0], &fns[1], "src/\"x\".rs"),
+            r#"{"file":"src/\"x\".rs","start_line":0,"end_line":3}"#
+        );
+        assert_eq!(
+            position_json_span(&fns[1], &fns[1], "src/x.rs"),
+            position_json(&fns[1], "src/x.rs")
         );
     }
 

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -57,6 +58,16 @@ pub fn parse_file(
         );
     }
 
+    // LA.37a fired_on marker (GLIA_DART_DEBUG=1): this file declared top-level
+    // functions / getters / setters, whose sibling bodies were walked.
+    let t = &acc.top_level;
+    if dart_debug_enabled() && t.bodies + t.bodyless > 0 {
+        eprintln!(
+            "[dart-top-level] bodies={} accessors={} bodyless={} file={file_rel_path}",
+            t.bodies, t.accessors, t.bodyless
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -82,6 +93,35 @@ struct Acc {
     /// LA.34: how this file's unqualified calls inside class members were
     /// classified, for the `[dart-calls]` marker.
     bare_calls: BareCallStats,
+    /// LA.37a: the declaration ids this file has already pushed as a Node. A
+    /// top-level getter / setter pair shares one qname and so one NodeId: the
+    /// first declaration in source order pushes the Node, its DEFINES edge and
+    /// its nav record; the second only walks its body under the same id.
+    /// Lookup-only, never iterated into output.
+    declared_ids: HashSet<NodeId>,
+    /// LA.37a: this file's top-level declarations, for the `[dart-top-level]`
+    /// marker.
+    top_level: TopLevelStats,
+}
+
+#[derive(Default)]
+struct TopLevelStats {
+    /// Top-level signatures whose sibling `function_body` was walked.
+    bodies: usize,
+    /// Top-level `getter_signature` + `setter_signature` declarations.
+    accessors: usize,
+    /// Top-level signatures with no body (`external`).
+    bodyless: usize,
+}
+
+/// `GLIA_DART_DEBUG=1` turns on the `[dart-top-level]` marker, read once. Off
+/// by default: nearly every Dart file declares a top-level function, and
+/// parsers run per file inside a panic-suppressed loop that must stay quiet on
+/// a normal build.
+fn dart_debug_enabled() -> bool {
+    static DART_DEBUG: OnceLock<bool> = OnceLock::new();
+    *DART_DEBUG
+        .get_or_init(|| std::env::var("GLIA_DART_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
 #[derive(Default)]
@@ -113,8 +153,13 @@ fn visit_top(
             "enum_declaration" => {
                 visit_enum(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
-            "function_signature" | "function_definition" | "top_level_definition" => {
-                visit_function(child, src, file_rel, parent_qname, parent_id, repo, acc);
+            // LA.37a: a top-level function / getter / setter's body is the
+            // signature's SIBLING under the program root, not its child. The
+            // signature claims it here, so a `function_body` child falls
+            // through to `_ => {}`.
+            "function_signature" | "getter_signature" | "setter_signature" => {
+                let body = sibling_body(child);
+                visit_function(child, body, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             // G19 — library-level `const`/`final NAME = expr;`. The hidden
             // `_top_level_definition` rule inlines the keyword + this list as
@@ -349,8 +394,33 @@ fn visit_enum(
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
 }
 
+/// tree-sitter-dart 0.1.0 puts a top-level function's body BESIDE its
+/// signature: the body is the signature's next named sibling after any
+/// comments. Anything else there (the next declaration after an `external`
+/// signature, which has no body) means no body, so a body-less function
+/// cannot steal its neighbour's.
+fn sibling_body(sig: TsNode) -> Option<TsNode> {
+    let mut next = sig.next_named_sibling();
+    while let Some(n) = next {
+        if n.kind() == "comment" {
+            next = n.next_named_sibling();
+            continue;
+        }
+        return (n.kind() == "function_body").then_some(n);
+    }
+    None
+}
+
+/// A top-level function, getter or setter (`node` is its signature) and, when
+/// it has one, the sibling `body` it owns (LA.37a): the FUNCTION's CODE /
+/// POSITION span signature + body, and the body's calls and client ENDPOINTs
+/// are credited to it under Dart's lexical scope - the function's parameters
+/// and locals first (LA.34's [`local_names`]), then library scope. There is no
+/// class scope here, so every other unqualified call stays Bare.
+#[allow(clippy::too_many_arguments)]
 fn visit_function(
     node: TsNode,
+    body: Option<TsNode>,
     src: &[u8],
     file_rel: &str,
     parent_qname: &str,
@@ -364,20 +434,39 @@ fn visit_function(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
 
-    acc.nodes.push(Node {
-        id,
-        repo,
-        confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel),
-    });
-    acc.edges.push(Edge {
-        from: parent_id,
-        to: id,
-        category: edge_category::DEFINES,
-        confidence: Confidence::Strong,
-    });
-    acc.nav
-        .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
+    if matches!(node.kind(), "getter_signature" | "setter_signature") {
+        acc.top_level.accessors += 1;
+    }
+    // The second half of a getter / setter pair is the same FUNCTION: it adds
+    // no Node, DEFINES edge or nav record, only its body's calls.
+    if acc.declared_ids.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: span_cells(&node, &body.unwrap_or(node), src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav
+            .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
+    }
+
+    let Some(body) = body else {
+        acc.top_level.bodyless += 1;
+        return;
+    };
+    acc.top_level.bodies += 1;
+    let no_members = HashSet::new();
+    let scope = CallScope {
+        members: &no_members,
+        locals: local_names(Some(node), body, src),
+    };
+    collect_calls_in(body, src, id, Some(&scope), repo, file_rel, acc);
 }
 
 /// G19: library-level `const`/`final` constants. The list holds one
@@ -822,8 +911,15 @@ fn class_member_names(class_body: TsNode, src: &[u8]) -> HashSet<String> {
 fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Some(sig) = signature {
-        let mut c = sig.walk();
-        for part in sig.named_children(&mut c) {
+        // A class member passes its `method_signature` wrapper; a top-level
+        // function / setter (LA.37a) passes the signature itself.
+        let parts: Vec<TsNode> = if matches!(sig.kind(), "function_signature" | "setter_signature") {
+            vec![sig]
+        } else {
+            let mut c = sig.walk();
+            sig.named_children(&mut c).collect()
+        };
+        for part in parts {
             if !matches!(part.kind(), "function_signature" | "setter_signature") {
                 continue;
             }
@@ -1403,6 +1499,36 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
             payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
         },
     ]
+}
+
+/// [`entity_cells`] for a declaration whose body is a sibling of its
+/// signature (LA.37a: a top-level function): CODE is the source from the
+/// start of `first` to the end of `last`, POSITION spans both, DOC is the
+/// `///` above `first`.
+fn span_cells(first: &TsNode, last: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
+    // Tree-sitter byte offsets sit on char boundaries; `get` + `from_utf8`
+    // still cannot panic, and fall back to the first node's own text.
+    let code = src
+        .get(first.start_byte()..last.end_byte())
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or_else(|| text_of(*first, src));
+    let mut cells = vec![
+        Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Text(code.to_string()),
+        },
+        Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(repo_graph_doc::position_json_span(first, last, file_rel)),
+        },
+    ];
+    if let Some(doc) = repo_graph_doc::leading_doc(first, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    cells
 }
 
 fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -2449,6 +2575,162 @@ abstract class A {
                 self_m("ext"),
             ])
         );
+    }
+
+    // ---- LA.37a: top-level functions own their sibling function_body ------
+
+    fn function_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, qname)
+    }
+
+    /// The call qualifiers emitted from one top-level FUNCTION, sorted.
+    fn fn_calls(fp: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = function_id(qname);
+        let mut out: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == id)
+            .map(|c| c.qualifier.clone())
+            .collect();
+        out.sort_by_key(|q| format!("{q:?}"));
+        out
+    }
+
+    fn cell_text(fp: &FileParse, id: NodeId, kind: repo_graph_core::CellTypeId) -> String {
+        fp.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .find(|c| c.kind == kind)
+            .map(|c| match &c.payload {
+                CellPayload::Text(t) | CellPayload::Json(t) => t.clone(),
+                other => format!("{other:?}"),
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn top_level_body_is_walked() {
+        let fp = parse_file("void f() { g(); }\nvoid g() {}\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::f"), vec![bare("g")]);
+        assert_eq!(fn_calls(&fp, "lib::m::g"), vec![]);
+    }
+
+    #[test]
+    fn top_level_endpoint_has_the_function_as_caller() {
+        let source = "Future<void> load() async {\n  await dio.get('/users');\n}\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let ep = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/users");
+        assert!(fp.nodes.iter().any(|n| n.id == ep), "{:?}", fp.nodes);
+        assert!(
+            fp.edges.iter().any(|e| e.from == function_id("lib::m::load")
+                && e.to == ep
+                && e.category == edge_category::CALLS),
+            "{:?}",
+            fp.edges
+        );
+    }
+
+    #[test]
+    fn top_level_getter_is_a_function_and_owns_its_body() {
+        let fp = parse_file("String get banner => describe();\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fp.nav.kind_by_id.get(&function_id("lib::m::banner")), Some(&node_kind::FUNCTION));
+        assert_eq!(fn_calls(&fp, "lib::m::banner"), vec![bare("describe")]);
+    }
+
+    /// `void set x(int v)` parses as a `setter_signature` (an untyped
+    /// `set x(..)` is a `function_signature` returning `set`); both are the
+    /// FUNCTION `x` owning the body.
+    #[test]
+    fn void_setter_signature_is_a_function_and_owns_its_body() {
+        let fp = parse_file("void set x(int v) { a(); }\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fp.nav.kind_by_id.get(&function_id("lib::m::x")), Some(&node_kind::FUNCTION));
+        assert_eq!(fn_calls(&fp, "lib::m::x"), vec![bare("a")]);
+        let fp = parse_file("set y(int v) { b(); }\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::y"), vec![bare("b")]);
+    }
+
+    #[test]
+    fn getter_setter_pair_is_one_function() {
+        let source = "int get level => h();\nvoid set level(int v) => s(v);\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let id = function_id("lib::m::level");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1, "{:?}", fp.nodes);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::m");
+        assert_eq!(
+            fp.edges
+                .iter()
+                .filter(|e| e.from == module && e.to == id && e.category == edge_category::DEFINES)
+                .count(),
+            1
+        );
+        assert_eq!(fn_calls(&fp, "lib::m::level"), vec![bare("h"), bare("s")]);
+        // The pair's cells are the first declaration's (the getter's) span.
+        assert_eq!(cell_text(&fp, id, cell_type::CODE), "int get level => h();");
+    }
+
+    #[test]
+    fn comment_between_signature_and_body() {
+        let source = "int commented() // the body follows a comment\n    => helper(3);\nint helper(int x) => x;\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::commented"), vec![bare("helper")]);
+        let pos = cell_text(&fp, function_id("lib::m::commented"), cell_type::POSITION);
+        assert!(pos.contains(r#""start_line":0,"end_line":1"#), "{pos}");
+    }
+
+    #[test]
+    fn external_function_has_no_body_and_does_not_steal_the_next() {
+        let source = "external void n();\nint m() => h();\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::n"), vec![]);
+        assert_eq!(fn_calls(&fp, "lib::m::m"), vec![bare("h")]);
+        // Both are FUNCTIONs; the external one keeps its signature-only CODE.
+        assert_eq!(cell_text(&fp, function_id("lib::m::n"), cell_type::CODE), "void n()");
+        // A trailing comment after the external signature changes nothing.
+        let source = "external int e(); // trailing\nint after() => d();\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::e"), vec![]);
+        assert_eq!(fn_calls(&fp, "lib::m::after"), vec![bare("d")]);
+    }
+
+    /// LA.34's local scope applies to top-level bodies: a parameter or local
+    /// named like a top-level function binds nothing.
+    #[test]
+    fn top_level_parameter_shadows_a_function() {
+        let source = r#"int helper(int x) => x;
+int apply(int Function(int) helper) => helper(2);
+int local() {
+  final helper = (int v) => v;
+  return helper(3);
+}
+int named({required int Function() helper}) => helper();
+"#;
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fn_calls(&fp, "lib::m::apply"), vec![]);
+        assert_eq!(fn_calls(&fp, "lib::m::local"), vec![]);
+        assert_eq!(fn_calls(&fp, "lib::m::named"), vec![]);
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+    }
+
+    #[test]
+    fn top_level_code_and_position_span_the_body() {
+        let source = r#"/// Loads users.
+Future<void> loadUsers() async {
+  await client.get('/users');
+  helper(1);
+}
+"#;
+        let fp = parse_file(source, "lib/app.dart", "lib::app", repo()).unwrap();
+        let id = function_id("lib::app::loadUsers");
+        let code = cell_text(&fp, id, cell_type::CODE);
+        assert!(code.starts_with("Future<void> loadUsers() async {"), "{code}");
+        assert!(code.contains("client.get('/users')"), "{code}");
+        assert!(code.ends_with('}'), "{code}");
+        assert_eq!(
+            cell_text(&fp, id, cell_type::POSITION),
+            r#"{"file":"lib/app.dart","start_line":1,"end_line":4}"#
+        );
+        assert_eq!(cell_text(&fp, id, cell_type::DOC), "Loads users.");
     }
 
     /// The committed `matrix/dart/calls` probe: `add(acc, x)` in `total`.

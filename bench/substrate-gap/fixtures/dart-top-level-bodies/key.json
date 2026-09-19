@@ -1,0 +1,39 @@
+{
+  "framework": "dart-top-level-bodies",
+  "language": "dart",
+  "dirs": ["."],
+  "cells": ["dart/calls"],
+  "note": "LA.37a: a top-level Dart function's, getter's or setter's function_body is a SIBLING of its signature (function_signature / getter_signature / setter_signature) under the program root in tree-sitter-dart 0.1.0. HEAD: visit_top matches only function_signature, visit_function records the FUNCTION from the signature and never reads the body, so no top-level function has an outgoing call or client ENDPOINT, a top-level getter or `void set` setter has no node, and the FUNCTION's CODE / POSITION cells cover the signature only. An `external` function has no body; a comment may sit between signature and body; a top-level getter / setter pair is one FUNCTION owning both bodies.",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "lib::app::banner", "note": "top-level getter -> FUNCTION"},
+    {"kind": "FUNCTION", "name": "lib::app::level", "note": "top-level getter + `void set` setter pair -> one FUNCTION"}
+  ],
+  "expect_edges": [
+    {"from": "lib::app::loadUsers", "to": "endpoint:GET:/users", "category": "CALLS",
+     "note": "client ENDPOINT from a top-level body (try_detect_dart_endpoint runs inside collect_calls_in)"},
+    {"from": "lib::app::loadUsers", "to": "lib::app::helper", "category": "CALLS",
+     "note": "top-level Bare call (LA.23e's call-site emission)"},
+    {"from": "lib::app::banner", "to": "lib::app::describeAll", "category": "CALLS",
+     "note": "top-level getter body"},
+    {"from": "lib::app::commented", "to": "lib::app::helper", "category": "CALLS",
+     "note": "a comment between signature and body does not orphan the body"},
+    {"from": "lib::app::afterNative", "to": "lib::app::helper", "category": "CALLS",
+     "note": "an `external` function (no body) does not steal the next function's body"},
+    {"from": "lib::app::level", "to": "lib::app::helper", "category": "CALLS",
+     "note": "the getter half of a getter / setter pair"},
+    {"from": "lib::app::level", "to": "lib::app::store", "category": "CALLS",
+     "note": "the setter half: `void set level(int v)` parses as setter_signature, and its body is credited to the same FUNCTION"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "lib::app::loadUsers", "cell": "CODE", "contains": "client.get('/users')",
+     "note": "CODE covers signature + body"},
+    {"kind": "FUNCTION", "node": "lib::app::loadUsers", "cell": "POSITION", "contains": "\"end_line\":7",
+     "note": "POSITION ends at the body's closing brace (0-indexed row 7)"}
+  ],
+  "forbid": [
+    {"from": "lib::app::apply", "to": "lib::app::helper", "category": "CALLS",
+     "note": "PRECISION: the parameter `helper` shadows the top-level function (LA.34's local scope applied to top-level bodies)"},
+    {"from": "lib::app::native", "to": "lib::app::helper", "category": "CALLS",
+     "note": "PRECISION: an external function has no body; the next function's body is not credited to it"}
+  ]
+}
