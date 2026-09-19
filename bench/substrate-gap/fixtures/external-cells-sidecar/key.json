@@ -1,0 +1,11 @@
+{
+  "framework": "external-cells-sidecar",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.1a: a checked-in .glia/cells.jsonl (a CONV and a DECISION row for app::charge, plus one orphan row for app::gone) and a local .glia/vectors.jsonl (2 f32 dims) are applied to their node at build. Baseline 2026-09-19 (HEAD 0c4fea5): nothing reads .glia/cells.jsonl or .glia/vectors.jsonl, so all three cells are missing.",
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "app::charge", "cell": "CONV", "contains": "retries are safe"},
+    {"kind": "FUNCTION", "node": "app::charge", "cell": "DECISION", "contains": "idempotent"},
+    {"kind": "FUNCTION", "node": "app::charge", "cell": "VECTOR"}
+  ]
+}

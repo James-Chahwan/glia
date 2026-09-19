@@ -14,7 +14,9 @@
 //! The build tail (cross-graph resolvers, post-passes, evidence fill, the
 //! determinism sort) is the code domain's pass registry,
 //! [`crate::profile::CODE_PASSES`], run by one
-//! [`crate::profile::run_code_passes`] call (LD.13).
+//! [`crate::profile::run_code_passes`] call (LD.13). After it, the external
+//! node-cell stage ([`crate::external::apply_external_cells`], LF.1a) applies
+//! each repo's `.glia` inputs, loaded once per repo right after its walk.
 
 mod assemble;
 mod grafts;
@@ -29,6 +31,7 @@ use repo_graph_graph::MergedGraph;
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
+use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
 use crate::profile::run_code_passes;
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
@@ -122,6 +125,9 @@ fn generate_one_inner(
     // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
     // prefixes are A8.7.
     let (files, regions, md, roots) = walk_source_files(&root);
+    // External inputs (LF.1a): `.glia/overlay.toml` loaded once, before any
+    // graph is built.
+    let inputs = [repo_inputs(repo, root.clone(), repo_path.to_string())];
     let go_prefix = read_go_module_prefix(&root);
     // Cached parses are only valid under the exact repo identity + go.mod
     // module they were built with — neither is visible to per-file hashes.
@@ -147,6 +153,7 @@ fn generate_one_inner(
     }
     let mut merged = MergedGraph::new(graphs);
     run_code_passes(&mut merged);
+    apply_external_cells(&mut merged, &inputs);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
@@ -185,9 +192,10 @@ pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult
 type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity);
 
 fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<GenerateResult, String> {
-    let Assembled { mut merged, parse_errors, label_inputs, repo_roots } =
+    let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
         assemble_many(repo_paths, incremental)?;
     run_code_passes(&mut merged);
+    apply_external_cells(&mut merged, &inputs);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
@@ -212,6 +220,8 @@ pub(crate) struct Assembled {
     /// input of [`crate::arch::repo_label_map`].
     pub(crate) label_inputs: Vec<(u64, String)>,
     pub(crate) repo_roots: std::collections::BTreeMap<u64, String>,
+    /// Each built repo's external inputs (LF.1a), in argument order.
+    pub(crate) inputs: Vec<RepoInputs>,
 }
 
 /// Walk, parse and build every repo of a multi-repo build and merge the
@@ -222,6 +232,7 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
     let mut repo_roots: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    let mut inputs: Vec<RepoInputs> = Vec::new();
 
     // Phase 1 — walk every repo before building any (A5.2), so the proto
     // service set is the UNION across the build: in a client/server split the
@@ -267,6 +278,7 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
         // or moved path keeps the key, so its sidecar is reused.
         let repo = RepoId::from_canonical(&ident.key);
         repo_id_marker(&ident, path);
+        inputs.push(repo_inputs(repo, root.clone(), path.clone()));
         label_inputs.push((repo.0, path.clone()));
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
@@ -310,6 +322,7 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
         parse_errors: all_errors,
         label_inputs,
         repo_roots,
+        inputs,
     })
 }
 

@@ -20,3 +20,6 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 # `snapshots::data_hash` (LF.5a): xxhash64 over a snapshot's data files, the
 # same hash and hex form the store uses for shard and input fingerprints.
 twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
+# `.glia/vectors.jsonl` rows carry their bytes as standard base64 (LF.1a,
+# `external_inputs`). Already in the lock as a transitive dep.
+base64 = "0.22"

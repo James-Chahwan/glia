@@ -1,0 +1,3 @@
+{"qname":"app::charge","cell":"CONV","entry":{"source":"api","id":"000001","text":"retries are safe"}}
+{"qname":"app::charge","cell":"DECISION","entry":{"source":"api","id":"charge-idempotent","title":"charge is idempotent on order id"}}
+{"qname":"app::gone","cell":"CONV","entry":{"source":"api","id":"000002","text":"this function was deleted"}}
