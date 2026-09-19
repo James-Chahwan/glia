@@ -1,8 +1,10 @@
 //! Repo walk + gating: which directories collapse to a single region anchor,
 //! which files are queued for parsing, and the one-node-per-region graph.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use repo_graph_code_domain::glia_config::{self, ProjectDecl, Spanned};
 use repo_graph_code_domain::project_roots::{self, ProjectRoot};
 use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
@@ -30,7 +32,7 @@ pub(crate) type WalkResult = (
     Vec<(String, String)>, // source files to parse
     Vec<RegionAnchor>,     // collapsed build/vendor regions
     Vec<(String, String)>, // markdown docs (rel_path, text) — G18
-    Vec<ProjectRoot>,      // manifest-rooted sub-projects, sorted by rel_path — A8.4
+    Vec<ProjectRoot>,      // manifest-rooted and declared sub-projects, sorted by rel_path — A8.4, LF.3a
 );
 
 /// The engine's own output directories: the layout `<root>/.glia/graph`
@@ -81,9 +83,16 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     let mut roots = Vec::new();
     let mut counts = GateCounts::default();
     let mut json = JsonAdmission::default();
+    // LF.3a: the user config's `[walk]` and `[[project]]` sections. Loaded once
+    // and silently: the build's external-input stage reports loader errors, and
+    // the store loads the same file through `IgnoreStack::for_repo`, so a user
+    // skip gates the freshness scan exactly as it gates this walk. User config
+    // is config, not inference: `--no-overlay` never switches it off.
+    let config = glia_config::load(root).map(|l| l.config).unwrap_or_default();
     // Per-directory `.gitignore` layers: pushed on the way down, popped on the
     // way back up, so each verdict sees exactly the files git would. (A8.2)
-    let mut ignores = IgnoreStack::default();
+    let mut ignores = IgnoreStack::with_config(root, &config.walk);
+    let mut declared = DeclaredDirs::new(&config.project);
     let pushed = ignores.push_dir(root);
     walk_dir(
         root,
@@ -95,10 +104,12 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
         &mut roots,
         &mut counts,
         &mut json,
+        &mut declared,
     );
     if pushed {
         ignores.pop();
     }
+    merge_declared_roots(&config.project, &declared, &regions, &mut roots);
     // A10.8 fired_on marker: `... 2>&1 | grep '^\[contract\] json sniffed='`.
     // Gated on non-zero like the other walk lines.
     if json.sniffed > 0 {
@@ -122,7 +133,104 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     if ignores.files > 0 {
         eprintln!("[walk] {}", ignores.marker());
     }
+    // LF.3a fired_on: `grep '^\[walk\] config skip'`, attributes file skips
+    // (directory skips are the `config=` count above).
+    if ignores.config_patterns > 0 {
+        eprintln!("[walk] {}", ignores.config_marker());
+    }
     (files, regions, md, roots)
+}
+
+/// The directories named by `[[project]]` stanzas and whether the walk
+/// descended into each (LF.3a). A declared root must be a directory the walk
+/// reads: one under a collapsed region or a skipped tree never gets a PROJECT.
+struct DeclaredDirs {
+    wanted: BTreeSet<String>,
+    visited: BTreeSet<String>,
+}
+
+impl DeclaredDirs {
+    fn new(decls: &[Spanned<ProjectDecl>]) -> Self {
+        Self {
+            wanted: decls.iter().map(|d| d.get_ref().rel_path().to_string()).collect(),
+            visited: BTreeSet::new(),
+        }
+    }
+
+    /// Record that the walk entered `rel` (the directory's path under the root).
+    fn enter(&mut self, rel: &str) {
+        if self.wanted.contains(rel) {
+            self.visited.insert(rel.to_string());
+        }
+    }
+}
+
+/// The `[roots] declared=` marker's tally.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DeclaredCounts {
+    added: usize,
+    shadowed: usize,
+    missing: usize,
+}
+
+/// Merge the `[[project]]` roots into the manifest-detected ones (LF.3a). Config
+/// extends, never replaces: a detected root at the same path wins (`shadowed`),
+/// and a declared path the walk never entered is reported and dropped
+/// (`missing`). Called before the explicit sort, which fixes node order.
+fn merge_declared_roots(
+    decls: &[Spanned<ProjectDecl>],
+    declared: &DeclaredDirs,
+    regions: &[RegionAnchor],
+    roots: &mut Vec<ProjectRoot>,
+) -> DeclaredCounts {
+    let mut n = DeclaredCounts::default();
+    if decls.is_empty() {
+        return n;
+    }
+    for decl in decls {
+        let decl = decl.get_ref();
+        let rel = decl.rel_path();
+        if !declared.visited.contains(rel) {
+            eprintln!("[roots] declared root {rel} skipped: {}", missing_reason(rel, regions));
+            n.missing += 1;
+            continue;
+        }
+        if let Some(found) = roots.iter().find(|r| r.rel_path == rel) {
+            eprintln!(
+                "[roots] declared root {rel} shadowed by {} manifest {}",
+                found.ecosystem, found.manifest
+            );
+            n.shadowed += 1;
+            continue;
+        }
+        let root = ProjectRoot::declared(rel.to_string(), decl.label.as_deref());
+        if let Some(label) = decl.label.as_deref()
+            && label.trim() != root.label
+        {
+            eprintln!(
+                "[roots] declared root {rel} label {label:?} rejected (a label holds no `::`, `${{` or control chars, at most 200 chars): using {:?}",
+                root.label
+            );
+        }
+        roots.push(root);
+        n.added += 1;
+    }
+    // LF.3a fired_on: `grep '^\[roots\] declared='`.
+    eprintln!("[roots] declared={} shadowed={} missing={}", n.added, n.shadowed, n.missing);
+    n
+}
+
+/// Why the walk never entered a declared directory: it sits at or under a
+/// collapsed region, it is not a directory, or an ancestor was skipped outright
+/// (VCS / editor metadata, glia's control dir, the engine's own output).
+fn missing_reason(rel: &str, regions: &[RegionAnchor]) -> String {
+    let covering = regions.iter().find(|r| {
+        rel == r.rel_path || rel.strip_prefix(r.rel_path.as_str()).is_some_and(|t| t.starts_with('/'))
+    });
+    match covering {
+        Some(r) => format!("inside region {} ({})", r.rel_path, r.provenance.provenance()),
+        None => "not a directory the walk reads (absent, a file, or under a skipped directory)".to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,8 +244,12 @@ fn walk_dir(
     roots: &mut Vec<ProjectRoot>,
     counts: &mut GateCounts,
     json: &mut JsonAdmission,
+    declared: &mut DeclaredDirs,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
+    if !declared.wanted.is_empty() {
+        declared.enter(&dir.strip_prefix(root).unwrap_or(dir).to_string_lossy());
+    }
     // Sort by name: read_dir yields filesystem/inode order, which leaked into
     // node/edge Vec order (and so shard bytes) — stable-ish on one machine,
     // not reproducible across machines or after file churn (audit 2026-06-10).
@@ -175,7 +287,12 @@ fn walk_dir(
             // dropping it or emitting a node per file inside. The rules live in
             // `code_domain::walk_gating` so `store::is_gmap_stale` scans exactly
             // this tree. (glia-v2 G1/G2/G10, A8.1)
-            let gate = walk_gating::gate_dir(&path, &name, ignores.is_ignored(&path, true));
+            let gate = walk_gating::gate_dir(
+                &path,
+                &name,
+                ignores.is_ignored(&path, true),
+                ignores.is_excluded(&path, true),
+            );
             counts.record(gate);
             if let Some(provenance) = gate.collapse() {
                 let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -190,7 +307,7 @@ fn walk_dir(
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, files, regions, md, roots, counts, json);
+            walk_dir(root, &path, ignores, files, regions, md, roots, counts, json, declared);
             if pushed {
                 ignores.pop();
             }
@@ -198,7 +315,9 @@ fn walk_dir(
             // File-level gitignore: committed-but-ignored output (`*.min.js`,
             // `*_pb2.py`) beside authored source never reaches a parser. Before
             // the markdown branch, so an ignored doc is not ingested either.
-            if ignores.skip_file(&path) {
+            // A user `[walk] skip` file (LF.3a) is dropped the same way, and
+            // first, like its directory verdict in `gate_dir`.
+            if ignores.exclude_file(&path) || ignores.skip_file(&path) {
                 continue;
             }
             let rel = path.strip_prefix(root).unwrap_or(&path);
@@ -1026,6 +1145,68 @@ mod walk_tests {
         assert!(files.iter().any(|(p, _)| p == "pkg/.ai/repo-graph/other.py"), "{files:?}");
         assert!(files.iter().all(|(p, _)| !p.contains(".glia")), "{files:?}");
         assert!(regions.is_empty(), "{}", regions.len());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LF.3a: `[[project]]` roots merge into the detected ones. A detected
+    /// manifest at the same path wins, and a path the walk never entered
+    /// (under a collapsed region, or absent) never becomes a root.
+    #[test]
+    fn declared_roots_extend_and_never_enter_a_region() {
+        let root = walk_tmp("declared");
+        for d in ["tools/migrator", "svc/api", "node_modules/pkg", "legacy/tool", ".glia"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("tools/migrator/run.py"), "def migrate():\n    return 2\n").unwrap();
+        std::fs::write(root.join("svc/api/pyproject.toml"), "[project]\nname = \"api-svc\"\n").unwrap();
+        std::fs::write(
+            root.join(".glia/overlay.toml"),
+            concat!(
+                "version = 1\n[walk]\nskip = [\"legacy\"]\n",
+                "[[project]]\npath = \"./tools/migrator/\"\nlabel = \"migrator\"\n",
+                "[[project]]\npath = \"svc/api\"\nlabel = \"declared-api\"\n",
+                "[[project]]\npath = \"node_modules/pkg\"\n",
+                "[[project]]\npath = \"legacy/tool\"\n",
+                "[[project]]\npath = \"nowhere\"\n",
+            ),
+        )
+        .unwrap();
+
+        let (files, regions, _md, roots) = walk_source_files(&root);
+        let got: Vec<(&str, &str, &str, &str)> = roots
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.label.as_str(), r.ecosystem, r.manifest.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("svc/api", "api-svc", "python", "svc/api/pyproject.toml"),
+                ("tools/migrator", "migrator", "declared", ".glia/overlay.toml"),
+            ],
+            "sorted by path; the manifest shadows the declaration"
+        );
+        assert!(files.iter().any(|(p, _)| p == "tools/migrator/run.py"), "{files:?}");
+        let legacy = regions.iter().find(|r| r.rel_path == "legacy").expect("legacy region");
+        assert_eq!(legacy.provenance, Collapse::Excluded);
+        assert_eq!(
+            missing_reason("legacy/tool", &regions),
+            "inside region legacy (excluded)"
+        );
+        assert_eq!(
+            missing_reason("node_modules/pkg", &regions),
+            "inside region node_modules (vendored)"
+        );
+        assert!(missing_reason("nowhere", &regions).starts_with("not a directory"));
+
+        // The tally behind `[roots] declared=`, recomputed over the same walk.
+        let cfg = glia_config::load(&root).expect("overlay").config;
+        let mut declared = DeclaredDirs::new(&cfg.project);
+        for rel in ["", "svc", "svc/api", "tools", "tools/migrator"] {
+            declared.enter(rel);
+        }
+        let mut detected = vec![ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", None)];
+        let n = merge_declared_roots(&cfg.project, &declared, &regions, &mut detected);
+        assert_eq!(n, DeclaredCounts { added: 1, shadowed: 1, missing: 3 });
         let _ = std::fs::remove_dir_all(&root);
     }
 

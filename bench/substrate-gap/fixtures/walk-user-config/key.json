@@ -1,0 +1,21 @@
+{
+  "framework": "walk-user-config",
+  "language": "python",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "PROJECT",  "name": "project:tools/migrator", "note": "[[project]] path=tools/migrator: a manifest-less sub-project, ORIGIN ecosystem declared, nav name = label migrator"},
+    {"kind": "REGION",   "name": "region:legacy",          "note": "[walk] skip=[\"legacy\"]: the directory is a REGION anchor with ORIGIN provenance excluded, not parsed"},
+    {"kind": "FUNCTION", "name": "main",                   "note": "control: app.py is still parsed"},
+    {"kind": "FUNCTION", "name": "migrate",                "note": "control: a declared root is still walked and parsed"}
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {"kind": "REGION",  "node": "region:legacy",          "cell": "ORIGIN", "contains": "\"provenance\":\"excluded\"", "note": "a user skip records its own provenance, not build_output"},
+    {"kind": "PROJECT", "node": "project:tools/migrator", "cell": "ORIGIN", "contains": "\"ecosystem\":\"declared\"", "note": "the declared ecosystem, manifest .glia/overlay.toml"}
+  ],
+  "forbid": [
+    {"kind": "MODULE",   "name": "legacy::old",               "note": "the skipped tree is never parsed"},
+    {"kind": "FUNCTION", "name": "legacy::old::legacy_thing", "note": "the skipped tree is never parsed"}
+  ],
+  "note": "LF.3a - .glia/overlay.toml user config: [walk] skip extends the walk's gates (a skipped DIRECTORY is a REGION with ORIGIN provenance excluded; a skipped file is not read) and [[project]] declares a manifest-less sub-project as a PROJECT node. Baseline 2026-09-19 (HEAD 5b73542, installed wheel = HEAD code): .glia/overlay.toml is ignored - legacy/old.py is parsed, no PROJECT for tools/migrator."
+}

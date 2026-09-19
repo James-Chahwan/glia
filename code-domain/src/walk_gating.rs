@@ -19,6 +19,12 @@
 //! independent. Both consumers push/pop the same per-directory layers, so they
 //! agree on nested `.gitignore` files, negation, anchoring and globs too (A8.2).
 //!
+//! The user's `[walk] skip` patterns (`.glia/overlay.toml`, LF.3a) ride the same
+//! stack: both consumers build it through [`IgnoreStack::with_config`] (the
+//! store via [`IgnoreStack::for_repo`]), so a user skip gates the freshness scan
+//! exactly as it gates the walk. A skipped directory is a REGION with the
+//! `excluded` provenance; a skipped file is simply not read.
+//!
 //! The same `.git` reading also answers "which repository is this?" for the
 //! build: [`repo_identity`] turns a checkout into a path-independent key (its
 //! normalised git remote, its git dir, or its directory name) that the engine
@@ -44,6 +50,9 @@ pub enum Collapse {
     Worktree,
     /// Some other repository's tree: a `.git` DIRECTORY.
     NestedRepo,
+    /// A `[walk] skip` pattern in `.glia/overlay.toml` matches it: the user told
+    /// glia not to read it (LF.3a).
+    Excluded,
 }
 
 impl Collapse {
@@ -56,6 +65,7 @@ impl Collapse {
             Collapse::Submodule => "submodule",
             Collapse::Worktree => "worktree",
             Collapse::NestedRepo => "nested_repo",
+            Collapse::Excluded => "excluded",
         }
     }
 }
@@ -80,6 +90,8 @@ pub enum Gate {
     Dotnet(Collapse),
     /// It carries its own `.git`, so it is another repo's tree.
     Nested(Collapse),
+    /// A user `[walk] skip` pattern matches it (LF.3a).
+    Config(Collapse),
 }
 
 impl Gate {
@@ -92,7 +104,8 @@ impl Gate {
             | Gate::Ignored(c)
             | Gate::Bundle(c)
             | Gate::Dotnet(c)
-            | Gate::Nested(c) => Some(c),
+            | Gate::Nested(c)
+            | Gate::Config(c) => Some(c),
         }
     }
 }
@@ -148,6 +161,12 @@ pub fn always_region(name: &str) -> Option<Collapse> {
 ///
 /// Every failure (unreadable file, bad glob) is logged and degrades to "not
 /// ignored" — a malformed `.gitignore` must never sink a build.
+///
+/// The user's `[walk] skip` matcher (LF.3a) is held beside the `.gitignore`
+/// layers but answered separately ([`IgnoreStack::is_excluded`]): it only ever
+/// ADDS a skip, so a `!pattern` there cannot un-ignore a gitignored path, and
+/// [`gate_dir`] checks it before every name rule, so it cannot un-collapse one
+/// either.
 #[derive(Default, Clone)]
 pub struct IgnoreStack {
     /// `(directory as the walker spelled it, its matcher)`. The directory is
@@ -155,15 +174,106 @@ pub struct IgnoreStack {
     /// root, and the under-root guard in `is_ignored` must compare like with
     /// like.
     layers: Vec<(PathBuf, Arc<Gitignore>)>,
+    /// The root-anchored `[walk] skip` matcher, `None` without one. One `Arc`,
+    /// so the per-directory clones in the store's scan stay pointer copies.
+    config: Option<Arc<ConfigSkip>>,
     /// `.gitignore` files successfully loaded.
     pub files: usize,
     /// Ignore + whitelist globs across every loaded file.
     pub patterns: usize,
     /// FILES (not directories) skipped because a pattern matched them.
     pub skipped_files: usize,
+    /// `[walk] skip` patterns in the config matcher.
+    pub config_patterns: usize,
+    /// FILES (not directories) skipped because a `[walk] skip` pattern matched.
+    pub excluded_files: usize,
+}
+
+/// The user's `[walk] skip` patterns compiled into one matcher rooted at the
+/// repo root.
+struct ConfigSkip {
+    /// The repo root as the walker spelled it (see `IgnoreStack::layers`).
+    root: PathBuf,
+    matcher: Gitignore,
 }
 
 impl IgnoreStack {
+    /// An empty stack carrying the user's `[walk] skip` patterns (LF.3a).
+    ///
+    /// Gitignore syntax and semantics, relative to `root` (the repo root,
+    /// spelled the way the walker spells the paths below it): a pattern with no
+    /// slash (`legacy`, `*.gen.py`) matches that name at ANY depth, one with a
+    /// leading or inner slash (`/legacy`, `tools/old`) only at that path from
+    /// the root, and a trailing slash (`fixtures/`) only directories. A `!`
+    /// line re-includes only against the config's own earlier patterns: it
+    /// never un-skips a hard skip, a collapsed region or a gitignored path.
+    ///
+    /// The loader (`glia_config::load`) has already compiled every pattern
+    /// with the same `add_line`, so none fails here. A matcher that fails to
+    /// build is reported and leaves the stack without config skips.
+    pub fn with_config(root: &Path, walk: &crate::glia_config::WalkConfig) -> Self {
+        let mut stack = Self::default();
+        if walk.skip.is_empty() {
+            return stack;
+        }
+        let mut builder = GitignoreBuilder::new(root);
+        for pattern in &walk.skip {
+            // Already validated by the loader; a failure here drops the line.
+            let _ = builder.add_line(None, pattern);
+        }
+        match builder.build() {
+            Ok(matcher) => {
+                stack.config_patterns = matcher.num_ignores() as usize + matcher.num_whitelists() as usize;
+                if !matcher.is_empty() {
+                    stack.config = Some(Arc::new(ConfigSkip { root: root.to_path_buf(), matcher }));
+                }
+            }
+            Err(e) => eprintln!("[walk] warning: {} [walk] skip: {e}", crate::glia_config::OVERLAY_FILE),
+        }
+        stack
+    }
+
+    /// [`with_config`](Self::with_config) on the repo's own
+    /// `.glia/overlay.toml`, loaded silently: the build reports loader errors,
+    /// never a freshness check. What the store's scan constructs, so it gates
+    /// exactly what the walk gates.
+    pub fn for_repo(root: &Path) -> Self {
+        match crate::glia_config::load(root) {
+            Some(loaded) => Self::with_config(root, &loaded.config.walk),
+            None => Self::default(),
+        }
+    }
+
+    /// True when a user `[walk] skip` pattern matches `path` (the child path
+    /// as the walker built it, under the root given to
+    /// [`with_config`](Self::with_config)).
+    pub fn is_excluded(&self, path: &Path, is_dir: bool) -> bool {
+        let Some(cfg) = &self.config else { return false };
+        // `matched_path_or_any_parents` ASSERTS the path is under the root.
+        if !path.starts_with(&cfg.root) {
+            return false;
+        }
+        cfg.matcher.matched_path_or_any_parents(path, is_dir).is_ignore()
+    }
+
+    /// [`is_excluded`](Self::is_excluded) for a FILE, counting the skip for
+    /// [`config_marker`](Self::config_marker).
+    pub fn exclude_file(&mut self, path: &Path) -> bool {
+        let hit = self.is_excluded(path, false);
+        if hit {
+            self.excluded_files += 1;
+        }
+        hit
+    }
+
+    /// `config skip 2 patterns, excluded 1 files`
+    pub fn config_marker(&self) -> String {
+        format!(
+            "config skip {} patterns, excluded {} files",
+            self.config_patterns, self.excluded_files
+        )
+    }
+
     /// Push `dir`'s own `.gitignore` if it has one. Returns true when a layer
     /// was pushed — the caller MUST [`pop`](Self::pop) after descending.
     ///
@@ -652,12 +762,13 @@ fn scp_split(url: &str) -> Option<(&str, &str)> {
 }
 
 /// One decision for a CHILD directory. Precedence, first match wins:
-/// hard-skip -> nested repo -> always-region -> `ignored` -> dotnet -> bundle
-/// -> descend.
+/// hard-skip -> nested repo -> `excluded` -> always-region -> `ignored` ->
+/// dotnet -> bundle -> descend.
 ///
 /// `ignored` is the caller's `.gitignore` verdict for this directory
-/// ([`IgnoreStack::is_ignored`] with `is_dir = true`).
-pub fn gate_dir(dir: &Path, name: &str, ignored: bool) -> Gate {
+/// ([`IgnoreStack::is_ignored`] with `is_dir = true`); `excluded` its user
+/// `[walk] skip` verdict ([`IgnoreStack::is_excluded`], LF.3a).
+pub fn gate_dir(dir: &Path, name: &str, ignored: bool, excluded: bool) -> Gate {
     if is_hard_skip(name) {
         return Gate::HardSkip;
     }
@@ -665,6 +776,12 @@ pub fn gate_dir(dir: &Path, name: &str, ignored: bool) -> Gate {
     // and its provenance is the more useful fact.
     if let Some(c) = nested_repo(dir) {
         return Gate::Nested(c);
+    }
+    // A user skip is the more specific fact than a name rule: `vendor` that
+    // the config names is recorded as `excluded`, not `vendored`. It can only
+    // add a collapse: it is never asked to descend.
+    if excluded {
+        return Gate::Config(Collapse::Excluded);
     }
     if let Some(c) = always_region(name) {
         return Gate::Always(c);
@@ -686,7 +803,9 @@ pub fn gate_dir(dir: &Path, name: &str, ignored: bool) -> Gate {
 /// (a hard-skipped directory produces no node at all, so not even its own mtime
 /// is observable), which is why that case is NOT folded in here.
 pub fn dir_is_gated(dir: &Path, name: &str, ignores: &IgnoreStack) -> bool {
-    gate_dir(dir, name, ignores.is_ignored(dir, true)).collapse().is_some()
+    gate_dir(dir, name, ignores.is_ignored(dir, true), ignores.is_excluded(dir, true))
+        .collapse()
+        .is_some()
 }
 
 /// Per-rule collapse tally behind the `[walk]` marker.
@@ -697,6 +816,8 @@ pub struct GateCounts {
     pub bundle: usize,
     pub dotnet: usize,
     pub nested: usize,
+    /// User `[walk] skip` collapses (LF.3a).
+    pub config: usize,
 }
 
 impl GateCounts {
@@ -708,23 +829,25 @@ impl GateCounts {
             Gate::Bundle(_) => self.bundle += 1,
             Gate::Dotnet(_) => self.dotnet += 1,
             Gate::Nested(_) => self.nested += 1,
+            Gate::Config(_) => self.config += 1,
         }
     }
 
     pub fn total(&self) -> usize {
-        self.always + self.gitignore + self.bundle + self.dotnet + self.nested
+        self.always + self.gitignore + self.bundle + self.dotnet + self.nested + self.config
     }
 
-    /// `collapsed 5 regions (always=2 gitignore=1 bundle=0 dotnet=1 nested=1)`
+    /// `collapsed 5 regions (always=2 gitignore=1 bundle=0 dotnet=1 nested=1 config=0)`
     pub fn marker(&self) -> String {
         format!(
-            "collapsed {} regions (always={} gitignore={} bundle={} dotnet={} nested={})",
+            "collapsed {} regions (always={} gitignore={} bundle={} dotnet={} nested={} config={})",
             self.total(),
             self.always,
             self.gitignore,
             self.bundle,
             self.dotnet,
-            self.nested
+            self.nested,
+            self.config
         )
     }
 }
@@ -747,7 +870,7 @@ mod tests {
         // LF.1d: glia's control dir, by name at any depth; only the exact name.
         assert!(is_hard_skip(CONTROL_DIR) && is_hard_skip(".glia"));
         assert!(!is_hard_skip(".glia2") && !is_hard_skip("glia"));
-        assert_eq!(gate_dir(Path::new("r/.glia"), ".glia", true), Gate::HardSkip);
+        assert_eq!(gate_dir(Path::new("r/.glia"), ".glia", true, true), Gate::HardSkip);
         assert_eq!(always_region("node_modules"), Some(Collapse::Vendored));
         assert_eq!(always_region("TestResults"), Some(Collapse::BuildOutput));
         assert_eq!(always_region("src"), None);
@@ -763,17 +886,17 @@ mod tests {
         std::fs::create_dir_all(root.join("obj")).unwrap();
         // No project file anywhere: a Python repo's bin/ of console scripts.
         assert_eq!(dotnet_build_dir(&root.join("bin"), "bin"), None);
-        assert_eq!(gate_dir(&root.join("bin"), "bin", false), Gate::Descend);
+        assert_eq!(gate_dir(&root.join("bin"), "bin", false, false), Gate::Descend);
         // obj/project.assets.json is MSBuild's own marker — evidence on its own.
         std::fs::write(root.join("obj/project.assets.json"), "{}").unwrap();
         assert_eq!(
-            gate_dir(&root.join("obj"), "obj", false),
+            gate_dir(&root.join("obj"), "obj", false, false),
             Gate::Dotnet(Collapse::BuildOutput)
         );
         // A project sibling covers bin/ too.
         std::fs::write(root.join("Api.csproj"), "<Project/>").unwrap();
         assert_eq!(
-            gate_dir(&root.join("bin"), "bin", false),
+            gate_dir(&root.join("bin"), "bin", false, false),
             Gate::Dotnet(Collapse::BuildOutput)
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -786,15 +909,15 @@ mod tests {
         std::fs::create_dir_all(&sub).unwrap();
         assert_eq!(nested_repo(&sub), None);
         std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/sdk\n").unwrap();
-        assert_eq!(gate_dir(&sub, "sdk", false), Gate::Nested(Collapse::Submodule));
+        assert_eq!(gate_dir(&sub, "sdk", false, false), Gate::Nested(Collapse::Submodule));
         std::fs::write(sub.join(".git"), "gitdir: /repo/.git/worktrees/wt\n").unwrap();
-        assert_eq!(gate_dir(&sub, "sdk", false), Gate::Nested(Collapse::Worktree));
+        assert_eq!(gate_dir(&sub, "sdk", false, false), Gate::Nested(Collapse::Worktree));
         // Unparsable content still means "another repo's tree".
         std::fs::write(sub.join(".git"), "garbage\n").unwrap();
         assert_eq!(nested_repo(&sub), Some(Collapse::Submodule));
         std::fs::remove_file(sub.join(".git")).unwrap();
         std::fs::create_dir_all(sub.join(".git")).unwrap();
-        assert_eq!(gate_dir(&sub, "sdk", false), Gate::Nested(Collapse::NestedRepo));
+        assert_eq!(gate_dir(&sub, "sdk", false, false), Gate::Nested(Collapse::NestedRepo));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -931,8 +1054,103 @@ mod tests {
         assert_eq!(c.total(), 2);
         assert_eq!(
             c.marker(),
-            "collapsed 2 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0)"
+            "collapsed 2 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=0)"
         );
+        c.record(Gate::Config(Collapse::Excluded));
+        assert_eq!(
+            c.marker(),
+            "collapsed 3 regions (always=0 gitignore=0 bundle=0 dotnet=2 nested=0 config=1)"
+        );
+        assert_eq!(Collapse::Excluded.provenance(), "excluded");
+    }
+
+    fn walk_cfg(skip: &[&str]) -> crate::glia_config::WalkConfig {
+        crate::glia_config::WalkConfig { skip: skip.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// LF.3a: `[walk] skip` is gitignore syntax rooted at the repo root.
+    #[test]
+    fn config_skip_is_root_anchored_gitignore_syntax() {
+        let root = tmp("cfg_anchor");
+        let st = IgnoreStack::with_config(&root, &walk_cfg(&["legacy", "/tools/old", "*.gen.py", "fixtures/"]));
+        assert_eq!(st.config_patterns, 4);
+        // No slash: any depth, directory or file.
+        assert!(st.is_excluded(&root.join("legacy"), true));
+        assert!(st.is_excluded(&root.join("pkg/legacy"), true));
+        assert!(st.is_excluded(&root.join("legacy/old.py"), false), "a file under a skipped dir");
+        // A slash anchors at the root only.
+        assert!(st.is_excluded(&root.join("tools/old"), true));
+        assert!(!st.is_excluded(&root.join("pkg/tools/old"), true));
+        // Globs, and a trailing slash that only matches directories.
+        assert!(st.is_excluded(&root.join("src/api.gen.py"), false));
+        assert!(!st.is_excluded(&root.join("src/api.py"), false));
+        assert!(st.is_excluded(&root.join("fixtures"), true));
+        assert!(!st.is_excluded(&root.join("fixtures"), false));
+        // Outside the root: no say (the crate would assert).
+        assert!(!st.is_excluded(Path::new("/definitely/elsewhere/legacy"), true));
+        // The gitignore half of the stack is untouched by config patterns.
+        assert!(!st.is_ignored(&root.join("legacy"), true));
+        // No patterns: no matcher, nothing excluded.
+        let none = IgnoreStack::with_config(&root, &walk_cfg(&[]));
+        assert!(!none.is_excluded(&root.join("legacy"), true));
+        assert_eq!(none.config_patterns, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LF.3a: config only adds skips. It outranks the name rules (the more
+    /// specific fact) but never un-skips a hard skip, un-collapses a region or
+    /// re-includes a gitignored path.
+    #[test]
+    fn config_skip_extends_never_replaces() {
+        let root = tmp("cfg_extend");
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::create_dir_all(root.join("gen")).unwrap();
+        std::fs::write(root.join(".gitignore"), "/gen\n").unwrap();
+        let mut st = IgnoreStack::with_config(&root, &walk_cfg(&["!node_modules", "!gen", "vendor"]));
+        assert!(st.push_dir(&root));
+        assert!(!st.is_excluded(&root.join("node_modules"), true));
+        assert!(dir_is_gated(&root.join("node_modules"), "node_modules", &st), "still vendored");
+        assert!(dir_is_gated(&root.join("gen"), "gen", &st), "still gitignored");
+        assert_eq!(
+            gate_dir(&root.join("node_modules"), "node_modules", false, st.is_excluded(&root.join("node_modules"), true)),
+            Gate::Always(Collapse::Vendored)
+        );
+        // The more specific fact: a user skip on `vendor` records `excluded`.
+        assert_eq!(gate_dir(&root.join("vendor"), "vendor", false, true), Gate::Config(Collapse::Excluded));
+        assert_eq!(gate_dir(&root.join("gen"), "gen", true, true), Gate::Config(Collapse::Excluded));
+        // A hard skip and another repo's tree keep their own verdicts.
+        assert_eq!(gate_dir(&root.join(".git"), ".git", false, true), Gate::HardSkip);
+        let sub = root.join("sdk");
+        std::fs::create_dir_all(sub.join(".git")).unwrap();
+        assert_eq!(gate_dir(&sub, "sdk", false, true), Gate::Nested(Collapse::NestedRepo));
+        // File skips are counted for the marker.
+        let mut cfg = IgnoreStack::with_config(&root, &walk_cfg(&["*.gen.py"]));
+        assert!(cfg.exclude_file(&root.join("a.gen.py")));
+        assert!(!cfg.exclude_file(&root.join("a.py")));
+        assert_eq!(cfg.config_marker(), "config skip 1 patterns, excluded 1 files");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LF.3a: `for_repo` reads the repo's own `.glia/overlay.toml`, silently,
+    /// and a clone of the stack shares the one matcher.
+    #[test]
+    fn for_repo_loads_the_overlay_walk_section() {
+        let root = tmp("cfg_repo");
+        assert!(!IgnoreStack::for_repo(&root).is_excluded(&root.join("legacy"), true), "no file");
+        std::fs::create_dir_all(root.join(".glia")).unwrap();
+        std::fs::write(root.join(".glia/overlay.toml"), "version = 1\n[walk]\nskip = [\"legacy\"]\n").unwrap();
+        let st = IgnoreStack::for_repo(&root);
+        assert!(st.is_excluded(&root.join("legacy"), true));
+        assert!(dir_is_gated(&root.join("legacy"), "legacy", &st));
+        let copy = st.clone();
+        assert!(Arc::ptr_eq(
+            st.config.as_ref().expect("matcher"),
+            copy.config.as_ref().expect("matcher")
+        ));
+        // A file the loader rejects as a whole (no version) skips nothing.
+        std::fs::write(root.join(".glia/overlay.toml"), "[walk]\nskip = [\"legacy\"]\n").unwrap();
+        assert!(!IgnoreStack::for_repo(&root).is_excluded(&root.join("legacy"), true));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn write(dir: &Path, rel: &str, body: &str) {

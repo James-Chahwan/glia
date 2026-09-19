@@ -1,0 +1,8 @@
+version = 1
+
+[walk]
+skip = ["legacy"]
+
+[[project]]
+path = "tools/migrator"
+label = "migrator"

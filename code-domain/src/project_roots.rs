@@ -56,7 +56,30 @@ impl ProjectRoot {
             manifest,
         }
     }
+
+    /// A `[[project]]` root declared in `.glia/overlay.toml` (LF.3a):
+    /// ecosystem [`DECLARED_ECOSYSTEM`], manifest the overlay file itself.
+    /// `rel_path` is the loader's normalised path (`ProjectDecl::rel_path`).
+    /// The label falls back like [`ProjectRoot::new`]: the declared label when
+    /// it passes the manifest-label rules (no `::`, `${` or control chars, at
+    /// most 200 chars), else the basename of `rel_path`, else `"root"`.
+    pub fn declared(rel_path: String, label: Option<&str>) -> Self {
+        let label = label
+            .and_then(clean_label)
+            .or_else(|| rel_path.rsplit('/').next().and_then(clean_label))
+            .unwrap_or_else(|| "root".to_string());
+        Self {
+            rel_path,
+            label,
+            ecosystem: DECLARED_ECOSYSTEM,
+            manifest: crate::glia_config::OVERLAY_FILE.to_string(),
+        }
+    }
 }
+
+/// The ecosystem of a `[[project]]` root declared in `.glia/overlay.toml`
+/// (LF.3a) rather than found by a manifest.
+pub const DECLARED_ECOSYSTEM: &str = "declared";
 
 /// Manifest basename → ecosystem, in precedence order. The first entry present
 /// (and confirmed, see [`confirms`]) decides the ecosystem; ties never happen
@@ -733,5 +756,20 @@ mod tests {
         assert_eq!(project_name(&tmp.0), Some("q".to_string()));
 
         assert_eq!(project_name(Path::new("/")), None);
+    }
+
+    /// LF.3a: a `[[project]]` root names the overlay file as its manifest and
+    /// falls back to the basename when the label breaks the label rules.
+    #[test]
+    fn declared_roots_carry_the_overlay_as_manifest() {
+        let r = ProjectRoot::declared("tools/migrator".into(), Some("migrator"));
+        assert_eq!(
+            (r.rel_path.as_str(), r.label.as_str(), r.ecosystem, r.manifest.as_str()),
+            ("tools/migrator", "migrator", "declared", ".glia/overlay.toml")
+        );
+        assert_eq!(ProjectRoot::declared("tools/migrator".into(), None).label, "migrator");
+        assert_eq!(ProjectRoot::declared("svc/api".into(), Some("a::b")).label, "api");
+        assert_eq!(ProjectRoot::declared("svc/api".into(), Some("  Billing  ")).label, "Billing");
+        assert_eq!(marker(&[r]), "1 project roots (declared=1)");
     }
 }
