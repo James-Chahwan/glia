@@ -70,6 +70,7 @@ LANDED = {
     33: "LD.11b",
     34: "LG.7 LG.5a LG.4b",
     35: "LG.10 LG.5b",
+    36: "LG.8",
 }
 
 ITEM_RE = re.compile(r"^(L[A-G]\.\d+)$")
