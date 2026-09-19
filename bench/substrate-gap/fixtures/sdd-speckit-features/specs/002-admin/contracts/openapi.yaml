@@ -1,0 +1,19 @@
+openapi: 3.0.3
+info:
+  title: Admin
+  version: 1.0.0
+paths:
+  /orders:
+    get:
+      operationId: adminListOrders
+      summary: List every order (admin view)
+      responses:
+        '200':
+          description: ok
+  /admin/purge:
+    post:
+      operationId: purge
+      summary: Purge cancelled orders
+      responses:
+        '204':
+          description: purged

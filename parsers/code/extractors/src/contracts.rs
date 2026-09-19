@@ -31,6 +31,8 @@
 //! Parsers EXTRACT — nothing here resolves anything; pairing operations with
 //! routes is the graph crate's job.
 
+use std::collections::BTreeSet;
+
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -50,15 +52,22 @@ pub struct ContractNodes {
     /// LE.10b: what the SCHEMA_FIELDS cells on this file's ops hold. Zero for
     /// a file whose ops declare no body shape, and for `openapi_annot`.
     pub field_stats: FieldStats,
+    /// LE.9a: the feature this file's ops are declared for — the `<f>` of a
+    /// quokka `features/<f>/feature.yaml`, or the `<NNN-slug>` of a spec-kit
+    /// `specs/<NNN-slug>/contracts/` file. `None` for every other contract.
+    pub feature: Option<String>,
 }
 
 /// The contract formats `extract_yaml_contracts` / `extract_json_contract`
-/// recognise. `Pact` only ever comes from JSON: Pact has no yaml form.
+/// recognise. `Pact` only ever comes from JSON: Pact has no yaml form, and
+/// `FeatureYaml` (LE.9a, a quokka feature's `backend_routes` list) only ever
+/// comes from yaml.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContractSource {
     OpenApi,
     AsyncApi,
     Pact,
+    FeatureYaml,
 }
 
 /// Per-build counters behind the `[contract]` marker. All four fields exist now
@@ -78,6 +87,15 @@ pub struct ContractCounts {
     pub fields: usize,
     pub refs_resolved: usize,
     pub refs_external: usize,
+    /// LE.9a: ops from quokka `features/<f>/feature.yaml` `backend_routes`
+    /// lists, and the distinct features that declared at least one.
+    pub feature_yaml: usize,
+    pub feature_yaml_features: BTreeSet<String>,
+    /// LE.9a: ops (of any format) from spec-kit `specs/<NNN-slug>/contracts/`
+    /// files — already counted under their format too — and the distinct
+    /// feature slugs that declared at least one.
+    pub speckit: usize,
+    pub speckit_features: BTreeSet<String>,
 }
 
 impl ContractCounts {
@@ -92,7 +110,16 @@ impl ContractCounts {
             Some(ContractSource::OpenApi) => self.openapi += n,
             Some(ContractSource::AsyncApi) => self.asyncapi += n,
             Some(ContractSource::Pact) => self.pact += n,
+            Some(ContractSource::FeatureYaml) => self.feature_yaml += n,
             None => return,
+        }
+        if let Some(feature) = &out.feature {
+            if out.source == Some(ContractSource::FeatureYaml) {
+                self.feature_yaml_features.insert(feature.clone());
+            } else {
+                self.speckit += n;
+                self.speckit_features.insert(feature.clone());
+            }
         }
         self.files += 1;
         let f = out.field_stats;
@@ -797,10 +824,20 @@ pub fn extract_yaml_contracts(
     repo: RepoId,
 ) -> ContractNodes {
     let mut out = ContractNodes::default();
+    // LE.9a: a quokka feature list is gated on its path first, so every other
+    // yaml pays one path split and goes on to the sniff.
+    if let Some(feature) = feature_dir(path)
+        && let Some(decls) = scan_feature_yaml(source)
+    {
+        out.source = Some(ContractSource::FeatureYaml);
+        out.feature = Some(feature.to_string());
+        emit_feature_yaml(&mut out, decls, feature, path, module_id, repo);
+        return out;
+    }
     let Some(kind) = sniff(source) else {
         return out;
     };
-    let stem = file_stem(path);
+    let stem = scoped_stem(&mut out, path);
     // LE.10b: the field reader walks the whole document, built once per file
     // and only when the file declares an op to read fields for.
     let tree = |empty: bool| (!empty).then(|| yaml_document(source));
@@ -809,13 +846,13 @@ pub fn extract_yaml_contracts(
             out.source = Some(ContractSource::OpenApi);
             let ops = scan_openapi(source);
             let doc = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, doc.as_ref(), stem, path, module_id, repo);
+            emit_openapi(&mut out, ops, doc.as_ref(), &stem, path, module_id, repo);
         }
         Sniffed::AsyncApi => {
             out.source = Some(ContractSource::AsyncApi);
             let ops = scan_asyncapi(source);
             let doc = tree(ops.is_empty());
-            emit_asyncapi(&mut out, ops, doc.as_ref(), stem, path, module_id, repo);
+            emit_asyncapi(&mut out, ops, doc.as_ref(), &stem, path, module_id, repo);
         }
     }
     out
@@ -827,6 +864,214 @@ pub(crate) fn file_stem(path: &str) -> &str {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("spec")
+}
+
+// ----------------------------------------------------------------------
+// LE.9a — feature-scoped declarations
+// ----------------------------------------------------------------------
+//
+// Spec-driven repos declare their API per FEATURE. spec_status needs every
+// declared op attributed to the feature that declared it, so:
+//  - spec-kit puts each feature's contracts in `specs/<NNN-slug>/contracts/`,
+//    and every one of those files is typically named `openapi.yaml`. Keyed by
+//    the file stem alone, two features declaring the same op collided into one
+//    NodeId; the stem segment is qualified by the feature instead.
+//  - quokka lists a feature's routes in `features/<f>/feature.yaml` under
+//    `backend_routes:`, items `- METHOD /path  # note`, optionally grouped
+//    under `protected:` / `public:`. Each item is an HTTP op with the node
+//    shape every other contract format emits, so the engine's contract-link
+//    pass pairs it with its ROUTE unchanged.
+
+/// The spec-kit feature a contract file is declared under: `001-orders` for
+/// `specs/001-orders/contracts/openapi.yaml` (or any file deeper inside that
+/// `contracts/`). `None` outside that layout.
+fn speckit_feature(path: &str) -> Option<&str> {
+    let segs: Vec<&str> = path.split(['/', '\\']).collect();
+    // A window of four: `specs`, the slug, `contracts`, and at least the file.
+    segs.windows(4)
+        .find(|w| w[0] == "specs" && is_speckit_slug(w[1]) && w[2] == "contracts")
+        .map(|w| w[1])
+}
+
+/// `^\d{3,}-[a-z0-9][a-z0-9-]*$`: spec-kit's numbered feature directory.
+fn is_speckit_slug(seg: &str) -> bool {
+    let digits = seg.bytes().take_while(u8::is_ascii_digit).count();
+    let Some(rest) = seg.get(digits..).and_then(|r| r.strip_prefix('-')) else {
+        return false;
+    };
+    let slug_byte = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    digits >= 3
+        && rest.bytes().next().is_some_and(slug_byte)
+        && rest.bytes().all(|b| slug_byte(b) || b == b'-')
+}
+
+/// The qname segment `path`'s ops sit under: the file stem, qualified as
+/// `feature:<NNN-slug>:<stem>` inside a spec-kit feature, whose slug is also
+/// recorded on `out` for the ORIGIN cells and the `[sdd]` counters. A file
+/// outside that layout keeps its bare stem, byte for byte.
+fn scoped_stem(out: &mut ContractNodes, path: &str) -> String {
+    let stem = file_stem(path);
+    match speckit_feature(path) {
+        Some(slug) => {
+            out.feature = Some(slug.to_string());
+            format!("feature:{slug}:{stem}")
+        }
+        None => stem.to_string(),
+    }
+}
+
+/// `,"feature":"<slug>"` for an op declared under a feature, or nothing (the
+/// field is OMITTED, so an unscoped op's ORIGIN is unchanged).
+fn feature_field(feature: Option<&str>) -> String {
+    match feature {
+        Some(f) => format!(r#","feature":{}"#, json_str(f)),
+        None => String::new(),
+    }
+}
+
+/// `activities` for `features/activities/feature.yaml` (or `.yml`): the
+/// feature a quokka feature list declares, read off its path. `None` for any
+/// other file, so a `feature.yaml` outside a `features/` directory is never
+/// read as one.
+fn feature_dir(path: &str) -> Option<&str> {
+    let mut segs = path.rsplit(['/', '\\']);
+    let file = segs.next()?;
+    let feature = segs.next()?;
+    let parent = segs.next()?;
+    (matches!(file, "feature.yaml" | "feature.yml") && parent == "features" && !feature.is_empty())
+        .then_some(feature)
+}
+
+/// One `backend_routes` item of a quokka feature list.
+#[derive(Debug, PartialEq, Eq)]
+struct RouteDecl {
+    method: String,
+    /// As written, minus any `?query` suffix. `:param` placeholders stay
+    /// verbatim: the route matcher folds them.
+    path: String,
+    /// The group key the item sits under (`protected`, `public`, ...), if any.
+    group: Option<String>,
+    /// 0-indexed line of the item.
+    line: u32,
+}
+
+/// `METHOD /path` → the declared op; `None` for an item that is not one (a
+/// method outside the HTTP allow-list, a path not starting with `/`). A
+/// trailing ` # note` and surrounding quotes are dropped first.
+fn route_item(raw: &str) -> Option<(String, String)> {
+    let item = unquote(strip_comment(raw));
+    let mut parts = item.split_whitespace();
+    let method = parts.next()?;
+    let path = parts.next()?;
+    if !METHODS.iter().any(|m| m.eq_ignore_ascii_case(method)) {
+        return None;
+    }
+    let path = path.split('?').next().unwrap_or(path);
+    path.starts_with('/').then(|| (method.to_ascii_uppercase(), path.to_string()))
+}
+
+/// Line scan of a feature list's top-level `backend_routes:` block. `None`
+/// when the file declares no such key (it is then not a feature list at all);
+/// `Some(empty)` for `backend_routes: []` or a block of non-route items.
+///
+/// Items are `- METHOD /path` lines anywhere in the block, attributed to the
+/// top-level group key they sit under (`protected:` / `public:` / any other
+/// name), or to none when they sit directly under `backend_routes:`. A flow
+/// list (`[GET /a, POST /b]`) is read the same way, on the key's line. The
+/// first declaration of a `(METHOD, path)` wins; the rest of the file
+/// (`frontend_components:`, `data_model:`, ...) is never read.
+fn scan_feature_yaml(source: &str) -> Option<Vec<RouteDecl>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let start = lines.iter().position(|l| {
+        !is_skippable(l) && indent_of(l) == 0 && key_of(l) == Some("backend_routes")
+    })?;
+    let mut decls: Vec<RouteDecl> = Vec::new();
+    let push = |decls: &mut Vec<RouteDecl>, raw: &str, group: Option<&str>, line: usize| {
+        let Some((method, path)) = route_item(raw) else {
+            return;
+        };
+        if decls.len() >= MAX_OPS || decls.iter().any(|d| d.method == method && d.path == path) {
+            return;
+        }
+        decls.push(RouteDecl { method, path, group: group.map(str::to_string), line: line as u32 });
+    };
+    let flow = |v: &str| -> Vec<String> {
+        v.strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .map(|inner| inner.split(',').map(|i| unquote(i.trim()).to_string()).collect())
+            .unwrap_or_default()
+    };
+    for item in flow(value_of(lines[start])) {
+        push(&mut decls, &item, None, start);
+    }
+    // The indent of the block's first line: keys there are the group keys.
+    let mut child_indent: Option<usize> = None;
+    let mut group: Option<(usize, &str)> = None;
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        if is_skippable(line) {
+            continue;
+        }
+        let ind = indent_of(line);
+        let t = line.trim();
+        let item = list_rest(t);
+        // A top-level key ends the block; a list item at indent 0 is the
+        // compact form of `backend_routes:`'s own sequence.
+        if ind == 0 && item.is_none() {
+            break;
+        }
+        let child = *child_indent.get_or_insert(ind);
+        // A sequence may sit at its key's own indent (`protected:` / `- ...`),
+        // so only a shallower line, or another key at the group's indent,
+        // leaves the group.
+        if let Some((gi, _)) = group
+            && (ind < gi || (ind == gi && item.is_none()))
+        {
+            group = None;
+        }
+        if let Some(rest) = item {
+            push(&mut decls, rest, group.map(|(_, g)| g), i);
+            continue;
+        }
+        if ind == child
+            && let Some(key) = key_of(line)
+        {
+            group = Some((ind, key));
+            for item in flow(value_of(line)) {
+                push(&mut decls, &item, Some(key), i);
+            }
+        }
+    }
+    Some(decls)
+}
+
+/// One DOC_SECTION per `backend_routes` item: qname
+/// `contract::feature:<f>::<METHOD>:<path>`, ORIGIN
+/// `{provenance: contract, source: feature_yaml, feature, group?, method, path, raw_path}`.
+fn emit_feature_yaml(
+    out: &mut ContractNodes,
+    decls: Vec<RouteDecl>,
+    feature: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) {
+    for d in decls {
+        let qname = format!("contract::feature:{feature}::{}:{}", d.method, d.path);
+        let name = format!("{} {}", d.method, d.path);
+        let group = d
+            .group
+            .as_deref()
+            .map(|g| format!(r#","group":{}"#, json_str(g)))
+            .unwrap_or_default();
+        let origin = format!(
+            r#"{{"provenance":"contract","source":"feature_yaml"{}{group},"method":{},"path":{},"raw_path":{}}}"#,
+            feature_field(Some(feature)),
+            json_str(&d.method),
+            json_str(&d.path),
+            json_str(&d.path),
+        );
+        push_op(out, &qname, &name, None, path, d.line, origin, module_id, repo);
+    }
 }
 
 /// One DOC_SECTION per HTTP operation. The yaml and JSON paths both end here,
@@ -843,11 +1088,12 @@ fn emit_openapi(
     repo: RepoId,
 ) {
     let mut cx = doc.map(FieldCx::new);
+    let feature = feature_field(out.feature.as_deref());
     for op in ops {
         let qname = format!("contract::{stem}::{}:{}", op.method, op.path);
         let name = format!("{} {}", op.method, op.path);
         let origin = format!(
-            r#"{{"provenance":"contract","source":"openapi","method":"{}","path":"{}","raw_path":"{}"{}}}"#,
+            r#"{{"provenance":"contract","source":"openapi"{feature},"method":"{}","path":"{}","raw_path":"{}"{}}}"#,
             esc(&op.method),
             esc(&op.path),
             esc(&op.raw_path),
@@ -879,11 +1125,12 @@ fn emit_asyncapi(
     repo: RepoId,
 ) {
     let mut cx = doc.map(FieldCx::new);
+    let feature = feature_field(out.feature.as_deref());
     for op in ops {
         let qname = format!("contract::{stem}::{}:{}", op.action, op.channel);
         let name = format!("{} {}", op.action, op.channel);
         let origin = format!(
-            r#"{{"provenance":"contract","source":"asyncapi","action":"{}","channel":"{}"{}}}"#,
+            r#"{{"provenance":"contract","source":"asyncapi"{feature},"action":"{}","channel":"{}"{}}}"#,
             op.action,
             esc(&op.channel),
             operation_id_field(op.operation_id.as_deref())
@@ -1237,7 +1484,8 @@ pub fn extract_json_contract(
         return out;
     };
     let lines = LineIndex::new(source);
-    let stem = file_stem(path);
+    let stem = scoped_stem(&mut out, path);
+    let feature = feature_field(out.feature.as_deref());
     out.source = Some(kind);
     // LE.10b: the field reader walks an order-keeping tree (the `Value` map
     // above may be sorted), parsed only when there is an op to read.
@@ -1251,13 +1499,15 @@ pub fn extract_json_contract(
         ContractSource::OpenApi => {
             let ops = json_openapi_ops(source, &doc, &lines);
             let t = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, t.as_ref(), stem, path, module_id, repo);
+            emit_openapi(&mut out, ops, t.as_ref(), &stem, path, module_id, repo);
         }
         ContractSource::AsyncApi => {
             let ops = json_asyncapi_ops(source, &doc, &lines);
             let t = tree(ops.is_empty());
-            emit_asyncapi(&mut out, ops, t.as_ref(), stem, path, module_id, repo);
+            emit_asyncapi(&mut out, ops, t.as_ref(), &stem, path, module_id, repo);
         }
+        // `sniff_json_contract` never answers it: a feature list is yaml-only.
+        ContractSource::FeatureYaml => {}
         ContractSource::Pact => {
             let ops = json_pact_ops(source, &doc, &lines);
             let t = tree(ops.is_empty());
@@ -1279,7 +1529,7 @@ pub fn extract_json_contract(
                     .map(|d| format!(r#","description":{}"#, json_str(d)))
                     .unwrap_or_default();
                 let origin = format!(
-                    r#"{{"provenance":"contract","source":"pact","method":{},"path":{},"raw_path":{}{description}{parties}}}"#,
+                    r#"{{"provenance":"contract","source":"pact"{feature},"method":{},"path":{},"raw_path":{}{description}{parties}}}"#,
                     json_str(&op.method),
                     json_str(&op.path),
                     json_str(&op.raw_path),
@@ -3880,6 +4130,243 @@ paths:
         assert_eq!(
             fields_of(&yaml(billing, "asyncapi.yaml"), "contract::asyncapi::subscribe:orders.placed"),
             Some(r#"{"format":"asyncapi","payload":[{"name":"orderId","type":"string"},{"name":"currency","type":"string"}]}"#)
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // LE.9a — feature-scoped declarations
+    // ------------------------------------------------------------------
+
+    /// `(qname, ORIGIN, POSITION)` of every op, in emission order.
+    fn ops_of(out: &ContractNodes) -> Vec<(String, String, String)> {
+        out.nodes
+            .iter()
+            .map(|n| {
+                (
+                    out.nav.qname_by_id[&n.id].clone(),
+                    cell_text(n, cell_type::ORIGIN).to_string(),
+                    cell_text(n, cell_type::POSITION).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    const QUOKKA_FEATURE: &str = "name: Activities
+status: complete
+backend_routes:
+  protected:
+    - POST /api/protected/activity                       # create activity
+    - GET  /api/protected/activity/:id                  # get detail
+  public:
+    - get /api/public/activities
+frontend_components:
+  - web/src/app/features/activities/activities.component.ts
+data_model:
+  - GET /not/a/route/either
+";
+
+    #[test]
+    fn feature_yaml_grouped_items() {
+        let out = yaml(QUOKKA_FEATURE, "features/activities/feature.yaml");
+        assert_eq!(out.source, Some(ContractSource::FeatureYaml));
+        assert_eq!(out.feature.as_deref(), Some("activities"));
+        let ops = ops_of(&out);
+        let qnames: Vec<&str> = ops.iter().map(|(q, _, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::feature:activities::POST:/api/protected/activity",
+                "contract::feature:activities::GET:/api/protected/activity/:id",
+                "contract::feature:activities::GET:/api/public/activities",
+            ],
+            "frontend_components and data_model are never read"
+        );
+        assert_eq!(
+            ops[0].1,
+            r#"{"provenance":"contract","source":"feature_yaml","feature":"activities","group":"protected","method":"POST","path":"/api/protected/activity","raw_path":"/api/protected/activity"}"#
+        );
+        assert!(ops[2].1.contains(r#""group":"public""#), "{}", ops[2].1);
+        assert_eq!(
+            ops[1].2,
+            r#"{"file":"features/activities/feature.yaml","start_line":5,"end_line":5}"#,
+            "POSITION is the item's 0-indexed line"
+        );
+        let names: Vec<&str> = out.nodes.iter().map(|n| out.nav.name_by_id[&n.id].as_str()).collect();
+        assert_eq!(names[1], "GET /api/protected/activity/:id");
+        for n in &out.nodes {
+            assert_eq!(out.nav.kind_by_id[&n.id], node_kind::DOC_SECTION);
+        }
+    }
+
+    #[test]
+    fn feature_yaml_ungrouped_and_compact_items() {
+        // Items directly under the key (no group), a sequence at its key's
+        // own indent, and a flow list on the group key's line.
+        let src = "backend_routes:\n- DELETE /a/:id\n- POST /b\nother: x\n";
+        let out = yaml(src, "features/a/feature.yml");
+        let ops = ops_of(&out);
+        assert_eq!(ops.len(), 2);
+        assert!(!ops[0].1.contains("\"group\""), "no group key: {}", ops[0].1);
+        let src = "backend_routes:\n  protected:\n  - PUT /c\n  public: [GET /d, \"POST /e\"]\n";
+        let ops = ops_of(&yaml(src, "features/b/feature.yaml"));
+        let got: Vec<(&str, bool)> = ops
+            .iter()
+            .map(|(q, o, _)| (q.as_str(), o.contains(r#""group":"public""#)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("contract::feature:b::PUT:/c", false),
+                ("contract::feature:b::GET:/d", true),
+                ("contract::feature:b::POST:/e", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn feature_yaml_empty_list() {
+        let src = "name: Marketing\nbackend_routes: []\nfrontend_components:\n  - GET /looks/like/a/route\n";
+        let out = yaml(src, "features/marketing/feature.yaml");
+        assert!(out.nodes.is_empty());
+        assert_eq!(out.source, Some(ContractSource::FeatureYaml));
+        let mut c = ContractCounts::default();
+        c.record(&out);
+        assert_eq!((c.files, c.feature_yaml, c.feature_yaml_features.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn feature_yaml_query_and_comment_stripped() {
+        let src = "backend_routes:
+  protected:
+    - GET  /api/protected/activities/city?city=&page=   # paginated list
+    - \"GET /api/quoted\"   # quoted item
+    - GET /api/protected/activities/city   # a duplicate once the query is dropped
+    - FETCH /api/not-a-method
+    - GET api/no-leading-slash
+    - method: GET
+";
+        let ops = ops_of(&yaml(src, "features/activities/feature.yaml"));
+        let qnames: Vec<&str> = ops.iter().map(|(q, _, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::feature:activities::GET:/api/protected/activities/city",
+                "contract::feature:activities::GET:/api/quoted",
+            ]
+        );
+        assert!(ops[0].1.contains(r#""path":"/api/protected/activities/city","raw_path":"/api/protected/activities/city""#));
+    }
+
+    #[test]
+    fn non_features_dir_feature_yaml_ignored() {
+        // The gate needs BOTH the `features/<f>/` path and the key.
+        for path in ["feature.yaml", "config/activities/feature.yaml", "features/feature.yaml", "features/a/other.yaml"] {
+            let out = yaml(QUOKKA_FEATURE, path);
+            assert!(out.nodes.is_empty(), "{path}");
+            assert_eq!(out.source, None, "{path}");
+        }
+        // A features/<f>/feature.yaml without the key is not a feature list;
+        // it still takes the ordinary contract sniff.
+        let no_key = "name: X\nroutes:\n  - GET /a\n";
+        assert_eq!(yaml(no_key, "features/x/feature.yaml").source, None);
+        assert_eq!(feature_dir(r"features\win\feature.yml"), Some("win"));
+    }
+
+    #[test]
+    fn speckit_path_qualifies_qname() {
+        let src = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+        let a = yaml(src, "specs/001-orders/contracts/openapi.yaml");
+        let b = yaml(src, "specs/002-admin/contracts/openapi.yaml");
+        assert_eq!(ops_of(&a)[0].0, "contract::feature:001-orders:openapi::GET:/orders");
+        assert_eq!(ops_of(&b)[0].0, "contract::feature:002-admin:openapi::GET:/orders");
+        assert_ne!(a.nodes[0].id, b.nodes[0].id, "two features' ops never share a NodeId");
+        assert_eq!(
+            ops_of(&b)[0].1,
+            r#"{"provenance":"contract","source":"openapi","feature":"002-admin","method":"GET","path":"/orders","raw_path":"/orders","operation_id":"listOrders"}"#
+        );
+        // AsyncAPI and the JSON formats take the same scope.
+        let async_src = "asyncapi: 2.6.0\nchannels:\n  orders:\n    subscribe:\n      summary: x\n";
+        let c = yaml(async_src, "docs/specs/0042-events/contracts/v1/asyncapi.yaml");
+        assert_eq!(ops_of(&c)[0].0, "contract::feature:0042-events:asyncapi::subscribe:orders");
+        assert!(ops_of(&c)[0].1.contains(r#""source":"asyncapi","feature":"0042-events","#));
+        let pact = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[
+            {"request":{"method":"GET","path":"/orders"}}]}"#;
+        let p = json(pact, "specs/003-web/contracts/web-api.json");
+        assert_eq!(ops_of(&p)[0].0, "contract::feature:003-web:web-api::GET:/orders");
+        assert!(ops_of(&p)[0].1.contains(r#""source":"pact","feature":"003-web","#));
+        let oj = json(r#"{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}"#, "specs/004-x/contracts/openapi.json");
+        assert_eq!(ops_of(&oj)[0].0, "contract::feature:004-x:openapi::GET:/a");
+        assert_eq!(speckit_feature(r"specs\004-x\contracts\openapi.json"), Some("004-x"));
+
+        let mut counts = ContractCounts::default();
+        for out in [&a, &b, &c, &p] {
+            counts.record(out);
+        }
+        assert_eq!((counts.files, counts.openapi, counts.asyncapi, counts.pact), (4, 2, 1, 1));
+        assert_eq!(counts.speckit, 4);
+        assert_eq!(
+            counts.speckit_features.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["001-orders", "002-admin", "003-web", "0042-events"]
+        );
+    }
+
+    #[test]
+    fn non_speckit_paths_unchanged() {
+        let src = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+        for path in [
+            "openapi.yaml",
+            "specs/openapi.yaml",
+            "specs/contracts/openapi.yaml",
+            "specs/01-short/contracts/openapi.yaml",
+            "specs/001-Orders/contracts/openapi.yaml",
+            "specs/001-/contracts/openapi.yaml",
+            "specs/001-orders/openapi.yaml",
+            "specs/001-orders/contracts",
+            "specs/001-orders/api/contracts/openapi.yaml",
+        ] {
+            let out = yaml(src, path);
+            let ops = ops_of(&out);
+            assert_eq!(ops.len(), 1, "{path}");
+            assert!(ops[0].0.starts_with("contract::"), "{path}");
+            assert!(!ops[0].0.contains("feature:"), "{path}: {}", ops[0].0);
+            assert!(!ops[0].1.contains("\"feature\""), "{path}: {}", ops[0].1);
+            assert_eq!(out.feature, None, "{path}");
+        }
+        assert_eq!(
+            ops_of(&yaml(src, "openapi.yaml"))[0].1,
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/orders","raw_path":"/orders","operation_id":"listOrders"}"#,
+            "an unscoped ORIGIN is byte-identical to before LE.9a"
+        );
+    }
+
+    #[test]
+    fn feature_yaml_counts() {
+        let mut c = ContractCounts::default();
+        c.record(&yaml(QUOKKA_FEATURE, "features/activities/feature.yaml"));
+        c.record(&yaml("backend_routes:\n  protected:\n    - POST /api/protected/swipe\n", "features/discover/feature.yaml"));
+        c.record(&yaml("backend_routes: []\n", "features/marketing/feature.yaml"));
+        c.record(&yaml("openapi: 3.0.0\npaths:\n  /a:\n    get:\n      summary: x\n", "openapi.yaml"));
+        assert_eq!((c.files, c.openapi, c.feature_yaml, c.speckit), (3, 1, 4, 0));
+        assert_eq!(
+            c.feature_yaml_features.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["activities", "discover"]
+        );
+    }
+
+    #[test]
+    fn sdd_quokka_feature_fixture_ops() {
+        let src = include_str!(
+            "../../../../bench/substrate-gap/fixtures/sdd-quokka-feature/features/activities/feature.yaml"
+        );
+        let ops = ops_of(&yaml(src, "features/activities/feature.yaml"));
+        let qnames: Vec<&str> = ops.iter().map(|(q, _, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::feature:activities::POST:/api/protected/activity",
+                "contract::feature:activities::GET:/api/protected/activity/:id",
+                "contract::feature:activities::POST:/api/protected/activity/:id/leave",
+            ]
         );
     }
 }

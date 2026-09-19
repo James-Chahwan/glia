@@ -1,0 +1,21 @@
+{
+  "framework": "sdd-quokka-feature",
+  "language": "go",
+  "note": "LE.9a: a quokka features/<f>/feature.yaml backend_routes list becomes contract ops (DOC_SECTION, ORIGIN provenance=contract source=feature_yaml, qname contract::feature:<f>::<METHOD>:<path>) that the existing contract-link pass pairs with the gin ROUTEs. Go ROUTEs are one node per (method, path) named `<METHOD> <path>` since LB.11a, so the DOCUMENTS targets and the exact forbid name the route that way. The `:id/leave` op is declared but has no route: it must stay unpaired, never prefix-folded onto `GET /api/protected/activity/:id`. frontend_components is a file list, not an op. Baseline 2026-09-19 (installed leap wheel, HEAD 77ba62f): feature.yaml is not ingested - nodes 0/3 (only the two gin ROUTEs are found), DOCUMENTS 0/2, ORIGIN 0/1.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "POST /api/protected/activity"},
+    {"kind": "DOC_SECTION", "name": "GET /api/protected/activity/:id"},
+    {"kind": "DOC_SECTION", "name": "POST /api/protected/activity/:id/leave"}
+  ],
+  "expect_edges": [
+    {"from": "contract::feature:activities::POST:/api/protected/activity", "to": "POST /api/protected/activity", "category": "DOCUMENTS"},
+    {"from": "contract::feature:activities::GET:/api/protected/activity/:id", "to": "GET /api/protected/activity/:id", "category": "DOCUMENTS"}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "contract::feature:activities::POST:/api/protected/activity", "cell": "ORIGIN", "contains": "\"source\":\"feature_yaml\""}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "web/src/app/features/activities/activities.component.ts", "note": "frontend_components is a file list, not a declared op"},
+    {"from": "contract::feature:activities::POST:/api/protected/activity/:id/leave", "to": "GET /api/protected/activity/:id", "category": "DOCUMENTS", "note": "PRECISION: the unimplemented leave op never documents the detail route"}
+  ]
+}

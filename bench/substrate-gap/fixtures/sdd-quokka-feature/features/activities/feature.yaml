@@ -1,0 +1,11 @@
+name: Activities
+status: complete
+purpose: Hosts create activities; members join or leave them.
+backend_routes:
+  protected:
+    - POST /api/protected/activity   # create
+    - GET  /api/protected/activity/:id
+    - POST /api/protected/activity/:id/leave   # not implemented yet
+frontend_components:
+  - web/src/app/features/activities/activities.component.ts
+mongo_collection: activities

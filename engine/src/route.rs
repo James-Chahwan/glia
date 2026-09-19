@@ -711,12 +711,29 @@ pub(crate) fn parse_repo_files(
 
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
-    let contract_ops = contracts.openapi + contracts.asyncapi + contracts.pact;
+    let contract_ops =
+        contracts.openapi + contracts.asyncapi + contracts.pact + contracts.feature_yaml;
     if contract_ops > 0 {
         eprintln!(
-            "[contract] files={} ops={contract_ops} (openapi={} asyncapi={} pact={})",
-            contracts.files, contracts.openapi, contracts.asyncapi, contracts.pact
+            "[contract] files={} ops={contract_ops} (openapi={} asyncapi={} pact={} feature_yaml={})",
+            contracts.files,
+            contracts.openapi,
+            contracts.asyncapi,
+            contracts.pact,
+            contracts.feature_yaml
         );
+    }
+    // LE.9a fired_on marker: declared ops attributed to the spec-driven
+    // feature that declared them — quokka `features/<f>/feature.yaml`
+    // `backend_routes`, spec-kit `specs/<NNN-slug>/contracts/`. `features` is
+    // the distinct features that declared at least one op.
+    for (framework, features, ops) in [
+        ("feature_yaml", contracts.feature_yaml_features.len(), contracts.feature_yaml),
+        ("speckit", contracts.speckit_features.len(), contracts.speckit),
+    ] {
+        if ops > 0 {
+            eprintln!("[sdd] framework={framework} features={features} ops={ops}");
+        }
     }
     // LE.10b fired_on marker: contract ops carry their declared request /
     // response / payload body fields as a SCHEMA_FIELDS cell. Only printed
@@ -1131,6 +1148,65 @@ mod tests {
         assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
     }
 
+    /// LE.9a: a quokka `features/<f>/feature.yaml` and spec-kit
+    /// `specs/<NNN-slug>/contracts/` files route through the yaml / json
+    /// branches into feature-scoped contract ops: two features declaring the
+    /// same op stay two nodes, each ORIGIN naming its feature.
+    #[test]
+    fn feature_scoped_contract_ops_route_through_the_contract_branches() {
+        let openapi = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+        let files: Vec<(String, String)> = [
+            (
+                "features/activities/feature.yaml",
+                "name: Activities\nbackend_routes:\n  protected:\n    - POST /api/protected/activity  # create\n",
+            ),
+            ("features/marketing/feature.yaml", "name: Marketing\nbackend_routes: []\n"),
+            ("specs/001-orders/contracts/openapi.yaml", openapi),
+            ("specs/002-admin/contracts/openapi.yaml", openapi),
+            (
+                "specs/003-web/contracts/openapi.json",
+                r#"{"openapi":"3.0.3","paths":{"/orders":{"get":{}}}}"#,
+            ),
+        ]
+        .into_iter()
+        .map(|(p, s)| (p.to_string(), s.to_string()))
+        .collect();
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut ops: Vec<(String, String)> = parses
+            .values()
+            .flatten()
+            .flat_map(|fp| {
+                fp.nodes.iter().filter_map(move |n| {
+                    (fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION)).then(|| {
+                        let origin = n
+                            .cells
+                            .iter()
+                            .find_map(|c| match &c.payload {
+                                CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        (fp.nav.qname_by_id[&n.id].clone(), origin)
+                    })
+                })
+            })
+            .collect();
+        ops.sort();
+        let qnames: Vec<&str> = ops.iter().map(|(q, _)| q.as_str()).collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::feature:001-orders:openapi::GET:/orders",
+                "contract::feature:002-admin:openapi::GET:/orders",
+                "contract::feature:003-web:openapi::GET:/orders",
+                "contract::feature:activities::POST:/api/protected/activity",
+            ]
+        );
+        assert!(ops[1].1.contains(r#""feature":"002-admin""#), "{}", ops[1].1);
+        assert!(ops[3].1.contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#), "{}", ops[3].1);
+    }
+
     /// LB.9a: every non-code branch names its MODULE by the full file name,
     /// the display name the MODULE already carried, so a `.proto` beside a
     /// same-stem `.go`, a `.json` beside a same-stem `.yaml`, and a
@@ -1154,7 +1230,7 @@ mod tests {
             "the code form keeps the stem"
         );
 
-        let cases: [(&str, &str, &str, &str); 13] = [
+        let cases: [(&str, &str, &str, &str); 14] = [
             (
                 "api/user.proto",
                 "syntax = \"proto3\";\npackage user;\nservice UserService {\n  rpc GetUser (GetUserRequest) returns (User);\n}\nmessage GetUserRequest { string id = 1; }\nmessage User { string id = 1; }\n",
@@ -1186,6 +1262,14 @@ mod tests {
                 "svc::api.dockerfile",
             ),
             (".env.local", "KEY=1\n", "dotenv", ".env.local"),
+            (
+                // LE.9a: a quokka feature list takes the yaml branch, so every
+                // feature's MODULE is its own (`features::<f>::feature.yaml`).
+                "features/activities/feature.yaml",
+                "name: Activities\nbackend_routes:\n  protected:\n    - POST /api/protected/activity\n",
+                "yaml",
+                "features::activities::feature.yaml",
+            ),
             (
                 "k8s/cron.yml",
                 "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: nightly\nspec:\n  schedule: \"0 2 * * *\"\n",
