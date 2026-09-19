@@ -1,2 +1,3 @@
 # pyo3 surface of py/src/snapshots.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
 fn history_sync(repo_path: &str, max_commits: usize = 2000, since: Option<String> = None, blame: bool = false, blame_max_files: usize = 300) -> PyResult<Py<PyAny>>
+fn tests_ingest(repo_path: &str, junit: Option<Vec<PathBuf>> = None, logs: Option<Vec<PathBuf>> = None, lcov: Option<Vec<PathBuf>> = None, run: Option<String> = None) -> PyResult<Py<PyAny>>

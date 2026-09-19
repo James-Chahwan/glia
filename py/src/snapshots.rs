@@ -2,20 +2,24 @@
 //! External, run-dependent inputs enter a build the way Confluence docs do: a
 //! separate step writes files under `<repo>/.glia/`, and the next
 //! `generate()` reads them back offline. The build never runs these steps
-//! itself; a consumer (the repo-graph wrapper, when HEAD moves) calls one
-//! before `generate()`.
+//! itself; a consumer (the repo-graph wrapper, when HEAD moves or when it is
+//! handed a CI run's reports) calls one before `generate()`.
 //!
 //! `history_sync` (LF.5d) reads the local git and writes
 //! `<repo>/.glia/history-snapshot/` (docs/overlay.md, "History snapshot").
-//! LF.6d's `tests_ingest` joins it here.
+//! `tests_ingest` (LF.6d) reads one CI run's test reports (JUnit XML, CI logs,
+//! lcov) and writes `<repo>/.glia/test-snapshot/`.
 //!
-//! Transport only: the capture, the snapshot format and the `[history] sync`
-//! marker live in `glia_snapshots`. The helper each pyfunction delegates to is
-//! pyo3-free, so `cargo test -p repo-graph-py` covers it (see the crate doc).
+//! Transport only: the capture, the parsing, the redaction, the snapshot
+//! formats and the `[history] sync` / `[tests] ingest` markers live in
+//! `glia_snapshots`. The helper each pyfunction delegates to is pyo3-free, so
+//! `cargo test -p repo-graph-py` covers it (see the crate doc).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use glia_snapshots::{HistoryOptions, HistorySummary, history_sync};
+use glia_snapshots::{
+    HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, history_sync, tests_ingest,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -77,8 +81,71 @@ fn history_sync_py(
     to_py(py, serde_json::to_string(&summary))
 }
 
+/// The options [`tests_ingest_py`] passes, tagged `surface=pyo3` for the
+/// marker. An omitted list is an empty one.
+fn tests_options(
+    junit: Option<Vec<PathBuf>>,
+    logs: Option<Vec<PathBuf>>,
+    lcov: Option<Vec<PathBuf>>,
+    run: Option<String>,
+) -> TestsIngestOptions {
+    TestsIngestOptions {
+        junit: junit.unwrap_or_default(),
+        logs: logs.unwrap_or_default(),
+        lcov: lcov.unwrap_or_default(),
+        run,
+        surface: "pyo3",
+    }
+}
+
+/// The ingest behind [`tests_ingest_py`], minus pyo3. `Err` is the library's
+/// plain message (not a directory, no reports given, no report readable,
+/// the write failed); nothing is written then. Reports skipped while others
+/// were read come back in `report_errors`, not as an `Err`.
+fn tests_of(repo_path: &str, opts: &TestsIngestOptions) -> Result<TestsSummary, String> {
+    tests_ingest(Path::new(repo_path), opts)
+}
+
+/// **tests_ingest** (LF.6d): read the test reports one CI run produced for
+/// the repo at `repo_path` and write `<repo>/.glia/test-snapshot/`
+/// (cases.jsonl, lcov.jsonl, meta.json), replacing any earlier snapshot. The
+/// next `generate()` ingests it: FAIL cells on failing tests and the code
+/// their traces implicate, COVERAGE cells from lcov. Never called by
+/// `generate()` itself.
+///
+/// `junit`: JUnit XML report paths. `logs`: CI log paths, read for their
+/// failure summary lines (pytest, go test, cargo test, jest). `lcov`: lcov
+/// tracefile paths. Each is a list of `str` or `os.PathLike`; at least one
+/// report is required. `run`: a label for the run (a CI run id), stored
+/// verbatim. Failure messages and traces are redacted before they are stored.
+///
+/// Returns `{reports, junit_files, log_files, lcov_files, cases, failed,
+/// errors, skipped, passed, stored, redacted, covered_files, report_errors}`;
+/// a report that could not be read or parsed is skipped and listed in
+/// `report_errors` as `{report, reason}`. Raises `ValueError` when no report
+/// is given or none could be read, and writes nothing then. Prints
+/// `[tests] ingest ... surface=pyo3` on stderr.
+#[pyfunction]
+#[pyo3(
+    name = "tests_ingest",
+    signature = (repo_path, junit=None, logs=None, lcov=None, run=None)
+)]
+fn tests_ingest_py(
+    py: Python<'_>,
+    repo_path: &str,
+    junit: Option<Vec<PathBuf>>,
+    logs: Option<Vec<PathBuf>>,
+    lcov: Option<Vec<PathBuf>>,
+    run: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    let opts = tests_options(junit, logs, lcov, run);
+    let summary = tests_of(repo_path, &opts).map_err(PyValueError::new_err)?;
+    to_py(py, serde_json::to_string(&summary))
+}
+
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(history_sync_py, m)?)?;
+    m.add_function(wrap_pyfunction!(tests_ingest_py, m)?)?;
     Ok(())
 }
 
@@ -211,5 +278,86 @@ mod tests {
             !plain.join(".glia").exists(),
             "a failed sync writes nothing"
         );
+    }
+    const PYTEST_JUNIT: &str = r#"<testsuites><testsuite name="pytest" tests="3" failures="1"><testcase classname="tests.test_app" name="test_boom" file="tests/test_app.py" line="3"><failure message="ValueError: boom">E   ValueError: boom</failure></testcase><testcase classname="tests.test_app" name="test_ok"/><testcase classname="tests.test_app" name="test_add"/></testsuite></testsuites>"#;
+    const LCOV: &str = "TN:\nSF:app.py\nDA:1,1\nDA:2,0\nend_of_record\n";
+
+    /// A scratch dir holding `repo/` (one python file) and `reports/`.
+    fn reports_repo(name: &str) -> (Scratch, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("glia-lf6d-py-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let top = root.join("repo");
+        let reports = root.join("reports");
+        std::fs::create_dir_all(&top).expect("scratch dir");
+        std::fs::create_dir_all(&reports).expect("reports dir");
+        std::fs::write(top.join("app.py"), "def f():\n    return 1\n").expect("write");
+        (Scratch(root), top, reports)
+    }
+
+    /// Omitted lists are empty ones, and the options name the pyo3 surface.
+    #[test]
+    fn tests_options_default_to_no_reports_and_name_pyo3() {
+        assert_eq!(
+            tests_options(None, None, None, None),
+            TestsIngestOptions {
+                surface: "pyo3",
+                ..TestsIngestOptions::default()
+            }
+        );
+        let opts = tests_options(
+            Some(vec![PathBuf::from("a.xml")]),
+            Some(vec![PathBuf::from("ci.log")]),
+            Some(vec![PathBuf::from("c.lcov"), PathBuf::from("d.lcov")]),
+            Some("ci-42".into()),
+        );
+        assert_eq!(
+            (opts.junit.len(), opts.logs.len(), opts.lcov.len(), opts.run.as_deref(), opts.surface),
+            (1, 1, 2, Some("ci-42"), "pyo3")
+        );
+    }
+
+    /// LF.6d: `tests_ingest` is transport — pin the wiring: the summary
+    /// reaches the JSON in field order with the skipped report listed, the
+    /// snapshot is written with the run label; no readable report, or none
+    /// given, is the library's plain error with nothing written.
+    #[test]
+    fn tests_ingest_returns_the_summary_json_or_the_error() {
+        let (_scratch, top, reports) = reports_repo("ok");
+        let repo = top.to_str().expect("utf-8 scratch path");
+        let junit = reports.join("junit.xml");
+        let lcov = reports.join("coverage.lcov");
+        let cut = reports.join("cut.xml");
+        std::fs::write(&junit, PYTEST_JUNIT).expect("write");
+        std::fs::write(&lcov, LCOV).expect("write");
+        std::fs::write(&cut, "<testsuite><testcase name=\"x\">").expect("write");
+
+        let opts = tests_options(
+            Some(vec![junit.clone(), cut.clone()]),
+            None,
+            Some(vec![lcov.clone()]),
+            Some("ci-42".into()),
+        );
+        let summary = tests_of(repo, &opts).expect("ingest");
+        let json = serde_json::to_string(&summary).expect("json");
+        let (junit, lcov, cut) = (junit.display(), lcov.display(), cut.display());
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"reports":["{lcov}","{junit}"],"junit_files":1,"log_files":0,"lcov_files":1,"cases":3,"failed":1,"errors":0,"skipped":0,"passed":2,"stored":1,"redacted":0,"covered_files":1,"report_errors":[{{"report":"{cut}","reason":"document ends with 2 element(s) still open"}}]}}"#
+            )
+        );
+        let dir = repo_graph_code_domain::snapshots::tests_dir(&top);
+        let meta = std::fs::read_to_string(dir.join("meta.json")).expect("meta.json written");
+        assert!(meta.contains(r#""run": "ci-42""#), "{meta}");
+
+        let (_scratch, top, reports) = reports_repo("bad");
+        let repo = top.to_str().expect("utf-8 scratch path");
+        let cut = reports.join("cut.xml");
+        std::fs::write(&cut, "<testsuite>").expect("write");
+        let err = tests_of(repo, &tests_options(Some(vec![cut]), None, None, None)).expect_err("nothing readable");
+        assert!(err.starts_with("no report could be read ("), "{err}");
+        let err = tests_of(repo, &tests_options(None, Some(Vec::new()), None, None)).expect_err("no reports");
+        assert!(err.starts_with("no test reports given"), "{err}");
+        assert!(!top.join(".glia").exists(), "a failed ingest writes nothing");
     }
 }

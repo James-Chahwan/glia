@@ -9,6 +9,7 @@ use clap::Subcommand;
 
 mod gaps;
 mod history;
+mod tests;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum InputsCmd {
@@ -23,11 +24,18 @@ pub(crate) enum InputsCmd {
     /// ingests (churn ATTN, CO_CHANGES); the build itself never syncs. Exits
     /// 1 when the sync fails.
     History(history::Args),
+    /// Test-report snapshot (LF.6d): `tests ingest` reads one CI run's JUnit
+    /// XML, CI logs and lcov tracefiles and writes
+    /// `<repo>/.glia/test-snapshot/`, which the next build ingests (FAIL and
+    /// COVERAGE cells); the build itself never ingests. A malformed report is
+    /// a `warning:` and is skipped; exits 1 only when no report could be read.
+    Tests(tests::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
     match c {
         InputsCmd::Gaps(a) => gaps::run(a),
         InputsCmd::History(a) => history::run(a),
+        InputsCmd::Tests(a) => tests::run(a),
     }
 }
