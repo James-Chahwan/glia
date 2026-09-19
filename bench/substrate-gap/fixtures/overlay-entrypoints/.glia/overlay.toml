@@ -1,0 +1,4 @@
+version = 1
+
+[entrypoints]
+qnames = ["app::jobs::nightly_rollup"]

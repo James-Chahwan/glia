@@ -72,6 +72,8 @@ struct LiveWalk {
     by_kind: usize,
     /// Entries only a ROLE cell made (LB.3b).
     by_role: usize,
+    /// Entries only a declared ENTRYPOINT cell made (LF.3b).
+    by_decl: usize,
     /// Types made live by a live METHOD they declare.
     owners: usize,
     /// Nodes made live by an IMPLEMENTS edge into a live node.
@@ -93,8 +95,12 @@ struct LiveWalk {
 /// components, `main` / `test*` / `Test*` functions and methods, and (LB.3b)
 /// any node carrying the COMPONENT role:
 /// since the LB.3a fold an Angular `@Component` is a CLASS with ROLE
-/// COMPONENT, not a COMPONENT node. The walk carries on
-/// `CODE_PROFILE.tables.carry_edges`.
+/// COMPONENT, not a COMPONENT node. Besides the table, any node carrying an
+/// ENTRYPOINT cell ([`is_declared_entry`]) is an entrypoint whatever its kind
+/// (LF.3b): the user declared it in `.glia/overlay.toml` `[entrypoints]`, for
+/// code the graph cannot see a trigger for (a job a scheduler wires by a
+/// string, a plugin hook loaded by reflection, a library's public API). The
+/// walk carries on `CODE_PROFILE.tables.carry_edges`.
 ///
 /// Two steps besides the forward carry walk (A7.8), each applied as a node is
 /// popped from the queue:
@@ -113,27 +119,37 @@ struct LiveWalk {
 ///   carry edge. INHERITS_FROM stays forward-only: a live base class does not
 ///   make its subclasses live.
 ///
-/// Prints `[live] profile=P entrypoints=E (kind=K role=R) owners=O
+/// Prints `[live] profile=P entrypoints=E (kind=K role=R declared=D) owners=O
 /// implementers=I reached=N/M` once per call — one line per liveness
 /// computation, so one per blast-radius query, as `[scope]` / `[locate]` print
 /// per query: `P` is the profile's graph type, `kind` counts entries by kind /
-/// name, `role` the ones only a ROLE cell made entries (LB.3b), `owners` /
+/// name, `role` the ones only a ROLE cell made entries (LB.3b), `declared` the
+/// ones only an ENTRYPOINT cell made entries (LF.3b), `owners` /
 /// `implementers` the nodes each A7.8 step made live, `N` the live set and `M`
 /// every node.
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
     let w = live_walk(merged);
     eprintln!(
-        "[live] profile={} entrypoints={} (kind={} role={}) owners={} implementers={} reached={}/{}",
+        "[live] profile={} entrypoints={} (kind={} role={} declared={}) owners={} implementers={} reached={}/{}",
         CODE_PROFILE.tables.graph_type,
-        w.by_kind + w.by_role,
+        w.by_kind + w.by_role + w.by_decl,
         w.by_kind,
         w.by_role,
+        w.by_decl,
         w.owners,
         w.implementers,
         w.live.len(),
         w.total
     );
     w.live
+}
+
+/// Did the user declare this node an entrypoint (LF.3b)? True when it
+/// carries an ENTRYPOINT cell, which the build's `[entrypoints]` stage writes
+/// from `.glia/overlay.toml` and the `.gmap` persists. Liveness seeds from it
+/// beside `CODE_PROFILE.tables.entry`.
+pub(crate) fn is_declared_entry(cells: &[Cell]) -> bool {
+    cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
 }
 
 /// What the liveness walk follows (LD.15b): the carry edges, plus the two
@@ -185,6 +201,7 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
         live: HashSet::new(),
         by_kind: 0,
         by_role: 0,
+        by_decl: 0,
         owners: 0,
         implementers: 0,
         total: 0,
@@ -210,6 +227,8 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             } else if t.entry.is_entry(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
             {
                 &mut w.by_role
+            } else if is_declared_entry(&n.cells) {
+                &mut w.by_decl
             } else {
                 continue;
             };
@@ -2690,6 +2709,34 @@ mod live_tests {
         // Implementers: Repo (via IRepo) and Repo::find (via IRepo::find).
         // Owners: Ctrl (via get); IRepo and Repo were already live.
         assert_eq!((w.owners, w.implementers), (1, 2));
+    }
+
+    /// LF.3b: a FUNCTION nothing calls is an entry once it carries an
+    /// ENTRYPOINT cell, and what it calls is live with it. A node the table
+    /// already makes an entry counts by kind, never twice.
+    #[test]
+    fn declared_entrypoint_cell_seeds_liveness() {
+        use repo_graph_code_domain::cell_type;
+        use repo_graph_core::{Cell, CellPayload};
+        let mut g = G::default();
+        let job = g.node(node_kind::FUNCTION, "app::jobs::nightly_rollup", None);
+        let helper = g.node(node_kind::FUNCTION, "app::jobs::summarise", None);
+        let undeclared = g.node(node_kind::FUNCTION, "app::jobs::weekly", None);
+        let main = g.node(node_kind::FUNCTION, "app::main", None);
+        g.edge(job, helper, edge_category::CALLS);
+        for n in g.nodes.iter_mut().filter(|n| n.id == job || n.id == main) {
+            n.cells.push(Cell {
+                kind: cell_type::ENTRYPOINT,
+                payload: CellPayload::Json(r#"{"pattern":"app::*","source":"config"}"#.into()),
+            });
+        }
+
+        let w = live_walk(&g.merged());
+        assert!(w.live.contains(&job), "the declared job is an entry");
+        assert!(w.live.contains(&helper), "what it calls is live");
+        assert!(!w.live.contains(&undeclared), "an undeclared job stays dead");
+        assert!(w.live.contains(&main));
+        assert_eq!((w.by_kind, w.by_role, w.by_decl), (1, 0, 1));
     }
 }
 

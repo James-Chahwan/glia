@@ -184,7 +184,9 @@ fn render(graphs: &[&RepoGraph], cross_edges: &[Edge], full_bodies: bool) -> Str
 /// (LD.6), `CODE_TABLES.entry` over each node's kind, name and roles (read
 /// through `roles_in`, so an `@Component` CLASS is marked like a COMPONENT) —
 /// the same rule liveness seeds from, so `*` never disagrees with a `live`
-/// flag's roots. Before LD.6 the sigil kept its own `ROUTE | ENDPOINT`
+/// flag's roots. A node carrying an ENTRYPOINT cell (LF.3b, declared in
+/// `.glia/overlay.toml` `[entrypoints]`) is marked whatever its kind, as
+/// liveness seeds from it too. Before LD.6 the sigil kept its own `ROUTE | ENDPOINT`
 /// list: an ENDPOINT is the CLIENT side of an HTTP call (outbound, where this
 /// code makes the request), never an entry, and every other inbound handler
 /// went unmarked.
@@ -200,6 +202,7 @@ fn is_entry_node(g: &RepoGraph, n: &Node) -> bool {
     let kind = g.nav.kind_by_id.get(&n.id).copied();
     let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
     CODE_TABLES.entry.is_entry(kind, name, &roles_in(kind, &n.cells))
+        || n.cells.iter().any(|c| c.kind == cell_type::ENTRYPOINT)
 }
 
 // ============================================================================
@@ -662,6 +665,9 @@ fn cell_label(c: CellTypeId) -> &'static str {
         17 => "msgtype",
         // LF.6c — cell_type::COVERAGE, lcov line counts {"hit","lines"}.
         23 => "coverage",
+        // LF.3b — cell_type::ENTRYPOINT, a `.glia/overlay.toml` [entrypoints]
+        // declaration {"source","pattern","decl"}.
+        24 => "entry",
         _ => "cell",
     }
 }
@@ -1260,6 +1266,27 @@ mod tests {
     fn coverage_cell_renders_as_coverage() {
         // LF.6c: the lcov counts read `:coverage`, not the generic `:cell`.
         assert_eq!(cell_label(cell_type::COVERAGE), "coverage");
+    }
+
+    #[test]
+    fn entrypoint_cell_renders_as_entry_and_marks_the_node() {
+        // LF.3b: a declared entrypoint reads `:entry`, not the generic
+        // `:cell`, and its node takes the `*` sigil whatever its kind.
+        assert_eq!(cell_label(cell_type::ENTRYPOINT), "entry");
+        let mut g = mini_graph();
+        let f = g.nodes[1].id;
+        assert!(!is_entry_node(&g, &g.nodes[1]), "m::a::f is no entry by kind or name");
+        g.nodes[1].cells.push(Cell {
+            kind: cell_type::ENTRYPOINT,
+            payload: CellPayload::Json(
+                r#"{"decl":".glia/overlay.toml:4","pattern":"m::a::f","source":"config"}"#.into(),
+            ),
+        });
+        assert!(is_entry_node(&g, &g.nodes[1]));
+        assert!(entry_nodes(&[&g]).contains(&f));
+        let mut out = String::new();
+        render_cell(&mut out, &g.nodes[1].cells[1], false);
+        assert!(out.starts_with(":entry "), "{out}");
     }
 
     #[test]

@@ -1,0 +1,9 @@
+{
+  "framework": "overlay-entrypoints",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.3b - a .glia/overlay.toml [entrypoints] qname lands as an ENTRYPOINT cell (id 24) {\"source\":\"config\",\"pattern\",\"decl\"} on the declared node, and liveness seeds from it: nightly_rollup is wired by a scheduler string, so nothing calls it and summarise, its only callee, reads live=false without the declaration (asserted in engine/tests/declared_entrypoints.rs). Baseline 2026-09-19 (HEAD 3f427fb, installed wheel = W28 code): nothing reads [entrypoints], so the ENTRYPOINT cell is missing.",
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "app::jobs::nightly_rollup", "cell": "ENTRYPOINT", "contains": "config"}
+  ]
+}

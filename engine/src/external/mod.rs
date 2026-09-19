@@ -38,10 +38,17 @@
 //!   / `[[note]]`, and `[declared] rules=<r> (forbid_edge=<f> no_cycle=<c> invariant=<i>)`
 //!   once per build whose graph then holds a CONSTRAINT rule (see [`declared`]);
 //! - `[tests] fail-cells repo=<label> cases=<n> mapped=<m> (file_line=<a> qname=<b> name=<c>) unmapped=<u> implicated=<i> fail_cells=<f> dropped=<d>`
-//!   once per repo with a complete `.glia/test-snapshot/` (see [`test_reports`]).
+//!   once per repo with a complete `.glia/test-snapshot/`, and
+//!   `[tests] lcov repo=<label> files=<n> matched=<m> unmatched=<u> coverage_nodes=<c>`
+//!   once per repo whose snapshot carries lcov line counts (see [`test_reports`]);
+//! - `[entrypoints] declared repo=<label> patterns=<p> matched_nodes=<m> unmatched_patterns=<u>`
+//!   once per repo whose overlay declares an `[entrypoints]` qname pattern,
+//!   plus one `[entrypoints] unmatched pattern=<p> <decl>` line per pattern
+//!   that binds no node (see [`entrypoints`]).
 
 mod cells;
 pub(crate) mod declared;
+mod entrypoints;
 mod history;
 mod overlay;
 mod test_reports;
@@ -134,17 +141,20 @@ pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInput
 /// then the git-history ATTN cells (LF.5b, [`history::history_cells`]), then
 /// the overlay's declared knowledge (LF.4a,
 /// [`declared::apply_declared_cells`]: never gated by `--no-overlay`), then
-/// the test-report FAIL cells (LF.6b, [`test_reports::ingest_test_reports`]:
-/// a fact input, never gated either), then the stage LF.3b appends.
+/// the test-report FAIL and COVERAGE cells (LF.6b / LF.6c,
+/// [`test_reports::ingest_test_reports`]: a fact input, never gated either),
+/// then the declared entrypoints (LF.3b,
+/// [`entrypoints::apply_declared_entrypoints`]: user config, never gated by
+/// `--no-overlay`), whose ENTRYPOINT cells liveness seeds from.
 ///
 /// Runs after the code passes. When any stage changed the graph, the evidence
 /// fill and the cross-edge sort run again (LC.3a: fill-then-sort is the last
 /// step of every build), so a stage that adds an edge still leaves it located
 /// and in canonical order. The sidecar and declared stages write only
 /// CONSTRAINT / DECISION / CONV / VECTOR node cells, the history stage
-/// only ATTN node cells and the test-report stage only FAIL node cells,
-/// which neither the fill (it reads POSITION) nor the
-/// sort (edges only) reads. A repo with no external inputs takes no branch
+/// only ATTN node cells, the test-report stage only FAIL and COVERAGE node
+/// cells and the entrypoints stage only ENTRYPOINT node cells, which neither
+/// the fill (it reads POSITION) nor the sort (edges only) reads. A repo with no external inputs takes no branch
 /// that writes anything. After a stage wrote, the build reports the CONSTRAINT
 /// rules `glia check` will read ([`declared::report_rules`]).
 pub(crate) fn apply_external_cells(merged: &mut MergedGraph, inputs: &[RepoInputs]) {
@@ -156,6 +166,9 @@ pub(crate) fn apply_external_cells(merged: &mut MergedGraph, inputs: &[RepoInput
             changed |= declared::apply_declared_cells(merged, input, cfg);
         }
         changed |= test_reports::ingest_test_reports(merged, input);
+        if let Some(cfg) = &input.config {
+            changed |= entrypoints::apply_declared_entrypoints(merged, input, cfg);
+        }
     }
     if changed {
         declared::report_rules(merged);
