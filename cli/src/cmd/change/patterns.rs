@@ -1,0 +1,250 @@
+//! `glia patterns` (LE.7b, EXPERIMENTAL) — the human surface over the engine's
+//! `patterns::{pattern_conformance, pattern_conformance_delta}` (LE.7a): route
+//! handlers grouped per service, each handler's role chain to its first effect
+//! sink as a signature, a population's most frequent signature as its
+//! convention, and every handler off it a located DIVERGENCE (tier heuristic:
+//! an observed convention, never a rule).
+//!
+//! The command refuses to run without `--experimental` (exit 2): the output
+//! format may change until the engine is promoted, and the flag keeps anyone
+//! from adopting it by accident.
+//!
+//! Two modes. Whole graph (the default): a fresh build of the repo (`--with`
+//! merges more repos in) and every exception listed. Delta (`--base <rev>`):
+//! the working tree against the rev through the graph delta (LE.1b), the
+//! conventions taken from the whole working-tree graph, and only the
+//! divergences the change touched listed; it builds the one repo, so `--with`
+//! with `--base` is a usage error, and so is `--no-overlay` (both sides are
+//! built with the repo's overlay).
+//!
+//! Table mode prints the counts (with the handlers left out of every
+//! population, by reason), then one section per population carrying its
+//! status: `judged` (`## <service> - <matching>/<size> follow <convention>`
+//! and a `| handler | route | signature | location |` row per divergence),
+//! `no_convention` (the top signature and its share), `too_small` (one
+//! `_(population below min support: ...)_` line). A repo with no placed
+//! handler says so instead of printing an empty report. `--json` prints the
+//! engine's `PatternReport` (`{experimental, delta_mode, handlers, judged,
+//! skipped_small, excluded, role_sources, populations, divergences}`). Every
+//! `file:line` is 1-based (LD.1).
+//!
+//! Exit 0 on an answer, 2 without `--experimental`, on a usage error, or a git
+//! / build failure with the engine's message. Delta mode saves the working
+//! tree's parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,
+//! self-gitignored) as an incremental build does, under `GLIA_NO_PERSIST=1`
+//! too; never a `.gmap` layout.
+//!
+//! Fired-on marker: this surface's
+//! `[patterns] experimental surface=cli mode=<graph|delta>` once the answer is
+//! in, beside the engine's `[patterns] experimental populations=..` line (and
+//! `[patterns] delta touched_nodes=..` in delta mode).
+
+use repo_graph_engine::delta::graph_delta_vs_rev;
+use repo_graph_engine::patterns::{
+    DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, PatternArgs, PatternReport, Population,
+    pattern_conformance, pattern_conformance_delta,
+};
+
+use crate::common::{build_options, generate_for};
+
+/// The refusal without `--experimental`, verbatim.
+const NOT_EXPERIMENTAL: &str =
+    "patterns is experimental: pass --experimental (output format may change)";
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct Args {
+    /// Path to the repo root (a git work tree with `--base`).
+    repo: String,
+    /// Required: acknowledges the command is experimental and its output
+    /// format may change.
+    #[arg(long)]
+    experimental: bool,
+    /// Delta mode: judge the working tree's graph, listing only the
+    /// divergences the change against this git rev (a branch, tag, sha or
+    /// `HEAD~N`) touched.
+    #[arg(long, value_name = "REV")]
+    base: Option<String>,
+    /// Smallest population (handlers of one service) that gets a verdict.
+    #[arg(long, default_value_t = DEFAULT_MIN_SUPPORT)]
+    min_support: usize,
+    /// Share of a population, in percent (0-100), the most frequent signature
+    /// needs to be declared its convention.
+    #[arg(long, default_value_t = DEFAULT_MIN_SHARE_PCT)]
+    min_share: usize,
+    /// Keep only handlers located under this repo-relative path or project
+    /// label.
+    #[arg(long)]
+    scope: Option<String>,
+    /// Additional repos to merge in (cross-service). Repeatable; whole-graph
+    /// mode only.
+    #[arg(long)]
+    with: Vec<String>,
+    /// Emit JSON instead of tables.
+    #[arg(long)]
+    json: bool,
+}
+
+/// The engine's options from the flags, or the usage error.
+fn pattern_args(args: &Args) -> Result<PatternArgs, String> {
+    if args.min_share > 100 {
+        return Err(format!("--min-share is a percentage (0-100), got {}", args.min_share));
+    }
+    let mut p = PatternArgs::default();
+    p.min_support = args.min_support;
+    p.min_share_pct = args.min_share;
+    p.scope = args.scope.clone();
+    Ok(p)
+}
+
+/// The report for whichever mode `args` names, and the mode's marker word.
+fn answer(args: &Args, p: &PatternArgs) -> Result<(PatternReport, &'static str), String> {
+    let Some(base) = args.base.as_deref() else {
+        let built = generate_for(&args.repo, &args.with)?;
+        return Ok((pattern_conformance(&built.merged, &built.repo_labels, p), "graph"));
+    };
+    if !args.with.is_empty() {
+        return Err("--base builds the one repo against its git rev; --with needs whole-graph mode (no --base)".to_string());
+    }
+    if !build_options().overlay {
+        return Err(
+            "--no-overlay does not apply to --base: both sides are built with the repo's overlay".to_string(),
+        );
+    }
+    let d = graph_delta_vs_rev(&args.repo, base)?;
+    let report = pattern_conformance_delta(&d.after.merged, &d.after.repo_labels, &d.delta, p);
+    Ok((report, "delta"))
+}
+
+pub(crate) fn run(args: Args) -> i32 {
+    if !args.experimental {
+        eprintln!("{NOT_EXPERIMENTAL}");
+        return 2;
+    }
+    let p = match pattern_args(&args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let (report, mode) = match answer(&args, &p) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    eprintln!("[patterns] experimental surface=cli mode={mode}");
+    if args.json {
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+    } else {
+        print!("{}", render(&args.repo, args.base.as_deref(), &p, &report));
+    }
+    0
+}
+
+/// `file:line`, `file`, or `—`.
+fn at(file: Option<&str>, line: Option<i64>) -> String {
+    match (file, line) {
+        (Some(f), Some(l)) => format!("{f}:{l}"),
+        (Some(f), None) => f.to_string(),
+        _ => "—".to_string(),
+    }
+}
+
+/// `METHOD path`, whichever half is known, or `—`.
+fn route(d: &Divergence) -> String {
+    match (d.route_method.as_deref(), d.route_path.as_deref()) {
+        (Some(m), Some(p)) => format!("{m} {p}"),
+        (None, Some(p)) => p.to_string(),
+        (Some(m), None) => m.to_string(),
+        (None, None) => "—".to_string(),
+    }
+}
+
+/// `k=v, ...` for a count map, or `none`.
+fn counts<'a>(m: impl IntoIterator<Item = (&'a &'static str, &'a usize)>) -> String {
+    let parts: Vec<String> = m.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if parts.is_empty() { "none".to_string() } else { parts.join(", ") }
+}
+
+/// The table report (module docs).
+fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) -> String {
+    let mut out = String::new();
+    let mode = match base {
+        Some(b) => format!("delta vs `{b}`"),
+        None => "whole graph".to_string(),
+    };
+    out.push_str(&format!("# glia patterns `{repo}` (experimental, {mode})\n\n"));
+    out.push_str(&format!(
+        "- handlers: {} in {} populations; judged: {}; below min support ({}): {}; divergences{}: {}\n",
+        r.handlers,
+        r.populations.len(),
+        r.judged,
+        p.min_support,
+        r.skipped_small,
+        if r.delta_mode { " touched by the change" } else { "" },
+        r.divergences.len(),
+    ));
+    out.push_str(&format!("- excluded handlers: {}\n", counts(&r.excluded)));
+    out.push_str(&format!("- role sources: {}\n\n", counts(&r.role_sources)));
+    if r.populations.is_empty() {
+        out.push_str("_(no route handler placed in any population: nothing to judge)_\n");
+        return out;
+    }
+    for pop in &r.populations {
+        population(&mut out, pop, r, p);
+    }
+    out
+}
+
+fn population(out: &mut String, pop: &Population, r: &PatternReport, p: &PatternArgs) {
+    let sigs: Vec<String> = pop.signatures.iter().map(|(s, n)| format!("`{s}` ×{n}")).collect();
+    match pop.status {
+        "too_small" => {
+            out.push_str(&format!(
+                "_(population below min support: `{}` has {} handlers, fewer than {})_\n\n",
+                pop.service, pop.size, p.min_support
+            ));
+            return;
+        }
+        "judged" => out.push_str(&format!(
+            "## {} - {}/{} follow `{}`\n\n",
+            pop.service,
+            pop.matching,
+            pop.size,
+            pop.convention.as_deref().unwrap_or_default()
+        )),
+        _ => out.push_str(&format!(
+            "## {} - no convention: no signature holds {}% of {} handlers\n\n",
+            pop.service, p.min_share_pct, pop.size
+        )),
+    }
+    out.push_str(&format!("- signatures: {}\n\n", sigs.join(", ")));
+    if pop.status != "judged" {
+        return;
+    }
+    let rows: Vec<&Divergence> = r.divergences.iter().filter(|d| d.service == pop.service).collect();
+    if rows.is_empty() {
+        if r.delta_mode && !pop.exceptions.is_empty() {
+            out.push_str(&format!(
+                "_(no divergence touched by the change; {} in the whole graph)_\n\n",
+                pop.exceptions.len()
+            ));
+        } else {
+            out.push_str("_(no divergence)_\n\n");
+        }
+        return;
+    }
+    out.push_str("| handler | route | signature | location |\n|---|---|---|---|\n");
+    for d in rows {
+        out.push_str(&format!(
+            "| `{}` | {} | `{}` | {} |\n",
+            d.handler,
+            route(d),
+            d.signature,
+            at(d.file.as_deref(), d.line)
+        ));
+    }
+    out.push('\n');
+}

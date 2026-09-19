@@ -10,6 +10,7 @@ use clap::Subcommand;
 
 mod delta;
 mod diff_impact;
+mod patterns;
 mod tests_for;
 
 #[derive(Subcommand, Debug)]
@@ -40,6 +41,17 @@ pub(crate) enum ChangeCmd {
     /// (`--base`). `--files-only` prints the test files for a runner. Exits
     /// 0 on an answer, 2 on a usage, git or build error.
     TestsFor(tests_for::Args),
+    /// Patterns (LE.7b, EXPERIMENTAL; refuses to run without
+    /// `--experimental`): pattern conformance — the route handlers of each
+    /// service grouped as a population, each handler's role chain to its
+    /// first effect sink as a signature (`handler>service>repository>db`),
+    /// the most frequent one declared the population's convention at
+    /// `--min-share` percent of at least `--min-support` handlers, and every
+    /// handler off it a located DIVERGENCE (an observation, never a rule).
+    /// `--base <rev>` lists only the divergences the working tree's change
+    /// touched. Exits 0 on an answer, 2 without `--experimental`, on a usage
+    /// error, or a git or build error.
+    Patterns(patterns::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -47,5 +59,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::Delta(a) => delta::run(a),
         ChangeCmd::DiffImpact(a) => diff_impact::run(a),
         ChangeCmd::TestsFor(a) => tests_for::run(a),
+        ChangeCmd::Patterns(a) => patterns::run(a),
     }
 }
