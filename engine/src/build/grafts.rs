@@ -148,6 +148,10 @@ pub(super) fn apply_post_cache(
         access.add(anchor::access_census(fp));
     }
     anchor::report_access(access, repo_label);
+    // LE.4b fired_on marker, from the same census, once per repo that holds a
+    // config-extractor env-read edge:
+    //   `[config-read] rehomed fn={F} module_kept={M} repo=<label>`
+    anchor::report_config_read(access, repo_label);
 
     // LB.4a / LB.8: qualify every owned node under a nested project root with
     // ` @<project path>` (see the ordering rule above). After the endpoint

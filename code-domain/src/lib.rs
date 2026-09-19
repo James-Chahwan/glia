@@ -345,7 +345,8 @@ pub mod edge_category {
     pub const SCHEDULES: EdgeCategoryId = EdgeCategoryId(23);
     pub const SHARES_CRON_SCHEDULE: EdgeCategoryId = EdgeCategoryId(24);
 
-    // v0.4.x — Config resolver. `READS_CONFIG` from a code module to a
+    // v0.4.x — Config resolver. `READS_CONFIG` from the innermost function /
+    // method holding the read (the module at module scope; LE.4b) to a
     // `CONFIG_KEY` it dereferences (e.g. `os.environ['DB_URL']`).
     // `DEFINES_CONFIG` from a Dockerfile / .env / k8s manifest module to a
     // `CONFIG_KEY` it sets. `SHARES_CONFIG` pairs CONFIG_KEY nodes across

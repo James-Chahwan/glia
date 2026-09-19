@@ -2,7 +2,10 @@
 //!
 //! Emits `CONFIG_KEY` nodes per unique env-var name with two edge flavours:
 //!
-//!   - `READS_CONFIG`  — code module → key  (`os.environ['DB_URL']` etc.)
+//!   - `READS_CONFIG`  — code module → key  (`os.environ['DB_URL']` etc.);
+//!     the engine then re-homes it to the innermost FUNCTION / METHOD holding
+//!     the read (LE.4b, `anchor::rehome_to_owner` over [`ConfigNodes::sites`]),
+//!     so only a read at module scope keeps the module edge.
 //!   - `DEFINES_CONFIG` — source module → key (Dockerfile `ENV`, `.env`, k8s)
 //!
 //! Single qname per name across the merged graph: `config:<flavor>:<rest>`.
@@ -59,6 +62,13 @@ pub struct ConfigNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+    /// LE.4b: every env read [`extract_config_reads`] kept, as
+    /// `(CONFIG_KEY id, byte offset of the read expression)`, in scan order
+    /// (one per match, so a key read twice has two sites). The engine turns
+    /// the offsets into lines and re-homes each `module -> key` READS_CONFIG
+    /// edge to the function holding its reads. Empty on the define side and
+    /// for secrets / flags.
+    pub sites: Vec<(NodeId, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -151,21 +161,39 @@ impl ConfigDef {
 /// the file type by extension; this scanner tries every language idiom because
 /// idioms cross language boundaries (`os.getenv` exists in C, Python, and Ruby
 /// shells; `process.env` shows up in TS-flavoured tooling).
+///
+/// Emits one `module -> key` READS_CONFIG edge per key, plus one
+/// [`ConfigNodes::sites`] entry per valid read so the engine can re-home the
+/// edge to the reading function (LE.4b).
 pub fn extract_config_reads(
     source: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> ConfigNodes {
-    let mut names = Vec::new();
-    names.extend(scan_python_env(source));
-    names.extend(scan_js_process_env(source));
-    names.extend(scan_rust_env(source));
-    names.extend(scan_go_env(source));
-    names.extend(scan_ruby_env(source));
-    names.extend(scan_java_system_getenv(source));
-    names.extend(scan_php_env(source));
-    let defs = names.into_iter().map(|n| ConfigDef::bare(n, "")).collect();
-    build_nodes(defs, Side::Read, module_id, repo)
+    let mut reads = Vec::new();
+    reads.extend(scan_python_env(source));
+    reads.extend(scan_js_process_env(source));
+    reads.extend(scan_rust_env(source));
+    reads.extend(scan_go_env(source));
+    reads.extend(scan_ruby_env(source));
+    reads.extend(scan_java_system_getenv(source));
+    reads.extend(scan_php_env(source));
+    let mut sites = Vec::new();
+    let mut defs = Vec::with_capacity(reads.len());
+    for (name, offset) in reads {
+        let def = ConfigDef::bare(name, "");
+        // The same validator and qname `build_sided` applies, so a site
+        // always names a node this call emits.
+        if Flavor::Env.accepts(&def) {
+            let qname = Flavor::Env.qname(&def);
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &qname);
+            sites.push((id, offset));
+        }
+        defs.push(def);
+    }
+    let mut out = build_nodes(defs, Side::Read, module_id, repo);
+    out.sites = sites;
+    out
 }
 
 /// Extract env-var definitions from a Dockerfile.
@@ -309,7 +337,7 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
         eprintln!("[config] defined={env_defined} valued={valued} redacted={redacted}");
     }
 
-    ConfigNodes { nodes, edges, nav }
+    ConfigNodes { nodes, edges, nav, sites: Vec::new() }
 }
 
 /// The ENV cell of a secret or flag key: its provider, and that a value
@@ -486,10 +514,12 @@ pub(crate) fn is_valid_flag_key(s: &str) -> bool {
 }
 
 // ----------------------------------------------------------------------------
-// Code-side scanners — one per language idiom.
+// Code-side scanners — one per language idiom. Each returns `(name, offset)`:
+// the byte offset where the read expression's needle starts (LE.4b), always a
+// char boundary because it is a `str::find` match.
 // ----------------------------------------------------------------------------
 
-fn scan_python_env(source: &str) -> Vec<String> {
+fn scan_python_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     // os.environ['X'], os.environ["X"], os.environ.get('X', ...), os.getenv('X')
     for needle in [
@@ -507,21 +537,22 @@ fn scan_python_env(source: &str) -> Vec<String> {
     out
 }
 
-fn scan_js_process_env(source: &str) -> Vec<String> {
+fn scan_js_process_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     // process.env.VAR — bare property access. Identifier-shaped name follows.
     let bytes = source.as_bytes();
     for needle in ["process.env.", "import.meta.env."] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
-            let pos = search_from + rel + needle.len();
+            let at = search_from + rel;
+            let pos = at + needle.len();
             // Read identifier chars.
             let mut j = pos;
             while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
                 j += 1;
             }
             if j > pos {
-                out.push(source[pos..j].to_string());
+                out.push((source[pos..j].to_string(), at));
             }
             search_from = pos.max(search_from + needle.len());
         }
@@ -535,7 +566,7 @@ fn scan_js_process_env(source: &str) -> Vec<String> {
     out
 }
 
-fn scan_rust_env(source: &str) -> Vec<String> {
+fn scan_rust_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for needle in ["std::env::var(", "env::var("] {
         for hit in capture_first_string_arg(source, needle) {
@@ -545,7 +576,7 @@ fn scan_rust_env(source: &str) -> Vec<String> {
     out
 }
 
-fn scan_go_env(source: &str) -> Vec<String> {
+fn scan_go_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for needle in ["os.Getenv(", "os.LookupEnv("] {
         for hit in capture_first_string_arg(source, needle) {
@@ -555,7 +586,7 @@ fn scan_go_env(source: &str) -> Vec<String> {
     out
 }
 
-fn scan_ruby_env(source: &str) -> Vec<String> {
+fn scan_ruby_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     // ENV['X'] / ENV["X"] / ENV.fetch('X', ...)
     for needle in ["ENV[", "ENV.fetch(", "ENV.fetch!("] {
@@ -566,11 +597,11 @@ fn scan_ruby_env(source: &str) -> Vec<String> {
     out
 }
 
-fn scan_java_system_getenv(source: &str) -> Vec<String> {
+fn scan_java_system_getenv(source: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "System.getenv(")
 }
 
-fn scan_php_env(source: &str) -> Vec<String> {
+fn scan_php_env(source: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     // getenv('X') and $_ENV['X']
     for needle in ["getenv(", "$_ENV[", "$_SERVER["] {
@@ -953,16 +984,17 @@ fn scan_compose_environment(source: &str) -> Vec<ConfigDef> {
 // ----------------------------------------------------------------------------
 
 /// For every occurrence of `needle` in `source`, read the first quoted string
-/// literal that follows the needle and push its inner text. `needle` should
-/// end at the position immediately before the value (after `(`, `[`, etc.).
-fn capture_first_string_arg(source: &str, needle: &str) -> Vec<String> {
+/// literal that follows the needle and push its inner text, with the byte
+/// offset where that occurrence of `needle` starts. `needle` should end at the
+/// position immediately before the value (after `(`, `[`, etc.).
+fn capture_first_string_arg(source: &str, needle: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find(needle) {
         let pos = search_from + rel;
         let after = &source[pos + needle.len()..];
         if let Some(name) = first_quoted(after) {
-            out.push(name);
+            out.push((name, pos));
         }
         search_from = pos + needle.len();
     }
@@ -1567,5 +1599,85 @@ services:
             out.nodes.iter().all(|n| n.cells.is_empty()),
             "a read site states no value, so it must attach no cell"
         );
+    }
+
+    fn env_id(repo: RepoId, key: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &format!("config:env:{key}"))
+    }
+
+    /// LE.4b: every read site's offset starts inside its key's read
+    /// expression, and the first one starts the expression. Overlapping
+    /// needles (`os.environ[` / `environ[`, `std::env::var(` / `env::var(`,
+    /// `$_ENV[` / `ENV[`, `System.getenv(` / `getenv(`) give one site each,
+    /// all inside the same expression, so they land on the same line.
+    #[test]
+    fn read_sites_point_at_the_read_expression() {
+        let repo = RepoId(1);
+        let cases: [(&str, &str); 7] = [
+            ("PY_KEY", "os.environ['PY_KEY']"),
+            ("JS_KEY", "process.env.JS_KEY"),
+            ("RS_KEY", "std::env::var(\"RS_KEY\")"),
+            ("GO_KEY", "os.Getenv(\"GO_KEY\")"),
+            ("RB_KEY", "ENV.fetch('RB_KEY')"),
+            ("JAVA_KEY", "System.getenv(\"JAVA_KEY\")"),
+            ("PHP_KEY", "$_ENV['PHP_KEY']"),
+        ];
+        let src: String = cases.iter().map(|(_, e)| format!("v = {e};\n")).collect();
+        let out = extract_config_reads(&src, module_id(repo), repo);
+        for (key, expr) in cases {
+            let start = src.find(expr).unwrap();
+            let offs: Vec<usize> = out
+                .sites
+                .iter()
+                .filter(|(t, _)| *t == env_id(repo, key))
+                .map(|(_, o)| *o)
+                .collect();
+            assert_eq!(offs.iter().min(), Some(&start), "{key}: {offs:?}");
+            assert!(
+                offs.iter().all(|o| (start..start + expr.len()).contains(o)),
+                "{key}: {offs:?} outside {expr} at {start}"
+            );
+        }
+        // Every site names a node this call emitted, and the module edges are
+        // unchanged: one READS_CONFIG per key.
+        let ids: Vec<NodeId> = out.nodes.iter().map(|n| n.id).collect();
+        assert!(out.sites.iter().all(|(t, _)| ids.contains(t)));
+        assert_eq!(out.edges.len(), 7);
+    }
+
+    #[test]
+    fn read_sites_one_per_read_char_safe_and_valid_only() {
+        let repo = RepoId(1);
+        // A multi-byte prefix, a key read twice, and a name the env validator
+        // rejects (no node, so no site).
+        let src = concat!(
+            "// caf\u{e9} \u{2264}\n",
+            "const a = process.env.TWICE;\n",
+            "function f() {\n",
+            "  return process.env.TWICE + process.env['9BAD'];\n",
+            "}\n",
+        );
+        let out = extract_config_reads(src, module_id(repo), repo);
+        let twice: Vec<usize> = out
+            .sites
+            .iter()
+            .filter(|(t, _)| *t == env_id(repo, "TWICE"))
+            .map(|(_, o)| *o)
+            .collect();
+        assert_eq!(twice.len(), 2, "{:?}", out.sites);
+        assert!(
+            twice
+                .iter()
+                .all(|&o| src.is_char_boundary(o) && src[o..].starts_with("process.env.TWICE"))
+        );
+        assert_eq!(out.sites.len(), 2, "the invalid name gives no site: {:?}", out.sites);
+        assert_eq!(out.edges.len(), 1);
+    }
+
+    #[test]
+    fn define_side_carries_no_sites() {
+        let repo = RepoId(1);
+        assert!(extract_dotenv_defs("A=1\n", module_id(repo), repo).sites.is_empty());
+        assert!(extract_dockerfile_defs("ENV B=2\n", module_id(repo), repo).sites.is_empty());
     }
 }

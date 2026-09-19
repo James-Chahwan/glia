@@ -335,7 +335,13 @@ pub(crate) fn apply_cross_cutting_extractors(
     // LE.4a: the extractor's statement sites (0-indexed lines here) and the
     // entities a declaration named, kept for the re-home below.
     let (entities, access) = data_entities::extract_data_entity_access(source, module_id, repo);
-    let access_sites = access_sites(source, &access.sites);
+    let access_sites = sites_at(
+        source,
+        access
+            .sites
+            .iter()
+            .map(|s| (s.entity, s.offset, s.verb.mode())),
+    );
     run_with_edges!("data_entities", entities);
     // LA.19a: not `run_with_edges!` — code-sourced jobs (Quartz, Hangfire,
     // robfig / gocron, APScheduler, Spring `@Scheduled`) also carry
@@ -349,10 +355,16 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.refs.extend(out.refs);
         merge_nav(&mut fp.nav, out.nav);
     }
-    run_with_edges!(
-        "config",
-        config::extract_config_reads(source, module_id, repo)
+    // LE.4b: the env reads' sites (0-indexed lines here), kept for the
+    // re-home below; `run_with_edges!` moves the rest.
+    let mut config_reads = config::extract_config_reads(source, module_id, repo);
+    let config_sites = sites_at(
+        source,
+        std::mem::take(&mut config_reads.sites)
+            .into_iter()
+            .map(|(key, offset)| (key, offset, None)),
     );
+    run_with_edges!("config", config_reads);
     // A13.8: secrets-manager refs (`config:secret:<provider>/<ref>`) and
     // feature-flag checks (`config:flag:<key>`), language-blind, so every
     // code file of every language is scanned. Per-file marker, printed only
@@ -501,6 +513,21 @@ pub(crate) fn apply_cross_cutting_extractors(
         anchor::DATA_ENTITIES_EMITTER,
     );
 
+    // LE.4b: every env read's `module -> config:env:<NAME>` READS_CONFIG edge
+    // moves to the innermost function / method holding its reads (no
+    // ACCESS_MODE, no declarations); a read at module scope keeps the module
+    // edge. Same cache rule; the build-level `[config-read]` marker counts it
+    // post-cache.
+    anchor::rehome_to_owner(
+        fp,
+        path,
+        module_id,
+        edge_category::READS_CONFIG,
+        &config_sites,
+        &[],
+        anchor::CONFIG_EMITTER,
+    );
+
     // LA.33: a consumer is HANDLED_BY the callback it passes, on top of the
     // subscribing function above: `this.x` / a method value bound in-file
     // (stamped `extractor:queue_callbacks`), a name or member as a HANDLED_BY
@@ -524,14 +551,16 @@ pub(crate) fn apply_cross_cutting_extractors(
     }
 }
 
-/// LE.4a: the data-entity extractor's sites as `anchor::Site`s, each offset
-/// turned into its 0-indexed line (`anchor::line_of`'s count) through one
-/// newline index, so a file with many statements is not rescanned per site.
-fn access_sites(
+/// LE.4a / LE.4b: an extractor's `(target, byte offset, mode)` sites as
+/// `anchor::Site`s, each offset turned into its 0-indexed line
+/// (`anchor::line_of`'s count) through one newline index, so a file with many
+/// statements is not rescanned per site.
+fn sites_at(
     source: &str,
-    sites: &[repo_graph_code_extractors::data_entities::AccessSite],
+    sites: impl IntoIterator<Item = (NodeId, usize, Option<&'static str>)>,
 ) -> Vec<repo_graph_code_extractors::anchor::Site> {
-    if sites.is_empty() {
+    let mut sites = sites.into_iter().peekable();
+    if sites.peek().is_none() {
         return Vec::new();
     }
     let newlines: Vec<usize> = source
@@ -540,13 +569,12 @@ fn access_sites(
         .filter_map(|(i, b)| (b == b'\n').then_some(i))
         .collect();
     sites
-        .iter()
-        .map(|s| {
-            let line = newlines.partition_point(|&nl| nl < s.offset.min(source.len()));
+        .map(|(target, offset, mode)| {
+            let line = newlines.partition_point(|&nl| nl < offset.min(source.len()));
             repo_graph_code_extractors::anchor::Site {
-                target: s.entity,
+                target,
                 line: u32::try_from(line).unwrap_or(u32::MAX),
-                mode: s.verb.mode(),
+                mode,
             }
         })
         .collect()

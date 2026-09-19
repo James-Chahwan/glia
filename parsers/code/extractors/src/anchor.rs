@@ -56,6 +56,13 @@
 //! from the sites' verbs. A target with a site at module scope, or one a
 //! declaration names, keeps its module edge. [`access_census`] and
 //! [`report_access`] give the build-level `[data-access]` marker.
+//!
+//! LE.4b: the config extractor's env reads take the same path: each
+//! `module -> config:env:<NAME>` READS_CONFIG edge moves to the function that
+//! holds its reads (no ACCESS_MODE: a read is a read), and a read at module
+//! scope keeps the module edge. The same census counts them apart
+//! (`config_fn` / `config_module`) for the sibling `[config-read]` marker
+//! ([`report_config_read`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -446,7 +453,9 @@ pub struct Site {
 
 /// LE.4a: how the data-access edges of one file (or one repo) ended up.
 /// Returned by [`rehome_to_owner`] for the edges it touched, and recounted
-/// from a finished parse by [`access_census`].
+/// from a finished parse by [`access_census`]. LE.4b: READS_CONFIG edges
+/// count in `config_fn` / `config_module` only, never in the data-access
+/// fields.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AccessStats {
     /// Function / method edges with an access site (re-homed, or a parser's
@@ -460,6 +469,11 @@ pub struct AccessStats {
     pub read_write: usize,
     /// ... of `to_fn`, with no ACCESS_MODE (every site's verb unknown).
     pub unknown: usize,
+    /// LE.4b: config-extractor READS_CONFIG edges from a FUNCTION / METHOD.
+    pub config_fn: usize,
+    /// LE.4b: config-extractor READS_CONFIG edges kept on the MODULE (a read
+    /// at module scope).
+    pub config_module: usize,
 }
 
 impl AccessStats {
@@ -470,6 +484,26 @@ impl AccessStats {
         self.write += other.write;
         self.read_write += other.read_write;
         self.unknown += other.unknown;
+        self.config_fn += other.config_fn;
+        self.config_module += other.config_module;
+    }
+
+    /// One function edge of `category` whose ACCESS_MODE is `mode`.
+    fn count_owner(&mut self, category: EdgeCategoryId, mode: Option<&str>) {
+        if category == edge_category::READS_CONFIG {
+            self.config_fn += 1;
+        } else {
+            self.count_fn(mode);
+        }
+    }
+
+    /// One module edge of `category` kept.
+    fn count_kept(&mut self, category: EdgeCategoryId) {
+        if category == edge_category::READS_CONFIG {
+            self.config_module += 1;
+        } else {
+            self.module_kept += 1;
+        }
     }
 
     /// One function edge whose ACCESS_MODE is `mode`.
@@ -541,7 +575,10 @@ fn set_mode(e: &mut Edge, mode: &'static str) {
 ///
 /// The site lines come from the same file as the spans, so the result is a
 /// function of the file's content and is safe to cache with the parse.
-/// Generic over the category on purpose: LE.4b re-homes READS_CONFIG here.
+/// Generic over the category on purpose: LE.4b re-homes READS_CONFIG here
+/// (with mode-less sites, so no ACCESS_MODE cell), and the returned stats
+/// count those edges in `config_fn` / `config_module`, exactly as
+/// [`access_census`] recounts them.
 pub fn rehome_to_owner(
     fp: &mut FileParse,
     path: &str,
@@ -594,7 +631,7 @@ pub fn rehome_to_owner(
         }
         if at.contains_key(&(module_id, target)) {
             if at_module || owners.is_empty() || keep_module.contains(&target) {
-                stats.module_kept += 1;
+                stats.count_kept(category);
             } else {
                 drop_module.insert(target);
             }
@@ -605,7 +642,7 @@ pub fn rehome_to_owner(
                     if let Some(m) = mode {
                         set_mode(e, m);
                     }
-                    stats.count_fn(mode_of(e));
+                    stats.count_owner(category, mode_of(e));
                 }
                 None => {
                     let mut e = Edge::new(owner, target, category, Confidence::Medium);
@@ -613,7 +650,7 @@ pub fn rehome_to_owner(
                         set_mode(&mut e, m);
                     }
                     evidence::attach(&mut e, Evidence::emitter(emitter).at(path, line));
-                    stats.count_fn(mode);
+                    stats.count_owner(category, mode);
                     fresh.push(e);
                 }
             }
@@ -641,9 +678,29 @@ fn emitter_of(e: &Edge) -> Option<String> {
 /// took an ACCESS_MODE. A FUNCTION / METHOD source is `to_fn` (by its mode),
 /// a MODULE source `module_kept`. Provider buckets (`data_source:*`) are not
 /// DATA_ENTITY nodes and never count.
+///
+/// LE.4b: READS_CONFIG edges into a CONFIG_KEY that the `extractor:config`
+/// stage emitted (its module edges and the ones [`rehome_to_owner`] adds for
+/// it) count in `config_fn` / `config_module` by the same source rule. The
+/// secrets / flags stage's READS_CONFIG edges are never re-homed, so they
+/// do not count.
 pub fn access_census(fp: &FileParse) -> AccessStats {
     let mut stats = AccessStats::default();
     for e in &fp.edges {
+        if e.category == edge_category::READS_CONFIG {
+            if fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::CONFIG_KEY)
+                && emitter_of(e).as_deref() == Some(CONFIG_EMITTER)
+            {
+                match fp.nav.kind_by_id.get(&e.from) {
+                    Some(k) if *k == node_kind::FUNCTION || *k == node_kind::METHOD => {
+                        stats.config_fn += 1;
+                    }
+                    Some(k) if *k == node_kind::MODULE => stats.config_module += 1,
+                    _ => {}
+                }
+            }
+            continue;
+        }
         if e.category != edge_category::ACCESSES_DATA
             || fp.nav.kind_by_id.get(&e.to) != Some(&node_kind::DATA_ENTITY)
         {
@@ -669,6 +726,11 @@ pub fn access_census(fp: &FileParse) -> AccessStats {
 /// [`rehome_to_owner`] adds for it.
 pub const DATA_ENTITIES_EMITTER: &str = "extractor:data_entities";
 
+/// LE.4b: the evidence emitter of the config extractor's env-read edges: its
+/// module edges (stamped by the engine's `run_with_edges!("config", ..)`) and
+/// the edges [`rehome_to_owner`] adds for it.
+pub const CONFIG_EMITTER: &str = "extractor:config";
+
 /// The LE.4a fired_on marker line for `stats`, or `None` when the repo holds
 /// no counted data-access edge:
 ///   `[data-access] rehomed fn={F} module_kept={M} modes read={R} write={W} read_write={X} unknown={U} repo=<label>`
@@ -685,6 +747,27 @@ pub fn report_access_line(stats: AccessStats, repo_label: &str) -> Option<String
 /// Print [`report_access_line`], once per repo that holds a data-access edge.
 pub fn report_access(stats: AccessStats, repo_label: &str) {
     if let Some(line) = report_access_line(stats, repo_label) {
+        eprintln!("{line}");
+    }
+}
+
+/// The LE.4b fired_on marker line for `stats`, or `None` when the repo holds
+/// no counted config-read edge:
+///   `[config-read] rehomed fn={F} module_kept={M} repo=<label>`
+pub fn report_config_read_line(stats: AccessStats, repo_label: &str) -> Option<String> {
+    if stats.config_fn + stats.config_module == 0 {
+        return None;
+    }
+    Some(format!(
+        "[config-read] rehomed fn={} module_kept={} repo={repo_label}",
+        stats.config_fn, stats.config_module
+    ))
+}
+
+/// Print [`report_config_read_line`], once per repo that holds a config-read
+/// edge.
+pub fn report_config_read(stats: AccessStats, repo_label: &str) {
+    if let Some(line) = report_config_read_line(stats, repo_label) {
         eprintln!("{line}");
     }
 }
@@ -1563,5 +1646,80 @@ mod tests {
             )
         );
         assert_eq!(report_access_line(AccessStats::default(), "r"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // LE.4b: READS_CONFIG through rehome_to_owner / access_census
+    // ------------------------------------------------------------------
+
+    /// LE.4b: a read inside `send` moves its key's module edge to `send`
+    /// (EVIDENCE at the read line, no ACCESS_MODE); a module-scope read keeps
+    /// its module edge; a secrets / flags READS_CONFIG edge is never counted;
+    /// the returned stats equal the census and never touch the data-access
+    /// fields.
+    #[test]
+    fn config_reads_rehome_and_count_apart() {
+        let (mut fp, module) = parse_with(&[(node_kind::FUNCTION, "send", Some((3, 6)))]);
+        let send = id(node_kind::FUNCTION, "send");
+        let notify = id(node_kind::CONFIG_KEY, "config:env:NOTIFY_URL");
+        let mode = id(node_kind::CONFIG_KEY, "config:env:RUNTIME_MODE");
+        let flag = id(node_kind::CONFIG_KEY, "config:flag:new-checkout");
+        for (t, q, emitter) in [
+            (notify, "config:env:NOTIFY_URL", CONFIG_EMITTER),
+            (mode, "config:env:RUNTIME_MODE", CONFIG_EMITTER),
+            (flag, "config:flag:new-checkout", "extractor:secrets_flags"),
+        ] {
+            fp.nodes.push(node(t, vec![]));
+            fp.nav.record(t, q, q, node_kind::CONFIG_KEY, Some(module));
+            let mut e = Edge::new(module, t, edge_category::READS_CONFIG, Confidence::Medium);
+            evidence::attach(&mut e, Evidence::emitter(emitter));
+            fp.edges.push(e);
+        }
+        let returned = rehome_to_owner(
+            &mut fp,
+            "svc/settings.ts",
+            module,
+            edge_category::READS_CONFIG,
+            &[site(notify, 5, None), site(mode, 2, None)],
+            &[],
+            CONFIG_EMITTER,
+        );
+        let reads = |to: NodeId| -> Vec<NodeId> {
+            fp.edges
+                .iter()
+                .filter(|e| e.to == to && e.category == edge_category::READS_CONFIG)
+                .map(|e| e.from)
+                .collect()
+        };
+        assert_eq!(reads(notify), vec![send]);
+        assert_eq!(reads(mode), vec![module]);
+        assert_eq!(reads(flag), vec![module]);
+        let e = fp.edges.iter().find(|e| e.from == send).unwrap();
+        assert!(e.cell(cell_type::ACCESS_MODE).is_none());
+        let ev = Evidence::of(e).unwrap();
+        assert_eq!(ev.emitter, CONFIG_EMITTER);
+        assert_eq!(
+            (ev.file.as_deref(), ev.line),
+            (Some("svc/settings.ts"), Some(5))
+        );
+        assert_eq!(ev.basis, evidence::Basis::Site);
+
+        let expected = AccessStats {
+            config_fn: 1,
+            config_module: 1,
+            ..AccessStats::default()
+        };
+        assert_eq!(returned, expected);
+        assert_eq!(
+            access_census(&fp),
+            expected,
+            "a cache-served parse counts like a fresh one"
+        );
+        assert_eq!(
+            report_config_read_line(expected, "r").as_deref(),
+            Some("[config-read] rehomed fn=1 module_kept=1 repo=r")
+        );
+        assert_eq!(report_access_line(expected, "r"), None);
+        assert_eq!(report_config_read_line(AccessStats::default(), "r"), None);
     }
 }

@@ -1,0 +1,13 @@
+{
+  "framework": "xcut-config-read-fn",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LE.4b: an env read inside a function is READS_CONFIG from that function (re-homed from the module by anchor::rehome_to_owner, EVIDENCE extractor:config at the read line); a module-scope read keeps the module edge.",
+  "expect_edges": [
+    {"from": "sendNotice", "to": "config:env:NOTIFY_URL", "category": "READS_CONFIG", "note": "process.env.NOTIFY_URL inside sendNotice"},
+    {"from": "svc::settings", "to": "config:env:RUNTIME_MODE", "category": "READS_CONFIG", "note": "module-scope const MODE keeps the module edge"}
+  ],
+  "forbid": [
+    {"from": "svc::settings", "to": "config:env:NOTIFY_URL", "category": "READS_CONFIG", "note": "every NOTIFY_URL read lies inside a function, so the module edge is re-homed"}
+  ]
+}
