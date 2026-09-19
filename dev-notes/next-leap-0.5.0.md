@@ -397,3 +397,8 @@ the run. The leap brief now forbids the wheel on other repos.
   per thread, runs the builds through `par_map_owned`, and returns the needle counts from `apply_post_cache`. It
   lands in W30 through a sequencing-only dependency on LE.4d (a dependency on a landed packet reorders landed
   waves in the from-scratch replan). 250 packets.
+  **Kept 2026-09-20** (James: *"Keep it"*) despite no measured gain (glia 1.21 -> 1.23 s, grpc-go 0.78 -> 0.79 s,
+  quokka 0.11 s): the ceiling is (sum - max) of the language builds and one language dominates each measured repo.
+  Known limit: the TS family still builds last and serially (only for output order, not a data dependency), so a
+  backend + TS-frontend repo overlaps nothing; moving it into the pool, appended last, is the fix if a big
+  polyglot repo needs it. Cost: the graph crate's per-language stderr markers are unordered at default threads.
