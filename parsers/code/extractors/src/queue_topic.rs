@@ -368,7 +368,7 @@ fn line_region(source: &str, after: usize) -> &str {
 /// Some needles already swallow their opening bracket (`.lpush(`, `new Worker(`);
 /// the rest are bare names (`nc.Publish`, `producer.send`) followed by optional
 /// whitespace and then `(`, `{` or `[`.
-fn arg_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str> {
+pub(crate) fn arg_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str> {
     let rest = source.get(after..)?;
     if needle.ends_with(['(', '{', '[']) {
         return region_body(rest);
@@ -383,7 +383,7 @@ fn arg_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str
 /// Walk from just after an opening bracket (depth already 1) to its match,
 /// respecting `'`/`"`/backtick quoting and `\` escapes. Stops at the matching
 /// close, at [`MAX_REGION`] bytes, or at EOF.
-fn region_body(s: &str) -> Option<&str> {
+pub(crate) fn region_body(s: &str) -> Option<&str> {
     let b = s.as_bytes();
     let limit = b.len().min(MAX_REGION);
     let mut depth = 1i32;
@@ -419,7 +419,7 @@ fn region_body(s: &str) -> Option<&str> {
 }
 
 /// Split an argument region on depth-0 commas.
-fn split_args(region: &str) -> Vec<&str> {
+pub(crate) fn split_args(region: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let b = region.as_bytes();
     let mut depth = 0i32;

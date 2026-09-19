@@ -268,10 +268,11 @@ pub(crate) fn apply_cross_cutting_extractors(
     // silently discard them. LE.4c: and one anchor per call site, so the
     // A5.8 pass below adds `function -USES-> queue_producer:<t>` and
     // `queue_consumer:<t> -HANDLED_BY-> function` on top of that CONTAINS.
-    run_marked_with_edges!(
-        "queues",
-        queues::extract_queue_consumer_nodes(source, path, module_id, repo)
-    );
+    // LA.33: the consumers' callbacks are kept apart (the macro moves the
+    // nodes) and bound after the anchor pass below, once every span is in.
+    let mut consumers = queues::extract_queue_consumer_nodes(source, path, module_id, repo);
+    let callbacks = std::mem::take(&mut consumers.callbacks);
+    run_marked_with_edges!("queues", consumers);
     run_marked_with_edges!(
         "queues",
         queues::extract_queue_producer_nodes(source, path, module_id, repo)
@@ -462,6 +463,16 @@ pub(crate) fn apply_cross_cutting_extractors(
     let before = fp.edges.len();
     anchor::attach(fp, path, module_id, &mut anchors);
     evidence::stamp_missing(&mut fp.edges[before..], "extractor:anchor");
+
+    // LA.33: a consumer is HANDLED_BY the callback it passes, on top of the
+    // subscribing function above: `this.x` / a method value bound in-file
+    // (stamped `extractor:queue_callbacks`), a name or member as a HANDLED_BY
+    // ref the graph builder's `resolve_refs` binds. Per-file fired_on marker,
+    // printed only when the file had a callback.
+    let cb = queues::bind_consumer_callbacks(fp, module_id, &callbacks);
+    if let Some(marker) = cb.marker(path) {
+        eprintln!("{marker}");
+    }
 
     // G14: cross-language SERVICE classification. Runs LAST so the per-file
     // nav already has every CLASS / STRUCT and its METHOD children populated

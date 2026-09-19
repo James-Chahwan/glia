@@ -96,6 +96,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "Connect/Twirp procedures and calls are read only when the service's .proto is in the build; a client stored in one file and called from another, and connect-node / non-Go Twirp code, are not extracted; a procedure whose implementing type lives in another file than its registration is contained by the module, not HANDLED_BY the method",
         verify: "grep New<Service>Client / createClient(<Service> and the method name",
     },
+    // LA.33: a consumer is HANDLED_BY its callback only for these client
+    // shapes; every other consumer keeps LE.4c's subscribing-function edge.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "HANDLED_BY",
+        note: "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe) and pika basic_consume, and only when the callback is a name, a member, this/self.method or a one-call inline function; other consumers are HANDLED_BY the function that subscribes",
+        verify: "grep the consumer call and read its callback argument",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",
@@ -396,6 +404,29 @@ mod tests {
         assert_eq!(
             edge_category::name(edge_category::RPC_CALLS),
             "RPC_CALLS",
+            "edges_found is keyed by this spelling"
+        );
+    }
+
+    #[test]
+    fn queue_callback_caveat_is_universal() {
+        // LA.33: every repo is told which consumer shapes bind their callback,
+        // and that the rest stay HANDLED_BY the subscribing function.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let rows: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "HANDLED_BY" && n.language == "*")
+            .collect();
+        assert_eq!(rows.len(), 1);
+        let note = rows[0].note;
+        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika"] {
+            assert!(note.contains(client), "{client}: {note}");
+        }
+        assert!(note.contains("the function that subscribes"), "{note}");
+        assert_eq!(rows[0].edges_found, 0);
+        assert_eq!(
+            edge_category::name(edge_category::HANDLED_BY),
+            "HANDLED_BY",
             "edges_found is keyed by this spelling"
         );
     }

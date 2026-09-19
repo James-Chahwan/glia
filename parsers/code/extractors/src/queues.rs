@@ -541,6 +541,11 @@ pub struct QueueNodes {
     /// function USES a QUEUE_PRODUCER, a QUEUE_CONSUMER is HANDLED_BY it. The
     /// node's POSITION and module CONTAINS above are kept as they are.
     pub anchors: Vec<Anchor>,
+    /// LA.33: the handler each consumer passes as a callback, one per
+    /// (consumer, handler), in site order. Consumer side only (empty for
+    /// producers); [`bind_consumer_callbacks`] turns them into HANDLED_BY
+    /// edges and refs once the file's spans are all in.
+    pub callbacks: Vec<ConsumerCallback>,
 }
 
 /// Call sites recorded per (topic, framework) per file. A generated file can
@@ -707,6 +712,12 @@ pub fn extract_queue_nodes_with_consts(
 /// own sites. The new owner edges take the removed ones' place (the end, when
 /// there were none) and are stamped `extractor:anchor` rule `const_fold`, the
 /// post-cache counterpart of the per-file `extractor:anchor` stamp.
+///
+/// LA.33: an old queue id the fold does not re-emit is GONE: every edge that
+/// touches it and every ref from it is dropped (the owner sweep already takes
+/// its HANDLED_BY callback edges). Then [`bind_consumer_callbacks`] re-binds
+/// the fold's consumer callbacks; the direct edges land with the new owner
+/// edges, and a same-id consumer's surviving refs are not doubled.
 pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fold: ConstFold) {
     let is_queue =
         |k: &NodeKindId| *k == node_kind::QUEUE_CONSUMER || *k == node_kind::QUEUE_PRODUCER;
@@ -761,6 +772,17 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
         path,
         ..
     } = fold;
+    // LA.33: a literal-topic node comes back with the SAME id; only the ids
+    // the fold did not re-emit (a sentinel whose sites all folded) are gone,
+    // and nothing may keep naming them.
+    let fresh_ids: HashSet<NodeId> = consumers
+        .nodes
+        .iter()
+        .chain(&producers.nodes)
+        .map(|n| n.id)
+        .collect();
+    let gone: HashSet<NodeId> = old.difference(&fresh_ids).copied().collect();
+    let callbacks = consumers.callbacks;
     let mut anchors = consumers.anchors;
     anchors.extend(producers.anchors);
     let mut fresh = FileParse {
@@ -812,8 +834,19 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
         .position(&old_owner)
         .unwrap_or(fp.edges.len());
     fp.edges.retain(|e| !old_owner(e));
+    // LA.33: the owner sweep above already took the old consumers' callback
+    // edges (HANDLED_BY from a queue id); no other edge and no ref may name
+    // a gone id either. A same-id consumer's refs stay, and the re-bind
+    // below dedupes against them.
+    fp.edges
+        .retain(|e| !gone.contains(&e.from) && !gone.contains(&e.to));
+    fp.refs.retain(|r| !gone.contains(&r.from));
     let tail = fp.edges.len();
     anchor::attach(fp, &path, module_id, &mut anchors);
+    // LA.33: the fold's consumers re-bind their callbacks; the direct edges
+    // join the re-anchored owner edges (already stamped, so the const-fold
+    // anchor stamp below leaves them be), the refs append.
+    bind_consumer_callbacks(fp, module_id, &callbacks);
     let mut added = fp.edges.split_off(tail);
     let ev = evidence::Evidence::emitter("extractor:anchor").rule("const_fold");
     evidence::stamp_missing_with(&mut added, &ev);
@@ -858,11 +891,15 @@ fn emit_queue_nodes(
     // tree-sitter parse that already ran, and it is what makes the gate
     // case-insensitive for every row at once.
     let lower = source.to_ascii_lowercase();
+    // LA.33: consumer callbacks, per (consumer, handler), in site order.
+    let mut callbacks: Vec<ConsumerCallback> = Vec::new();
+    let mut callback_seen: HashSet<(NodeId, HandlerExpr)> = HashSet::new();
 
     for (pattern, framework, signals, rule) in patterns {
         if !source.contains(pattern) || !signals_present(&lower, signals) {
             continue;
         }
+        let handler = handler_rule(pattern).filter(|_| kind == node_kind::QUEUE_CONSUMER);
         let mut hits = queue_topic::scan(source, pattern, *rule);
         if yields_to_earlier_rows(framework) {
             let len = pattern.len();
@@ -951,6 +988,11 @@ fn emit_queue_nodes(
                 fired_on(pattern, rule, framework, topic, path);
                 cloud_fired_on(framework, topic, *form, path);
             }
+            // LA.33: this site's handler belongs to the node it just joined.
+            if let (Some(h), Some(id)) = (handler, pending_id(&pending, &seen, topic, framework)) {
+                let found = handlers_at(source, *offset, pattern, h);
+                push_callbacks(&mut callbacks, &mut callback_seen, id, found);
+            }
         }
         // A needle whose rule is `NoIdentity` NEVER names a topic (it is a
         // liveness signal — Go's `r.ReadMessage(ctx)`), so falling back to a
@@ -981,10 +1023,31 @@ fn emit_queue_nodes(
             ) {
                 fired_on(pattern, rule, framework, &tag, path);
             }
+            // LA.33: every topic-less occurrence is the sentinel's; its
+            // handler is a queue handler whatever the topic.
+            if let (Some(h), Some(id)) = (handler, pending_id(&pending, &seen, &tag, framework)) {
+                for hit in &hits {
+                    let found = handlers_at(source, hit.offset, pattern, h);
+                    push_callbacks(&mut callbacks, &mut callback_seen, id, found);
+                }
+            }
         }
     }
 
-    finish(pending, source, path, module_id, repo, kind)
+    let mut out = finish(pending, source, path, module_id, repo, kind);
+    out.callbacks = callbacks;
+    out
+}
+
+/// The id [`record_site`] gave (topic, framework) in this file.
+fn pending_id(
+    pending: &[Pending],
+    seen: &std::collections::HashMap<String, usize>,
+    topic: &str,
+    framework: &QueueFramework,
+) -> Option<NodeId> {
+    let idx = *seen.get(&format!("{topic}:{framework:?}"))?;
+    pending.get(idx).map(|p| p.id)
 }
 
 /// Record one call site for a (topic, framework).
@@ -1125,6 +1188,7 @@ fn finish(
         edges,
         nav,
         anchors,
+        callbacks: Vec::new(),
     }
 }
 
@@ -1162,6 +1226,650 @@ fn framework_tag(f: &QueueFramework) -> String {
 /// could drift from the enum. A12.2 calls this rather than re-deriving it.
 pub fn is_framework_tag(topic: &str) -> bool {
     topic.starts_with(UNRESOLVED_PREFIX)
+}
+
+// ---- LA.33: consumer callbacks -> HANDLED_BY the handler ------------------
+// A QUEUE_CONSUMER was HANDLED_BY only the function holding its subscribe call
+// (LE.4c's owner edge). The handler a consumer passes as a callback -
+// `consumer.run({ eachMessage: onPayment })`, `channel.consume(q, onOrder)`,
+// `nc.Subscribe(subj, onOrder)` - was read by no one: the needle already found
+// the call and `queue_topic` already split its arguments, but the handler
+// argument was thrown away, so no path ran from a consumer into the code that
+// processes its messages.
+//
+// PARSERS EXTRACT, THE GRAPH RESOLVES. The extractor records WHICH expression
+// is the handler ([`HandlerExpr`]); [`bind_consumer_callbacks`] turns a plain
+// or member name into a HANDLED_BY `UnresolvedRef` that the graph builder's
+// `resolve_refs` binds through the file's import bindings, the module's
+// symbols and its unique-global HANDLED_BY fallbacks (the Go ROUTE handler
+// precedent), so a handler imported from another file resolves and nothing
+// cross-file is guessed here. Only `this.x` / `self.x`, and a method value on
+// the enclosing method's own type (`w.handle` inside `(w *Worker) Start`), are
+// bound in-file: the enclosing class is a fact of this file.
+//
+// fired_on (per file, printed by the engine):
+//   `... 2>&1 | grep '\[queue-callbacks\] consumers='`
+// ---------------------------------------------------------------------------
+
+/// Where a consumer needle's handler sits. Keyed by the SAME needle strings as
+/// [`CONSUMER_PATTERNS`] (`handler_rules_name_consumer_needles` asserts it).
+#[derive(Debug, Clone, Copy)]
+enum HandlerRule {
+    /// Positional argument N of the needle's call.
+    ArgIndex(usize),
+    /// `key: value` / `key=value` in the call's argument region (a top-level
+    /// keyword argument, or a member of a top-level object argument; keys
+    /// tried in order), falling back to positional argument N.
+    KeyedOrArg(&'static [&'static str], usize),
+    /// kafkajs: the handler is not an argument of `subscribe` but of the SAME
+    /// receiver's `run({ eachMessage })`, anywhere in the file.
+    RunCallback(&'static [&'static str]),
+}
+
+const HANDLER_RULES: &[(&str, HandlerRule)] = &[
+    // kafkajs: `consumer.subscribe({ topic })` + `consumer.run({ eachMessage })`.
+    ("consumer.subscribe", HandlerRule::RunCallback(&["eachMessage", "eachBatch"])),
+    // amqplib: `channel.consume(queue, onMessage, options)`.
+    ("channel.consume", HandlerRule::ArgIndex(1)),
+    // BullMQ: `new Worker(queue, processor, options)`.
+    ("new Worker(", HandlerRule::ArgIndex(1)),
+    // nats.js v2 `nc.subscribe(subject, { callback: (err, msg) => .. })`; v1
+    // passed the callback positionally, `nc.subscribe(subject, onMsg)`.
+    ("nc.subscribe", HandlerRule::KeyedOrArg(&["callback"], 1)),
+    // nats.go: `nc.Subscribe(subj, cb)`, `nc.QueueSubscribe(subj, queue, cb)`.
+    ("nc.Subscribe", HandlerRule::ArgIndex(1)),
+    ("nc.QueueSubscribe", HandlerRule::ArgIndex(2)),
+    // pika 1.x: `basic_consume(queue, on_message_callback, ...)`, keyword or positional.
+    ("basic_consume(", HandlerRule::KeyedOrArg(&["on_message_callback"], 1)),
+];
+
+fn handler_rule(needle: &str) -> Option<HandlerRule> {
+    HANDLER_RULES
+        .iter()
+        .find(|(n, _)| *n == needle)
+        .map(|(_, r)| *r)
+}
+
+/// The handler expression a consumer passes, as written.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HandlerExpr {
+    /// `onOrder` - a function name (local, imported or package-level).
+    Name(String),
+    /// `handlers.onOrder`, Go's method value `w.handle`.
+    Member { base: String, name: String },
+    /// `this.handle` / `self.on_message` (a trailing `.bind(..)` stripped).
+    SelfMember(String),
+}
+
+/// One consumer's handler, read at a call site of that consumer's needle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerCallback {
+    pub consumer: NodeId,
+    /// 0-indexed line of the expression naming the handler (the needle's
+    /// line, or the kafkajs `run(` call's).
+    pub line: u32,
+    pub handler: HandlerExpr,
+    /// The handler was the one call inside an inline function
+    /// (`(job) => sendEmail(job)`), not a reference.
+    pub inline: bool,
+}
+
+/// What [`bind_consumer_callbacks`] did with one file's callbacks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CallbackStats {
+    /// Distinct consumers that had at least one callback.
+    pub consumers: usize,
+    /// Callbacks bound in-file to a METHOD (`this.x`, a method value).
+    pub direct: usize,
+    /// Callbacks handed to the graph builder as HANDLED_BY `UnresolvedRef`s.
+    pub refs: usize,
+    /// The share of `direct + refs` read out of a one-call inline function.
+    pub inline: usize,
+    /// `this.x` / method values with no such method on the enclosing type.
+    pub unbound: usize,
+}
+
+impl CallbackStats {
+    pub fn bound(&self) -> usize {
+        self.direct + self.refs
+    }
+
+    /// The per-file fired_on line, or `None` when the file had no callback.
+    pub fn marker(&self, path: &str) -> Option<String> {
+        (self.consumers > 0).then(|| {
+            format!(
+                "[queue-callbacks] consumers={} bound={} (direct={} refs={} inline={}) unbound={} path={path}",
+                self.consumers,
+                self.bound(),
+                self.direct,
+                self.refs,
+                self.inline,
+                self.unbound
+            )
+        })
+    }
+}
+
+/// Bytes of a receiver chain / callee: `consumer`, `this.consumer`, `w.handle`.
+fn is_chain_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.'
+}
+
+/// Words that are never a handler name on their own.
+const NOT_A_HANDLER: &[&str] = &[
+    "this", "self", "super", "null", "undefined", "nil", "None", "true", "false", "True",
+    "False", "function", "async", "await", "return", "lambda", "func", "new",
+];
+
+/// One identifier: `[A-Za-z_$][A-Za-z0-9_$]*`.
+fn is_ident(s: &str) -> bool {
+    let b = s.as_bytes();
+    matches!(b.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_' || *c == b'$')
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$')
+}
+
+/// `word` followed by a non-identifier byte (or the end) at the start of `s`;
+/// returns the rest after it.
+fn strip_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(word)?;
+    match rest.as_bytes().first() {
+        Some(c) if c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$' => None,
+        _ => Some(rest),
+    }
+}
+
+/// The body of a bracket opened just before `s`, when its close is really
+/// there (an unterminated or over-long region is `None`).
+fn closed_region(s: &str) -> Option<&str> {
+    let inner = queue_topic::region_body(s)?;
+    let close = s.as_bytes().get(inner.len())?;
+    (matches!(close, b')' | b'}' | b']') && inner.len() < queue_topic::MAX_REGION)
+        .then_some(inner)
+}
+
+/// `handler.bind(anything)` -> `handler`; anything else unchanged.
+fn strip_bind(t: &str) -> &str {
+    let Some(at) = t.rfind(".bind(") else {
+        return t;
+    };
+    let Some(rest) = t.get(at + ".bind(".len()..) else {
+        return t;
+    };
+    match closed_region(rest) {
+        Some(inner) if inner.len() + 1 == rest.len() => t.get(..at).map_or(t, str::trim_end),
+        _ => t,
+    }
+}
+
+/// A name or a one-dot member chain as a [`HandlerExpr`].
+fn reference(t: &str) -> Option<HandlerExpr> {
+    let t = strip_bind(t.trim());
+    let mut parts = t.split('.');
+    let first = parts.next()?;
+    let second = parts.next();
+    if parts.next().is_some() || !is_ident(first) {
+        return None;
+    }
+    let Some(name) = second else {
+        return (!NOT_A_HANDLER.contains(&first)).then(|| HandlerExpr::Name(first.to_string()));
+    };
+    if !is_ident(name) || NOT_A_HANDLER.contains(&name) {
+        return None;
+    }
+    if first == "this" || first == "self" {
+        return Some(HandlerExpr::SelfMember(name.to_string()));
+    }
+    (!NOT_A_HANDLER.contains(&first)).then(|| HandlerExpr::Member {
+        base: first.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// The callee of `s` when `s` is exactly ONE call statement:
+/// `[return] [await] callee(args)[;]`. A chained call (`f(x).then(g)`) or a
+/// second statement leaves text after the call and is `None`.
+fn single_call(s: &str) -> Option<&str> {
+    let mut s = s.trim();
+    if let Some(rest) = strip_word(s, "return") {
+        s = rest.trim_start();
+    }
+    if let Some(rest) = strip_word(s, "await") {
+        s = rest.trim_start();
+    }
+    let b = s.as_bytes();
+    let len = b.iter().take_while(|c| is_chain_byte(**c)).count();
+    if len == 0 || b.get(len) != Some(&b'(') {
+        return None;
+    }
+    let args = s.get(len + 1..)?;
+    let inner = closed_region(args)?;
+    let rest = args.get(inner.len() + 1..)?;
+    rest.trim()
+        .trim_end_matches(';')
+        .trim()
+        .is_empty()
+        .then(|| s.get(..len))
+        .flatten()
+}
+
+/// The single call inside a block body `{ .. }` that ends the text.
+fn block_call(s: &str) -> Option<&str> {
+    let s = s.trim_start().strip_prefix('{')?;
+    let inner = closed_region(s)?;
+    let rest = s.get(inner.len() + 1..)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    single_call(inner)
+}
+
+/// After a parameter list's `(`: the text following its matching `)`.
+fn after_params(s: &str) -> Option<&str> {
+    let s = s.strip_prefix('(')?;
+    let inner = closed_region(s)?;
+    s.get(inner.len() + 1..)
+}
+
+/// The callee of an inline function whose body is exactly one call: JS
+/// arrows (`[async] (p) => [await] f(p)`, `p => f(p)`, block bodies with one
+/// `[await|return] f(p);`), JS `function (p) { f(p); }`, a Go func literal
+/// `func(m *nats.Msg) { f(m) }` and a Python `lambda ch, m, p, b: f(m)`.
+fn inline_callee(t: &str) -> Option<&str> {
+    let t = t.trim();
+    // Python lambda: params end at the first `:`.
+    if let Some(rest) = strip_word(t, "lambda") {
+        let colon = rest.find(':')?;
+        return single_call(rest.get(colon + 1..)?);
+    }
+    let t = strip_word(t, "async").map_or(t, str::trim_start);
+    // JS `function [name] (params) { .. }`.
+    if let Some(rest) = strip_word(t, "function") {
+        let rest = rest.trim_start().trim_start_matches('*').trim_start();
+        let name_len = rest
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$')
+            .count();
+        let rest = rest.get(name_len..)?.trim_start();
+        return block_call(after_params(rest)?);
+    }
+    // Go `func(params) { .. }`.
+    if let Some(rest) = strip_word(t, "func") {
+        return block_call(after_params(rest.trim_start())?);
+    }
+    // JS arrow.
+    let rest = if t.starts_with('(') {
+        after_params(t)?
+    } else {
+        let n = t
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$')
+            .count();
+        if n == 0 {
+            return None;
+        }
+        t.get(n..)?
+    };
+    let body = rest.trim_start().strip_prefix("=>")?.trim_start();
+    if body.starts_with('{') {
+        block_call(body)
+    } else {
+        single_call(body)
+    }
+}
+
+/// The handler an argument / value expression names, and whether it came out
+/// of a one-call inline function. `None` for anything else (multi-statement
+/// bodies, chained calls, computed values): LE.4c's owner edge then stays the
+/// consumer's only link.
+fn handler_expr(text: &str) -> Option<(HandlerExpr, bool)> {
+    if let Some(h) = reference(text) {
+        return Some((h, false));
+    }
+    inline_callee(text)
+        .and_then(reference)
+        .map(|h| (h, true))
+}
+
+/// [`queue_topic::split_args`], with a Python lambda's own commas put back:
+/// `f(q, lambda ch, m, p, b: g(m))` has two arguments, not five.
+fn call_args(region: &str) -> Vec<&str> {
+    let raw = queue_topic::split_args(region);
+    let base = region.as_ptr() as usize;
+    let span = |a: &str| {
+        let start = (a.as_ptr() as usize).saturating_sub(base);
+        (start, start + a.len())
+    };
+    let opens_lambda = |a: &str| {
+        let v = a.trim_start();
+        let v = v.find('=').map_or(v, |eq| v.get(eq + 1..).unwrap_or(v).trim_start());
+        strip_word(v, "lambda").is_some_and(|rest| !rest.contains(':'))
+    };
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while i < raw.len() {
+        let (start, mut end) = span(raw[i]);
+        if opens_lambda(raw[i]) {
+            let mut j = i + 1;
+            while j < raw.len() {
+                end = span(raw[j]).1;
+                j += 1;
+                if raw[j - 1].contains(':') {
+                    break;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+        if let Some(arg) = region.get(start..end) {
+            out.push(arg);
+        }
+    }
+    out
+}
+
+/// The value of `key: value` / `key=value` when `member` is that member
+/// (`'key': value` too). Keys compare ASCII-case-insensitively, like
+/// `queue_topic`'s keyed lookup; `==`, `=>` and `::` are not separators.
+fn member_value<'a>(member: &'a str, key: &str) -> Option<&'a str> {
+    let m = member.trim();
+    let (m, quote) = match m.as_bytes().first() {
+        Some(q @ (b'\'' | b'"' | b'`')) => (m.get(1..)?, Some(*q)),
+        _ => (m, None),
+    };
+    let head = m.get(..key.len())?;
+    if !head.eq_ignore_ascii_case(key) {
+        return None;
+    }
+    let mut rest = m.get(key.len()..)?;
+    match quote {
+        Some(q) => rest = rest.strip_prefix(q as char)?,
+        None => {
+            if rest
+                .as_bytes()
+                .first()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'$')
+            {
+                return None;
+            }
+        }
+    }
+    let rest = rest.trim_start();
+    let b = rest.as_bytes();
+    let sep_ok = match b.first() {
+        Some(b':') => b.get(1) != Some(&b':'),
+        Some(b'=') => !matches!(b.get(1), Some(b'=' | b'>')),
+        _ => false,
+    };
+    sep_ok.then(|| rest.get(1..)).flatten().map(str::trim)
+}
+
+/// The value keyed by one of `keys` in a call's argument region: a top-level
+/// keyword argument, or a member of a top-level object argument.
+fn keyed_value<'a>(region: &'a str, keys: &[&str]) -> Option<&'a str> {
+    let args = call_args(region);
+    for key in keys {
+        for arg in &args {
+            if let Some(v) = member_value(arg, key) {
+                return Some(v);
+            }
+            let Some(obj) = arg.trim().strip_prefix('{') else {
+                continue;
+            };
+            let Some(inner) = closed_region(obj) else {
+                continue;
+            };
+            if let Some(v) = call_args(inner).iter().find_map(|m| member_value(m, key)) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Every `(line, handler, inline)` the call at `offset` names under `rule`.
+fn handlers_at(
+    source: &str,
+    offset: usize,
+    needle: &str,
+    rule: HandlerRule,
+) -> Vec<(u32, HandlerExpr, bool)> {
+    let after = offset.saturating_add(needle.len());
+    let line = anchor::line_of(source, offset);
+    let region = || queue_topic::arg_region(source, after, needle);
+    let arg = |n: usize| region().and_then(|r| call_args(r).get(n).copied());
+    let read = match rule {
+        HandlerRule::ArgIndex(n) => arg(n),
+        HandlerRule::KeyedOrArg(keys, n) => region()
+            .and_then(|r| keyed_value(r, keys))
+            .or_else(|| arg(n)),
+        HandlerRule::RunCallback(keys) => return run_callbacks(source, offset, needle, keys),
+    };
+    read.and_then(handler_expr)
+        .map(|(h, inline)| vec![(line, h, inline)])
+        .unwrap_or_default()
+}
+
+/// kafkajs: the receiver chain before the needle's last `.` (`consumer`,
+/// `this.consumer`), then every `<chain>.run(` in the file whose chain starts
+/// at an identifier boundary - each `eachMessage` / `eachBatch` value.
+fn run_callbacks(
+    source: &str,
+    offset: usize,
+    needle: &str,
+    keys: &[&str],
+) -> Vec<(u32, HandlerExpr, bool)> {
+    let mut out = Vec::new();
+    let b = source.as_bytes();
+    // The needle's own receiver (`consumer` of `consumer.subscribe`) plus
+    // whatever chain precedes it (`this.`).
+    let Some(dot) = needle.rfind('.').map(|d| offset + d) else {
+        return out;
+    };
+    let mut start = dot;
+    while start > 0 && b.get(start - 1).is_some_and(|c| is_chain_byte(*c)) {
+        start -= 1;
+    }
+    let Some(chain) = source.get(start..dot).filter(|c| !c.is_empty()) else {
+        return out;
+    };
+    let run = format!("{chain}.run(");
+    for (at, _) in source
+        .match_indices(&run)
+        .take(queue_topic::MAX_HITS_PER_NEEDLE)
+    {
+        if at > 0 && b.get(at - 1).is_some_and(|c| is_chain_byte(*c)) {
+            continue;
+        }
+        let Some(region) = queue_topic::arg_region(source, at + run.len(), "run(") else {
+            continue;
+        };
+        let line = anchor::line_of(source, at);
+        for key in keys {
+            if let Some((h, inline)) = keyed_value(region, &[key]).and_then(handler_expr) {
+                out.push((line, h, inline));
+            }
+        }
+    }
+    out
+}
+
+/// Record `found` for `consumer`, deduped per (consumer, handler), first
+/// site wins.
+fn push_callbacks(
+    callbacks: &mut Vec<ConsumerCallback>,
+    seen: &mut HashSet<(NodeId, HandlerExpr)>,
+    consumer: NodeId,
+    found: Vec<(u32, HandlerExpr, bool)>,
+) {
+    for (line, handler, inline) in found {
+        if seen.insert((consumer, handler.clone())) {
+            callbacks.push(ConsumerCallback {
+                consumer,
+                line,
+                handler,
+                inline,
+            });
+        }
+    }
+}
+
+/// Is `name` a name this file's imports bind (an alias, an imported symbol,
+/// a whole module's first or last path segment)? Over-approximate on purpose:
+/// a name that might be an import goes to the graph's resolver as a ref.
+fn import_binds(fp: &FileParse, name: &str) -> bool {
+    use repo_graph_code_domain::ImportTarget;
+    fp.imports.iter().any(|i| match &i.target {
+        ImportTarget::Symbol {
+            name: sym, alias, ..
+        } => alias.as_deref().unwrap_or(sym) == name,
+        ImportTarget::Module { path, alias } => match alias {
+            Some(a) => a == name,
+            None => {
+                let segs: Vec<&str> = path
+                    .split(['/', ':', '.', '\\', '"', '\''])
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                segs.first() == Some(&name)
+                    || path
+                        .rsplit(['/', ':', '\\'])
+                        .next()
+                        .and_then(|last| last.split('.').next())
+                        == Some(name)
+            }
+        },
+    })
+}
+
+/// Parent kinds a `this.x` / method value resolves against.
+const OWNER_TYPES: &[NodeKindId] = &[node_kind::CLASS, node_kind::STRUCT];
+
+/// The METHOD `name` of the type enclosing the function that holds `line`:
+/// the innermost METHOD / FUNCTION span, then up its nav parents to the first
+/// CLASS / STRUCT, then that type's METHOD child named `name`.
+fn own_method(fp: &FileParse, idx: &anchor::OwnerIndex, line: u32, name: &str) -> Option<NodeId> {
+    let mut at = anchor::owner_of_line(idx, line)?;
+    let mut ty = None;
+    for _ in 0..8 {
+        let parent = *fp.nav.parent_of.get(&at)?;
+        if fp
+            .nav
+            .kind_by_id
+            .get(&parent)
+            .is_some_and(|k| OWNER_TYPES.contains(k))
+        {
+            ty = Some(parent);
+            break;
+        }
+        at = parent;
+    }
+    fp.nav.children_of.get(&ty?)?.iter().copied().find(|c| {
+        fp.nav.kind_by_id.get(c) == Some(&node_kind::METHOD)
+            && fp.nav.name_by_id.get(c).is_some_and(|n| n == name)
+    })
+}
+
+/// Bind one file's consumer callbacks (LA.33).
+///
+/// - `this.x` / `self.x` -> `consumer -HANDLED_BY-> <enclosing type>::x`, direct;
+/// - `base.name` where `base` is not an import binding and the enclosing
+///   type declares a METHOD `name` (Go's method value `w.handle`) -> the same
+///   direct edge; any other member -> a HANDLED_BY `UnresolvedRef`
+///   `Attribute { base, name }`;
+/// - a name -> a HANDLED_BY `UnresolvedRef` `Bare(name)`, which the graph
+///   builder binds through the import bindings, the module's symbols, then
+///   the unique-global HANDLED_BY fallback.
+///
+/// Direct edges carry `extractor:queue_callbacks` EVIDENCE (rule `self` or
+/// `method_value`) at the callback's line in the module's file. Edges dedupe
+/// by (from, to, category) and refs by (from, qualifier, category) against
+/// what `fp` already holds, so a second call (the post-cache const fold
+/// re-binding a same-id consumer) never doubles one. Output order is callback
+/// order.
+pub fn bind_consumer_callbacks(
+    fp: &mut FileParse,
+    module_id: NodeId,
+    callbacks: &[ConsumerCallback],
+) -> CallbackStats {
+    use repo_graph_code_domain::{CallQualifier, UnresolvedRef};
+    let mut stats = CallbackStats::default();
+    if callbacks.is_empty() {
+        return stats;
+    }
+    let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
+    let file = fp
+        .nodes
+        .iter()
+        .find(|n| n.id == module_id)
+        .and_then(|n| evidence::locate(&n.cells))
+        .map(|(f, _)| f);
+    let mut edges: HashSet<(NodeId, NodeId)> = fp
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::HANDLED_BY)
+        .map(|e| (e.from, e.to))
+        .collect();
+    let mut consumers: HashSet<NodeId> = HashSet::new();
+    for cb in callbacks {
+        consumers.insert(cb.consumer);
+        let direct = match &cb.handler {
+            HandlerExpr::SelfMember(x) => own_method(fp, &idx, cb.line, x).map(|m| (m, "self")),
+            HandlerExpr::Member { base, name } if !import_binds(fp, base) => {
+                own_method(fp, &idx, cb.line, name).map(|m| (m, "method_value"))
+            }
+            _ => None,
+        };
+        let qualifier = match (&cb.handler, direct) {
+            (_, Some((to, rule))) => {
+                if edges.insert((cb.consumer, to)) {
+                    let ev = evidence::Evidence::emitter("extractor:queue_callbacks").rule(rule);
+                    let ev = match &file {
+                        Some(f) => ev.at(f.clone(), cb.line),
+                        None => ev.line(cb.line),
+                    };
+                    fp.edges.push(
+                        Edge::new(cb.consumer, to, edge_category::HANDLED_BY, Confidence::Medium)
+                            .with_cell(ev.to_cell()),
+                    );
+                }
+                stats.direct += 1;
+                if cb.inline {
+                    stats.inline += 1;
+                }
+                continue;
+            }
+            (HandlerExpr::SelfMember(_), None) => {
+                stats.unbound += 1;
+                continue;
+            }
+            (HandlerExpr::Member { base, name }, None) => CallQualifier::Attribute {
+                base: base.clone(),
+                name: name.clone(),
+            },
+            (HandlerExpr::Name(n), None) => CallQualifier::Bare(n.clone()),
+        };
+        let dup = fp.refs.iter().any(|r| {
+            r.from == cb.consumer
+                && r.category == edge_category::HANDLED_BY
+                && r.qualifier == qualifier
+        });
+        if !dup {
+            fp.refs.push(UnresolvedRef {
+                from: cb.consumer,
+                from_module: module_id,
+                qualifier,
+                category: edge_category::HANDLED_BY,
+                line: cb.line,
+            });
+        }
+        stats.refs += 1;
+        if cb.inline {
+            stats.inline += 1;
+        }
+    }
+    stats.consumers = consumers.len();
+    stats
 }
 
 // ---- A12.1: MESSAGE_TYPE cell --------------------------------------------
@@ -3282,5 +3990,445 @@ public class AuditFunction
                     && ev.rule.as_deref() == Some("const_fold"))
         );
         assert_eq!(anchor::census(&fp), anchor::census(&literal));
+    }
+
+    // ---- LA.33: consumer callbacks -> HANDLED_BY the handler --------------
+
+    fn name(h: &str) -> HandlerExpr {
+        HandlerExpr::Name(h.to_string())
+    }
+
+    fn member(base: &str, h: &str) -> HandlerExpr {
+        HandlerExpr::Member {
+            base: base.to_string(),
+            name: h.to_string(),
+        }
+    }
+
+    /// `(consumer qname, line, handler, inline)` per callback.
+    fn callbacks_of(r: &QueueNodes) -> Vec<(String, u32, HandlerExpr, bool)> {
+        r.callbacks
+            .iter()
+            .map(|c| {
+                let q = r.nav.qname_by_id.get(&c.consumer).cloned().unwrap_or_default();
+                (q, c.line, c.handler.clone(), c.inline)
+            })
+            .collect()
+    }
+
+    fn cb(q: &str, line: u32, h: HandlerExpr, inline: bool) -> (String, u32, HandlerExpr, bool) {
+        (q.to_string(), line, h, inline)
+    }
+
+    #[test]
+    fn handler_rules_name_consumer_needles() {
+        for (needle, _) in HANDLER_RULES {
+            assert!(
+                CONSUMER_PATTERNS.iter().any(|(n, ..)| n == needle),
+                "{needle} is not a CONSUMER_PATTERNS needle"
+            );
+            assert!(
+                !PRODUCER_PATTERNS.iter().any(|(n, ..)| n == needle),
+                "{needle} is a producer needle"
+            );
+        }
+        // A producer never carries callbacks, even when a consumer needle's
+        // text appears in its file.
+        let src = "import { Kafka } from 'kafkajs';\nawait consumer.subscribe({ topic: 'a' });\nawait consumer.run({ eachMessage: h });\nawait producer.send({ topic: 'b', messages });\n";
+        let p = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert!(p.callbacks.is_empty());
+    }
+
+    #[test]
+    fn handler_expr_forms() {
+        let bare = |t: &str| handler_expr(t).map(|(h, _)| h);
+        let inline = |t: &str| handler_expr(t).filter(|(_, i)| *i).map(|(h, _)| h);
+        assert_eq!(handler_expr(" onOrder "), Some((name("onOrder"), false)));
+        assert_eq!(bare("handlers.onOrder"), Some(member("handlers", "onOrder")));
+        assert_eq!(bare("w.handle"), Some(member("w", "handle")));
+        assert_eq!(
+            bare("this.handle"),
+            Some(HandlerExpr::SelfMember("handle".into()))
+        );
+        assert_eq!(
+            bare("self.on_message"),
+            Some(HandlerExpr::SelfMember("on_message".into()))
+        );
+        assert_eq!(
+            handler_expr("this.handle.bind(this)"),
+            Some((HandlerExpr::SelfMember("handle".into()), false))
+        );
+        // One-call inline functions bind their callee, marked inline.
+        for t in [
+            "(job) => sendEmail(job)",
+            "async (job) => await sendEmail(job)",
+            "job => sendEmail(job)",
+            "async job => sendEmail(job, 1)",
+            "({ message }) => { sendEmail(message); }",
+            "async (p) => { await sendEmail(p) }",
+            "(p) => { return sendEmail(p); }",
+            "function (p) { sendEmail(p); }",
+            "async function named(p) {\n  return await sendEmail(p);\n}",
+            "func(m *nats.Msg) { sendEmail(m) }",
+            "lambda ch, method, props, body: sendEmail(body)",
+        ] {
+            assert_eq!(inline(t), Some(name("sendEmail")), "{t}");
+        }
+        assert_eq!(
+            inline("(m) => this.handle(m)"),
+            Some(HandlerExpr::SelfMember("handle".into()))
+        );
+        assert_eq!(
+            inline("func(m *nats.Msg) { w.handle(m) }"),
+            Some(member("w", "handle"))
+        );
+        // Anything else stays unread.
+        for t in [
+            "(p) => { a(p); b(p); }",
+            "(p) => {\n  a(p)\n  b(p)\n}",
+            "(p) => a(p).then(b)",
+            "(p) => a.b.c(p)",
+            "a.b.c",
+            "handlers[name]",
+            "makeHandler(cfg)",
+            "'orders'",
+            "{ noAck: true }",
+            "this",
+            "null",
+            "(p) => {",
+            "lambda: ",
+            "π => f(π)",
+        ] {
+            assert_eq!(handler_expr(t), None, "{t}");
+        }
+    }
+
+    #[test]
+    fn kafkajs_run_pairs_by_receiver_chain() {
+        // Two receivers in ONE file: `consumer` and `this.consumer` pair with
+        // their own run() only.
+        let src = "import { Kafka } from 'kafkajs';\n\
+await consumer.subscribe({ topic: 'payments' });\n\
+await consumer.run({ eachMessage: onPayment });\n\
+class R {\n\
+  async start() {\n\
+    await this.consumer.subscribe({ topic: 'refunds' });\n\
+    await this.consumer.run({ eachBatch: this.onBatch.bind(this) });\n\
+  }\n\
+}\n\
+await myconsumer.run({ eachMessage: notMine });\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:payments", 2, name("onPayment"), false),
+                cb(
+                    "queue_consumer:refunds",
+                    6,
+                    HandlerExpr::SelfMember("onBatch".into()),
+                    false
+                ),
+            ]
+        );
+        // One run() serves every topic its receiver subscribed, and a topic
+        // subscribed twice keeps one callback.
+        let src = "import { Kafka } from 'kafkajs';\nawait consumer.subscribe({ topic: 'a' });\nawait consumer.subscribe({ topic: 'b' });\nawait consumer.subscribe({ topic: 'a' });\nawait consumer.run({\n  eachMessage: async ({ message }) => handle(message),\n});\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:a", 4, name("handle"), true),
+                cb("queue_consumer:b", 4, name("handle"), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn amqplib_worker_and_nats_arg_indexes() {
+        let src = "import amqp from 'amqplib';\nimport { Worker } from 'bullmq';\nimport { connect } from 'nats';\nchannel.consume('orders', onOrder, { noAck: true });\nchannel.consume('audit', (msg) => { audit(msg); record(msg); });\nnew Worker('emails', (job) => sendEmail(job), { connection });\nnc.subscribe('events', { callback: (err, msg) => onEvent(msg) });\nnc.subscribe('plain');\nnc.subscribe('v1', onV1);\nnc.subscribe('opts', { queue: 'workers' });\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:emails", 5, name("sendEmail"), true),
+                cb("queue_consumer:events", 6, name("onEvent"), true),
+                cb("queue_consumer:v1", 8, name("onV1"), false),
+                cb("queue_consumer:orders", 3, name("onOrder"), false),
+            ],
+            "table order (BullMQ, NATS, RabbitMQ), then site order; the two-statement arrow, the callback-less subscribe and an options-only object read nothing"
+        );
+        let go = "import \"github.com/nats-io/nats.go\"\nfunc main() {\n\tnc.Subscribe(\"orders\", onOrder)\n\tnc.QueueSubscribe(\"audit\", \"workers\", func(m *nats.Msg) { onAudit(m) })\n\tw.nc.Subscribe(\"refunds\", w.handle)\n}\n";
+        let c = extract_queue_consumer_nodes(go, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:orders", 2, name("onOrder"), false),
+                cb("queue_consumer:refunds", 4, member("w", "handle"), false),
+                cb("queue_consumer:audit", 3, name("onAudit"), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn pika_keyed_and_positional() {
+        let src = "import pika\nch.basic_consume(queue='orders', on_message_callback=on_order, auto_ack=True)\nch.basic_consume('audit', lambda ch, method, props, body: on_audit(body))\nch.basic_consume(queue='jobs', on_message_callback=self.on_job)\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:orders", 1, name("on_order"), false),
+                cb("queue_consumer:audit", 2, name("on_audit"), true),
+                cb(
+                    "queue_consumer:jobs",
+                    3,
+                    HandlerExpr::SelfMember("on_job".into()),
+                    false
+                ),
+            ]
+        );
+        // A keyword lambda keeps its own commas too.
+        let src = "import pika\nch.basic_consume(queue='orders', on_message_callback=lambda c, m, p, b: on_order(b), auto_ack=True)\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![cb("queue_consumer:orders", 1, name("on_order"), true)]
+        );
+    }
+
+    #[test]
+    fn a_sentinel_consumer_keeps_every_sites_callback() {
+        let src = "import amqp from 'amqplib';\nchannel.consume(queueA, onA);\nchannel.consume(queueB, onB);\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:unresolved:rabbitmq", 1, name("onA"), false),
+                cb("queue_consumer:unresolved:rabbitmq", 2, name("onB"), false),
+            ]
+        );
+    }
+
+    /// POSITION span cell on `id`.
+    fn spanned(id: NodeId, span: (u32, u32)) -> Node {
+        Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"{PATH}","start_line":{},"end_line":{}}}"#,
+                    span.0, span.1
+                )),
+            }],
+        }
+    }
+
+    /// A MODULE holding a CLASS `Svc` (lines `class`) whose METHODs are
+    /// `methods` (name, span), then the file's queue nodes, anchored, with
+    /// the consumers' callbacks bound exactly as the engine binds them.
+    fn class_parse(src: &str, class: (u32, u32), methods: &[(&str, (u32, u32))]) -> FileParse {
+        let module = module_id();
+        let class_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "test::Svc");
+        let mut fp = FileParse {
+            nodes: vec![spanned(module, (0, 100)), spanned(class_id, class)],
+            ..Default::default()
+        };
+        fp.nav.record(module, "test", "test", node_kind::MODULE, None);
+        fp.nav
+            .record(class_id, "Svc", "test::Svc", node_kind::CLASS, Some(module));
+        for (m, span) in methods {
+            let q = format!("test::Svc::{m}");
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &q);
+            fp.nodes.push(spanned(id, *span));
+            fp.nav.record(id, m, &q, node_kind::METHOD, Some(class_id));
+        }
+        let mut anchors = Vec::new();
+        let mut callbacks = Vec::new();
+        for out in [
+            extract_queue_consumer_nodes(src, PATH, module, repo()),
+            extract_queue_producer_nodes(src, PATH, module, repo()),
+        ] {
+            fp.nodes.extend(out.nodes);
+            fp.edges.extend(out.edges);
+            anchors.extend(out.anchors);
+            callbacks.extend(out.callbacks);
+            merge(&mut fp.nav, out.nav);
+        }
+        anchor::attach(&mut fp, PATH, module, &mut anchors);
+        bind_consumer_callbacks(&mut fp, module, &callbacks);
+        fp
+    }
+
+    fn qid(kind: NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn handled(fp: &FileParse, from: NodeId) -> Vec<NodeId> {
+        fp.edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::HANDLED_BY)
+            .map(|e| e.to)
+            .collect()
+    }
+
+    fn refs_from(fp: &FileParse, from: NodeId) -> Vec<repo_graph_code_domain::CallQualifier> {
+        fp.refs
+            .iter()
+            .filter(|r| r.from == from && r.category == edge_category::HANDLED_BY)
+            .map(|r| r.qualifier.clone())
+            .collect()
+    }
+
+    #[test]
+    fn bind_self_member_uses_the_owner_class() {
+        let src = "import { Kafka } from 'kafkajs';\nclass Svc {\n  async start() {\n    await this.consumer.subscribe({ topic: 'refunds' });\n    await this.consumer.run({ eachMessage: this.handle.bind(this) });\n  }\n  async handle(p) { return p; }\n}\nawait other.subscribe({ topic: 'x' });\n";
+        let fp = class_parse(src, (1, 7), &[("start", (2, 5)), ("handle", (6, 6))]);
+        let refunds = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:refunds");
+        let start = qid(node_kind::METHOD, "test::Svc::start");
+        let handle = qid(node_kind::METHOD, "test::Svc::handle");
+        assert_eq!(
+            handled(&fp, refunds),
+            vec![start, handle],
+            "LE.4c's owner edge, then the callback"
+        );
+        assert!(refs_from(&fp, refunds).is_empty());
+        let edge = fp
+            .edges
+            .iter()
+            .find(|e| e.from == refunds && e.to == handle)
+            .expect("callback edge");
+        assert_eq!(edge.confidence, Confidence::Medium);
+        let ev = evidence::Evidence::of(edge).expect("evidence");
+        assert_eq!(ev.emitter, "extractor:queue_callbacks");
+        assert_eq!(ev.rule.as_deref(), Some("self"));
+        assert_eq!((ev.file.as_deref(), ev.line), (Some(PATH), Some(4)));
+
+        // `this.x` with no such method on the class binds nothing.
+        let src = "import { Kafka } from 'kafkajs';\nclass Svc {\n  async start() {\n    await this.consumer.subscribe({ topic: 'refunds' });\n    await this.consumer.run({ eachMessage: this.missing });\n  }\n}\n";
+        let mut fp = class_parse(src, (1, 6), &[("start", (2, 5))]);
+        assert_eq!(handled(&fp, refunds), vec![start]);
+        assert!(refs_from(&fp, refunds).is_empty());
+        let cbs = extract_queue_consumer_nodes(src, PATH, module_id(), repo()).callbacks;
+        let stats = bind_consumer_callbacks(&mut fp, module_id(), &cbs);
+        assert_eq!(
+            stats,
+            CallbackStats {
+                consumers: 1,
+                unbound: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn member_on_import_binding_becomes_a_ref() {
+        use repo_graph_code_domain::{CallQualifier, ImportStmt, ImportTarget};
+        // `handlers` is an import binding, so `handlers.onOrder` goes to the
+        // resolver even though the enclosing class declares an `onOrder`;
+        // `w.onOrder` is not, so it binds to the class's own method.
+        let src = "import amqp from 'amqplib';\nclass Svc {\n  start() {\n    channel.consume('orders', handlers.onOrder);\n    channel.consume('audit', w.onOrder);\n    channel.consume('jobs', onJob);\n  }\n  onOrder(m) {}\n}\n";
+        let mut fp = class_parse(src, (1, 8), &[("start", (2, 6)), ("onOrder", (7, 7))]);
+        let orders = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:orders");
+        let audit = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:audit");
+        let jobs = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:jobs");
+        let own = qid(node_kind::METHOD, "test::Svc::onOrder");
+        // Without the import, `handlers.onOrder` is a method value too.
+        assert!(handled(&fp, orders).contains(&own));
+
+        fp.imports.push(ImportStmt {
+            from_module: "test".into(),
+            target: ImportTarget::Module {
+                path: "./handlers".into(),
+                alias: Some("handlers".into()),
+            },
+            line: 0,
+        });
+        fp.edges
+            .retain(|e| !(e.category == edge_category::HANDLED_BY && e.to == own));
+        let cbs = extract_queue_consumer_nodes(src, PATH, module_id(), repo()).callbacks;
+        let stats = bind_consumer_callbacks(&mut fp, module_id(), &cbs);
+        assert!(!handled(&fp, orders).contains(&own));
+        assert_eq!(
+            refs_from(&fp, orders),
+            vec![CallQualifier::Attribute {
+                base: "handlers".into(),
+                name: "onOrder".into()
+            }]
+        );
+        assert!(handled(&fp, audit).contains(&own));
+        let ev = fp
+            .edges
+            .iter()
+            .find(|e| e.from == audit && e.to == own)
+            .and_then(evidence::Evidence::of)
+            .expect("evidence");
+        assert_eq!(ev.rule.as_deref(), Some("method_value"));
+        assert_eq!(refs_from(&fp, jobs), vec![CallQualifier::Bare("onJob".into())]);
+        let r = fp.refs.iter().find(|r| r.from == jobs).expect("ref");
+        assert_eq!((r.from_module, r.line), (module_id(), 5));
+        assert_eq!(
+            stats,
+            CallbackStats {
+                consumers: 3,
+                direct: 1,
+                refs: 2,
+                inline: 0,
+                unbound: 0
+            }
+        );
+        // A second bind of the same callbacks adds nothing.
+        let (edges, refs) = (fp.edges.len(), fp.refs.len());
+        bind_consumer_callbacks(&mut fp, module_id(), &cbs);
+        assert_eq!((fp.edges.len(), fp.refs.len()), (edges, refs));
+    }
+
+    #[test]
+    fn replace_queue_nodes_leaves_no_dangling_edge_or_ref() {
+        // `payments` is a literal kafkajs consumer (same id before and after
+        // the fold) with a `this.onPayment` callback; the amqplib consumer
+        // names its queue by a constant, so the per-file parse mints the
+        // `unresolved:rabbitmq` sentinel, which the fold replaces by `orders`.
+        let src = "import { Kafka } from 'kafkajs';\nimport amqp from 'amqplib';\nclass Svc {\n  async start() {\n    await consumer.subscribe({ topic: 'payments' });\n    await consumer.run({ eachMessage: this.onPayment });\n    channel.consume(ORDERS_QUEUE, onOrder);\n  }\n  onPayment(p) {}\n}\n";
+        let mut fp = class_parse(src, (2, 9), &[("start", (3, 7)), ("onPayment", (8, 8))]);
+        let sentinel = qid(
+            node_kind::QUEUE_CONSUMER,
+            "queue_consumer:unresolved:rabbitmq",
+        );
+        let payments = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:payments");
+        let orders = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:orders");
+        let start = qid(node_kind::METHOD, "test::Svc::start");
+        let on_payment = qid(node_kind::METHOD, "test::Svc::onPayment");
+        let on_order = repo_graph_code_domain::CallQualifier::Bare("onOrder".into());
+        assert_eq!(handled(&fp, sentinel), vec![start]);
+        assert_eq!(refs_from(&fp, sentinel), vec![on_order.clone()]);
+        assert_eq!(handled(&fp, payments), vec![start, on_payment]);
+
+        let fold = folded(src, &[("ORDERS_QUEUE", "orders")]);
+        assert_eq!(fold.counts.folded, 1);
+        replace_queue_nodes(&mut fp, module_id(), "typescript", fold);
+
+        assert!(
+            fp.edges.iter().all(|e| e.from != sentinel && e.to != sentinel),
+            "no edge names the sentinel"
+        );
+        assert!(
+            fp.refs.iter().all(|r| r.from != sentinel),
+            "no ref names the sentinel"
+        );
+        assert!(!fp.nav.kind_by_id.contains_key(&sentinel));
+        // The literal consumer keeps exactly one HANDLED_BY per target.
+        assert_eq!(handled(&fp, payments), vec![start, on_payment]);
+        let cb_edge = fp
+            .edges
+            .iter()
+            .find(|e| e.from == payments && e.to == on_payment)
+            .and_then(evidence::Evidence::of)
+            .expect("evidence");
+        assert_eq!(cb_edge.emitter, "extractor:queue_callbacks");
+        // The folded consumer carries the owner edge and the callback ref.
+        assert_eq!(handled(&fp, orders), vec![start]);
+        assert_eq!(refs_from(&fp, orders), vec![on_order]);
+        assert_eq!(fp.refs.len(), 1);
     }
 }

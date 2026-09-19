@@ -1,0 +1,17 @@
+{
+  "framework": "xcut-queue-consumer-callbacks",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LA.33: a queue consumer whose handler is passed as a callback is HANDLED_BY that handler: kafkajs `consumer.run({ eachMessage })` paired to the same receiver's `subscribe`, amqplib `channel.consume(q, h)`, BullMQ `new Worker(q, processor)` (an inline arrow whose body is one call binds that callee), and a class-held consumer's `this.handle.bind(this)`. LE.4c's HANDLED_BY to the subscribing function stays; this adds the handler itself. Baseline (HEAD 67728e2 wheel): HANDLED_BY 0/4.",
+  "expect_edges": [
+    {"from": "queue_consumer:payments", "to": "svc/worker/handlePayment", "category": "HANDLED_BY", "note": "kafkajs eachMessage, same-file function"},
+    {"from": "queue_consumer:orders", "to": "svc/handlers/onOrder", "category": "HANDLED_BY", "note": "amqplib consume arg #1, imported function"},
+    {"from": "queue_consumer:emails", "to": "svc/worker/sendEmail", "category": "HANDLED_BY", "note": "BullMQ processor arrow with a single call"},
+    {"from": "queue_consumer:refunds", "to": "svc/refunds/RefundsConsumer/handle", "category": "HANDLED_BY", "note": "this.handle.bind(this) on a class-held consumer"}
+  ],
+  "forbid": [
+    {"from": "queue_consumer:payments", "to": "svc/worker/settle", "category": "HANDLED_BY", "note": "a callee of the handler is not the handler"},
+    {"from": "queue_consumer:refunds", "to": "svc/worker/handlePayment", "category": "HANDLED_BY", "note": "cross-file guard: kafkajs run() pairing is per file and per receiver chain (`this.consumer` in refunds.ts vs `consumer` in worker.ts); the same-file chain split is pinned by the unit test kafkajs_run_pairs_by_receiver_chain"},
+    {"from": "queue_consumer:payments", "to": "svc/refunds/RefundsConsumer/handle", "category": "HANDLED_BY"}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "framework": "go-nats-consumer-callbacks",
+  "language": "go",
+  "dirs": ["."],
+  "note": "LA.33 (Go): nats.go `nc.Subscribe(subj, h)` binds arg #1, `nc.QueueSubscribe(subj, queue, h)` arg #2; a method value `w.handle` binds through the HANDLED_BY Attribute ref; a func literal whose body is one call binds that callee. Baseline (HEAD 67728e2 wheel): HANDLED_BY 0/3.",
+  "expect_edges": [
+    {"from": "queue_consumer:orders", "to": "main/onOrder", "category": "HANDLED_BY"},
+    {"from": "queue_consumer:audit", "to": "main/onAudit", "category": "HANDLED_BY", "note": "single-call func literal"},
+    {"from": "queue_consumer:refunds", "to": "main/Worker/handle", "category": "HANDLED_BY", "note": "method value on a struct receiver"}
+  ],
+  "forbid": [
+    {"from": "queue_consumer:audit", "to": "main/record", "category": "HANDLED_BY", "note": "the handler's own callee is not the handler"},
+    {"from": "queue_consumer:orders", "to": "main/Worker/handle", "category": "HANDLED_BY"}
+  ]
+}
