@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use repo_graph_code_domain::walk_gating;
+use repo_graph_code_domain::{GRAPH_TYPE, walk_gating};
 use repo_graph_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
 use repo_graph_graph::RepoGraph;
 
@@ -145,6 +145,57 @@ pub struct Manifest {
     /// is not bumped (additive, the `build_stamp` precedent above).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pass_undo: Vec<PassUndo>,
+    /// The `.glia` inputs fingerprint of EACH repo of a layout that records
+    /// two or more repo roots (LC.10b, closing LF.1d's multi-root hand-off):
+    /// `RepoId.0` -> the map [`Self::external_inputs`] holds for a one-root
+    /// layout, for every recorded root that has inputs. [`is_gmap_stale`] on
+    /// such a layout compares the entry of the repo whose recorded root is the
+    /// path it is given, so a multi-repo or merged layout is not stale on
+    /// every call for a repo that has `.glia` inputs. Omitted when empty (no
+    /// root has inputs), so a layout without any writes the same bytes as
+    /// before; additive, `MANIFEST_VERSION` is not bumped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_inputs_by_repo: BTreeMap<u64, BTreeMap<String, String>>,
+    /// The members a merge of pre-built layouts combined, in merge order
+    /// (LC.10b, `repo_graph_engine::merge`). Omitted for a layout one build
+    /// wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<MemberMeta>,
+}
+
+/// One member of a merged layout (LC.10b): the name the merge gave it, where
+/// its graph came from (`gmap`: a pre-built layout dir, `repo`: a source tree
+/// whose own layout was loaded or rebuilt) and the build stamp of the layout
+/// it was read from (`""` when unknown).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MemberMeta {
+    pub name: String,
+    pub source: String,
+    #[serde(default)]
+    pub build_stamp: String,
+}
+
+/// A shard of a domain other than code (LC.10b): its manifest name, its
+/// `graph_type` (the manifest's, which a writer sets from the file's
+/// `Header::graph_type`) and the whole `.gmap` file's bytes. A layout carries
+/// it verbatim: never decoded into the `MergedGraph`, written back byte for
+/// byte, so a non-code graph can ride a code layout through a merge without
+/// the code store knowing its sections.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ForeignShard {
+    pub name: String,
+    pub graph_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What a layout holds beside the code graph and its [`LayoutMeta`] (LC.10b):
+/// the foreign-domain shards, in manifest order, and the merge members.
+/// Written by [`write_merged_sharded_extras`] (the other merged-graph writers
+/// write none), read back by [`read_layout_extras`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayoutExtras {
+    pub foreign: Vec<ForeignShard>,
+    pub members: Vec<MemberMeta>,
 }
 
 /// One entry of [`Manifest::pass_undo`] (LC.10a): a node whose confidence a
@@ -284,6 +335,65 @@ pub struct ShardEntry {
     pub path: String,
     /// xxhash64 of the shard's bytes, hex-encoded (16 lowercase hex chars).
     pub content_hash: String,
+    /// The domain of the shard's graph (LC.10b): `"code"`
+    /// (`repo_graph_code_domain::GRAPH_TYPE`) for every shard the code build
+    /// writes, another value for a foreign domain's shard ([`ForeignShard`]),
+    /// which readers hash-check but never decode as code. Read as `"code"`
+    /// when absent and omitted when `"code"`, so a code-only manifest keeps
+    /// the bytes it had before the field.
+    #[serde(default = "code_graph_type", skip_serializing_if = "is_code_graph_type")]
+    pub graph_type: String,
+}
+
+impl ShardEntry {
+    /// Is this shard the code domain's (a `RepoGraph` shard)?
+    pub fn is_code(&self) -> bool {
+        is_code_graph_type(&self.graph_type)
+    }
+}
+
+fn code_graph_type() -> String {
+    GRAPH_TYPE.to_string()
+}
+
+fn is_code_graph_type(t: &str) -> bool {
+    t == GRAPH_TYPE
+}
+
+/// What a sharded write records beyond the shards and the [`LayoutMeta`]:
+/// the `.glia` fingerprints (LF.1d, LC.10b), the post-pass undo (LC.10a) and
+/// the foreign shards and merge members (LC.10b). Empty for a bare writer.
+#[derive(Default)]
+struct Recorded<'a> {
+    external_inputs: BTreeMap<String, String>,
+    external_inputs_by_repo: BTreeMap<u64, BTreeMap<String, String>>,
+    pass_undo: Vec<PassUndo>,
+    foreign: &'a [ForeignShard],
+    members: &'a [MemberMeta],
+}
+
+/// A foreign shard `write_sharded_with` refuses: a name that is not a plain
+/// file stem, a `graph_type` that is empty or the code domain's (a reader
+/// would decode it as code), or a name (so a `<name>.gmap` file) another
+/// shard of the layout already has. `taken` holds the names before it.
+fn check_foreign(f: &ForeignShard, taken: &[&str]) -> Result<(), StoreError> {
+    let bad = |why: &str| {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("foreign shard {:?} (graph_type {:?}): {why}", f.name, f.graph_type),
+        )))
+    };
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if f.name.is_empty() || f.name.starts_with('.') || !f.name.chars().all(plain) {
+        return bad("the name must be a plain file stem ([A-Za-z0-9._-], no leading '.')");
+    }
+    if f.graph_type.is_empty() || is_code_graph_type(&f.graph_type) {
+        return bad("a foreign shard's graph_type must be set and not the code domain's");
+    }
+    if format!("{}.gmap", f.name) == CROSS_STACK_NAME || taken.contains(&f.name.as_str()) {
+        return bad("another shard of the layout already has this name");
+    }
+    Ok(())
 }
 
 /// Write a sharded `.gmap` layout: one `<name>.gmap` per input graph plus a
@@ -315,22 +425,30 @@ pub fn write_sharded_meta(
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
-    write_sharded_with(shards, cross_edges, meta, dir, BTreeMap::new(), Vec::new())
+    write_sharded_with(shards, cross_edges, meta, dir, Recorded::default())
 }
 
 /// The sharded writer behind [`write_sharded_meta`] and the merged-graph
-/// writers: `external_inputs` is the `.glia` fingerprint the manifest records
-/// (LF.1d), empty for a layout no repo root is known for; `pass_undo` is the
-/// merged graph's post-pass undo record (LC.10a), sorted by node id, empty
-/// for a writer of bare shards.
+/// writers. `recorded` holds what the manifest records beyond the shards:
+/// the `.glia` fingerprint (LF.1d), empty for a layout no repo root is known
+/// for, and the per-repo ones of a multi-root layout (LC.10b); the merged
+/// graph's post-pass undo record (LC.10a), sorted by node id; and the foreign
+/// shards, written verbatim after the code shards and before
+/// `cross_stack.gmap` in the order given, and the merge members (LC.10b).
+/// Every one of them is empty for a writer of bare shards.
 fn write_sharded_with(
     shards: &[(&str, &RepoGraph)],
     cross_edges: &[Edge],
     meta: &LayoutMeta,
     dir: &Path,
-    external_inputs: BTreeMap<String, String>,
-    pass_undo: Vec<PassUndo>,
+    recorded: Recorded<'_>,
 ) -> Result<Manifest, StoreError> {
+    // LC.10b: every foreign shard is checked before anything is written.
+    let mut taken: Vec<&str> = shards.iter().map(|(name, _)| *name).collect();
+    for f in recorded.foreign {
+        check_foreign(f, &taken)?;
+        taken.push(&f.name);
+    }
     std::fs::create_dir_all(dir)?;
 
     // Phase 1 incremental rebuild: load prior manifest (if present) and
@@ -376,6 +494,29 @@ fn write_sharded_with(
             name: (*name).to_string(),
             path: file_name,
             content_hash,
+            graph_type: code_graph_type(),
+        });
+    }
+
+    // LC.10b: foreign-domain shards, byte for byte, after the code shards
+    // (their names were checked above), skipped when unchanged like them.
+    for f in recorded.foreign {
+        let file_name = format!("{}.gmap", f.name);
+        let shard_path = dir.join(&file_name);
+        let content_hash = hex_xxhash64(&f.bytes);
+        let unchanged = prior_manifest.as_ref().is_some_and(|m| {
+            m.shards.iter().any(|e| e.name == f.name && e.content_hash == content_hash)
+        }) && on_disk_is(&shard_path, &f.bytes);
+        if unchanged {
+            shards_skipped += 1;
+        } else {
+            write_atomic(&shard_path, &f.bytes)?;
+        }
+        entries.push(ShardEntry {
+            name: f.name.clone(),
+            path: file_name,
+            content_hash,
+            graph_type: f.graph_type.clone(),
         });
     }
 
@@ -400,6 +541,7 @@ fn write_sharded_with(
             name: "cross_stack".to_string(),
             path: CROSS_STACK_NAME.to_string(),
             content_hash,
+            graph_type: code_graph_type(),
         })
     };
 
@@ -414,8 +556,10 @@ fn write_sharded_with(
         cross,
         repos,
         parse_errors: meta.parse_errors.clone(),
-        external_inputs,
-        pass_undo,
+        external_inputs: recorded.external_inputs,
+        pass_undo: recorded.pass_undo,
+        external_inputs_by_repo: recorded.external_inputs_by_repo,
+        members: recorded.members.to_vec(),
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     // Skip the manifest write only if it's byte-identical to the prior one
@@ -440,7 +584,7 @@ fn write_sharded_with(
         eprintln!(
             "[store] write_sharded: {} shards skipped (unchanged), {} written, manifest {}",
             shards_skipped,
-            shards.len() + cross_edges.len().min(1) - shards_skipped,
+            shards.len() + recorded.foreign.len() + cross_edges.len().min(1) - shards_skipped,
             if manifest_unchanged { "unchanged" } else { "rewritten" },
         );
     }
@@ -467,7 +611,10 @@ impl ShardedMmap {
     /// Open a sharded directory. Validates the manifest schema version (from
     /// a probe, before the full manifest is parsed), then opens each shard's
     /// `.gmap` and verifies its content hash against the manifest. Returns on
-    /// the first hash mismatch or missing file.
+    /// the first hash mismatch or missing file. A foreign-domain shard
+    /// (LC.10b, `graph_type` other than `"code"`) is hash-checked but not
+    /// opened: `shards` holds the code shards only, and the manifest still
+    /// lists every shard.
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
         let manifest = read_manifest(dir)?;
 
@@ -475,6 +622,9 @@ impl ShardedMmap {
         for entry in &manifest.shards {
             let shard_path = dir.join(&entry.path);
             verify_hash(entry, &shard_path)?;
+            if !entry.is_code() {
+                continue;
+            }
             let mmap = MmapContainer::open(&shard_path)?;
             shards.push((entry.name.clone(), mmap));
         }
@@ -513,6 +663,11 @@ impl ShardedMmap {
 }
 
 fn verify_hash(entry: &ShardEntry, path: &Path) -> Result<(), StoreError> {
+    verified_bytes(entry, path).map(|_| ())
+}
+
+/// The bytes of the shard `entry` names, once they match its manifest hash.
+fn verified_bytes(entry: &ShardEntry, path: &Path) -> Result<Vec<u8>, StoreError> {
     if !path.exists() {
         return Err(StoreError::ShardMissing(entry.name.clone()));
     }
@@ -525,7 +680,7 @@ fn verify_hash(entry: &ShardEntry, path: &Path) -> Result<(), StoreError> {
             got,
         });
     }
-    Ok(())
+    Ok(bytes)
 }
 
 // ============================================================================
@@ -570,6 +725,24 @@ pub fn write_merged_sharded_meta(
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
+    write_merged_sharded_extras(merged, meta, &[], &[], dir)
+}
+
+/// [`write_merged_sharded_meta`] plus what a merge of layouts records
+/// (LC.10b): each `foreign` shard written verbatim as `<name>.gmap`, with its
+/// `graph_type` and the hash of its bytes, after the code shards and before
+/// `cross_stack.gmap`, in the order given; `members` in the manifest. A
+/// foreign name that is not a plain file stem or repeats another shard's, or
+/// a `graph_type` that is empty or `"code"`, is an `InvalidInput` error and no
+/// shard or manifest is written. [`read_merged_sharded_meta`] plus
+/// [`read_layout_extras`] read it back.
+pub fn write_merged_sharded_extras(
+    merged: &repo_graph_graph::MergedGraph,
+    meta: &LayoutMeta,
+    foreign: &[ForeignShard],
+    members: &[MemberMeta],
+    dir: &Path,
+) -> Result<Manifest, StoreError> {
     // First, so a recorded root relative to `dir` (`../repo`) resolves: the
     // OS walks `dir/..` only when `dir` exists.
     std::fs::create_dir_all(dir)?;
@@ -578,7 +751,38 @@ pub fn write_merged_sharded_meta(
         _ => None,
     });
     let inputs = root.map(|r| external_inputs_fingerprint(&r)).unwrap_or_default();
-    write_merged_with(merged, meta, dir, inputs)
+    write_merged_with(
+        merged,
+        meta,
+        dir,
+        Recorded {
+            external_inputs: inputs,
+            external_inputs_by_repo: inputs_by_repo(meta, dir),
+            foreign,
+            members,
+            ..Recorded::default()
+        },
+    )
+}
+
+/// The per-repo `.glia` fingerprints of a layout whose metadata records two
+/// or more repo roots (LC.10b): each root resolved against `dir` as
+/// [`RepoMeta::root`] is written, entries with no inputs left out. Empty for
+/// a layout of one root, which [`Manifest::external_inputs`] covers.
+fn inputs_by_repo(meta: &LayoutMeta, dir: &Path) -> BTreeMap<u64, BTreeMap<String, String>> {
+    let rooted: Vec<(u64, PathBuf)> = meta
+        .repos
+        .iter()
+        .filter_map(|r| Some((r.id, dir.join(r.root.as_deref()?))))
+        .collect();
+    if rooted.len() < 2 {
+        return BTreeMap::new();
+    }
+    rooted
+        .into_iter()
+        .map(|(id, root)| (id, external_inputs_fingerprint(&root)))
+        .filter(|(_, inputs)| !inputs.is_empty())
+        .collect()
 }
 
 /// [`write_merged_sharded_meta`] recording the `.glia` inputs fingerprint of
@@ -590,14 +794,16 @@ pub fn write_merged_sharded_for_repo(
     dir: &Path,
     repo_root: &Path,
 ) -> Result<Manifest, StoreError> {
-    write_merged_with(merged, meta, dir, external_inputs_fingerprint(repo_root))
+    let recorded =
+        Recorded { external_inputs: external_inputs_fingerprint(repo_root), ..Recorded::default() };
+    write_merged_with(merged, meta, dir, recorded)
 }
 
 fn write_merged_with(
     merged: &repo_graph_graph::MergedGraph,
     meta: &LayoutMeta,
     dir: &Path,
-    external_inputs: BTreeMap<String, String>,
+    recorded: Recorded<'_>,
 ) -> Result<Manifest, StoreError> {
     let names: Vec<String> = merged
         .graphs
@@ -621,8 +827,7 @@ fn write_merged_with(
         &merged.cross_edges,
         meta,
         dir,
-        external_inputs,
-        pass_undo_entries(&merged.pass_undo),
+        Recorded { pass_undo: pass_undo_entries(&merged.pass_undo), ..recorded },
     )
 }
 
@@ -649,6 +854,10 @@ pub fn read_merged_sharded(
 /// The manifest's post-pass undo record (LC.10a) comes back on the graph, as
 /// `MergedGraph::pass_undo`, not in the [`LayoutMeta`]: it is the graph's
 /// state, and one carrier keeps the write and the read from disagreeing.
+///
+/// A foreign-domain shard (LC.10b) is hash-checked but not decoded: one
+/// `[gmap] skipped foreign shard <name> graph_type=<t>` line is printed per
+/// shard, and [`read_layout_extras`] hands back its bytes.
 pub fn read_merged_sharded_meta(
     dir: &Path,
 ) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
@@ -661,6 +870,23 @@ pub fn read_merged_sharded_meta(
     result
 }
 
+/// What the layout at `dir` holds beside its code graph (LC.10b): every
+/// foreign-domain shard, hash-checked, as its manifest name, `graph_type` and
+/// bytes in manifest order (so a merge carries them on), and the merge members
+/// its manifest records. Reads the manifest and the foreign shards only.
+pub fn read_layout_extras(dir: &Path) -> Result<LayoutExtras, StoreError> {
+    let manifest = read_manifest(dir)?;
+    let mut foreign = Vec::new();
+    for entry in manifest.shards.iter().filter(|e| !e.is_code()) {
+        foreign.push(ForeignShard {
+            name: entry.name.clone(),
+            graph_type: entry.graph_type.clone(),
+            bytes: verified_bytes(entry, &dir.join(&entry.path))?,
+        });
+    }
+    Ok(LayoutExtras { foreign, members: manifest.members })
+}
+
 fn read_merged_sharded_inner(
     dir: &Path,
 ) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
@@ -668,6 +894,9 @@ fn read_merged_sharded_inner(
     let mut graphs = Vec::with_capacity(sharded.shards.len());
     for (_name, mmap) in &sharded.shards {
         graphs.push(decode_repo_graph(mmap)?);
+    }
+    for entry in sharded.manifest.shards.iter().filter(|e| !e.is_code()) {
+        eprintln!("[gmap] skipped foreign shard {} graph_type={}", entry.name, entry.graph_type);
     }
     let cross_edges = if let Some(cross_mmap) = &sharded.cross {
         let archived = cross_mmap.archived()?;
@@ -764,12 +993,37 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     // LF.1d: the control dir's inputs, by content. Un-gated like the lines
     // above; `grep '^\[gmap\] stale: external input changed'` is the marker.
     let now = external_inputs_fingerprint(repo_path);
-    if let Some(key) = first_changed_input(&m.external_inputs, &now) {
+    if let Some(key) = first_changed_input(recorded_inputs(&m, gmap_dir, repo_path), &now) {
         eprintln!("[gmap] stale: external input changed ({key}) - regenerating");
         return true;
     }
 
     scan_for_newer(repo_path, gmap_dir, manifest_mtime)
+}
+
+/// The `.glia` fingerprint `m` recorded for `repo_path` (LC.10b): when the
+/// layout recorded per-repo fingerprints and one of its repos' roots
+/// (resolved against `dir`) is `repo_path`, that repo's entry, or an empty map
+/// for a rooted repo that had no inputs; otherwise the one-root
+/// [`Manifest::external_inputs`].
+fn recorded_inputs<'a>(m: &'a Manifest, dir: &Path, repo_path: &Path) -> &'a BTreeMap<String, String> {
+    static NONE: BTreeMap<String, String> = BTreeMap::new();
+    if m.external_inputs_by_repo.is_empty() {
+        return &m.external_inputs;
+    }
+    let resolved = |p: &Path| {
+        std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let want = resolved(repo_path);
+    let repo = m.repos.iter().find(|r| {
+        r.root.as_deref().is_some_and(|root| resolved(&dir.join(root)) == want)
+    });
+    match repo {
+        Some(r) => m.external_inputs_by_repo.get(&r.id).unwrap_or(&NONE),
+        None => &m.external_inputs,
+    }
 }
 
 /// Files under `.glia` the store or the parse cache writes itself: never an
@@ -1000,7 +1254,8 @@ pub fn upsert_cell_sharded(
     let manifest_path = dir.join(MANIFEST_NAME);
     let mut manifest = read_manifest(dir)?;
 
-    for entry in &mut manifest.shards {
+    // A foreign-domain shard (LC.10b) is carried verbatim, never mutated.
+    for entry in manifest.shards.iter_mut().filter(|e| e.is_code()) {
         let shard_path = dir.join(&entry.path);
         let mmap = MmapContainer::open(&shard_path)?;
         let archived = mmap.archived()?;
@@ -1853,6 +2108,101 @@ mod tests {
         assert!(!is_gmap_stale(&other, &repo_dir));
         write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay v2\n");
         assert!(is_gmap_stale(&other, &repo_dir));
+    }
+
+    /// LC.10b (LF.1d's multi-root hand-off): a layout recording several roots
+    /// fingerprints each repo's `.glia` inputs, so it is fresh for every root
+    /// until one of that root's own inputs changes. Before, it recorded none
+    /// and was stale on every call for any root with inputs.
+    #[test]
+    fn multi_root_layout_fingerprints_each_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = |n: &str| tmp.path().join(n);
+        for n in ["a", "b", "c", "d"] {
+            write_file(&root(n).join("m.py"), "def f():\n    return 1\n");
+        }
+        for n in ["a", "b", "d"] {
+            write_file(&root(n).join(".glia/overlay.toml"), &format!("# {n}\n"));
+        }
+        let meta = LayoutMeta {
+            repos: ["a", "b", "c"]
+                .iter()
+                .enumerate()
+                .map(|(i, n)| RepoMeta { id: i as u64 + 1, label: n.to_string(), root: Some(format!("../{n}")) })
+                .collect(),
+            parse_errors: vec![],
+        };
+        let out = root("out");
+        write_merged_sharded_meta(&one_graph("test://multi"), &meta, &out).unwrap();
+        let json = manifest_json(&out);
+        assert!(json.get("external_inputs").is_none(), "no single root: {json}");
+        let by_repo = json["external_inputs_by_repo"].as_object().unwrap();
+        assert_eq!(by_repo.keys().collect::<Vec<_>>(), ["1", "2"], "c has no inputs: {json}");
+        assert!(by_repo["1"][".glia/overlay.toml"].is_string());
+        for n in ["a", "b", "c"] {
+            assert!(!is_gmap_stale(&out, &root(n)), "{n}: fresh right after the write");
+        }
+        write_file(&root("b").join(".glia/overlay.toml"), "# b v2\n");
+        assert!(is_gmap_stale(&out, &root("b")), "b's own input changed");
+        assert!(!is_gmap_stale(&out, &root("a")), "a's inputs did not");
+        write_file(&root("c").join(".glia/overlay.toml"), "# c\n");
+        assert!(is_gmap_stale(&out, &root("c")), "c gained an input");
+        assert!(is_gmap_stale(&out, &root("d")), "d is no root of the layout: nothing recorded");
+    }
+
+    /// LC.10b: a foreign-domain shard rides a layout verbatim (never decoded,
+    /// so any bytes do), listed with its graph_type; code readers skip it,
+    /// `read_layout_extras` hands it back hash-checked, and a bad one is
+    /// refused before anything is written.
+    #[test]
+    fn foreign_shards_ride_the_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let merged = one_graph("test://foreign");
+        let foreign = vec![ForeignShard {
+            name: "clip".into(),
+            graph_type: "toy".into(),
+            bytes: b"not a gmap: never decoded".to_vec(),
+        }];
+        let members = vec![MemberMeta { name: "cam".into(), source: "gmap".into(), build_stamp: "s".into() }];
+        let dir = tmp.path().join("layout");
+        let written = write_merged_sharded_extras(&merged, &LayoutMeta::default(), &foreign, &members, &dir)
+            .unwrap();
+        assert_eq!(written.shards.len(), 2);
+        assert_eq!(written.shards[1].path, "clip.gmap");
+        assert_eq!(written.shards[1].content_hash, hex_xxhash64(&foreign[0].bytes));
+        let json = manifest_json(&dir);
+        assert!(json["shards"][0].get("graph_type").is_none(), "a code shard keeps its old JSON: {json}");
+        assert_eq!(json["shards"][1]["graph_type"], "toy");
+        assert_eq!(json["members"][0]["name"], "cam");
+        let old: ShardEntry =
+            serde_json::from_str(r#"{"name":"a","path":"a.gmap","content_hash":"00"}"#).unwrap();
+        assert!(old.is_code(), "an entry written before the field is code");
+
+        let opened = ShardedMmap::open(&dir).unwrap();
+        assert_eq!((opened.shards.len(), opened.manifest.shards.len()), (1, 2), "opened as code: 1");
+        assert_eq!(read_merged_sharded(&dir).unwrap().graphs.len(), 1);
+        let extras = read_layout_extras(&dir).unwrap();
+        assert_eq!((extras.foreign, extras.members), (foreign.clone(), members));
+        assert!(matches!(
+            upsert_cell_sharded(&dir, NodeId(424242), CellTypeId(1), CellPayload::Text("x".into())),
+            Err(StoreError::NodeNotFound(_))
+        ));
+
+        std::fs::write(dir.join("clip.gmap"), b"damaged").unwrap();
+        assert!(read_layout_extras(&dir).unwrap_err().needs_rebuild());
+        assert!(ShardedMmap::open(&dir).is_err(), "a damaged foreign shard fails the layout");
+
+        let code_name = written.shards[0].name.clone();
+        for (name, graph_type) in
+            [("../x", "toy"), ("", "toy"), (".hidden", "toy"), ("clip", "code"), ("clip", ""), (code_name.as_str(), "toy")]
+        {
+            let bad = tmp.path().join(format!("bad-{}", graph_type.len() + name.len()));
+            let f = ForeignShard { name: name.into(), graph_type: graph_type.into(), bytes: vec![1] };
+            let err = write_merged_sharded_extras(&merged, &LayoutMeta::default(), &[f], &[], &bad)
+                .expect_err(&format!("{name:?} / {graph_type:?} must be refused"));
+            assert!(err.to_string().contains("foreign shard"), "{err}");
+            assert!(!bad.join(MANIFEST_NAME).exists(), "{name:?}: nothing written");
+        }
     }
 
     #[test]

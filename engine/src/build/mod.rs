@@ -30,7 +30,7 @@ use crate::passes::post_passes;
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
 use assemble::build_graphs_for_repo;
-use resolvers::run_all_resolvers;
+pub(crate) use resolvers::run_all_resolvers;
 use rpc_needles::RpcContext;
 
 /// One build's output. Outside this crate it comes from [`generate_one`] /

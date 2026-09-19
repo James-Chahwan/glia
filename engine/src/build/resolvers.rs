@@ -9,7 +9,7 @@ use repo_graph_graph::{
     SharedSchemaResolver, WebSocketStackResolver,
 };
 
-pub(super) fn run_all_resolvers(merged: &mut MergedGraph) {
+pub(crate) fn run_all_resolvers(merged: &mut MergedGraph) {
     // LC.3a: resolvers only append to `cross_edges`, so the range each one
     // appended is stamped `resolver:<name>`. A resolver that attached its own
     // evidence (with a rule, LC.3c) keeps it: a stamp never overrides.
