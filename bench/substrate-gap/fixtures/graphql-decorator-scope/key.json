@@ -1,0 +1,83 @@
+{
+  "framework": "graphql-decorator-scope",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.38. The GraphQL decorator nouns and the decorator-method field scan in parsers/code/extractors/src/graphql.rs run on every code file of every language and read `@Query(` / `@Resolver(` / `@ResolveField(` / `ObjectType):` / `@strawberry.type` anywhere: a Spring Data JPA `@Query(\"SELECT ...\")` mints graphql_resolver:Query HANDLED_BY the repository method plus a FIELD resolver graphql_resolver:findPets, a NestJS REST controller's @nestjs/common `@Query()` parameter decorator mints graphql_resolver:Query, a Rust needle table mints Resolver / ResolveField / ObjectType / strawberry.type, and real NestJS / strawberry files mint the decorator names Resolver and strawberry.type as if they were GraphQL types. The family now runs only for TypeScript-family files importing @nestjs/graphql or type-graphql and Python files importing strawberry or graphene, at decorator / class position, and the noun is the root type the syntax declares (Query / Mutation / Subscription). server/recipes.resolver.ts and schema/schema.py are the controls. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:recipes",
+      "note": "NestJS @Query field - the control"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:addRecipe",
+      "note": "NestJS @Mutation field - the control"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:Query",
+      "note": "root type from the NestJS @Query decorator and from strawberry `@strawberry.type class Query`"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:Mutation",
+      "note": "root type from the NestJS @Mutation decorator"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "server::recipes.resolver",
+      "to": "graphql_resolver:Query",
+      "category": "CONTAINS",
+      "note": "NestJS control: the root noun stays in a real resolver file"
+    },
+    {
+      "from": "schema::schema",
+      "to": "graphql_resolver:Query",
+      "category": "CONTAINS",
+      "note": "strawberry `@strawberry.type class Query:` names the root type (HEAD mints graphql_resolver:strawberry.type instead)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:Resolver",
+      "note": "@Resolver( is a decorator name, not a GraphQL type (recipes.resolver.ts, tools/patterns.rs)"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:ResolveField",
+      "note": "tools/patterns.rs needle table (Rust)"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:ObjectType",
+      "note": "tools/patterns.rs needle table (Rust)"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:strawberry.type",
+      "note": "decorator name; schema.py's root class is Query"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:findPets",
+      "note": "Spring Data JPA @Query(\"SELECT ...\") repository method read as a GraphQL field"
+    },
+    {
+      "from": "graphql_resolver:Query",
+      "to": "findPets",
+      "category": "HANDLED_BY",
+      "note": "Spring Data JPA: the Java repository method is not a GraphQL resolver (matched by name so LB.2's Java qname change does not move the row)"
+    },
+    {
+      "from": "server::users.controller",
+      "to": "graphql_resolver:Query",
+      "category": "CONTAINS",
+      "note": "NestJS REST: @Query() from @nestjs/common is a query-string parameter decorator"
+    }
+  ]
+}

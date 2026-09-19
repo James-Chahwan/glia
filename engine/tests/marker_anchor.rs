@@ -282,9 +282,10 @@ fn owner_edges_are_emitted_in_a_stable_order() {
     };
     let (la, lb) = (listing(&a), listing(&b));
     assert_eq!(la, lb);
-    // 6 owner edges + 3 module fallbacks (the package-level ws Upgrader and
-    // the two class-level GraphQL decorator nouns), as the marker line says.
-    assert_eq!(la.len(), 9, "{la:?}");
+    // 7 owner edges + 1 module fallback (the class-level GraphQL root noun
+    // `Query`; LA.38 retired the `Resolver` decorator noun), as the marker
+    // line says.
+    assert_eq!(la.len(), 8, "{la:?}");
     assert!(
         la.iter().any(|(f, t, c)| f.ends_with("::FetchUser")
             && t == "grpc_client:UserService"

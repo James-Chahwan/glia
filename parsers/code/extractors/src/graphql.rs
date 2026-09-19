@@ -339,11 +339,24 @@ fn scan_operation_needles(source: &str) -> (Vec<(String, u32)>, NeedleTally) {
     (hits, tally)
 }
 
-/// Decorator and code-first resolver nouns, read from code files: the noun
-/// (`Query`, `Resolver`, `strawberry.type`) is the resolver name. SDL root
-/// types are not here (LA.27): a `type Query {` opener is SDL, so it counts
-/// only in a `.graphql` / `.gql` file or inside a GraphQL-marked literal.
-const DECORATOR_PATTERNS: &[&str] = &[
+/// LA.38: the GraphQL root types, the only type-level resolver nouns a
+/// decorator or class can name. `@Resolver(` / `@ResolveField(` /
+/// `@strawberry.type` are decorator names, and an object type
+/// (`class Recipe`) is never a resolver.
+const ROOT_TYPES: &[&str] = &["Query", "Mutation", "Subscription"];
+
+/// LA.38: NestJS / TypeGraphQL decorators that name the root type they sit
+/// on. Read only at the start of a line of a TypeScript-family file that
+/// imports a GraphQL server package ([`decorator_scan`]).
+const ROOT_DECORATORS: &[(&str, &str)] = &[
+    ("@Query(", "Query"),
+    ("@Mutation(", "Mutation"),
+    ("@Subscription(", "Subscription"),
+];
+
+/// LA.38: every needle the pre-LA.38 scan minted a noun from, anywhere in any
+/// file. Counted only, for the `[graphql-decorators]` census.
+const DECORATOR_NEEDLES: &[&str] = &[
     "@Query(",
     "@Mutation(",
     "@Subscription(",
@@ -355,9 +368,95 @@ const DECORATOR_PATTERNS: &[&str] = &[
     "graphene.ObjectType",
 ];
 
+/// The graphene needles: they sit in a class base list, not at a line start.
+const GRAPHENE_NEEDLES: &[&str] = &["ObjectType):", "graphene.ObjectType"];
+
+/// LA.38: packages whose import (a whole quoted module string, LA.26's
+/// [`quoted_module_at`] rule) makes a TypeScript-family file a GraphQL server.
+const TS_SERVER_MODULES: &[(&str, GqlLib)] = &[
+    ("@nestjs/graphql", GqlLib::NestGraphql),
+    ("type-graphql", GqlLib::TypeGraphql),
+];
+
+/// LA.38: Python GraphQL server packages, imported by a line that starts with
+/// `import <pkg>` or `from <pkg>`.
+const PY_SERVER_PACKAGES: &[(&str, GqlLib)] = &[
+    ("strawberry", GqlLib::Strawberry),
+    ("graphene", GqlLib::Graphene),
+];
+
+/// LA.38: the languages whose GraphQL server libraries spell resolvers with
+/// the decorators and classes read here. Java / Kotlin / C# / PHP / Rust / Go
+/// / Dart servers use other spellings (`@QueryMapping`, `@DgsQuery`,
+/// HotChocolate attributes), and a Java `@Query(` is Spring Data / Micronaut
+/// Data / Room.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DecoratorFamily {
+    /// NestJS / TypeGraphQL decorators.
+    Ts,
+    /// strawberry / graphene root classes.
+    Py,
+}
+
+/// LA.38: the GraphQL server package a file imports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum GqlLib {
+    NestGraphql,
+    TypeGraphql,
+    Strawberry,
+    Graphene,
+}
+
+impl GqlLib {
+    fn label(self) -> &'static str {
+        match self {
+            GqlLib::NestGraphql => "@nestjs/graphql",
+            GqlLib::TypeGraphql => "type-graphql",
+            GqlLib::Strawberry => "strawberry",
+            GqlLib::Graphene => "graphene",
+        }
+    }
+}
+
+/// LA.38: what one file's decorator needles came to, for the
+/// `[graphql-decorators]` marker. Each needle occurrence lands in at most one
+/// rejection count: a file of another language (`rej_lang`), a file with no
+/// GraphQL server import (`rej_import`), or an occurrence off decorator /
+/// class position (`rej_position`: a comment, a string, mid-line).
+#[derive(Default, Debug)]
+struct DecoratorCensus {
+    /// Occurrences of [`DECORATOR_NEEDLES`].
+    hits: usize,
+    lib: Option<GqlLib>,
+    /// Root nouns kept, in line order.
+    roots: Vec<&'static str>,
+    /// Methods read under a field decorator.
+    fields: usize,
+    rej_lang: usize,
+    rej_import: usize,
+    rej_position: usize,
+}
+
+impl DecoratorCensus {
+    /// The marker line, or `None` for a file with no decorator needle.
+    fn marker(&self, lang: &str) -> Option<String> {
+        (self.hits > 0).then(|| {
+            format!(
+                "[graphql-decorators] lang={lang} import={} roots={} fields={} rejected lang={} import={} position={}",
+                self.lib.map_or("none", GqlLib::label),
+                self.roots.join(","),
+                self.fields,
+                self.rej_lang,
+                self.rej_import,
+                self.rej_position
+            )
+        })
+    }
+}
+
 /// Decorators whose *following method* is the actual resolver field (e.g. the
-/// `getUser` in NestJS `@Query() async getUser()`). The decorator nouns above
-/// only recover "Query", never the field a client operation is keyed by, so
+/// `getUser` in NestJS `@Query() async getUser()`). The root nouns only
+/// recover "Query", never the field a client operation is keyed by, so
 /// GRAPHQL_CALLS never pairs.
 const RESOLVER_FIELD_DECORATORS: &[&str] =
     &["@Query(", "@Mutation(", "@Subscription(", "@ResolveField("];
@@ -474,46 +573,249 @@ pub fn extract_graphql_operation_nodes(
 }
 
 /// CODE mode, for every code file of every language
-/// (`engine::extract::apply_cross_cutting_extractors`): the decorator nouns,
-/// the method under a field decorator, and SDL only inside a GraphQL-marked
-/// literal ([`gql_literal_regions`], LA.27). A comment or an unmarked string
-/// that holds `type Query {` mints nothing. A `.graphql` / `.gql` body goes
+/// (`engine::extract::apply_cross_cutting_extractors`, `lang` from
+/// `detect_language`): the decorator family ([`decorator_scan`], LA.38) and
+/// SDL only inside a GraphQL-marked literal ([`gql_literal_regions`], LA.27).
+/// A comment or an unmarked string that holds `type Query {` mints nothing,
+/// and neither does a decorator needle outside a TypeScript / Python file
+/// that imports a GraphQL server package. A `.graphql` / `.gql` body goes
 /// through [`extract_graphql_sdl_file_nodes`] instead.
 pub fn extract_graphql_resolver_nodes(
     source: &str,
+    lang: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> GraphqlNodes {
-    // (name, 0-indexed line the name was read from)
-    let mut names: Vec<(String, u32)> = Vec::new();
-
-    // Decorator nouns: "Query", "Resolver", "strawberry.type", ...
-    for &pattern in DECORATOR_PATTERNS {
-        if let Some(idx) = source.find(pattern) {
-            let noun = pattern
-                .trim_start_matches('@')
-                .trim_end_matches('(')
-                .trim_end_matches("):")
-                .replace("graphene.", "");
-            names.push((noun, line_of(source, idx)));
+    // (name, 0-indexed line the name was read from): root nouns and the
+    // methods under field decorators, then the roots and fields of SDL held
+    // in marked literals, in source order. Fields carry the operation name a
+    // client `gql query getUser` pairs against.
+    let (mut names, census) = decorator_scan(source, lang);
+    let embedded = embedded_sdl(source);
+    if graphql_debug() {
+        for marker in [census.marker(lang), embedded.marker()].into_iter().flatten() {
+            eprintln!("{marker}");
         }
     }
-
-    // Field level, in source order: the method under a resolver decorator,
-    // and the roots and fields of SDL held in marked literals. Fields carry
-    // the operation name a client `gql query getUser` pairs against.
-    let embedded = embedded_sdl(source);
-    if graphql_debug()
-        && let Some(marker) = embedded.marker()
-    {
-        eprintln!("{marker}");
-    }
-    let mut fields = decorator_method_names(source);
-    fields.extend(embedded.hits.into_iter().map(|h| (h.name, h.line)));
-    fields.sort_by_key(|&(_, line)| line);
-    names.extend(fields);
+    names.extend(embedded.hits.into_iter().map(|h| (h.name, h.line)));
+    names.sort_by_key(|&(_, line)| line);
 
     resolver_nodes(names, module_id, repo)
+}
+
+/// LA.38: the GraphQL decorator family of one code file, as (name, 0-indexed
+/// line) pairs in line order, plus the census for the `[graphql-decorators]`
+/// marker. It runs only for a TypeScript-family or Python file
+/// ([`decorator_family`]) that imports a GraphQL server package
+/// ([`graphql_server_lib`]), and reads only at decorator / class position:
+/// - TypeScript (NestJS / TypeGraphQL): a line starting with `@Query(` /
+///   `@Mutation(` / `@Subscription(` names that root type, and the method
+///   under a field decorator ([`decorator_method_names`]) is a field;
+/// - Python: `@strawberry.type` on `class Query:`, or graphene
+///   `class Query(graphene.ObjectType):`, names that root type.
+///
+/// Every noun is a root type: `@Resolver(`, `@ResolveField(`,
+/// `@strawberry.type`, `@strawberry.mutation` and `ObjectType` name nothing.
+fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCensus) {
+    let mut census = DecoratorCensus {
+        hits: DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
+        ..DecoratorCensus::default()
+    };
+    let Some(family) = decorator_family(lang) else {
+        census.rej_lang = census.hits;
+        return (Vec::new(), census);
+    };
+    let Some(lib) = graphql_server_lib(source, family) else {
+        census.rej_import = census.hits;
+        return (Vec::new(), census);
+    };
+    census.lib = Some(lib);
+    let lines: Vec<&str> = source.lines().collect();
+    census.rej_position = misplaced_needles(&lines);
+    let roots = match family {
+        DecoratorFamily::Ts => ts_root_decorators(&lines),
+        DecoratorFamily::Py => py_root_classes(&lines, lib),
+    };
+    census.roots = roots.iter().map(|&(root, _)| root).collect();
+    let mut names: Vec<(String, u32)> = roots
+        .into_iter()
+        .map(|(root, line)| (root.to_string(), line))
+        .collect();
+    if family == DecoratorFamily::Ts {
+        let fields = decorator_method_names(source);
+        census.fields = fields.len();
+        names.extend(fields);
+    }
+    names.sort_by_key(|&(_, line)| line);
+    (names, census)
+}
+
+/// LA.38: the decorator family of a `detect_language` tag (`.ts` / `.tsx` /
+/// `.js` / `.jsx` are `typescript`, `.component.ts` is `angular`).
+fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
+    match lang {
+        "typescript" | "react" | "angular" | "vue" => Some(DecoratorFamily::Ts),
+        "python" => Some(DecoratorFamily::Py),
+        _ => None,
+    }
+}
+
+/// LA.38: the GraphQL server package the file imports. TypeScript: a quoted
+/// `@nestjs/graphql` / `type-graphql` module string, so a multi-line import
+/// counts and a REST controller importing `Query` from `@nestjs/common` does
+/// not. Python: a line starting with `import` / `from` and the package name
+/// as a whole token (`import strawberry as sb`, `from graphene import ...`).
+fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
+    match family {
+        DecoratorFamily::Ts => {
+            let b = source.as_bytes();
+            b.iter()
+                .enumerate()
+                .filter(|&(_, &c)| c == b'\'' || c == b'"')
+                .find_map(|(i, _)| {
+                    TS_SERVER_MODULES
+                        .iter()
+                        .find(|(module, _)| quoted_module_at(b, i + 1, module))
+                        .map(|&(_, lib)| lib)
+                })
+        }
+        DecoratorFamily::Py => source.lines().find_map(|line| {
+            let t = line.trim_start();
+            let rest = t
+                .strip_prefix("import ")
+                .or_else(|| t.strip_prefix("from "))?
+                .trim_start();
+            PY_SERVER_PACKAGES
+                .iter()
+                .find(|(package, _)| {
+                    rest.strip_prefix(package)
+                        .is_some_and(|after| !after.bytes().next().is_some_and(is_ident_byte))
+                })
+                .map(|&(_, lib)| lib)
+        }),
+    }
+}
+
+/// LA.38: needle occurrences off decorator / class position: not at the
+/// start of their line (a graphene needle also counts inside a `class` line's
+/// base list).
+fn misplaced_needles(lines: &[&str]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let lead = line.len() - trimmed.len();
+            let class_line = trimmed.starts_with("class ");
+            DECORATOR_NEEDLES
+                .iter()
+                .map(|&needle| {
+                    let positioned = |at: usize| {
+                        at == lead || (class_line && GRAPHENE_NEEDLES.contains(&needle))
+                    };
+                    line.match_indices(needle)
+                        .filter(|&(at, _)| !positioned(at))
+                        .count()
+                })
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn line_u32(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
+}
+
+/// Push `root` unless the file already has it: one node per root type,
+/// anchored at its first qualifying line.
+fn push_root(roots: &mut Vec<(&'static str, u32)>, root: &'static str, line: usize) {
+    if !roots.iter().any(|&(r, _)| r == root) {
+        roots.push((root, line_u32(line)));
+    }
+}
+
+/// LA.38: the root types NestJS / TypeGraphQL decorators name, from lines that
+/// start with `@Query(` / `@Mutation(` / `@Subscription(`.
+fn ts_root_decorators(lines: &[&str]) -> Vec<(&'static str, u32)> {
+    let mut roots = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if let Some(&(_, root)) = ROOT_DECORATORS.iter().find(|(d, _)| t.starts_with(d)) {
+            push_root(&mut roots, root, i);
+        }
+    }
+    roots
+}
+
+/// LA.38: the root types Python classes declare, anchored at the class line.
+/// strawberry: `@strawberry.type` (bare or called), then within 4 lines, past
+/// blank lines and further decorators, `class <Root>`. graphene:
+/// `class <Root>(...)` whose base list holds the token `ObjectType`.
+fn py_root_classes(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, u32)> {
+    let mut roots = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        match lib {
+            GqlLib::Strawberry => {
+                let Some(after) = t.strip_prefix("@strawberry.type") else {
+                    continue;
+                };
+                if !(after.is_empty() || after.starts_with(['(', ' ', '\t', '#'])) {
+                    continue;
+                }
+                let class_line = lines
+                    .iter()
+                    .enumerate()
+                    .skip(i + 1)
+                    .take(4)
+                    .find(|(_, l)| {
+                        let t = l.trim();
+                        !t.is_empty() && !t.starts_with('@')
+                    });
+                if let Some((j, l)) = class_line
+                    && let Some((root, _)) = class_root(l.trim())
+                {
+                    push_root(&mut roots, root, j);
+                }
+            }
+            GqlLib::Graphene => {
+                if let Some(root) = graphene_root(t) {
+                    push_root(&mut roots, root, i);
+                }
+            }
+            GqlLib::NestGraphql | GqlLib::TypeGraphql => {}
+        }
+    }
+    roots
+}
+
+/// The root type a trimmed `class <Ident>` line declares, and the text after
+/// the identifier. `None` for any other class.
+fn class_root(t: &str) -> Option<(&'static str, &str)> {
+    let rest = t.strip_prefix("class ")?.trim_start();
+    let end = rest
+        .bytes()
+        .position(|c| !is_ident_byte(c))
+        .unwrap_or(rest.len());
+    let ident = rest.get(..end)?;
+    let root = ROOT_TYPES.iter().copied().find(|r| *r == ident)?;
+    Some((root, rest.get(end..)?))
+}
+
+/// A graphene root: `class Query(graphene.ObjectType):` or
+/// `class Query(ObjectType):`, the token `ObjectType` in the base list up to
+/// the first `)` on the line.
+fn graphene_root(t: &str) -> Option<&'static str> {
+    let (root, after) = class_root(t)?;
+    let bases = after.trim_start().strip_prefix('(')?;
+    let bases = bases.get(..bases.find(')')?)?;
+    let b = bases.as_bytes();
+    let token = "ObjectType";
+    bases
+        .match_indices(token)
+        .any(|(at, _)| {
+            !ident_byte_before(b, at) && !b.get(at + token.len()).is_some_and(|&c| is_ident_byte(c))
+        })
+        .then_some(root)
 }
 
 /// WHOLE-FILE mode for a routed `.graphql` / `.gql` schema
@@ -562,7 +864,6 @@ fn resolver_nodes(names: Vec<(String, u32)>, module_id: NodeId, repo: RepoId) ->
 fn decorator_method_names(source: &str) -> Vec<(String, u32)> {
     let mut names = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
-    let line_u32 = |i: usize| u32::try_from(i).unwrap_or(u32::MAX);
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if !RESOLVER_FIELD_DECORATORS
@@ -1018,8 +1319,8 @@ mod tests {
 
     #[test]
     fn detects_resolver_decorator() {
-        let source = "@Query()\nasync users() { return []; }";
-        let result = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let source = "import { Query } from '@nestjs/graphql';\n@Query()\nasync users() { return []; }";
+        let result = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         assert!(!result.nodes.is_empty());
         assert!(result.nav.qname_by_id.values().any(|q| q.starts_with("graphql_resolver:")));
     }
@@ -1035,8 +1336,8 @@ mod tests {
     #[test]
     fn extracts_decorator_method_field_name() {
         // NestJS: the resolver field is the method under @Query(), not "Query".
-        let source = "  @Query(() => User)\n  async getUser(@Args('id') id: string) {\n    return this.userService.findOne(id);\n  }";
-        let result = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let source = "import { Query } from '@nestjs/graphql';\n  @Query(() => User)\n  async getUser(@Args('id') id: string) {\n    return this.userService.findOne(id);\n  }";
+        let result = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         // The client op `gql query getUser` pairs against this field name.
         assert!(
             result
@@ -1047,7 +1348,7 @@ mod tests {
             "expected field-named resolver getUser, got {:?}",
             result.nav.qname_by_id.values().collect::<Vec<_>>()
         );
-        // Existing decorator-noun extraction is retained.
+        // The root noun the decorator sits on is retained.
         assert!(result
             .nav
             .qname_by_id
@@ -1096,14 +1397,15 @@ mod tests {
 
     #[test]
     fn anchors_resolvers_at_the_method_and_sdl_lines() {
-        let src = "@Resolver('User')\nexport class R {\n  @Query(() => User)\n  async getUser(id: string) {\n    return 1;\n  }\n}";
-        let out = extract_graphql_resolver_nodes(src, module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(3));
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2));
-        assert_eq!(anchor_line(&out, "graphql_resolver:Resolver"), Some(0));
+        let src = "import { Resolver, Query } from '@nestjs/graphql';\n@Resolver('User')\nexport class R {\n  @Query(() => User)\n  async getUser(id: string) {\n    return 1;\n  }\n}";
+        let out = extract_graphql_resolver_nodes(src, "typescript", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(4));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        // LA.38: `@Resolver(` is a decorator name, never a node.
+        assert_eq!(anchor_line(&out, "graphql_resolver:Resolver"), None);
 
         let sdl = "const typeDefs = `\ntype Query {\n  getUser(id: ID!): User\n  listUsers: [User]\n}\n`;";
-        let out = extract_graphql_resolver_nodes(sdl, module_id(), repo());
+        let out = extract_graphql_resolver_nodes(sdl, "typescript", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(2));
         assert_eq!(anchor_line(&out, "graphql_resolver:listUsers"), Some(3));
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1));
@@ -1235,15 +1537,15 @@ mod tests {
     // glia's own build of this file reads no SDL line from it.
 
     /// Resolver qnames minted from `source` in code mode, sorted.
-    fn resolver_qnames(source: &str) -> Vec<String> {
-        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+    fn resolver_qnames(source: &str, lang: &str) -> Vec<String> {
+        let out = extract_graphql_resolver_nodes(source, lang, module_id(), repo());
         let mut qnames: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
         qnames.sort();
         qnames
     }
 
-    fn assert_resolvers(source: &str, want: &[&str]) {
-        let got = resolver_qnames(source);
+    fn assert_resolvers(source: &str, lang: &str, want: &[&str]) {
+        let got = resolver_qnames(source, lang);
         let want: Vec<String> = want.iter().map(|n| format!("graphql_resolver:{n}")).collect();
         assert_eq!(got, want, "{source}");
     }
@@ -1253,7 +1555,7 @@ mod tests {
         // engine/src/route.rs's A10.4 comment, verbatim: the glia self-build
         // minted graphql_resolver:Query from it, HANDLED_BY parse_repo_files.
         let source = "fn parse_repo_files() {\n        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan that\n        // embedded `type Query {` blocks already get, so a schema-first\n        // service has resolvers for its clients' operations to pair with.\n        if lang == \"graphql\" {}\n}\n";
-        assert_resolvers(source, &[]);
+        assert_resolvers(source, "rust", &[]);
         assert_eq!(
             embedded_sdl(source).marker().as_deref(),
             Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
@@ -1262,10 +1564,10 @@ mod tests {
 
     #[test]
     fn sdl_in_an_unmarked_string_mints_nothing() {
-        assert_resolvers(r#"let sdl = "type Query {\n  getUser(id: ID!): User\n}\n";"#, &[]);
+        assert_resolvers(r#"let sdl = "type Query {\n  getUser(id: ID!): User\n}\n";"#, "rust", &[]);
         // A multi-line raw string: the block scan read it line by line.
         let raw = "#[test]\nfn schema_routes() {\n    let sdl = r#\"\ntype Subscription {\n  orderShipped: Order\n}\n\"#;\n    assert!(!sdl.is_empty());\n}\n";
-        assert_resolvers(raw, &[]);
+        assert_resolvers(raw, "rust", &[]);
         assert_eq!(
             embedded_sdl(raw).marker().as_deref(),
             Some("[graphql-sdl-code] literals=0 roots= fields=0 unmarked_roots=1")
@@ -1275,14 +1577,14 @@ mod tests {
     #[test]
     fn sdl_in_a_python_comment_mints_nothing() {
         let source = "# How the resolver scan works: a line like\n#   type Query {\n# opens a root type block.\ndef scan(text):\n    return text.splitlines()\n";
-        assert_resolvers(source, &[]);
+        assert_resolvers(source, "python", &[]);
     }
 
     #[test]
     fn gql_tagged_sdl_mints_root_and_fields() {
         // The tag marks the literal whatever the variable is called.
         let source = "import { gql } from \"graphql-tag\";\n\nexport const schema = gql`\n  type Query {\n    listOrders: [Order]\n  }\n\n  type Order {\n    id: ID!\n  }\n`;\n";
-        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        let out = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
         assert_eq!(anchor_line(&out, "graphql_resolver:listOrders"), Some(4));
         assert_eq!(out.nodes.len(), 2, "`type Order {{` is an object type, never a resolver");
@@ -1295,56 +1597,56 @@ mod tests {
     #[test]
     fn ariadne_gql_call_mints_fields() {
         let source = "from ariadne import gql\n\nsdl = gql(\"\"\"\n    type Mutation {\n        placeOrder(sku: String!): Order\n    }\n\"\"\")\n";
-        assert_resolvers(source, &["Mutation", "placeOrder"]);
-        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        assert_resolvers(source, "python", &["Mutation", "placeOrder"]);
+        let out = extract_graphql_resolver_nodes(source, "python", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:placeOrder"), Some(4));
     }
 
     #[test]
     fn go_must_parse_schema_literal_mints_fields() {
         let source = "func Schema() *graphql.Schema {\n\treturn graphql.MustParseSchema(`\n\ttype Query {\n\t\tuser(id: ID!): User\n\t}\n`, &resolver{})\n}\n";
-        assert_resolvers(source, &["Query", "user"]);
+        assert_resolvers(source, "go", &["Query", "user"]);
         // A schema string passed by name is not a marked literal.
-        assert_resolvers("var s = `\ntype Query {\n  user: User\n}\n`\nvar _ = graphql.MustParseSchema(s, &r{})\n", &[]);
+        assert_resolvers("var s = `\ntype Query {\n  user: User\n}\n`\nvar _ = graphql.MustParseSchema(s, &r{})\n", "go", &[]);
         // `rebuildSchema(` is not `buildSchema(`.
-        assert_resolvers("rebuildSchema(`\ntype Query {\n  user: User\n}\n`)\n", &[]);
+        assert_resolvers("rebuildSchema(`\ntype Query {\n  user: User\n}\n`)\n", "go", &[]);
     }
 
     #[test]
     fn ruby_graphql_heredoc_mints_fields() {
         let source = "class Schema\n  DEFINITION = <<~GRAPHQL\n    type Query {\n      posts: [Post]\n    }\n  GRAPHQL\nend\nSchema2 = GraphQL::Schema.from_definition(<<-GQL)\n  extend type Mutation {\n    deletePost(id: ID!): Boolean\n  }\nGQL\n";
-        assert_resolvers(source, &["Mutation", "Query", "deletePost", "posts"]);
-        let out = extract_graphql_resolver_nodes(source, module_id(), repo());
+        assert_resolvers(source, "ruby", &["Mutation", "Query", "deletePost", "posts"]);
+        let out = extract_graphql_resolver_nodes(source, "ruby", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:posts"), Some(3));
         assert_eq!(anchor_line(&out, "graphql_resolver:deletePost"), Some(9));
         // No terminator line: no region, and no panic.
-        assert_resolvers("q = <<~GRAPHQL\n  type Query {\n    posts: [Post]\n  }\n", &[]);
+        assert_resolvers("q = <<~GRAPHQL\n  type Query {\n    posts: [Post]\n  }\n", "ruby", &[]);
     }
 
     #[test]
     fn graphql_magic_comment_template_mints_fields() {
         let source = "const schema = /* GraphQL */ `\n  type Mutation {\n    addBook(title: String): Book\n  }\n`;\n";
-        assert_resolvers(source, &["Mutation", "addBook"]);
+        assert_resolvers(source, "typescript", &["Mutation", "addBook"]);
     }
 
     #[test]
     fn hash_graphql_template_mints_fields() {
         // Apollo Server 4: `schema` is a name no binding rule knows.
         let source = "const schema = `#graphql\n  type Query {\n    books: [Book]\n  }\n`;\n";
-        assert_resolvers(source, &["Query", "books"]);
+        assert_resolvers(source, "typescript", &["Query", "books"]);
         let py = "SCHEMA = \"\"\"\n# graphql\ntype Query {\n  books: [Book]\n}\n\"\"\"\n";
-        assert_resolvers(py, &["Query", "books"]);
+        assert_resolvers(py, "python", &["Query", "books"]);
     }
 
     #[test]
     fn typedefs_bindings_mint_fields() {
-        for source in [
-            "export const typeDefs: string = `\ntype Query {\n  me: User\n}\n`;\n",
-            "type_defs = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
-            "type_defs: str = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n",
-            "new ApolloServer({\n  typeDefs: `\n    type Query {\n      me: User\n    }\n  `,\n  resolvers,\n});\n",
+        for (source, lang) in [
+            ("export const typeDefs: string = `\ntype Query {\n  me: User\n}\n`;\n", "typescript"),
+            ("type_defs = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n", "python"),
+            ("type_defs: str = \"\"\"\ntype Query {\n    me: User\n}\n\"\"\"\n", "python"),
+            ("new ApolloServer({\n  typeDefs: `\n    type Query {\n      me: User\n    }\n  `,\n  resolvers,\n});\n", "typescript"),
         ] {
-            assert_resolvers(source, &["Query", "me"]);
+            assert_resolvers(source, lang, &["Query", "me"]);
         }
         // The same template in a differently named variable is not read
         // (the coverage caveat row declares this), nor is a longer name.
@@ -1353,7 +1655,7 @@ mod tests {
             "const typeDefsV2 = `\ntype Query {\n  me: User\n}\n`;\n",
             "if (typeDefs == `\ntype Query {\n  me: User\n}\n`) {}\n",
         ] {
-            assert_resolvers(source, &[]);
+            assert_resolvers(source, "typescript", &[]);
         }
     }
 
@@ -1366,7 +1668,7 @@ mod tests {
         let (s, e) = regions[0];
         assert_eq!(source.get(s..e), Some("é type Query {"));
         // A root opener mid-line is not a line start, and `b` is unread.
-        assert_resolvers(source, &[]);
+        assert_resolvers(source, "typescript", &[]);
         // Unterminated openers of every shape end the scan cleanly.
         for tail in ["gql`", "gql(\"", "gql(\"\"\"", "typeDefs = '", "/* GraphQL */", "<<~GRAPHQL"] {
             assert!(gql_literal_regions(tail).is_empty(), "{tail}");
@@ -1391,6 +1693,127 @@ mod tests {
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1));
         assert_eq!(anchor_line(&out, "graphql_resolver:logout"), Some(6));
         // The same bare document in a code file is not a marked literal.
-        assert_resolvers(sdl, &[]);
+        assert_resolvers(sdl, "typescript", &[]);
+    }
+
+    // LA.38. Every source below is a one-line Rust string (`\n` escapes), and
+    // glia's own build reads this file as Rust, so neither mints a resolver.
+
+    const JPA_REPOSITORY: &str = "import org.springframework.data.jpa.repository.Query;\n@Query(\"SELECT p FROM Pet p\")\nList<Pet> findPets();";
+    const REST_CONTROLLER: &str = "import { Controller, Get, Query } from '@nestjs/common';\n@Get()\nasync list(\n  @Query() filter: Dto,\n) {}";
+    const COMMENT_AND_STRING: &str = "import { Query } from '@nestjs/graphql';\n// use @Mutation(() => X) once writes land\nconst doc = \"@Subscription(\";\n@Query(() => [User])\nasync users() {}";
+
+    #[test]
+    fn decorator_family_needs_a_graphql_language() {
+        // Spring Data JPA's @Query is JPQL (HEAD: Query + findPets).
+        assert_resolvers(JPA_REPOSITORY, "java", &[]);
+        // A needle table (HEAD: Resolver, ResolveField, ObjectType,
+        // strawberry.type).
+        let table = "pub const NOUNS: &[&str] = &[\"@Resolver(\", \"@ResolveField(\", \"ObjectType):\", \"@strawberry.type\"];";
+        assert_resolvers(table, "rust", &[]);
+        // HEAD: Query.
+        assert_resolvers("// @Query(() => X)\nfunc f() {}", "go", &[]);
+        // The same decorator in a GraphQL server file of the TypeScript family.
+        let nest = "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
+        for lang in ["typescript", "angular", "vue", "react"] {
+            assert_resolvers(nest, lang, &["Query", "users"]);
+        }
+        assert_resolvers(nest, "kotlin", &[]);
+    }
+
+    #[test]
+    fn decorator_family_needs_a_graphql_import() {
+        // @nestjs/common's query-string parameter decorator (HEAD: Query).
+        assert_resolvers(REST_CONTROLLER, "typescript", &[]);
+        let graphql = "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
+        assert_resolvers(graphql, "typescript", &["Query", "users"]);
+        // A multi-line import, and TypeGraphQL.
+        let multi_line = "import {\n  Args,\n  Query,\n} from \"@nestjs/graphql\";\n@Query(() => [User])\nasync users() {}";
+        assert_resolvers(multi_line, "typescript", &["Query", "users"]);
+        let type_graphql = "import { Query, Resolver } from 'type-graphql';\n@Query(() => [User])\nasync users() {}";
+        assert_resolvers(type_graphql, "typescript", &["Query", "users"]);
+        // A package that only starts with the name is not it.
+        let lookalike = "import { Query } from '@nestjs/graphql-x';\n@Query(() => [User])\nasync users() {}";
+        assert_resolvers(lookalike, "typescript", &[]);
+        // Python: strawberry-like package names are not strawberry.
+        let fields = "from strawberryfields import ops\n@strawberry.type\nclass Query:\n    x: int";
+        assert_resolvers(fields, "python", &[]);
+    }
+
+    #[test]
+    fn decorators_count_only_at_decorator_position() {
+        // HEAD: Mutation + Query + Subscription + users.
+        assert_resolvers(COMMENT_AND_STRING, "typescript", &["Query", "users"]);
+        // A JSDoc line starts with `*`, not with the decorator.
+        let jsdoc = "import { Query } from '@nestjs/graphql';\n/**\n * @Mutation(() => X) lands later\n */\nconst x = 1;";
+        assert_resolvers(jsdoc, "typescript", &[]);
+    }
+
+    #[test]
+    fn only_root_types_are_nouns() {
+        // HEAD adds Resolver and ResolveField.
+        let source = "import { Resolver, ResolveField, Query, Subscription } from '@nestjs/graphql';\n@Resolver(() => Recipe)\nexport class R {\n  @Query(() => [Recipe])\n  recipes() {}\n  @Subscription(() => Recipe)\n  added() {}\n  @ResolveField()\n  author() {}\n}";
+        assert_resolvers(source, "typescript", &["Query", "Subscription", "added", "author", "recipes"]);
+        let out = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Subscription"), Some(5));
+        assert_eq!(anchor_line(&out, "graphql_resolver:author"), Some(8));
+    }
+
+    #[test]
+    fn strawberry_and_graphene_root_classes() {
+        let strawberry = "import strawberry\n\n@strawberry.type\nclass Recipe:\n    title: str\n\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def recipe(self) -> Recipe: ...\n\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation\n    def add(self) -> Recipe: ...";
+        // HEAD: strawberry.type + strawberry.mutation.
+        assert_resolvers(strawberry, "python", &["Mutation", "Query"]);
+        let out = extract_graphql_resolver_nodes(strawberry, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(7));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Mutation"), Some(12));
+        // HEAD: ObjectType.
+        let graphene = "import graphene\nclass User(graphene.ObjectType):\n    name = graphene.String()\nclass Query(graphene.ObjectType):\n    user = graphene.Field(User)";
+        assert_resolvers(graphene, "python", &["Query"]);
+        let out = extract_graphql_resolver_nodes(graphene, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        // Without its import the strawberry source mints nothing.
+        let unimported = strawberry.trim_start_matches("import strawberry\n");
+        assert_resolvers(unimported, "python", &[]);
+        // A called decorator past a stacked one, a submodule import, a bare
+        // ObjectType base beside a mixin; `MyObjectType` is not the token.
+        let shapes = "from strawberry.types import Info\n@strawberry.type(description=\"root\")\n@other\nclass Subscription:\n    pass\n";
+        assert_resolvers(shapes, "python", &["Subscription"]);
+        let bare = "from graphene import ObjectType\nclass Query(ObjectType, Mixin):\n    pass\nclass Mutation(MyObjectType):\n    pass\n";
+        assert_resolvers(bare, "python", &["Query"]);
+    }
+
+    #[test]
+    fn census_counts_every_rejection() {
+        let census = |source: &str, lang: &str| decorator_scan(source, lang).1;
+        let java = census(JPA_REPOSITORY, "java");
+        assert_eq!((java.hits, java.rej_lang, java.rej_import, java.rej_position), (1, 1, 0, 0));
+        let rest = census(REST_CONTROLLER, "typescript");
+        assert_eq!((rest.hits, rest.rej_lang, rest.rej_import, rest.rej_position), (1, 0, 1, 0));
+        let mixed = census(COMMENT_AND_STRING, "typescript");
+        assert_eq!((mixed.hits, mixed.rej_lang, mixed.rej_import, mixed.rej_position), (3, 0, 0, 2));
+        assert_eq!((mixed.roots.as_slice(), mixed.fields), (&["Query"][..], 1));
+
+        assert_eq!(
+            java.marker("java").as_deref(),
+            Some("[graphql-decorators] lang=java import=none roots= fields=0 rejected lang=1 import=0 position=0")
+        );
+        assert_eq!(
+            rest.marker("typescript").as_deref(),
+            Some("[graphql-decorators] lang=typescript import=none roots= fields=0 rejected lang=0 import=1 position=0")
+        );
+        let resolver = "import { Args, Mutation, Query, Resolver } from \"@nestjs/graphql\";\n\n@Resolver(() => Recipe)\nexport class RecipesResolver {\n  @Query(() => [Recipe])\n  async recipes() {\n    return [];\n  }\n\n  @Mutation(() => Recipe)\n  async addRecipe(@Args(\"title\") title: string) {\n    return { title };\n  }\n}";
+        assert_eq!(
+            census(resolver, "typescript").marker("typescript").as_deref(),
+            Some("[graphql-decorators] lang=typescript import=@nestjs/graphql roots=Query,Mutation fields=2 rejected lang=0 import=0 position=0")
+        );
+        let py = "import strawberry\n@strawberry.type\nclass Query:\n    x: int";
+        assert_eq!(
+            census(py, "python").marker("python").as_deref(),
+            Some("[graphql-decorators] lang=python import=strawberry roots=Query fields=0 rejected lang=0 import=0 position=0")
+        );
+        // No needle, no marker line.
+        assert_eq!(census("const x = 1;", "typescript").marker("typescript"), None);
     }
 }
