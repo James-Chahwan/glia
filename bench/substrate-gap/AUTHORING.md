@@ -143,6 +143,7 @@ committed fixtures:
 | framework | node name | qname |
 |---|---|---|
 | Go / chi | `GET /users` | same — one node per method since LB.11a (was `route:/users`, no method) |
+| Express / Next / Nest / SvelteKit / Hapi / Bun (ts_routes) | `GET /users` | same — one node per method since LB.11b (was `route:/users`, name `/users`); `.all(`, `@All(`, Hapi `*`, a Pages Router default export and a Bun single-value route are `ANY` |
 | Spring | `GET /users/{id}` | same |
 | Rails | `GET /users/:id` | same |
 | ASP.NET | `ANY api/users` | same — method present, **no leading slash** |
@@ -152,13 +153,18 @@ separately via `expect_cells` on `ROUTE_METHOD` (verified satisfiable against
 `fixtures/java-spring-http`). The scaffolder stamps that cell for you on
 `http_server`.
 
-**Gotcha 2 — synthetic nodes carry no POSITION.** The cross-cutting extractors
-mint nodes without a span: `QUEUE_PRODUCER`, `QUEUE_CONSUMER`, `ROUTE` and
-`ENDPOINT` all dump `path=None`, while AST entities (`MODULE`, `FUNCTION`,
-`CLASS`) carry one. `expect_cells` is optional and the scaffolder leaves it
-**empty** on purpose: add a `POSITION` gate only where `--dump` shows a real
-path. A blanket POSITION assertion would cap every messaging/http/rpc cell at
-partial forever.
+**Gotcha 2 — some synthetic nodes carry no POSITION.** The cross-cutting
+extractors mint some nodes without a span: `ENDPOINT` and the `ROUTE`s of the
+bare-verb server parsers (Spring, Rails, ASP.NET, ... — located only through
+their handler) dump `path=None`, while AST entities (`MODULE`, `FUNCTION`,
+`CLASS`) carry one. `ROUTE` is no longer POSITION-less everywhere: Go routes
+(LA.32a) and ts_routes routes (LB.11b, Express / Next / Nest / SvelteKit /
+Hapi / Bun) carry a POSITION per registration, and the queue markers
+(`QUEUE_PRODUCER` / `QUEUE_CONSUMER`) now dump the file of their call site.
+`expect_cells` is optional and the scaffolder leaves it **empty** on purpose:
+add a `POSITION` gate only where `--dump` shows a real path. A blanket
+POSITION assertion would cap every messaging/http/rpc cell at partial
+forever.
 
 ### 6. Forbid the phantoms the fixture provokes
 

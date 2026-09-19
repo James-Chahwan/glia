@@ -722,11 +722,11 @@ pub struct Located {
 ///
 /// Placement has three tiers, first hit wins:
 ///
-/// 1. the node's first POSITION cell ([`position_of`]) — every parsed entity;
+/// 1. the node's first POSITION cell ([`position_of`]) — every parsed entity,
+///    and the go / ts_routes ROUTEs (a POSITION per registration);
 /// 2. ROUTE / ENDPOINT only (A3.6): the ENDPOINT_HIT cell or a JSON
 ///    ROUTE_METHOD cell ([`endpoint::http_node_span`]), which carry the call
-///    or registration site. ts_routes' `"line":0` placeholder yields a file
-///    with `line: None`;
+///    or registration site;
 /// 3. ROUTE only (A3.6): the POSITION of the handler the route is HANDLED_BY,
 ///    for the parsers whose ROUTE_METHOD is the bare verb. "Where is this
 ///    route" is answered by its handler.

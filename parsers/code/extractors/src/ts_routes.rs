@@ -3,12 +3,22 @@
 //!   - Next.js file-based API routes: `pages/api/...` and `app/api/.../route.ts`
 //!   - Express / Koa / Hono / Fastify-style: `app.get('/path', ...)`,
 //!     `router.post('/path', ...)`.
+//!   - SvelteKit `+server.ts`, NestJS controllers, Hapi `server.route(...)`
+//!     and Bun.serve `routes:` objects.
 //!
 //! Runs per-file. Output is route nodes that HttpStackResolver can match
 //! against endpoint nodes to produce cross-stack HTTP edges.
 //!
-//! Emits one Route node per path, with stacked ROUTE_METHOD cells — matches
-//! the shape parser-go writes and the shape HttpStackResolver reads.
+//! LB.11b: one ROUTE node per (method, path), qname `<METHOD> <path>` built by
+//! `endpoint::route_qname` with name = qname — the shape every other server
+//! parser writes (Go since LB.11a). Each registration row adds a POSITION cell
+//! (ascending, deduped), then one ROUTE_METHOD cell carries the method, the
+//! named handler and the 1-based line of the first registration. A
+//! method-agnostic registration is `ANY`, the token the resolver's any tier
+//! keys on: Express `.all(`, Nest `@All(`, Hapi `*` / `ANY` / `ALL`, a Next.js
+//! Pages Router default export (Next hands it every method) and a Bun route
+//! whose value is a handler function or a `Response` (Bun serves it for every
+//! method).
 //!
 //! Like the other cross-cutting extractors, this is pattern-based. Only called
 //! by the pipeline for JS/TS-family languages.
@@ -26,6 +36,8 @@ use repo_graph_code_domain::{
 };
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
+use crate::anchor;
+
 pub struct RouteNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
@@ -39,9 +51,31 @@ pub struct RouteNodes {
     /// no longer minted. Feeds the `[extract] ts-routes client-calls skipped`
     /// build marker.
     pub skipped_client_calls: usize,
+    /// LB.11b: POSITION cells pushed, one per distinct registration row of
+    /// each route. Feeds the per-file `[ts-routes]` marker.
+    pub positioned: usize,
+    /// LB.11b: ROUTE nodes whose method is `ANY` (a method-agnostic
+    /// registration). Feeds the per-file `[ts-routes]` marker.
+    pub any: usize,
 }
 
 const HTTP_METHODS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head", "all"];
+
+/// The method token of a method-agnostic ROUTE — the one every server parser
+/// writes and the HTTP resolver's any tier keys on.
+const ANY: &str = "ANY";
+
+/// One ROUTE under construction: the handler its registrations named ("" when
+/// none did) and the 0-based source row of every registration.
+#[derive(Debug, Default)]
+struct RouteEntry {
+    handler: String,
+    rows: Vec<u32>,
+}
+
+/// `(canonical path, METHOD)` -> its route. A BTreeMap, so emission order is a
+/// function of the keys alone (the byte-identical store gate).
+type RouteMap = BTreeMap<(String, &'static str), RouteEntry>;
 
 pub fn extract_ts_backend_routes(
     source: &str,
@@ -49,15 +83,15 @@ pub fn extract_ts_backend_routes(
     module_id: NodeId,
     repo: RepoId,
 ) -> RouteNodes {
-    // path → (method, handler) pairs (BTreeMap gives stable ordering for
-    // deterministic output). `handler` is "" when the shape names none.
-    let mut by_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-    // (route, handler) pairs for the HANDLED_BY refs, deduped and ordered.
-    let mut handled_by: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut by_route: RouteMap = BTreeMap::new();
+    // (path, METHOD, handler) triples for the HANDLED_BY refs, deduped and
+    // ordered; each ref leaves from its own per-method node.
+    let mut handled_by: BTreeSet<(String, &'static str, String)> = BTreeSet::new();
     let mut skipped_client_calls = 0usize;
 
     // Shape 1: Express-style `<x>.<method>('/...', ...)` and Hono/Koa routers.
-    for line in source.lines() {
+    for (row, line) in source.lines().enumerate() {
+        let row = u32::try_from(row).unwrap_or(u32::MAX);
         let t = line.trim();
         for method in HTTP_METHODS {
             let needle = format!(".{method}(");
@@ -98,83 +132,88 @@ pub fn extract_ts_backend_routes(
                 continue;
             }
             let handler = named_handler(after_literal);
-            if add_method(&mut by_path, route, method, handler.unwrap_or(""))
+            if let Some(key) = add_method(&mut by_route, route, method, handler.unwrap_or(""), row)
                 && let Some(h) = handler
             {
-                handled_by.insert((route.to_string(), h.to_string()));
+                handled_by.insert((key.0, key.1, h.to_string()));
             }
         }
     }
 
     // Shape 2: Next.js file-based routing — path gives us the route, source
-    // gives us the method(s).
+    // gives us the method(s) and the row of each export.
     if let Some(route) = nextjs_route_from_path(path) {
-        for method in nextjs_methods_from_source(source) {
-            add_method(&mut by_path, &route, method, "");
+        for (method, row) in nextjs_methods_from_source(source) {
+            add_method(&mut by_route, &route, method, "", row);
         }
     }
 
     // Shape 3: SvelteKit `+server.ts` — path from file path, methods from
     // named exports (same shape as Next.js App Router).
     if let Some(route) = sveltekit_route_from_path(path) {
-        for method in nextjs_methods_from_source(source) {
-            add_method(&mut by_path, &route, method, "");
+        for (method, row) in nextjs_methods_from_source(source) {
+            add_method(&mut by_route, &route, method, "", row);
         }
     }
 
     // Shape 4: NestJS controllers — combine @Controller(prefix) with method
-    // decorators @Get/@Post/...(suffix).
-    for (method, route) in nestjs_routes(source) {
-        add_method(&mut by_path, &route, method, "");
+    // decorators @Get/@Post/...(suffix), located at the decorator.
+    for (method, route, row) in nestjs_routes(source) {
+        add_method(&mut by_route, &route, method, "", row);
     }
 
     // Shape 5: Hapi.js — `server.route({ method: 'GET', path: '/x', handler })`
     // and array form `server.route([{ ... }, { ... }])`. Method may be a string
-    // ('GET') or array of strings (['GET', 'POST']).
-    for (method, route) in hapi_routes(source) {
-        add_method(&mut by_path, &route, method, "");
+    // ('GET') or array of strings (['GET', 'POST']). Located at the config
+    // object's `{`.
+    for (method, route, row) in hapi_routes(source) {
+        add_method(&mut by_route, &route, method, "", row);
     }
 
     // Shape 6: Bun.serve `routes:` object —
     // `Bun.serve({ routes: { '/api/users': { GET: h, POST: h2 }, ... } })`.
-    // Bun 1.2+ syntax. Single-handler `fetch(req)` style is intentionally
-    // skipped (routing is internal to user code).
-    for (method, route) in bun_serve_routes(source) {
-        add_method(&mut by_path, &route, method, "");
+    // Bun 1.2+ syntax, located at the route key. Single-handler `fetch(req)`
+    // style is intentionally skipped (routing is internal to user code).
+    for (method, route, row) in bun_serve_routes(source) {
+        add_method(&mut by_route, &route, method, "", row);
     }
 
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
-    for (route, methods) in by_path {
-        // LB.5: the shared builder. Every `by_path` key is already canonical
-        // (`add_method`), so this is the key with `route:` in front.
-        let qname = endpoint::route_path_qname(&route);
+    let (mut positioned, mut any) = (0usize, 0usize);
+    for ((route, method), entry) in by_route {
+        // LB.5 / LB.11b: the shared builder. Every key's path is already
+        // canonical (`add_method`), so the qname is `<METHOD> <path>`.
+        let qname = endpoint::route_qname(method, &route);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
-        let cells = methods
-            .into_iter()
-            .map(|(m, handler)| Cell {
-                kind: cell_type::ROUTE_METHOD,
-                payload: CellPayload::Json(format!(
-                    r#"{{"method":"{}","handler":"{}","file":"{}","line":0,"col":0}}"#,
-                    m.to_ascii_uppercase(),
-                    escape_json(&handler),
-                    escape_json(path),
-                )),
-            })
-            .collect();
+        let mut rows = entry.rows;
+        rows.sort_unstable();
+        rows.dedup();
+        let mut cells: Vec<Cell> = rows.iter().map(|&r| anchor::position_cell(path, r)).collect();
+        positioned += cells.len();
+        let line = rows.first().map_or(0, |r| u64::from(*r) + 1);
+        cells.push(Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Json(format!(
+                r#"{{"method":"{method}","handler":"{}","file":"{}","line":{line},"col":0}}"#,
+                escape_json(&entry.handler),
+                escape_json(path),
+            )),
+        });
+        any += usize::from(method == ANY);
         nodes.push(Node {
             id,
             repo,
             confidence: Confidence::Medium,
             cells,
         });
-        nav.record(id, &route, &qname, node_kind::ROUTE, Some(module_id));
+        nav.record(id, &qname, &qname, node_kind::ROUTE, Some(module_id));
     }
 
     let refs = handled_by
         .into_iter()
-        .map(|(route, handler)| {
-            let qname = endpoint::route_path_qname(&route);
+        .map(|(route, method, handler)| {
+            let qname = endpoint::route_qname(method, &route);
             let qualifier = match handler.split_once('.') {
                 Some((base, name)) => CallQualifier::Attribute {
                     base: base.to_string(),
@@ -191,37 +230,55 @@ pub fn extract_ts_backend_routes(
         })
         .collect();
 
-    RouteNodes { nodes, nav, refs, skipped_client_calls }
+    RouteNodes { nodes, nav, refs, skipped_client_calls, positioned, any }
 }
 
-/// Record `method` (with its `handler`, "" when none is named) on `route`.
-/// Returns false when the route is dropped, so the caller emits no ref for it.
-/// A repeated method keeps its first entry, filling in a handler the first
-/// registration did not name.
+/// The upper-case ROUTE method token for a lower- or upper-case verb:
+/// `get` -> `GET`, and the method-agnostic spellings (`all` — Express
+/// `.all(`, Nest `@All(`, Hapi `*` via [`canonical_http_method`] — and `any`)
+/// -> [`ANY`]. None for anything else, which drops the registration.
+fn method_token(method: &str) -> Option<&'static str> {
+    Some(match method.to_ascii_lowercase().as_str() {
+        "get" => "GET",
+        "post" => "POST",
+        "put" => "PUT",
+        "delete" => "DELETE",
+        "patch" => "PATCH",
+        "options" => "OPTIONS",
+        "head" => "HEAD",
+        "all" | "any" | "*" => ANY,
+        _ => return None,
+    })
+}
+
+/// Record a registration of `method` on `route` at 0-based source `row`, with
+/// its `handler` ("" when none is named). Returns the `(path, METHOD)` key it
+/// landed on, or None when the registration is dropped, so the caller emits no
+/// ref for it. A repeated (method, path) keeps one node: the row is appended
+/// and a handler the first registration did not name is filled in.
 fn add_method(
-    by_path: &mut BTreeMap<String, Vec<(String, String)>>,
+    by_route: &mut RouteMap,
     route: &str,
     method: &str,
     handler: &str,
-) -> bool {
+    row: u32,
+) -> Option<(String, &'static str)> {
     // Drop template-source expressions captured from framework internals
     // (`/${this.routeConfig.path}`) — not literal routes. (glia-v2 G8)
     if route.contains("${") {
-        return false;
+        return None;
     }
+    let method = method_token(method)?;
     // LB.5: keyed on the canonical path, so a relative and a slashed spelling
     // of one route can never become two nodes with one id. Every shape above
     // hands in a slashed path today; this is the guarantee, not a rewrite.
-    let entry = by_path
-        .entry(endpoint::canonical_http_path(route).into_owned())
-        .or_default();
-    let m = method.to_ascii_lowercase();
-    match entry.iter_mut().find(|(existing, _)| existing == &m) {
-        Some((_, h)) if h.is_empty() => *h = handler.to_string(),
-        Some(_) => {}
-        None => entry.push((m, handler.to_string())),
+    let key = (endpoint::canonical_http_path(route).into_owned(), method);
+    let entry = by_route.entry(key.clone()).or_default();
+    if entry.handler.is_empty() {
+        entry.handler = handler.to_string();
     }
-    true
+    entry.rows.push(row);
+    Some(key)
 }
 
 /// The top-level arguments that follow the route literal on this line, and
@@ -440,11 +497,13 @@ fn sveltekit_params_to_colon(path: &str) -> String {
 }
 
 /// Scan a TS source for NestJS @Controller + @Get/@Post/... method decorators.
-/// Returns (method, full_path) pairs.
-fn nestjs_routes(source: &str) -> Vec<(&'static str, String)> {
+/// Returns (method, full_path, row) triples, `row` the decorator's 0-based
+/// line.
+fn nestjs_routes(source: &str) -> Vec<(&'static str, String, u32)> {
     let mut out = Vec::new();
     let mut controller_prefix: Option<String> = None;
-    for line in source.lines() {
+    for (row, line) in source.lines().enumerate() {
+        let row = u32::try_from(row).unwrap_or(u32::MAX);
         let t = line.trim();
         if t.starts_with("@Controller(") {
             controller_prefix = Some(extract_decorator_string(t).unwrap_or_default());
@@ -463,7 +522,7 @@ fn nestjs_routes(source: &str) -> Vec<(&'static str, String)> {
             if t.starts_with(deco) {
                 let suffix = extract_decorator_string(t).unwrap_or_default();
                 let full = combine_nest_paths(controller_prefix.as_deref().unwrap_or(""), &suffix);
-                out.push((*method, full));
+                out.push((*method, full, row));
                 break;
             }
         }
@@ -521,38 +580,40 @@ pub(crate) fn combine_nest_paths(prefix: &str, suffix: &str) -> String {
     out
 }
 
-fn nextjs_methods_from_source(source: &str) -> Vec<&'static str> {
+/// The methods a Next.js route file (App Router `route.ts`, Pages Router
+/// `pages/api/*`) or a SvelteKit `+server.ts` serves, each with the 0-based row
+/// of its export: a named `export async function M` / `export function M` /
+/// `export const M` (the first of the three needles in the file). A file with
+/// no named verb export but an `export default` is a Pages Router API route,
+/// which Next.js hands EVERY method, so it serves `any` at the default export.
+fn nextjs_methods_from_source(source: &str) -> Vec<(&'static str, u32)> {
     let mut methods = Vec::new();
     for method in ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] {
-        let needle_async = format!("export async function {method}");
-        let needle_sync = format!("export function {method}");
-        let needle_const = format!("export const {method}");
-        if source.contains(&needle_async)
-            || source.contains(&needle_sync)
-            || source.contains(&needle_const)
-        {
-            methods.push(match method {
-                "GET" => "get",
-                "POST" => "post",
-                "PUT" => "put",
-                "DELETE" => "delete",
-                "PATCH" => "patch",
-                "OPTIONS" => "options",
-                "HEAD" => "head",
-                _ => unreachable!(),
-            });
+        let first = [
+            format!("export async function {method}"),
+            format!("export function {method}"),
+            format!("export const {method}"),
+        ]
+        .iter()
+        .filter_map(|needle| source.find(needle.as_str()))
+        .min();
+        if let Some(at) = first {
+            methods.push((method, anchor::line_of(source, at)));
         }
     }
-    if methods.is_empty() && source.contains("export default") {
-        methods.push("get");
+    if methods.is_empty()
+        && let Some(at) = source.find("export default")
+    {
+        methods.push(("any", anchor::line_of(source, at)));
     }
     methods
 }
 
 /// Scan for Hapi.js `server.route(...)` registrations. Returns one entry per
-/// (method, path) pair; multiple methods on the same path produce one entry
-/// each. Both single-config and array-of-configs are recognised.
-fn hapi_routes(source: &str) -> Vec<(&'static str, String)> {
+/// (method, path) pair, with the 0-based row of its config object's `{`;
+/// multiple methods on the same path produce one entry each. Both
+/// single-config and array-of-configs are recognised.
+fn hapi_routes(source: &str) -> Vec<(&'static str, String, u32)> {
     let mut out = Vec::new();
     let mut search_from = 0;
     // Match both `.route(` (instance) and rare `route: [...]` connection-options
@@ -564,18 +625,21 @@ fn hapi_routes(source: &str) -> Vec<(&'static str, String)> {
             continue;
         };
         let body = &source[arg_start..arg_start + close_rel];
-        for (method, path) in extract_hapi_configs(body) {
-            out.push((method, path));
+        // `body` starts at `arg_start`, so an object offset within it is an
+        // absolute offset once `arg_start` is added.
+        for (method, path, at) in extract_hapi_configs(body) {
+            out.push((method, path, anchor::line_of(source, arg_start + at)));
         }
         search_from = arg_start + close_rel + 1;
     }
     out
 }
 
-/// Walk a `server.route(...)` body and pull `{ method, path }` configs. The
-/// body may be a single object, or an array of objects. Methods may be a
-/// quoted string or an array of quoted strings (`['GET', 'POST']`).
-fn extract_hapi_configs(body: &str) -> Vec<(&'static str, String)> {
+/// Walk a `server.route(...)` body and pull `{ method, path }` configs, each
+/// with the byte offset of its object's `{` within `body`. The body may be a
+/// single object, or an array of objects. Methods may be a quoted string or an
+/// array of quoted strings (`['GET', 'POST']`).
+fn extract_hapi_configs(body: &str) -> Vec<(&'static str, String, usize)> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0;
@@ -590,7 +654,7 @@ fn extract_hapi_configs(body: &str) -> Vec<(&'static str, String)> {
             if let Some(p) = path {
                 if looks_like_url_path(&p) {
                     for m in methods {
-                        out.push((m, p.clone()));
+                        out.push((m, p.clone(), i));
                     }
                 }
             }
@@ -658,8 +722,8 @@ fn obj_string_field(obj: &str, field: &str) -> Option<String> {
 
 /// Read the `method` field from a Hapi config object. Returns one or more
 /// canonical method names (`get`, `post`, ...). Handles both single-string
-/// (`method: 'GET'`) and array (`method: ['GET', 'POST']`) forms; an
-/// uppercase wildcard `'*'` becomes `all`.
+/// (`method: 'GET'`) and array (`method: ['GET', 'POST']`) forms; the
+/// wildcard `'*'` becomes `all`, which `add_method` records as `ANY`.
 fn obj_method_field(obj: &str) -> Vec<&'static str> {
     let needles = ["method:", "'method':", "\"method\":"];
     for needle in &needles {
@@ -716,8 +780,9 @@ fn canonical_http_method(s: &str) -> Option<&'static str> {
 /// Scan for `Bun.serve({ routes: { '/path': { GET: h, POST: h2 }, ... } })`.
 /// Each route key is the path; the value object's keys (uppercase HTTP verbs)
 /// give the methods. Method-shorthand `GET: handler` and `'/path': handler`
-/// (single handler) are both handled. Returns (method, path) pairs.
-fn bun_serve_routes(source: &str) -> Vec<(&'static str, String)> {
+/// (single handler, served for every method) are both handled. Returns
+/// (method, path, row) triples, `row` the 0-based line of the route key.
+fn bun_serve_routes(source: &str) -> Vec<(&'static str, String, u32)> {
     let mut out = Vec::new();
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("Bun.serve(") {
@@ -730,6 +795,9 @@ fn bun_serve_routes(source: &str) -> Vec<(&'static str, String)> {
         // the opening `{` so `routes:` is at depth 0 within the inner body.
         let arg_body = &source[arg_start..arg_start + close];
         let trimmed = arg_body.trim_start();
+        // Absolute offsets are tracked alongside the slices: each trim only
+        // drops a prefix, so `len` differences give where a slice starts.
+        let config_start = arg_start + (arg_body.len() - trimmed.len()) + 1;
         if !trimmed.starts_with('{') {
             search_from = arg_start + close + 1;
             continue;
@@ -745,6 +813,7 @@ fn bun_serve_routes(source: &str) -> Vec<(&'static str, String)> {
             continue;
         };
         let after = config_body[routes_idx..].trim_start();
+        let after_start = config_start + (config_body.len() - after.len());
         let bytes = after.as_bytes();
         if bytes.first() != Some(&b'{') {
             search_from = arg_start + close + 1;
@@ -755,8 +824,10 @@ fn bun_serve_routes(source: &str) -> Vec<(&'static str, String)> {
             continue;
         };
         let routes_obj = &after[1..1 + routes_close];
-        for (method, path) in parse_bun_routes_object(routes_obj) {
-            out.push((method, path));
+        let routes_start = after_start + 1;
+        debug_assert_eq!(source.get(routes_start..routes_start + routes_obj.len()), Some(routes_obj));
+        for (method, path, at) in parse_bun_routes_object(routes_obj) {
+            out.push((method, path, anchor::line_of(source, routes_start + at)));
         }
         search_from = arg_start + close + 1;
     }
@@ -807,10 +878,11 @@ fn find_obj_field(obj: &str, field: &str) -> Option<usize> {
 }
 
 /// Walk the body of a `routes: { ... }` object, pulling each `'<path>':`
-/// key. Path values may be a function reference (single handler → `get`),
-/// an object `{ GET: h, POST: h2 }`, or a Response literal — only object
-/// form gives explicit methods.
-fn parse_bun_routes_object(body: &str) -> Vec<(&'static str, String)> {
+/// key with the byte offset of its opening quote within `body`. Path values
+/// may be an object `{ GET: h, POST: h2 }` (its verb keys are the methods), or
+/// a function reference / inline handler / `Response` literal, which Bun
+/// serves for EVERY method, so the route is `any`.
+fn parse_bun_routes_object(body: &str) -> Vec<(&'static str, String, usize)> {
     let mut out = Vec::new();
     let bytes = body.as_bytes();
     let mut i = 0;
@@ -848,19 +920,20 @@ fn parse_bun_routes_object(body: &str) -> Vec<(&'static str, String)> {
                 i = k;
                 continue;
             }
-            // Value: object → enumerate verb keys; otherwise → single handler ⇒ `get`.
+            // Value: object → enumerate verb keys; otherwise → a single
+            // handler or Response, served for every method ⇒ `any`.
             if k < bytes.len() && bytes[k] == b'{' {
                 let Some(vclose) = find_balanced_close(&body[k + 1..], b'{', b'}') else {
                     break;
                 };
                 let val = &body[k + 1..k + 1 + vclose];
                 for verb in extract_verb_keys(val) {
-                    out.push((verb, key.to_string()));
+                    out.push((verb, key.to_string(), i));
                 }
                 i = k + 1 + vclose + 1;
                 continue;
             }
-            out.push(("get", key.to_string()));
+            out.push(("any", key.to_string(), i));
             i = k;
             continue;
         }
@@ -942,12 +1015,63 @@ mod tests {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "test")
     }
 
+    /// Every cell payload of `n`, as `(cell type, text)`.
+    fn cells(n: &Node) -> Vec<(repo_graph_core::CellTypeId, String)> {
+        n.cells
+            .iter()
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => (c.kind, s.clone()),
+                CellPayload::Bytes(_) => (c.kind, String::new()),
+            })
+            .collect()
+    }
+
+    /// Every ROUTE qname the extraction recorded, sorted.
+    fn qnames(r: &RouteNodes) -> Vec<String> {
+        let mut q: Vec<String> = r.nav.qname_by_id.values().cloned().collect();
+        q.sort_unstable();
+        q
+    }
+
+    /// The node recorded under `qname`.
+    fn node<'a>(r: &'a RouteNodes, qname: &str) -> &'a Node {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, qname);
+        r.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("no ROUTE `{qname}` in {:?}", qnames(r)))
+    }
+
+    /// The POSITION `start_line`s on `n`, in cell order.
+    fn position_rows(n: &Node) -> Vec<u32> {
+        cells(n)
+            .into_iter()
+            .filter(|(k, _)| *k == cell_type::POSITION)
+            .filter_map(|(_, s)| {
+                let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                u32::try_from(v["start_line"].as_u64()?).ok()
+            })
+            .collect()
+    }
+
     #[test]
     fn detects_express_get() {
         let src = "app.get('/users/:id', handler);";
         let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
         assert_eq!(r.nodes.len(), 1);
-        assert_eq!(r.nodes[0].cells.len(), 1);
+        assert_eq!(qnames(&r), vec!["GET /users/:id"]);
+        // LB.11b: the name is the qname, like every other server parser.
+        let id = r.nodes[0].id;
+        assert_eq!(r.nav.name_by_id.get(&id).map(String::as_str), Some("GET /users/:id"));
+        let c = cells(&r.nodes[0]);
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert_eq!(c[0], (cell_type::POSITION, r#"{"file":"server.ts","start_line":0,"end_line":0}"#.to_string()));
+        assert_eq!(c[1].0, cell_type::ROUTE_METHOD);
+        assert_eq!(
+            c[1].1,
+            r#"{"method":"GET","handler":"handler","file":"server.ts","line":1,"col":0}"#
+        );
+        assert_eq!((r.positioned, r.any), (1, 0));
     }
 
     #[test]
@@ -964,29 +1088,39 @@ mod tests {
         assert_eq!(r.nodes.len(), 0);
     }
 
+    /// A Pages Router API route's default export is handed EVERY method by
+    /// Next.js, so it is `ANY`, located at the `export default`.
     #[test]
     fn detects_nextjs_pages_router() {
-        let src = "export default function handler(req, res) { res.json({}); }";
+        let src = "// users\nexport default function handler(req, res) { res.json({}); }";
         let r = extract_ts_backend_routes(src, "pages/api/users.ts", module_id(), repo());
-        assert_eq!(r.nodes.len(), 1);
+        assert_eq!(qnames(&r), vec!["ANY /api/users"]);
+        assert_eq!(position_rows(node(&r, "ANY /api/users")), vec![1]);
+        assert_eq!(route_methods(&r, "/api/users"), vec!["ANY"]);
+        assert_eq!(r.any, 1);
     }
 
+    /// App Router named exports: one node per method, one ROUTE_METHOD each,
+    /// each located at its own export.
     #[test]
     fn detects_nextjs_app_router_named_exports() {
         let src = "export async function GET() {}\nexport async function POST() {}";
         let r = extract_ts_backend_routes(src, "app/api/widgets/route.ts", module_id(), repo());
-        // One Route node per path, with one ROUTE_METHOD cell per method.
-        assert_eq!(r.nodes.len(), 1);
-        assert_eq!(r.nodes[0].cells.len(), 2);
+        assert_eq!(qnames(&r), vec!["GET /api/widgets", "POST /api/widgets"]);
+        for (q, row) in [("GET /api/widgets", 0), ("POST /api/widgets", 1)] {
+            let n = node(&r, q);
+            assert_eq!(position_rows(n), vec![row], "{q}");
+            let methods = cells(n).into_iter().filter(|(k, _)| *k == cell_type::ROUTE_METHOD).count();
+            assert_eq!(methods, 1, "{q}");
+        }
+        assert_eq!((r.positioned, r.any), (2, 0));
     }
 
     #[test]
     fn converts_nextjs_dynamic_segment() {
         let src = "export default function h() {}";
         let r = extract_ts_backend_routes(src, "pages/api/users/[id].ts", module_id(), repo());
-        assert_eq!(r.nodes.len(), 1);
-        let qname = r.nav.qname_by_id.values().next().unwrap();
-        assert!(qname.contains("/api/users/:id"), "qname={qname}");
+        assert_eq!(qnames(&r), vec!["ANY /api/users/:id"]);
     }
 
     #[test]
@@ -1011,49 +1145,83 @@ export class UsersController {
 }
 "#;
         let r = extract_ts_backend_routes(src, "src/users.controller.ts", module_id(), repo());
-        let qnames: Vec<&str> = r.nav.qname_by_id.values().map(|s| s.as_str()).collect();
-        assert!(qnames.iter().any(|q| *q == "route:/users"));
-        assert!(qnames.iter().any(|q| *q == "route:/users/:id"));
+        assert_eq!(
+            qnames(&r),
+            vec!["DELETE /users/:id", "GET /users", "GET /users/:id", "POST /users", "PUT /users/:id"]
+        );
+        // Each located at its decorator's 0-based row.
+        for (q, row) in [
+            ("GET /users", 3),
+            ("GET /users/:id", 6),
+            ("POST /users", 9),
+            ("PUT /users/:id", 12),
+            ("DELETE /users/:id", 15),
+        ] {
+            assert_eq!(position_rows(node(&r, q)), vec![row], "{q}");
+        }
+    }
+
+    /// Nest `@All(` is method-agnostic: `ANY`, never `ALL`.
+    #[test]
+    fn nestjs_all_is_any() {
+        let src = "@Controller('health')\nexport class H {\n  @All()\n  check() {}\n}\n";
+        let r = extract_ts_backend_routes(src, "src/health.controller.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["ANY /health"]);
+        assert_eq!(position_rows(node(&r, "ANY /health")), vec![2]);
     }
 
     #[test]
     fn detects_sveltekit_plus_server() {
         let src = "export async function GET() {}\nexport async function POST() {}";
         let r = extract_ts_backend_routes(src, "src/routes/api/widgets/+server.ts", module_id(), repo());
-        let qnames: Vec<&str> = r.nav.qname_by_id.values().map(|s| s.as_str()).collect();
-        assert!(qnames.iter().any(|q| *q == "route:/api/widgets"));
-        let node = r.nodes.iter().find(|n| n.cells.len() == 2).expect("combined node");
-        assert_eq!(node.cells.len(), 2);
+        assert_eq!(qnames(&r), vec!["GET /api/widgets", "POST /api/widgets"]);
+        assert_eq!(position_rows(node(&r, "POST /api/widgets")), vec![1]);
     }
 
     #[test]
     fn sveltekit_dynamic_segment() {
         let src = "export function GET() {}";
         let r = extract_ts_backend_routes(src, "src/routes/api/users/[id]/+server.ts", module_id(), repo());
-        let qnames: Vec<&str> = r.nav.qname_by_id.values().map(|s| s.as_str()).collect();
-        assert!(qnames.iter().any(|q| q.contains("/api/users/:id")));
+        assert_eq!(qnames(&r), vec!["GET /api/users/:id"]);
     }
 
     /// LB.5 — `add_method` keys routes on the canonical path, so a relative
-    /// and a slashed spelling of one route are one `by_path` entry (and so one
-    /// `route:/…` node), with both methods stacked on it.
+    /// and a slashed spelling of one (method, path) are one entry (and so one
+    /// `<METHOD> /…` node); LB.11b — a second method on the path is its own
+    /// entry, and the method token is upper-cased (`all` -> `ANY`).
     #[test]
-    fn add_method_keys_on_the_canonical_path() {
-        let mut by_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
-        assert!(add_method(&mut by_path, "users", "get", "listUsers"));
-        assert!(add_method(&mut by_path, "/users", "post", ""));
-        assert_eq!(by_path.keys().collect::<Vec<_>>(), vec!["/users"]);
-        assert_eq!(by_path["/users"].len(), 2);
-        assert_eq!(endpoint::route_path_qname("/users"), "route:/users");
+    fn add_method_keys_on_the_canonical_path_and_method() {
+        let mut m: RouteMap = BTreeMap::new();
+        assert_eq!(add_method(&mut m, "users", "get", "listUsers", 0), Some(("/users".into(), "GET")));
+        assert_eq!(add_method(&mut m, "/users", "get", "", 3), Some(("/users".into(), "GET")));
+        assert_eq!(add_method(&mut m, "/users", "post", "", 1), Some(("/users".into(), "POST")));
+        assert_eq!(add_method(&mut m, "/users", "all", "", 2), Some(("/users".into(), "ANY")));
+        assert_eq!(add_method(&mut m, "/${x}", "get", "", 2), None);
+        assert_eq!(add_method(&mut m, "/users", "trace", "", 2), None);
+        assert_eq!(
+            m.keys().cloned().collect::<Vec<_>>(),
+            vec![("/users".to_string(), "ANY"), ("/users".to_string(), "GET"), ("/users".to_string(), "POST")]
+        );
+        let get = &m[&("/users".to_string(), "GET")];
+        assert_eq!((get.handler.as_str(), get.rows.clone()), ("listUsers", vec![0, 3]));
     }
 
+    /// The ROUTE_METHOD method of every node whose qname's path part (after
+    /// the first space) is `path`, sorted — a path's method set, spread over
+    /// its per-method nodes.
     fn route_methods(r: &RouteNodes, path: &str) -> Vec<String> {
-        let qname = format!("route:{path}");
-        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, &qname);
-        r.nodes
+        let mut out: Vec<String> = r
+            .nodes
             .iter()
-            .filter(|n| n.id == id)
+            .filter(|n| {
+                r.nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .and_then(|q| q.split_once(' '))
+                    .is_some_and(|(_, p)| p == path)
+            })
             .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::ROUTE_METHOD)
             .filter_map(|c| match &c.payload {
                 CellPayload::Json(s) => {
                     let m = s.split("\"method\":\"").nth(1)?;
@@ -1061,7 +1229,9 @@ export class UsersController {
                 }
                 _ => None,
             })
-            .collect()
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     #[test]
@@ -1103,6 +1273,15 @@ server.route([
         let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
         assert_eq!(route_methods(&r, "/a"), vec!["GET".to_string()]);
         assert_eq!(route_methods(&r, "/b"), vec!["POST".to_string()]);
+    }
+
+    /// Hapi's `method: '*'` (and `ANY` / `ALL`) is method-agnostic: `ANY`.
+    #[test]
+    fn hapi_wildcard_is_any() {
+        let src = "server.route({ method: '*', path: '/x', handler: h });\nserver.route({ method: 'ALL', path: '/y', handler: h });";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["ANY /x", "ANY /y"]);
+        assert_eq!(r.any, 2);
     }
 
     #[test]
@@ -1170,14 +1349,11 @@ Bun.serve({
 });
 "#;
         let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
-        // '/api/health' value is not an object → defaults to `get`.
-        assert_eq!(route_methods(&r, "/api/health"), vec!["GET".to_string()]);
-        let users = route_methods(&r, "/api/users");
-        assert!(users.contains(&"GET".to_string()));
-        assert!(users.contains(&"POST".to_string()));
-        let by_id = route_methods(&r, "/api/users/:id");
-        assert!(by_id.contains(&"GET".to_string()));
-        assert!(by_id.contains(&"DELETE".to_string()));
+        // '/api/health' value is a Response, not a verb object: Bun serves it
+        // for every method, so it is `ANY`.
+        assert_eq!(route_methods(&r, "/api/health"), vec!["ANY".to_string()]);
+        assert_eq!(route_methods(&r, "/api/users"), vec!["GET", "POST"]);
+        assert_eq!(route_methods(&r, "/api/users/:id"), vec!["DELETE", "GET"]);
     }
 
     #[test]
@@ -1197,22 +1373,118 @@ Bun.serve({
         assert_eq!(r.nodes.len(), 1);
     }
 
+    /// Two registrations on one line are two nodes, both on row 0, each with
+    /// its own method.
     #[test]
     fn route_cell_carries_method_json() {
         let src = "app.get('/x', h); app.post('/x', h);";
         let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["GET /x", "POST /x"]);
+        for (q, m) in [("GET /x", "GET"), ("POST /x", "POST")] {
+            let n = node(&r, q);
+            assert_eq!(position_rows(n), vec![0], "{q}");
+            let rm: Vec<String> = cells(n)
+                .into_iter()
+                .filter(|(k, _)| *k == cell_type::ROUTE_METHOD)
+                .map(|(_, s)| s)
+                .collect();
+            assert_eq!(rm.len(), 1, "{q}");
+            assert!(rm[0].contains(&format!("\"method\":\"{m}\"")), "{rm:?}");
+        }
+    }
+
+    /// LB.11b: each method on a path is its own node, and a HANDLED_BY ref
+    /// leaves from its own method's node only.
+    #[test]
+    fn express_methods_are_separate_route_nodes() {
+        let src = "app.get('/users', listUsers);\napp.post('/users', createUser);\napp.get('/users/:id', getUser);\napp.delete('/users/:id', deleteUser);";
+        let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
+        assert_eq!(
+            qnames(&r),
+            vec!["DELETE /users/:id", "GET /users", "GET /users/:id", "POST /users"]
+        );
+        assert!(!qnames(&r).iter().any(|q| q.starts_with("route:")));
+        let mut refs = handled_by(&r);
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            refs,
+            vec![
+                ("DELETE /users/:id".to_string(), CallQualifier::Bare("deleteUser".into())),
+                ("GET /users".to_string(), CallQualifier::Bare("listUsers".into())),
+                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into())),
+                ("POST /users".to_string(), CallQualifier::Bare("createUser".into())),
+            ]
+        );
+    }
+
+    /// Express `.all(` serves every method: `ANY`, never `ALL`.
+    #[test]
+    fn express_all_is_any() {
+        let src = "app.all('/health', (req, res) => res.send('ok'));";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["ANY /health"]);
+        assert_eq!(route_methods(&r, "/health"), vec!["ANY"]);
+        assert_eq!((r.positioned, r.any), (1, 1));
+    }
+
+    /// The ROUTE_METHOD `line` is the 1-based line of the registration (the
+    /// Go convention); `col` stays 0 = unknown.
+    #[test]
+    fn route_method_line_is_the_registration_line() {
+        let src = "const app = express();\napp.post('/users', createUser);";
+        let r = extract_ts_backend_routes(src, "app.ts", module_id(), repo());
+        let n = node(&r, "POST /users");
+        assert_eq!(position_rows(n), vec![1]);
+        let rm = cells(n).into_iter().find(|(k, _)| *k == cell_type::ROUTE_METHOD).expect("ROUTE_METHOD");
+        assert!(rm.1.contains(r#""line":2,"col":0"#), "{}", rm.1);
+    }
+
+    /// The same (method, path) registered twice is ONE node with two
+    /// ascending POSITION cells and one ROUTE_METHOD at the first line; the
+    /// handler the first registration did not name is filled in.
+    #[test]
+    fn repeated_registration_stacks_positions() {
+        let src = "app.get('/x', (req, res) => res.end());\n\n\napp.get('/x', getX);";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
         assert_eq!(r.nodes.len(), 1);
-        assert_eq!(r.nodes[0].cells.len(), 2);
-        let payloads: Vec<String> = r.nodes[0]
-            .cells
-            .iter()
-            .map(|c| match &c.payload {
-                CellPayload::Json(s) => s.clone(),
-                _ => String::new(),
-            })
+        let n = node(&r, "GET /x");
+        assert_eq!(position_rows(n), vec![0, 3]);
+        let rm: Vec<String> = cells(n)
+            .into_iter()
+            .filter(|(k, _)| *k == cell_type::ROUTE_METHOD)
+            .map(|(_, s)| s)
             .collect();
-        assert!(payloads.iter().any(|p| p.contains("\"method\":\"GET\"")));
-        assert!(payloads.iter().any(|p| p.contains("\"method\":\"POST\"")));
+        assert_eq!(
+            rm,
+            vec![r#"{"method":"GET","handler":"getX","file":"server.ts","line":1,"col":0}"#.to_string()]
+        );
+        assert_eq!(r.positioned, 2);
+    }
+
+    /// A Bun route whose value is a handler function or a `Response` is served
+    /// for every method (`ANY`); a verb object keeps its verbs.
+    #[test]
+    fn bun_single_value_route_is_any() {
+        let src = "Bun.serve({\n  routes: {\n    '/api/ping': () => new Response('pong'),\n    '/api/x': { GET: hx },\n  },\n});";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(qnames(&r), vec!["ANY /api/ping", "GET /api/x"]);
+        assert_eq!(r.any, 1);
+    }
+
+    /// Bun and Hapi rows are source rows, read through absolute offsets of
+    /// the route key / config object — not rows within the sliced body. A
+    /// multi-byte character ahead of them does not shift a row.
+    #[test]
+    fn bun_and_hapi_rows_are_source_rows() {
+        let src = "// é ünïcode\nimport x from 'y';\n\nBun.serve({\n  routes: {\n    '/a': { GET: ha },\n    '/b': new Response('b'),\n  },\n});\n";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(position_rows(node(&r, "GET /a")), vec![5]);
+        assert_eq!(position_rows(node(&r, "ANY /b")), vec![6]);
+
+        let src = "// hapi — server\nconst s = Hapi.server();\ns.route({\n  method: 'GET',\n  path: '/h',\n  handler: h,\n});\ns.route([\n  { method: 'POST', path: '/p', handler: p },\n]);";
+        let r = extract_ts_backend_routes(src, "server.ts", module_id(), repo());
+        assert_eq!(position_rows(node(&r, "GET /h")), vec![2]);
+        assert_eq!(position_rows(node(&r, "POST /p")), vec![8]);
     }
 
     fn handled_by(r: &RouteNodes) -> Vec<(String, CallQualifier)> {
@@ -1302,10 +1574,10 @@ Bun.serve({
         assert_eq!(
             refs,
             vec![
-                ("route:/users".to_string(), CallQualifier::Bare("createUser".into())),
-                ("route:/users/:id".to_string(), CallQualifier::Bare("getUser".into())),
+                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into())),
+                ("POST /users".to_string(), CallQualifier::Bare("createUser".into())),
                 (
-                    "route:/users/:id".to_string(),
+                    "PUT /users/:id".to_string(),
                     CallQualifier::Attribute { base: "users".into(), name: "update".into() }
                 ),
             ]

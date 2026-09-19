@@ -1562,16 +1562,14 @@ pub mod endpoint {
         p.is_empty() || p == "<unresolved>" || p.starts_with('/') || p.starts_with("${")
     }
 
-    /// Legacy ROUTE qname shape `<METHOD> <path>` (java, csharp, rust, php,
-    /// clojure, ...), with the path canonical.
+    /// The ROUTE qname `<METHOD> <path>`, with the path canonical: one node
+    /// per (method, path), `ANY` for a method-agnostic registration. Every
+    /// server parser builds it here; since LB.11a (go) and LB.11b (ts_routes)
+    /// nothing emits the per-path `route:<path>` shape, which the HTTP
+    /// resolver still reads for tolerance and its `[http-qname] pathonly=`
+    /// census counts.
     pub fn route_qname(method: &str, path: &str) -> String {
         format!("{method} {}", canonical_http_path(path))
-    }
-
-    /// Per-path ROUTE qname shape `route:<path>` (go, ts_routes), with the
-    /// path canonical. Methods ride on stacked ROUTE_METHOD cells.
-    pub fn route_path_qname(path: &str) -> String {
-        format!("route:{}", canonical_http_path(path))
     }
 
     /// ENDPOINT qname `endpoint:<METHOD>:<path>`, with the path canonical —
@@ -1582,7 +1580,7 @@ pub mod endpoint {
 
     /// LB.4a: the separator between an HTTP qname and its OWNER segment, the
     /// repo-relative dir of the nested project root the node lives under:
-    /// `GET /health @services/users`, `route:/users @api`,
+    /// `GET /health @services/users`, `POST /users @api`,
     /// `endpoint:GET:/health @web`, `page:/users @web`. A suffix, so every
     /// reader that parses from the `route:` / `endpoint:` / `<METHOD> ` start
     /// keeps working once it strips it with [`split_owner`]. A canonical path
@@ -3098,14 +3096,14 @@ mod tests {
         }
     }
 
-    /// LB.5 — the three qname builders share `canonical_http_path`, so a
-    /// relative and a slashed literal build the SAME qname in every shape.
+    /// LB.5 — the qname builders share `canonical_http_path`, so a relative
+    /// and a slashed literal build the SAME qname in every shape (LB.11b
+    /// removed the third, the per-path `route:` builder, with its last
+    /// caller).
     #[test]
     fn http_qname_builders_canonicalise_the_path() {
         assert_eq!(endpoint::route_qname("GET", "widgets"), "GET /widgets");
         assert_eq!(endpoint::route_qname("GET", "/widgets"), "GET /widgets");
-        assert_eq!(endpoint::route_path_qname("items"), "route:/items");
-        assert_eq!(endpoint::route_path_qname("/items"), "route:/items");
         assert_eq!(
             endpoint::endpoint_qname("GET", "auth/login"),
             "endpoint:GET:/auth/login"

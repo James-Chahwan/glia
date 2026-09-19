@@ -281,6 +281,16 @@ pub(crate) fn apply_cross_cutting_extractors(
         // a count of client calls the scan declined to mint as routes.
         let routes = ts_routes::extract_ts_backend_routes(source, path, module_id, repo);
         stats.ts_client_calls_skipped += routes.skipped_client_calls;
+        // LB.11b fired_on marker: one ROUTE per (method, path), each located
+        // by a POSITION per registration; `any=` counts method-agnostic ones.
+        if !routes.nodes.is_empty() {
+            eprintln!(
+                "[ts-routes] routes={} positioned={} any={} path={path}",
+                routes.nodes.len(),
+                routes.positioned,
+                routes.any
+            );
+        }
         fp.refs.extend(routes.refs);
         fp.nodes.extend(routes.nodes);
         merge_nav(&mut fp.nav, routes.nav);

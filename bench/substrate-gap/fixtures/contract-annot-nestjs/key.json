@@ -7,7 +7,7 @@
     {"kind": "DOC_SECTION", "name": "contract::users.controller::GET:/users/:id", "note": "one op for the decorated handler"}
   ],
   "expect_edges": [
-    {"from": "contract::users.controller::GET:/users/:id", "to": "route:/users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link route matcher"}
+    {"from": "contract::users.controller::GET:/users/:id", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link route matcher; the ts_routes ROUTE is `GET /users/:id` since LB.11b (was `route:/users/:id`)"}
   ],
   "expect_cells": [
     {"kind": "DOC_SECTION", "node": "contract::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"source\":\"nestjs\"", "note": "framework discriminator"},

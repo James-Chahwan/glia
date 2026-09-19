@@ -129,7 +129,8 @@ fn annotation_ops_document_their_routes() {
         node_kind::DOC_SECTION,
         "contract::users.controller::GET:/users/:id",
     );
-    let route = node(&m, node_kind::ROUTE, "route:/users/:id");
+    // LB.11b: the ts_routes ROUTE is one node per (method, path).
+    let route = node(&m, node_kind::ROUTE, "GET /users/:id");
     assert_eq!(documents(&m, op), vec![route]);
     let origin = cell(&m, op, cell_type::ORIGIN);
     for want in [r#""source":"nestjs""#, r#""responses":["200"]"#] {

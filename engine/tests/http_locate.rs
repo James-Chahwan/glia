@@ -7,7 +7,9 @@
 //!
 //! - tier 2 — the ENDPOINT_HIT cell (every client language) and the JSON
 //!   ROUTE_METHOD cell (parser-go, ts_routes) carry `file` + a 1-indexed
-//!   `line`, which the locator converts to POSITION's 0-indexed row;
+//!   `line`, which the locator converts to POSITION's 0-indexed row. Go
+//!   (LA.32a) and ts_routes (LB.11b) ROUTEs now also carry a POSITION per
+//!   registration, so tier 1 answers them first;
 //! - tier 3 — the eleven parsers that write ROUTE_METHOD as a bare verb are
 //!   placed by the handler the route is HANDLED_BY.
 //!
@@ -23,8 +25,9 @@ use repo_graph_graph::MergedGraph;
 
 /// Three services under one tempdir:
 /// - `web/`    — a TS client (`fetch('/users')`, call on line 2) and
-///   an Express server whose inline handler gives ts_routes nothing to bind,
-///   so its ROUTE carries only the `"line":0` placeholder;
+///   an Express server, `app.get('/health', ...)` on line 5, whose inline
+///   handler gives ts_routes nothing to bind: the route is placed by its own
+///   registration POSITION (LB.11b), not by a handler;
 /// - `goapi/`  — a chi server, `r.Get("/users", listUsers)` on line 15;
 /// - `pyapi/`  — a Flask server, `@app.route('/users/<int:uid>')` + `get_user`.
 fn fixture() -> (tempfile::TempDir, MergedGraph) {
@@ -119,12 +122,15 @@ fn http_nodes_are_located_by_cell_or_handler() {
         ("ROUTE", handler.1.clone(), handler.2),
     );
 
-    // (4) ts_routes writes `"line":0` — "unknown", not line 0. The file is
-    // real; the line must be None rather than a bogus -1 or 0.
+    // (4) ts_routes ROUTE (LB.11b): one node per (method, path), `GET
+    // /health`, located by tier 1 — the POSITION at its registration, 0-based
+    // row 4, reported as the 1-based line 5. Before LB.11b it was
+    // `route:/health` with a `"line":0` placeholder and no line at all.
     assert_eq!(
-        locate(&m, "route:/health"),
-        ("ROUTE", Some("server.ts".to_string()), None),
+        locate(&m, "GET /health"),
+        ("ROUTE", Some("server.ts".to_string()), Some(5)),
     );
+    assert!(m.node_id_by_qname("route:/health").is_none());
 }
 
 #[test]

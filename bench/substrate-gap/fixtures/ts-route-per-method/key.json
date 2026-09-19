@@ -1,0 +1,122 @@
+{
+ "framework": "ts-route-per-method",
+ "language": "typescript",
+ "dirs": [
+  "web",
+  "server"
+ ],
+ "note": "LB.11b: a ts_routes ROUTE is one node per (method, path), qname `<METHOD> <path>` like every other parser, located by a POSITION cell at its registration; Express `.all(` and a Next.js Pages Router default export are method-agnostic, so they are ANY. HEAD (ee4a84a, installed wheel): `route:/users` is one node HANDLED_BY listUsers AND createUser, every ts_routes ROUTE_METHOD cell says \"line\":0 and there is no POSITION, `.all(` is ALL (pairs with nothing) and the default export is GET, so the POST to /api/status pairs with nothing.",
+ "expect_nodes": [
+  {
+   "kind": "ROUTE",
+   "name": "GET /users"
+  },
+  {
+   "kind": "ROUTE",
+   "name": "POST /users"
+  },
+  {
+   "kind": "ROUTE",
+   "name": "DELETE /users/:id"
+  },
+  {
+   "kind": "ROUTE",
+   "name": "ANY /health",
+   "note": "Express app.all"
+  },
+  {
+   "kind": "ROUTE",
+   "name": "ANY /api/status",
+   "note": "Next.js Pages Router default export"
+  }
+ ],
+ "expect_edges": [
+  {
+   "from": "GET /users",
+   "to": "app::listUsers",
+   "category": "HANDLED_BY"
+  },
+  {
+   "from": "POST /users",
+   "to": "app::createUser",
+   "category": "HANDLED_BY"
+  },
+  {
+   "from": "DELETE /users/:id",
+   "to": "app::deleteUser",
+   "category": "HANDLED_BY"
+  },
+  {
+   "from": "endpoint:GET:/users",
+   "to": "GET /users",
+   "category": "HTTP_CALLS"
+  },
+  {
+   "from": "endpoint:POST:/users",
+   "to": "POST /users",
+   "category": "HTTP_CALLS"
+  },
+  {
+   "from": "endpoint:DELETE:/users/",
+   "to": "DELETE /users/:id",
+   "category": "HTTP_CALLS"
+  },
+  {
+   "from": "endpoint:POST:/api/status",
+   "to": "ANY /api/status",
+   "category": "HTTP_CALLS",
+   "note": "a POST reaches the method-agnostic default export"
+  }
+ ],
+ "expect_cells": [
+  {
+   "kind": "ROUTE",
+   "node": "GET /users",
+   "cell": "POSITION",
+   "contains": "\"file\":\"app.ts\",\"start_line\":9",
+   "note": "0-based row of app.get(\"/users\", ...)"
+  },
+  {
+   "kind": "ROUTE",
+   "node": "DELETE /users/:id",
+   "cell": "POSITION",
+   "contains": "\"start_line\":12"
+  },
+  {
+   "kind": "ROUTE",
+   "node": "ANY /api/status",
+   "cell": "POSITION",
+   "contains": "\"file\":\"pages/api/status.ts\",\"start_line\":1"
+  },
+  {
+   "kind": "ROUTE",
+   "node": "POST /users",
+   "cell": "ROUTE_METHOD",
+   "contains": "\"line\":11",
+   "note": "1-based registration line replaces the line:0 placeholder"
+  }
+ ],
+ "forbid": [
+  {
+   "kind": "ROUTE",
+   "name": "route:/users",
+   "note": "the path-only node that stacked GET and POST is gone"
+  },
+  {
+   "from": "GET /users",
+   "to": "app::createUser",
+   "category": "HANDLED_BY",
+   "note": "PRECISION: a GET route is never handled by the POST handler"
+  },
+  {
+   "from": "endpoint:DELETE:/users/${…}",
+   "to": "GET /users/:id",
+   "category": "HTTP_CALLS"
+  },
+  {
+   "kind": "ROUTE",
+   "name": "ALL /health",
+   "note": "Express .all( is ANY, the token every parser uses"
+  }
+ ]
+}

@@ -28,9 +28,9 @@
   "expect_edges": [
     {
       "from": "endpoint:GET:/users",
-      "to": "route:/users",
+      "to": "GET /users",
       "category": "HTTP_CALLS",
-      "note": "the cross-service link the column rolls up"
+      "note": "the cross-service link the column rolls up (LB.11b: the Express ROUTE is `GET /users`, was `route:/users`)"
     }
   ],
   "note": "LA.21b. services.rs TS rule (@Injectable); Express route + requests client."

@@ -19,9 +19,11 @@ use crate::types::RepoGraph;
 /// Matching rule:
 /// - Endpoint qname `endpoint:<METHOD>:<path>` is the source side. Method comes
 ///   straight from the qname; path is normalised (see `normalise_http_path`).
-/// - Route qname `route:<path>` — one Route node per path across all methods.
-///   Methods live on stacked `ROUTE_METHOD` cells. Each (path, method) pair is
-///   a distinct target.
+/// - Route qname `<METHOD> <path>` — one Route node per (method, path), `ANY`
+///   for a method-agnostic registration (every server parser since LB.11b).
+///   The legacy per-path `route:<path>` shape, methods on stacked
+///   `ROUTE_METHOD` cells, is still read (see `index_route_node`); each of its
+///   (path, method) pairs is a distinct target.
 /// - Cross-repo is the common case (Angular → Go gin backend), but same-repo
 ///   matches also link correctly (Next.js route-handlers + fetchers, etc.).
 /// - Emitted edge confidence = min(endpoint_node_confidence, Strong) since
@@ -252,11 +254,17 @@ struct HttpMatchStats {
 /// routes (A3.4) are out of scope exactly as they are out of the index; a
 /// qname in neither route shape has no path part to judge and is counted
 /// but never flagged.
+///
+/// LB.11b: `pathonly` is the second permanent detector — ROUTE qnames (owner
+/// split off) in the per-path `route:<path>` shape. Since LB.11a (go) and
+/// LB.11b (ts_routes) every server parser keys a route `<METHOD> <path>`, so a
+/// non-zero count names a parser that regressed to the path-only shape.
 #[derive(Default)]
 struct QnameCensus {
     routes: usize,
     endpoints: usize,
     offenders: Vec<String>,
+    pathonly: Vec<String>,
 }
 
 impl QnameCensus {
@@ -265,9 +273,11 @@ impl QnameCensus {
     fn route(&mut self, qname: &str) {
         self.routes += 1;
         let base = split_owner(qname).0;
-        let path = base
-            .strip_prefix("route:")
-            .or_else(|| base.split_once(' ').map(|(_, p)| p));
+        let legacy = base.strip_prefix("route:");
+        if legacy.is_some() {
+            self.pathonly.push(qname.to_string());
+        }
+        let path = legacy.or_else(|| base.split_once(' ').map(|(_, p)| p));
         self.judge(qname, path);
     }
 
@@ -284,21 +294,28 @@ impl QnameCensus {
 
     /// LB.5 fired_on marker, silent on a build with no HTTP surface (like
     /// `[http]`). With offenders it names the first three, sorted, so a
-    /// regressing parser is identified without a rerun.
+    /// regressing parser is identified without a rerun; LB.11b's `pathonly=`
+    /// names its first three the same way.
     fn report(&mut self) {
         if self.routes + self.endpoints == 0 {
             return;
         }
         eprintln!(
-            "[http-qname] routes={} endpoints={} noncanonical={}",
+            "[http-qname] routes={} endpoints={} noncanonical={} pathonly={}",
             self.routes,
             self.endpoints,
             self.offenders.len(),
+            self.pathonly.len(),
         );
         if !self.offenders.is_empty() {
             self.offenders.sort_unstable();
             let first = &self.offenders[..self.offenders.len().min(3)];
             eprintln!("[http-qname] noncanonical first {}: {first:?}", first.len());
+        }
+        if !self.pathonly.is_empty() {
+            self.pathonly.sort_unstable();
+            let first = &self.pathonly[..self.pathonly.len().min(3)];
+            eprintln!("[http-qname] pathonly first {}: {first:?}", first.len());
         }
     }
 }
@@ -649,16 +666,17 @@ impl HttpRouteMatcher {
 }
 
 /// Register a ROUTE node into the (METHOD, path) index. Handles both qname
-/// conventions now in the repo:
-///   1. parser-go / ts_routes: qname = `route:<path>`, methods live on
-///      stacked ROUTE_METHOD cells (JSON payload).
-///   2. parser-java / parser-csharp / parser-rust / parser-php: qname =
-///      `<METHOD> <path>`, one Route node per (method, path) with a single
-///      ROUTE_METHOD cell carrying the method as a plain Text payload.
+/// conventions:
+///   1. LEGACY ONLY, no emitter since LB.11a (go) / LB.11b (ts_routes):
+///      qname = `route:<path>`, methods live on stacked ROUTE_METHOD cells
+///      (JSON payload). Kept so a hand-built or pre-0.5.0 graph still pairs;
+///      the `[http-qname] pathonly=` census counts any that appear.
+///   2. Every server parser: qname = `<METHOD> <path>` (`ANY` for a
+///      method-agnostic registration), one Route node per (method, path),
+///      its ROUTE_METHOD cell a bare-verb Text payload or a located JSON one.
 ///
 /// Both shapes target the same downstream key space so HttpStackResolver sees
-/// all routes uniformly. Migrate the non-Go parsers to shape (1) when the
-/// other resolvers start needing per-path aggregation.
+/// all routes uniformly.
 ///
 /// Returns the raw path the qname carried (once per node, however many
 /// methods it stacks), or `None` for a qname neither shape describes — the
@@ -692,8 +710,9 @@ fn index_route_node<'q>(
 }
 
 /// The one reader of the two ROUTE qname shapes (owner-free):
-/// `route:<path>` -> `(None, path)`, methods on stacked `ROUTE_METHOD` cells;
-/// `<METHOD> <path>` -> `(Some(METHOD), path)`. `None` for neither.
+/// `route:<path>` (legacy, no emitter since LB.11b) -> `(None, path)`, methods
+/// on stacked `ROUTE_METHOD` cells; `<METHOD> <path>` -> `(Some(METHOD), path)`.
+/// `None` for neither.
 fn split_route_qname(qname: &str) -> Option<(Option<&str>, &str)> {
     if let Some(path) = qname.strip_prefix("route:") {
         return Some((None, path));
@@ -2378,6 +2397,9 @@ mod tests {
             got,
             vec!["GET widgets", "endpoint:DELETE:protected/x", "route:items"]
         );
+        // LB.11b: the path-only shape is counted whether or not its path is
+        // canonical, and only for ROUTEs.
+        assert_eq!(c.pathonly, vec!["route:/items", "route:items"]);
 
         // LB.4a: the owner segment is stripped before judging, both ways: it
         // never makes a canonical path an offender, and never hides one.
@@ -2390,5 +2412,7 @@ mod tests {
         let mut got = c.offenders.clone();
         got.sort_unstable();
         assert_eq!(got, vec!["GET widgets @api", "endpoint:GET:users @web"]);
+        // The owner is split off before the path-only test, too.
+        assert_eq!(c.pathonly, vec!["route:/items @web"]);
     }
 }
