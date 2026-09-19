@@ -1,0 +1,32 @@
+// The whole data model of a Prisma stack lives in this one file.
+// model Draft { id Int @id }  <- a commented-out model is not a table
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id     Int     @id @default(autoincrement())
+  email  String  @unique
+  role   Role    @default(USER)
+  orders Order[]
+
+  @@index([email])
+  @@map("app_users")
+}
+
+model Order {
+  id     Int  @id
+  userId Int  @map("user_id")
+  user   User @relation(fields: [userId], references: [id])
+}

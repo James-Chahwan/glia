@@ -14,6 +14,7 @@ pub mod nav_routes;
 pub mod next_pages;
 pub mod openapi_annot;
 pub mod packages;
+pub mod prisma;
 pub mod eventbus;
 pub mod graphql;
 pub mod grpc;

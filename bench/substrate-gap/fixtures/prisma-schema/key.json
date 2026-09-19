@@ -1,0 +1,23 @@
+{
+  "framework": "prisma-schema",
+  "language": "prisma+typescript",
+  "dirs": ["."],
+  "note": "A13.16: schema.prisma matched neither detect_language nor the walk's bypass set, so the file declaring a Prisma stack's whole data model was never read. The walk now admits `.prisma` and routes it to a line scan of its `model` blocks. Identity follows A13.1: each model is keyed on the MODEL name (data_entity:sql:User, sql because the datasource provider is postgresql; mongodb would give nosql), and a declared `@@map` table rides a CODE table cell {table, orm: prisma}. The TS delegate link (prisma.user -> model User) is cross-file resolution and out of scope, so every edge here leaves the schema MODULE.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "model User, keyed on the model name although @@map names app_users"},
+    {"kind": "DATA_ENTITY", "name": "Order", "note": "model without @@map"}
+  ],
+  "expect_edges": [
+    {"from": "schema", "to": "User", "category": "ACCESSES_DATA", "note": "the schema MODULE declares the model"},
+    {"from": "schema", "to": "Order", "category": "ACCESSES_DATA", "note": "the schema MODULE declares the model"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "app_users", "note": "@@map(\"app_users\") -> data_entity::table_cell(\"app_users\", \"prisma\")"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "app_users", "max_nodes": 0, "note": "precision: the @@map table is a cell on the model-keyed node, never its own table-keyed node"},
+    {"kind": "DATA_ENTITY", "name": "user_id", "max_nodes": 0, "note": "precision: a field-level @map names a column, not a table"},
+    {"kind": "DATA_ENTITY", "name": "Role", "max_nodes": 0, "note": "precision: an enum block is not a model"},
+    {"kind": "DATA_ENTITY", "name": "Draft", "max_nodes": 0, "note": "precision: a model inside a // comment is not a model"}
+  ]
+}

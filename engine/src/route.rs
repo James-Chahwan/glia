@@ -1,8 +1,8 @@
 //! Per-file routing: which extractor or language parser sees which file.
 //! Holds the non-source branches (yaml / Dockerfile / package manifest /
-//! dotenv / migration `.sql` / contract and JSON Schema `.json` / `.proto` /
-//! `.graphql`), the WP-D incremental parse-cache lookup, and the per-file
-//! panic isolation.
+//! dotenv / migration `.sql` / Prisma `.prisma` / contract and JSON Schema
+//! `.json` / `.proto` / `.graphql`), the WP-D incremental parse-cache lookup,
+//! and the per-file panic isolation.
 //! Split out of `build_graphs_for_repo`.
 
 use std::any::Any;
@@ -93,6 +93,15 @@ pub(crate) fn parse_repo_files(
     let mut links_origin = 0usize;
     let mut links_template = 0usize;
     let mut links_dynamic = 0usize;
+    // A13.16: a prismaSchemaFolder schema declares its `datasource` in one
+    // `.prisma` file and its models in the others; a model file with no
+    // datasource of its own takes the provider every schema file agrees on.
+    let prisma_provider = repo_graph_code_extractors::prisma::shared_provider(
+        files
+            .iter()
+            .filter(|(p, _)| repo_graph_code_extractors::prisma::is_prisma_schema(p))
+            .map(|(_, s)| s.as_str()),
+    );
 
     for (path, source) in files {
         let yaml_ext = matches!(
@@ -255,6 +264,41 @@ pub(crate) fn parse_repo_files(
             if !out.entities.nodes.is_empty() {
                 stash_synthetic_parse(
                     "migration",
+                    path,
+                    module_id,
+                    repo,
+                    vec![out.entities.nodes],
+                    vec![out.entities.edges],
+                    vec![out.entities.nav],
+                    vec![],
+                    &mut parses_by_lang,
+                );
+            }
+            continue;
+        }
+
+        // A13.16: a Prisma schema (the walk admits `.prisma` only through
+        // `is_prisma_schema`). Each `model` is a model-keyed DATA_ENTITY and an
+        // ACCESSES_DATA target of the file's MODULE; `@@map` rides a table
+        // cell. Before detect_language, which has no prisma arm on purpose:
+        // the const-table scan would bind `provider = "postgresql"`.
+        if repo_graph_code_extractors::prisma::is_prisma_schema(path) {
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            let out = repo_graph_code_extractors::prisma::extract_prisma_models(
+                source,
+                module_id,
+                repo,
+                prisma_provider.as_deref(),
+            );
+            eprintln!("{}", out.marker(path));
+            if !out.entities.nodes.is_empty() {
+                stash_synthetic_parse(
+                    "prisma",
                     path,
                     module_id,
                     repo,
@@ -822,6 +866,58 @@ mod tests {
         // Admitted but table-less: no stash, no empty MODULE.
         let parses = route("db/migrations/V2__noop.sql", "-- nothing yet\n");
         assert!(!parses.contains_key("migration"));
+    }
+
+    /// A13.16: a `.prisma` file becomes a MODULE (`prisma::schema`, named
+    /// `schema.prisma`) whose models are model-keyed DATA_ENTITYs; a
+    /// prismaSchemaFolder model file takes the flavor of the datasource
+    /// another file declares.
+    #[test]
+    fn prisma_schema_routes_to_the_model_scan() {
+        assert_eq!(detect_language("prisma/schema.prisma"), None);
+        let schema = "datasource db {\n  provider = \"postgresql\"\n}\n\
+                      model User {\n  id Int @id\n  @@map(\"app_users\")\n}\n";
+        let parses = route("prisma/schema.prisma", schema);
+        let fp = &parses["prisma"][0];
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "prisma::schema");
+        let user = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:User",
+        );
+        assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
+        assert_eq!(fp.nav.name_by_id[&module_id], "schema.prisma");
+        assert_eq!(fp.nodes[1].id, user);
+        assert_eq!(
+            repo_graph_code_domain::data_entity::table_of(&fp.nodes[1].cells),
+            Some("app_users".to_string())
+        );
+        assert_eq!((fp.edges[0].from, fp.edges[0].to), (module_id, user));
+        assert_eq!(fp.edges[0].category, edge_category::ACCESSES_DATA);
+
+        let files = vec![
+            (
+                "prisma/schema/main.prisma".to_string(),
+                "datasource db {\n  provider = \"mongodb\"\n}\n".to_string(),
+            ),
+            (
+                "prisma/schema/event.prisma".to_string(),
+                "model Event {\n  id String @id\n}\n".to_string(),
+            ),
+        ];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let fps = &parses["prisma"];
+        assert_eq!(fps.len(), 1, "the model-less datasource file stashes nothing");
+        let event = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::DATA_ENTITY,
+            "data_entity:nosql:Event",
+        );
+        assert_eq!(fps[0].nodes[1].id, event);
     }
 
     #[test]

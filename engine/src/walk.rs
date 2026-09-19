@@ -365,6 +365,9 @@ fn is_bypass_path(path: &str) -> bool {
         // A13.9: a migration `.sql` (Flyway name, `.up.sql`, `db/migrate/`,
         // `migrations/`). Any other `.sql` stays unread.
         || repo_graph_code_extractors::migrations::is_migration_path(path)
+        // A13.16: a Prisma schema (`schema.prisma`, or any `.prisma` of a
+        // prismaSchemaFolder), the file that declares the stack's data model.
+        || repo_graph_code_extractors::prisma::is_prisma_schema(path)
 }
 
 /// LA.6c: an Angular CLI component template (`home.component.html`). Read only
@@ -644,6 +647,21 @@ mod walk_tests {
                 ),
             ]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A13.16: a `.prisma` schema is read (it matches no language) and a
+    /// backup beside it is not.
+    #[test]
+    fn walk_admits_prisma_schema() {
+        let root = walk_tmp("prisma");
+        std::fs::create_dir_all(root.join("prisma")).unwrap();
+        for rel in ["prisma/schema.prisma", "prisma/schema.prisma.bak"] {
+            std::fs::write(root.join(rel), "model User {\n  id Int @id\n}\n").unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(read, ["prisma/schema.prisma"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
