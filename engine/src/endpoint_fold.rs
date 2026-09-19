@@ -43,14 +43,23 @@
 //! stands: the pass never replaces it, only counts it, so an entry whose path
 //! does not move is left byte-identical. Both kinds of host feed the one
 //! `[endpoint-host]` line.
+//!
+//! OVERLAY CONSTANTS (LF.2d). A key pinned from `.glia/overlay.toml`
+//! `[constants]` (`ConstTable::pin`) folds like a source binding. When the
+//! folded template read one ([`ConstTable::pinned_keys_in`]), the entry is
+//! inference, not extraction: its ENDPOINT_HIT gains
+//! `"overlay":"const:<KEY>[,<KEY>...]"` and the node takes the pin's
+//! confidence ([`pin_confidence`], Weak), so every pairing it makes is at most
+//! Weak. An entry no pin reached is untouched.
 
 use std::collections::HashMap;
 use std::fmt;
 
 use repo_graph_code_domain::endpoint::{endpoint_qname, url_split};
+use repo_graph_code_domain::glia_config::Origin;
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
 use repo_graph_code_extractors::constants::{ConstTable, fold_interpolations};
-use repo_graph_core::{CellPayload, Node, NodeId, RepoId};
+use repo_graph_core::{CellPayload, Confidence, Node, NodeId, RepoId};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -124,6 +133,15 @@ struct Plan {
     payload: String,
     moved: bool,
     host: bool,
+    /// LF.2d: the node's new confidence, when an overlay constant folded it.
+    confidence: Option<Confidence>,
+}
+
+/// LF.2d: the confidence of an entry an overlay constant folded. `[constants]`
+/// is a flat `NAME = "literal"` table with no per-key `origin`, so every pin
+/// has the default stanza origin (`llm`): Weak.
+fn pin_confidence() -> Confidence {
+    Origin::default().confidence()
 }
 
 /// Fold the ENDPOINT nodes of one file in place.
@@ -173,6 +191,9 @@ pub(crate) fn fold_endpoint_paths(
                 continue;
             };
             node.id = plan.id;
+            if let Some(c) = plan.confidence {
+                node.confidence = c;
+            }
             for cell in node
                 .cells
                 .iter_mut()
@@ -210,6 +231,11 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
     let folded = fields
         .str("template")
         .and_then(|t| fold_interpolations(t, consts));
+    // LF.2d: the overlay constants that fold read, if it folded at all.
+    let pins: Vec<String> = match (&folded, fields.str("template")) {
+        (Some(_), Some(t)) => consts.pinned_keys_in(t).into_iter().map(String::from).collect(),
+        _ => Vec::new(),
+    };
     let input = folded
         .as_deref()
         .or_else(|| fields.str("raw"))
@@ -239,6 +265,9 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
     if !hosts.is_empty() {
         fields.set("hosts", Value::from(hosts));
     }
+    if !pins.is_empty() {
+        fields.set("overlay", Value::from(format!("const:{}", pins.join(","))));
+    }
     let payload = serde_json::to_string(&fields).ok()?;
     // `url_split` only ever returns a path starting with `/`, so this is
     // byte-identical to the literal shape; it keeps ONE qname builder (LB.5).
@@ -255,6 +284,7 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         payload,
         moved,
         host: host.is_some(),
+        confidence: (!pins.is_empty()).then(pin_confidence),
     })
 }
 
@@ -944,5 +974,54 @@ mod tests {
             "cache must hold the parser's own identity: {qnames:?}"
         );
         assert!(!qnames.iter().any(|q| *q == "endpoint:GET:/users"));
+    }
+
+    /// LF.2d: a base the source cannot bind (`process.env`), pinned by an
+    /// overlay constant, folds; the entry records which pin it read and
+    /// becomes Weak. The same template against the source-only table is left
+    /// alone, and a source-folded entry is not marked.
+    #[test]
+    fn pinned_base_folds_marks_overlay_and_weakens() {
+        let json = r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${GATEWAY}/users"}"#;
+        let mut consts = ConstTable::scan_file("const GATEWAY = process.env.GATEWAY_URL;\n", "typescript");
+        assert!(consts.get("GATEWAY").is_none(), "an env read never binds");
+
+        let mut fp = file();
+        push_call(&mut fp, "${…}/users", json);
+        let before = fp.clone();
+        assert_eq!(fold_endpoint_paths(&mut fp, &consts, repo()), FoldStats::default());
+        assert!(same(&fp, &before));
+
+        assert!(consts.pin("GATEWAY", "/orders-svc"));
+        let stats = fold_endpoint_paths(&mut fp, &consts, repo());
+        assert_eq!(stats.folded, 1);
+        let new = ep_id("GET", "/orders-svc/users");
+        assert_eq!(fp.nodes[1].id, new);
+        assert_eq!(fp.nodes[1].confidence, Confidence::Weak);
+        assert_eq!(fp.nav.qname_by_id.get(&new).map(String::as_str), Some("endpoint:GET:/orders-svc/users"));
+        let v: Value = serde_json::from_str(payload(&fp, 1)).unwrap();
+        assert_eq!(v["overlay"], "const:GATEWAY");
+        assert_eq!(v["path"], "/orders-svc/users");
+        assert_eq!(v["folded_from"], "${…}/users");
+        assert!(fp.edges.iter().any(|e| e.to == new), "the CALLS edge follows the node");
+
+        // A source binding folds without the overlay mark or a confidence change.
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "${…}/users",
+            r#"{"method":"GET","path":"${…}/users","file":"a.ts","line":9,"col":5,"confidence":"medium","template":"${environment.apiUrl}/users"}"#,
+        );
+        assert_eq!(fold_endpoint_paths(&mut fp, &consts_with_source(), repo()).folded, 1);
+        assert_eq!(fp.nodes[1].confidence, Confidence::Medium);
+        assert!(!payload(&fp, 1).contains("overlay"));
+    }
+
+    /// The source table plus an unrelated pin: a pin the template never reads
+    /// marks nothing.
+    fn consts_with_source() -> ConstTable {
+        let mut t = table();
+        assert!(t.pin("GATEWAY", "/orders-svc"));
+        t
     }
 }

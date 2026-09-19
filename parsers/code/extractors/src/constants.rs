@@ -27,9 +27,16 @@
 //! language), and [`ConstTable::resolve_expr`] refuses `process.env.X`-style
 //! reads. Define-side env values live on A13.7's redacted `cell_type::ENV` cell.
 //!
+//! PINS (LF.2d). A repo's `.glia/overlay.toml` `[constants]` binds a name the
+//! source cannot (`const GATEWAY = process.env.GATEWAY_URL`) through
+//! [`ConstTable::pin`]: the same secret-name and value gates as a scanned
+//! binding, then it REPLACES the key's binding and clears its alternatives, so
+//! first-wins cannot override it and the strict lookups see one value. Pins
+//! are applied after every source merge.
+//!
 //! No panics: every slice goes through `get()` or lands on an ASCII byte.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Longest literal kept. Anything longer is a payload, not a name or a URL.
 pub const MAX_VALUE_LEN: usize = 512;
@@ -54,6 +61,8 @@ pub struct ConstTable {
     /// order they were seen. A key present here is ambiguous.
     alternatives: BTreeMap<String, Vec<String>>,
     files: usize,
+    /// Keys bound by [`ConstTable::pin`] (an overlay constant), not by source.
+    pinned: BTreeSet<String>,
 }
 
 impl ConstTable {
@@ -190,9 +199,93 @@ impl ConstTable {
         self.files
     }
 
-    /// Distinct extra values seen for already-bound keys.
+    /// Distinct extra values seen for already-bound keys. A pinned key is
+    /// never a conflict: the pin is its one value.
     pub fn conflicts(&self) -> usize {
-        self.alternatives.values().map(Vec::len).sum()
+        self.alternatives
+            .iter()
+            .filter(|(k, _)| !self.pinned.contains(*k))
+            .map(|(_, alts)| alts.len())
+            .sum()
+    }
+
+    /// LF.2d: bind `key` to `value` as an overlay constant. The same gates as
+    /// a scanned binding run first: a secret-shaped name (`is_secret_name`)
+    /// or a value `accept_value` refuses (empty, oversized, multi-line,
+    /// interpolated) is NOT bound and returns `false`, so an overlay constant
+    /// never bypasses secret redaction. Otherwise the pin REPLACES the key's
+    /// binding, clears its alternatives (so [`Self::resolve_expr_strict`] and
+    /// [`Self::resolve_identity`] see an unambiguous key) and marks it pinned.
+    ///
+    /// Apply pins AFTER every source merge: a later [`Self::merge_from`] into
+    /// a pinned key would add its differing value as an alternative again and
+    /// make the key ambiguous for the strict lookups.
+    pub fn pin(&mut self, key: &str, value: &str) -> bool {
+        if is_secret_name(key) {
+            return false;
+        }
+        let Some(v) = accept_value(value) else {
+            return false;
+        };
+        self.by_key.insert(key.to_string(), v);
+        self.alternatives.remove(key);
+        self.pinned.insert(key.to_string());
+        true
+    }
+
+    /// `key` was bound by [`Self::pin`]. The hook a consumer that mints
+    /// identity from a value (LA.4's queue-topic fold) reads to mark what an
+    /// overlay constant produced.
+    pub fn is_pinned(&self, key: &str) -> bool {
+        self.pinned.contains(key)
+    }
+
+    /// The pinned keys [`fold_interpolations`] would read to fold `template`,
+    /// in span order, each once: the leading span's lenient lookup (full key,
+    /// then its last segment, as [`Self::resolve_expr`]) and every later
+    /// constant-shaped span's exact key. Empty when no pin is involved.
+    pub fn pinned_keys_in(&self, template: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        if self.pinned.is_empty() {
+            return out;
+        }
+        let mut rest = template;
+        let mut leading = true;
+        while let Some(start) = rest.find("${") {
+            let first = leading && start == 0;
+            leading = false;
+            let Some(inner) = rest.get(start + 2..) else { break };
+            let Some(end) = closing_brace(inner) else { break };
+            let Some(expr) = inner.get(..end) else { break };
+            let key = if first {
+                self.lenient_key(expr)
+            } else if constant_shaped(expr) {
+                normalise_expr(expr)
+                    .filter(|k| !self.alternatives.contains_key(k) && self.by_key.contains_key(k))
+            } else {
+                None
+            };
+            if let Some(k) = key
+                && let Some(pinned) = self.pinned.get(k.as_str())
+                && !out.contains(&pinned.as_str())
+            {
+                out.push(pinned.as_str());
+            }
+            let Some(after) = inner.get(end + 1..) else { break };
+            rest = after;
+        }
+        out
+    }
+
+    /// The key [`Self::resolve_expr`] resolves `expr` through: the full
+    /// normalised key, else its last segment.
+    fn lenient_key(&self, expr: &str) -> Option<String> {
+        let key = normalise_expr(expr)?;
+        if self.by_key.contains_key(&key) {
+            return Some(key);
+        }
+        let last = key.rsplit('.').next()?;
+        self.by_key.contains_key(last).then(|| last.to_string())
     }
 
     /// Validate, redact, then bind.
@@ -1102,5 +1195,79 @@ mod tests {
         // The lenient resolver still takes the first binding: the reason the
         // identity path does not use it.
         assert_eq!(repo.resolve_expr("DUP"), Some("a"));
+    }
+
+    /// LF.2d: a pin replaces a first-wins binding and clears its
+    /// alternatives, so the strict lookups resolve it again; conflicts no
+    /// longer count it.
+    #[test]
+    fn pin_overrides_first_wins_and_clears_alternatives() {
+        let mut repo = ConstTable::default();
+        repo.merge_from(&scan("export const GATEWAY = '/a';
+", "typescript"));
+        repo.merge_from(&scan("export const GATEWAY = '/b';
+", "typescript"));
+        assert_eq!(repo.resolve_expr_strict("GATEWAY"), None, "ambiguous before the pin");
+        assert_eq!(repo.conflicts(), 1);
+        assert!(!repo.is_pinned("GATEWAY"));
+
+        assert!(repo.pin("GATEWAY", "/orders-svc"));
+        assert!(repo.is_pinned("GATEWAY"));
+        assert_eq!(repo.get("GATEWAY"), Some("/orders-svc"));
+        assert_eq!(repo.resolve_expr_strict("GATEWAY"), Some("/orders-svc"));
+        assert_eq!(repo.resolve_identity("GATEWAY"), Some("/orders-svc"));
+        assert_eq!(repo.candidates("GATEWAY"), vec!["/orders-svc"]);
+        assert_eq!(repo.conflicts(), 0);
+        assert_eq!(
+            fold_interpolations("${GATEWAY}/users", &repo).as_deref(),
+            Some("/orders-svc/users")
+        );
+
+        // A key the source never bound is added.
+        assert!(repo.pin("api.base", "http://gw:8080"));
+        assert_eq!(repo.resolve_expr("this.api.base"), Some("http://gw:8080"));
+        assert_eq!(repo.len(), 2);
+    }
+
+    /// The scan's gates run on a pin too: a secret-shaped name or a value the
+    /// scan would refuse is not bound, and the table is left unchanged.
+    #[test]
+    fn secret_named_pin_is_refused() {
+        let mut repo = scan("export const API = '/v1';
+", "typescript");
+        assert!(!repo.pin("API_TOKEN", "x"));
+        assert!(!repo.pin("API", ""));
+        assert!(!repo.pin("API", "${OTHER}/x"));
+        assert!(!repo.pin("API", "a\nb"));
+        assert_eq!(repo.get("API_TOKEN"), None);
+        assert_eq!(repo.get("API"), Some("/v1"));
+        assert!(!repo.is_pinned("API_TOKEN") && !repo.is_pinned("API"));
+        assert_eq!(repo.len(), 1);
+        // Userinfo is masked exactly as a scanned value's.
+        assert!(repo.pin("GW", "https://user:pw@gw:8080/api"));
+        assert!(!repo.get("GW").is_some_and(|v| v.contains("pw")));
+    }
+
+    /// `pinned_keys_in` names the pinned keys the fold reads: the leading
+    /// span leniently (its last segment too), later constant-shaped spans
+    /// exactly, never a path parameter and never an unpinned key.
+    #[test]
+    fn pinned_keys_in_finds_the_folded_pins() {
+        let mut repo = scan("export const VERSION = 'v2';
+export const PAGE = 'p';
+", "typescript");
+        assert!(repo.pinned_keys_in("${GATEWAY}/users").is_empty(), "no pins at all");
+        assert!(repo.pin("GATEWAY", "/orders-svc"));
+        assert!(repo.pin("id", "7"));
+        assert!(repo.pin("PAGE", "q"));
+        assert_eq!(repo.pinned_keys_in("${GATEWAY}/users"), ["GATEWAY"]);
+        assert_eq!(repo.pinned_keys_in("${this.cfg.GATEWAY}/users"), ["GATEWAY"], "last segment");
+        assert_eq!(repo.pinned_keys_in("${GATEWAY}/${VERSION}/users"), ["GATEWAY"], "VERSION is source");
+        assert_eq!(repo.pinned_keys_in("${GATEWAY}/${PAGE}/${GATEWAY}"), ["GATEWAY", "PAGE"]);
+        assert!(repo.pinned_keys_in("/users/${id}").is_empty(), "a path parameter never folds");
+        assert!(repo.pinned_keys_in("/x/${GATEWAY}").iter().eq(["GATEWAY"].iter()), "a later span, exact");
+        assert!(repo.pinned_keys_in("${OTHER}/users").is_empty());
+        assert!(repo.pinned_keys_in("/users").is_empty());
+        assert!(repo.pinned_keys_in("${GATEWAY").is_empty(), "unclosed span");
     }
 }

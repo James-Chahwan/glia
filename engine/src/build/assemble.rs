@@ -1,15 +1,17 @@
 //! Per-repo graph assembly: `build_graphs_for_repo` and the facts and markers
-//! it owns (the A11.1 const table, the A12.1 `[msgtype]` census, the panic-hook
-//! guard that covers the whole assembly).
+//! it owns (the A11.1 const table and its LF.2d overlay pins, the A12.1
+//! `[msgtype]` census, the panic-hook guard that covers the whole assembly).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::endpoint::split_owner;
+use repo_graph_code_domain::glia_config::LoadedConfig;
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{cell_type, di_stats, node_kind};
 use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_core::RepoId;
 
+use super::BuildOptions;
 use super::grafts;
 use super::lang_build;
 use super::rpc_needles::RpcContext;
@@ -39,11 +41,59 @@ fn build_const_table(files: &[(String, String)], parse_errors: &mut Vec<String>)
     table
 }
 
+/// LF.2d: pin the repo's `.glia/overlay.toml` `[constants]` into `table`,
+/// after every source merge (`ConstTable::pin` replaces a first-wins binding
+/// and clears its alternatives). Only when the build applies the overlay: an
+/// extraction-only build (`--no-overlay`) folds against the source table, and
+/// `external::apply_external_edges` prints its `[overlay] disabled` line.
+///
+/// fired_on marker, once per repo that declares `[constants]`:
+///   `[overlay] constants repo=<label> pinned=<n> overrode=<o> rejected=<r>`
+/// `pinned` counts bound pins, `overrode` the pinned keys that already had a
+/// differing (or ambiguous) source binding, `rejected` the pins the scan's
+/// secret-name / value gates refused (never bound: an overlay constant never
+/// bypasses redaction).
+fn pin_overlay_constants(
+    table: &mut ConstTable,
+    config: Option<&LoadedConfig>,
+    opts: &BuildOptions,
+    repo_label: &str,
+) {
+    let Some(cfg) = config.filter(|_| opts.overlay) else {
+        return;
+    };
+    let constants = &cfg.config.constants;
+    if constants.is_empty() {
+        return;
+    }
+    let (mut pinned, mut overrode, mut rejected) = (0usize, 0usize, 0usize);
+    for (key, value) in constants {
+        let prior: Vec<String> = match table.candidates(key) {
+            c if !c.is_empty() => c.into_iter().map(String::from).collect(),
+            _ => table.get(key).map(String::from).into_iter().collect(),
+        };
+        if !table.pin(key, value.get_ref()) {
+            rejected += 1;
+            continue;
+        }
+        pinned += 1;
+        let now = table.get(key);
+        overrode += usize::from(prior.iter().any(|p| Some(p.as_str()) != now));
+    }
+    eprintln!(
+        "[overlay] constants repo={repo_label} pinned={pinned} overrode={overrode} rejected={rejected}"
+    );
+}
+
 /// `repo_label` is the repo path as the caller was given it. It only prefixes
 /// the `[incremental]` marker, so a multi-repo build prints one attributable
 /// line per repo; it never reaches the graph. `rpc` is the build-wide proto
 /// service set (A5.2). `roots` are the walk's project roots (A8.4), the owner
-/// vocabulary of the LB.4a HTTP owner segment.
+/// vocabulary of the LB.4a HTTP owner segment. `config` is the repo's loaded
+/// `.glia/overlay.toml` (`RepoInputs::config`) and `opts` the build's options:
+/// together they decide the overlay stages that run before the graph is built
+/// (LF.2d's constant pins; LF.2e's wrappers reuse them).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
@@ -52,6 +102,8 @@ pub(super) fn build_graphs_for_repo(
     repo_label: &str,
     rpc: &RpcContext,
     roots: &[ProjectRoot],
+    config: Option<&LoadedConfig>,
+    opts: &BuildOptions,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
     // Suppress the default panic-print-to-stderr while we run per-file parsers
     // — we catch panics below and report them as parse_errors. The default
@@ -68,7 +120,7 @@ pub(super) fn build_graphs_for_repo(
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
     // and live in `grafts::apply_post_cache`, beside `apply_rpc_needles`.
-    let const_table = build_const_table(files, &mut parse_errors);
+    let mut const_table = build_const_table(files, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
             "[const] repo table: {} bindings from {} files ({} conflicts) repo={repo_label}",
@@ -77,6 +129,9 @@ pub(super) fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
+    // LF.2d: overlay constants, after every source binding and after the
+    // `[const]` line (which keeps describing the source alone).
+    pin_overlay_constants(&mut const_table, config, opts, repo_label);
     // LA.1a / LA.1b: the Cargo packages, read by the A16.4 IMPORTS filter
     // (a sibling crate is not a dependency) and by `build_rust`.
     let rust_crates = lang_build::rust_crates(files, roots);

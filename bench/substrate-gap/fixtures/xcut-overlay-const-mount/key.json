@@ -1,0 +1,16 @@
+{
+  "framework": "xcut-overlay-const-mount",
+  "language": "typescript",
+  "dirs": ["web", "orders", "billing"],
+  "note": "LF.2d: web's .glia/overlay.toml [constants] pins GATEWAY = \"/orders-svc\", so the env-built `${GATEWAY}/users` re-keys to endpoint:GET:/orders-svc/users (ENDPOINT_HIT \"overlay\":\"const:GATEWAY\", Weak); orders' [[route_prefix]] mounts its routes under /orders-svc, so both gateway paths pair with orders' routes only (Weak HTTP_CALLS). Baseline 2026-09-19 (HEAD a128c48): endpoint:GET:${…}/users base-folds to BOTH services' GET /users (base=2); endpoint:GET:/orders-svc/orders pairs with nothing. Billing no-fan-out is asserted in engine/tests/overlay_resolution.rs (route qnames collide across repos). web/src/api.ts must import axios or no ENDPOINT is minted.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/orders-svc/users"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/orders-svc/users", "to": "GET /users", "category": "HTTP_CALLS"},
+    {"from": "endpoint:GET:/orders-svc/orders", "to": "GET /orders", "category": "HTTP_CALLS"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/users"}
+  ]
+}

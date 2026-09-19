@@ -108,7 +108,18 @@ macro_rules! resolver {
 /// Every build pass of the code domain. Resolvers run in the order their
 /// cross edges land in (before the Finalize sort fixes the stored order).
 pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegistry::new(&[
-    resolver!("http", HttpStackResolver),
+    // LF.2d: the HTTP resolver with the build's `[[route_prefix]]` mounts. No
+    // mounts (no overlay, or none declared) is the plain resolver.
+    PassSpec {
+        name: "http",
+        stage: Stage::Resolve,
+        after: &[],
+        populates: &[],
+        run: |m, ctx| {
+            let mounts = RepoInputs::route_mounts(m, &ctx.inputs, ctx.overlay);
+            resolve(m, &HttpStackResolver::with_mounts(&mounts), "resolver:http")
+        },
+    },
     resolver!("grpc", GrpcStackResolver),
     resolver!("rpc", RpcStackResolver),
     resolver!("queue", QueueStackResolver),

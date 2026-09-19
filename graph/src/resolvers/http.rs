@@ -2,7 +2,7 @@
 //! (method, normalised path).
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use repo_graph_code_domain::endpoint::{is_canonical_http_path, split_owner};
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
@@ -38,17 +38,104 @@ use crate::types::RepoGraph;
 /// ENDPOINT or ROUTE id present in two language graphs of one repo, or a ROUTE
 /// with two stacked `ROUTE_METHOD` cells for one verb, yields one edge per
 /// (endpoint, route) pair, never one per entry.
+///
+/// LF.2d: [`HttpStackResolver::resolve_with_mounts`] also indexes every ROUTE
+/// at the gateway paths a [`RouteMounts`] names for it. The trait's `resolve`
+/// is that call with no mounts.
 pub struct HttpStackResolver;
 
 impl CrossGraphResolver for HttpStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
+        self.resolve_with_mounts(merged, &RouteMounts::default());
+    }
+}
+
+/// LF.2d: the paths a gateway ALSO serves a ROUTE under, from a repo's
+/// `.glia/overlay.toml` `[[route_prefix]]` stanzas. Nothing in a service's
+/// source says a gateway serves it under `/orders-svc`, so a client calling
+/// `/orders-svc/users` pairs with nothing, or its `${GATEWAY}/users` base-folds
+/// onto every service's `/users`. A mount registers the route at
+/// `prefix + path` as well, so the gateway path pairs with the mounted service
+/// only.
+///
+/// Per ROUTE, each prefix once, with the confidence of the stanza that
+/// declared it (`Origin::confidence`: never Strong). Built by the engine from
+/// the build's overlays; empty (the default) is the plain resolver.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RouteMounts {
+    /// `NodeId.0` -> `(prefix, confidence)`, first declaration first.
+    by_route: BTreeMap<u64, Vec<(String, Confidence)>>,
+}
+
+impl RouteMounts {
+    /// Mount `route` under `prefix` (a path starting with `/`). A prefix
+    /// already mounted for the route keeps its slot and takes the stronger
+    /// confidence.
+    pub fn add(&mut self, route: NodeId, prefix: &str, conf: Confidence) {
+        let slots = self.by_route.entry(route.0).or_default();
+        match slots.iter_mut().find(|(p, _)| p == prefix) {
+            Some((_, c)) => *c = strongest(*c, conf),
+            None => slots.push((prefix.to_string(), conf)),
+        }
+    }
+
+    /// No route is mounted anywhere.
+    pub fn is_empty(&self) -> bool {
+        self.by_route.is_empty()
+    }
+
+    /// ROUTE nodes with at least one mount.
+    pub fn routes(&self) -> usize {
+        self.by_route.len()
+    }
+
+    /// The `(prefix, confidence)` mounts of `route`, first declaration first.
+    pub fn of(&self, route: NodeId) -> &[(String, Confidence)] {
+        self.by_route.get(&route.0).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// [`HttpStackResolver`] bound to a set of [`RouteMounts`], as the
+/// [`CrossGraphResolver`] a pass registry runs (LF.2d). Made by
+/// [`HttpStackResolver::with_mounts`].
+pub struct MountedHttpResolver<'a> {
+    mounts: &'a RouteMounts,
+}
+
+impl CrossGraphResolver for MountedHttpResolver<'_> {
+    fn resolve(&self, merged: &mut MergedGraph) {
+        HttpStackResolver.resolve_with_mounts(merged, self.mounts);
+    }
+}
+
+impl HttpStackResolver {
+    /// This resolver with `mounts` applied, as a [`CrossGraphResolver`].
+    pub fn with_mounts(mounts: &RouteMounts) -> MountedHttpResolver<'_> {
+        MountedHttpResolver { mounts }
+    }
+
+    /// Pair every ENDPOINT with the ROUTEs serving it, every mounted ROUTE
+    /// also indexed at its gateway paths ([`RouteMounts`]). A mounted key sits
+    /// in the STRONG index, so an exact gateway path pairs at the Exact tier,
+    /// but its target carries the mount's confidence: a mount can never
+    /// manufacture a Strong edge from an `llm` stanza.
+    ///
+    /// Empty `mounts` is exactly the pre-LF.2d resolver: no key, no counter
+    /// and no marker changes. Otherwise one more fired_on line, after the
+    /// `[http] routes=...` line (which is unchanged):
+    ///   `[http] overlay mounts: routes=<r> keys=<k> paired=<p>`
+    /// `routes` counts indexed ROUTE nodes that gained a mounted key, `keys`
+    /// the mounted `(METHOD, path)` keys, `paired` the edges emitted through
+    /// one.
+    pub fn resolve_with_mounts(&self, merged: &mut MergedGraph, mounts: &RouteMounts) {
         // Read ONCE per build. Never per lookup: the env read would show up in
         // every match and `normalise_http_path` (which is `pub`, and used by
         // fixtures and tests) must stay a pure function of its argument.
         let prefixes = api_prefixes();
         let mut stats = HttpMatchStats::default();
         let mut rules = RuleTally::new("http", &MatchTier::RULES);
-        let (index, stripped, owners) = build_route_index(&merged.graphs, &prefixes, &mut stats);
+        let (index, stripped, owners) =
+            build_route_index(&merged.graphs, &prefixes, mounts, &mut stats);
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in the Resolve stage of CODE_PASSES does not matter.
@@ -79,6 +166,7 @@ impl CrossGraphResolver for HttpStackResolver {
             }
             for (target, tier) in hits {
                 stats.record(tier);
+                stats.mount_hits += usize::from(target.mounted);
                 // Tiers 1-3 reproduce pre-A3.1 confidence exactly
                 // (`weakest(_, Strong)` is the identity); the fuzzy tiers
                 // floor it so a consumer can tell a principled pairing from a
@@ -97,6 +185,7 @@ impl CrossGraphResolver for HttpStackResolver {
         stats.qnames.report();
         stats.report_placeholder_folds();
         stats.report_client_normalised();
+        stats.report_mounts(mounts);
         stats.report_host_narrowed(aliases.len());
         stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
@@ -268,6 +357,11 @@ struct HttpMatchStats {
     /// (` @<project path>`), and ENDPOINT nodes likewise.
     owned_routes: usize,
     owned_endpoints: usize,
+    /// LF.2d: indexed ROUTE nodes that gained a mounted key, the mounted
+    /// `(METHOD, path)` keys, and the edges emitted through one.
+    mount_routes: usize,
+    mount_keys: usize,
+    mount_hits: usize,
 }
 
 /// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
@@ -421,6 +515,18 @@ impl HttpMatchStats {
         );
     }
 
+    /// LF.2d fired_on marker, a line of its own so the A3.1 line above never
+    /// moves. Printed only when the build carries mounts.
+    fn report_mounts(&self, mounts: &RouteMounts) {
+        if mounts.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[http] overlay mounts: routes={} keys={} paired={}",
+            self.mount_routes, self.mount_keys, self.mount_hits,
+        );
+    }
+
     /// A3.2 fired_on marker. Printed only when a build folded at least one
     /// `<…>` / `*name` / `[…]` segment, like the A3.4 line above.
     fn report_placeholder_folds(&self) {
@@ -501,6 +607,8 @@ struct RouteTarget {
     /// under) as an index into the build's [`RouteOwners`], so the target
     /// stays `Copy`. `None` for a route outside every nested root.
     owner: Option<u32>,
+    /// LF.2d: registered under a [`RouteMounts`] gateway path, not its own.
+    mounted: bool,
 }
 
 /// LB.4a: the owner segments of every indexed ROUTE, interned, so a
@@ -568,9 +676,15 @@ fn owner_spelling(rel: &str) -> Cow<'_, str> {
 /// A ROUTE's owner segment (LB.4a) is split off first: the method and path
 /// are read from the owner-free qname, so pairing ignores owners, and the
 /// owner rides on the target through the returned [`RouteOwners`] table.
+///
+/// LF.2d: a ROUTE `mounts` names is ALSO registered, after its own keys,
+/// under every `(METHOD, prefix + path)` in the strong `index` (never the
+/// stripped one), with a `mounted` target whose confidence is the weaker of
+/// the route's and the mount's ([`index_mounted`]).
 fn build_route_index(
     graphs: &[RepoGraph],
     prefixes: &[String],
+    mounts: &RouteMounts,
     stats: &mut HttpMatchStats,
 ) -> (RouteIndex, RouteIndex, RouteOwners) {
     let mut index: RouteIndex = HashMap::new();
@@ -582,6 +696,7 @@ fn build_route_index(
     // second map so the strong `index` stays exactly what it was.
     let mut stripped: RouteIndex = HashMap::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut mounted_seen: HashSet<NodeId> = HashSet::new();
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -614,6 +729,7 @@ fn build_route_index(
                 confidence: n.confidence,
                 repo: g.repo,
                 owner: owner.and_then(|o| owners.intern(o)),
+                mounted: false,
             };
             // Every entry is indexed (another graph's entry can stack a verb
             // the first did not), but counted once.
@@ -624,9 +740,57 @@ fn build_route_index(
                     stats.count_folds(path);
                 }
             }
+            for (prefix, conf) in mounts.of(n.id) {
+                let mounted = RouteTarget {
+                    confidence: weakest(n.confidence, *conf),
+                    mounted: true,
+                    ..target
+                };
+                let keys = index_mounted(&mut index, qname, &n.cells, mounted, prefix);
+                stats.mount_keys += keys;
+                if keys > 0 && mounted_seen.insert(n.id) {
+                    stats.mount_routes += 1;
+                }
+            }
         }
     }
     (index, stripped, owners)
+}
+
+/// LF.2d: register a mounted `target` under every `(METHOD, prefix + path)`
+/// the owner-free route `qname` serves (its own method, or each
+/// `ROUTE_METHOD` cell's for the legacy `route:<path>` shape), in the STRONG
+/// index only: a gateway path is matched as given, never prefix-stripped
+/// again. Returns how many keys gained the target; a key that already holds
+/// the route (its own path equals the mounted one) keeps its slot.
+fn index_mounted(
+    index: &mut RouteIndex,
+    qname: &str,
+    cells: &[Cell],
+    target: RouteTarget,
+    prefix: &str,
+) -> usize {
+    let Some((method, path)) = split_route_qname(qname) else {
+        return 0;
+    };
+    let key_path = normalise_http_path(&format!("{prefix}/{path}"));
+    let methods: Vec<String> = match method {
+        Some(m) => vec![m.to_ascii_uppercase()],
+        None => cells
+            .iter()
+            .filter(|c| c.kind == cell_type::ROUTE_METHOD)
+            .filter_map(cell_method)
+            .map(|m| m.to_ascii_uppercase())
+            .collect(),
+    };
+    let mut added = 0;
+    for m in methods {
+        let slot = index.entry((m, key_path.clone())).or_default();
+        let before = slot.len();
+        push_target(slot, target);
+        added += slot.len() - before;
+    }
+    added
 }
 
 /// The resolver's ROUTE index and match ladder, reusable by a pass that pairs
@@ -664,7 +828,10 @@ impl HttpRouteMatcher {
     pub fn new(graphs: &[RepoGraph]) -> Self {
         let prefixes = api_prefixes();
         let mut scratch = HttpMatchStats::default();
-        let (index, stripped, _owners) = build_route_index(graphs, &prefixes, &mut scratch);
+        // A contract pairs DECLARED paths: a gateway mount is not part of an
+        // OpenAPI path, so the matcher never sees one (LF.2d).
+        let (index, stripped, _owners) =
+            build_route_index(graphs, &prefixes, &RouteMounts::default(), &mut scratch);
         Self { index, stripped, prefixes }
     }
 
@@ -1637,7 +1804,8 @@ mod tests {
             ],
         );
         let mut stats = HttpMatchStats::default();
-        let (index, _, owners) = build_route_index(std::slice::from_ref(&g), &[], &mut stats);
+        let (index, _, owners) =
+            build_route_index(std::slice::from_ref(&g), &[], &RouteMounts::default(), &mut stats);
         let targets = index
             .get(&("GET".to_string(), "/health".to_string()))
             .map(Vec::as_slice)
@@ -2000,6 +2168,7 @@ mod tests {
                 confidence: Confidence::Strong,
                 repo: RepoId(repo),
                 owner,
+                mounted: false,
             },
             MatchTier::Exact,
         )
@@ -2318,7 +2487,7 @@ mod tests {
         assert_eq!(endpoint_hosts(endpoints[0].cells.iter().copied()), None);
         // The route is counted, and indexed, once.
         let mut stats = HttpMatchStats::default();
-        let (index, _, _) = build_route_index(&merged.graphs, &[], &mut stats);
+        let (index, _, _) = build_route_index(&merged.graphs, &[], &RouteMounts::default(), &mut stats);
         assert_eq!(stats.routes, 1);
         assert_eq!(index.get(&("GET".to_string(), "/user/2fa".to_string())).map(Vec::len), Some(1));
     }
@@ -2456,5 +2625,95 @@ mod tests {
         assert_eq!(got, vec!["GET widgets @api", "endpoint:GET:users @web"]);
         // The owner is split off before the path-only test, too.
         assert_eq!(c.pathonly, vec!["route:/items @web"]);
+    }
+
+    // ---- LF.2d route mounts ----------------------------------------------
+
+    /// A mount registers the orders route at `/orders-svc/users`: the gateway
+    /// path pairs with it alone (billing serves `/users` too), at the Exact
+    /// tier but with the mount's confidence. Without the mount it pairs with
+    /// nothing, and the contract matcher never sees a mount.
+    #[test]
+    fn mounted_key_pairs_only_the_mounted_route() {
+        let build = || {
+            let (web, _) = repo_graph(
+                RepoId(501),
+                vec![
+                    (node_kind::ENDPOINT, "endpoint:GET:/orders-svc/users", vec![hit("{}")]),
+                    (node_kind::ENDPOINT, "endpoint:GET:/orders-svc/orders", vec![hit("{}")]),
+                    (node_kind::ENDPOINT, "endpoint:GET:/users", vec![hit("{}")]),
+                ],
+            );
+            let (orders, o) = repo_graph(
+                RepoId(502),
+                vec![
+                    (node_kind::ROUTE, "GET /users", vec![]),
+                    // The legacy path-only shape reads its verbs off the cell.
+                    (node_kind::ROUTE, "route:/orders", get_route()),
+                ],
+            );
+            let (billing, b) = repo_graph(RepoId(503), vec![(node_kind::ROUTE, "GET /users", vec![])]);
+            (MergedGraph::new(vec![web, orders, billing]), o, b[0])
+        };
+        let pairs = |m: &MergedGraph| -> Vec<(String, NodeId, Confidence, Option<String>)> {
+            let mut out: Vec<_> = m
+                .cross_edges
+                .iter()
+                .filter(|e| e.category == edge_category::HTTP_CALLS)
+                .map(|e| {
+                    let from = m.graphs[0].nav.qname_by_id.get(&e.from).cloned().unwrap_or_default();
+                    let rule = repo_graph_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule);
+                    (from, e.to, e.confidence, rule)
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
+            out
+        };
+
+        // No mounts: the gateway paths pair with nothing; `/users` fans out.
+        let (mut plain, o, billing) = build();
+        HttpStackResolver.resolve(&mut plain);
+        let got = pairs(&plain);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().all(|p| p.0 == "endpoint:GET:/users"), "{got:?}");
+
+        let mut mounts = RouteMounts::default();
+        assert!(mounts.is_empty());
+        mounts.add(o[0], "/orders-svc", Confidence::Weak);
+        mounts.add(o[1], "/orders-svc/", Confidence::Weak);
+        mounts.add(o[1], "/orders-svc/", Confidence::Medium);
+        assert_eq!(mounts.routes(), 2);
+        assert_eq!(mounts.of(o[1]), [("/orders-svc/".to_string(), Confidence::Medium)]);
+        assert!(mounts.of(billing).is_empty());
+
+        let (mut mounted, _, _) = build();
+        HttpStackResolver::with_mounts(&mounts).resolve(&mut mounted);
+        let got = pairs(&mounted);
+        let exact = Some("exact".to_string());
+        assert_eq!(
+            got,
+            vec![
+                ("endpoint:GET:/orders-svc/orders".to_string(), o[1], Confidence::Medium, exact.clone()),
+                ("endpoint:GET:/orders-svc/users".to_string(), o[0], Confidence::Weak, exact.clone()),
+                ("endpoint:GET:/users".to_string(), o[0], Confidence::Strong, exact.clone()),
+                ("endpoint:GET:/users".to_string(), billing, Confidence::Strong, exact),
+            ],
+            "the mounted keys pair the orders routes only, at the mount's confidence; \
+             the routes' own keys are untouched"
+        );
+
+        // The mounted index: keys land in the strong index only, counted.
+        let mut stats = HttpMatchStats::default();
+        let (index, stripped, _) = build_route_index(&mounted.graphs, &["api".to_string()], &mounts, &mut stats);
+        assert_eq!((stats.mount_routes, stats.mount_keys), (2, 2));
+        let key = ("GET".to_string(), "/orders-svc/users".to_string());
+        let hit = index.get(&key).expect("mounted key");
+        assert_eq!(hit.len(), 1);
+        assert!(hit[0].mounted && hit[0].route_id == o[0] && hit[0].confidence == Confidence::Weak);
+        assert!(!stripped.contains_key(&key));
+        assert!(index.get(&("GET".to_string(), "/users".to_string())).is_some_and(|t| t.iter().all(|t| !t.mounted)));
+
+        // The contract matcher pairs declared paths only.
+        assert!(HttpRouteMatcher::new(&mounted.graphs).lookup("GET", "/orders-svc/users").is_empty());
     }
 }

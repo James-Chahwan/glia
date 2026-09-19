@@ -1,0 +1,5 @@
+version = 1
+
+# The gateway base the web client reads from the environment at runtime.
+[constants]
+GATEWAY = "/orders-svc"

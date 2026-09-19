@@ -190,8 +190,17 @@ fn generate_one_inner(
     }
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
-    let (mut graphs, mut parse_errors) =
-        build_graphs_for_repo(&files, repo, &go_prefix, cache, repo_path, &rpc, &roots);
+    let (mut graphs, mut parse_errors) = build_graphs_for_repo(
+        &files,
+        repo,
+        &go_prefix,
+        cache,
+        repo_path,
+        &rpc,
+        &roots,
+        inputs.first().and_then(|i| i.config.as_ref()),
+        opts,
+    );
     // Slot order is regions, then projects, then docs. It fixes the shard index,
     // so generate_many_inner must use the same order.
     if !regions.is_empty() {
@@ -262,7 +271,7 @@ fn generate_many_inner(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
-        assemble_many(repo_paths, incremental)?;
+        assemble_many_with(repo_paths, incremental, opts)?;
     let ctx = CodeBuildCtx::new(inputs, opts);
     run_code_passes_with(&mut merged, &ctx);
     apply_external_cells(&mut merged, &ctx.inputs);
@@ -295,9 +304,21 @@ pub(crate) struct Assembled {
 }
 
 /// Walk, parse and build every repo of a multi-repo build and merge the
-/// graphs (phases 1 and 2 of `generate_many`), without running a pass. Errs
-/// when no path produced a graph.
+/// graphs (phases 1 and 2 of `generate_many`), without running a pass, with
+/// the default [`BuildOptions`]: the test entry for running the passes one at
+/// a time. Errs when no path produced a graph.
+#[cfg(test)]
 pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<Assembled, String> {
+    assemble_many_with(repo_paths, incremental, &BuildOptions::default())
+}
+
+/// `assemble_many` built with `opts`: the overlay stages that run before a
+/// graph is built (LF.2d's constant pins) read `opts.overlay`.
+pub(crate) fn assemble_many_with(
+    repo_paths: &[String],
+    incremental: bool,
+    opts: &BuildOptions,
+) -> Result<Assembled, String> {
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
@@ -348,7 +369,7 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
         // or moved path keeps the key, so its sidecar is reused.
         let repo = RepoId::from_canonical(&ident.key);
         repo_id_marker(&ident, path);
-        inputs.push(repo_inputs(repo, root.clone(), path.clone()));
+        let input = repo_inputs(repo, root.clone(), path.clone());
         label_inputs.push((repo.0, path.clone()));
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
@@ -358,8 +379,18 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
         if let Some(c) = cache.as_mut() {
             c.validate_context(&ident.key, &go_prefix);
         }
-        let (graphs, parse_errors) =
-            build_graphs_for_repo(&files, repo, &go_prefix, cache.as_mut(), path, &rpc, &roots);
+        let (graphs, parse_errors) = build_graphs_for_repo(
+            &files,
+            repo,
+            &go_prefix,
+            cache.as_mut(),
+            path,
+            &rpc,
+            &roots,
+            input.config.as_ref(),
+            opts,
+        );
+        inputs.push(input);
         if let Some(c) = cache.as_ref()
             && let Err(e) = c.save(path)
         {

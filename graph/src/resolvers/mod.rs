@@ -47,6 +47,9 @@ pub use http::normalise_http_path;
 // A10.2 — the route index + tiers 1-4 for passes that pair a DECLARED path
 // (a contract operation) with the ROUTE serving it.
 pub use http::{HttpRouteMatcher, RouteMatch};
+// LF.2d — gateway route mounts from `.glia/overlay.toml` `[[route_prefix]]`,
+// and the http resolver bound to them (the engine's http Resolve pass).
+pub use http::{MountedHttpResolver, RouteMounts};
 // A9.1 — `cross_links` reads the HTTP channel label off the same parse the
 // resolver uses; crate-internal only, the public surface is the facade.
 pub(crate) use http::parse_endpoint_qname;

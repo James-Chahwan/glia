@@ -1,0 +1,6 @@
+version = 1
+
+# The gateway serves this whole service under /orders-svc.
+[[route_prefix]]
+scope = "."
+prefix = "/orders-svc"
