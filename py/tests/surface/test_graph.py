@@ -24,9 +24,10 @@ def main() -> int:
         c.check("node_cells: (int, str) pairs",
                 cells and all(type(x) is tuple and type(x[0]) is int and type(x[1]) is str for x in cells),
                 cells[:2])
-        nb = g.neighbours(helper["id"])
-        c.check("neighbours: (int, int) pairs",
-                all(type(x) is tuple and type(x[0]) is int and type(x[1]) is int for x in nb), nb[:2])
+        nb = g.neighbours(helper["id"], "both")
+        c.check("neighbours: (int, int, str) triples (LD.3c)",
+                nb and all(type(x) is tuple and len(x) == 3 and type(x[0]) is int and type(x[1]) is int
+                           and x[2] in ("out", "in") for x in nb), nb[:2])
 
         before = tree(repo)
         out = os.path.join(tmp, "layout")

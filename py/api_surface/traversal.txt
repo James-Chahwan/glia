@@ -1,2 +1,6 @@
 # pyo3 surface of py/src/traversal.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.neighbours(node_id: u64) -> Vec<(u64, u32)>
+method PyGraph.bfs(node_id: u64, direction: &str = "out", categories: Option<Vec<u32>> = None, depth: usize = 3) -> PyResult<Vec<(u64, usize, u32, u64)>>
+method PyGraph.neighbours(node_id: u64, direction: &str = "out", categories: Option<Vec<u32>> = None) -> PyResult<Vec<(u64, u32, &'static str)>>
+method PyGraph.predecessors(node_id: u64, categories: Option<Vec<u32>> = None, depth: usize = 3) -> PyResult<Vec<u64>>
+method PyGraph.reachable_by(sink_id: u64, source_ids: Vec<u64>, categories: Option<Vec<u32>> = None, depth: usize = 6) -> PyResult<Vec<u64>>
+method PyGraph.shortest_path(from_id: u64, to_id: u64, direction: &str = "both", categories: Option<Vec<u32>> = None, depth: usize = 12) -> PyResult<Option<Vec<PathStep>>>
