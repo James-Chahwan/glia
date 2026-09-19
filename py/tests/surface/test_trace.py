@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/trace.rs (LD.2): `cross_stack_trace` returns a
 native list of hop dicts (LD.4a later makes it a dict and updates this file).
-Shared helpers: test_build.py."""
+LD.6: every hop carries a bool `to_live`. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -9,7 +9,8 @@ import tempfile
 
 from test_build import Checks, fixture_repo, rg
 
-KEYS = ["depth", "mechanism", "cross_service", "from_qname", "to_qname", "to_kind", "to_file", "to_line"]
+KEYS = ["depth", "mechanism", "cross_service", "from_qname", "to_qname", "to_kind", "to_live", "to_file",
+        "to_line"]
 
 
 def main() -> int:
@@ -21,6 +22,9 @@ def main() -> int:
         hops = t if type(t) is list else []
         c.check("main -> helper hop", any(h.get("to_qname") == "app::helper" for h in hops), hops[:3])
         c.check("hop keys in engine field order", hops and list(hops[0]) == KEYS, hops and list(hops[0]))
+        c.check("hops carry a bool to_live", hops and all(type(h["to_live"]) is bool for h in hops))
+        c.check("main -> helper lands on a live node",
+                any(h.get("to_qname") == "app::helper" and h.get("to_live") is True for h in hops), hops[:3])
         c.raises("unknown feature", ValueError, lambda: g.cross_stack_trace("no::such::thing"))
     return c.done()
 

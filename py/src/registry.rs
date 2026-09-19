@@ -40,6 +40,19 @@ fn cell_type_names() -> Vec<(u32, String)> {
     cell_type::ALL.iter().map(|(id, n)| (id.0, (*n).to_string())).collect()
 }
 
+/// The code domain's entrypoint kinds (LD.6) as `[(id, name)]`, in table
+/// order — the one entrypoint set liveness seeds from. A consumer that tiers
+/// entry kinds derives its set from here (`{i for i, _ in entry_kinds()}`)
+/// instead of keeping a copy; a node's full entry verdict (its roles and the
+/// `main` / `test*` name rule included) is `nodes_json`'s `entry`.
+#[pyfunction]
+fn entry_kinds() -> Vec<(u32, String)> {
+    repo_graph_engine::profile::entry_kinds()
+        .into_iter()
+        .map(|(id, n)| (id.0, n.to_string()))
+        .collect()
+}
+
 #[pyfunction]
 fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -60,6 +73,7 @@ fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kind_names, m)?)?;
     m.add_function(wrap_pyfunction!(category_names, m)?)?;
     m.add_function(wrap_pyfunction!(cell_type_names, m)?)?;
+    m.add_function(wrap_pyfunction!(entry_kinds, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(build_stamp, m)?)?;
     Ok(())
@@ -70,6 +84,19 @@ inventory::submit! { ModuleFns { name: "registry", add: register } }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LD.6: `entry_kinds()` is the engine's entry table, ids and names, in
+    /// table order.
+    #[test]
+    fn entry_kinds_is_the_entry_table() {
+        let kinds = entry_kinds();
+        let ids: Vec<u32> = kinds.iter().map(|(i, _)| *i).collect();
+        assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28]);
+        assert!(kinds.contains(&(13, "QUEUE_CONSUMER".to_string())), "{kinds:?}");
+        for (id, name) in &kinds {
+            assert_eq!(node_kind::name(repo_graph_core::NodeKindId(*id)), name);
+        }
+    }
 
     /// A1.6: `build_stamp()` extends `version()` — same release, plus the
     /// parser hash — so a wrapper that reads `version()` keeps working and a

@@ -65,17 +65,24 @@ pub(crate) fn run(args: Args) -> i32 {
         print_absence(a);
         return 0;
     }
-    println!("| score | kind | qname | location |");
-    println!("|--:|---|---|---|");
+    println!("| score | live | kind | qname | location |");
+    println!("|--:|:-:|---|---|---|");
     for a in &answer.results {
         let loc = match (&a.file, a.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
-        println!("| {:.4} | {} | `{}` | {} |", a.score, a.kind, a.qname, loc);
+        println!("| {:.4} | {} | {} | `{}` | {} |", a.score, live_glyph(a.live), a.kind, a.qname, loc);
     }
     0
+}
+
+/// The `live` column of the answer tables (LD.6), as `blast-radius` renders
+/// it: `●` reachable from an entrypoint, `⊘` likely dead. Used by `resolve`,
+/// `trace`, `docs-for` and `find`.
+pub(crate) fn live_glyph(live: bool) -> &'static str {
+    if live { "●" } else { "⊘" }
 }
 
 /// The LD.8a absence block, printed under an empty answer's `_(...)_` line

@@ -5,10 +5,12 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use std::collections::HashSet;
+
 use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeKindId;
+use repo_graph_core::{NodeId, NodeKindId};
 use repo_graph_engine::absence::Answer;
-use repo_graph_engine::find::{FindOptions, FoundNode, find_nodes};
+use repo_graph_engine::find::{FindOptions, FoundNode, find_nodes_with_live};
 use repo_graph_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -38,9 +40,11 @@ fn kinds_by_name(names: &[String]) -> Result<Vec<NodeKindId>, String> {
 
 /// The whole body of [`PyGraph::find`], minus pyo3 — kept pyo3-free so
 /// `cargo test -p repo-graph-py` covers it (see the crate doc). An empty
-/// `kinds` list filters nothing, as `glia find` with no `--kind`.
+/// `kinds` list filters nothing, as `glia find` with no `--kind`. `live` is
+/// the graph's cached `entrypoint_reachable` set (`PyGraph::live`).
 fn find_answer(
     merged: &MergedGraph,
+    live: &HashSet<NodeId>,
     query: &str,
     top_k: usize,
     kinds: &[String],
@@ -52,7 +56,7 @@ fn find_answer(
     opts.top_k = top_k;
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
     opts.scope = scope;
-    let mut answer = find_nodes(merged, query, &opts);
+    let mut answer = find_nodes_with_live(merged, live, query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = unparsed_files;
     }
@@ -64,8 +68,9 @@ impl PyGraph {
     /// **find** (LD.3b): the ranked, located nodes whose name or qname
     /// `query` names, in one call — the one lookup (it replaced `find_node`
     /// and `find_nodes_by_qname`). Returns a dict `{results, absence}`:
-    /// `results` is the records `{id, qname, name, kind, file, line, match}`
-    /// (`line` is 1-based; `match` names the tier that matched: `exact_qname`,
+    /// `results` is the records `{id, qname, name, kind, live, file, line,
+    /// match}` (`live`: an entrypoint reaches the node, `false` = likely dead;
+    /// `line` is 1-based; `match` names the tier that matched: `exact_qname`,
     /// `exact_name`, `exact_ci`, `qname_suffix`, `name_prefix`, `name_word`,
     /// `name_substring`, `qname_substring`, `subsequence`); `absence` is
     /// `None` when there are results, else a `no_match` dict with
@@ -94,6 +99,7 @@ impl PyGraph {
     ) -> PyResult<Py<PyAny>> {
         let answer = find_answer(
             &self.merged,
+            self.live(),
             query,
             top_k,
             kinds.as_deref().unwrap_or_default(),
@@ -108,7 +114,8 @@ impl PyGraph {
     /// test id, or `auto`-sniffed) → the ranked, LOCATED nodes it points at, in
     /// one call. Resolution order preserved. Returns a dict `{results,
     /// absence}` (LD.8a): `results` is the records
-    /// `{id, qname, name, kind, score, file, line}` (`line` is 1-based);
+    /// `{id, qname, name, kind, score, live, file, line}` (`live`: an
+    /// entrypoint reaches the node, `false` = likely dead; `line` is 1-based);
     /// `absence` is `None` when there are results, else the FACT-tier reason —
     /// `no_signal_match` (the signal resolved to no node; the note counts what
     /// it held) or `no_match` (`scope` or `top_k=0` removed every node) — with
@@ -129,8 +136,14 @@ impl PyGraph {
         top_k: Option<usize>,
         scope: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let mut answer =
-            repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k, scope);
+        let mut answer = repo_graph_engine::resolve_signal_located_with_live(
+            &self.merged,
+            self.live(),
+            text,
+            kind,
+            top_k,
+            scope,
+        );
         if let Some(a) = answer.absence.as_mut() {
             a.unparsed_files = self.parse_errors.len();
         }
@@ -141,6 +154,7 @@ impl PyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use repo_graph_engine::find::find_nodes;
 
     fn built(tag: &str) -> MergedGraph {
         let root = std::env::temp_dir().join(format!("glia-ld2-find-{tag}-{}", std::process::id()));
@@ -164,20 +178,23 @@ mod tests {
     #[test]
     fn find_is_the_engine_find_with_kind_names() {
         let merged = built("kinds");
-        let all = find_answer(&merged, "helper", 20, &[], None, 0).expect("answer");
+        let live = repo_graph_engine::entrypoint_reachable(&merged);
+        let all = find_answer(&merged, &live, "helper", 20, &[], None, 0).expect("answer");
         let engine = find_nodes(&merged, "helper", &FindOptions::default());
         assert_eq!(all.results, engine.results);
         assert_eq!(all.results.first().map(|r| r.qname.as_str()), Some("app::helper"));
+        // LD.6: `main` calls `helper`, so both are live; the rows carry it.
+        assert!(all.results.first().is_some_and(|r| r.live), "{:?}", all.results);
 
-        let funcs = find_answer(&merged, "helper", 0, &["function".into()], None, 0).expect("answer");
+        let funcs = find_answer(&merged, &live, "helper", 0, &["function".into()], None, 0).expect("answer");
         assert!(!funcs.results.is_empty());
         assert!(funcs.results.iter().all(|r| r.kind == "FUNCTION"), "{:?}", funcs.results);
 
-        let bad = find_answer(&merged, "helper", 20, &["FUNCTOIN".into()], None, 0);
+        let bad = find_answer(&merged, &live, "helper", 20, &["FUNCTOIN".into()], None, 0);
         let err = bad.expect_err("an unknown kind name is an error");
         assert!(err.contains("unknown kind 'FUNCTOIN'") && err.contains("FUNCTION"), "{err}");
 
-        let scoped = find_answer(&merged, "helper", 0, &[], Some("svc".into()), 0).expect("answer");
+        let scoped = find_answer(&merged, &live, "helper", 0, &[], Some("svc".into()), 0).expect("answer");
         assert!(!scoped.results.is_empty());
         assert!(
             scoped.results.iter().all(|r| r.file.as_deref().is_none_or(|f| f.starts_with("svc/"))),
@@ -185,7 +202,7 @@ mod tests {
             scoped.results
         );
 
-        let none = find_answer(&merged, "zzqqxx", 20, &[], None, 7).expect("answer");
+        let none = find_answer(&merged, &live, "zzqqxx", 20, &[], None, 7).expect("answer");
         assert!(none.results.is_empty());
         let absence = none.absence.expect("an empty answer carries its absence");
         assert_eq!((absence.reason, absence.unparsed_files), ("no_match", 7));

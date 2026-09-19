@@ -36,10 +36,16 @@
 //! crate's blast carry list and its activation default / preset functions) are
 //! deleted; `code_profile_matches_head_tables` pins the tables to their values
 //! as literals.
+//!
+//! LD.6: `tables.entry` is the one entrypoint set. It gained the inbound
+//! handler kinds liveness lacked (GRPC_SERVER, RPC_PROCEDURE, QUEUE_CONSUMER,
+//! GRAPHQL_RESOLVER, CRON_JOB), and [`entry_kinds`] lists its kinds for the
+//! consumers that kept their own copy.
 
 use repo_graph_activation::passes::{PassRegistry, PassSpec, Stage};
 use repo_graph_activation::profile::DomainProfile;
-use repo_graph_code_domain::{cell_type, evidence};
+use repo_graph_code_domain::{cell_type, evidence, node_kind};
+use repo_graph_core::NodeKindId;
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
@@ -217,6 +223,24 @@ pub static CODE_PROFILE: DomainProfile<MergedGraph, CodeBuildCtx> = DomainProfil
     tables: repo_graph_code_domain::profile::CODE_TABLES,
     passes: CODE_PASSES,
 };
+
+/// The code domain's entrypoint kinds (LD.6): `CODE_PROFILE.tables.entry.kinds`
+/// as `(id, name)`, in table order — the ONE entrypoint set liveness seeds
+/// from (`entrypoint_reachable`) and the dense-text `*` sigil reads, so a
+/// consumer (the repo-graph wrapper's entry tiering, pyo3 `entry_kinds()`)
+/// derives its set from here instead of keeping a copy. Kinds only: the
+/// table's entry ROLES (a CLASS carrying ROLE COMPONENT) and its `main` /
+/// `test*` / `Test*` name rule also make entries; `nodes_json`'s per-node
+/// `entry` flag applies the whole rule.
+pub fn entry_kinds() -> Vec<(NodeKindId, &'static str)> {
+    CODE_PROFILE
+        .tables
+        .entry
+        .kinds
+        .iter()
+        .map(|k| (*k, node_kind::name(*k)))
+        .collect()
+}
 
 /// Run [`CODE_PASSES`] over an assembled graph, through [`CODE_PROFILE`]: the
 /// whole build tail, given the build's context (its repos' external inputs
@@ -420,15 +444,23 @@ mod tests {
         }
 
         // The entrypoint predicate `engine::answers` hardcoded before LD.14b,
-        // literally.
-        const ENTRY_KINDS: [NodeKindId; 6] = [
+        // literally, plus the five inbound handler kinds LD.6 reconciled in
+        // (GRPC_SERVER, RPC_PROCEDURE, QUEUE_CONSUMER, GRAPHQL_RESOLVER,
+        // CRON_JOB), in table order.
+        const ENTRY_KINDS: [NodeKindId; 11] = [
             nk::ROUTE,
             nk::GRPC_SERVICE,
+            nk::GRPC_SERVER,
+            nk::RPC_PROCEDURE,
+            nk::QUEUE_CONSUMER,
+            nk::GRAPHQL_RESOLVER,
             nk::WS_HANDLER,
             nk::EVENT_HANDLER,
             nk::CLI_COMMAND,
+            nk::CRON_JOB,
             nk::COMPONENT,
         ];
+        assert_eq!(t.entry.kinds, ENTRY_KINDS, "entry kinds, in table order");
         let head_entry = |kind: Option<NodeKindId>, name: &str, roles: &[NodeKindId]| {
             if roles.contains(&nk::COMPONENT) {
                 return true;
@@ -456,9 +488,9 @@ mod tests {
                 }
             }
         }
-        // 6 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
+        // 11 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
         // `main` / `test*` / `Test*` match.
-        assert_eq!(entries_without_roles, 6 * 8 + 2 * 5);
+        assert_eq!(entries_without_roles, 11 * 8 + 2 * 5);
 
         assert_eq!(CODE_PROFILE.validate(), Ok(()));
         assert_eq!(

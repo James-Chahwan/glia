@@ -45,13 +45,13 @@ use repo_graph_core::{NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
-use crate::answers::{Locator, in_scope, resolve_scope};
+use crate::answers::{Locator, entrypoint_reachable, in_scope, live_marker, resolve_scope};
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
 
-/// One ranked hit: identity, 1-based location (LD.1's [`Locator`]) and the
-/// tier that matched it. `match` is a tier name from the module doc.
+/// One ranked hit: identity, `live`, 1-based location (LD.1's [`Locator`])
+/// and the tier that matched it. `match` is a tier name from the module doc.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FoundNode {
@@ -59,6 +59,9 @@ pub struct FoundNode {
     pub qname: String,
     pub name: String,
     pub kind: &'static str,
+    /// Reachable from an entrypoint (LD.6, the flag `BlastAnswer::live`
+    /// carries): `false` = likely dead.
+    pub live: bool,
     pub file: Option<String>,
     /// 1-based.
     pub line: Option<i64>,
@@ -101,10 +104,29 @@ impl Default for FindOptions {
 ///
 /// Cost: one O(V) pass of string checks, one O(V) [`Locator`] build, and one
 /// O(E) degree pass, run only when more than one candidate survives the
-/// filters. Prints one `[find] query=...` line per call, and one
-/// `[absence] primitive=find` line when the answer is empty.
+/// filters, plus one O(V + E) liveness walk (`entrypoint_reachable`) for the
+/// rows' `live` flags (LD.6); [`find_nodes_with_live`] takes the live set
+/// instead. Prints one `[find] query=...` line and one `[live] annotate
+/// surface=find` line per call, and one `[absence] primitive=find` line when
+/// the answer is empty.
 pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Answer<FoundNode> {
-    let found = search(merged, query, opts);
+    find_nodes_with_live(merged, &entrypoint_reachable(merged), query, opts)
+}
+
+/// [`find_nodes`] over a live set the caller already holds (pyo3's `PyGraph`
+/// computes it once per graph): `live` must be `entrypoint_reachable` of
+/// `merged`.
+pub fn find_nodes_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    query: &str,
+    opts: &FindOptions,
+) -> Answer<FoundNode> {
+    let mut found = search(merged, query, opts);
+    for r in &mut found.rows {
+        r.live = live.contains(&NodeId(r.id));
+    }
+    live_marker("find", found.rows.len(), found.rows.iter().filter(|r| r.live).count());
     Answer::from_results(found.rows, || {
         if found.out_of_scope > 0
             && let Some(scope) = opts.scope.as_deref()
@@ -137,7 +159,9 @@ pub(crate) struct Found {
 
 /// The search itself, without the envelope: what an answer that resolves its
 /// seed through find (`governing_docs`) calls, so the rows it did not take
-/// become its suggestions without a second pass.
+/// become its suggestions without a second pass. Every row's `live` is
+/// `false` here: [`find_nodes_with_live`] sets it, and a caller that only
+/// reads qnames (suggestions, the exact-match seed) pays no liveness walk.
 pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Found {
     let q = Query::new(query);
     if q.raw.is_empty() {
@@ -235,6 +259,7 @@ pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> F
                 qname: l.qname,
                 name: l.name,
                 kind: l.kind,
+                live: false,
                 file: l.file,
                 line: l.line,
                 r#match: c.tier.label(),

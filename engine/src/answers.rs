@@ -3,7 +3,7 @@
 // so the CLI, pyo3/MCP, and future TUI/3d-viewer all share one implementation.
 // ============================================================================
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use repo_graph_code_domain::{cell_type, edge_category, endpoint, node_kind};
@@ -80,9 +80,12 @@ struct LiveWalk {
 /// false-dead flags — the failure mode the handoff warns about.
 ///
 /// Both halves come from the code domain's profile (LD.14b): an entrypoint is
-/// what `CODE_PROFILE.tables.entry` says one is — routes, gRPC / WS / event
-/// handlers, CLI commands, framework components, `main` / `test*` / `Test*`
-/// functions and methods, and (LB.3b) any node carrying the COMPONENT role:
+/// what `CODE_PROFILE.tables.entry` says one is — routes, gRPC services and
+/// servers, Connect / Twirp procedures, queue consumers, GraphQL resolvers,
+/// WS / event handlers, CLI commands, cron jobs (the inbound handler kinds,
+/// reconciled by LD.6 and listed by `profile::entry_kinds`), framework
+/// components, `main` / `test*` / `Test*` functions and methods, and (LB.3b)
+/// any node carrying the COMPONENT role:
 /// since the LB.3a fold an Angular `@Component` is a CLASS with ROLE
 /// COMPONENT, not a COMPONENT node. The walk carries on
 /// `CODE_PROFILE.tables.carry_edges`.
@@ -171,8 +174,6 @@ fn live_hop(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId)
 /// the maps are only looked up, never iterated, so the counts are
 /// deterministic.
 fn live_walk(merged: &MergedGraph) -> LiveWalk {
-    use std::collections::HashSet;
-
     let t = &CODE_PROFILE.tables;
     let mut w = LiveWalk {
         live: HashSet::new(),
@@ -354,6 +355,9 @@ pub struct TraceHop {
     pub from_qname: String,
     pub to_qname: String,
     pub to_kind: &'static str,
+    /// The destination is reachable from an entrypoint (LD.6, the flag
+    /// [`BlastAnswer::live`] carries): `false` = likely dead.
+    pub to_live: bool,
     pub to_file: Option<String>,
     /// 1-based (see [`Located`]).
     pub to_line: Option<i64>,
@@ -368,8 +372,23 @@ pub struct TraceHop {
 /// Deliberately takes NO `scope` (A8.3): a trace's entire value is that it
 /// crosses service/directory boundaries, so filtering its hops would delete the
 /// answer. Scope `blast_radius`/`resolve`/`governing_docs` instead.
+///
+/// Each hop's `to_live` (LD.6) is read off one [`entrypoint_reachable`] walk,
+/// run once per call; [`cross_stack_trace_with_live`] takes the set instead.
 pub fn cross_stack_trace(
     merged: &MergedGraph,
+    feature: &str,
+    max_depth: usize,
+) -> Result<Vec<TraceHop>, String> {
+    cross_stack_trace_with_live(merged, &entrypoint_reachable(merged), feature, max_depth)
+}
+
+/// [`cross_stack_trace`] over a live set the caller already holds (pyo3's
+/// `PyGraph` computes it once per graph): `live` must be
+/// [`entrypoint_reachable`] of `merged`.
+pub fn cross_stack_trace_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
     feature: &str,
     max_depth: usize,
 ) -> Result<Vec<TraceHop>, String> {
@@ -389,7 +408,7 @@ pub fn cross_stack_trace(
     // One forward BFS over the carry edges' index (LD.15b): each reached node
     // is one hop, in discovery order, from the node that first reached it.
     let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
-    let hops = reach::bfs(&adj, &[seed], Walk::Forward, max_depth)
+    let hops: Vec<TraceHop> = reach::bfs(&adj, &[seed], Walk::Forward, max_depth)
         .reached
         .iter()
         .map(|r| {
@@ -402,16 +421,31 @@ pub fn cross_stack_trace(
                 from_qname: from.qname,
                 to_qname: to.qname,
                 to_kind: to.kind,
+                to_live: live.contains(&r.id),
                 to_file: to.file,
                 to_line: to.line,
             }
         })
         .collect();
+    live_marker("trace", hops.len(), hops.iter().filter(|h| h.to_live).count());
     Ok(hops)
 }
 
+/// LD.6's fired_on line, once per answer that carries `live` flags:
+/// `[live] annotate surface=<s> rows=<n> live=<l> entry_kinds=<k>` — `s` is
+/// the answer (`resolve`, `docs`, `find`, `trace`; pyo3 prints `nodes_json`
+/// in the same format), `n` its rows, `l` the rows flagged live, `k` the
+/// entry table's kinds. Grep token `[live] annotate`.
+pub(crate) fn live_marker(surface: &str, rows: usize, live: usize) {
+    eprintln!(
+        "[live] annotate surface={surface} rows={rows} live={live} entry_kinds={}",
+        CODE_PROFILE.tables.entry.kinds.len()
+    );
+}
+
 /// One located node in a `resolve` answer: identity + kind + PPR relevance +
-/// `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it doesn't walk.)
+/// `live` + `file`:`line`. (No `reason`/`depth` — `resolve` locates seeds, it
+/// doesn't walk.)
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct LocatedNode {
@@ -420,6 +454,9 @@ pub struct LocatedNode {
     pub name: String,
     pub kind: &'static str,
     pub score: f64,
+    /// Reachable from an entrypoint (LD.6, the flag [`BlastAnswer::live`]
+    /// carries): `false` = likely dead.
+    pub live: bool,
     pub file: Option<String>,
     /// 1-based (see [`Located`]).
     pub line: Option<i64>,
@@ -444,8 +481,26 @@ pub struct LocatedNode {
 /// no mechanism, because resolution is by POSITION file and line or by name,
 /// not by edges. `no_match` when `scope` (or `top_k = Some(0)`) removed every
 /// resolved node.
+///
+/// Each row's `live` (LD.6) is read off one [`entrypoint_reachable`] walk,
+/// run once per call; [`resolve_signal_located_with_live`] takes the set
+/// instead.
 pub fn resolve_signal_located(
     merged: &MergedGraph,
+    text: &str,
+    kind: &str,
+    top_k: Option<usize>,
+    scope: Option<&str>,
+) -> Answer<LocatedNode> {
+    resolve_signal_located_with_live(merged, &entrypoint_reachable(merged), text, kind, top_k, scope)
+}
+
+/// [`resolve_signal_located`] over a live set the caller already holds
+/// (pyo3's `PyGraph` computes it once per graph): `live` must be
+/// [`entrypoint_reachable`] of `merged`.
+pub fn resolve_signal_located_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
     text: &str,
     kind: &str,
     top_k: Option<usize>,
@@ -457,6 +512,7 @@ pub fn resolve_signal_located(
     // Pre-PPR: `activate` below must only see in-scope seeds.
     let seeds = apply_scope(&loc, seeds, scope, |id| *id, "resolve");
     if seeds.is_empty() {
+        live_marker("resolve", 0, 0);
         return Answer::from_results(Vec::new(), || match scope {
             Some(s) if resolved > 0 => absence::scope_emptied(merged, "resolve", text, resolved, s),
             _ => absence::empty(
@@ -485,6 +541,7 @@ pub fn resolve_signal_located(
                 name: at.name,
                 kind: at.kind,
                 score: scores.get(id).copied().unwrap_or(0.0),
+                live: live.contains(id),
                 file: at.file,
                 line: at.line,
             }
@@ -494,6 +551,7 @@ pub fn resolve_signal_located(
     if let Some(k) = top_k {
         out.truncate(k);
     }
+    live_marker("resolve", out.len(), out.iter().filter(|r| r.live).count());
     Answer::from_results(out, || {
         let note = format!(
             "top_k 0 kept none of the {kept} resolved {}",
@@ -628,8 +686,23 @@ fn added_lines(text: &str) -> usize {
 /// (find's nearest qnames as suggestions), `no_edges` (no DOCUMENTS edge
 /// reaches the symbol; caveats narrowed to the symbol's language), or
 /// `no_match` (`scope` removed every section).
+///
+/// Each row's `live` (LD.6) is read off one [`entrypoint_reachable`] walk,
+/// run once per call; [`governing_docs_with_live`] takes the set instead.
 pub fn governing_docs(
     merged: &MergedGraph,
+    qname: &str,
+    scope: Option<&str>,
+) -> Answer<LocatedNode> {
+    governing_docs_with_live(merged, &entrypoint_reachable(merged), qname, scope)
+}
+
+/// [`governing_docs`] over a live set the caller already holds (pyo3's
+/// `PyGraph` computes it once per graph): `live` must be
+/// [`entrypoint_reachable`] of `merged`.
+pub fn governing_docs_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
     qname: &str,
     scope: Option<&str>,
 ) -> Answer<LocatedNode> {
@@ -646,6 +719,7 @@ pub fn governing_docs(
         .filter(|r| find::is_exact(r))
         .map(|r| NodeId(r.id))
     else {
+        live_marker("docs", 0, 0);
         return Answer::from_results(Vec::new(), || {
             absence::unknown_symbol(merged, "governing_docs", qname, mechanisms, &near)
         });
@@ -665,6 +739,7 @@ pub fn governing_docs(
                 name: at.name,
                 kind: at.kind,
                 score: 0.0,
+                live: live.contains(&e.from),
                 file: at.file,
                 line: at.line,
             });
@@ -672,6 +747,7 @@ pub fn governing_docs(
     }
     let documented = out.len();
     let out = apply_scope(&loc, out, scope, |d| NodeId(d.id), "governing_docs");
+    live_marker("docs", out.len(), out.iter().filter(|r| r.live).count());
     Answer::from_results(out, || match scope {
         Some(s) if documented > 0 => {
             absence::scope_emptied(merged, "governing_docs", qname, documented, s)

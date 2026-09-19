@@ -8,7 +8,7 @@ use repo_graph_code_domain::node_kind;
 use repo_graph_core::NodeKindId;
 use repo_graph_engine::find::{DEFAULT_TOP_K, FindOptions, find_nodes};
 
-use crate::cmd::resolve::print_absence;
+use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;
 
 #[derive(clap::Args, Debug)]
@@ -90,15 +90,15 @@ pub(crate) fn run(args: Args) -> i32 {
         print_absence(a);
         return 0;
     }
-    println!("| match | kind | qname | location |");
-    println!("|---|---|---|---|");
+    println!("| match | live | kind | qname | location |");
+    println!("|---|:-:|---|---|---|");
     for r in &answer.results {
         let loc = match (&r.file, r.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
-        println!("| {} | {} | `{}` | {} |", r.r#match, r.kind, r.qname, loc);
+        println!("| {} | {} | {} | `{}` | {} |", r.r#match, live_glyph(r.live), r.kind, r.qname, loc);
     }
     0
 }

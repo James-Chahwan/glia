@@ -209,3 +209,63 @@ fn empty_answers_carry_their_absence() {
     assert_eq!(v["results"], serde_json::json!([]), "{v}");
     assert_eq!(v["absence"]["reason"], "no_match", "{v}");
 }
+
+/// LD.6: `resolve` rows carry a bool `live` and `trace` hops a bool
+/// `to_live`, read off the same walk as `blast-radius`; the resolve table
+/// renders it as a `live` column (● / ⊘). `main` is an entrypoint by name, so
+/// it and the `helper` it calls are live; no carry edge reaches the MODULE.
+/// The `[live] annotate` stderr line is the LD.6 fired_on marker.
+#[test]
+fn resolve_and_trace_rows_carry_live() {
+    let repo = TempRepo::new("live");
+    let d = repo.path();
+
+    let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff", "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let marker = stderr
+        .lines()
+        .find(|l| l.starts_with("[live] annotate surface=resolve"))
+        .unwrap_or_else(|| panic!("the resolve marker fires:\n{stderr}"));
+    eprintln!("{marker}");
+    assert_eq!(marker, "[live] annotate surface=resolve rows=3 live=2 entry_kinds=11");
+    let v = json(&out);
+    let mut got: Vec<(String, bool)> = v["results"]
+        .as_array()
+        .expect("a `results` array")
+        .iter()
+        .map(|r| {
+            let live = r["live"].as_bool().unwrap_or_else(|| panic!("row carries a bool `live`: {r}"));
+            (r["qname"].as_str().unwrap_or_default().to_string(), live)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("app".to_string(), false),
+            ("app::helper".to_string(), true),
+            ("app::main".to_string(), true),
+        ],
+        "{v}"
+    );
+
+    let v = json(&glia(&repo.0, &["trace", d, "app::main", "--json"]));
+    let hops = v.as_array().expect("a JSON array");
+    assert!(!hops.is_empty(), "{v}");
+    for h in hops {
+        assert!(h["to_live"].is_boolean(), "hop carries a bool `to_live`: {h}");
+    }
+    let helper = hops.iter().find(|h| h["to_qname"] == "app::helper").expect("main -> helper hop");
+    assert_eq!(helper["to_live"], true, "{v}");
+
+    let out = glia(&repo.0, &["resolve", d, "app.py", "--kind", "diff"]);
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(table.contains("| score | live | kind | qname | location |"), "{table}");
+    assert!(table.contains("| ● | FUNCTION | `app::main` | app.py:8 |"), "{table}");
+    assert!(table.contains("| ⊘ | MODULE | `app` | app.py:1 |"), "{table}");
+
+    let out = glia(&repo.0, &["trace", d, "app::main"]);
+    let table = String::from_utf8_lossy(&out.stdout);
+    assert!(table.contains("| depth | mechanism | xsvc | from | → to | live | location |"), "{table}");
+    assert!(table.contains("| `app::main` | `app::helper` (FUNCTION) | ● | app.py:4 |"), "{table}");
+}

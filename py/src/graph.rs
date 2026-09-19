@@ -11,8 +11,9 @@
 //! (LF.2b) is extraction-only: `save_to_default` refuses it, so the repo's
 //! default layout dir only ever holds the overlay-applied graph.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -44,6 +45,15 @@ pub(crate) struct PyGraph {
     /// taken as overlay-applied: the writers keep an extraction-only graph out
     /// of the default dir.
     pub(crate) overlay_applied: bool,
+    /// The entrypoint-reachable node set (LD.6), walked once on first use by
+    /// [`PyGraph::live`] — `nodes_json`, `find`, `resolve`, `governing_docs`
+    /// and `cross_stack_trace` all read it, so an MCP session pays the walk
+    /// once. Valid while nothing liveness reads changes: node kinds and
+    /// names, ROLE cells and edges. `set_cell` / `remove_cell` write only the
+    /// externally-writable cells (`external_inputs::WRITABLE`: CONSTRAINT,
+    /// DECISION, CONV, VECTOR), none of which it reads; a method that changes
+    /// what it does read must reset this cell.
+    live: OnceLock<HashSet<NodeId>>,
 }
 
 /// Why `save_to_default` refuses a graph, or `None` when it may write it: an
@@ -67,7 +77,14 @@ impl PyGraph {
             repo_labels: r.repo_labels,
             repo_roots: r.repo_roots,
             overlay_applied: true,
+            live: OnceLock::new(),
         }
+    }
+
+    /// The live set of this graph: `entrypoint_reachable`, computed on the
+    /// first call and cached (see the `live` field).
+    pub(crate) fn live(&self) -> &HashSet<NodeId> {
+        self.live.get_or_init(|| repo_graph_engine::entrypoint_reachable(&self.merged))
     }
 
     /// `self` marked with whether its build applied the overlay.
@@ -201,6 +218,18 @@ impl PyGraph {
 #[cfg(test)]
 mod tests {
     use super::default_dir_refusal;
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_code_domain::external_inputs::WRITABLE;
+
+    /// LD.6 guard: `PyGraph.live` is cached for the graph's lifetime, and the
+    /// only mutating methods (`set_cell` / `remove_cell`) write WRITABLE cells
+    /// only. Liveness reads ROLE cells (the COMPONENT role seeds it), so a
+    /// ROLE in WRITABLE would make the cache stale after a write: reset the
+    /// cell in those methods before allowing it.
+    #[test]
+    fn writable_cells_leave_the_live_cache_valid() {
+        assert!(!WRITABLE.contains(&cell_type::ROLE), "a ROLE write would change liveness");
+    }
 
     /// LF.2b persist guard: only an overlay-applied graph may go to the
     /// default layout dir.

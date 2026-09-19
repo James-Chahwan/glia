@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/find.rs (LD.2): `find` is the one name / qname
 lookup (find_node, find_nodes_by_qname and resolve_signal are gone), and
-`find` / `resolve` return the LD.8a envelope as a native dict.
+`find` / `resolve` return the LD.8a envelope as a native dict. LD.6: every
+row carries a bool `live`, read off one liveness walk per graph (PyGraph caches
+it, so only the first answer prints the `[live] profile=` walk line).
 Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
 import tempfile
 
-from test_build import Checks, fixture_repo, node_ids, params, rg
+from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
-FIND_KEYS = ["id", "qname", "name", "kind", "file", "line", "match"]
-RESOLVE_KEYS = ["id", "qname", "name", "kind", "score", "file", "line"]
+FIND_KEYS = ["id", "qname", "name", "kind", "live", "file", "line", "match"]
+RESOLVE_KEYS = ["id", "qname", "name", "kind", "score", "live", "file", "line"]
 
 
 def main() -> int:
@@ -24,9 +26,13 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-find-") as tmp:
         g = rg.generate(fixture_repo(tmp))
+        a, err = stderr_of(lambda: g.find("helper"))
+        c.check("first answer walks liveness once", err.count("[live] profile=") == 1, err[-400:])
+        c.check("find live marker", "[live] annotate surface=find rows=" in err, err[-400:])
+        _, err = stderr_of(lambda: g.find("main"))
+        c.check("later answers reuse the cached live set", "[live] profile=" not in err, err[-400:])
         ids = node_ids(g)
 
-        a = g.find("helper")
         c.check("find -> dict", type(a) is dict, type(a))
         c.check("find envelope keys", list(a) == ["results", "absence"], list(a))
         rows = a["results"]
@@ -35,6 +41,8 @@ def main() -> int:
                 rows and list(rows[0]))
         c.check("find ids are ints of the graph",
                 all(type(r["id"]) is int and r["id"] in ids for r in rows))
+        c.check("find rows carry a bool live", rows and all(type(r["live"]) is bool for r in rows))
+        c.check("helper is live (main calls it)", rows and rows[0]["live"] is True, rows[:1])
         c.check("find hit has no absence", a["absence"] is None, a["absence"])
         one = g.find("helper", top_k=1)["results"]
         c.check("top_k=1 keeps one row", len(one) == 1 and one[0] == rows[0], one)
@@ -62,6 +70,11 @@ def main() -> int:
         c.check("resolve record keys", recs and list(recs[0]) == RESOLVE_KEYS, recs and list(recs[0]))
         c.check("resolve ids are ints of the graph",
                 all(type(x["id"]) is int and x["id"] in ids for x in recs))
+        live = {x["qname"]: x["live"] for x in recs}
+        c.check("resolve rows carry a bool live", recs and all(type(x["live"]) is bool for x in recs))
+        c.check("resolve live flags: main / helper live, module and step_0 dead",
+                (live.get("app::main"), live.get("app::helper"), live.get("app"), live.get("app::step_0"))
+                == (True, True, False, False), live)
     return c.done()
 
 

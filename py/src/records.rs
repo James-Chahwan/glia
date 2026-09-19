@@ -2,8 +2,11 @@
 
 use pyo3::prelude::*;
 
+use std::collections::HashSet;
+
 use repo_graph_code_domain::node_kind;
-use repo_graph_core::{Confidence, Node};
+use repo_graph_core::{Confidence, Node, NodeId};
+use repo_graph_engine::profile::CODE_PROFILE;
 use repo_graph_graph::roles::roles_in;
 use repo_graph_graph::{MergedGraph, RepoGraph};
 
@@ -13,16 +16,20 @@ use crate::graph::PyGraph;
 #[pymethods]
 impl PyGraph {
     /// Every node as `{id, kind, name, qname, confidence, path, start_line,
-    /// end_line, roles}`. `start_line` / `end_line` are 1-based and inclusive —
-    /// the same base as the `line` of every answer record (`blast_radius`,
-    /// `resolve`, `cross_stack_trace`, ...), so the two never disagree about
-    /// where a node starts. `roles` names the framework roles the node plays
-    /// (`["COMPONENT"]`, `["SERVICE"]`, ...; `[]` when none): since LB.3a a
-    /// component or service is a CLASS / FUNCTION carrying a ROLE cell, so a
-    /// consumer that tiers or iconifies by role reads `roles`, not `kind`.
-    /// Returns a JSON array.
+    /// end_line, roles, entry, live}`. `start_line` / `end_line` are 1-based
+    /// and inclusive — the same base as the `line` of every answer record
+    /// (`blast_radius`, `resolve`, `cross_stack_trace`, ...), so the two never
+    /// disagree about where a node starts. `roles` names the framework roles
+    /// the node plays (`["COMPONENT"]`, `["SERVICE"]`, ...; `[]` when none):
+    /// since LB.3a a component or service is a CLASS / FUNCTION carrying a
+    /// ROLE cell, so a consumer that tiers or iconifies by role reads `roles`,
+    /// not `kind`. `entry` (LD.6) is the code domain's entrypoint rule over the
+    /// node's kind, name and roles (the kinds `entry_kinds()` lists, `main` /
+    /// `test*` functions, a COMPONENT role); `live` is whether an entrypoint
+    /// reaches it (`false` = likely dead), the flag every answer record
+    /// carries. Returns a JSON array.
     fn nodes_json(&self) -> PyResult<String> {
-        Ok(nodes_json_string(&self.merged))
+        Ok(nodes_json_string(&self.merged, self.live()))
     }
 
     fn edges_json(&self) -> PyResult<String> {
@@ -50,27 +57,38 @@ impl PyGraph {
 }
 
 /// The body of `PyGraph::nodes_json`, pyo3-free so `cargo test -p
-/// repo-graph-py` can exercise it (see the crate doc's link note).
-fn nodes_json_string(merged: &MergedGraph) -> String {
+/// repo-graph-py` can exercise it (see the crate doc's link note). `live` is
+/// the graph's `entrypoint_reachable` set. Prints LD.6's
+/// `[live] annotate surface=nodes_json rows=<n> live=<l> entry_kinds=<k>`,
+/// the engine's `answers::live_marker` format.
+fn nodes_json_string(merged: &MergedGraph, live: &HashSet<NodeId>) -> String {
     let mut out = String::from("[");
-    let mut first = true;
+    let (mut rows, mut live_rows) = (0usize, 0usize);
     for g in &merged.graphs {
         for n in &g.nodes {
-            if !first {
+            if rows > 0 {
                 out.push(',');
             }
-            first = false;
-            out.push_str(&node_record_json(g, n));
+            rows += 1;
+            let is_live = live.contains(&n.id);
+            live_rows += usize::from(is_live);
+            out.push_str(&node_record_json(g, n, is_live));
         }
     }
     out.push(']');
+    eprintln!(
+        "[live] annotate surface=nodes_json rows={rows} live={live_rows} entry_kinds={}",
+        CODE_PROFILE.tables.entry.kinds.len()
+    );
     out
 }
 
 /// One `nodes_json` record. Stored POSITION rows are 0-based; this emits
 /// them 1-based, the answer-record base. `roles` comes from the one reader,
-/// `roles_in` (the node's own role kind plus its ROLE cell), always present.
-fn node_record_json(g: &RepoGraph, n: &Node) -> String {
+/// `roles_in` (the node's own role kind plus its ROLE cell), always present;
+/// `entry` applies `CODE_PROFILE.tables.entry` to the kind, name and those
+/// roles (LD.6), and `live` is the caller's membership test.
+fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
     let kind = g.nav.kind_by_id.get(&n.id).copied();
     let name = g.nav.name_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
     let qname = g.nav.qname_by_id.get(&n.id).map(|s| s.as_str()).unwrap_or("");
@@ -91,12 +109,14 @@ fn node_record_json(g: &RepoGraph, n: &Node) -> String {
         ),
         None => r#","path":null,"start_line":null,"end_line":null"#.to_string(),
     };
-    let roles: Vec<String> = roles_in(kind, &n.cells)
+    let role_kinds = roles_in(kind, &n.cells);
+    let entry = CODE_PROFILE.tables.entry.is_entry(kind, name, &role_kinds);
+    let roles: Vec<String> = role_kinds
         .into_iter()
         .map(|r| format!("\"{}\"", escape_json(node_kind::name(r))))
         .collect();
     format!(
-        r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"{},"roles":[{}]}}"#,
+        r#"{{"id":{},"kind":{},"name":"{}","qname":"{}","confidence":"{}"{},"roles":[{}],"entry":{},"live":{}}}"#,
         n.id.0,
         kind.map(|k| k.0).unwrap_or(0),
         escape_json(name),
@@ -104,6 +124,8 @@ fn node_record_json(g: &RepoGraph, n: &Node) -> String {
         conf,
         span,
         roles.join(","),
+        entry,
+        live,
     )
 }
 
@@ -142,10 +164,10 @@ mod tests {
             unresolved_refs: vec![],
             properties: Default::default(),
         };
-        let rec = |i: usize| node_record_json(&g, &g.nodes[i]);
-        assert!(rec(0).ends_with(r#","roles":["SERVICE"]}"#), "{}", rec(0));
-        assert!(rec(1).ends_with(r#","roles":[]}"#), "{}", rec(1));
-        assert!(rec(2).ends_with(r#","roles":["COMPONENT"]}"#), "{}", rec(2));
+        let rec = |i: usize| node_record_json(&g, &g.nodes[i], false);
+        assert!(rec(0).ends_with(r#","roles":["SERVICE"],"entry":false,"live":false}"#), "{}", rec(0));
+        assert!(rec(1).ends_with(r#","roles":[],"entry":false,"live":false}"#), "{}", rec(1));
+        assert!(rec(2).ends_with(r#","roles":["COMPONENT"],"entry":true,"live":false}"#), "{}", rec(2));
         let v: serde_json::Value = serde_json::from_str(&rec(0)).expect("valid JSON");
         assert_eq!(v["kind"], node_kind::CLASS.0);
         assert_eq!(v["qname"], "svc::Api");
@@ -168,8 +190,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
 
+        let live = repo_graph_engine::entrypoint_reachable(&merged);
         let v: serde_json::Value =
-            serde_json::from_str(&nodes_json_string(&merged)).expect("valid JSON");
+            serde_json::from_str(&nodes_json_string(&merged, &live)).expect("valid JSON");
         let mut spans: Vec<(String, i64, Option<i64>)> = v
             .as_array()
             .expect("a JSON array")
@@ -194,5 +217,22 @@ mod tests {
         // The values themselves: 1-based, as an editor shows them.
         let starts: Vec<i64> = spans.iter().map(|(_, s, _)| *s).collect();
         assert_eq!(starts, [1, 4, 8]);
+
+        // LD.6: every record carries bool `entry` / `live`. `main` is an
+        // entry by name and live; `helper` is live through main's call but no
+        // entry; the MODULE is neither.
+        let flags: Vec<(String, bool, bool)> = v
+            .as_array()
+            .expect("a JSON array")
+            .iter()
+            .map(|n| {
+                let entry = n["entry"].as_bool().expect("bool entry");
+                let live = n["live"].as_bool().expect("bool live");
+                (n["qname"].as_str().unwrap_or("").to_string(), entry, live)
+            })
+            .collect();
+        for (q, entry, live) in [("app", false, false), ("app::helper", false, true), ("app::main", true, true)] {
+            assert!(flags.contains(&(q.to_string(), entry, live)), "{q}: {flags:?}");
+        }
     }
 }

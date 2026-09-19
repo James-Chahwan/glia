@@ -137,9 +137,11 @@ fn table_names_the_tier_and_location() {
     let fx = Fixture::new("table");
     let out = ok(&["find", &fx.repo("api"), "get_user", "--top-k", "1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("| match | kind | qname | location |"), "{stdout}");
+    // LD.6: the `live` column, rendered as `blast-radius` renders it; nothing
+    // reaches `get_user` from an entrypoint in this fixture.
+    assert!(stdout.contains("| match | live | kind | qname | location |"), "{stdout}");
     assert!(
-        stdout.contains("| exact_name | FUNCTION | `users::get_user` | users.py:1 |"),
+        stdout.contains("| exact_name | ⊘ | FUNCTION | `users::get_user` | users.py:1 |"),
         "{stdout}"
     );
 }

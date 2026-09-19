@@ -9,7 +9,9 @@
 //! so the graph, store and projection crates (which cannot depend on the
 //! engine) read the same tables. Every list is the hardcoding it replaced,
 //! with the same members in the same order:
-//! - `entry`: the entrypoint predicate in `engine::answers`;
+//! - `entry`: the entrypoint predicate in `engine::answers` (LD.6 then
+//!   reconciled it with the repo-graph wrapper's `ENTRY_KINDS` and added the
+//!   inbound handler kinds both lacked, so it is the one entrypoint set);
 //! - `carry_edges`: the blast carry list in `graph::blast`;
 //! - `activation_weights` / `activation_presets`: the activation default and
 //!   preset functions in `graph::activation`.
@@ -36,18 +38,27 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         edge_categories: ec::ALL,
         cell_types: cell_type::ALL,
     },
-    // Routes, gRPC / WS / event handlers, CLI commands and framework
-    // components are externally triggered roots; so are `main` and
-    // `test*` / `Test*` functions and methods. A COMPONENT role (LB.3a's fold:
-    // an Angular `@Component` is a CLASS carrying ROLE COMPONENT) is an entry
-    // exactly as the COMPONENT kind is (LB.3b); the other roles never were.
+    // The ONE entrypoint set (LD.6): liveness seeds from it, the engine's
+    // `profile::entry_kinds()` lists it, and the dense-text `*` sigil reads
+    // it. Every kind is an externally triggered inbound handler: routes, gRPC
+    // services and servers, Connect / Twirp procedures, queue consumers,
+    // GraphQL resolvers, WS / event handlers, CLI commands, cron jobs and
+    // framework components; so are `main` and `test*` / `Test*` functions and
+    // methods. A COMPONENT role (LB.3a's fold: an Angular `@Component` is a
+    // CLASS carrying ROLE COMPONENT) is an entry exactly as the COMPONENT
+    // kind is (LB.3b); the other roles never were.
     entry: EntryRule {
         kinds: &[
             nk::ROUTE,
             nk::GRPC_SERVICE,
+            nk::GRPC_SERVER,
+            nk::RPC_PROCEDURE,
+            nk::QUEUE_CONSUMER,
+            nk::GRAPHQL_RESOLVER,
             nk::WS_HANDLER,
             nk::EVENT_HANDLER,
             nk::CLI_COMMAND,
+            nk::CRON_JOB,
             nk::COMPONENT,
         ],
         roles: &[nk::COMPONENT],

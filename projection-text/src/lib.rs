@@ -22,10 +22,12 @@ pub mod synth_callsite_argflow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+use repo_graph_code_domain::profile::CODE_TABLES;
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{
     CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
 };
+use repo_graph_graph::roles::roles_in;
 use repo_graph_graph::{MergedGraph, RepoGraph};
 
 const LEGEND: &str = "\
@@ -161,11 +163,34 @@ fn render(graphs: &[&RepoGraph], cross_edges: &[Edge], full_bodies: bool) -> Str
         }
     }
 
+    let entries = entry_nodes(graphs);
     out.push('\n');
-    render_topology(&mut out, graphs, cross_edges, &scopes);
+    render_topology(&mut out, graphs, cross_edges, &scopes, &entries);
     out.push('\n');
     render_nodes(&mut out, graphs, &scopes, &defaults, full_bodies);
     out
+}
+
+/// The nodes the `*` sigil marks: the code domain's ONE entrypoint set
+/// (LD.6), `CODE_TABLES.entry` over each node's kind, name and roles (read
+/// through `roles_in`, so an `@Component` CLASS is marked like a COMPONENT) —
+/// the same rule liveness seeds from, so `*` never disagrees with a `live`
+/// flag's roots. Before LD.6 the sigil kept its own `ROUTE | ENDPOINT`
+/// list: an ENDPOINT is the CLIENT side of an HTTP call (outbound, where this
+/// code makes the request), never an entry, and every other inbound handler
+/// went unmarked.
+fn entry_nodes(graphs: &[&RepoGraph]) -> HashSet<NodeId> {
+    graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter().filter(|n| is_entry_node(g, n)).map(|n| n.id))
+        .collect()
+}
+
+/// Is `n` (a node of `g`) an entrypoint? See [`entry_nodes`].
+fn is_entry_node(g: &RepoGraph, n: &Node) -> bool {
+    let kind = g.nav.kind_by_id.get(&n.id).copied();
+    let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+    CODE_TABLES.entry.is_entry(kind, name, &roles_in(kind, &n.cells))
 }
 
 // ============================================================================
@@ -325,6 +350,7 @@ fn render_topology(
     graphs: &[&RepoGraph],
     cross_edges: &[Edge],
     scopes: &[(String, String)],
+    entries: &HashSet<NodeId>,
 ) {
     out.push_str("[TOPOLOGY]\n");
     let mut lines: Vec<String> = Vec::new();
@@ -334,7 +360,7 @@ fn render_topology(
             if !is_depends_category(e.category) {
                 continue;
             }
-            if let Some(line) = edge_line(graphs, g, e, scopes) {
+            if let Some(line) = edge_line(graphs, g, e, scopes, entries) {
                 lines.push(line);
             }
         }
@@ -347,7 +373,7 @@ fn render_topology(
         let Some(from_g) = find_owning_graph(graphs, e.from) else {
             continue;
         };
-        if let Some(line) = edge_line(graphs, from_g, e, scopes) {
+        if let Some(line) = edge_line(graphs, from_g, e, scopes, entries) {
             lines.push(line);
         }
     }
@@ -365,14 +391,14 @@ fn edge_line(
     src_g: &RepoGraph,
     e: &Edge,
     scopes: &[(String, String)],
+    entries: &HashSet<NodeId>,
 ) -> Option<String> {
     let src_qname = src_g.nav.qname_by_id.get(&e.from)?.as_str();
-    let src_kind = src_g.nav.kind_by_id.get(&e.from).copied();
     let dst_qname = lookup_qname(graphs, e.to);
 
     let mut line = String::new();
     line.push_str(&abbreviate(src_qname, scopes));
-    if src_kind.is_some_and(is_entry_kind) {
+    if entries.contains(&e.from) {
         line.push_str(" *");
     }
     line.push_str(" > ");
@@ -405,10 +431,6 @@ fn is_depends_category(c: EdgeCategoryId) -> bool {
     c == edge_category::CALLS
         || c == edge_category::HANDLED_BY
         || c == edge_category::HTTP_CALLS
-}
-
-fn is_entry_kind(k: NodeKindId) -> bool {
-    k == node_kind::ROUTE || k == node_kind::ENDPOINT
 }
 
 // ============================================================================
@@ -451,7 +473,7 @@ fn render_node_block(
     out.push_str(&abbreviate(qname, scopes));
     out.push(']');
     let kind = g.nav.kind_by_id.get(&n.id).copied();
-    if kind.is_some_and(is_entry_kind) {
+    if is_entry_node(g, n) {
         out.push_str(" *");
     }
     out.push('\n');
@@ -932,12 +954,71 @@ mod tests {
         });
 
         let s = render_merged(&merged);
+        // LD.6: the sigil marks the one entrypoint set; an ENDPOINT is the
+        // client (outbound) side of the call, not an entry.
         assert!(
-            s.contains("endpoint:GET:/api/x * > route:/api/x"),
+            s.contains("endpoint:GET:/api/x > route:/api/x"),
             "missing cross-repo topology line:\n{s}"
         );
         assert!(s.contains("[route:/api/x] *"));
-        assert!(s.contains("[endpoint:GET:/api/x] *"));
+        assert!(s.contains("[endpoint:GET:/api/x]\n"), "an ENDPOINT carries no star:\n{s}");
+    }
+
+    /// LD.6: the `*` sigil reads `CODE_TABLES.entry`, the rule liveness seeds
+    /// from — every inbound handler kind, `main` / `test*` functions and an
+    /// `@Component` CLASS (its ROLE cell) are marked; a plain function and a
+    /// plain class are not.
+    #[test]
+    fn star_sigil_is_the_entry_table() {
+        let repo = RepoId::from_canonical("test://entry-star");
+        let mut nodes = Vec::new();
+        let mut nav = repo_graph_code_domain::CodeNav::default();
+        let mut add = |kind, qname: &str, cells: Vec<Cell>| {
+            let id = NodeId::from_parts("code", repo, kind, qname);
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            nav.record(id, name, qname, kind, None);
+            nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+        };
+        let role = Cell {
+            kind: cell_type::ROLE,
+            payload: CellPayload::Json(r#"{"roles":["COMPONENT"]}"#.into()),
+        };
+        add(node_kind::QUEUE_CONSUMER, "queue_consumer:orders", vec![]);
+        add(node_kind::GRAPHQL_RESOLVER, "graphql:Query.user", vec![]);
+        add(node_kind::CRON_JOB, "cron:nightly", vec![]);
+        add(node_kind::GRPC_SERVER, "grpc_server:Greeter", vec![]);
+        add(node_kind::RPC_PROCEDURE, "rpc:eliza.Say", vec![]);
+        add(node_kind::FUNCTION, "m::main", vec![]);
+        add(node_kind::FUNCTION, "m::test_login", vec![]);
+        add(node_kind::CLASS, "ui::Page", vec![role]);
+        add(node_kind::FUNCTION, "m::helper", vec![]);
+        add(node_kind::CLASS, "m::Plain", vec![]);
+        let g = RepoGraph {
+            repo,
+            nodes,
+            edges: vec![],
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: HashSet::new(),
+        };
+        let s = render_repo_graph(&g);
+        for q in [
+            "queue_consumer:orders",
+            "graphql:Query.user",
+            "cron:nightly",
+            "grpc_server:Greeter",
+            "rpc:eliza.Say",
+            "m::main",
+            "m::test_login",
+            "ui::Page",
+        ] {
+            assert!(s.contains(&format!("[{q}] *\n")), "{q} carries the entry star:\n{s}");
+        }
+        for q in ["m::helper", "m::Plain"] {
+            assert!(s.contains(&format!("[{q}]\n")), "{q} carries no star:\n{s}");
+        }
     }
 
     #[test]

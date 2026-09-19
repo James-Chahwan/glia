@@ -2,7 +2,7 @@
 //! <qname>, located. An unknown qname is an absence answer (exit 0, with
 //! suggestions), not an error.
 
-use crate::cmd::resolve::print_absence;
+use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;
 
 #[derive(clap::Args, Debug)]
@@ -55,15 +55,15 @@ pub(crate) fn run(args: Args) -> i32 {
         print_absence(a);
         return 0;
     }
-    println!("| kind | doc section | location |");
-    println!("|---|---|---|");
+    println!("| live | kind | doc section | location |");
+    println!("|:-:|---|---|---|");
     for d in &docs.results {
         let loc = match (&d.file, d.line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
             (Some(f), None) => f.clone(),
             _ => "—".to_string(),
         };
-        println!("| {} | `{}` | {} |", d.kind, d.qname, loc);
+        println!("| {} | {} | `{}` | {} |", live_glyph(d.live), d.kind, d.qname, loc);
     }
     0
 }

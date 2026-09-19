@@ -2,5 +2,6 @@
 fn build_stamp() -> &'static str
 fn category_names() -> Vec<(u32, String)>
 fn cell_type_names() -> Vec<(u32, String)>
+fn entry_kinds() -> Vec<(u32, String)>
 fn kind_names() -> Vec<(u32, String)>
 fn version() -> &'static str

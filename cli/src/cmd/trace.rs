@@ -1,6 +1,7 @@
 //! `glia trace` (P3 cross_stack_trace) — follow <feature> forward across
 //! service boundaries; the ordered path with a mechanism per hop.
 
+use crate::cmd::resolve::live_glyph;
 use crate::common::generate_for;
 
 #[derive(clap::Args, Debug)]
@@ -50,8 +51,8 @@ pub(crate) fn run(args: Args) -> i32 {
         println!("_(no outward flow)_");
         return 0;
     }
-    println!("| depth | mechanism | xsvc | from | → to | location |");
-    println!("|--:|---|:-:|---|---|---|");
+    println!("| depth | mechanism | xsvc | from | → to | live | location |");
+    println!("|--:|---|:-:|---|---|:-:|---|");
     for h in &hops {
         let loc = match (&h.to_file, h.to_line) {
             (Some(f), Some(l)) => format!("{f}:{l}"),
@@ -60,8 +61,15 @@ pub(crate) fn run(args: Args) -> i32 {
         };
         let xsvc = if h.cross_service { "✔" } else { "" };
         println!(
-            "| {} | {} | {} | `{}` | `{}` ({}) | {} |",
-            h.depth, h.mechanism, xsvc, h.from_qname, h.to_qname, h.to_kind, loc
+            "| {} | {} | {} | `{}` | `{}` ({}) | {} | {} |",
+            h.depth,
+            h.mechanism,
+            xsvc,
+            h.from_qname,
+            h.to_qname,
+            h.to_kind,
+            live_glyph(h.to_live),
+            loc
         );
     }
     0
