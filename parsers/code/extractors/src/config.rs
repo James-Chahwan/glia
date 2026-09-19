@@ -359,7 +359,7 @@ fn mask_userinfo(value: &str) -> Option<String> {
 /// The ENV cell for one define-side declaration, plus whether the stored
 /// payload had to be altered. Returns `None` when the site declared no value.
 ///
-/// REDACTION IS NOT OPTIONAL. `.gmap` files are written to `.ai/repo-graph/`,
+/// REDACTION IS NOT OPTIONAL. `.gmap` files are persisted inside the repo,
 /// shipped to consumers, and rendered verbatim into the dense text handed to
 /// an LLM (projection-text renders every cell), so a secret-named key records
 /// only that a value exists — never the value itself.

@@ -213,7 +213,7 @@ directory exits 1.
 ```
 
 - **Copies, never the fixture dirs.** `GLIA_NO_PERSIST=1` gates only the
-  `.gmap` write, not `<repo>/.ai/repo-graph/parse_cache.bin`. A sidecar left in
+  `.gmap` write, not `<repo>/.glia/graph/parse_cache.bin`. A sidecar left in
   a fixture would make later cold grades depend on the previous run. A copy
   grades the same as the in-tree fixture: all 180 fixtures matched at A1.7.
 - **grade.py is not modified.** `grade_fixture` runs as-is, with its module

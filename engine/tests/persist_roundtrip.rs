@@ -141,7 +141,7 @@ fn in_repo_layout_root_is_dot_dot() {
     let tmp = tempfile::tempdir().unwrap();
     let (api, web) = two_repo_fixture(tmp.path());
     let r = build(&api, &web);
-    let dir = api.join(".ai/repo-graph");
+    let dir = repo_graph_store::default_gmap_dir(&api);
     assert!(!dir.exists());
     let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, &dir);
     let roots: BTreeSet<Option<String>> = meta.repos.iter().map(|m| m.root.clone()).collect();

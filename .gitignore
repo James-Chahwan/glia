@@ -23,9 +23,15 @@ bench/latent/out/
 
 runpod.sh
 
-# Cached graph data produced by repo-graph-py 0.4.14+ auto-persist. Regenerable
-# from source — `repo_graph_py.generate()` writes here unless GLIA_NO_PERSIST=1.
-# Match at any depth (crates auto-persist into their own `<crate>/.ai/`).
+# Cached graph data: the 0.5.0 layout `<repo>/.glia/graph/` written by
+# `glia build`, the install-hooks hooks and `repo_graph_py.generate()`'s
+# auto-persist (unless GLIA_NO_PERSIST=1). Regenerable from source. The dir
+# also ignores itself (its own `.gitignore` is `*`); these lines cover glia's
+# own repo regardless. The rest of `.glia/` (overlay.toml, cells.jsonl) is
+# checked-in input. Match at any depth (fixtures and crates get their own).
+.glia/graph/
+**/.glia/graph/
+# The 0.4.x layout + parse cache (0.5.0 never reads or writes it).
 .ai/repo-graph/
 **/.ai/repo-graph/
 

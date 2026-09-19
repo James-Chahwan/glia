@@ -185,6 +185,8 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
 
 Zero-copy rkyv serialisation with memory-mapped read. Sharded by kind to keep hot paths local. Write-once, rebuild-whole-file — no in-place mutation. Owned vs Archived types are the mental model: loaded views are `Archived<T>`, writes go through `Owned<T>` then serialise.
 
+Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache).
+
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
 - **Dense text** — sigil-based projection with prefix/default/module dedup and scope collapse

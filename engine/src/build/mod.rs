@@ -92,8 +92,9 @@ pub fn generate_one_with_cache(
 }
 
 /// Disk-backed incremental build: load the parse cache from
-/// `<repo>/.ai/repo-graph/parse_cache.bin`, build, then persist it. Cache save
-/// failures are logged, not fatal. Backs pyo3 `generate(incremental=True)`.
+/// `<repo>/.glia/graph/parse_cache.bin` (beside the layout), build, then
+/// persist it. Cache save failures are logged, not fatal. Backs pyo3
+/// `generate(incremental=True)` and `glia build`.
 pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, String> {
     let mut cache = ParseCache::load(repo_path);
     let result = generate_one_inner(repo_path, Some(&mut cache))?;
@@ -168,7 +169,7 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
 }
 
 /// Disk-backed incremental multi-repo build: each path gets its OWN
-/// `<repo>/.ai/repo-graph/parse_cache.bin`, loaded before and saved after that
+/// `<repo>/.glia/graph/parse_cache.bin`, loaded before and saved after that
 /// repo's parse (audit 2026-06-10 #14). Byte-identical to [`generate_many`].
 /// Opt-in, never the default: the substrate-gap eval grades through
 /// `generate_many` and must stay hermetic. Cache save failures are logged, not

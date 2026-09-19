@@ -21,11 +21,24 @@ use crate::container::{
 };
 use crate::error::StoreError;
 
-/// Convention: `<repo>/.ai/repo-graph/` holds the sharded layout (manifest.json
-/// + per-language `.gmap` + `cross_stack.gmap`). Matches the `mcp-repo-graph`
-/// wrapper's config location (`.ai/repo-graph/config.yaml`) so all on-disk
-/// state for a repo lives under one directory.
-pub const DEFAULT_GMAP_SUBDIR: &str = ".ai/repo-graph";
+/// Convention (LC.9): `<repo>/.glia/graph/` holds exactly the engine's OUTPUT
+/// for a repo - `manifest.json`, the per-language `.gmap` shards,
+/// `cross_stack.gmap`, the parse cache `parse_cache.bin` beside them, and a
+/// self-ignoring `.gitignore` - written by one writer
+/// (`repo_graph_engine::persist::persist_result`) for `glia build`, the git
+/// hooks and pyo3 alike, and read by `load_from_gmap` and the MCP. Everything
+/// else under `.glia/` is an INPUT glia reads (`docs-snapshot/`,
+/// `overlay.toml`), so the output gets its own subdirectory rather than
+/// sharing `.glia/` with checked-in files. The one name to change if the
+/// directory ever moves.
+pub const DEFAULT_GMAP_SUBDIR: &str = ".glia/graph";
+
+/// Where 0.4.x wrote the sharded layout and parse cache (and where the 0.4.x
+/// `mcp-repo-graph` wrapper still does). 0.5.0 neither reads nor writes a
+/// layout there: the builder walk and the [`is_gmap_stale`] scan skip it as
+/// engine output, so a 0.4.x writer still running beside 0.5.0 never marks the
+/// new layout stale, and the writer only reports it.
+pub const LEGACY_GMAP_SUBDIR: &str = ".ai/repo-graph";
 
 /// Resolve the conventional gmap directory for a repo. Does NOT create the
 /// directory — callers decide whether to write.
@@ -100,7 +113,7 @@ pub struct Manifest {
 /// `service_map` names services by), and its root.
 ///
 /// `root` is RELATIVE to the layout directory with `/` separators (`../..`
-/// for `<repo>/.ai/repo-graph`), so a committed layout carries no absolute
+/// for `<repo>/.glia/graph`), so a committed layout carries no absolute
 /// path and still resolves after a clone. It is absolute only when no
 /// relative path exists (another Windows drive), and absent when the writer
 /// did not know it.
@@ -561,15 +574,21 @@ fn scan_for_newer(
     gmap_dir: &Path,
     manifest_mtime: std::time::SystemTime,
 ) -> bool {
-    // Our own output, skipped by PREFIX rather than by the name `.ai`. The
+    // Our own output, skipped by PREFIX rather than by a directory name. The
     // shards and the parse cache beside them are written after the manifest, so
     // counting them would make every gmap instantly stale — a silent infinite
-    // regenerate. But `.ai` itself is NOT our output: the engine ingests
-    // `.ai/**/*.md` as DOC_SECTIONs, so an edit there MUST mark the gmap stale,
-    // which the old blanket name-skip swallowed. Canonicalised so the prefix
-    // test survives a relative `repo_path` against an absolute `gmap_dir`.
+    // regenerate. Three prefixes, mirroring the builder walk's
+    // `is_self_output`: the layout being checked, the repo's default layout
+    // `<repo>/.glia/graph` (a layout checked at another dir must not go stale
+    // because a hook refreshed the default one), and the legacy
+    // `<repo>/.ai/repo-graph` a 0.4.x wrapper may still write into. Their
+    // parents are NOT our output: `.glia/overlay.toml` is an input and the
+    // engine ingests `.ai/**/*.md` as DOC_SECTIONs, so an edit there MUST mark
+    // the gmap stale. Canonicalised so the prefix test survives a relative
+    // `repo_path` against an absolute `gmap_dir`.
     let root = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let gmap = std::fs::canonicalize(gmap_dir).unwrap_or_else(|_| gmap_dir.to_path_buf());
+    let own_output = [gmap, root.join(DEFAULT_GMAP_SUBDIR), root.join(LEGACY_GMAP_SUBDIR)];
     let mut gated = 0usize;
     let mut checked = 0usize;
     let mut stale = false;
@@ -594,7 +613,8 @@ fn scan_for_newer(
                 // Hard-skipped dirs and our own output produce no node of any
                 // kind, so not even their own mtime is observable — they must
                 // NOT reach the gated-dir-mtime rule below.
-                if path.starts_with(&gmap) || walk_gating::is_hard_skip(&bn) {
+                let own = own_output.iter().any(|p| path.starts_with(p));
+                if own || walk_gating::is_hard_skip(&bn) {
                     gated += 1;
                     continue;
                 }
@@ -1083,27 +1103,35 @@ mod tests {
     }
 
     /// The conventional on-disk layout: the gmap lives INSIDE the repo at
-    /// `<repo>/.ai/repo-graph`, so `.ai` is both our output directory and a
-    /// directory the engine ingests docs from.
-    fn ai_layout_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    /// `<repo>/.glia/graph`, so `.glia` holds both our output and inputs the
+    /// build reads (`overlay.toml`), and `.ai` is a directory the engine
+    /// ingests docs from.
+    fn glia_layout_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let repo_dir = dir.path().join("repo");
         let gmap_dir = repo_dir.join(DEFAULT_GMAP_SUBDIR);
         write_file(&repo_dir.join("src/a.py"), "x = 1\n");
         std::fs::create_dir_all(repo_dir.join("node_modules/pkg")).unwrap();
-        write_sharded(&[("a", &empty_graph("test://ai-layout"))], &[], &gmap_dir).unwrap();
+        write_sharded(&[("a", &empty_graph("test://glia-layout"))], &[], &gmap_dir).unwrap();
         // mtime granularity: make "after the manifest" unambiguous.
         std::thread::sleep(std::time::Duration::from_millis(20));
         (dir, gmap_dir, repo_dir)
     }
 
     #[test]
+    fn default_layout_is_under_dot_glia() {
+        assert_eq!(default_gmap_dir(Path::new("r")), Path::new("r/.glia/graph"));
+        assert_eq!(LEGACY_GMAP_SUBDIR, ".ai/repo-graph");
+    }
+
+    #[test]
     fn stale_scan_ignores_our_own_output() {
-        let (_tmp, gmap_dir, repo_dir) = ai_layout_repo();
+        let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
         // The parse cache is written AFTER the manifest, inside the gmap dir.
         // Counting it would make every gmap permanently stale — an infinite
         // regenerate loop. Churn in a collapsed region is invisible too.
         write_file(&gmap_dir.join("parse_cache.bin"), "cache\n");
+        write_file(&gmap_dir.join(".gitignore"), "*\n");
         write_file(&repo_dir.join("node_modules/pkg/x.js"), "//\n");
         assert!(
             !is_gmap_stale(&gmap_dir, &repo_dir),
@@ -1111,17 +1139,52 @@ mod tests {
         );
     }
 
+    /// LC.9: a 0.4.x wrapper still writing `<repo>/.ai/repo-graph` beside the
+    /// 0.5.0 layout must not mark the new layout stale.
+    #[test]
+    fn stale_scan_ignores_legacy_dir() {
+        let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
+        write_file(&repo_dir.join(LEGACY_GMAP_SUBDIR).join("parse_cache.bin"), "old\n");
+        write_file(&repo_dir.join(LEGACY_GMAP_SUBDIR).join("manifest.json"), "{}\n");
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "the legacy layout is engine output, not source"
+        );
+    }
+
+    /// A layout checked at another dir skips the repo's default layout too:
+    /// a hook refreshing `<repo>/.glia/graph` is not source churn.
+    #[test]
+    fn stale_scan_skips_the_default_layout_for_any_gmap_dir() {
+        let (_tmp, gmap_dir, repo_dir) = gated_repo();
+        write_file(&repo_dir.join(DEFAULT_GMAP_SUBDIR).join("manifest.json"), "{}\n");
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+    }
+
     #[test]
     fn stale_scan_sees_ai_docs_beside_the_gmap_dir() {
-        let (_tmp, gmap_dir, repo_dir) = ai_layout_repo();
+        let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
         // `.ai` is NOT blanket-skipped: the engine ingests `.ai/**/*.md` as
-        // DOC_SECTION nodes, so a doc edit DOES change the graph. Only the gmap
-        // directory itself (a prefix, not the name `.ai`) is our own output.
+        // DOC_SECTION nodes, so a doc edit DOES change the graph. Only the
+        // legacy `.ai/repo-graph` inside it is (a prefix, not the name `.ai`).
         write_file(&repo_dir.join(".ai/architecture.md"), "# arch\n");
         assert!(
             is_gmap_stale(&gmap_dir, &repo_dir),
             "an ingested .ai doc must mark the gmap stale"
+        );
+    }
+
+    /// `.glia` is not blanket-skipped either: only `.glia/graph` is output,
+    /// while `.glia/overlay.toml` is an input the build reads.
+    #[test]
+    fn stale_scan_sees_glia_inputs_beside_the_gmap_dir() {
+        let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay\n");
+        assert!(
+            is_gmap_stale(&gmap_dir, &repo_dir),
+            "an edited .glia input must mark the gmap stale"
         );
     }
 

@@ -2,8 +2,9 @@
 //!
 //! `glia install-hooks <repo>` writes the REBUILD hooks (`post-commit`,
 //! `post-merge`, `post-checkout`; each runs `glia build .` or `--command`) so
-//! the repo's `.gmap` rebuilds on every change. They go where git reads hooks
-//! from — `git rev-parse --git-path hooks` — which honours `core.hooksPath`
+//! every change keeps `<repo>/.glia/graph`, the layout the MCP reads, fresh.
+//! They go where git reads hooks from — `git rev-parse --git-path hooks` —
+//! which honours `core.hooksPath`
 //! and, for a linked worktree, is the common dir's `hooks/`, shared by every
 //! worktree of that repo (the old `<gitdir>/hooks` of a worktree is never run).
 //!
@@ -35,7 +36,7 @@ use std::process::{Command, Stdio};
 
 use clap::Subcommand;
 
-/// Hooks that keep the `.gmap` fresh; installed on every run.
+/// Hooks that keep `<repo>/.glia/graph` fresh; installed on every run.
 const REBUILD_HOOKS: &[&str] = &["post-commit", "post-merge", "post-checkout"];
 /// The branch-pair lock; installed only with `--pair`.
 const PAIR_HOOKS: &[&str] = &["pre-commit", "commit-msg"];
@@ -591,7 +592,7 @@ fn rebuild_script(hook_name: &str, cmd: &str) -> String {
     format!(
         r#"#!/bin/sh
 {HOOK_MARKER}
-# Managed by `glia install-hooks`. Re-run on changes to keep .gmap fresh.
+# Managed by `glia install-hooks`. Re-run on changes to keep <repo>/.glia/graph fresh.
 # Hook: {hook_name}
 # Edit `--command` and re-run install-hooks to change. Remove with `--uninstall`.
 

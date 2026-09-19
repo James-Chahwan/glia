@@ -121,7 +121,7 @@ Top-level rule: parsers extract, graph crate resolves. Parsers emit raw `Extract
 | **CrossGraphResolver** | Trait every cross-service resolver implements. 13 of them today. `HttpStackResolver` is the canonical example to copy. |
 | **ExtractedItems / UnresolvedRef** | What a parser hands to the graph builder. Parsers don't resolve names; they extract everything the AST gives + emit unresolved refs. The graph walker turns those into concrete edges. |
 | **Universal resolver** | The shared walker in `graph/` that handles `SelfMethod` → enclosing CLASS/STRUCT, etc. Languages contribute via a reserved `extra_hook` seam when generic walking isn't enough. |
-| **.gmap** | The on-disk format. rkyv zero-copy + mmap, sharded by kind. Write-once: rebuild-whole-file, no in-place mutation. Owned vs Archived types are the mental model. Lives at `<repo>/.glia/`. |
+| **.gmap** | The on-disk format. rkyv zero-copy + mmap, sharded by kind. Write-once: rebuild-whole-file, no in-place mutation. Owned vs Archived types are the mental model. Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache), written by `glia build`, the hooks and pyo3 alike. |
 | **Cell** | A typed JSON payload hanging off a node. `CellType::POSITION = {"file","start_line","end_line"}`, `CellType::CODE = source text`. Same registry as NodeKind/EdgeCategory, locked IDs. |
 | **Activation / PPR** | Personalised PageRank, damping = 0.5. `ActivationConfig` exposes direction + edge weights + node specificity as the three dials. Domain-agnostic. HippoRAG-shaped: seed → propagate → top-K. |
 | **Projection (dense text)** | Sigil-based text rendering of a sub-graph. Prefix/default/module dedup, scope collapse. Designed to pack the most graph signal per LLM context token. |
@@ -237,9 +237,9 @@ cargo build --release -p glia-cli  # release CLI
 
 # Per-repo .gmap build (post-commit-hook flavour)
 ./target/release/glia build ~/Code/<some-repo>
-ls ~/Code/<some-repo>/.glia/
+ls ~/Code/<some-repo>/.glia/graph/
 
-# Opt-in git hooks (keeps .gmap fresh on every commit)
+# Opt-in git hooks (keep <repo>/.glia/graph fresh on every commit)
 ./target/release/glia install-hooks ~/Code/<some-repo>
 # undo with --uninstall
 

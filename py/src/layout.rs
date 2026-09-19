@@ -6,8 +6,8 @@ use std::path::Path;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::persist::load_layout;
-use repo_graph_store::{default_gmap_dir as store_default_gmap_dir, is_gmap_stale};
+use repo_graph_engine::persist::{default_layout_dir, load_layout};
+use repo_graph_store::is_gmap_stale;
 
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
@@ -28,11 +28,16 @@ fn load_from_gmap(dir: &str) -> PyResult<PyGraph> {
         .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))
 }
 
-/// Conventional gmap directory path for a repo: `<repo>/.ai/repo-graph`.
-/// The Python wrapper uses this to know where to look for a cached graph.
+/// Conventional gmap directory path for a repo: `<repo>/.glia/graph` (0.4.x:
+/// `<repo>/.ai/repo-graph`, no longer read or written). The one layout
+/// `generate`'s auto-persist, `save_to_default`, `glia build` and the
+/// `glia install-hooks` hooks all write, and the directory holding only
+/// engine output (a watcher should skip exactly this prefix, not all of
+/// `.glia/`, whose `overlay.toml` is an input). The Python wrapper uses this
+/// to know where to look for a cached graph.
 #[pyfunction]
 fn default_gmap_dir(repo_path: &str) -> String {
-    store_default_gmap_dir(Path::new(repo_path))
+    default_layout_dir(Path::new(repo_path))
         .to_string_lossy()
         .into_owned()
 }
@@ -44,7 +49,8 @@ fn default_gmap_dir(repo_path: &str) -> String {
 ///
 /// Directory gating is shared with the builder's walk, so the scan skips
 /// exactly what the parse skips: VCS/editor metadata (`.git`, `.hg`, `.svn`,
-/// `.idea`, `.vscode`), the gmap dir (`.ai/`), dependency and build-output
+/// `.idea`, `.vscode`), engine output (the gmap dir, `<repo>/.glia/graph` and
+/// the legacy `<repo>/.ai/repo-graph`, by prefix), dependency and build-output
 /// trees (`node_modules`, `vendor`, `bower_components`, `.venv`,
 /// `site-packages`, `target`, `dist`, `build`, `out`, `__pycache__`, `.cache`,
 /// `.next`, `.nuxt`, `.angular`, `coverage`), plain directory entries in the

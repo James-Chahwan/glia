@@ -2,9 +2,11 @@
 //! `#[pymethods] impl PyGraph` block per primitive module (pyo3
 //! `multiple-pymethods`). This block holds the graph's own accessors: parse
 //! state, counts, raw cells, and persistence. Every `PyGraph` is made by
-//! [`PyGraph::from_result`] and saved by [`PyGraph::persist`], both over
-//! `repo_graph_engine::persist` (LC.7), so a saved-then-loaded graph carries
-//! the same labels, roots, parse errors and properties as the fresh one.
+//! [`PyGraph::from_result`] and saved over `repo_graph_engine::persist` (LC.7):
+//! `save_to` through `persist_layout`, `save_to_default` (like `generate`'s
+//! auto-persist) through the single layout writer `persist_graph` (LC.9), so a
+//! saved-then-loaded graph carries the same labels, roots, parse errors and
+//! properties as the fresh one.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,9 +16,8 @@ use pyo3::prelude::*;
 
 use repo_graph_core::{CellPayload, NodeId};
 use repo_graph_engine::GenerateResult;
-use repo_graph_engine::persist::{layout_meta, persist_layout};
+use repo_graph_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
 use repo_graph_graph::MergedGraph;
-use repo_graph_store::default_gmap_dir as store_default_gmap_dir;
 
 #[pyclass]
 pub(crate) struct PyGraph {
@@ -48,23 +49,12 @@ impl PyGraph {
         }
     }
 
-    /// Persist `merged` with its labels, roots and parse errors to `dir`
-    /// through the engine's one persist path. `writer` names the caller in the
-    /// `[gmap] meta` marker.
-    pub(crate) fn persist(
-        merged: &MergedGraph,
-        labels: &BTreeMap<u64, String>,
-        roots: &BTreeMap<u64, String>,
-        parse_errors: &[String],
-        dir: &Path,
-        writer: &str,
-    ) -> Result<(), String> {
-        let meta = layout_meta(labels, roots, parse_errors, dir);
-        persist_layout(merged, &meta, dir, writer)
-    }
-
+    /// Persist this graph with its labels, roots and parse errors to an
+    /// explicit `dir` through the engine's layout write (`save_to`); the
+    /// repo's own layout dir goes through `persist_graph` instead.
     fn persist_to(&self, dir: &Path) -> Result<(), String> {
-        Self::persist(&self.merged, &self.repo_labels, &self.repo_roots, &self.parse_errors, dir, "py")
+        let meta = layout_meta(&self.repo_labels, &self.repo_roots, &self.parse_errors, dir);
+        persist_layout(&self.merged, &meta, dir, "py")
     }
 }
 
@@ -130,11 +120,21 @@ impl PyGraph {
             .map_err(|e| PyValueError::new_err(format!("save_to({dir}): {e}")))
     }
 
-    /// Convenience: save under the conventional `<repo>/.ai/repo-graph/`. The
-    /// wrapper's cache-load path will find it there.
+    /// Convenience: save to the repo's layout dir `<repo>/.glia/graph/` (see
+    /// `default_gmap_dir`) with the same single writer as `generate`'s
+    /// auto-persist and `glia build`: the dir's self-ignoring `.gitignore`,
+    /// orphan-shard cleanup and the legacy `.ai/repo-graph` notice included.
+    /// The wrapper's cache-load path will find it there.
     fn save_to_default(&self, repo_path: &str) -> PyResult<()> {
-        let dir = store_default_gmap_dir(Path::new(repo_path));
-        self.persist_to(&dir)
-            .map_err(|e| PyValueError::new_err(format!("save_to_default({}): {e}", dir.display())))
+        let dir = default_layout_dir(Path::new(repo_path));
+        persist_graph(
+            &self.merged,
+            &self.repo_labels,
+            &self.repo_roots,
+            &self.parse_errors,
+            &dir,
+            "py",
+        )
+        .map_err(|e| PyValueError::new_err(format!("save_to_default({}): {e}", dir.display())))
     }
 }

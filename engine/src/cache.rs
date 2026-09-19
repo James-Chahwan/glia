@@ -52,17 +52,17 @@ const CACHE_FILE: &str = "parse_cache.bin";
 ///
 /// No stale-tmp sweep: a crashed build leaves a `parse_cache.bin.<pid>.tmp`
 /// behind, and sweeping `*.tmp` older than the sidecar races a concurrent
-/// writer's live staging file. The leftovers are small and live in a gitignored
-/// directory (`.gitignore` `**/.ai/repo-graph/`).
+/// writer's live staging file. The leftovers are small and live in the layout
+/// directory, which ignores itself (`<repo>/.glia/graph/.gitignore` is `*`).
 fn tmp_name() -> String {
     format!("{CACHE_FILE}.{}.tmp", std::process::id())
 }
 
-/// Conventional cache location, mirroring `repo_graph_store::default_gmap_dir`
-/// (`<repo>/.ai/repo-graph`). The engine is store-independent, so the literal is
-/// replicated here rather than depending on the store crate.
+/// Conventional cache location: the repo's layout directory
+/// (`repo_graph_store::default_gmap_dir`, `<repo>/.glia/graph`), so the parse
+/// cache sits beside the gmap it is invalidated with.
 fn gmap_dir(repo_path: &str) -> PathBuf {
-    Path::new(repo_path).join(".ai").join("repo-graph")
+    repo_graph_store::default_gmap_dir(Path::new(repo_path))
 }
 
 /// xxhash64 of a source string — the same primitive the store uses for shard
@@ -283,7 +283,7 @@ impl ParseCache {
         self.entries.is_empty()
     }
 
-    /// Load `<repo>/.ai/repo-graph/parse_cache.bin`. Returns an empty cache if
+    /// Load `<repo>/.glia/graph/parse_cache.bin`. Returns an empty cache if
     /// missing, unreadable, corrupt, or written by a different build identity.
     pub fn load(repo_path: &str) -> ParseCache {
         let path = gmap_dir(repo_path).join(CACHE_FILE);
@@ -320,9 +320,14 @@ impl ParseCache {
     /// Persist atomically next to the `.gmap`, staging through a per-process
     /// tmp file (see [`tmp_name`]). Best-effort: the cache is an optimization,
     /// never load-bearing.
+    ///
+    /// The directory gets its self-ignoring `.gitignore` here too (as from
+    /// `persist::persist_result`), so a cache-only build (pyo3 `generate` under
+    /// `GLIA_NO_PERSIST=1`) never shows up in the repo's `git status` either.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {
         let dir = gmap_dir(repo_path);
         std::fs::create_dir_all(&dir)?;
+        crate::persist::write_self_ignore(&dir)?;
         let bytes = bincode::serialize(self).map_err(std::io::Error::other)?;
         let tmp = dir.join(tmp_name());
         std::fs::write(&tmp, &bytes)?;

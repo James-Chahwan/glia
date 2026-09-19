@@ -15,7 +15,7 @@ pub(crate) struct Args {
     #[arg(long)]
     out: Option<String>,
     /// Reuse the per-repo incremental parse caches (WP-D): each repo gets
-    /// its own `<repo>/.ai/repo-graph/parse_cache.bin`. Off by default for
+    /// its own `<repo>/.glia/graph/parse_cache.bin`. Off by default for
     /// merges, so a merge writes nothing into the repos it reads.
     #[arg(long)]
     incremental: bool,

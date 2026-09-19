@@ -33,17 +33,20 @@ pub(crate) type WalkResult = (
     Vec<ProjectRoot>,      // manifest-rooted sub-projects, sorted by rel_path — A8.4
 );
 
-/// The engine's own output directory, `<root>/.ai/repo-graph` — where the store
-/// writes the gmap and `cache.rs` keeps `parse_cache.bin` (the literal mirrors
-/// `cache::gmap_dir` and `repo_graph_store::default_gmap_dir`). Skipped outright,
-/// like `store::scan_for_newer` skips it by prefix: otherwise a repo that
-/// gitignores it grows a `region:.ai/repo-graph` only after its FIRST persisted
-/// build, so the graph depends on build history. (A8.2 → A8.4 hand-off)
-/// Only the root's copy is ours; `.ai` itself is authored and still walked.
+/// The engine's own output directories: the layout `<root>/.glia/graph`
+/// (`repo_graph_store::DEFAULT_GMAP_SUBDIR`, where the store writes the gmap and
+/// `cache.rs` keeps `parse_cache.bin`) and the 0.4.x layout `<root>/.ai/repo-graph`
+/// (`LEGACY_GMAP_SUBDIR`, which a 0.4.x wrapper may still write). Skipped
+/// outright, like `store::scan_for_newer` skips them by prefix: otherwise a repo
+/// that gitignores one grows a `region:.glia/graph` only after its FIRST
+/// persisted build, so the graph depends on build history. (A8.2 → A8.4
+/// hand-off, LC.9) Only the root's copies are ours; `.glia` (inputs such as
+/// `overlay.toml`) and `.ai` (authored docs) are still walked, and a nested
+/// `pkg/.glia/graph` stays under the usual gates.
 fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
-    name == "repo-graph"
-        && parent.file_name().is_some_and(|n| n == ".ai")
-        && parent.parent() == Some(root)
+    let at_root =
+        |dir: &str| parent.file_name().is_some_and(|n| n == dir) && parent.parent() == Some(root);
+    (name == "graph" && at_root(".glia")) || (name == "repo-graph" && at_root(".ai"))
 }
 
 /// Largest `.json` the walk reads to sniff for an API contract (A10.8). A
@@ -965,31 +968,40 @@ mod walk_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The A8.2 hand-off: the engine's own `<root>/.ai/repo-graph` is neither
-    /// walked nor a region, gitignored or not, while the rest of `.ai` is.
+    /// The A8.2 hand-off, LC.9: the engine's own `<root>/.glia/graph` and the
+    /// legacy `<root>/.ai/repo-graph` are neither walked nor a region,
+    /// gitignored or not, while the rest of `.glia` and `.ai` is.
     #[test]
     fn engine_output_dir_is_skipped() {
         let root = walk_tmp("selfout");
-        std::fs::create_dir_all(root.join(".ai/repo-graph")).unwrap();
-        std::fs::create_dir_all(root.join("pkg/.ai/repo-graph")).unwrap();
-        std::fs::write(root.join(".gitignore"), "**/.ai/repo-graph/\n").unwrap();
+        for d in [".glia/graph", ".ai/repo-graph", "pkg/.glia/graph", "pkg/.ai/repo-graph"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), "**/.glia/graph/\n**/.ai/repo-graph/\n").unwrap();
+        std::fs::write(root.join(".glia/graph/leak.py"), "x = 1\n").unwrap();
         std::fs::write(root.join(".ai/repo-graph/leak.py"), "x = 1\n").unwrap();
         std::fs::write(root.join(".ai/notes.md"), "# Notes\n").unwrap();
+        std::fs::write(root.join(".glia/notes.md"), "# Glia notes\n").unwrap();
+        std::fs::write(root.join("pkg/.glia/graph/other.py"), "y = 2\n").unwrap();
         std::fs::write(root.join("pkg/.ai/repo-graph/other.py"), "y = 2\n").unwrap();
 
         let (files, regions, md, _roots) = walk_source_files(&root);
 
         let region_paths: Vec<&str> = regions.iter().map(|r| r.rel_path.as_str()).collect();
+        assert!(!region_paths.contains(&".glia/graph"), "{region_paths:?}");
         assert!(!region_paths.contains(&".ai/repo-graph"), "{region_paths:?}");
-        assert!(files.iter().all(|(p, _)| !p.starts_with(".ai/")), "{files:?}");
+        let own = |p: &str| p.starts_with(".glia/graph/") || p.starts_with(".ai/repo-graph/");
+        assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
         assert!(md.iter().any(|(p, _)| p == ".ai/notes.md"), "authored .ai is still walked");
-        // Only the ROOT copy is ours; a nested one stays under the usual gates.
-        assert_eq!(region_paths, ["pkg/.ai/repo-graph"]);
+        assert!(md.iter().any(|(p, _)| p == ".glia/notes.md"), "the rest of .glia is still walked");
+        // Only the ROOT copies are ours; nested ones stay under the usual gates.
+        assert_eq!(region_paths, ["pkg/.ai/repo-graph", "pkg/.glia/graph"]);
 
-        // Without a gitignore it is still never parsed.
+        // Without a gitignore they are still never parsed.
         std::fs::remove_file(root.join(".gitignore")).unwrap();
         let (files, regions, _md, _roots) = walk_source_files(&root);
-        assert!(files.iter().all(|(p, _)| !p.starts_with(".ai/")), "{files:?}");
+        assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
+        assert!(files.iter().any(|(p, _)| p == "pkg/.glia/graph/other.py"), "{files:?}");
         assert!(regions.is_empty(), "{}", regions.len());
         let _ = std::fs::remove_dir_all(&root);
     }

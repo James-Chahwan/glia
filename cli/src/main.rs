@@ -76,8 +76,9 @@ enum Cmd {
     /// Merge N repos into one MergedGraph; cross-resolvers fire across repo
     /// boundaries. Emit summary + cross-edge counts + (optionally) JSON.
     Merge(cmd::merge::Args),
-    /// Walk a repo and write one `.gmap` per per-language sub-graph to
-    /// `<repo>/.glia/` (or a custom dir). Idempotent + atomic.
+    /// Walk a repo and write its graph layout (manifest.json + shards +
+    /// cross_stack.gmap) to `<repo>/.glia/graph/` - the directory the MCP
+    /// server and `load_from_gmap` read. Idempotent + atomic.
     Build(cmd::build::Args),
     /// Sync external docs (Confluence) to/from a repo's doc snapshot. This is
     /// the **network** step, deliberately separate from `build` so the
@@ -86,7 +87,7 @@ enum Cmd {
     Docs(cmd::docs::Args),
     /// Install git hooks (`post-commit`, `post-merge`, `post-checkout`) into
     /// the directory git reads hooks from (core.hooksPath / the repo's common
-    /// dir) so the `.gmap` rebuilds automatically on each change. Opt-in only —
+    /// dir) so each change keeps `<repo>/.glia/graph` fresh. Opt-in only —
     /// rebuild latency on big repos can be noticeable. `--pair <sibling>` adds
     /// the cross-repo branch-pair lock (`pre-commit` + `commit-msg`, G8 / u151).
     InstallHooks(hooks::InstallArgs),

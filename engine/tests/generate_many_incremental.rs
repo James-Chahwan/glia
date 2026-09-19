@@ -3,7 +3,7 @@
 //! The multi-repo path is what `glia merge`, every `--with` query and pyo3
 //! `generate_many` run on, and it used to hardcode `cache: None` (audit
 //! 2026-06-10 #14). `generate_many_incremental` gives each repo path its OWN
-//! `<repo>/.ai/repo-graph/parse_cache.bin`. Plain `generate_many` must stay
+//! `<repo>/.glia/graph/parse_cache.bin`. Plain `generate_many` must stay
 //! cold and sidecar-free: `bench/substrate-gap/grade.py` grades every multi-dir
 //! fixture through it with no way to opt out, and `GLIA_NO_PERSIST=1` gates
 //! only the gmap write, never the parse-cache sidecar.
@@ -15,10 +15,10 @@ use repo_graph_engine::cache::content_hash;
 use repo_graph_engine::{GenerateResult, ParseCache, generate_many, generate_many_incremental};
 use repo_graph_store::write_merged_sharded;
 
-/// `<repo>/.ai/repo-graph/parse_cache.bin` — mirrors the engine's private
-/// `cache::gmap_dir` + `CACHE_FILE`.
+/// `<repo>/.glia/graph/parse_cache.bin` — the store's layout dir (which the
+/// engine's private `cache::gmap_dir` returns) + `CACHE_FILE`.
 fn sidecar(repo: &Path) -> PathBuf {
-    repo.join(".ai").join("repo-graph").join("parse_cache.bin")
+    repo_graph_store::default_gmap_dir(repo).join("parse_cache.bin")
 }
 
 const A_PY: &str = "import requests\n\ndef foo():\n    \"\"\"Frobnicates.\"\"\"\n    return requests.get(\"http://svc-b/api/items\")\n\ndef bar():\n    return foo()\n";
@@ -93,8 +93,8 @@ fn generate_many_writes_no_sidecar_by_default() {
     assert!(result.total_nodes > 0, "fixture must produce a graph");
     assert!(!sidecar(&a).exists(), "generate_many wrote a sidecar into {}", a.display());
     assert!(!sidecar(&b).exists(), "generate_many wrote a sidecar into {}", b.display());
-    assert!(!a.join(".ai").exists(), "generate_many created {}/.ai", a.display());
-    assert!(!b.join(".ai").exists(), "generate_many created {}/.ai", b.display());
+    assert!(!a.join(".glia").exists(), "generate_many created {}/.glia", a.display());
+    assert!(!b.join(".glia").exists(), "generate_many created {}/.glia", b.display());
 }
 
 /// Warm both sidecars, then change BOTH repos so the second build mixes reused,

@@ -8,15 +8,15 @@ use pyo3::prelude::*;
 
 use repo_graph_code_domain::node_kind;
 use repo_graph_core::{Confidence, RepoId};
+use repo_graph_engine::persist::{default_layout_dir, persist_result};
 use repo_graph_engine::{generate_many as engine_generate_many, generate_one, parse_one};
-use repo_graph_store::default_gmap_dir as store_default_gmap_dir;
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// Build the graph for a repo. `incremental` (default True, WP-D) reuses a
-/// per-file parse cache at `<repo>/.ai/repo-graph/parse_cache.bin` so unchanged
+/// per-file parse cache at `<repo>/.glia/graph/parse_cache.bin` so unchanged
 /// files skip tree-sitter; the result is identical to a clean build. Pass
 /// `incremental=False` to force a full reparse (this also deletes the sidecar,
 /// so the next incremental build starts cold).
@@ -43,23 +43,18 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
             result.parse_errors.first().unwrap_or(&String::new())
         )));
     }
-    // Auto-persist to the conventional gmap dir so the next session can
-    // `load_from_gmap` instead of regenerating — labels, roots and parse
-    // errors included (LC.7), so the loaded graph answers like this one.
-    // Failure to write is logged but not fatal — a fresh in-memory graph is
-    // still usable, the cache layer is an optimization. Opt out with
-    // `GLIA_NO_PERSIST=1` (tests / experiments that don't want side effects on
-    // the target repo).
+    // Auto-persist to the repo's layout dir `<repo>/.glia/graph` through the
+    // engine's single writer (LC.9, the same one `glia build` and the hooks
+    // use) so the next session can `load_from_gmap` instead of regenerating —
+    // labels, roots and parse errors included (LC.7), so the loaded graph
+    // answers like this one. Failure to write is logged but not fatal — a
+    // fresh in-memory graph is still usable, the cache layer is an
+    // optimization. Opt out with `GLIA_NO_PERSIST=1` (tests / experiments that
+    // don't want side effects on the target repo); it gates this write only,
+    // not the parse-cache purge of `incremental=False` above.
     if std::env::var("GLIA_NO_PERSIST").as_deref() != Ok("1") {
-        let dir = store_default_gmap_dir(Path::new(repo_path));
-        if let Err(e) = PyGraph::persist(
-            &result.merged,
-            &result.repo_labels,
-            &result.repo_roots,
-            &result.parse_errors,
-            &dir,
-            "py",
-        ) {
+        let dir = default_layout_dir(Path::new(repo_path));
+        if let Err(e) = persist_result(&result, &dir, "py") {
             eprintln!("[repo-graph-py] warning: failed to persist gmap: {e}");
         }
     }
@@ -78,7 +73,7 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
 /// that two unrelated services pair correctly under the resolver layer.
 ///
 /// `incremental=True` (WP-D, A1.4) gives each path its own per-file parse cache
-/// at `<repo>/.ai/repo-graph/parse_cache.bin`, so unchanged files skip
+/// at `<repo>/.glia/graph/parse_cache.bin`, so unchanged files skip
 /// tree-sitter; the result is identical to a clean build. The default is
 /// False here — unlike `generate` — BECAUSE the substrate-gap eval grades
 /// every multi-dir fixture through this entry point and must stay hermetic

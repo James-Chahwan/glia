@@ -21,7 +21,7 @@ Grading logic is not duplicated: `grade_fixture` runs as-is with its module
 global `build_graph` swapped for one call (the seam matrix.py's
 `grade_with_kinds` already uses), so grade.py grows no mode switch.
 Copies, never the fixture dirs: GLIA_NO_PERSIST=1 gates only the .gmap write,
-not `<repo>/.ai/repo-graph/parse_cache.bin`, and a sidecar left under the
+not `<repo>/.glia/graph/parse_cache.bin`, and a sidecar left under the
 bench tree would silently de-hermeticise every later cold grade.
 
 Usage:
@@ -62,7 +62,7 @@ from matrix import discover  # noqa: E402
 
 rg = grade.rg
 COLD = grade.build_graph
-SIDECAR = Path(".ai") / "repo-graph" / "parse_cache.bin"
+SIDECAR = Path(".glia") / "graph" / "parse_cache.bin"
 MARK = re.compile(r"^\[incremental\] (.+): reused (\d+), reparsed (\d+), evicted \d+", re.M)
 VERBOSE = False
 

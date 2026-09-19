@@ -121,9 +121,11 @@ glia merge <repo1> <repo2> [...] [--out <file>]
     fire across repo boundaries. `--out -` for stdout JSON, `--out <path>`
     for file.
 
-glia build <repo> [--out <dir>]
-    Walk repo and write per-language `.gmap` files (rkyv + mmap) to
-    `<repo>/.glia/` (or the given dir). For tools that read .gmap directly.
+glia build <repo> [--out <dir>] [--no-incremental]
+    Walk repo and write its graph layout (manifest.json + per-language
+    `.gmap` shards + cross_stack.gmap, rkyv + mmap) to `<repo>/.glia/graph/`
+    (or the given dir) - the directory the MCP server and `load_from_gmap`
+    read. The parse cache lives beside it; the dir ignores itself in git.
 
 glia install-hooks <repo> [--uninstall] [--command "..."]
     Install opt-in git hooks (post-commit, post-merge, post-checkout) that
