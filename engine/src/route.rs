@@ -656,6 +656,18 @@ pub(crate) fn parse_repo_files(
             contracts.files, contracts.openapi, contracts.asyncapi, contracts.pact
         );
     }
+    // LE.10b fired_on marker: contract ops carry their declared request /
+    // response / payload body fields as a SCHEMA_FIELDS cell. Only printed
+    // when a build gave at least one op that cell.
+    if contracts.ops_with_fields > 0 {
+        eprintln!(
+            "[contract] fields ops_with_fields={} fields={} refs_resolved={} refs_external={}",
+            contracts.ops_with_fields,
+            contracts.fields,
+            contracts.refs_resolved,
+            contracts.refs_external
+        );
+    }
 
     (parses_by_lang, parse_errors)
 }

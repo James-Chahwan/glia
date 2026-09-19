@@ -1,0 +1,23 @@
+{
+  "framework": "asyncapi-payload-fields",
+  "language": "yaml",
+  "dirs": [
+    "orders",
+    "billing"
+  ],
+  "note": "LE.10b: AsyncAPI message payload properties (inline, and through a local components/messages $ref) as a SCHEMA_FIELDS cell (22) on the channel op. billing expects `currency`, which orders never produces (LE.10c reports it).",
+  "expect_cells": [
+    {
+      "kind": "DOC_SECTION",
+      "node": "contract::asyncapi::publish:orders.placed",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"totalCents\""
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "contract::asyncapi::subscribe:orders.placed",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"currency\""
+    }
+  ]
+}

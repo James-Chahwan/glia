@@ -1,0 +1,22 @@
+{
+  "consumer": {"name": "web"},
+  "provider": {"name": "orders"},
+  "interactions": [
+    {
+      "description": "place an order",
+      "providerState": "the sku is in stock",
+      "request": {
+        "method": "POST",
+        "path": "/orders",
+        "headers": {"Content-Type": "application/json"},
+        "body": {"sku": "SKU-1", "quantity": 2, "giftWrap": true}
+      },
+      "response": {
+        "status": 201,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"id": "ord-1"}
+      }
+    }
+  ],
+  "metadata": {"pactSpecification": {"version": "3.0.0"}}
+}

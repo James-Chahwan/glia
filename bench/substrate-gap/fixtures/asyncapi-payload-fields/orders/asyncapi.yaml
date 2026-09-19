@@ -1,0 +1,19 @@
+asyncapi: 2.6.0
+info:
+  title: Orders service
+  version: 1.0.0
+channels:
+  orders.placed:
+    publish:
+      operationId: publishOrderPlaced
+      message:
+        name: OrderPlaced
+        payload:
+          type: object
+          required:
+            - orderId
+          properties:
+            orderId:
+              type: string
+            totalCents:
+              type: integer

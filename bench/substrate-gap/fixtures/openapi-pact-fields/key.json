@@ -1,0 +1,29 @@
+{
+  "framework": "openapi-pact-fields",
+  "language": "yaml+json",
+  "dirs": [
+    "provider",
+    "web"
+  ],
+  "note": "LE.10b: request/response body fields on contract ops as a SCHEMA_FIELDS cell (22): OpenAPI requestBody via a local $ref (with its `required` list), and Pact request body keys typed by their JSON example value. The pact sends `giftWrap`, which the provider's schema never declares (LE.10c reports it).",
+  "expect_cells": [
+    {
+      "kind": "DOC_SECTION",
+      "node": "contract::openapi::POST:/orders",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"quantity\""
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "contract::openapi::POST:/orders",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"required\":true"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "contract::web-orders::POST:/orders",
+      "cell": "SCHEMA_FIELDS",
+      "contains": "\"name\":\"giftWrap\""
+    }
+  ]
+}

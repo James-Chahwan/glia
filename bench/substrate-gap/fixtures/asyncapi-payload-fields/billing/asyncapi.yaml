@@ -1,0 +1,21 @@
+asyncapi: 2.6.0
+info:
+  title: Billing service
+  version: 1.0.0
+channels:
+  orders.placed:
+    subscribe:
+      operationId: onOrderPlaced
+      message:
+        $ref: '#/components/messages/OrderPlaced'
+components:
+  messages:
+    OrderPlaced:
+      name: OrderPlaced
+      payload:
+        type: object
+        properties:
+          orderId:
+            type: string
+          currency:
+            type: string
