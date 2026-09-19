@@ -7,6 +7,7 @@
 
 use clap::Subcommand;
 
+mod cell;
 mod inspect;
 
 #[derive(Subcommand, Debug)]
@@ -18,10 +19,19 @@ pub(crate) enum StoreCmd {
     /// 1 with the reason when a file cannot be read (an old format says
     /// "rebuild the graph").
     Inspect(inspect::Args),
+    /// Cell (LF.1c): write, remove and audit the cells the repo's `.glia`
+    /// sidecars carry (`cells.jsonl`: CONSTRAINT / DECISION / CONV entries;
+    /// `vectors.jsonl`: VECTORs). `set` / `rm` go through the store's write
+    /// API (sidecar under its lock, plus the default layout while it is
+    /// fresh); `ls --check` binds every row against a fresh build through the
+    /// build's resolver and exits 1 when a row is ambiguous, orphaned or
+    /// rejected; `--rekey` rewrites rows a moved node re-bound.
+    Cell(cell::Args),
 }
 
 pub(crate) fn run(c: StoreCmd) -> i32 {
     match c {
         StoreCmd::Inspect(a) => inspect::run(a),
+        StoreCmd::Cell(a) => cell::run(a),
     }
 }
