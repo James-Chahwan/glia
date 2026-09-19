@@ -355,7 +355,113 @@ fn collect_types(
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
         });
+        if kind == node_kind::INTERFACE {
+            collect_interface_elems(type_node, src, file_rel, &qname, id, module_id, repo, acc);
+        }
         type_ids.insert(name, id);
+    }
+}
+
+/// LD.7b: the body of one `interface_type`. tree-sitter-go 0.25 names its
+/// elements `method_elem` (fields `name` / `parameters` / `result`) and
+/// `type_elem` (one child per union term).
+///
+/// * A `method_elem` becomes a METHOD node `<interface qname>::<name>` under
+///   the interface: nav parent, an interface -> method DEFINES edge, and the
+///   CODE / POSITION / DOC cells of [`entity_cells`]. The graph files it in
+///   `interface_methods` (A6.6), never `class_methods`, so the Go HANDLED_BY
+///   fallback (`unique_global_method`) never sees it.
+/// * A `type_elem` of exactly one named type is an embedded interface: an
+///   INHERITS_FROM ref out of the interface ([`embedded_iface_qualifier`]).
+///   Unions and `~T` terms are constraint type sets, not embedded method
+///   sets, and emit nothing.
+///
+/// The graph's implicit-IMPLEMENTS pass reads the METHOD children as the
+/// interface's own method set and follows the INHERITS_FROM edges for the
+/// embedded ones.
+#[allow(clippy::too_many_arguments)]
+fn collect_interface_elems(
+    iface: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    iface_qname: &str,
+    iface_id: NodeId,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut cursor = iface.walk();
+    for elem in iface.named_children(&mut cursor) {
+        match elem.kind() {
+            "method_elem" => {
+                let Some(name_node) = elem.child_by_field_name("name") else {
+                    continue;
+                };
+                let name = text_of(name_node, src);
+                if name.is_empty() {
+                    continue;
+                }
+                let qname = format!("{iface_qname}::{name}");
+                let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+                acc.nodes.push(Node {
+                    id,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: entity_cells(elem, src, file_rel),
+                });
+                acc.nav.record(id, name, &qname, node_kind::METHOD, Some(iface_id));
+                acc.edges.push(Edge {
+                    from: iface_id,
+                    to: id,
+                    category: edge_category::DEFINES,
+                    confidence: Confidence::Strong,
+                });
+            }
+            "type_elem" => {
+                let mut tc = elem.walk();
+                let mut terms = elem.named_children(&mut tc);
+                let (Some(term), None) = (terms.next(), terms.next()) else {
+                    continue;
+                };
+                if let Some(qualifier) = embedded_iface_qualifier(term, src) {
+                    acc.refs.push(UnresolvedRef {
+                        from: iface_id,
+                        from_module: module_id,
+                        qualifier,
+                        category: edge_category::INHERITS_FROM,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How an embedded interface term is named: `R` and `R[T]` -> `Bare("R")`,
+/// `pkg.R` and `pkg.R[T]` -> `Attribute { base: "pkg", name: "R" }`. `any`
+/// embeds no method and gives `None`, as does every other term shape (`~T`,
+/// pointer / slice / map / func literals), none of which is an interface.
+///
+/// An embed the graph cannot bind (another module's interface, the
+/// predeclared `error` and `comparable`) stays in `unresolved_refs`, which is
+/// how the graph's implicit-IMPLEMENTS pass knows the interface's method set
+/// is not fully known.
+fn embedded_iface_qualifier(term: TsNode, src: &[u8]) -> Option<CallQualifier> {
+    let term = if term.kind() == "generic_type" { term.child_by_field_name("type")? } else { term };
+    match term.kind() {
+        "type_identifier" => {
+            let name = text_of(term, src);
+            (!name.is_empty() && name != "any").then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "qualified_type" => {
+            let base = text_of(term.child_by_field_name("package")?, src);
+            let name = text_of(term.child_by_field_name("name")?, src);
+            (!base.is_empty() && !name.is_empty()).then(|| CallQualifier::Attribute {
+                base: base.to_string(),
+                name: name.to_string(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -2650,6 +2756,101 @@ func (u *User) save() error {
             c.from == login_id
                 && matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "save")
         }));
+    }
+
+    const IFACES: &str = r#"package shop
+
+// Store is the storage port.
+type Store interface {
+    // Get reads one value.
+    Get(id string) (string, error)
+    Put(id string, v string) error
+}
+
+type ReadStore interface {
+    Reader
+    io.Closer
+    Paged[string]
+    any
+    Len() int
+}
+
+type Number interface {
+    ~int | ~float64
+}
+
+type Ordered interface {
+    int | string
+}
+
+type Small interface {
+    ~int
+}
+"#;
+
+    fn iface_refs(parse: &FileParse, iface: NodeId) -> Vec<(CallQualifier, EdgeCategoryId)> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == iface)
+            .map(|r| (r.qualifier.clone(), r.category))
+            .collect()
+    }
+
+    /// LD.7b: every `method_elem` of an interface is a METHOD node
+    /// `<iface>::<name>`, parented to the interface with a DEFINES edge and
+    /// carrying CODE / POSITION (and its leading DOC) like any other entity.
+    #[test]
+    fn interface_method_elems_are_method_nodes() {
+        let parse = parse_file(IFACES, "shop/store.go", "shop::store", "", repo()).unwrap();
+        let store = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "shop::store::Store");
+        for name in ["Get", "Put"] {
+            let q = format!("shop::store::Store::{name}");
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &q);
+            let node = parse.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("{q}"));
+            assert!(has_edge(&parse, store, id, edge_category::DEFINES), "{q}");
+            assert_eq!(parse.nav.parent_of.get(&id), Some(&store), "{q}");
+            assert_eq!(parse.nav.name_by_id.get(&id).map(String::as_str), Some(name));
+            let kinds: Vec<_> = node.cells.iter().map(|c| c.kind).collect();
+            assert!(kinds.contains(&cell_type::CODE) && kinds.contains(&cell_type::POSITION), "{q}");
+        }
+        let get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "shop::store::Store::Get");
+        let get_node = parse.nodes.iter().find(|n| n.id == get).unwrap();
+        assert!(get_node.cells.iter().any(|c| c.kind == cell_type::DOC));
+        // Type-term-only interfaces declare no method.
+        let methods = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::METHOD))
+            .count();
+        assert_eq!(methods, 3, "Store::Get, Store::Put, ReadStore::Len");
+    }
+
+    /// LD.7b: an embedded interface is an INHERITS_FROM ref out of the
+    /// embedding interface: `R` and `R[T]` Bare, `pkg.R` Attribute. `any`,
+    /// unions and `~T` terms emit nothing.
+    #[test]
+    fn embedded_interface_emits_inherits_from_ref() {
+        let parse = parse_file(IFACES, "shop/store.go", "shop::store", "", repo()).unwrap();
+        let iface = |name: &str| {
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, &format!("shop::store::{name}"))
+        };
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::store");
+        assert_eq!(
+            iface_refs(&parse, iface("ReadStore")),
+            vec![
+                (CallQualifier::Bare("Reader".to_string()), edge_category::INHERITS_FROM),
+                (
+                    CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+                    edge_category::INHERITS_FROM
+                ),
+                (CallQualifier::Bare("Paged".to_string()), edge_category::INHERITS_FROM),
+            ]
+        );
+        assert!(parse.refs.iter().filter(|r| r.from == iface("ReadStore")).all(|r| r.from_module == module));
+        for name in ["Store", "Number", "Ordered", "Small"] {
+            assert!(iface_refs(&parse, iface(name)).is_empty(), "{name}");
+        }
     }
 
     const AUTH: &str = r#"package auth

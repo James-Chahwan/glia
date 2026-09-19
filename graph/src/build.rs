@@ -4,10 +4,10 @@
 use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{
-    CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, edge_category,
-    node_kind,
+    CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, ImportTarget, UnresolvedRef,
+    edge_category, node_kind,
 };
-use repo_graph_core::{Cell, NodeId, RepoId};
+use repo_graph_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
 use crate::calls::{emit_method_level_implements, push_edge, resolve_calls, resolve_refs};
 use crate::imports::{
@@ -41,18 +41,40 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// its file's `module_symbols` no longer lists it as a top-level function.
 /// Its Bare / Attribute calls still resolve in its own file's scope
 /// ([`resolve_go_calls`]).
+///
+/// LD.7b: an interface's embedded interfaces bind package-scoped and to an
+/// INTERFACE only ([`resolve_go_embeds`]); then, Go interfaces being
+/// satisfied implicitly, [`emit_go_implicit_implements`] derives each type ->
+/// interface IMPLEMENTS edge from method names, before A6.6 pairs them
+/// method by method.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
+    let (g, split, implicit) = build_go_passes(repo, parses);
+    if let Some(line) = split.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(stats) = implicit {
+        eprintln!("{}", stats.marker());
+    }
+    Ok(g)
+}
+
+/// [`build_go`]'s passes, returning the stats its markers print.
+fn build_go_passes(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+) -> (RepoGraph, SplitStats, Option<GoImplicitStats>) {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
     resolve_imports_go(&mut g, &all_imports);
     resolve_go_calls(&mut g, &all_calls, &split);
-    resolve_refs(&mut g, &all_refs);
+    let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+        all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
+    resolve_refs(&mut g, &refs);
+    resolve_go_embeds(&mut g, &embeds, &all_imports);
+    let implicit = emit_go_implicit_implements(&mut g);
     emit_method_level_implements(&mut g);
-    if let Some(line) = split.marker() {
-        eprintln!("{line}");
-    }
-    Ok(g)
+    (g, split, implicit)
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -359,9 +381,6 @@ fn go_receiver_of<'a>(method_qname: &'a str, module_qname: &str) -> Option<&'a s
 /// Deterministic: candidates are visited in `g.nodes` order; the index is a
 /// lookup table only.
 fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
-    fn package_dir(module_qname: &str) -> &str {
-        module_qname.rsplit_once("::").map_or("", |(dir, _)| dir)
-    }
     let mut stats = SplitStats::default();
     let mut binds: Vec<(NodeId, NodeId, NodeId)> = Vec::new();
     {
@@ -380,7 +399,7 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
             let Some((module, module_qname)) = module_of(&n.id) else { continue };
             if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
                 if let Some(name) = nav.name_by_id.get(&n.id) {
-                    let ids = types.entry((package_dir(module_qname), name.as_str())).or_default();
+                    let ids = types.entry((go_package_dir(module_qname), name.as_str())).or_default();
                     if !ids.contains(&n.id) {
                         ids.push(n.id);
                     }
@@ -391,7 +410,7 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
                     .get(&n.id)
                     .and_then(|q| go_receiver_of(q, module_qname))
             {
-                candidates.push((n.id, module, package_dir(module_qname), recv));
+                candidates.push((n.id, module, go_package_dir(module_qname), recv));
             }
         }
         for (method, module, dir, recv) in candidates {
@@ -459,6 +478,319 @@ fn under_bound_method(nav: &CodeNav, bound: &HashSet<NodeId>, mut id: NodeId) ->
         }
     }
     false
+}
+
+/// A Go node's package: a package is a directory and a MODULE qname is the
+/// file path, so it is the MODULE qname minus its last `::` segment
+/// (`svc::users::store` -> `svc::users`, a root-level file -> `""`).
+fn go_package_dir(module_qname: &str) -> &str {
+    module_qname.rsplit_once("::").map_or("", |(dir, _)| dir)
+}
+
+// ============================================================================
+// Go implicit interface satisfaction (LD.7b)
+// ============================================================================
+
+/// An embed ref of the Go parser: INHERITS_FROM out of an INTERFACE (one
+/// `type_elem` naming a single type).
+fn is_go_embed(nav: &CodeNav, r: &UnresolvedRef) -> bool {
+    r.category == edge_category::INHERITS_FROM
+        && nav.kind_by_id.get(&r.from) == Some(&node_kind::INTERFACE)
+}
+
+/// Bind each Go embed ref to the INTERFACE it names, Go's way: `R` is the
+/// interface `R` of the embedding interface's own package (directory), and
+/// `pkg.R` the interface `R` of the package the file imports as `pkg` (its
+/// import path, or a directory ending in it when the path has two or more
+/// segments, for a go.mod below the repo root). Exactly one INTERFACE must
+/// match, else the ref stays in `unresolved_refs`: another module's
+/// interface (`io.Reader`), a predeclared one (`error`, `comparable`), a
+/// constraint's exact type term (`interface{ MyStruct }`), or an ambiguous
+/// name.
+///
+/// Not `resolve_refs`: its repo-wide by-name fallback binds any same-named
+/// node, and on grpc-go bound `ServerStream` (a same-package interface) to a
+/// DATA_ENTITY of that name. Edges are pushed in ref (parse) order.
+fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[ImportStmt]) {
+    if embeds.is_empty() {
+        return;
+    }
+    let mut bound: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut unbound: Vec<UnresolvedRef> = Vec::new();
+    {
+        let nav = &g.nav;
+        let mut by_dir_name: HashMap<(&str, &str), Vec<NodeId>> = HashMap::new();
+        let mut by_name: HashMap<&str, Vec<(&str, NodeId)>> = HashMap::new();
+        for n in &g.nodes {
+            if nav.kind_by_id.get(&n.id) != Some(&node_kind::INTERFACE) {
+                continue;
+            }
+            let (Some(name), Some(parent)) = (nav.name_by_id.get(&n.id), nav.parent_of.get(&n.id)) else {
+                continue;
+            };
+            let Some(module_qname) = nav.qname_by_id.get(parent) else {
+                continue;
+            };
+            let dir = go_package_dir(module_qname);
+            by_dir_name.entry((dir, name.as_str())).or_default().push(n.id);
+            by_name.entry(name.as_str()).or_default().push((dir, n.id));
+        }
+        // (importing file's MODULE qname, local package name) -> import path.
+        let mut import_paths: HashMap<(&str, &str), &str> = HashMap::new();
+        for stmt in imports {
+            let ImportTarget::Module { path, alias } = &stmt.target else {
+                continue;
+            };
+            let local = match alias.as_deref() {
+                Some("_") | Some(".") => continue,
+                Some(a) => a,
+                None => path.rsplit("::").next().unwrap_or(path),
+            };
+            import_paths.insert((stmt.from_module.as_str(), local), path.as_str());
+        }
+        let only = |ids: &[NodeId]| match ids {
+            [one] => Some(*one),
+            _ => None,
+        };
+        for r in embeds {
+            let module_qname = nav.qname_by_id.get(&r.from_module).map_or("", String::as_str);
+            let hit = match &r.qualifier {
+                CallQualifier::Bare(name) => by_dir_name
+                    .get(&(go_package_dir(module_qname), name.as_str()))
+                    .and_then(|ids| only(ids)),
+                CallQualifier::Attribute { base, name } => {
+                    import_paths.get(&(module_qname, base.as_str())).and_then(|&path| {
+                        let suffix = format!("::{path}");
+                        let ids: Vec<NodeId> = by_name
+                            .get(name.as_str())
+                            .into_iter()
+                            .flatten()
+                            .filter(|(dir, _)| {
+                                *dir == path || (path.contains("::") && dir.ends_with(&suffix))
+                            })
+                            .map(|&(_, id)| id)
+                            .collect();
+                        only(&ids)
+                    })
+                }
+                _ => None,
+            };
+            match hit {
+                Some(to) if to != r.from => bound.push((r.from, to)),
+                _ => unbound.push(r.clone()),
+            }
+        }
+    }
+    for (from, to) in bound {
+        push_edge(g, from, to, edge_category::INHERITS_FROM);
+    }
+    g.unresolved_refs.extend(unbound);
+}
+
+/// Method sets of the predeclared interfaces a Go interface can embed. No
+/// parse declares them, so their embed ref stays unresolved; this is what
+/// they contribute instead of leaving the embedding interface's set unknown.
+const GO_PREDECLARED_IFACES: &[(&str, &[&str])] = &[("error", &["Error"])];
+
+/// What [`emit_go_implicit_implements`] did to one Go graph.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GoImplicitStats {
+    /// IMPLEMENTS edges pushed.
+    edges: usize,
+    /// Interfaces with a known, non-empty method set: the ones matched.
+    interfaces: usize,
+    /// Distinct types given at least one IMPLEMENTS edge.
+    types: usize,
+    /// Distinct interface -> interface INHERITS_FROM edges (embeds) followed.
+    embedded: usize,
+    /// Interfaces not matched because an embed did not bind, so their method
+    /// set is not fully known.
+    open: usize,
+}
+
+impl GoImplicitStats {
+    /// `[iface] go implicit implements: E (interfaces=I types=T embedded=M
+    /// open=O)`, once per Go graph that has an INTERFACE.
+    fn marker(&self) -> String {
+        format!(
+            "[iface] go implicit implements: {} (interfaces={} types={} embedded={} open={})",
+            self.edges, self.interfaces, self.types, self.embedded, self.open
+        )
+    }
+}
+
+/// Go satisfies interfaces implicitly: a named type implements an interface
+/// when its method NAME set covers the interface's (own + embedded,
+/// transitively). Signatures are not compared (the parser records none), so
+/// every edge is `Confidence::Medium`.
+///
+/// * An interface's own methods are its `interface_methods` (the parser's
+///   `method_elem` METHOD children). Its embedded interfaces are its
+///   INHERITS_FROM edges to another INTERFACE, walked depth-first with a
+///   visited set, so an embedding cycle (which Go rejects) cannot loop.
+/// * An embed that did not become such an edge leaves the set unknown and
+///   the interface is skipped (`open`): an INHERITS_FROM ref still in
+///   `unresolved_refs` (another module's `io.Reader`, `comparable`) or an edge
+///   to a non-INTERFACE. The predeclared `error` is the exception and
+///   contributes `Error` ([`GO_PREDECLARED_IFACES`]). Matching on the known
+///   part instead would pair `type ReadCloser interface { io.Reader; Close()
+///   error }` with every type that has a `Close`.
+/// * An empty set (`interface{}`, a constraint of type terms only) is
+///   implemented by nothing here.
+/// * An unexported method name is package-scoped in Go: it matches only a
+///   type in the package (directory, [`go_package_dir`]) of the interface
+///   that declares it.
+/// * Types are the STRUCT / CLASS owners in `class_methods`. Pointer and
+///   value receivers both count toward a type's set, and methods promoted
+///   from an embedded struct field are not seen.
+///
+/// Runs after [`resolve_go_embeds`] (the embed refs are bound) and before
+/// `emit_method_level_implements`, which then pairs each new edge's methods.
+/// Pairs are sorted by id and deduped before any edge is pushed (the method
+/// tables are HashMaps with per-process seeds, and edge order feeds the
+/// store's shard hashes), and an IMPLEMENTS edge already present is not
+/// pushed again. `None` when the graph has no INTERFACE.
+fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
+    let ifaces: Vec<NodeId> = g
+        .nodes
+        .iter()
+        .map(|n| n.id)
+        .filter(|id| g.nav.kind_by_id.get(id) == Some(&node_kind::INTERFACE))
+        .collect();
+    if ifaces.is_empty() {
+        return None;
+    }
+    let mut stats = GoImplicitStats::default();
+    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    {
+        let nav = &g.nav;
+        let is_iface = |id: &NodeId| nav.kind_by_id.get(id) == Some(&node_kind::INTERFACE);
+        let pkg_of = |id: &NodeId| -> Option<&str> {
+            let parent = nav.parent_of.get(id)?;
+            if nav.kind_by_id.get(parent) != Some(&node_kind::MODULE) {
+                return None;
+            }
+            nav.qname_by_id.get(parent).map(|q| go_package_dir(q))
+        };
+
+        let mut embeds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut embed_pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
+        let mut open: HashSet<NodeId> = HashSet::new();
+        for e in &g.edges {
+            if e.category != edge_category::INHERITS_FROM || !is_iface(&e.from) {
+                continue;
+            }
+            if !is_iface(&e.to) {
+                open.insert(e.from);
+            } else if embed_pairs.insert((e.from, e.to)) {
+                embeds.entry(e.from).or_default().push(e.to);
+            }
+        }
+        stats.embedded = embed_pairs.len();
+        let mut predeclared: HashMap<NodeId, Vec<&'static str>> = HashMap::new();
+        for r in &g.unresolved_refs {
+            if r.category != edge_category::INHERITS_FROM || !is_iface(&r.from) {
+                continue;
+            }
+            let known = match &r.qualifier {
+                CallQualifier::Bare(name) => {
+                    GO_PREDECLARED_IFACES.iter().find(|(n, _)| n == name).map(|(_, ms)| *ms)
+                }
+                _ => None,
+            };
+            match known {
+                Some(ms) => predeclared.entry(r.from).or_default().extend(ms.iter().copied()),
+                None => {
+                    open.insert(r.from);
+                }
+            }
+        }
+
+        // Method name -> the types declaring it, to narrow each interface's
+        // candidates to the holders of its rarest method name.
+        let mut by_method: HashMap<&str, Vec<NodeId>> = HashMap::new();
+        for (owner, methods) in &g.symbols.class_methods {
+            let kind = nav.kind_by_id.get(owner);
+            if kind != Some(&node_kind::STRUCT) && kind != Some(&node_kind::CLASS) {
+                continue;
+            }
+            for name in methods.keys() {
+                by_method.entry(name.as_str()).or_default().push(*owner);
+            }
+        }
+
+        for &iface in &ifaces {
+            // (method name, declaring package when the name is unexported).
+            let mut set: HashSet<(&str, Option<&str>)> = HashSet::new();
+            let mut visited: HashSet<NodeId> = HashSet::new();
+            let mut stack = vec![iface];
+            let mut known = true;
+            'walk: while let Some(i) = stack.pop() {
+                if !visited.insert(i) {
+                    continue;
+                }
+                if open.contains(&i) {
+                    known = false;
+                    break;
+                }
+                for name in g.symbols.interface_methods.get(&i).into_iter().flat_map(|m| m.keys()) {
+                    if name.chars().next().is_some_and(char::is_uppercase) {
+                        set.insert((name.as_str(), None));
+                    } else if let Some(pkg) = pkg_of(&i) {
+                        set.insert((name.as_str(), Some(pkg)));
+                    } else {
+                        known = false;
+                        break 'walk;
+                    }
+                }
+                for &name in predeclared.get(&i).into_iter().flatten() {
+                    set.insert((name, None));
+                }
+                stack.extend(embeds.get(&i).into_iter().flatten().copied());
+            }
+            if !known {
+                stats.open += 1;
+                continue;
+            }
+            if set.is_empty() {
+                continue;
+            }
+            stats.interfaces += 1;
+            let Some(candidates) = set
+                .iter()
+                .map(|(name, _)| by_method.get(name).map_or(&[][..], Vec::as_slice))
+                .min_by_key(|c| c.len())
+            else {
+                continue;
+            };
+            for &ty in candidates {
+                let Some(methods) = g.symbols.class_methods.get(&ty) else {
+                    continue;
+                };
+                let covers = set.iter().all(|&(name, pkg)| {
+                    methods.contains_key(name) && pkg.is_none_or(|p| pkg_of(&ty) == Some(p))
+                });
+                if covers {
+                    pairs.push((ty, iface));
+                }
+            }
+        }
+    }
+    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+    pairs.dedup();
+    let existing: HashSet<(NodeId, NodeId)> = g
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::IMPLEMENTS)
+        .map(|e| (e.from, e.to))
+        .collect();
+    pairs.retain(|p| !existing.contains(p));
+    stats.types = pairs.iter().map(|&(ty, _)| ty).collect::<HashSet<_>>().len();
+    stats.edges = pairs.len();
+    for (from, to) in pairs {
+        g.edges.push(Edge { from, to, category: edge_category::IMPLEMENTS, confidence: Confidence::Medium });
+    }
+    Some(stats)
 }
 
 #[cfg(test)]
@@ -984,5 +1316,341 @@ mod tests {
         assert!(has_edge(&g, handle, helper, edge_category::CALLS), "self-call through the struct");
         assert!(!g.edges.iter().any(|e| e.from == run && e.category == edge_category::CALLS));
         assert_eq!(g.unresolved_calls.len(), 1, "only the bare `Handle()` stays unresolved");
+    }
+
+    // ---- LD.7b: Go implicit interface satisfaction --------------------------
+
+    /// An embed ref the Go parser emits: INHERITS_FROM out of `iface` (an
+    /// INTERFACE of `module`).
+    fn embed(module: &str, iface: &str, qualifier: CallQualifier) -> UnresolvedRef {
+        UnresolvedRef {
+            from: gid(node_kind::INTERFACE, iface),
+            from_module: gid(node_kind::MODULE, module),
+            qualifier,
+            category: edge_category::INHERITS_FROM,
+        }
+    }
+
+    /// `build_go` with the implicit pass's stats.
+    fn go_implicit(parses: Vec<FileParse>) -> (RepoGraph, Option<GoImplicitStats>) {
+        let (g, _, stats) = build_go_passes(repo(), parses);
+        (g, stats)
+    }
+
+    fn implements_edge(g: &RepoGraph, from: NodeId, to: NodeId) -> Option<Confidence> {
+        g.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::IMPLEMENTS)
+            .map(|e| e.confidence)
+    }
+
+    /// The fixtures/go-implicit-iface shape: `store.go` declares `Store { Get;
+    /// Put }`, `mem.go` declares `MemStore` with both methods and `ReadOnly`
+    /// with `Get` only.
+    fn implicit_iface_shape() -> Vec<FileParse> {
+        vec![
+            go_file(
+                "store",
+                &[
+                    (node_kind::INTERFACE, "store::Store", None),
+                    (node_kind::METHOD, "store::Store::Get", Some("store::Store")),
+                    (node_kind::METHOD, "store::Store::Put", Some("store::Store")),
+                    (node_kind::FUNCTION, "store::Use", None),
+                ],
+            ),
+            go_file(
+                "mem",
+                &[
+                    (node_kind::STRUCT, "mem::MemStore", None),
+                    (node_kind::METHOD, "mem::MemStore::Get", Some("mem::MemStore")),
+                    (node_kind::METHOD, "mem::MemStore::Put", Some("mem::MemStore")),
+                    (node_kind::STRUCT, "mem::ReadOnly", None),
+                    (node_kind::METHOD, "mem::ReadOnly::Get", Some("mem::ReadOnly")),
+                ],
+            ),
+        ]
+    }
+
+    /// A type implements an interface only when it declares every one of its
+    /// methods; the edge is Medium (names, not signatures), and A6.6 then
+    /// pairs the methods of the new edge.
+    #[test]
+    fn go_implicit_implements_requires_full_method_set() {
+        let (store, mem_store, read_only) = (
+            gid(node_kind::INTERFACE, "store::Store"),
+            gid(node_kind::STRUCT, "mem::MemStore"),
+            gid(node_kind::STRUCT, "mem::ReadOnly"),
+        );
+        let (_, stats) = go_implicit(implicit_iface_shape());
+        assert_eq!(
+            stats.map(|s| s.marker()).as_deref(),
+            Some("[iface] go implicit implements: 1 (interfaces=1 types=1 embedded=0 open=0)")
+        );
+
+        let g = build_go(repo(), implicit_iface_shape()).unwrap();
+        assert_eq!(implements_edge(&g, mem_store, store), Some(Confidence::Medium));
+        assert_eq!(implements_edge(&g, read_only, store), None, "ReadOnly lacks Put");
+        for name in ["Get", "Put"] {
+            let (from, to) = (
+                gid(node_kind::METHOD, &format!("mem::MemStore::{name}")),
+                gid(node_kind::METHOD, &format!("store::Store::{name}")),
+            );
+            assert!(implements_edge(&g, from, to).is_some(), "method-level {name}");
+        }
+        let (ro_get, store_get) =
+            (gid(node_kind::METHOD, "mem::ReadOnly::Get"), gid(node_kind::METHOD, "store::Store::Get"));
+        assert_eq!(implements_edge(&g, ro_get, store_get), None);
+    }
+
+    /// Several interfaces and implementors: the whole edge Vec is identical
+    /// across builds (the method tables' HashMap seeds differ per map).
+    #[test]
+    fn go_implicit_implements_is_deterministic() {
+        let shape = || {
+            let mut items: Vec<(repo_graph_core::NodeKindId, String, Option<String>)> = Vec::new();
+            for i in ["A", "B", "C", "D"] {
+                let q = format!("pkg::I{i}");
+                items.push((node_kind::INTERFACE, q.clone(), None));
+                for m in ["Open", "Close", "Read"] {
+                    items.push((node_kind::METHOD, format!("{q}::{m}{i}"), Some(q.clone())));
+                }
+            }
+            for t in ["W", "X", "Y", "Z"] {
+                let q = format!("pkg::{t}");
+                items.push((node_kind::STRUCT, q.clone(), None));
+                for i in ["A", "B", "C", "D"] {
+                    for m in ["Open", "Close", "Read"] {
+                        items.push((node_kind::METHOD, format!("{q}::{m}{i}"), Some(q.clone())));
+                    }
+                }
+            }
+            let borrowed: Vec<_> =
+                items.iter().map(|(k, q, p)| (*k, q.as_str(), p.as_deref())).collect();
+            vec![go_file("pkg", &borrowed)]
+        };
+        let first = build_go(repo(), shape()).unwrap();
+        let second = build_go(repo(), shape()).unwrap();
+        let implicit: Vec<_> = first
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS && e.confidence == Confidence::Medium)
+            .collect();
+        assert_eq!(implicit.len(), 16, "4 types x 4 interfaces");
+        assert_eq!(first.edges, second.edges);
+    }
+
+    /// The fixtures/go-iface-embed shape: `Store` embeds `Reader`, so its set
+    /// is {Get, Put}; `Mem` has both and implements both interfaces, `Half`
+    /// has only `Put` and implements neither.
+    #[test]
+    fn go_embedded_interface_method_set_is_transitive() {
+        let mut file = go_file(
+            "store",
+            &[
+                (node_kind::INTERFACE, "store::Reader", None),
+                (node_kind::METHOD, "store::Reader::Get", Some("store::Reader")),
+                (node_kind::INTERFACE, "store::Store", None),
+                (node_kind::METHOD, "store::Store::Put", Some("store::Store")),
+                (node_kind::STRUCT, "store::Mem", None),
+                (node_kind::METHOD, "store::Mem::Get", Some("store::Mem")),
+                (node_kind::METHOD, "store::Mem::Put", Some("store::Mem")),
+                (node_kind::STRUCT, "store::Half", None),
+                (node_kind::METHOD, "store::Half::Put", Some("store::Half")),
+            ],
+        );
+        file.refs = vec![embed("store", "store::Store", CallQualifier::Bare("Reader".to_string()))];
+        let (reader, store, mem, half) = (
+            gid(node_kind::INTERFACE, "store::Reader"),
+            gid(node_kind::INTERFACE, "store::Store"),
+            gid(node_kind::STRUCT, "store::Mem"),
+            gid(node_kind::STRUCT, "store::Half"),
+        );
+        let (g, stats) = go_implicit(vec![file]);
+        assert!(has_edge(&g, store, reader, edge_category::INHERITS_FROM));
+        assert_eq!(implements_edge(&g, mem, store), Some(Confidence::Medium));
+        assert_eq!(implements_edge(&g, mem, reader), Some(Confidence::Medium));
+        assert_eq!(implements_edge(&g, half, store), None, "Half lacks the embedded Get");
+        assert_eq!(implements_edge(&g, half, reader), None);
+        assert_eq!(
+            stats.map(|s| s.marker()).as_deref(),
+            Some("[iface] go implicit implements: 2 (interfaces=2 types=1 embedded=1 open=0)")
+        );
+    }
+
+    /// An embed that does not bind (`io.Reader` from outside the parse)
+    /// leaves the interface's method set unknown: no type implements it on
+    /// its own `Close` alone. The predeclared `error` is known: `Error`.
+    #[test]
+    fn go_unbound_embed_leaves_interface_unmatched() {
+        let mut file = go_file(
+            "port",
+            &[
+                (node_kind::INTERFACE, "port::ReadCloser", None),
+                (node_kind::METHOD, "port::ReadCloser::Close", Some("port::ReadCloser")),
+                (node_kind::INTERFACE, "port::CodedError", None),
+                (node_kind::METHOD, "port::CodedError::Code", Some("port::CodedError")),
+                (node_kind::STRUCT, "port::File", None),
+                (node_kind::METHOD, "port::File::Close", Some("port::File")),
+                (node_kind::METHOD, "port::File::Code", Some("port::File")),
+                (node_kind::STRUCT, "port::Fault", None),
+                (node_kind::METHOD, "port::Fault::Code", Some("port::Fault")),
+                (node_kind::METHOD, "port::Fault::Error", Some("port::Fault")),
+            ],
+        );
+        file.refs = vec![
+            embed(
+                "port",
+                "port::ReadCloser",
+                CallQualifier::Attribute { base: "io".to_string(), name: "Reader".to_string() },
+            ),
+            embed("port", "port::CodedError", CallQualifier::Bare("error".to_string())),
+        ];
+        let (read_closer, coded, file_ty, fault) = (
+            gid(node_kind::INTERFACE, "port::ReadCloser"),
+            gid(node_kind::INTERFACE, "port::CodedError"),
+            gid(node_kind::STRUCT, "port::File"),
+            gid(node_kind::STRUCT, "port::Fault"),
+        );
+        let (g, stats) = go_implicit(vec![file]);
+        assert_eq!(implements_edge(&g, file_ty, read_closer), None);
+        assert_eq!(implements_edge(&g, file_ty, coded), None, "File has Code but no Error");
+        assert_eq!(implements_edge(&g, fault, coded), Some(Confidence::Medium));
+        assert_eq!(
+            stats.map(|s| s.marker()).as_deref(),
+            Some("[iface] go implicit implements: 1 (interfaces=1 types=1 embedded=0 open=1)")
+        );
+    }
+
+    /// An unexported method name belongs to its package: a type in another
+    /// directory with the same `isSealed` does not implement the interface.
+    #[test]
+    fn go_unexported_method_matches_only_its_package() {
+        let parses = vec![
+            go_file(
+                "a::sealed",
+                &[
+                    (node_kind::INTERFACE, "a::sealed::Sealed", None),
+                    (node_kind::METHOD, "a::sealed::Sealed::isSealed", Some("a::sealed::Sealed")),
+                ],
+            ),
+            go_file(
+                "a::impl",
+                &[
+                    (node_kind::STRUCT, "a::impl::T", None),
+                    (node_kind::METHOD, "a::impl::T::isSealed", Some("a::impl::T")),
+                ],
+            ),
+            go_file(
+                "b::impl",
+                &[
+                    (node_kind::STRUCT, "b::impl::U", None),
+                    (node_kind::METHOD, "b::impl::U::isSealed", Some("b::impl::U")),
+                ],
+            ),
+        ];
+        let sealed = gid(node_kind::INTERFACE, "a::sealed::Sealed");
+        let (g, _) = go_implicit(parses);
+        let same_pkg = gid(node_kind::STRUCT, "a::impl::T");
+        assert_eq!(implements_edge(&g, same_pkg, sealed), Some(Confidence::Medium));
+        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "b::impl::U"), sealed), None);
+    }
+
+    /// Embeds bind to an INTERFACE only, package-scoped: `Reader` is the
+    /// same-directory interface in another file (not a same-named DATA_ENTITY
+    /// of the embedding file, not an interface of another package); `store.
+    /// Writer` is the interface of the imported package, also when the go.mod
+    /// sits below the repo root (`backend::internal::store`); `io.Closer` and
+    /// an ambiguous name stay unresolved.
+    #[test]
+    fn go_embed_binds_package_scoped_interfaces_only() {
+        let mut api = go_file(
+            "backend::svc::api",
+            &[
+                (node_kind::INTERFACE, "backend::svc::api::Port", None),
+                (node_kind::DATA_ENTITY, "backend::svc::api::Reader", None),
+            ],
+        );
+        api.imports = vec![
+            ImportStmt {
+                from_module: "backend::svc::api".to_string(),
+                target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+            },
+            ImportStmt {
+                from_module: "backend::svc::api".to_string(),
+                target: ImportTarget::Module { path: "io".to_string(), alias: None },
+            },
+        ];
+        let port = "backend::svc::api::Port";
+        api.refs = vec![
+            embed("backend::svc::api", port, CallQualifier::Bare("Reader".to_string())),
+            embed(
+                "backend::svc::api",
+                port,
+                CallQualifier::Attribute { base: "store".to_string(), name: "Writer".to_string() },
+            ),
+            embed(
+                "backend::svc::api",
+                port,
+                CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+            ),
+            embed("backend::svc::api", port, CallQualifier::Bare("Dup".to_string())),
+        ];
+        let parses = vec![
+            api,
+            go_file("backend::svc::read", &[(node_kind::INTERFACE, "backend::svc::read::Reader", None)]),
+            go_file("backend::other::read", &[(node_kind::INTERFACE, "backend::other::read::Reader", None)]),
+            go_file(
+                "backend::internal::store::write",
+                &[(node_kind::INTERFACE, "backend::internal::store::write::Writer", None)],
+            ),
+            go_file("backend::svc::dup_a", &[(node_kind::INTERFACE, "backend::svc::dup_a::Dup", None)]),
+            go_file("backend::svc::dup_b", &[(node_kind::INTERFACE, "backend::svc::dup_b::Dup", None)]),
+        ];
+        let (g, _) = go_implicit(parses);
+        let from = gid(node_kind::INTERFACE, port);
+        let mut embedded: Vec<NodeId> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::INHERITS_FROM)
+            .map(|e| e.to)
+            .collect();
+        embedded.sort_unstable_by_key(|id| id.0);
+        let mut expect = vec![
+            gid(node_kind::INTERFACE, "backend::svc::read::Reader"),
+            gid(node_kind::INTERFACE, "backend::internal::store::write::Writer"),
+        ];
+        expect.sort_unstable_by_key(|id| id.0);
+        assert_eq!(embedded, expect);
+        let unbound: Vec<&CallQualifier> =
+            g.unresolved_refs.iter().filter(|r| r.from == from).map(|r| &r.qualifier).collect();
+        assert_eq!(
+            unbound,
+            vec![
+                &CallQualifier::Attribute { base: "io".to_string(), name: "Closer".to_string() },
+                &CallQualifier::Bare("Dup".to_string()),
+            ]
+        );
+    }
+
+    /// An empty interface is implemented by nothing, and a graph with no
+    /// INTERFACE reports no marker.
+    #[test]
+    fn go_empty_interface_and_no_interface() {
+        let file = go_file(
+            "any",
+            &[
+                (node_kind::INTERFACE, "any::Anything", None),
+                (node_kind::STRUCT, "any::T", None),
+                (node_kind::METHOD, "any::T::Run", Some("any::T")),
+            ],
+        );
+        let (g, stats) = go_implicit(vec![file]);
+        assert!(!g.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS));
+        assert_eq!(
+            stats.map(|s| s.marker()).as_deref(),
+            Some("[iface] go implicit implements: 0 (interfaces=0 types=0 embedded=0 open=0)")
+        );
+        let (_, none) = go_implicit(vec![go_file("x", &[(node_kind::STRUCT, "x::T", None)])]);
+        assert_eq!(none, None);
     }
 }

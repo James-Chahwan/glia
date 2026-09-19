@@ -1,0 +1,28 @@
+{
+  "framework": "go-iface-embed",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "go/impl"
+  ],
+  "note": "LD.7b. Store embeds Reader, so Store's method set is {Get, Put} and Mem satisfies both. Baseline HEAD: no edge between Store and Reader and no IMPLEMENTS.",
+  "expect_edges": [
+    {
+      "from": "store::Store",
+      "to": "store::Reader",
+      "category": "INHERITS_FROM"
+    },
+    {
+      "from": "store::Mem",
+      "to": "store::Store",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "store::Mem",
+      "to": "store::Reader",
+      "category": "IMPLEMENTS"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "framework": "go-implicit-iface",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "go/impl"
+  ],
+  "note": "LD.7b. Go satisfies interfaces implicitly: MemStore declares both of Store's methods (across two files), ReadOnly only Get. Baseline HEAD: 0 IMPLEMENTS edges; interface method specs are not nodes. MemStore::Get -> Store::Get is A6.6's method-level pass riding on the class-level edge.",
+  "expect_nodes": [
+    {
+      "kind": "INTERFACE",
+      "name": "store::Store"
+    },
+    {
+      "kind": "METHOD",
+      "name": "store::Store::Get"
+    },
+    {
+      "kind": "METHOD",
+      "name": "store::Store::Put"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "mem::MemStore"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "mem::MemStore",
+      "to": "store::Store",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "mem::MemStore::Get",
+      "to": "store::Store::Get",
+      "category": "IMPLEMENTS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "mem::ReadOnly",
+      "to": "store::Store",
+      "category": "IMPLEMENTS"
+    }
+  ]
+}
