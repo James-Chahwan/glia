@@ -10,7 +10,7 @@
   ],
   "expect_edges": [
     {"from": "SqlRepo", "to": "Repo", "category": "IMPLEMENTS",
-     "note": "INTENDED: `implements Repo` routes to the abstract CLASS node. MEASURED 2026-09-16: an IMPLEMENTS edge IS emitted but with a fabricated target — `--dump` prints `[IMPLEMENTS] 'SqlRepo' -> '?'`, identical to typescript/impl. The review called Dart heritage 'downgraded by the verifier'; what is actually measured is the SAME dangling-NodeId failure as TypeScript, not a confidence downgrade. Recall 0/1."}
+     "note": "INTENDED: `implements Repo` routes to the abstract CLASS node. MEASURED 2026-09-16: an IMPLEMENTS edge IS emitted but with a fabricated target — `--dump` prints `[IMPLEMENTS] 'SqlRepo' -> '?'`, identical to typescript/impl. The review called Dart heritage 'downgraded by the verifier'; what is actually measured is the SAME dangling-NodeId failure as TypeScript, not a confidence downgrade. Recall 0/1. MEASURED 2026-09-19 after A6.5 (debug CLI, `analyze --format json`): the parser emits a Bare IMPLEMENTS ref instead of a bare-name NodeId and resolve_refs binds it by its repo-unique name — `[IMPLEMENTS] 'sql_repo::SqlRepo' -> 'repo::Repo'`, stderr `[heritage] refs bound: dart=1 unresolved: dart=0`. Recall 1/1."}
   ],
   "expect_cells": [],
   "forbid": [],

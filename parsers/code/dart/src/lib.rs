@@ -272,8 +272,9 @@ fn visit_class(
     acc.declared_ids.insert(id);
 
     // G12.5 — heritage: `extends Y` → INHERITS_FROM (superclass);
-    // `implements I` and `with M` → IMPLEMENTS (interface/mixin).
-    visit_class_heritage(node, src, id, repo, acc);
+    // `implements I` and `with M` → IMPLEMENTS (interface/mixin). A6.5: emitted
+    // as refs from this file's MODULE (`parent_id`), bound by the graph crate.
+    visit_class_heritage(node, src, id, parent_id, acc);
 
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
@@ -599,51 +600,85 @@ fn member_name(sig: TsNode, src: &[u8]) -> Option<(String, bool)> {
 ///   - `extends Y`  → INHERITS_FROM (class → superclass)
 ///   - `with M`     → IMPLEMENTS    (class → mixin)
 ///   - `implements I` → IMPLEMENTS  (class → interface)
-fn visit_class_heritage(node: TsNode, src: &[u8], id: NodeId, repo: RepoId, acc: &mut Acc) {
+///
+/// A6.5: each is a Bare [`UnresolvedRef`] from `module_id` (the file's MODULE),
+/// never an edge. A Dart class is keyed `<module>::<Name>`, so the parser cannot
+/// name the target node; the graph crate's `resolve_refs` binds a same-file
+/// base through the module's own symbols and a cross-file one by its
+/// repo-unique name. An external base (`extends StatelessWidget`) stays an
+/// unresolved ref and emits no edge.
+fn visit_class_heritage(node: TsNode, src: &[u8], id: NodeId, module_id: NodeId, acc: &mut Acc) {
     if let Some(superclass) = node.child_by_field_name("superclass") {
-        // `extends <type>` arrives via the `type` field; mixins (`with`) nest as
-        // a `mixins` child holding one or more `_type_not_void` types.
-        if let Some(sc_type) = superclass.child_by_field_name("type") {
-            emit_heritage_ref(text_of(sc_type, src), edge_category::INHERITS_FROM, id, repo, acc);
+        // The `extends <type>` head sits directly under `superclass` (its `type`
+        // field is the hidden `_type_not_void`); mixins (`with`) nest as a
+        // `mixins` child holding one or more types.
+        for head in heritage_type_heads(superclass, src) {
+            emit_heritage_ref(head, edge_category::INHERITS_FROM, id, module_id, acc);
         }
         let mut sc_cursor = superclass.walk();
         for child in superclass.named_children(&mut sc_cursor) {
             if child.kind() == "mixins" {
-                emit_mixin_or_interface_refs(child, src, id, repo, acc);
+                emit_mixin_or_interface_refs(child, src, id, module_id, acc);
             }
         }
     }
     if let Some(interfaces) = node.child_by_field_name("interfaces") {
-        emit_mixin_or_interface_refs(interfaces, src, id, repo, acc);
+        emit_mixin_or_interface_refs(interfaces, src, id, module_id, acc);
     }
 }
 
-/// Emit an IMPLEMENTS edge per type in a `mixins` (`with`) or `interfaces`
-/// (`implements`) clause. The `with`/`implements` keywords are anonymous, so the
-/// named children are the type nodes themselves.
+/// Emit an IMPLEMENTS ref per type in a `mixins` (`with`) or `interfaces`
+/// (`implements`) clause.
 fn emit_mixin_or_interface_refs(
     clause: TsNode,
     src: &[u8],
     id: NodeId,
-    repo: RepoId,
+    module_id: NodeId,
     acc: &mut Acc,
 ) {
-    let mut cursor = clause.walk();
-    for ty in clause.named_children(&mut cursor) {
-        // Each type head is a `type_identifier` (or function/record type). Skip
-        // trailing `type_arguments` so generics don't spawn spurious edges.
-        if ty.kind() == "type_arguments" {
-            continue;
-        }
-        emit_heritage_ref(text_of(ty, src), edge_category::IMPLEMENTS, id, repo, acc);
+    for head in heritage_type_heads(clause, src) {
+        emit_heritage_ref(head, edge_category::IMPLEMENTS, id, module_id, acc);
     }
+}
+
+/// A6.5: the class-type heads directly under one heritage clause, as source
+/// text. The grammar inlines `_type_name` (`type_identifier ('.'
+/// type_identifier)?`), so a library-prefixed `p.Base` arrives as TWO sibling
+/// `type_identifier`s split by an anonymous `.`: they are one head, spanned
+/// here so [`emit_heritage_ref`] reduces it to `Base`. Read one identifier at a
+/// time, the prefix `p` would become a ref that binds by name to whatever the
+/// repo calls `p`. Generics (`type_arguments`), a nested `mixins` clause and a
+/// function / record type (never a class, so never a Dart supertype) are not
+/// heads.
+fn heritage_type_heads<'a>(clause: TsNode, src: &'a [u8]) -> Vec<&'a str> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut after_dot = false;
+    let mut cursor = clause.walk();
+    for child in clause.children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => match spans.last_mut() {
+                Some(span) if after_dot => span.1 = child.end_byte(),
+                _ => spans.push((child.start_byte(), child.end_byte())),
+            },
+            "." => {
+                after_dot = true;
+                continue;
+            }
+            _ => {}
+        }
+        after_dot = false;
+    }
+    spans
+        .into_iter()
+        .filter_map(|(start, end)| std::str::from_utf8(src.get(start..end)?).ok())
+        .collect()
 }
 
 fn emit_heritage_ref(
     raw: &str,
     category: repo_graph_core::EdgeCategoryId,
     from_id: NodeId,
-    repo: RepoId,
+    module_id: NodeId,
     acc: &mut Acc,
 ) {
     // Strip generic args (`Comparable<Foo>` → `Comparable`) and take the trailing
@@ -653,12 +688,11 @@ fn emit_heritage_ref(
     if simple.is_empty() {
         return;
     }
-    let target = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, simple);
-    acc.edges.push(Edge {
+    acc.refs.push(UnresolvedRef {
         from: from_id,
-        to: target,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(simple.to_string()),
         category,
-        confidence: Confidence::Weak,
     });
 }
 
@@ -2008,6 +2042,29 @@ void main() {
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::FUNCTION).count(), 1);
     }
 
+    /// A6.5: the Bare heritage refs `class_id` carries, as (name, category),
+    /// sorted. Every one must come from the file's MODULE.
+    fn heritage_refs(fp: &FileParse, class_id: NodeId, module_id: NodeId) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = fp
+            .refs
+            .iter()
+            .filter(|r| r.from == class_id)
+            .map(|r| {
+                assert_eq!(r.from_module, module_id, "heritage ref must come from the file MODULE");
+                let CallQualifier::Bare(name) = &r.qualifier else {
+                    panic!("heritage ref must be Bare, got {:?}", r.qualifier);
+                };
+                (name.clone(), r.category.0)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn is_heritage_edge(e: &Edge) -> bool {
+        e.category == edge_category::INHERITS_FROM || e.category == edge_category::IMPLEMENTS
+    }
+
     #[test]
     fn heritage_implements_and_extends() {
         let source = r#"
@@ -2020,21 +2077,18 @@ class X extends Base with Mix implements IFoo {
 "#;
         let fp = parse_file(source, "lib/x.dart", "lib::x", repo()).unwrap();
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::x::X");
-        let base = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "Base");
-        let mix = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "Mix");
-        let ifoo = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "IFoo");
-        // extends → INHERITS_FROM
-        assert!(fp.edges.iter().any(|e| e.from == x_id
-            && e.to == base
-            && e.category == edge_category::INHERITS_FROM));
-        // with → IMPLEMENTS
-        assert!(fp.edges.iter().any(|e| e.from == x_id
-            && e.to == mix
-            && e.category == edge_category::IMPLEMENTS));
-        // implements → IMPLEMENTS
-        assert!(fp.edges.iter().any(|e| e.from == x_id
-            && e.to == ifoo
-            && e.category == edge_category::IMPLEMENTS));
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::x");
+        // extends → INHERITS_FROM; with / implements → IMPLEMENTS. All refs the
+        // graph crate binds, none a parser-minted edge.
+        assert_eq!(
+            heritage_refs(&fp, x_id, module_id),
+            vec![
+                ("Base".to_string(), edge_category::INHERITS_FROM.0),
+                ("IFoo".to_string(), edge_category::IMPLEMENTS.0),
+                ("Mix".to_string(), edge_category::IMPLEMENTS.0),
+            ]
+        );
+        assert!(!fp.edges.iter().any(is_heritage_edge));
     }
 
     #[test]
@@ -2042,10 +2096,69 @@ class X extends Base with Mix implements IFoo {
         let source = "class IFoo {}\nclass X implements IFoo {}\n";
         let fp = parse_file(source, "lib/x.dart", "lib::x", repo()).unwrap();
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::x::X");
-        let ifoo = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "IFoo");
-        assert!(fp.edges.iter().any(|e| e.from == x_id
-            && e.to == ifoo
-            && e.category == edge_category::IMPLEMENTS));
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::x");
+        assert_eq!(
+            heritage_refs(&fp, x_id, module_id),
+            vec![("IFoo".to_string(), edge_category::IMPLEMENTS.0)]
+        );
+        assert!(!fp.edges.iter().any(is_heritage_edge));
+    }
+
+    /// A6.5: a single-file `class Dog extends Animal` names a ref the graph
+    /// crate binds through the file's own symbols. `build` fills
+    /// `module_symbols[module]` from the MODULE's nav children by simple name,
+    /// so the ref's `from_module` must own a CLASS child of exactly that name:
+    /// the node every Dart class is keyed by (`<module>::Animal`), not the bare
+    /// `Animal` id the parser minted before.
+    #[test]
+    fn same_file_heritage_binds() {
+        let source = "class Animal {}\nclass Dog extends Animal {}\n";
+        let fp = parse_file(source, "lib/pets.dart", "lib::pets", repo()).unwrap();
+        let dog = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::pets::Dog");
+        let animal = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::pets::Animal");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::pets");
+        let r = fp
+            .refs
+            .iter()
+            .find(|r| r.from == dog && r.category == edge_category::INHERITS_FROM)
+            .expect("Dog's extends ref");
+        let CallQualifier::Bare(name) = &r.qualifier else {
+            panic!("extends ref must be Bare, got {:?}", r.qualifier);
+        };
+        let bound: Vec<NodeId> = fp
+            .nav
+            .children_of
+            .get(&r.from_module)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|c| fp.nav.name_by_id.get(c) == Some(name))
+            .collect();
+        assert_eq!(r.from_module, module_id);
+        assert_eq!(bound, vec![animal]);
+        assert_eq!(fp.nav.kind_by_id.get(&animal), Some(&node_kind::CLASS));
+    }
+
+    /// A6.5: a generic or library-prefixed type reduces to its simple name, so
+    /// `extends p.Base<T>` binds like `extends Base`, in every clause.
+    #[test]
+    fn heritage_ref_strips_generics_and_prefix() {
+        let source = "import 'm.dart' as p;\n\
+                      class X extends p.Base<int> with p.Mix implements Comparable<X>, p.I {}\n";
+        let fp = parse_file(source, "lib/x.dart", "lib::x", repo()).unwrap();
+        let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::x::X");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::x");
+        // The grammar splits `p.Base` into two sibling identifiers; the prefix
+        // `p` is never a ref of its own.
+        assert_eq!(
+            heritage_refs(&fp, x_id, module_id),
+            vec![
+                ("Base".to_string(), edge_category::INHERITS_FROM.0),
+                ("Comparable".to_string(), edge_category::IMPLEMENTS.0),
+                ("I".to_string(), edge_category::IMPLEMENTS.0),
+                ("Mix".to_string(), edge_category::IMPLEMENTS.0),
+            ]
+        );
     }
 
     #[test]

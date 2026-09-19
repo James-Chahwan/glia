@@ -1,0 +1,21 @@
+{
+  "framework": "dart-heritage",
+  "language": "dart",
+  "dirs": ["."],
+  "cells": ["dart/impl"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Dog", "note": "derived, dog.dart"},
+    {"kind": "CLASS", "name": "Animal", "note": "superclass, base.dart"},
+    {"kind": "CLASS", "name": "Walker", "note": "`abstract class` is the Dart interface; the parser maps it to CLASS"},
+    {"kind": "CLASS", "name": "Runs", "note": "`mixin Runs` is a CLASS node since LA.37b"},
+    {"kind": "CLASS", "name": "Cat", "note": "same-file subclass, base.dart"}
+  ],
+  "expect_edges": [
+    {"from": "dog", "to": "base", "category": "IMPORTS", "note": "import 'base.dart' — the positive control, 1.00 before A6.5"},
+    {"from": "Dog", "to": "Animal", "category": "INHERITS_FROM", "note": "cross-file `extends`. Before A6.5 the parser minted a BARE-name NodeId (`Animal`) while the class is keyed `<module>::Animal`, so the edge dangled: `[INHERITS_FROM] 'Dog' -> '?'`"},
+    {"from": "Cat", "to": "Animal", "category": "INHERITS_FROM", "note": "SAME-file `extends` — dangled identically before A6.5; binds through the module's own symbols"},
+    {"from": "Dog", "to": "Walker", "category": "IMPLEMENTS", "note": "cross-file `implements` — same bare-name phantom before A6.5"},
+    {"from": "Dog", "to": "Runs", "category": "IMPLEMENTS", "note": "`with Runs` is emitted as IMPLEMENTS by design; binds to the mixin's CLASS node"}
+  ],
+  "note": "A6.5: Dart heritage goes through UnresolvedRef (Bare) so resolve_refs binds it — same-file via module_symbols, cross-file via the repo-unique name. An external base (`extends StatelessWidget`) stays an unresolved ref and emits no edge. Marker: the engine's `[heritage] refs bound: ... dart=N ...` line."
+}
