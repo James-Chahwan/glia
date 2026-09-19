@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use repo_graph_code_domain::evidence::{self, Basis, Evidence, Location};
-use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind};
+use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
 use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
@@ -900,11 +900,14 @@ struct TestsModule {
     /// (LB.9b, `api::user.py`) is its bare form (`api::user`), so its stem,
     /// not its extension, is the tail.
     key: String,
-    /// Named by its file name: a same-stem file of another build group sits
-    /// beside it.
+    /// Named by its file name: a same-stem file sits beside it (another
+    /// build group's, LB.9b, or its own group's, LB.13).
     qualified: bool,
     /// Its `merged.graphs` index.
     graph: usize,
+    /// LB.13: its file's extension, from its POSITION (`ts` for
+    /// `src/util.ts`): a test picks the same-stem sibling its language loads.
+    ext: Option<String>,
 }
 
 /// Pair each test MODULE with the module(s) it tests by stripping the test
@@ -933,7 +936,11 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
                     .or_default()
                     .push(module_info.len());
             }
-            module_info.push(TestsModule { id: n.id, key, qualified, graph });
+            let ext = position_file(&n.cells).and_then(|f| {
+                let file = f.rsplit('/').next().unwrap_or(&f);
+                file.rsplit_once('.').map(|(_, e)| e.to_string())
+            });
+            module_info.push(TestsModule { id: n.id, key, qualified, graph, ext });
         }
     }
     for test in &module_info {
@@ -971,17 +978,24 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
 /// LB.9b: a candidate named by its file name (`api::user.py` beside
 /// `api/user.ts`) is kept only when it sits in the test module's own graph:
 /// a Python test never pairs the TypeScript module that merely shares its
-/// stem. Every other pairing is unchanged.
+/// stem.
+///
+/// LB.13: file-named candidates of one bare form (`src::util.ts` +
+/// `src::util.js`) among the best-scored keep only the sibling the test's
+/// language loads first ([`same_stem_order`] of `test.ext`; candidate order
+/// breaks ties). A test language with no file-import order keeps them all
+/// (`FooTest.java` pairs `Foo.java` and `Foo.kt`). Every other pairing is
+/// unchanged.
 fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<NodeId> {
     const MAX_TEST_TARGETS: usize = 3;
     let test_parent: Vec<&str> = qname_parent_segments(&test.key);
-    let mut scored: Vec<(usize, NodeId)> = candidates
+    let mut scored: Vec<(usize, &TestsModule)> = candidates
         .iter()
         .filter(|c| c.id != test.id)
         .filter(|c| !c.qualified || c.graph == test.graph)
         .map(|c| {
             let cand_parent = qname_parent_segments(&c.key);
-            (common_prefix_len(&test_parent, &cand_parent), c.id)
+            (common_prefix_len(&test_parent, &cand_parent), *c)
         })
         .collect();
     if scored.is_empty() {
@@ -989,8 +1003,35 @@ fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<N
     }
     let max_score = scored.iter().map(|(s, _)| *s).max().unwrap_or(0);
     scored.retain(|(s, _)| *s == max_score);
-    scored.truncate(MAX_TEST_TARGETS);
-    scored.into_iter().map(|(_, id)| id).collect()
+    let order = test.ext.as_deref().map_or(&[][..], same_stem_order);
+    let rank = |c: &TestsModule| {
+        c.ext
+            .as_deref()
+            .and_then(|e| order.iter().position(|o| *o == e))
+            .unwrap_or(usize::MAX)
+    };
+    let mut kept: Vec<NodeId> = Vec::with_capacity(scored.len());
+    for (i, (_, c)) in scored.iter().enumerate() {
+        if c.qualified {
+            let sibling = |o: &TestsModule| o.qualified && o.key == c.key;
+            let best = scored
+                .iter()
+                .filter(|(_, o)| sibling(o))
+                .map(|(_, o)| rank(o))
+                .min()
+                .unwrap_or(usize::MAX);
+            // An empty order (or no sibling in it) keeps the whole group;
+            // otherwise only the first best-ranked sibling stays.
+            if best != usize::MAX
+                && scored.iter().position(|(_, o)| sibling(o) && rank(o) == best) != Some(i)
+            {
+                continue;
+            }
+        }
+        kept.push(c.id);
+    }
+    kept.truncate(MAX_TEST_TARGETS);
+    kept
 }
 
 fn qname_parent_segments(qname: &str) -> Vec<&str> {
@@ -1725,6 +1766,40 @@ mod passes_tests {
         want.sort_by_key(|(f, t)| (f.0, t.0));
         assert_eq!(got, want);
         assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 3 });
+    }
+
+    /// LB.13: a test pairs the one same-stem sibling its language loads; a
+    /// test language with no file-import order pairs every sibling.
+    #[test]
+    fn a_test_pairs_the_same_stem_sibling_its_language_loads() {
+        use repo_graph_code_domain::GRAPH_TYPE;
+        use repo_graph_core::RepoId;
+        let repo = RepoId::from_canonical("test://lb13");
+        let module = |qname: &str, key: &str, qualified: bool, ext: &str| TestsModule {
+            id: NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, qname),
+            key: key.to_string(),
+            qualified,
+            graph: 0,
+            ext: Some(ext.to_string()),
+        };
+        let ts = module("src::util.ts", "src::util", true, "ts");
+        let js = module("src::util.js", "src::util", true, "js");
+        let other = module("lib::util", "lib::util", false, "ts");
+        let candidates = [&js, &ts, &other];
+        let pick = |test: &TestsModule| select_test_targets(test, &candidates);
+        assert_eq!(pick(&module("src::util.test", "src::util.test", false, "ts")), [ts.id]);
+        assert_eq!(pick(&module("src::util.test", "src::util.test", false, "js")), [js.id]);
+        // FooTest.java beside Foo.java + Foo.kt keeps both: no file order.
+        assert_eq!(
+            pick(&module("src::util_test", "src::util_test", false, "java")),
+            [js.id, ts.id]
+        );
+        // A test with no located file keeps both too.
+        let unlocated = TestsModule { ext: None, ..module("src::util.test", "src::util.test", false, "") };
+        assert_eq!(pick(&unlocated), [js.id, ts.id]);
+        // Only the best-scored survive to the sibling pick: `lib::util` shares
+        // no directory with `src::util.test`, so it was never a candidate.
+        assert!(!pick(&module("src::util.test", "src::util.test", false, "ts")).contains(&other.id));
     }
 
     #[test]

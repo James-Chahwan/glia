@@ -1162,9 +1162,10 @@ pub struct FileParse {
 
 /// LB.9b: the stem-form qname of a code MODULE named by its full file name.
 ///
-/// When code files of two build groups share a directory and a stem
-/// (`api/user.py` + `api/user.ts`), the engine names each MODULE by its file
-/// name (`api::user.py`, `api::user.ts`) and keeps the stem as its nav name
+/// When two or more code files share a directory and a stem, whatever their
+/// build groups (`api/user.py` + `api/user.ts`, LB.9b; `src/util.ts` +
+/// `src/util.js`, LB.13), the engine names each MODULE by its file name
+/// (`api::user.py`, `api::user.ts`) and keeps the stem as its nav name
 /// (`user`). For such a MODULE this returns the qname its imports name
 /// (`api::user`); for every other qname it returns None: a normal code
 /// module's last segment IS its name, and a non-code MODULE's name is its
@@ -1180,6 +1181,30 @@ pub fn bare_module_qname(qname: &str, name: &str) -> Option<String> {
     } else {
         format!("{dir}::{name}")
     })
+}
+
+/// LB.13: which sibling a bare import binds when one graph holds several
+/// files of a stem (`src/util.ts` + `src/util.js`, both named by file name).
+///
+/// Keyed by the IMPORTER's file extension; each list is that language's own
+/// resolution order, first match wins. Only languages that import FILES have
+/// one: Java / Kotlin imports name classes, Elixir aliases name `defmodule`s,
+/// Terraform modules are directories, and a `.cljc` file is compiled for both
+/// platforms and loads a different sibling on each. Empty = no rule: the
+/// import stays unresolved (and counted), never guessed.
+pub fn same_stem_order(importer_ext: &str) -> &'static [&'static str] {
+    match importer_ext {
+        // tsc: `.ts` `.tsx` (`.d.ts`), then `.js` `.jsx` under `allowJs`.
+        "ts" | "tsx" => &["ts", "tsx", "js", "jsx", "vue"],
+        // Node / Vite `resolve.extensions` default: `.mjs` `.js` `.mts` `.ts`
+        // `.jsx` `.tsx`.
+        "js" | "jsx" | "vue" => &["js", "ts", "jsx", "tsx", "vue"],
+        // Clojure `RT.load`: `.clj` before `.cljc`, never `.cljs`.
+        "clj" => &["clj", "cljc"],
+        // ClojureScript: `.cljs` before `.cljc`, never `.clj`.
+        "cljs" => &["cljs", "cljc"],
+        _ => &[],
+    }
 }
 
 /// Code-domain navigation indices — what the strict `Node` shape pushed out of
@@ -2764,6 +2789,31 @@ mod tests {
         assert!(local.is_local_path("user"));
         assert!(!local.is_local_path("py"), "the extension is not a local module");
         assert!(!local.is_local_path("user.py"));
+    }
+
+    // ---- LB.13: which same-stem sibling an importer's language loads -------
+
+    #[test]
+    fn same_stem_order_is_the_importers_own_resolution_order() {
+        // TypeScript tries its own files first, JavaScript its own.
+        for ext in ["ts", "tsx"] {
+            assert_eq!(same_stem_order(ext).first(), Some(&"ts"), "{ext}");
+        }
+        for ext in ["js", "jsx", "vue"] {
+            assert_eq!(same_stem_order(ext).first(), Some(&"js"), "{ext}");
+            assert!(same_stem_order(ext).contains(&"ts"), "{ext}: allowJs / bundlers load .ts");
+        }
+        // A JVM Clojure load never offers the ClojureScript file, and back.
+        assert_eq!(same_stem_order("clj"), ["clj", "cljc"]);
+        assert_eq!(same_stem_order("cljs"), ["cljs", "cljc"]);
+        assert!(!same_stem_order("clj").contains(&"cljs"));
+        assert!(!same_stem_order("cljs").contains(&"clj"));
+        // No file-import rule: a .cljc loads a different sibling per platform;
+        // Java / Kotlin import classes, Elixir aliases modules, Terraform
+        // modules are directories, C/C++ includes name the file.
+        for ext in ["cljc", "java", "kt", "ex", "exs", "tf", "hcl", "cpp", "h", "py", ""] {
+            assert!(same_stem_order(ext).is_empty(), "{ext}");
+        }
     }
 
     fn index_of(decls: &[(NodeKindId, &str)]) -> LocalModuleIndex {

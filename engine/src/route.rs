@@ -38,7 +38,7 @@ pub(crate) fn parse_repo_files(
     // walked list before any parse, so a cache hit is checked against it.
     let modules = ModuleQnames::plan(files);
     // LB.9b: cached parses rejected because the plan renamed their MODULE (a
-    // same-stem file of another build group appeared or vanished).
+    // same-stem file of any build group, LB.13 included, appeared or vanished).
     let mut requalified: Vec<String> = Vec::new();
     // A5.1 `[proto]` marker counters.
     let mut proto_files = 0usize;
@@ -515,8 +515,8 @@ pub(crate) fn parse_repo_files(
             None => None,
         };
         // LB.9b: a parse cached under this file's other MODULE form (a
-        // sibling of another build group appeared or vanished since) is stale
-        // although its content is not.
+        // same-stem sibling, of any build group since LB.13, appeared or
+        // vanished since) is stale although its content is not.
         let cached_fp = match cached_fp {
             Some(fp) if cached_under_other_form(&fp, path, &module_qname) => {
                 requalified.push(path.clone());
@@ -748,6 +748,12 @@ pub(crate) fn parse_repo_files(
     if let Some(line) = modules.marker(repo_label) {
         eprintln!("{line}");
     }
+    // LB.13 fired_on marker: code files of ONE build group share a directory
+    // and a stem (`util.ts` + `util.js`), so each names its MODULE by its
+    // file name. Only printed when the plan qualified such a file.
+    if let Some(line) = modules.same_group_marker(repo_label) {
+        eprintln!("{line}");
+    }
     // LB.10a fired_on marker: every C/C++ file names its MODULE by its file
     // name. Printed whenever the walk routed one to the C/C++ parser.
     if let Some(line) = modules.c_cpp_marker(repo_label) {
@@ -853,8 +859,14 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
 /// MODULE is `<dir>::<file name>` (`api::user.py`) and every symbol under it
 /// follows. Its nav name stays the stem, and each language graph aliases the
 /// bare path to it (`repo_graph_graph` `build_symbol_table`), so bare-path
-/// imports still bind. Same-group pairs (`util.js` + `util.ts`) keep their
-/// shared MODULE.
+/// imports still bind.
+///
+/// LB.13: a key claimed by two or more files of ONE build group (`util.ts` +
+/// `util.js`, `core.clj` + `core.cljs`, `Foo.java` + `Foo.kt`) qualifies them
+/// the same way, so neither file's symbols land on the other's NodeIds. Their
+/// graph holds two MODULEs of one bare form and registers no alias for it; a
+/// bare import binds the sibling the importer's language loads instead
+/// (`repo_graph_graph` `SameStem`, `same_stem_order`).
 ///
 /// LB.10a: every C/C++ file (`parser_route` `c_cpp`) is named by its file
 /// name, whatever its siblings: an `#include` names a file WITH its
@@ -868,8 +880,9 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
 /// router, the post-cache grafts and a warm cache all agree on every id.
 #[derive(Debug, Default)]
 pub(crate) struct ModuleQnames {
-    /// Paths whose MODULE is named by file name: the cross-group stems and
-    /// every C/C++ file.
+    /// Paths whose MODULE is named by file name: every file of a stem two or
+    /// more code files claim (LB.9b cross-group, LB.13 same-group) and every
+    /// C/C++ file.
     qualified: BTreeSet<String>,
     /// Files qualified for a cross-group stem (LB.9b's marker count).
     cross_group_files: usize,
@@ -879,6 +892,11 @@ pub(crate) struct ModuleQnames {
     /// beside `util.py`): that group's bare alias is ambiguous and is not
     /// registered.
     same_group_dupes: usize,
+    /// LB.13: files qualified for a key only ONE build group claims.
+    same_group_files: usize,
+    /// LB.13: those keys, per build group (the `[modules] same-group stems`
+    /// marker; the TS family reports `typescript`, Kotlin `java`).
+    same_group: BTreeMap<&'static str, usize>,
     /// LB.10a: C/C++ files, all named by file name ...
     c_cpp_files: usize,
     /// ... of which headers (`.h` / `.hh` / `.hpp` / `.hxx`).
@@ -910,15 +928,23 @@ impl ModuleQnames {
                 None => {}
             }
         }
-        for groups in by_key.values().filter(|g| g.len() > 1) {
-            plan.stems += 1;
-            if groups.values().any(|paths| paths.len() > 1) {
-                plan.same_group_dupes += 1;
+        for groups in by_key.values() {
+            let files: usize = groups.values().map(Vec::len).sum();
+            if files < 2 {
+                continue;
             }
-            for path in groups.values().flatten() {
-                plan.cross_group_files += 1;
-                plan.qualified.insert((*path).to_string());
+            if groups.len() > 1 {
+                plan.stems += 1;
+                if groups.values().any(|paths| paths.len() > 1) {
+                    plan.same_group_dupes += 1;
+                }
+                plan.cross_group_files += files;
+            } else if let Some(group) = groups.keys().next() {
+                // LB.13: one build group, two or more files of the stem.
+                *plan.same_group.entry(group).or_default() += 1;
+                plan.same_group_files += files;
             }
+            plan.qualified.extend(groups.values().flatten().map(|p| (*p).to_string()));
         }
         plan
     }
@@ -951,6 +977,22 @@ impl ModuleQnames {
                 self.cross_group_files,
                 self.stems,
                 self.same_group_dupes
+            )
+        })
+    }
+
+    /// LB.13 fired_on marker, once per repo with a same-group qualified file:
+    ///   `[modules] same-group stems: files={f} stems={s} ({group}={n} ...) repo=<label>`
+    /// (groups in name order, `n` = that group's stems).
+    fn same_group_marker(&self, repo_label: &str) -> Option<String> {
+        (self.same_group_files > 0).then(|| {
+            let per_group: Vec<String> =
+                self.same_group.iter().map(|(g, n)| format!("{g}={n}")).collect();
+            format!(
+                "[modules] same-group stems: files={} stems={} ({}) repo={repo_label}",
+                self.same_group_files,
+                self.same_group.values().sum::<usize>(),
+                per_group.join(" ")
             )
         })
     }
@@ -1528,16 +1570,20 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_qualifies_cross_group_stems_only() {
+    fn the_plan_qualifies_cross_group_stems() {
         assert_eq!(
             qualified(&["api/user.py", "api/user.ts", "api/main.py"]),
             ["api/user.py", "api/user.ts"]
         );
-        // One build group: the TS family.
-        assert!(qualified(&["a/x.js", "a/x.ts"]).is_empty());
-        assert!(qualified(&["web/x.component.ts", "web/x.ts", "web/x.vue"]).is_empty());
+        // LB.13: one build group (the TS family, the JVM family) qualifies
+        // too; `x.component.ts` is its own key (`web::x.component`).
+        assert_eq!(qualified(&["a/x.js", "a/x.ts"]), ["a/x.js", "a/x.ts"]);
+        assert_eq!(
+            qualified(&["web/x.component.ts", "web/x.ts", "web/x.vue"]),
+            ["web/x.ts", "web/x.vue"]
+        );
         // Kotlin joins Java's graph (A14.2).
-        assert!(qualified(&["jvm/A.java", "jvm/A.kt"]).is_empty());
+        assert_eq!(qualified(&["jvm/A.java", "jvm/A.kt"]), ["jvm/A.java", "jvm/A.kt"]);
         // yaml never routes to a parser.
         assert!(qualified(&["c/app.py", "c/app.yaml"]).is_empty());
         // Different directories never share a key.
@@ -1551,6 +1597,8 @@ mod tests {
             plan.marker("r").as_deref(),
             Some("[modules] cross-language stems: files=3 stems=1 same-group-ambiguous=1 repo=r")
         );
+        // A cross-group key is never a same-group stem, whatever it holds.
+        assert_eq!(plan.same_group_marker("r"), None);
         assert_eq!(ModuleQnames::plan(&files_of(&["v.go"])).marker("r"), None);
         // A root-level file's qualified name is its file name.
         let plan = ModuleQnames::plan(&files_of(&["x.py", "x.go"]));
@@ -1560,6 +1608,50 @@ mod tests {
             plan.module_id("x.go", RepoId(1)),
             NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "x.go")
         );
+    }
+
+    /// LB.13: every file of a stem ONE build group claims twice or more is
+    /// named by its file name; a lone file keeps its stem-form qname.
+    #[test]
+    fn same_group_stems_are_qualified() {
+        let plan = ModuleQnames::plan(&files_of(&["src/util.ts", "src/util.js"]));
+        assert_eq!(plan.module_qname("src/util.ts"), "src::util.ts");
+        assert_eq!(plan.module_qname("src/util.js"), "src::util.js");
+        assert_eq!(
+            qualified(&["c/core.clj", "c/core.cljs", "c/core.cljc"]),
+            ["c/core.clj", "c/core.cljs", "c/core.cljc"]
+        );
+        assert_eq!(qualified(&["j/Foo.java", "j/Foo.kt"]), ["j/Foo.java", "j/Foo.kt"]);
+        assert_eq!(qualified(&["l/foo.ex", "l/foo.exs"]), ["l/foo.ex", "l/foo.exs"]);
+        assert_eq!(qualified(&["t/main.tf", "t/main.hcl"]), ["t/main.tf", "t/main.hcl"]);
+        let lone = ModuleQnames::plan(&files_of(&["src/util.ts", "src/app.js"]));
+        assert_eq!(lone.module_qname("src/util.ts"), "src::util");
+        assert_eq!(lone.same_group_marker("r"), None);
+        // C/C++ files never enter the key map (LB.10a): no same-group stem.
+        let cpp = ModuleQnames::plan(&files_of(&["src/W.h", "src/W.cpp"]));
+        assert_eq!(cpp.same_group_marker("r"), None);
+
+        let plan = ModuleQnames::plan(&files_of(&[
+            "src/util.ts",
+            "src/util.js",
+            "src/app.ts",
+            "clj/app/core.clj",
+            "clj/app/core.cljs",
+            "jvm/shop/Foo.java",
+            "jvm/shop/Foo.kt",
+            "api/user.py",
+            "api/user.ts",
+        ]));
+        assert_eq!(
+            plan.same_group_marker("fx").as_deref(),
+            Some("[modules] same-group stems: files=6 stems=3 (clojure=1 java=1 typescript=1) repo=fx")
+        );
+        assert_eq!(
+            plan.marker("fx").as_deref(),
+            Some("[modules] cross-language stems: files=2 stems=1 same-group-ambiguous=0 repo=fx"),
+            "the cross-group count is LB.9b's alone"
+        );
+        assert_eq!(plan.qualified.len(), 8);
     }
 
     #[test]

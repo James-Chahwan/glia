@@ -16,6 +16,7 @@ use crate::calls::{
 };
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
+    same_stem_table,
 };
 use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
@@ -32,7 +33,9 @@ use crate::types::{GraphError, RepoGraph, SymbolTable};
 pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
-    resolve_imports_python(&mut g, &all_imports);
+    let mut same = same_stem_table(&g);
+    resolve_imports_python(&mut g, &all_imports, &mut same);
+    same.report();
     let mut tally = EvidenceTally::default();
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
@@ -102,6 +105,12 @@ fn build_go_passes(
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
 /// (`./user`, `@angular/core`) that the caller resolves to module qnames via
 /// `resolve_source`. Returning `None` treats the import as external (no edge).
+///
+/// LB.13: a source resolving to the bare form of two same-stem siblings
+/// (`./util` beside `util.ts` + `util.js`) binds the one the specifier's
+/// extension names, else the one the importer's language loads first
+/// (`imports::SameStem`); builders print the `[imports] same-stem
+/// picks` marker when any such import was tried.
 pub fn build_typescript<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -112,7 +121,9 @@ where
 {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
-    resolve_imports_ts(&mut g, &all_imports, &resolve_source);
+    let mut same = same_stem_table(&g);
+    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
+    same.report();
     let mut tally = EvidenceTally::default();
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
@@ -129,7 +140,9 @@ where
 pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
-    resolve_imports_python(&mut g, &all_imports);
+    let mut same = same_stem_table(&g);
+    resolve_imports_python(&mut g, &all_imports, &mut same);
+    same.report();
     let mut tally = EvidenceTally::default();
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
@@ -550,9 +563,10 @@ fn under_bound_method(nav: &CodeNav, bound: &HashSet<NodeId>, mut id: NodeId) ->
 /// this graph's file: register it as an alias of that MODULE.
 ///
 /// An alias is registered only when exactly ONE file-named MODULE of this
-/// graph has that bare form (`util.js` + `util.ts` beside a `util.py` leave
-/// `./util` unresolved in the TypeScript graph rather than guess), and never
-/// over a real MODULE qname. Decided by counts over a BTreeMap, so HashMap
+/// graph has that bare form, and never over a real MODULE qname. Two
+/// (`util.js` + `util.ts`, LB.13) register none: the import binds the
+/// sibling its importer's language loads (`imports::SameStem`),
+/// decided per build and never stored here. Decided by counts over a BTreeMap, so HashMap
 /// order cannot pick a winner. The alias persists with the symbol table.
 fn register_bare_module_aliases(g: &mut RepoGraph) {
     let mut bare: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();

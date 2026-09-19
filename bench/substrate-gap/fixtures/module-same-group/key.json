@@ -1,0 +1,128 @@
+{
+  "framework": "module-same-group",
+  "language": "typescript+clojure+java",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.13 identity fixture (legacy-only, no matrix cell). Same-stem files of ONE build group (util.ts + util.js in the TS family graph, core.clj + core.cljs in the Clojure graph, Foo.java + Foo.kt in the JVM graph) each get their own MODULE, named by full file name as LB.9b does across groups, and a bare import of the shared stem binds the sibling the IMPORTER's language would load (tsc: .ts first; node / bundlers: .js first; Clojure JVM: .clj; ClojureScript: .cljs). HEAD: one MODULE per stem (src::util, clj::app::core, jvm::shop::Foo) holding both files' symbols, so util.ts's fmt -> pad and util.js's fmt -> legacy land on one fmt node.",
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "src::util.ts"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::util.js"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::util.ts::fmt"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::util.js::fmt"
+    },
+    {
+      "kind": "MODULE",
+      "name": "clj::app::core.clj"
+    },
+    {
+      "kind": "MODULE",
+      "name": "clj::app::core.cljs"
+    },
+    {
+      "kind": "MODULE",
+      "name": "jvm::shop::Foo.java"
+    },
+    {
+      "kind": "MODULE",
+      "name": "jvm::shop::Foo.kt"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::app",
+      "to": "src::util.ts",
+      "category": "IMPORTS",
+      "note": "a .ts importer binds util.ts (tsc resolution order)"
+    },
+    {
+      "from": "src::old",
+      "to": "src::util.js",
+      "category": "IMPORTS",
+      "note": "a .js importer binds util.js (node / bundler order)"
+    },
+    {
+      "from": "src::app::render",
+      "to": "src::util.ts::fmt",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::old::draw",
+      "to": "src::util.js::fmt",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::util.ts::fmt",
+      "to": "src::util.ts::pad",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::util.js::fmt",
+      "to": "src::util.js::legacy",
+      "category": "CALLS"
+    },
+    {
+      "from": "clj::app::server",
+      "to": "clj::app::core.clj",
+      "category": "IMPORTS",
+      "note": "a JVM Clojure require loads core.clj"
+    },
+    {
+      "from": "clj::app::main",
+      "to": "clj::app::core.cljs",
+      "category": "IMPORTS",
+      "note": "a ClojureScript require loads core.cljs"
+    },
+    {
+      "from": "clj::app::core.clj::f",
+      "to": "clj::app::core.clj::g",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "MODULE",
+      "name": "src::util"
+    },
+    {
+      "kind": "MODULE",
+      "name": "clj::app::core"
+    },
+    {
+      "kind": "MODULE",
+      "name": "jvm::shop::Foo"
+    },
+    {
+      "from": "src::old::draw",
+      "to": "src::util.ts::fmt",
+      "category": "CALLS",
+      "note": "a JS importer never binds the TS sibling"
+    },
+    {
+      "from": "src::app",
+      "to": "src::util.js",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "clj::app::main",
+      "to": "clj::app::core.clj",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "clj::app::core.cljs::f",
+      "to": "clj::app::core.clj::g",
+      "category": "CALLS"
+    }
+  ]
+}
