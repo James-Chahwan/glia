@@ -157,9 +157,12 @@ def main() -> int:
         c.check("overlay=False graph is marked", bare.overlay_applied is False, bare.overlay_applied)
         c.check("overlay=False builds the same graph without an overlay file",
                 bare.node_count() == g.node_count(), (bare.node_count(), g.node_count()))
+        # Compare the tree around the refusal: the incremental steps above already
+        # created .glia/graph/ (purge_parse_cache removes the file, not the dir).
+        before_refusal = tree(repo)
         c.raises("save_to_default refuses an overlay=False graph", ValueError,
                  lambda: bare.save_to_default(repo), "overlay=False")
-        c.check("the refusal wrote nothing", not os.path.exists(rg.default_gmap_dir(repo)))
+        c.check("the refusal wrote nothing", tree(repo) == before_refusal, tree(repo))
         out = os.path.join(tmp, "bare-layout")
         bare.save_to(out)
         c.check("save_to(dir) takes an overlay=False graph",
