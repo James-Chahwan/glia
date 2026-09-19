@@ -15977,6 +15977,36 @@
    ],
    "risks": "The `gone` rule of LA.33 must stay 'old ids minus new ids' - this packet relies on a same-id node's surviving owner edge being deduplicated, not re-added. An owner edge for a site no function encloses is correctly absent (attach falls back to the CONTAINS that already exists). Evidence: if LC.3a's helper names change, use whatever LC.3a shipped for stamp_missing / the stage strings; the attribution must match the extraction path's (`extractor:anchor`, `extractor:queues`). Determinism: attach sorts anchors itself; the fold iterates walk-sorted `files`; no HashMap iteration. Panic isolation: apply_queue_const_topics already wraps the per-file fold in catch_unwind; attach adds no slicing. Serialises with LG.1a (restructures engine/src/build/ for rayon, W25), LB.8 (moves qualify_repo after the fold, re-keys queue nodes and their edges - evidence cells move with the edges) and any packet editing queues.rs (LE.4c, LA.33, LC.3a).",
    "spec_group": "LA-r3b (run 3)"
+  },
+  {
+   "id": "LC.11",
+   "title": "The parse cache is written only when it changed: ParseCache::save skips the write when the serialized bytes equal parse_cache.bin on disk, as the store already does for shards and the manifest",
+   "batch": "LC",
+   "area": "engine - parse cache persistence",
+   "loc": 70,
+   "rationale": "Added mid-run 2026-09-19 at James's request (verbatim: \"i think we probably should add the write only if changed thing just anyways. probs into the leap\"). MEASURED on James's machine: the repo-graph MCP server (pre-leap wheel, cwd glia) had written ~1.2 TB (/proc/<pid>/io write_bytes 1,206,125,252,608) in about a day, rewriting the 21 MB `.ai/repo-graph/parse_cache.bin` about every 1.4 s (11 rewrites in 15 s, 14.8 MiB/s). The trigger is repo-graph's watcher rebuilding on read-only inotify events (LG.5a hands that off). The amplifier is glia's: `ParseCache::save` (engine/src/cache.rs) serializes and writes the whole cache on EVERY build, even when no entry changed, while the store already skips unchanged shards and an unchanged manifest (store/src/layout.rs, skip-when-unchanged) and `persist::write_self_ignore` already skips an identical `.gitignore`. An incremental build with no source change should write nothing.",
+   "entry_points": [
+    "engine/src/cache.rs ParseCache::save - after `bincode::serialize`, compare with the existing `<dir>/parse_cache.bin` (length first, then bytes); when identical, skip the tmp write + rename and print the unchanged marker; otherwise keep today's per-pid tmp + atomic rename",
+    "engine/src/cache.rs mod tests - the new tests beside the existing tmp-name tests"
+   ],
+   "files_touched": [
+    "engine/src/cache.rs"
+   ],
+   "implementation": "Compare against the on-disk file, not a digest remembered at load: another writer may have replaced the file since this process loaded it, and comparing with what is actually there is right in both cases (identical -> nothing to do; different -> write ours, as today). Read the existing file only when its length (std::fs::metadata) equals the new byte length, so a changed cache costs no extra read. Keep `write_self_ignore` before the comparison (it is already idempotent). Keep save best-effort: a failed read of the old file means write, never an error. Do not change the cache format, CACHE_VERSION or the serialized bytes - bincode over the BTreeMap is already deterministic (byte_identical relies on it).",
+   "acceptance": "New unit tests in engine/src/cache.rs: (1) save_twice_unchanged_does_not_rewrite - save a cache, record the file's inode + mtime (std::os::unix::fs::MetadataExt), save the same cache again -> inode and mtime unchanged and no `parse_cache.bin.<pid>.tmp` left; (2) save_after_change_rewrites - change one entry, save -> the file's bytes equal the new serialization; (3) save_when_on_disk_differs_rewrites - overwrite the file with different bytes of the same length, save -> rewritten. `cargo test -p <engine package> --lib cache` and `--test byte_identical` green; `engine/tests/generate_many_incremental.rs` green. MEASURED: build glia twice with `GLIA_NO_PERSIST=0`-equivalent persistence into a scratch copy (the second build with no source change) -> the second build prints the unchanged marker and parse_cache.bin's mtime does not move. PRE-FIX BASELINE: test (1) fails at HEAD (the inode changes on every save because of the tmp + rename).",
+   "fired_on_marker": "[incremental] unchanged <n> entries - parse_cache.bin not rewritten",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [],
+    "what_changes": "Nothing observable except fewer writes: parse_cache.bin keeps its inode and mtime across a build that changed no entry.",
+    "in_repo_consumers": []
+   },
+   "depends_on": [
+    "LD.14a"
+   ],
+   "risks": "The dependency on LD.14a is SEQUENCING ONLY: the packet was added after W19 landed and the scheduler replans from scratch, so without a dependency on a not-yet-landed packet it would be placed in an already-landed wave and fail `leap_schedule.py --verify`. It has no code relation to LD.14a. mtime-based freshness: store::scan_for_newer compares source mtimes against the layout, not the parse cache, so an unchanged cache keeping an old mtime cannot make a build look stale (verify by name: grep scan_for_newer).",
+   "fixtures": [],
+   "spec_group": "LC"
   }
  ],
  "batch_c": [

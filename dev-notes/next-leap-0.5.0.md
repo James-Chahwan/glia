@@ -381,3 +381,13 @@ The spec agents were read-only on every repo, but three of them called the wheel
 wrote untracked, regenerable `.ai/repo-graph/` caches into quokka-stack (rewrote existing shards) and neuropil (a new
 untracked `.ai/` directory). No tracked file in any repo changed; quokka's tracked `.ai/repo-graph` deletions predate
 the run. The leap brief now forbids the wheel on other repos.
+
+### 7.8 Added mid-run
+
+- **LC.11 — the parse cache is written only when it changed** (added 2026-09-19 after W19; James: *"i think we
+  probably should add the write only if changed thing just anyways. probs into the leap"*). The repo-graph MCP was
+  measured rewriting the 21 MB `parse_cache.bin` about every 1.4 s (~1.2 TB in a day): repo-graph's watcher rebuilds
+  on read-only inotify events (`opened` / `closed_no_write`), and every glia build rewrote the whole cache even when
+  nothing changed. LC.11 is glia's half; the watcher fix is the wrapper's and is now first in LG.5a's handoff. It is
+  scheduled into W21 (a sequencing-only dependency on LD.14a keeps it out of the landed waves); no other wave moved.
+  The leap is now 249 packets. James kept the MCP watcher on (*"we probs don't wanna turn it off"*).
