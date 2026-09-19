@@ -96,6 +96,8 @@ A build runs its walk reads, per-file parse / extract, const-table scan, RPC nee
 
 For LLM/MCP usage see [repo-graph](https://github.com/James-Chahwan/repo-graph), which wraps the wheel as an MCP server with 13 navigation tools.
 
+**Use without MCP.** An agent can also call the CLI directly, one `glia <command> <repo> --json` per question. [`skills/glia/SKILL.md`](./skills/glia/SKILL.md) is a Claude Code skill that teaches this. It maps each question to its command and shows how to read an answer (`file:line` rows, absences, blind spots), with one worked example per command. To install it, copy it to `~/.claude/skills/glia/` or `<repo>/.claude/skills/glia/`. No server stays resident: each call builds the graph in memory and exits. `cli/tests/skill_surface.rs` checks every command and flag the skill names against `cli/surface/`.
+
 ## CLI
 
 Every subcommand and flag of `glia`, one usage line each, rendered from the committed CLI surface snapshots in `cli/surface/` (LG.6a); `glia <command> --help` has the full text. `--with <repo>` (repeatable) merges more repos in first, so the resolvers pair across them; `--json` prints JSON instead of tables; `--scope` takes a repo-relative path or a project label from `glia projects`. The global `--no-overlay` builds without `.glia/overlay.toml`'s `[[edge]]` stanzas, the extraction-only graph ([docs/overlay.md](./docs/overlay.md)).
