@@ -1,0 +1,37 @@
+{
+  "framework": "nav-react-pages-dir-not-next",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/account",
+      "note": "control: the app's real React Router route"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /home",
+      "note": "src/pages/Home.tsx is not a Next page here (grade.py case-folds, so /Home and /home are one pattern) (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/home",
+      "note": "src/pages/Home.tsx is not a Next page here (grade.py case-folds, so /Home and /home are one pattern) (LB.4c page: qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /settings",
+      "note": "src/pages/Settings.tsx is not a Next page here (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/settings",
+      "note": "src/pages/Settings.tsx is not a Next page here (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6d precision twin: a Vite + React Router app with a src/pages/ folder and no `next` dependency. Route paths are chosen so no real route case-folds onto a forbidden page path. Passes on HEAD and must keep passing."
+}

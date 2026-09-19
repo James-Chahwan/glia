@@ -76,8 +76,8 @@ pub(super) fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
-    // A11.2, LB.4a, LA.4, A5.2 / A5.3, A5.8, A16.4: the post-cache grafts,
-    // in that order.
+    // A11.2, LA.6d, LB.4a, LA.4, A5.2 / A5.3, A5.8, A16.4: the post-cache
+    // grafts, in that order.
     grafts::apply_post_cache(
         &mut parses_by_lang,
         files,

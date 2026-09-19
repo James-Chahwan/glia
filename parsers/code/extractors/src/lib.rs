@@ -10,6 +10,7 @@ pub mod data_sources;
 pub mod iac;
 pub mod nav_links;
 pub mod nav_routes;
+pub mod next_pages;
 pub mod openapi_annot;
 pub mod packages;
 pub mod eventbus;

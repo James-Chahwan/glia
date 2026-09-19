@@ -1,0 +1,93 @@
+{
+  "framework": "nav-next-pages",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "/users/:id",
+      "note": "pages/users/[id].tsx"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/orders/:id",
+      "note": "app/orders/[id]/page.tsx"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/about",
+      "note": "app/(marketing)/about/page.tsx - route group stripped"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "/docs/[...slug]",
+      "note": "pages/docs/[...slug].tsx scoped catch-all; the bracket syntax stays in the qname so graph/src/nav.rs classifies it as a REQUIRED catch-all (a `:slug*` spelling would read as optional and also serve the bare /docs)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/users/:id",
+      "to": "UserPage",
+      "category": "HANDLED_BY",
+      "note": "the file's default-exported component"
+    },
+    {
+      "from": "/orders/:id",
+      "to": "OrderPage",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "Home",
+      "to": "/users/:id",
+      "category": "NAVIGATES_TO",
+      "note": "<Link href=\"/users/7\"> (LA.6c emitter) now has a page to land on"
+    },
+    {
+      "from": "Home",
+      "to": "/orders/:id",
+      "category": "NAVIGATES_TO",
+      "note": "router.push(\"/orders/9\")"
+    },
+    {
+      "from": "Home",
+      "to": "/docs/[...slug]",
+      "category": "NAVIGATES_TO",
+      "note": "a SCOPED catch-all is a real page: /docs/intro lands on it"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /(marketing)/about",
+      "note": "route groups never appear in the URL (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/(marketing)/about",
+      "note": "route groups never appear in the URL (LB.4c page: qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /_app",
+      "note": "pages/_app.tsx is not a page (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/_app",
+      "note": "pages/_app.tsx is not a page (LB.4c page: qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/health",
+      "note": "pages/api stays a server route, never a nav page (legacy nav qname shape)"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "page:/api/health",
+      "note": "pages/api stays a server route, never a nav page (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6d. Next.js file-system routing, both routers, gated on package.json declaring `next`. Baseline HEAD: zero nav ROUTE nodes for pages/ or app/ page files (only pages/api and app/api server routes are extracted by ts_routes.rs nextjs_route_from_path). The catch-all keeps Next's `[...slug]` spelling (the LA.6a handoff), which graph/src/nav.rs reads as a scoped, required catch-all."
+}
