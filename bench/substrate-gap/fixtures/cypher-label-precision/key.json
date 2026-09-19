@@ -1,0 +1,15 @@
+{
+  "framework": "cypher-label-precision",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LA.28. scan_cypher_labels (parsers/code/extractors/src/data_entities.rs) finds MATCH / MERGE / CREATE case-insensitively anywhere in any file and reads every `:ident` inside a `(...)` in the next 256 bytes, so a Rust `match` over paths mints data_entity:graph:<path segment> (the glia self-build has 91 graph:* DATA_ENTITY nodes, among them data_entity:graph:pick_primary; neuropil 98, Engram 16, none real) and a comment quoting Cypher mints its placeholder label. Labels count only inside a Cypher-shaped string literal. people.py is the control. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:Person", "note": "people.py tx.run(\"MATCH (p:Person ...\") - the control"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:Company", "note": "people.py implicit-concatenated MERGE statement"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:CLASS", "note": "merged.rs: `(node_kind::CLASS)` inside a Rust match"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:pick_primary", "note": "merged.rs: `(merged::pick_primary(a, b))` inside a Rust match"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:graph:Label", "note": "merged.rs: Cypher quoted in a comment"}
+  ]
+}

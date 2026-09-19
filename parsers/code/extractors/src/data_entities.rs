@@ -28,10 +28,14 @@
 //!     `.Collection("x")` (Go mongo-driver / Firestore), `.getCollection("x")`
 //!     (Java), `.GetCollection<T>("x" | nameof(T))` (C# MongoDB.Driver)
 //!   - Cypher: `MATCH (x:<Label>)` / `MERGE (x:<Label>)` (label-only; query
-//!     parsing punted)
+//!     parsing punted), read only from Cypher-shaped string literals joined
+//!     like SQL (LA.28, [`scan_cypher_labels`]): a Rust `match`, SQL `MERGE
+//!     INTO`, prose and comments are not Cypher; `::` and property-map values
+//!     are never labels.
 //!
-//! Debug marker (LG.3b), one line per file that produced or rejected anything:
-//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='`
+//! Debug markers, one line per file that produced or rejected anything:
+//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='` (LG.3b)
+//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] cypher '` (LA.28)
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -711,24 +715,44 @@ pub(crate) struct LiteralSql {
     pub(crate) rejected_fmt: usize,
 }
 
-/// Join adjacent literals whose gap holds only whitespace and at most one
+/// The string literals of a source file, grouped into the runtime values they
+/// build ([`joined_literals`]). Shared by the SQL scan ([`sql_statements`])
+/// and the Cypher scan ([`cypher_statements`], LA.28).
+struct JoinedLiterals {
+    /// Every string literal, in source order.
+    lits: Vec<Lit>,
+    /// `joints[k]`: how literal k attaches to literal k - 1 (`joints[0]` is
+    /// [`Joint::Apart`]).
+    joints: Vec<Joint>,
+}
+
+impl JoinedLiterals {
+    /// The joined runs in source order, each as its literals and how each one
+    /// attaches to the one before it. Never empty.
+    fn groups(&self) -> impl Iterator<Item = (&[Lit], &[Joint])> + '_ {
+        let n = self.lits.len();
+        let mut start = 0;
+        (1..=n).filter_map(move |k| {
+            if k < n && self.joints[k] != Joint::Apart {
+                return None;
+            }
+            let run = start..k;
+            start = k;
+            Some((&self.lits[run.clone()], &self.joints[run]))
+        })
+    }
+}
+
+/// Group adjacent literals whose gap holds only whitespace and at most one
 /// concatenation token (`+` Go / Java / JS / C#, `.` PHP, `\` a line
 /// continuation, nothing at all for Python / C implicit concatenation), so
-/// `"SELECT o.id " +\n "FROM orders o"` is one statement, and the lines of a
-/// string builder (see [`Joint::Builder`]); keep a joined literal iff it opens
-/// a SQL statement ([`opens_sql_statement`]) or is a builder fragment holding
-/// a subquery ([`has_subquery`]), and is not a Go fmt message
-/// ([`has_go_fmt_verb`]).
-pub(crate) fn sql_statements(source: &str) -> LiteralSql {
+/// `"SELECT o.id " +\n "FROM orders o"` is one value, and the lines of a
+/// string builder (see [`Joint::Builder`]). Nothing is joined yet: a scan
+/// checks a run's first word before paying for [`join_group`].
+fn joined_literals(source: &str) -> JoinedLiterals {
     let lits = string_literals(source);
     let b = source.as_bytes();
-    let mut out = LiteralSql {
-        literals: lits.len(),
-        statements: Vec::new(),
-        rejected_fmt: 0,
-    };
-    // `joints[k]`: how literal k attaches to literal k - 1.
-    let joints: Vec<Joint> = (0..lits.len())
+    let joints = (0..lits.len())
         .map(|k| {
             if k == 0 {
                 Joint::Apart
@@ -737,31 +761,45 @@ pub(crate) fn sql_statements(source: &str) -> LiteralSql {
             }
         })
         .collect();
-    let mut start = 0;
-    for k in 1..=lits.len() {
-        if k < lits.len() && joints[k] != Joint::Apart {
-            continue;
+    JoinedLiterals { lits, joints }
+}
+
+/// One run's literal bodies back to back, and where each came from. A builder
+/// append (`AppendLine`, `WriteString`, `+=`) is one line of the value: a
+/// `\n` keeps its tokens apart.
+fn join_group(source: &str, group: &[Lit], joints: &[Joint]) -> (String, Vec<Piece>) {
+    let mut text = String::new();
+    let mut pieces = Vec::with_capacity(group.len());
+    for (lit, j) in group.iter().zip(joints) {
+        if *j == Joint::Builder {
+            text.push('\n');
         }
-        let group = &lits[start..k];
-        let group_joints = &joints[start..k];
-        start = k;
+        pieces.push((lit.body.start, text.len(), lit.body.len()));
+        text.push_str(&source[lit.body.clone()]);
+    }
+    (text, pieces)
+}
+
+/// The joined literals ([`joined_literals`]) that are SQL: kept iff the run
+/// opens a SQL statement ([`opens_sql_statement`]) or is a builder fragment
+/// holding a subquery ([`has_subquery`]), and is not a Go fmt message
+/// ([`has_go_fmt_verb`]).
+pub(crate) fn sql_statements(source: &str) -> LiteralSql {
+    let joined = joined_literals(source);
+    let b = source.as_bytes();
+    let mut out = LiteralSql {
+        literals: joined.lits.len(),
+        statements: Vec::new(),
+        rejected_fmt: 0,
+    };
+    for (group, group_joints) in joined.groups() {
         // Cheap first: no allocation unless the first word is a SQL verb or
         // a piece holds a parenthesised subquery.
         let verb = group_opens_with_verb(source, group);
         if !verb && !group.iter().any(|lit| has_subquery(&b[lit.body.clone()])) {
             continue;
         }
-        let mut text = String::new();
-        let mut pieces = Vec::with_capacity(group.len());
-        for (lit, j) in group.iter().zip(group_joints) {
-            // A builder append (`AppendLine`, `WriteString`, `+=`) is one
-            // line of the statement: keep its tokens apart.
-            if *j == Joint::Builder {
-                text.push('\n');
-            }
-            pieces.push((lit.body.start, text.len(), lit.body.len()));
-            text.push_str(&source[lit.body.clone()]);
-        }
+        let (text, pieces) = join_group(source, group, group_joints);
         let mut scan = blank_sql_noise(&blank_escapes(&text));
         let is_sql = if verb {
             opens_sql_statement(&scan)
@@ -2143,13 +2181,247 @@ fn find_word_in(s: &str, word: &str) -> Option<usize> {
 }
 
 // ----------------------------------------------------------------------------
-// Cypher labels: `MATCH (x:Label)` / `MERGE (x:Label)`. Label-only — query
-// shape (relationships, properties, return clauses) deferred to v0.5+.
+// Cypher labels (LA.28): `MATCH (x:Label)` / `MERGE (x:Label)` read only from
+// Cypher-shaped string literals, joined like SQL ([`joined_literals`]). A
+// Rust `match`, SQL `MERGE INTO`, prose `create` and comments are not Cypher.
+// Label-only: relationships, properties and return clauses are not read.
 // ----------------------------------------------------------------------------
 
+/// The node labels of every Cypher statement in `source`, in statement order
+/// then label order. Under `GLIA_DATA_DEBUG` prints the file's
+/// `[data-entity] cypher …` line ([`cypher_marker`]).
 fn scan_cypher_labels(source: &str) -> Vec<String> {
+    let stmts = cypher_statements(source);
+    let labels: Vec<String> = stmts
+        .iter()
+        .flat_map(|stmt| extract_node_labels(&stmt.text))
+        .collect();
+    if debug_enabled()
+        && let Some(line) = cypher_marker(source, &stmts, &labels)
+    {
+        eprintln!("{line}");
+    }
+    labels
+}
+
+/// One Cypher statement: a joined literal run that [`is_cypher_statement`].
+struct CypherStmt {
+    /// The literal bodies back to back, `\n`-style escapes blanked
+    /// ([`blank_escapes`]).
+    text: String,
+    /// Source span from the first literal's opening delimiter to the last
+    /// one's closing delimiter.
+    span: Range<usize>,
+}
+
+/// Words a Cypher statement can open with ([`is_cypher_statement`] checks the
+/// shape that must follow).
+const CYPHER_OPENERS: &[&str] = &[
+    "MATCH", "OPTIONAL", "MERGE", "CREATE", "UNWIND", "WITH", "CALL", "USE",
+];
+
+/// Clauses that carry node patterns.
+const CYPHER_PATTERN_CLAUSES: &[&str] = &["MATCH", "MERGE", "CREATE"];
+
+/// The joined literals ([`joined_literals`]) of `source` that are Cypher
+/// statements, in source order.
+fn cypher_statements(source: &str) -> Vec<CypherStmt> {
+    let joined = joined_literals(source);
     let mut out = Vec::new();
-    for keyword in ["MATCH", "MERGE", "CREATE"] {
+    for (group, joints) in joined.groups() {
+        // Cheap first: no allocation unless the run opens with a Cypher word.
+        if !group_opens_with_cypher_word(source, group) {
+            continue;
+        }
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let (text, _) = join_group(source, group, joints);
+        let text = blank_escapes(&text);
+        if is_cypher_statement(&text) {
+            out.push(CypherStmt {
+                text,
+                span: first.outer.start..last.outer.end,
+            });
+        }
+    }
+    out
+}
+
+fn group_opens_with_cypher_word(source: &str, group: &[Lit]) -> bool {
+    let b = source.as_bytes();
+    for lit in group {
+        let body = &b[lit.body.clone()];
+        let s = skip_cypher_lead(body, 0);
+        if s == body.len() {
+            continue; // an all-blank piece: the keyword is in the next one
+        }
+        let w = next_word(body, s);
+        return w.0 == s && CYPHER_OPENERS.iter().any(|k| word_is(body, w, k));
+    }
+    false
+}
+
+/// Offset of the first byte of `b` at or after `i` that is not whitespace, an
+/// opening paren, a `\n` / `\t` / `\r` escape or a Cypher comment.
+fn skip_cypher_lead(b: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'(') {
+            i += 1;
+        }
+        if b[i..].starts_with(b"\\") && matches!(b.get(i + 1), Some(b'n' | b't' | b'r')) {
+            i += 2;
+        } else if b[i..].starts_with(b"//") {
+            i = line_end(b, i);
+        } else if b[i..].starts_with(b"/*") {
+            i = find_bytes(b, i + 2, b"*/").map_or(b.len(), |j| j + 2);
+        } else {
+            return i;
+        }
+    }
+}
+
+/// True when `text` (a joined literal, escapes blanked) is a Cypher statement,
+/// ASCII case-insensitive on its start (whitespace, `(` and comments
+/// skipped): `MATCH` / `OPTIONAL MATCH` / `MERGE` / `CREATE` followed by
+/// whitespace and then a node pattern `(` or a path variable `p =`, which
+/// rejects `CREATE TABLE`, `CREATE INDEX`, SQL `MERGE INTO` and a bare
+/// `create()` call; `UNWIND` / `WITH` / `CALL` / `USE` only when the
+/// statement also holds a pattern clause followed by whitespace and `(`.
+fn is_cypher_statement(text: &str) -> bool {
+    let b = text.as_bytes();
+    let s = skip_cypher_lead(b, 0);
+    let first = next_word(b, s);
+    if first.0 != s || first.0 == first.1 {
+        return false;
+    }
+    let clause = if word_is(b, first, "OPTIONAL") {
+        let clause = next_word(b, first.1);
+        if !word_is(b, clause, "MATCH") {
+            return false;
+        }
+        clause
+    } else {
+        first
+    };
+    if CYPHER_PATTERN_CLAUSES.iter().any(|k| word_is(b, clause, k)) {
+        return opens_pattern(b, clause.1, true);
+    }
+    ["UNWIND", "WITH", "CALL", "USE"]
+        .iter()
+        .any(|k| word_is(b, first, k))
+        && holds_pattern_clause(b, first.1)
+}
+
+/// True when the clause keyword ending at `end` is followed by whitespace and
+/// then a node pattern `(`, or (with `path_var`) a path variable `p =`.
+fn opens_pattern(b: &[u8], end: usize, path_var: bool) -> bool {
+    if !b.get(end).is_some_and(|c| c.is_ascii_whitespace()) {
+        return false;
+    }
+    let w = next_word(b, end);
+    if b.get(w.0) == Some(&b'(') {
+        return true;
+    }
+    if !path_var || w.0 == w.1 || b[w.0].is_ascii_digit() {
+        return false;
+    }
+    let mut j = w.1;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    b.get(j) == Some(&b'=') && b.get(j + 1) != Some(&b'=')
+}
+
+/// True when `b` holds, at or after `from`, a word-bounded `MATCH` / `MERGE`
+/// / `CREATE` followed by whitespace and `(`.
+fn holds_pattern_clause(b: &[u8], from: usize) -> bool {
+    (from..b.len()).any(|i| {
+        (i == 0 || !is_word_byte(b[i - 1]))
+            && CYPHER_PATTERN_CLAUSES.iter().any(|kw| {
+                let k = kw.as_bytes();
+                b.get(i..i + k.len())
+                    .is_some_and(|w| w.eq_ignore_ascii_case(k))
+                    && opens_pattern(b, i + k.len(), false)
+            })
+    })
+}
+
+/// The `:Label`s of the node patterns in a Cypher statement: `(p:Person)`,
+/// `(:Person)`, `(p:Person:Admin)`. Inside a `( … )` labels are read only
+/// before the property map `{` (`{active:true}` holds values, not labels,
+/// and is skipped to its closing `}`); a `:` next to another `:` (`::`, a
+/// Cypher type predicate) is skipped whole; relationship types in `[ … ]`
+/// sit outside every `( … )` and are never read. A label opens with a letter
+/// or `_`. Bytes only: every slice is cut at an ASCII delimiter.
+fn extract_node_labels(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'(' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut labels_open = true;
+        while j < b.len() && b[j] != b')' {
+            match b[j] {
+                b'{' => {
+                    labels_open = false;
+                    j = brace_end(b, j);
+                }
+                b':' if labels_open => {
+                    let run = b[j..].iter().take_while(|&&c| c == b':').count();
+                    if run > 1 {
+                        j += run;
+                        continue;
+                    }
+                    let s = j + 1;
+                    let mut k = s;
+                    while k < b.len() && is_word_byte(b[k]) {
+                        k += 1;
+                    }
+                    if k > s && k - s < 128 && !b[s].is_ascii_digit() {
+                        out.push(text[s..k].to_string());
+                    }
+                    j = k.max(s);
+                }
+                _ => j += 1,
+            }
+        }
+        i = j + 1;
+    }
+    out
+}
+
+/// Offset just past the `}` closing the `{` at `open`, or the end of `b`.
+fn brace_end(b: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (k, &c) in b.iter().enumerate().skip(open) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return k + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    b.len()
+}
+
+/// `[data-entity] cypher statements=N labels=a,b rejected_outside_literal=K`
+/// for a file with a Cypher statement or a rejected keyword hit, else `None`.
+/// `labels` lists each label once, first-seen order (empty when none); `K`
+/// counts the `MATCH` / `MERGE` / `CREATE` hits of [`find_keyword_ci`] (what
+/// the pre-LA.28 whole-file scan read from) that fall outside every Cypher
+/// statement.
+fn cypher_marker(source: &str, stmts: &[CypherStmt], labels: &[String]) -> Option<String> {
+    let mut rejected = 0;
+    for keyword in CYPHER_PATTERN_CLAUSES {
         let kw_lower = keyword.to_ascii_lowercase();
         let mut search_from = 0;
         while search_from < source.len() {
@@ -2157,55 +2429,28 @@ fn scan_cypher_labels(source: &str) -> Vec<String> {
                 break;
             };
             let pos = search_from + rel;
-            // Look forward for `(<var>:<Label>)` shapes within the next
-            // ~256 bytes (one statement worth), snapped DOWN to a char
-            // boundary so a multibyte char on the cut can't panic the slice.
-            let win_end = source.floor_char_boundary((pos + 256).min(source.len()));
-            let win = &source[pos..win_end];
-            for label in extract_cypher_labels_in_window(win) {
-                out.push(label);
+            if !stmts.iter().any(|s| s.span.contains(&pos)) {
+                rejected += 1;
             }
+            // The keyword is followed by an ASCII whitespace byte, so this
+            // is a char boundary.
             search_from = pos + keyword.len() + 1;
         }
     }
-    out
-}
-
-/// Pull `:Label` tokens that follow a `(` or `,` and a node-variable. Matches
-/// `(p:Person)`, `(:Person)`, `(p:Person:Admin)` (colon-separated labels).
-fn extract_cypher_labels_in_window(win: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = win.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'(' {
-            // Inside a node pattern. Scan until `)` for `:Label` substrings.
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j] != b')' {
-                if bytes[j] == b':' {
-                    let s = j + 1;
-                    let mut k = s;
-                    while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_')
-                    {
-                        k += 1;
-                    }
-                    if k > s {
-                        let label = &win[s..k];
-                        if !label.is_empty() && label.len() < 128 {
-                            out.push(label.to_string());
-                        }
-                    }
-                    j = k;
-                    continue;
-                }
-                j += 1;
-            }
-            i = j + 1;
-            continue;
-        }
-        i += 1;
+    if stmts.is_empty() && rejected == 0 {
+        return None;
     }
-    out
+    let mut seen: Vec<&str> = Vec::new();
+    for label in labels {
+        if !seen.contains(&label.as_str()) {
+            seen.push(label);
+        }
+    }
+    Some(format!(
+        "[data-entity] cypher statements={} labels={} rejected_outside_literal={rejected}",
+        stmts.len(),
+        seen.join(",")
+    ))
 }
 
 #[cfg(test)]
@@ -2475,6 +2720,148 @@ const q3 = "MATCH (a:Account)-[:OWNS]->(b:Wallet)";
         assert!(qnames.contains(&"data_entity:graph:User".to_string()));
         assert!(qnames.contains(&"data_entity:graph:Account".to_string()));
         assert!(qnames.contains(&"data_entity:graph:Wallet".to_string()));
+    }
+
+    // ---- LA.28: Cypher labels only from Cypher-shaped string literals ----
+
+    /// The `data_entity:graph:*` labels of `src`, in emission order.
+    fn graph_labels(src: &str) -> Vec<String> {
+        let repo = RepoId(1);
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        out.nodes
+            .iter()
+            .filter_map(|n| out.nav.qname_by_id.get(&n.id))
+            .filter_map(|q| q.strip_prefix("data_entity:graph:"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rust_match_over_paths_is_not_cypher() {
+        let src = "pub fn pick(kind: u32, a: u64, b: u64) -> u64 {\n    match kind { k if k == (node_kind::CLASS) => a, _ => (merged::pick_primary(a, b)) }\n}\n";
+        assert_eq!(graph_labels(src), Vec::<String>::new());
+        // `::` is never a label, even inside a Cypher statement's parens.
+        assert_eq!(
+            extract_node_labels(
+                "MATCH (n) WHERE (node_kind::CLASS) OR (merged::pick_primary(a, b))"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            extract_node_labels("MATCH (n:Person) WHERE (n.age :: INTEGER) AND (x::Y)"),
+            strings(&["Person"])
+        );
+    }
+
+    #[test]
+    fn cypher_in_a_comment_is_not_a_label() {
+        let src =
+            "// the Cypher form MATCH (x:Label)\n# MERGE (n:Node)\n/* CREATE (m:Block) */\nx = 1\n";
+        assert_eq!(graph_labels(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn lowercase_prose_create_is_not_cypher() {
+        let src = "// create a user (id:abc) here\n# create a user (id:abc) here\nmsg = \"create a user (id:abc) here\"\n";
+        assert_eq!(graph_labels(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn sql_merge_into_is_not_cypher() {
+        let src =
+            "q = \"MERGE INTO t USING s ON (t.id = :id) WHEN MATCHED THEN UPDATE SET x = 1\"\n";
+        assert_eq!(graph_labels(src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn property_map_values_are_not_labels() {
+        let src = "q = \"MATCH (u:User {active:true}) RETURN u\"\n";
+        assert_eq!(graph_labels(src), strings(&["User"]));
+        // The map is skipped to its own `}`: a `)` inside it ends nothing.
+        assert_eq!(
+            extract_node_labels(
+                "MERGE (e:Event {at: datetime({epochMillis: $ts}), kind:x}) RETURN e"
+            ),
+            strings(&["Event"])
+        );
+    }
+
+    #[test]
+    fn java_spring_data_query_annotation() {
+        let src = r#"
+public interface MovieRepository extends Neo4jRepository<Movie, Long> {
+    @Query("MATCH (m:Movie)<-[:ACTED_IN]-(p:Person) RETURN m")
+    List<Movie> findActedIn();
+}
+"#;
+        assert_eq!(graph_labels(src), strings(&["Movie", "Person"]));
+    }
+
+    #[test]
+    fn concatenated_cypher_statement() {
+        let js = "const q = \"MATCH \" + \"(o:Order) RETURN o\";\n";
+        assert_eq!(graph_labels(js), strings(&["Order"]));
+        let py =
+            "tx.run(\n    \"MERGE (c:Company {id: $id}) \"\n    \"RETURN c\",\n    id=cid,\n)\n";
+        assert_eq!(graph_labels(py), strings(&["Company"]));
+    }
+
+    #[test]
+    fn cypher_statement_shapes() {
+        for yes in [
+            "MATCH (n) RETURN n",
+            "  match (n:Person) return n",
+            "OPTIONAL MATCH (n:Person) RETURN n",
+            "MATCH p = (a)-[:KNOWS]->(b) RETURN p",
+            "CREATE\n(n:Person)",
+            "UNWIND $rows AS r MERGE (n:Person {id: r.id})",
+            "WITH $x AS x MATCH (n:Person) RETURN n",
+            "CALL db.labels() YIELD label MATCH (n) RETURN n",
+            "(MATCH (n) RETURN n)",
+        ] {
+            assert!(is_cypher_statement(yes), "{yes:?}");
+        }
+        for no in [
+            "CREATE TABLE users (id int)",
+            "CREATE INDEX idx ON users (id)",
+            "create()",
+            "MATCH(n:Person) RETURN n",
+            "MERGE INTO t USING s ON (t.id = :id)",
+            "OPTIONAL (n)",
+            "OPTIONAL MERGE (n)",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "UNWIND $rows AS r RETURN r",
+            "create a user (id:abc) here",
+            "MATCH x == (n)",
+            "Matches (n:Person)",
+        ] {
+            assert!(!is_cypher_statement(no), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn cypher_marker_counts_rejected_keywords() {
+        let people = "from neo4j import GraphDatabase\n\ndef find_person(tx, name):\n    return tx.run(\"MATCH (p:Person {name: $name}) RETURN p\", name=name).single()\n\ndef upsert_company(tx, cid):\n    tx.run(\n        \"MERGE (c:Company {id: $id}) \"\n        \"RETURN c\",\n        id=cid,\n    )\n";
+        let stmts = cypher_statements(people);
+        let labels = scan_cypher_labels(people);
+        assert_eq!(labels, strings(&["Person", "Company"]));
+        assert_eq!(
+            cypher_marker(people, &stmts, &labels).as_deref(),
+            Some(
+                "[data-entity] cypher statements=2 labels=Person,Company rejected_outside_literal=0"
+            )
+        );
+        let merged = "// Graph merge helpers. A Rust `match` is not Cypher, and neither is this\n// comment about the Cypher form MATCH (x:Label).\npub fn pick(kind: u32) -> u64 {\n    match kind {\n        _ => 0,\n    }\n}\n";
+        let stmts = cypher_statements(merged);
+        assert_eq!(
+            cypher_marker(merged, &stmts, &[]).as_deref(),
+            Some("[data-entity] cypher statements=0 labels= rejected_outside_literal=3")
+        );
+        assert_eq!(cypher_marker("x = 1\n", &[], &[]), None);
     }
 
     #[test]
