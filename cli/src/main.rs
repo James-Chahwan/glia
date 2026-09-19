@@ -73,8 +73,9 @@ enum Cmd {
     /// Resolve (P3): a failure/change signal (stacktrace, diff, test id) → the
     /// ranked, located nodes it points at, in one call.
     Resolve(cmd::resolve::Args),
-    /// Merge N repos into one MergedGraph; cross-resolvers fire across repo
-    /// boundaries. Emit summary + cross-edge counts + (optionally) JSON.
+    /// Merge N repos, or pre-built `.gmap` layouts (--gmap / --workspace),
+    /// into one MergedGraph; cross-resolvers fire across repo boundaries.
+    /// Emit summary + cross-edge counts + (optionally) JSON and a layout.
     Merge(cmd::merge::Args),
     /// Walk a repo and write its graph layout (manifest.json + shards +
     /// cross_stack.gmap) to `<repo>/.glia/graph/` - the directory the MCP
