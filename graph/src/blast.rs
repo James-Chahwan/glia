@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use repo_graph_activation::algo::{self, Adjacency, Walk};
+use repo_graph_activation::plan::{ActivationPlan, FilterPredicate};
 use repo_graph_activation::profile::DomainTables;
 use repo_graph_core::{EdgeCategoryId, NodeId};
 
@@ -63,12 +64,37 @@ impl MergedGraph {
     /// `imports`) — and the ranking is `tables.activation_config(None)`. The
     /// code domain passes `repo_graph_code_domain::profile::CODE_TABLES`; a
     /// caller that needs another carry set passes its own tables.
+    ///
+    /// [`Self::blast_radius_filtered`] with no filters.
     pub fn blast_radius(
         &self,
         seed: NodeId,
         reach: Reach,
         max_depth: usize,
         tables: &DomainTables,
+    ) -> Vec<BlastHit> {
+        self.blast_radius_filtered(seed, reach, max_depth, tables, &[])
+    }
+
+    /// [`Self::blast_radius`] with `filters` run over the ranked closure
+    /// (LD.12c): the closure is ranked by one
+    /// [`ActivationPlan::rank`] — PPR seeded at `seed`, every closure node at
+    /// its score or 0.0 where PPR gave it none, sorted by score (desc) then
+    /// node id (asc) — and each filter drops nodes from it in registration
+    /// order. A filter only removes rows, so the kept rows are the unfiltered
+    /// answer's rows in the same order. Nothing is truncated here: a caller's
+    /// `top_k` cut comes after its own post-steps.
+    ///
+    /// `GLIA_ACTIVATION_DEBUG=1` prints the plan's
+    /// `[activation] plan mode=rank .. filters=[..] universe=N kept=N dropped=[..]`
+    /// line, `universe` being the closure.
+    pub fn blast_radius_filtered(
+        &self,
+        seed: NodeId,
+        reach: Reach,
+        max_depth: usize,
+        tables: &DomainTables,
+        filters: &[&dyn FilterPredicate<MergedGraph>],
     ) -> Vec<BlastHit> {
         use repo_graph_activation::Direction;
         use std::collections::HashMap;
@@ -100,8 +126,10 @@ impl MergedGraph {
         }
         let first: HashMap<NodeId, (usize, EdgeCategoryId)> =
             b.reached.iter().map(|r| (r.id, (r.depth, r.via))).collect();
+        let closure: Vec<NodeId> = b.reached.iter().map(|r| r.id).collect();
 
-        // Rank the closure by PPR seeded at the target.
+        // Rank the closure by PPR seeded at the target, then filter it: one
+        // plan. A closure node PPR never scored stays in at 0.0.
         let mut config = tables.activation_config(None);
         config.direction = match reach {
             Reach::Forward => Direction::Forward,
@@ -109,25 +137,19 @@ impl MergedGraph {
             Reach::Both => Direction::Undirected,
         };
         config.top_k = usize::MAX; // score the whole closure, no truncation
-        let scores: HashMap<NodeId, f64> =
-            self.activate(&[seed], &config).scores.into_iter().collect();
+        let mut plan = ActivationPlan::new(config);
+        for f in filters {
+            plan = plan.filter(*f);
+        }
+        let view = plan.rank(self, &[seed], &closure);
 
-        let mut hits: Vec<BlastHit> = first
+        // The view's order (score desc, id asc) is the answer's order.
+        view.scores
             .into_iter()
-            .map(|(id, (depth, reason))| BlastHit {
-                id,
-                depth,
-                reason,
-                score: scores.get(&id).copied().unwrap_or(0.0),
+            .filter_map(|(id, score)| {
+                first.get(&id).map(|&(depth, reason)| BlastHit { id, depth, reason, score })
             })
-            .collect();
-        hits.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.id.0.cmp(&b.id.0))
-        });
-        hits
+            .collect()
     }
 }
 
@@ -202,5 +224,79 @@ mod tests {
         for w in hits.windows(2) {
             assert!(w[0].score >= w[1].score, "hits must be score-sorted");
         }
+    }
+
+    /// Drops one named node: the filter half of an `ActivationPlan`.
+    struct DropOne(NodeId);
+
+    impl FilterPredicate<MergedGraph> for DropOne {
+        fn name(&self) -> &'static str {
+            "drop"
+        }
+
+        fn keep(&self, _: &MergedGraph, id: NodeId, _: f64) -> bool {
+            id != self.0
+        }
+    }
+
+    fn rows(hits: &[BlastHit]) -> Vec<(NodeId, usize, EdgeCategoryId, u64)> {
+        hits.iter().map(|h| (h.id, h.depth, h.reason, h.score.to_bits())).collect()
+    }
+
+    #[test]
+    fn blast_radius_filtered_is_the_unfiltered_answer_minus_the_dropped_rows() {
+        // a→b→c, d→c. Both ways from c reaches {b, d, a}.
+        let merged = MergedGraph::new(vec![flow_graph()]);
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
+        let (b, c) = (id("m::b"), id("m::c"));
+        let all = merged.blast_radius(c, Reach::Both, 4, &CODE_TABLES);
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            rows(&merged.blast_radius_filtered(c, Reach::Both, 4, &CODE_TABLES, &[])),
+            rows(&all),
+            "no filter: the blast_radius answer, bit for bit"
+        );
+        let drop_b = DropOne(b);
+        let kept = merged.blast_radius_filtered(c, Reach::Both, 4, &CODE_TABLES, &[&drop_b]);
+        let expected: Vec<BlastHit> = all.iter().filter(|h| h.id != b).cloned().collect();
+        assert_eq!(rows(&kept), rows(&expected), "same rows, same order, b gone");
+    }
+
+    #[test]
+    fn closure_node_ppr_never_scored_stays_in_at_zero() {
+        // x --CALLS--> ghost, an id that is no node: the walk reaches it, PPR
+        // (over the nodes) cannot score it, and it stays in the answer at 0.0.
+        let r = repo();
+        let x = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::x");
+        let y = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::y");
+        let ghost = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::ghost");
+        let mk = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let call = |from, to| Edge {
+            from,
+            to,
+            category: edge_category::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        };
+        let mut nav = CodeNav::default();
+        nav.record(x, "x", "m::x", node_kind::FUNCTION, None);
+        nav.record(y, "y", "m::y", node_kind::FUNCTION, None);
+        let g = RepoGraph {
+            repo: r,
+            nodes: vec![mk(x), mk(y)],
+            edges: vec![call(x, y), call(x, ghost)],
+            symbols: SymbolTable::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: HashSet::new(),
+        };
+        let merged = MergedGraph::new(vec![g]);
+        let hits = merged.blast_radius(x, Reach::Forward, 4, &CODE_TABLES);
+        let ids: Vec<NodeId> = hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![y, ghost], "y scored, ghost last at 0.0");
+        assert!(hits[0].score > 0.0);
+        assert_eq!(hits[1].score.to_bits(), 0.0f64.to_bits());
+        assert_eq!(hits[1].depth, 1);
     }
 }

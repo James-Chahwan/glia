@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use repo_graph_activation::plan::{ActivationPlan, FilterPredicate};
 use repo_graph_code_domain::{cell_type, edge_category, endpoint, node_kind};
 use repo_graph_code_extractors::queues::is_framework_tag;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
@@ -311,11 +312,16 @@ pub fn blast_radius_by_qname(
         o => return Err(format!("direction must be forward|backward|both, got `{o}`")),
     };
     let live = entrypoint_reachable(merged);
-    let hits = merged.blast_radius(seed, reach, max_depth, &CODE_PROFILE.tables);
+    // `live_only` is a filter on the ranking plan: it drops rows from the
+    // ranked closure and keeps the rest in order, so scope and `top_k` below
+    // see what the post-sort filter they replaced saw.
+    let live_filter = LiveFilter(&live);
+    let filters: Vec<&dyn FilterPredicate<MergedGraph>> =
+        if live_only { vec![&live_filter] } else { Vec::new() };
+    let hits = merged.blast_radius_filtered(seed, reach, max_depth, &CODE_PROFILE.tables, &filters);
     let loc = Locator::new(merged);
     let out: Vec<BlastAnswer> = hits
         .iter()
-        .filter(|h| !live_only || live.contains(&h.id))
         .map(|h| {
             let at = loc.locate(h.id);
             BlastAnswer {
@@ -339,6 +345,21 @@ pub fn blast_radius_by_qname(
         out.truncate(k);
     }
     Ok(out)
+}
+
+/// `live_only` as an activation-plan filter (LD.12c): keeps a node only when
+/// it is in the [`entrypoint_reachable`] set it borrows. Its drops are counted
+/// under `live` on the `[activation] plan` debug line.
+struct LiveFilter<'a>(&'a HashSet<NodeId>);
+
+impl FilterPredicate<MergedGraph> for LiveFilter<'_> {
+    fn name(&self) -> &'static str {
+        "live"
+    }
+
+    fn keep(&self, _: &MergedGraph, id: NodeId, _: f64) -> bool {
+        self.0.contains(&id)
+    }
 }
 
 /// LD.6's fired_on line, once per answer that carries `live` flags:
@@ -439,8 +460,12 @@ pub fn resolve_signal_located_with_live(
     let mut config = CODE_PROFILE.tables.activation_config(None);
     config.direction = repo_graph_activation::Direction::Undirected;
     config.top_k = usize::MAX;
-    let scores: HashMap<NodeId, f64> =
-        merged.activate(&seeds, &config).scores.into_iter().collect();
+    // The seeds ranked by PPR seeded at all of them (LD.12c): the plan scores
+    // each seed, 0.0 where PPR gave it none; the rows keep resolution order.
+    // One map over the view, not `score_of` per seed: a changed-file list can
+    // seed thousands of nodes, and `score_of` is a linear scan.
+    let view = ActivationPlan::new(config).rank(merged, &seeds, &seeds);
+    let scores: HashMap<NodeId, f64> = view.scores.into_iter().collect();
     let mut out: Vec<LocatedNode> = seeds
         .iter()
         .map(|id| {
