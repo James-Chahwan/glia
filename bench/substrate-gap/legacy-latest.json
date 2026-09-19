@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 247,
+  "fixtures": 251,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -268,6 +268,11 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "csharp-mongo-collection": {
+      "framework": "csharp-mongo-collection",
+      "language": "csharp",
+      "per_category": {}
+    },
     "csharp-namespace-qnames": {
       "framework": "csharp-namespace-qnames",
       "language": "csharp",
@@ -439,6 +444,13 @@
         "HANDLED_BY": 1.0
       }
     },
+    "go-data-entity-precision": {
+      "framework": "go-data-entity-precision",
+      "language": "go",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "go-field-dispatch": {
       "framework": "go-field-dispatch",
       "language": "go",
@@ -517,6 +529,13 @@
       "language": "go",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "graphql-decorator-scope": {
+      "framework": "graphql-decorator-scope",
+      "language": "typescript",
+      "per_category": {
+        "CONTAINS": 1.0
       }
     },
     "graphql-op-needle-precision": {
@@ -653,6 +672,13 @@
       "per_category": {
         "IMPLEMENTS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "java-jpa-table": {
+      "framework": "java-jpa-table",
+      "language": "java",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
       }
     },
     "java-lombok-injects": {

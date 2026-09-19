@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "b255e7c",
-  "after_wave": 10,
+  "measured_at_head": "33daea9",
+  "after_wave": 11,
   "cargo_test_workspace": {
-    "passed": 2176,
+    "passed": 2224,
     "failed": 0
   },
   "history_passed": [
@@ -37,10 +37,11 @@
     1911,
     2003,
     2087,
-    2176
+    2176,
+    2224
   ],
   "run_py": {
-    "fixtures": 247,
+    "fixtures": 251,
     "blind_spots": 1,
     "blind_spot_detail": "blind: ['kotlin-ktor: CALLS']; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
@@ -57,10 +58,10 @@
   },
   "matrix_py": {
     "full": 144,
-    "partial": 23,
+    "partial": 24,
     "none": 8,
-    "unknown": 305,
-    "covered": 175,
+    "unknown": 304,
+    "covered": 176,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0
