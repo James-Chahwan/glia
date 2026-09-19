@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 272,
+  "fixtures": 276,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -386,6 +386,13 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "docs-adr-decision": {
+      "framework": "docs-adr-decision",
+      "language": "python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
     "docs-md-section-lines": {
       "framework": "docs-md-section-lines",
       "language": "markdown",
@@ -576,6 +583,13 @@
         "DEFINES": 1.0
       }
     },
+    "go-sql-call-args": {
+      "framework": "go-sql-call-args",
+      "language": "go",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "go-wire-di": {
       "framework": "go-wire-di",
       "language": "go",
@@ -599,6 +613,13 @@
       "framework": "graphql-sdl-literal-scope",
       "language": "typescript",
       "per_category": {}
+    },
+    "history-cochange": {
+      "framework": "history-cochange",
+      "language": "python",
+      "per_category": {
+        "CO_CHANGES": 1.0
+      }
     },
     "http-absolute-url-client": {
       "framework": "http-absolute-url-client",
@@ -1601,6 +1622,13 @@
         "HANDLED_BY": 1.0,
         "RPC_CALLS": 1.0,
         "USES": 1.0
+      }
+    },
+    "xcut-data-access-fn": {
+      "framework": "xcut-data-access-fn",
+      "language": "typescript",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
       }
     },
     "xcut-eventbus-event_flows": {
