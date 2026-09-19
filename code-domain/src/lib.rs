@@ -1,16 +1,16 @@
-//! repo-graph-code-domain — shared code-domain types for every language parser.
+//! glia-code-domain — shared code-domain types for every language parser.
 //!
-//! Extracted from `repo-graph-parser-python` at v0.4.3b so Go + TypeScript
+//! Extracted from `glia-parser-python` at v0.4.3b so Go + TypeScript
 //! parsers can share the constants + structural types without a weird
 //! inter-parser dependency. All code-language parsers produce a `FileParse`,
-//! and `repo-graph-graph` consumes the uniform shape.
+//! and `glia-graph` consumes the uniform shape.
 //!
 //! Registry-locked u32 values live here as the single source of truth.
 //! See `memory/reference_code_domain_registries.md` for the semantic notes.
 
 use std::collections::HashMap;
 
-use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
+use glia_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId};
 
 /// Graph-type tag for any code-language graph. First arg to `NodeId::from_parts`.
 pub const GRAPH_TYPE: &str = "code";
@@ -783,7 +783,7 @@ pub fn dir_stem_qname(path: &str) -> String {
 }
 
 /// Classification of a call site by its syntactic shape. Resolution (which
-/// node id the call actually targets) happens in `repo-graph-graph` using the
+/// node id the call actually targets) happens in `glia-graph` using the
 /// import table + symbol table, not in the parser.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -1028,7 +1028,7 @@ impl LocalModuleIndex {
         }
     }
 
-    /// Declare a workspace crate's path identifier (`repo_graph_engine`)
+    /// Declare a workspace crate's path identifier (`glia_engine`)
     /// local (LA.1b): a Rust `use` of a sibling crate is intra-repo, not a
     /// dependency. The engine seeds every Cargo package the walk found.
     pub fn add_local_crate(&mut self, name: &str) {
@@ -1234,7 +1234,7 @@ pub fn attach_imports_cell_filtered(
     (libs.len(), dropped)
 }
 
-/// The per-file output every code-language parser produces. `repo-graph-graph`
+/// The per-file output every code-language parser produces. `glia-graph`
 /// consumes a `Vec<FileParse>` to build a `RepoGraph`.
 ///
 /// `Clone` + serde: the incremental build (WP-D) caches the per-file parse so an
@@ -1415,14 +1415,14 @@ impl CodeNav {
 
 pub mod endpoint {
     use super::{cell_type, edge_category, node_kind, GRAPH_TYPE};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
     use std::collections::HashSet;
 
     use super::CodeNav;
 
     /// One extracted client HTTP call. `path` MUST use `${…}` for any
     /// interpolated segment so it normalises the same way TS template paths do:
-    /// `normalise_http_path` in repo-graph-graph collapses any segment containing
+    /// `normalise_http_path` in glia-graph collapses any segment containing
     /// `${` (or `:id` / `{id}`) to `{}`, so `/users/${…}` matches route
     /// `/users/{id}` uniformly.
     pub struct ClientEndpoint {
@@ -1584,7 +1584,7 @@ pub mod endpoint {
     /// root `"/"`. Never panics.
     ///
     /// Deliberately does NOT trim a trailing `/`: `normalise_http_path` in
-    /// repo-graph-graph already does that downstream, and stripping it twice
+    /// glia-graph already does that downstream, and stripping it twice
     /// would change existing route qnames.
     ///
     /// ```text
@@ -2186,7 +2186,7 @@ pub mod endpoint {
     /// carries several POSITION cells (A2.8).
     ///
     /// Returns `(file, line0)`. `line0` is ZERO-indexed to match POSITION's
-    /// `start_line` (`repo_graph_doc::position_json` stores
+    /// `start_line` (`glia_doc::position_json` stores
     /// `start_position().row`), while these cells store `row + 1`. A `line`
     /// of 0 is ts_routes' "unknown" placeholder and yields `None`, as does a
     /// missing or non-integer `line`. A cell without a non-empty string
@@ -2866,12 +2866,12 @@ mod tests {
     fn decl_parse(decls: &[(NodeKindId, &str)], imports: Vec<ImportStmt>) -> FileParse {
         let mut fp = FileParse { imports, ..Default::default() };
         for (kind, qname) in decls {
-            let id = NodeId::from_parts(GRAPH_TYPE, repo_graph_core::RepoId(1), *kind, qname);
+            let id = NodeId::from_parts(GRAPH_TYPE, glia_core::RepoId(1), *kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);
             fp.nodes.push(Node {
                 id,
-                repo: repo_graph_core::RepoId(1),
-                confidence: repo_graph_core::Confidence::Strong,
+                repo: glia_core::RepoId(1),
+                confidence: glia_core::Confidence::Strong,
                 cells: Vec::new(),
             });
             fp.nav.record(id, name, qname, *kind, None);
@@ -2906,7 +2906,7 @@ mod tests {
         // `user`. Its local paths are the bare form's, never `py`.
         let id = NodeId::from_parts(
             GRAPH_TYPE,
-            repo_graph_core::RepoId(1),
+            glia_core::RepoId(1),
             node_kind::MODULE,
             "api::user.py",
         );
@@ -3455,7 +3455,7 @@ mod tests {
 
     /// `abs_path` is the single place a route template is forced to exactly
     /// one leading `/`. It must never trim a trailing one — `normalise_http_path`
-    /// in repo-graph-graph already does that, and doing it twice would move
+    /// in glia-graph already does that, and doing it twice would move
     /// existing route qnames.
     #[test]
     fn abs_path_forces_single_leading_slash() {
@@ -3533,8 +3533,8 @@ mod tests {
             "endpoint:GET:<unresolved>"
         );
         assert_eq!(
-            endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "x"),
-            endpoint::endpoint_id(repo_graph_core::RepoId(1), "DELETE", "/x"),
+            endpoint::endpoint_id(glia_core::RepoId(1), "DELETE", "x"),
+            endpoint::endpoint_id(glia_core::RepoId(1), "DELETE", "/x"),
         );
     }
 
@@ -3573,7 +3573,7 @@ mod tests {
     #[test]
     fn client_endpoint_relative_path_is_canonical_with_raw() {
         use endpoint::HitExtras;
-        use repo_graph_core::{Confidence, RepoId};
+        use glia_core::{Confidence, RepoId};
         let ep = |path: &str| endpoint::ClientEndpoint {
             method: "DELETE".into(),
             path: path.into(),
@@ -3747,7 +3747,7 @@ mod tests {
     /// payload is byte-identical to the pre-A3.3 writer.
     #[test]
     fn endpoint_hit_carries_raw_only_when_given() {
-        use repo_graph_core::{Confidence, RepoId};
+        use glia_core::{Confidence, RepoId};
         let ep = endpoint::ClientEndpoint {
             method: "POST".into(),
             path: "/users".into(),
@@ -3793,7 +3793,7 @@ mod tests {
     #[test]
     fn endpoint_hit_carries_host_after_raw_only_when_given() {
         use endpoint::HitExtras;
-        use repo_graph_core::{Confidence, RepoId};
+        use glia_core::{Confidence, RepoId};
         let ep = endpoint::ClientEndpoint {
             method: "GET".into(),
             path: "/users".into(),
@@ -4174,7 +4174,7 @@ mod tests {
 
     #[test]
     fn record_field_type_keys_by_owner_and_ignores_empty_names() {
-        let r = repo_graph_core::RepoId(1);
+        let r = glia_core::RepoId(1);
         let a = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "m::A");
         let b = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, "m::B");
         let mut nav = CodeNav::default();
@@ -4193,7 +4193,7 @@ mod tests {
 
     #[test]
     fn record_local_type_keys_by_scope_and_a_conflict_is_unknown() {
-        let r = repo_graph_core::RepoId(1);
+        let r = glia_core::RepoId(1);
         let f = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::f");
         let g = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::g");
         let mut nav = CodeNav::default();

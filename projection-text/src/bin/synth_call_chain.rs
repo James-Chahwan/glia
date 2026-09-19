@@ -32,9 +32,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::NodeId;
-use repo_graph_projection_text::driver_utils::build_repo_graph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::NodeId;
+use glia_projection_text::driver_utils::build_repo_graph;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -126,7 +126,7 @@ fn label_to_qname_suffix(label: &str) -> String {
 }
 
 fn find_f2p_anchor(
-    graph: &repo_graph_graph::RepoGraph,
+    graph: &glia_graph::RepoGraph,
     suffix: &str,
 ) -> Option<(NodeId, String)> {
     if suffix.is_empty() {
@@ -216,7 +216,7 @@ fn extract_candidates_from_test_patch(patch: &str) -> BTreeSet<String> {
 /// METHOD / FUNCTION / CLASS. Iterate `graph.nodes` (deterministic Vec) not
 /// `qname_by_id` (HashMap with randomized hasher).
 fn build_tail_index<'g>(
-    graph: &'g repo_graph_graph::RepoGraph,
+    graph: &'g glia_graph::RepoGraph,
 ) -> BTreeMap<&'g str, Vec<(NodeId, &'g str)>> {
     let mut out: BTreeMap<&str, Vec<(NodeId, &str)>> = BTreeMap::new();
     for n in &graph.nodes {
@@ -239,7 +239,7 @@ fn build_tail_index<'g>(
 /// Class anchors expand to their methods (a CLASS node has no outgoing CALLS).
 /// Returns each method's NodeId + qname.
 fn expand_class_to_methods<'g>(
-    graph: &'g repo_graph_graph::RepoGraph,
+    graph: &'g glia_graph::RepoGraph,
     class_id: NodeId,
 ) -> Vec<(NodeId, &'g str)> {
     let Some(methods_map) = graph.symbols.class_methods.get(&class_id) else {
@@ -260,7 +260,7 @@ fn expand_class_to_methods<'g>(
 
 /// BFS forward via CALLS, recording depth. Start node excluded.
 fn call_chain(
-    graph: &repo_graph_graph::RepoGraph,
+    graph: &glia_graph::RepoGraph,
     start: NodeId,
     max_depth: usize,
 ) -> Vec<(NodeId, usize)> {
@@ -288,7 +288,7 @@ fn call_chain(
 }
 
 fn methods_from_reachable(
-    graph: &repo_graph_graph::RepoGraph,
+    graph: &glia_graph::RepoGraph,
     reachable: Vec<(NodeId, usize)>,
 ) -> Vec<ChainEntry> {
     reachable

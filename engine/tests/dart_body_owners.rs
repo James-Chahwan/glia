@@ -10,9 +10,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::NodeId;
+use glia_engine::generate_one;
 
 const FIXTURE: &str = "fixtures/dart-body-owners";
 
@@ -24,7 +24,7 @@ fn bench(rel: &str) -> String {
 fn member_bodies_are_credited_to_their_owner() {
     let r = generate_one(&bench(FIXTURE)).expect("fixture builds");
     let mut qname: HashMap<NodeId, String> = HashMap::new();
-    let mut kind: HashMap<NodeId, repo_graph_core::NodeKindId> = HashMap::new();
+    let mut kind: HashMap<NodeId, glia_core::NodeKindId> = HashMap::new();
     for g in &r.merged.graphs {
         for (id, q) in &g.nav.qname_by_id {
             qname.insert(*id, q.clone());
@@ -34,7 +34,7 @@ fn member_bodies_are_credited_to_their_owner() {
         }
     }
 
-    let nodes: HashSet<(repo_graph_core::NodeKindId, &str)> = qname
+    let nodes: HashSet<(glia_core::NodeKindId, &str)> = qname
         .iter()
         .filter_map(|(id, q)| kind.get(id).map(|k| (*k, q.as_str())))
         .collect();

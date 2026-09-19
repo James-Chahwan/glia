@@ -15,9 +15,9 @@
 
 use std::path::PathBuf;
 
-use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
-use repo_graph_graph::build_go;
-use repo_graph_parser_go::{FileParse, GRAPH_TYPE, edge_category, node_kind, parse_file};
+use glia_core::{EdgeCategoryId, NodeId, RepoId};
+use glia_graph::build_go;
+use glia_parser_go::{FileParse, GRAPH_TYPE, edge_category, node_kind, parse_file};
 
 const MODULE_PREFIX: &str = "example.com/myapp";
 

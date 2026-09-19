@@ -7,7 +7,7 @@
 //! the `HTTP_CALLS` cross-edge sat in the graph. Run with `-- --nocapture` to
 //! see the marker.
 
-use repo_graph_engine::{generate_one, service_map};
+use glia_engine::{generate_one, service_map};
 
 fn fixture() -> String {
     concat!(

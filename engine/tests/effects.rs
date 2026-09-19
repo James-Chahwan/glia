@@ -11,8 +11,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use repo_graph_engine::effects::{EffectRow, Effects, EffectsArgs, MAX_SEEDS, effects};
-use repo_graph_engine::{GenerateResult, generate_one};
+use glia_engine::effects::{EffectRow, Effects, EffectsArgs, MAX_SEEDS, effects};
+use glia_engine::{GenerateResult, generate_one};
 
 const ORDERS_TS: &str = "import { Kafka } from 'kafkajs';
 import axios from 'axios';

@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use repo_graph_store::{MANIFEST_VERSION, default_gmap_dir, is_gmap_stale, read_merged_sharded};
+use glia_store::{MANIFEST_VERSION, default_gmap_dir, is_gmap_stale, read_merged_sharded};
 
 /// The content every persisted layout dir carries as its own `.gitignore`.
 const SELF_IGNORE: &str = "# written by glia - this directory is regenerated\n*\n";
@@ -96,7 +96,7 @@ fn gmaps_directly_in(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-fn cross_triples(m: &repo_graph_graph::MergedGraph) -> Vec<(u64, u64, u32)> {
+fn cross_triples(m: &glia_graph::MergedGraph) -> Vec<(u64, u64, u32)> {
     let mut v: Vec<(u64, u64, u32)> =
         m.cross_edges.iter().map(|e| (e.from.0, e.to.0, e.category.0)).collect();
     v.sort_unstable();
@@ -128,7 +128,7 @@ fn build_writes_the_layout_the_mcp_reads() {
 
     // What the MCP loads is what a fresh build computes, cross edges included.
     let loaded = read_merged_sharded(&layout).expect("layout loads");
-    let fresh = repo_graph_engine::generate_one(path_str(&repo)).expect("fresh build");
+    let fresh = glia_engine::generate_one(path_str(&repo)).expect("fresh build");
     let loaded_nodes: usize = loaded.graphs.iter().map(|g| g.nodes.len()).sum();
     assert_eq!(loaded_nodes, fresh.total_nodes);
     assert_eq!(cross_triples(&loaded), cross_triples(&fresh.merged));

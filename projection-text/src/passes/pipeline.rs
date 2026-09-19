@@ -126,8 +126,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use repo_graph_core::RepoId;
-    use repo_graph_graph::build_python;
+    use glia_core::RepoId;
+    use glia_graph::build_python;
 
     fn empty_ctx() -> PassContext {
         let graph = build_python(RepoId::from_canonical("test"), vec![]).unwrap();

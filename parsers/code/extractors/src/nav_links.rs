@@ -58,8 +58,8 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{CallQualifier, UnresolvedRef, edge_category};
-use repo_graph_core::NodeId;
+use glia_code_domain::{CallQualifier, UnresolvedRef, edge_category};
+use glia_core::NodeId;
 
 /// Byte cap on one argument / assigned expression.
 const MAX_ARG: usize = 1024;
@@ -1226,8 +1226,8 @@ fn scan_tags(text: &str, ctx: &Ctx, em: &mut Emitter) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{GRAPH_TYPE, node_kind};
-    use repo_graph_core::RepoId;
+    use glia_code_domain::{GRAPH_TYPE, node_kind};
+    use glia_core::RepoId;
 
     fn module_id() -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "src::app::x")

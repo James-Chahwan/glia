@@ -23,8 +23,8 @@
 //! `[delta] base=<rev> ...` lines, then this surface's
 //! `[delta] surface=cli rows=<n>`, `n` the node + edge rows printed.
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_engine::delta::{DeltaEdge, DeltaNode, GraphDeltaAnswer, graph_delta_vs_rev};
+use glia_code_domain::edge_category;
+use glia_engine::delta::{DeltaEdge, DeltaNode, GraphDeltaAnswer, graph_delta_vs_rev};
 
 use crate::common::build_options;
 

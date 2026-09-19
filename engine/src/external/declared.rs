@@ -9,7 +9,7 @@
 //!
 //! ANCHOR, shared by the three kinds:
 //! 1. `anchor = "<qname>"` binds through the repo's
-//!    [`QnameIndex`](repo_graph_graph::cells::QnameIndex); several nodes
+//!    [`QnameIndex`](glia_graph::cells::QnameIndex); several nodes
 //!    sharing the qname take the smallest NodeId. An anchor that binds nothing
 //!    orphans the stanza (it never falls back to a scope: a stale qname must
 //!    be visible).
@@ -52,14 +52,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::cell_type;
+use glia_code_domain::external_inputs::{
     ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_entry,
 };
-use repo_graph_code_domain::glia_config::{LoadedConfig, NOTE_ID_PREFIX, Origin};
-use repo_graph_core::{Cell, CellTypeId, NodeId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex};
+use glia_code_domain::glia_config::{LoadedConfig, NOTE_ID_PREFIX, Origin};
+use glia_core::{Cell, CellTypeId, NodeId};
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex};
 use serde_json::{Map, Value};
 
 use super::RepoInputs;
@@ -469,7 +469,7 @@ pub(super) fn report_rules(merged: &MergedGraph) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::CellPayload;
+    use glia_core::CellPayload;
 
     const OVERLAY: &str = "version = 1
 

@@ -1,4 +1,4 @@
-//! repo-graph-parser-go — tree-sitter Go → code-domain FileParse.
+//! glia-parser-go — tree-sitter Go → code-domain FileParse.
 //!
 //! Single-file scan. A Go package spans multiple files; `parse_file` emits a
 //! Module node per file with the package's NodeId and one Code+Position cell.
@@ -17,16 +17,16 @@
 
 use std::collections::HashMap;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::di_stats::{self, DiShape};
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::data_entity;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, canonical_http_path, client_url_split, join_path,
     push_client_endpoint_with, route_qname,
 };
@@ -725,7 +725,7 @@ fn emit_state_var_spec(
 /// Noise gate: keep documented specs and non-trivial initialisers; skip a spec
 /// whose only value is a single literal primitive and which carries no doc.
 fn state_var_is_noise(spec: TsNode, src: &[u8]) -> bool {
-    if repo_graph_doc::leading_doc(&spec, src).is_some() {
+    if glia_doc::leading_doc(&spec, src).is_some() {
         return false;
     }
     // Values live under the `value` field — an `expression_list`. A trivial
@@ -2713,7 +2713,7 @@ fn entity_cells(node: TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         position_cell(node, file_rel),
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(&node, src) {
+    if let Some(doc) = glia_doc::leading_doc(&node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -2725,7 +2725,7 @@ fn entity_cells(node: TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
 fn position_cell(node: TsNode, file_rel: &str) -> Cell {
     Cell {
         kind: cell_type::POSITION,
-        payload: CellPayload::Json(repo_graph_doc::position_json(&node, file_rel)),
+        payload: CellPayload::Json(glia_doc::position_json(&node, file_rel)),
     }
 }
 
@@ -2746,7 +2746,7 @@ fn text_of<'a>(node: TsNode, src: &'a [u8]) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::EdgeCategoryId;
+    use glia_core::EdgeCategoryId;
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://go_smoke")
@@ -3686,7 +3686,7 @@ func setupRoutes(r *mux.Router) {
 
     // ------------------------------------------------------------------------
     // Real-repo eval — ignored by default. Run with:
-    //   cargo test -p repo-graph-parser-go -- --ignored eval --nocapture
+    //   cargo test -p glia-parser-go -- --ignored eval --nocapture
     // Walks several real Go repos in ~/Code, parses every .go file, and
     // tabulates routes by method (and by inferred shape: HandleFunc / verb).
     // No assertions — diagnostic only, used to sanity-check the v0.4.x

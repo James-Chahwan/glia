@@ -8,14 +8,14 @@
 //! wheel build — stay free of that cross-repo dependency.
 //!
 //! Run it from this crate when `Engram` is checked out next to `glia`:
-//!   cargo run -p repo-graph-engram-export --bin glia-export-engram -- \
+//!   cargo run -p glia-engram-export --bin glia-export-engram -- \
 //!       <repo> [--out <file>] [--include-noise] [--exclude <glob>]...
 
 use std::path::Path;
 
 use clap::Parser;
-use repo_graph_engine::generate_one;
-use repo_graph_engram_export::{ExportOptions, export_engram_gmap, sidecar_path};
+use glia_engine::generate_one;
+use glia_engram_export::{ExportOptions, export_engram_gmap, sidecar_path};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -55,7 +55,7 @@ fn run(args: &Args) -> i32 {
     let out_path = match &args.out {
         Some(p) => Path::new(p).to_path_buf(),
         None => {
-            let name = repo_graph_code_domain::project_roots::project_name(repo_root)
+            let name = glia_code_domain::project_roots::project_name(repo_root)
                 .unwrap_or_else(|| "repo".to_string());
             std::path::PathBuf::from(format!("{name}.engram-gmap"))
         }

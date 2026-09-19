@@ -15,7 +15,7 @@ Every directive / content extractor under `projection-text/src/bin/synth_*.rs` f
 
 **Entry sequence**:
 1. Read input file(s)
-2. Call `build_repo_graph(&args.src, &args.repo_canonical)` from `repo_graph_projection_text::driver_utils`
+2. Call `build_repo_graph(&args.src, &args.repo_canonical)` from `glia_projection_text::driver_utils`
 3. Build a tail-index (§5)
 4. Resolve identifiers / line numbers against graph qnames
 5. Emit `## Required fix target (graph-derived from <source>)` markdown block via `--text-out`
@@ -199,7 +199,7 @@ Adding a field to a public struct breaks every struct literal of it outside the 
   - Re-exports from another crate are skipped. `ActivationConfig` and `DomainProfile` stay exhaustive because domains build them by literal.
   - The rest are stopgaps, each naming the test that builds the type by literal. Delete an entry once its type is marked.
 
-`cargo test -p repo-graph-engine --test api_stability` enforces this. It prints `[api_stability] scan types=… offenders=…`, and on failure it lists each offender as `file:line`. It also fails loudly on a stale allowlist entry or on a facade shape it cannot follow. Four `compile_fail` doctests prove that the attribute refuses a literal: `GenerateResult`, `BlastAnswer`, `ServiceMap` and `BlastHit`. Each snippet is only the literal with every current field, because stable rustdoc does not check the error code. So when you add a field to one of those four types, add it to its snippet too.
+`cargo test -p glia-engine --test api_stability` enforces this. It prints `[api_stability] scan types=… offenders=…`, and on failure it lists each offender as `file:line`. It also fails loudly on a stale allowlist entry or on a facade shape it cannot follow. Four `compile_fail` doctests prove that the attribute refuses a literal: `GenerateResult`, `BlastAnswer`, `ServiceMap` and `BlastHit`. Each snippet is only the literal with every current field, because stable rustdoc does not check the error code. So when you add a field to one of those four types, add it to its snippet too.
 
 ---
 

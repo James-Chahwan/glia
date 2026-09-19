@@ -1,8 +1,8 @@
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_core::RepoId;
+use glia_core::RepoId;
 
 pub fn parse_file(
     source: &str,
@@ -11,7 +11,7 @@ pub fn parse_file(
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
     let script = extract_script(source);
-    repo_graph_parser_typescript::parse_file(script, file_rel_path, module_qname, repo)
+    glia_parser_typescript::parse_file(script, file_rel_path, module_qname, repo)
 }
 
 fn extract_script(source: &str) -> &str {

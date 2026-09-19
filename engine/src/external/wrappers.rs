@@ -122,16 +122,16 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use repo_graph_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
-use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::glia_config::{
+use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
+use glia_code_domain::evidence::{self, Evidence};
+use glia_code_domain::glia_config::{
     HTTP_METHODS, LoadedConfig, OVERLAY_FILE, Origin, WrapperDecl, WrapperKind,
 };
-use repo_graph_code_domain::{
+use glia_code_domain::{
     FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_extractors::{anchor, queue_topic};
-use repo_graph_core::{
+use glia_code_extractors::{anchor, queue_topic};
+use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
 
@@ -1379,7 +1379,7 @@ fn mint_entities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::glia_config::parse_str;
+    use glia_code_domain::glia_config::parse_str;
 
     fn sites(overlay: &str, source: &str, lang: &str) -> Vec<Site> {
         let cfg = parse_str(overlay);

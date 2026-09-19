@@ -242,7 +242,7 @@ echo "  exemplars:   $(ls exemplars 2>/dev/null | wc -l) repos"
 echo
 echo "=== cargo build (release, --features research) ==="
 cd /home/ivy/Code/glia
-cargo build --release -p repo-graph-projection-text --features research 2>&1 | tail -3
+cargo build --release -p glia-projection-text --features research 2>&1 | tail -3
 
 echo
 echo "=== cargo build glia-lens (release, --features cuda) ==="

@@ -1,14 +1,14 @@
 //! LE.1b acceptance: the graph delta of a git rev against the working tree
-//! (`repo_graph_engine::delta::graph_delta_vs_rev`), every case built on a
+//! (`glia_engine::delta::graph_delta_vs_rev`), every case built on a
 //! real git repo through the shared two-commit harness.
 
 mod git_fixture;
 
 use git_fixture::GitRepo;
-use repo_graph_code_domain::{DocProvenance, DocRecord, DocSourceKind, node_kind};
-use repo_graph_engine::delta::{DeltaEdge, DeltaNode, RevDelta, graph_delta_vs_rev};
-use repo_graph_engine::{ParseCache, generate_one, generate_one_with_cache};
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::{DocProvenance, DocRecord, DocSourceKind, node_kind};
+use glia_engine::delta::{DeltaEdge, DeltaNode, RevDelta, graph_delta_vs_rev};
+use glia_engine::{ParseCache, generate_one, generate_one_with_cache};
+use glia_store::write_merged_sharded;
 
 /// `place` calls `price`; `price` sits below it so its HEAD line (5) is not
 /// one the working tree could also report.
@@ -49,7 +49,7 @@ fn rows(d: &RevDelta) -> String {
     s
 }
 
-fn has_kind(merged: &repo_graph_graph::MergedGraph, kind: repo_graph_core::NodeKindId) -> bool {
+fn has_kind(merged: &glia_graph::MergedGraph, kind: glia_core::NodeKindId) -> bool {
     merged.graphs.iter().flat_map(|g| g.nav.kind_by_id.values()).any(|k| *k == kind)
 }
 

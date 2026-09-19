@@ -1,8 +1,8 @@
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
     node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
 /// The CLI library a `cli:<name>` declaration was read from: the
 /// discriminator of the per-file `[cli-decl]` marker (`rust=clap:3`). A

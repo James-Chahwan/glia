@@ -9,13 +9,13 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::external_inputs::{ConstraintKind, parse_constraints};
-use repo_graph_core::{CellPayload, CellTypeId};
-use repo_graph_engine::{
+use glia_code_domain::cell_type;
+use glia_code_domain::external_inputs::{ConstraintKind, parse_constraints};
+use glia_core::{CellPayload, CellTypeId};
+use glia_engine::{
     BuildOptions, GenerateResult, ParseCache, generate_one, generate_one_opts, generate_one_with_cache,
 };
-use repo_graph_store::write_merged_sharded;
+use glia_store::write_merged_sharded;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/overlay-declared-cells";
 const OVERLAY: &str = include_str!("../../bench/substrate-gap/fixtures/overlay-declared-cells/.glia/overlay.toml");

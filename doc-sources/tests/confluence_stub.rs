@@ -1,13 +1,13 @@
 //! LA.11 — the Confluence REST transport, driven against the loopback stub.
 //!
-//! Every request goes over real TCP to `repo_graph_doc_sources::stub`, so these
+//! Every request goes over real TCP to `glia_doc_sources::stub`, so these
 //! pin the wire shape (targets, Basic auth, JSON bodies, pagination) that only a
 //! live Atlassian site could exercise before `--site` accepted an origin.
 //! Credentials are always passed explicitly, so neither the process env nor a
 //! `./.env` can steer a test at a real site.
 
-use repo_graph_doc_sources::confluence_rest::{self, Config};
-use repo_graph_doc_sources::stub::{Canned, StubServer};
+use glia_doc_sources::confluence_rest::{self, Config};
+use glia_doc_sources::stub::{Canned, StubServer};
 
 /// base64("e@x:t") — the Basic credential every stubbed call must carry.
 const AUTH: &str = "Basic ZUB4OnQ=";

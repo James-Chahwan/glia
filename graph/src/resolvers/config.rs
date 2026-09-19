@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId, RepoId};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Confidence, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
 use crate::merged::MergedGraph;
@@ -62,8 +62,8 @@ impl CrossGraphResolver for ConfigResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::Node;
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::Node;
     use crate::types::{RepoGraph, SymbolTable};
 
     fn graph_with_config(repo_id: RepoId, qname: &str) -> RepoGraph {

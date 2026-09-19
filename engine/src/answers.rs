@@ -5,12 +5,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
-use repo_graph_activation::plan::{ActivationPlan, FilterPredicate};
-use repo_graph_code_domain::{cell_type, edge_category, endpoint, node_kind};
-use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
-use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_activation::plan::{ActivationPlan, FilterPredicate};
+use glia_code_domain::{cell_type, edge_category, endpoint, node_kind};
+use glia_code_extractors::queues::is_framework_tag;
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
+use glia_graph::{MergedGraph, Reach, RepoGraph};
 
 use crate::absence::{self, Absence, Answer};
 use crate::find::{self, FindOptions};
@@ -22,7 +22,7 @@ use crate::profile::CODE_PROFILE;
 /// never built by a struct literal outside this crate (LD.9):
 ///
 /// ```compile_fail
-/// let _ = repo_graph_engine::BlastAnswer {
+/// let _ = glia_engine::BlastAnswer {
 ///     id: 0,
 ///     qname: String::new(),
 ///     name: String::new(),
@@ -61,7 +61,7 @@ pub struct BlastAnswer {
 
 /// Types whose liveness a live METHOD they declare implies (A7.8): the
 /// method's direct `parent_of` must be one of these for the owner step to fire.
-const OWNER_KINDS: [repo_graph_core::NodeKindId; 3] =
+const OWNER_KINDS: [glia_core::NodeKindId; 3] =
     [node_kind::CLASS, node_kind::STRUCT, node_kind::INTERFACE];
 
 /// One liveness walk: the live set plus how each part of it got there, for
@@ -181,7 +181,7 @@ impl GraphSource for LiveSource<'_> {
 }
 
 /// A walk-local hop of [`LiveSource`].
-fn live_hop(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+fn live_hop(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
     Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
 }
 
@@ -224,7 +224,7 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
             let seeded = if t.entry.is_entry(kind, name, &[]) {
                 &mut w.by_kind
-            } else if t.entry.is_entry(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
+            } else if t.entry.is_entry(kind, name, &glia_graph::roles::roles_in(kind, &n.cells))
             {
                 &mut w.by_role
             } else if is_declared_entry(&n.cells) {
@@ -798,7 +798,7 @@ pub fn resolve_signal_located_with_live(
         });
     }
     let mut config = CODE_PROFILE.tables.activation_config(None);
-    config.direction = repo_graph_activation::Direction::Undirected;
+    config.direction = glia_activation::Direction::Undirected;
     config.top_k = usize::MAX;
     // The seeds ranked by PPR seeded at all of them (LD.12c): the plan scores
     // each seed, 0.0 where PPR gave it none; the rows keep resolution order.
@@ -1869,9 +1869,9 @@ pub fn message_contracts(merged: &MergedGraph) -> Vec<MessageContractRow> {
 #[cfg(test)]
 mod locate_tests {
     use super::locate_node;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
-    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
     /// A2.8 — FIRST POSITION WINS, and `position_of` returning on the first
     /// parseable cell is what makes it so. `merge_parses` appends the cells of every `FileParse` that
@@ -1937,8 +1937,8 @@ mod locate_tests {
     /// non-HTTP node carrying an HTTP-shaped cell, stay unlocated.
     #[test]
     fn bare_verb_route_is_located_by_its_first_positioned_handler() {
-        use repo_graph_code_domain::edge_category;
-        use repo_graph_core::Edge;
+        use glia_code_domain::edge_category;
+        use glia_core::Edge;
         let repo = RepoId::from_canonical("test://locate-route");
         let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, repo, kind, q);
         let pos = |file: &str, line: u32| Cell {
@@ -2087,9 +2087,9 @@ mod scope_tests {
 #[cfg(test)]
 mod project_scope_tests {
     use super::{project_roots, resolve_scope};
-    use repo_graph_code_domain::project_roots::ProjectRoot;
-    use repo_graph_core::{CellPayload, RepoId};
-    use repo_graph_graph::MergedGraph;
+    use glia_code_domain::project_roots::ProjectRoot;
+    use glia_core::{CellPayload, RepoId};
+    use glia_graph::MergedGraph;
 
     fn graph(roots: &[ProjectRoot]) -> MergedGraph {
         MergedGraph::new(vec![crate::walk::build_project_graph(roots, RepoId(1))])
@@ -2138,9 +2138,9 @@ mod project_scope_tests {
 #[cfg(test)]
 mod contracts_tests {
     use super::{MessageContractSide, contract_side, contract_verdict, message_contracts};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
     fn msg(ty: &str, window: &str) -> Cell {
         Cell {
@@ -2327,9 +2327,9 @@ mod contracts_tests {
 mod role_live_tests {
     use super::entrypoint_reachable;
     use crate::profile::CODE_PROFILE;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+    use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
     /// `app::Page` -INJECTS-> `app::Api`, both CLASS; `Page` carries a ROLE
     /// cell with `roles` when given. Returns the graph and `(page, api)`.
@@ -2402,12 +2402,12 @@ mod live_tests {
 
     use super::{entrypoint_reachable, live_walk};
     use crate::profile::CODE_PROFILE;
-    use repo_graph_code_domain::{
+    use glia_code_domain::{
         CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind,
     };
-    use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
-    use repo_graph_graph::roles::roles_in;
-    use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable, build_typescript};
+    use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+    use glia_graph::roles::roles_in;
+    use glia_graph::{MergedGraph, RepoGraph, SymbolTable, build_typescript};
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://live")
@@ -2716,8 +2716,8 @@ mod live_tests {
     /// already makes an entry counts by kind, never twice.
     #[test]
     fn declared_entrypoint_cell_seeds_liveness() {
-        use repo_graph_code_domain::cell_type;
-        use repo_graph_core::{Cell, CellPayload};
+        use glia_code_domain::cell_type;
+        use glia_core::{Cell, CellPayload};
         let mut g = G::default();
         let job = g.node(node_kind::FUNCTION, "app::jobs::nightly_rollup", None);
         let helper = g.node(node_kind::FUNCTION, "app::jobs::summarise", None);

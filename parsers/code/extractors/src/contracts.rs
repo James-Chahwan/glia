@@ -38,8 +38,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, dir_stem_qname, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, dir_stem_qname, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 /// Everything one contract file contributes to the graph. `edges` is empty for
 /// OpenAPI: the module CONTAINS relation is carried by the nav parent, exactly
@@ -160,7 +160,7 @@ pub struct Op {
     /// when the prefixed form doesn't pair with a ROUTE.
     pub raw_path: String,
     pub operation_id: Option<String>,
-    /// 0-indexed source line of the method key (`repo_graph_docs::position_json`
+    /// 0-indexed source line of the method key (`glia_doc::position_json`
     /// convention, same as build_docs_graph).
     pub line: u32,
 }
@@ -3205,7 +3205,7 @@ operations:
     // A10.8 — contracts shipped as JSON
     // ------------------------------------------------------------------
 
-    fn cell_text(node: &Node, kind: repo_graph_core::CellTypeId) -> &str {
+    fn cell_text(node: &Node, kind: glia_core::CellTypeId) -> &str {
         match &node.cells.iter().find(|c| c.kind == kind).expect("cell present").payload {
             CellPayload::Json(s) | CellPayload::Text(s) => s.as_str(),
             other => panic!("unexpected payload {other:?}"),

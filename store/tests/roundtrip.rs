@@ -8,11 +8,11 @@
 
 use std::path::PathBuf;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{NodeId, RepoId};
-use repo_graph_graph::build_go;
-use repo_graph_parser_go::parse_file;
-use repo_graph_store::{
+use glia_code_domain::node_kind;
+use glia_core::{NodeId, RepoId};
+use glia_graph::build_go;
+use glia_parser_go::parse_file;
+use glia_store::{
     CODE_SECTION, FORMAT_VERSION, MmapContainer, StoreError, code_section_of, qname_of,
     write_repo_graph,
 };
@@ -30,7 +30,7 @@ fn repo() -> RepoId {
     RepoId::from_canonical("test://http_stack_smoke/backend")
 }
 
-fn build() -> repo_graph_graph::RepoGraph {
+fn build() -> glia_graph::RepoGraph {
     let files = [
         ("users/users.go", "users"),
         ("server/server.go", "server"),

@@ -4,7 +4,7 @@
 //! pyo3 `find`), so it lives in the engine and nowhere else.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::find::<item>`, never flattened into the
+//! reached as `glia_engine::find::<item>`, never flattened into the
 //! crate root.
 //!
 //! # Match tiers
@@ -40,9 +40,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::{NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
 use crate::answers::{Locator, entrypoint_reachable, in_scope, live_marker, resolve_scope};

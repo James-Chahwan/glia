@@ -9,12 +9,12 @@
 //!
 //! Builders are copied from `stack_resolvers.rs` rather than shared.
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
-use repo_graph_graph::*;
+use glia_graph::*;
 
 fn repo(tag: &str) -> RepoId {
     RepoId::from_canonical(&format!("test://resolver_evidence/{tag}"))
@@ -75,7 +75,7 @@ impl G {
     }
 }
 
-fn json_cell(kind: repo_graph_core::CellTypeId, json: &str) -> Cell {
+fn json_cell(kind: glia_core::CellTypeId, json: &str) -> Cell {
     Cell {
         kind,
         payload: CellPayload::Json(json.to_string()),

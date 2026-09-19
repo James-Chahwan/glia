@@ -13,8 +13,8 @@
 //! `blast_radius_by_qname(m, "app::save", "both", 4, None, false, None)` over
 //! this same build, captured at the wave HEAD.
 
-use repo_graph_engine::{BlastAnswer, BlastOptions, BlastRadius, blast_radius, generate_many};
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_engine::{BlastAnswer, BlastOptions, BlastRadius, blast_radius, generate_many};
+use glia_graph::{MergedGraph, Reach};
 
 const APP_PY: &str = "from flask import Flask\nfrom kafka import KafkaProducer\n\napp = Flask(__name__)\nproducer = KafkaProducer()\n\n\ndef audit(order):\n    return order\n\n\ndef publish(order):\n    producer.send('orders', order)\n\n\ndef save(order):\n    return audit(order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    save(order)\n    publish(order)\n    return order\n";
 const CHECKOUT_TS: &str = "export async function placeOrder(body: unknown) {\n  return fetch('/orders', { method: 'POST', body: JSON.stringify(body) });\n}\n";

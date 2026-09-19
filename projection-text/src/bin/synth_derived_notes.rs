@@ -23,12 +23,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use repo_graph_activation::ActivationConfig;
-use repo_graph_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
-use repo_graph_core::RepoId;
-use repo_graph_graph::{RepoGraph, build_python};
-use repo_graph_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
-use repo_graph_projection_text::research::key_symbols::{KEY_SYMBOLS, SUMMARY};
+use glia_activation::ActivationConfig;
+use glia_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
+use glia_core::RepoId;
+use glia_graph::{RepoGraph, build_python};
+use glia_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
+use glia_projection_text::research::key_symbols::{KEY_SYMBOLS, SUMMARY};
 use serde_json::Value;
 
 #[derive(Parser, Debug)]

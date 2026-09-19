@@ -32,18 +32,18 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use repo_graph_activation::ActivationConfig;
-use repo_graph_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
-use repo_graph_core::NodeId;
-use repo_graph_graph::RepoGraph;
-use repo_graph_projection_text::driver_utils::{
+use glia_activation::ActivationConfig;
+use glia_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
+use glia_core::NodeId;
+use glia_graph::RepoGraph;
+use glia_projection_text::driver_utils::{
     build_repo_graph, load_chain_depths, read_json, reverse_qname_index, write_json,
 };
-use repo_graph_projection_text::hooks::{
+use glia_projection_text::hooks::{
     ACCESS_PATH, AccessPathSynth, CALLSITE_ARGFLOW, CallsiteArgflowSynth,
 };
-use repo_graph_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
-use repo_graph_projection_text::research::key_symbols::{
+use glia_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
+use glia_projection_text::research::key_symbols::{
     KEY_SYMBOLS, KeySymbolsSynth, SUMMARY, TestPatchFacts, cell_attr,
 };
 use serde::{Deserialize, Serialize};

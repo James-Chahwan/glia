@@ -9,9 +9,9 @@
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
-use repo_graph_code_extractors::contracts::ContractNodes;
-use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
+use glia_code_extractors::contracts::ContractNodes;
+use glia_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
 use crate::extract::{
@@ -62,7 +62,7 @@ pub(crate) fn parse_repo_files(
     let mut tally = SynthTally::default();
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
-    let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
+    let mut contracts = glia_code_extractors::contracts::ContractCounts::default();
     // WP-D incremental: track which main-parser files parsed so deleted (or
     // no-longer-parseable) files get evicted from the sidecar.
     let mut live_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -88,10 +88,10 @@ pub(crate) fn parse_repo_files(
     // A13.16: a prismaSchemaFolder schema declares its `datasource` in one
     // `.prisma` file and its models in the others; a model file with no
     // datasource of its own takes the provider every schema file agrees on.
-    let prisma_provider = repo_graph_code_extractors::prisma::shared_provider(
+    let prisma_provider = glia_code_extractors::prisma::shared_provider(
         files
             .iter()
-            .filter(|(p, _)| repo_graph_code_extractors::prisma::is_prisma_schema(p))
+            .filter(|(p, _)| glia_code_extractors::prisma::is_prisma_schema(p))
             .map(|(_, s)| s.as_str()),
     );
     let ctx = RouteCtx {
@@ -622,17 +622,17 @@ fn route_branches(
     if yaml_ext {
         *branch = "yaml";
         let module_id = synthetic_module_id(repo, path);
-        let cron_out = repo_graph_code_extractors::cron::extract_cron_nodes(
+        let cron_out = glia_code_extractors::cron::extract_cron_nodes(
             source, path, module_id, repo,
         );
-        let cfg_out = repo_graph_code_extractors::config::extract_yaml_env_defs(
+        let cfg_out = glia_code_extractors::config::extract_yaml_env_defs(
             source, module_id, repo,
         );
         let iac_out =
-            repo_graph_code_extractors::iac::extract_yaml(source, module_id, repo);
+            glia_code_extractors::iac::extract_yaml(source, module_id, repo);
         // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
         // API surface. Non-contract yaml takes a cheap sniff-miss here.
-        let contract_out = repo_graph_code_extractors::contracts::extract_yaml_contracts(
+        let contract_out = glia_code_extractors::contracts::extract_yaml_contracts(
             source, path, module_id, repo,
         );
         // A10.3: the same call also covers `asyncapi.yaml`; `record`
@@ -659,10 +659,10 @@ fn route_branches(
     if is_dockerfile_path(path) {
         *branch = "dockerfile";
         let module_id = synthetic_module_id(repo, path);
-        let cfg_out = repo_graph_code_extractors::config::extract_dockerfile_defs(
+        let cfg_out = glia_code_extractors::config::extract_dockerfile_defs(
             source, module_id, repo,
         );
-        let iac_out = repo_graph_code_extractors::iac::extract_dockerfile(
+        let iac_out = glia_code_extractors::iac::extract_dockerfile(
             source, path, module_id, repo,
         );
         let fp = (!cfg_out.nodes.is_empty() || !iac_out.nodes.is_empty()).then(|| {
@@ -679,20 +679,20 @@ fn route_branches(
         return Routed::NonCode { key: "dockerfile", fp, tally: t };
     }
 
-    if repo_graph_code_extractors::packages::is_manifest_path(path) {
+    if glia_code_extractors::packages::is_manifest_path(path) {
         *branch = "manifest";
         let module_id = synthetic_module_id(repo, path);
-        let pkg_out = repo_graph_code_extractors::packages::extract_for_path(
+        let pkg_out = glia_code_extractors::packages::extract_for_path(
             source, path, module_id, repo,
         );
         // LA.20c: the binaries the manifest declares (pyproject scripts,
         // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
         // invocation's argv0 pairs with them. A manifest that declares a
         // binary but no dependency is still stashed.
-        let bin_out = repo_graph_code_extractors::cli::extract_manifest_binaries(
+        let bin_out = glia_code_extractors::cli::extract_manifest_binaries(
             source, path, module_id, repo,
         );
-        if let Some(marker) = repo_graph_code_extractors::cli::manifest_marker(path, &bin_out) {
+        if let Some(marker) = glia_code_extractors::cli::manifest_marker(path, &bin_out) {
             t.lines.push(marker);
         }
         let fp = (!pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty()).then(|| {
@@ -712,7 +712,7 @@ fn route_branches(
     if is_dotenv_path(path) {
         *branch = "dotenv";
         let module_id = synthetic_module_id(repo, path);
-        let cfg_out = repo_graph_code_extractors::config::extract_dotenv_defs(
+        let cfg_out = glia_code_extractors::config::extract_dotenv_defs(
             source, module_id, repo,
         );
         let fp = (!cfg_out.nodes.is_empty()).then(|| {
@@ -734,10 +734,10 @@ fn route_branches(
     // drops, each an ACCESSES_DATA target of the file's MODULE. Before
     // detect_language, which has no sql arm on purpose: the const-table
     // scan would bind `UPDATE t SET name = 'x'` as a constant.
-    if repo_graph_code_extractors::migrations::is_migration_path(path) {
+    if glia_code_extractors::migrations::is_migration_path(path) {
         *branch = "migration";
         let module_id = synthetic_module_id(repo, path);
-        let out = repo_graph_code_extractors::migrations::extract_sql_migration(
+        let out = glia_code_extractors::migrations::extract_sql_migration(
             source, path, module_id, repo,
         );
         t.lines.push(out.marker(path));
@@ -760,10 +760,10 @@ fn route_branches(
     // ACCESSES_DATA target of the file's MODULE; `@@map` rides a table
     // cell. Before detect_language, which has no prisma arm on purpose:
     // the const-table scan would bind `provider = "postgresql"`.
-    if repo_graph_code_extractors::prisma::is_prisma_schema(path) {
+    if glia_code_extractors::prisma::is_prisma_schema(path) {
         *branch = "prisma";
         let module_id = synthetic_module_id(repo, path);
-        let out = repo_graph_code_extractors::prisma::extract_prisma_models(
+        let out = glia_code_extractors::prisma::extract_prisma_models(
             source,
             module_id,
             repo,
@@ -799,7 +799,7 @@ fn route_branches(
         *branch = "nav template links";
         let module_id = modules.module_id(&angular_component_source(path, modules), repo);
         let links =
-            repo_graph_code_extractors::nav_links::extract_template_links(source, module_id);
+            glia_code_extractors::nav_links::extract_template_links(source, module_id);
         t.links_router += links.router;
         t.links_href += links.href;
         t.links_origin += links.origin;
@@ -827,10 +827,10 @@ fn route_branches(
         // declares MESSAGE_TYPEs, the shape a `.proto` message or an
         // `.avsc` record gets, so MessageSchemaResolver can pair them
         // across repos. A contract keeps the A10.8 path below.
-        if repo_graph_code_extractors::contracts::sniff_json_contract(source).is_none()
-            && repo_graph_code_extractors::schemas::sniff_json_schema(source)
+        if glia_code_extractors::contracts::sniff_json_contract(source).is_none()
+            && glia_code_extractors::schemas::sniff_json_schema(source)
         {
-            let recs = repo_graph_code_extractors::schemas::extract_json_schema_types(
+            let recs = glia_code_extractors::schemas::extract_json_schema_types(
                 source, path, module_id, repo,
             );
             t.jsonschema_files += 1;
@@ -849,7 +849,7 @@ fn route_branches(
             });
             return Routed::NonCode { key: "json", fp, tally: t };
         }
-        let out = repo_graph_code_extractors::contracts::extract_json_contract(
+        let out = glia_code_extractors::contracts::extract_json_contract(
             source, path, module_id, repo,
         );
         t.keep_contract(&out);
@@ -872,12 +872,12 @@ fn route_branches(
     if lang == "proto" {
         *branch = "proto";
         let module_id = synthetic_module_id(repo, path);
-        let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
+        let out = glia_code_extractors::grpc::extract_grpc_service_nodes(
             source, path, module_id, repo,
         );
         // A10.5: the file's `message` / `enum` declarations, as
         // MESSAGE_TYPE nodes under the same MODULE.
-        let msgs = repo_graph_code_extractors::schemas::extract_proto_messages(
+        let msgs = glia_code_extractors::schemas::extract_proto_messages(
             source, path, module_id, repo,
         );
         t.proto_files += 1;
@@ -920,11 +920,11 @@ fn route_branches(
     if lang == "graphql" {
         *branch = "graphql";
         let module_id = synthetic_module_id(repo, path);
-        let repo_graph_code_extractors::graphql::GraphqlNodes {
+        let glia_code_extractors::graphql::GraphqlNodes {
             nodes,
             nav,
             mut anchors,
-        } = repo_graph_code_extractors::graphql::extract_graphql_sdl_file_nodes(
+        } = glia_code_extractors::graphql::extract_graphql_sdl_file_nodes(
             source, module_id, repo,
         );
         t.sdl_files += 1;
@@ -933,7 +933,7 @@ fn route_branches(
             let mut fp = synthetic_parse(path, module_id, repo, vec![nodes], vec![], vec![nav], vec![]);
             // A5.8: POSITION on each field, and the MODULE CONTAINS
             // fallback, since no function in a schema owns a field.
-            repo_graph_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
+            glia_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
             fp
         });
         return Routed::NonCode { key: "graphql", fp, tally: t };
@@ -945,7 +945,7 @@ fn route_branches(
     if lang == "avro" {
         *branch = "avro";
         let module_id = synthetic_module_id(repo, path);
-        let recs = repo_graph_code_extractors::schemas::extract_avro_records(
+        let recs = glia_code_extractors::schemas::extract_avro_records(
             source, path, module_id, repo,
         );
         t.avro_files += 1;
@@ -1029,10 +1029,10 @@ fn route_branches(
         // G15: denormalize the file's library names onto every node as an
         // IMPORTS cell (one place, all languages). This is the RAW list:
         // telling a dependency from the repo's own module needs the whole
-        // repo, so `build::filter_imports_cells` rewrites it in place after
+        // repo, so `build::grafts::filter_imports_cells` rewrites it in place after
         // the cache (A16.4). The cell also marks a language-parser parse —
         // synthetic parses above never get one.
-        repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
+        glia_code_domain::attach_imports_cell(&mut fp, lang);
         Ok::<_, String>((fp, stats))
     });
     let outcome = match parse_result {
@@ -1064,10 +1064,10 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
         .and_then(|e| e.to_str());
     if matches!(ext, Some("yml" | "yaml"))
         || is_dockerfile_path(path)
-        || repo_graph_code_extractors::packages::is_manifest_path(path)
+        || glia_code_extractors::packages::is_manifest_path(path)
         || is_dotenv_path(path)
-        || repo_graph_code_extractors::migrations::is_migration_path(path)
-        || repo_graph_code_extractors::prisma::is_prisma_schema(path)
+        || glia_code_extractors::migrations::is_migration_path(path)
+        || glia_code_extractors::prisma::is_prisma_schema(path)
         || is_angular_template_path(path)
         || ext.is_some_and(|e| e.eq_ignore_ascii_case("json"))
     {
@@ -1090,7 +1090,7 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
 /// ([`crate::extract::build_group`]) qualifies EVERY file of that key: its
 /// MODULE is `<dir>::<file name>` (`api::user.py`) and every symbol under it
 /// follows. Its nav name stays the stem, and each language graph aliases the
-/// bare path to it (`repo_graph_graph` `build_symbol_table`), so bare-path
+/// bare path to it (`glia_graph` `build_symbol_table`), so bare-path
 /// imports still bind.
 ///
 /// LB.13: a key claimed by two or more files of ONE build group (`util.ts` +
@@ -1098,7 +1098,7 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
 /// the same way, so neither file's symbols land on the other's NodeIds. Their
 /// graph holds two MODULEs of one bare form and registers no alias for it; a
 /// bare import binds the sibling the importer's language loads instead
-/// (`repo_graph_graph` `SameStem`, `same_stem_order`).
+/// (`glia_graph` `SameStem`, `same_stem_order`).
 ///
 /// LB.10a: every C/C++ file (`parser_route` `c_cpp`) is named by its file
 /// name, whatever its siblings: an `#include` names a file WITH its
@@ -1386,8 +1386,8 @@ fn synthetic_parse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{cell_type, edge_category};
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::{cell_type, edge_category};
+    use glia_core::CellPayload;
 
     fn route(path: &str, source: &str) -> HashMap<&'static str, Vec<FileParse>> {
         let files = vec![(path.to_string(), source.to_string())];
@@ -1454,7 +1454,7 @@ mod tests {
         assert_eq!(fp.nav.name_by_id[&module_id], "schema.prisma");
         assert_eq!(fp.nodes[1].id, user);
         assert_eq!(
-            repo_graph_code_domain::data_entity::table_of(&fp.nodes[1].cells),
+            glia_code_domain::data_entity::table_of(&fp.nodes[1].cells),
             Some("app_users".to_string())
         );
         assert_eq!((fp.edges[0].from, fp.edges[0].to), (module_id, user));

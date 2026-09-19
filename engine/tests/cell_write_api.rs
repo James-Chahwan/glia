@@ -1,4 +1,4 @@
-//! LF.1b: the cell write API. `repo_graph_store::write_cell` /
+//! LF.1b: the cell write API. `glia_store::write_cell` /
 //! `remove_cell_entry` upsert `.glia/cells.jsonl` (`.glia/vectors.jsonl` for a
 //! VECTOR) under `.glia/cells.lock`, and write through into a persisted gmap
 //! only when that gmap is fresh right now, so a write never makes a stale
@@ -8,17 +8,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::cell_type;
+use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, read_rows,
 };
-use repo_graph_code_domain::snapshots::REDACTED;
-use repo_graph_core::{Cell, CellPayload, CellTypeId, RepoId};
-use repo_graph_engine::persist::layout_meta;
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
-use repo_graph_store::{
+use glia_code_domain::snapshots::REDACTED;
+use glia_core::{Cell, CellPayload, CellTypeId, RepoId};
+use glia_engine::persist::layout_meta;
+use glia_engine::{generate_many, generate_one};
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_store::{
     CELLS_LOCK, CellRemoval, MANIFEST_NAME, WriteThrough, default_gmap_dir, is_gmap_stale,
     read_merged_sharded, remove_cell_entry, write_cell, write_merged_sharded,
     write_merged_sharded_meta,

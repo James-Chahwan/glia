@@ -7,10 +7,10 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::NodeKindId;
-use repo_graph_engine::generate_one;
-use repo_graph_graph::{MergedGraph, RepoGraph};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::NodeKindId;
+use glia_engine::generate_one;
+use glia_graph::{MergedGraph, RepoGraph};
 
 const JAVA_SERVICE: &str = "\
 package com.acme.billing;

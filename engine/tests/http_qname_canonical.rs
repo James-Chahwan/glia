@@ -16,10 +16,10 @@
 //! normalisation one: the directory still guards that nothing it does emit is
 //! non-canonical.
 
-use repo_graph_code_domain::endpoint::is_canonical_http_path;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::endpoint::is_canonical_http_path;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 /// Write `files` under a fresh tempdir and build it as one repo.
 fn build(files: &[(&str, &str)]) -> (tempfile::TempDir, MergedGraph) {

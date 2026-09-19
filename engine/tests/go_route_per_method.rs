@@ -15,11 +15,11 @@
 
 use std::collections::BTreeSet;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_many;
-use repo_graph_engine::trace::{TraceHop, TraceOptions, cross_stack_trace};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::NodeId;
+use glia_engine::generate_many;
+use glia_engine::trace::{TraceHop, TraceOptions, cross_stack_trace};
+use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "../../bench/substrate-gap/fixtures/go-route-per-method";
 const GO_MOD: &str =
@@ -60,7 +60,7 @@ fn qname_of(m: &MergedGraph, id: NodeId) -> String {
 
 /// Qnames of every node `from` reaches over one `category` edge, intra-repo
 /// or cross-repo, sorted.
-fn targets(m: &MergedGraph, from: NodeId, category: repo_graph_core::EdgeCategoryId) -> Vec<String> {
+fn targets(m: &MergedGraph, from: NodeId, category: glia_core::EdgeCategoryId) -> Vec<String> {
     let set: BTreeSet<String> = m
         .graphs
         .iter()

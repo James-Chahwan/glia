@@ -41,7 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 
-use repo_graph_core::{Edge, NodeId};
+use glia_core::{Edge, NodeId};
 
 use crate::algo::GraphSource;
 use crate::{ActivationConfig, Specificity};
@@ -522,7 +522,7 @@ impl fmt::Display for Marker<'_> {
 mod oracle {
     use std::collections::HashMap;
 
-    use repo_graph_core::{Edge, NodeId};
+    use glia_core::{Edge, NodeId};
 
     use crate::{ActivationConfig, ActivationResult, Direction, Specificity};
 
@@ -696,7 +696,7 @@ mod oracle {
 mod tests {
     use super::*;
     use crate::{ActivationResult, Direction, activate};
-    use repo_graph_core::{Confidence, EdgeCategoryId};
+    use glia_core::{Confidence, EdgeCategoryId};
 
     fn edge(from: u64, to: u64, category: u32) -> Edge {
         Edge {

@@ -7,7 +7,7 @@
 //! exactly one place.
 
 use crate::confluence::storage_to_markdown;
-use repo_graph_code_domain::{DocProvenance, DocRecord, DocSourceKind};
+use glia_code_domain::{DocProvenance, DocRecord, DocSourceKind};
 use std::path::{Path, PathBuf};
 
 /// A page fetched from an external source, pre-conversion. `storage` is the

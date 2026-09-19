@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{CodeNav, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, canonical_edge_cmp};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{CodeNav, edge_category, node_kind};
+use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, canonical_edge_cmp};
 
 use crate::resolvers::{CrossGraphResolver, parse_endpoint_qname, weakest};
 use crate::types::{RepoGraph, SymbolTable};
@@ -75,7 +75,7 @@ impl MergedGraph {
     }
 
     /// Put `cross_edges` in the canonical order
-    /// ([`repo_graph_core::canonical_edge_cmp`]): `(from, to, category,
+    /// ([`glia_core::canonical_edge_cmp`]): `(from, to, category,
     /// confidence, cells)`. The order is total, so the result, and the
     /// cross-edge bytes written from it, do not depend on the order the
     /// resolvers pushed in, even when same-key edges differ only in their
@@ -600,8 +600,8 @@ fn find_qname(id: NodeId, merged: &MergedGraph) -> Option<String> {
 mod tests {
     use super::*;
     use crate::test_support::{flow_graph, repo};
-    use repo_graph_code_domain::{GRAPH_TYPE, edge_category, node_kind};
-    use repo_graph_core::{Confidence, RepoId};
+    use glia_code_domain::{GRAPH_TYPE, edge_category, node_kind};
+    use glia_core::{Confidence, RepoId};
 
     #[test]
     fn subset_keeps_only_requested_nodes_and_internal_edges() {
@@ -867,7 +867,7 @@ mod tests {
         m
     }
 
-    fn xedge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+    fn xedge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
         Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
     }
 
@@ -1178,8 +1178,8 @@ mod tests {
     /// in: all 720 input orders of six such edges sort to the same Vec.
     #[test]
     fn sort_cross_edges_is_permutation_invariant() {
-        use repo_graph_code_domain::cell_type;
-        use repo_graph_core::{Cell, CellPayload};
+        use glia_code_domain::cell_type;
+        use glia_core::{Cell, CellPayload};
         let ep = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "POST /users");
         let route = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "POST /users");
         let at = |line: u32| Cell {

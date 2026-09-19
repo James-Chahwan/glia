@@ -4,7 +4,7 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_engine::trace::{TraceOptions, cross_stack_trace_with_live, entry_flows_with_live};
+use glia_engine::trace::{TraceOptions, cross_stack_trace_with_live, entry_flows_with_live};
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;

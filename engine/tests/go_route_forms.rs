@@ -18,10 +18,10 @@
 //! so the lookups below name the method (`PATCH /users/:id`, `ANY /ping`, one
 //! node each for `GET /orders` and `POST /orders`).
 
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{CellPayload, NodeId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 const FIXTURE_GO_MOD: &str =
     include_str!("../../bench/substrate-gap/fixtures/go-route-registration-forms/go.mod");
@@ -43,7 +43,7 @@ fn route(m: &MergedGraph, qname: &str) -> NodeId {
 }
 
 /// Every JSON payload of `kind` on node `id`, in cell order.
-fn cells_of(m: &MergedGraph, id: NodeId, kind: repo_graph_core::CellTypeId) -> Vec<String> {
+fn cells_of(m: &MergedGraph, id: NodeId, kind: glia_core::CellTypeId) -> Vec<String> {
     m.graphs
         .iter()
         .flat_map(|g| g.nodes.iter())

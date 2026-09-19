@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::contract_fields::{FieldChange, FieldDiffRow, contract_fields};
-use repo_graph_engine::generate_many;
+use glia_engine::contract_fields::{FieldChange, FieldDiffRow, contract_fields};
+use glia_engine::generate_many;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

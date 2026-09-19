@@ -13,9 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, NodeId, RepoId};
-use repo_graph_engine::generate_many;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId, RepoId};
+use glia_engine::generate_many;
 
 fn fixture(dir: &str) -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,7 +25,7 @@ fn fixture(dir: &str) -> String {
         .to_string()
 }
 
-fn json_cell(cells: &[repo_graph_core::Cell], kind: repo_graph_core::CellTypeId) -> Option<String> {
+fn json_cell(cells: &[glia_core::Cell], kind: glia_core::CellTypeId) -> Option<String> {
     cells
         .iter()
         .find(|c| c.kind == kind)
@@ -51,7 +51,7 @@ fn json_schemas_are_shared_message_types() {
 
     // Every MESSAGE_TYPE, per repo, with its cells; and every node's qname.
     let mut types: HashMap<RepoId, BTreeSet<String>> = HashMap::new();
-    let mut by_qname: BTreeMap<String, Vec<(RepoId, NodeId, Vec<repo_graph_core::Cell>)>> =
+    let mut by_qname: BTreeMap<String, Vec<(RepoId, NodeId, Vec<glia_core::Cell>)>> =
         BTreeMap::new();
     let mut qname_of: HashMap<NodeId, String> = HashMap::new();
     let mut edges = Vec::new();

@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::{
+use glia_code_domain::evidence::{self, Evidence};
+use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, UnresolvedRef, cell_type, edge_category, node_kind,
     recv_stats,
 };
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
 use crate::types::RepoGraph;
 
@@ -378,12 +378,12 @@ fn lowest_qname_ext(g: &RepoGraph, ids: &[NodeId]) -> String {
 
 /// The `file` field of a node's POSITION cell (JSON `{"file":"…",…}`). Also
 /// read by `nav` to place a linking file under its LB.4a project owner.
-pub(crate) fn position_file(node: &repo_graph_core::Node) -> Option<String> {
+pub(crate) fn position_file(node: &glia_core::Node) -> Option<String> {
     node.cells.iter().find_map(|c| {
         if c.kind != cell_type::POSITION {
             return None;
         }
-        let repo_graph_core::CellPayload::Json(j) = &c.payload else {
+        let glia_core::CellPayload::Json(j) = &c.payload else {
             return None;
         };
         let marker = "\"file\":\"";
@@ -594,7 +594,7 @@ fn attribute_base(
     g: &RepoGraph,
     bindings: Option<&HashMap<String, NodeId>>,
     base: &str,
-) -> Option<(NodeId, repo_graph_core::NodeKindId)> {
+) -> Option<(NodeId, glia_core::NodeKindId)> {
     let base_id = *bindings?.get(base)?;
     g.nav.kind_by_id.get(&base_id).map(|k| (base_id, *k))
 }
@@ -1001,8 +1001,8 @@ mod tests {
     use super::*;
     use crate::build::{build_dotted, build_python, build_typescript};
     use crate::test_support::repo;
-    use repo_graph_code_domain::{FileParse, GRAPH_TYPE, ImportStmt, ImportTarget};
-    use repo_graph_core::Node;
+    use glia_code_domain::{FileParse, GRAPH_TYPE, ImportStmt, ImportTarget};
+    use glia_core::Node;
     use std::collections::HashSet;
 
     /// Elixir shape: `defmodule` emits a PACKAGE node holding the `def`s, and
@@ -1091,7 +1091,7 @@ mod tests {
 
         fn add(
             &mut self,
-            kind: repo_graph_core::NodeKindId,
+            kind: glia_core::NodeKindId,
             qname: &str,
             parent: Option<NodeId>,
         ) -> NodeId {
@@ -1539,9 +1539,9 @@ mod tests {
     /// Give the node `id` a POSITION cell in `file`.
     fn place(file: &mut FileParse, id: NodeId, path: &str) {
         let node = file.nodes.iter_mut().find(|n| n.id == id).expect("node in file");
-        node.cells.push(repo_graph_core::Cell {
+        node.cells.push(glia_core::Cell {
             kind: cell_type::POSITION,
-            payload: repo_graph_core::CellPayload::Json(format!(
+            payload: glia_core::CellPayload::Json(format!(
                 "{{\"file\":\"{path}\",\"start_line\":1,\"end_line\":2}}"
             )),
         });
@@ -1890,7 +1890,7 @@ mod tests {
         g.edges
             .iter()
             .find(|e| e.from == from && e.to == to && e.category == category)
-            .and_then(repo_graph_code_domain::evidence::Evidence::of)
+            .and_then(glia_code_domain::evidence::Evidence::of)
             .map(|ev| (ev.emitter, ev.rule))
     }
 

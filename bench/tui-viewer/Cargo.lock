@@ -74,6 +74,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -84,6 +99,16 @@ name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
 
 [[package]]
 name = "bumpalo"
@@ -210,6 +235,31 @@ dependencies = [
  "ryu",
  "static_assertions",
 ]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crossterm"
@@ -349,19 +399,430 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia-activation"
+version = "0.4.6"
+dependencies = [
+ "glia-core",
+]
+
+[[package]]
+name = "glia-code-domain"
+version = "0.4.3"
+dependencies = [
+ "base64",
+ "glia-activation",
+ "glia-core",
+ "ignore",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-code-extractors"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "glia-core"
+version = "0.4.1"
+dependencies = [
+ "rkyv",
+ "serde",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-doc"
+version = "0.4.13"
+dependencies = [
+ "tree-sitter",
+]
+
+[[package]]
+name = "glia-engine"
+version = "0.4.18"
+dependencies = [
+ "bincode",
+ "glia-activation",
+ "glia-code-domain",
+ "glia-code-extractors",
+ "glia-core",
+ "glia-graph",
+ "glia-parser-angular",
+ "glia-parser-c-cpp",
+ "glia-parser-clojure",
+ "glia-parser-csharp",
+ "glia-parser-dart",
+ "glia-parser-elixir",
+ "glia-parser-go",
+ "glia-parser-java",
+ "glia-parser-kotlin",
+ "glia-parser-php",
+ "glia-parser-python",
+ "glia-parser-react",
+ "glia-parser-ruby",
+ "glia-parser-rust",
+ "glia-parser-scala",
+ "glia-parser-solidity",
+ "glia-parser-swift",
+ "glia-parser-terraform",
+ "glia-parser-typescript",
+ "glia-parser-vue",
+ "glia-stamp",
+ "glia-store",
+ "rayon",
+ "serde",
+ "serde_json",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-graph"
+version = "0.4.3"
+dependencies = [
+ "glia-activation",
+ "glia-code-domain",
+ "glia-code-extractors",
+ "glia-core",
+ "glia-parser-go",
+ "glia-parser-python",
+ "glia-parser-typescript",
+ "thiserror",
+]
+
+[[package]]
+name = "glia-parser-angular"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-c-cpp"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+]
+
+[[package]]
+name = "glia-parser-clojure"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-clojure-orchard",
+]
+
+[[package]]
+name = "glia-parser-csharp"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+]
+
+[[package]]
+name = "glia-parser-dart"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-dart",
+]
+
+[[package]]
+name = "glia-parser-elixir"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-elixir",
+]
+
+[[package]]
+name = "glia-parser-go"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-go",
+]
+
+[[package]]
+name = "glia-parser-java"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-java",
+]
+
+[[package]]
+name = "glia-parser-kotlin"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "tree-sitter",
+ "tree-sitter-kotlin-ng",
+]
+
+[[package]]
+name = "glia-parser-php"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-php",
+]
+
+[[package]]
+name = "glia-parser-python"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-python",
+]
+
+[[package]]
+name = "glia-parser-react"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-ruby"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-ruby",
+]
+
+[[package]]
+name = "glia-parser-rust"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "glia-parser-scala"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-scala",
+]
+
+[[package]]
+name = "glia-parser-solidity"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-solidity",
+]
+
+[[package]]
+name = "glia-parser-swift"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-swift",
+]
+
+[[package]]
+name = "glia-parser-terraform"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-hcl",
+]
+
+[[package]]
+name = "glia-parser-typescript"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-vue"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-stamp"
+version = "0.4.18"
+
+[[package]]
+name = "glia-store"
+version = "0.4.18"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-graph",
+ "glia-stamp",
+ "memmap2",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
 name = "glia-tui"
 version = "0.4.13"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "glia-activation",
+ "glia-code-domain",
+ "glia-core",
+ "glia-engine",
+ "glia-graph",
  "notify",
  "ratatui",
- "repo-graph-activation",
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-engine",
- "repo-graph-graph",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e47d37d2ae4464254884b60ab7071be2b876a9c35b696bd018ddcc76847309cd"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -392,6 +853,22 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+
+[[package]]
+name = "ignore"
+version = "0.4.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b17771570a2b94107741a7b033f19132c2eee21d59d21b24d2ced26500bd66e"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
 
 [[package]]
 name = "indexmap"
@@ -560,6 +1037,15 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "memmap2"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mio"
@@ -743,6 +1229,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rayon"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -796,337 +1302,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cadadef317c2f20755a64d7fdc48f9e7178ee6b0e1f7fce33fa60f1d68a276e6"
 dependencies = [
  "bytecheck",
-]
-
-[[package]]
-name = "repo-graph-activation"
-version = "0.4.6"
-dependencies = [
- "repo-graph-core",
-]
-
-[[package]]
-name = "repo-graph-code-domain"
-version = "0.4.3"
-dependencies = [
- "repo-graph-core",
- "rkyv",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "repo-graph-code-extractors"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "repo-graph-core"
-version = "0.4.1"
-dependencies = [
- "rkyv",
- "serde",
- "thiserror",
- "twox-hash",
-]
-
-[[package]]
-name = "repo-graph-engine"
-version = "0.4.13"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-code-extractors",
- "repo-graph-core",
- "repo-graph-graph",
- "repo-graph-parser-angular",
- "repo-graph-parser-c-cpp",
- "repo-graph-parser-clojure",
- "repo-graph-parser-csharp",
- "repo-graph-parser-dart",
- "repo-graph-parser-elixir",
- "repo-graph-parser-go",
- "repo-graph-parser-java",
- "repo-graph-parser-php",
- "repo-graph-parser-python",
- "repo-graph-parser-react",
- "repo-graph-parser-ruby",
- "repo-graph-parser-rust",
- "repo-graph-parser-scala",
- "repo-graph-parser-solidity",
- "repo-graph-parser-swift",
- "repo-graph-parser-terraform",
- "repo-graph-parser-typescript",
- "repo-graph-parser-vue",
-]
-
-[[package]]
-name = "repo-graph-graph"
-version = "0.4.3"
-dependencies = [
- "repo-graph-activation",
- "repo-graph-code-domain",
- "repo-graph-code-extractors",
- "repo-graph-core",
- "repo-graph-parser-go",
- "repo-graph-parser-python",
- "repo-graph-parser-typescript",
- "thiserror",
-]
-
-[[package]]
-name = "repo-graph-parser-angular"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-c-cpp"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-cpp",
-]
-
-[[package]]
-name = "repo-graph-parser-clojure"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-clojure-orchard",
-]
-
-[[package]]
-name = "repo-graph-parser-csharp"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-c-sharp",
-]
-
-[[package]]
-name = "repo-graph-parser-dart"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-dart",
-]
-
-[[package]]
-name = "repo-graph-parser-elixir"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-elixir",
-]
-
-[[package]]
-name = "repo-graph-parser-go"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-go",
-]
-
-[[package]]
-name = "repo-graph-parser-java"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-java",
-]
-
-[[package]]
-name = "repo-graph-parser-php"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-php",
-]
-
-[[package]]
-name = "repo-graph-parser-python"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-python",
-]
-
-[[package]]
-name = "repo-graph-parser-react"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-ruby"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-ruby",
-]
-
-[[package]]
-name = "repo-graph-parser-rust"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "repo-graph-parser-scala"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-scala",
-]
-
-[[package]]
-name = "repo-graph-parser-solidity"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-solidity",
-]
-
-[[package]]
-name = "repo-graph-parser-swift"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-swift",
-]
-
-[[package]]
-name = "repo-graph-parser-terraform"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-hcl",
-]
-
-[[package]]
-name = "repo-graph-parser-typescript"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-vue"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -1241,6 +1416,15 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1385,6 +1569,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
+name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "toml_edit",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap",
+ "serde",
+ "serde_spanned",
+ "toml_datetime",
+ "winnow",
+]
+
+[[package]]
 name = "tree-sitter"
 version = "0.26.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1483,6 +1701,16 @@ name = "tree-sitter-java"
 version = "0.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0aa6cbcdc8c679b214e616fd3300da67da0e492e066df01bcf5a5921a71e90d6"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-kotlin-ng"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e800ebbda938acfbf224f4d2c34947a31994b1295ee6e819b65226c7b51b4450"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -1819,6 +2047,15 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+
+[[package]]
+name = "winnow"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "zmij"

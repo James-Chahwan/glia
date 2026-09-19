@@ -26,11 +26,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-header-impl-files";
 const NAMESPACE_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-namespace-qnames";
@@ -223,7 +223,7 @@ fn header_and_impl_are_two_modules() {
 
 /// The whole store, file by file, for a byte comparison.
 fn store_bytes(merged: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
+    glia_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .expect("read store dir")
         .flatten()
@@ -246,8 +246,8 @@ fn incremental_builds_match_a_clean_build() {
     let repo = tmp.path().join("repo");
     let repo = repo.to_str().expect("utf-8 tempdir");
     let clean = build(&tmp);
-    let cold = repo_graph_engine::generate_one_incremental(repo).expect("cold").merged;
-    let warm = repo_graph_engine::generate_one_incremental(repo).expect("warm").merged;
+    let cold = glia_engine::generate_one_incremental(repo).expect("cold").merged;
+    let warm = glia_engine::generate_one_incremental(repo).expect("warm").merged;
     let clean_bytes = store_bytes(&clean, &tmp.path().join("clean"));
     assert_eq!(store_bytes(&cold, &tmp.path().join("cold")), clean_bytes, "cold vs clean");
     assert_eq!(store_bytes(&warm, &tmp.path().join("warm")), clean_bytes, "warm vs clean");

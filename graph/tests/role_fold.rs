@@ -8,13 +8,13 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category,
     node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::roles::{ROLE_KINDS, roles_in};
-use repo_graph_graph::{MergedGraph, RepoGraph, build_typescript};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+use glia_graph::roles::{ROLE_KINDS, roles_in};
+use glia_graph::{MergedGraph, RepoGraph, build_typescript};
 
 fn repo() -> RepoId {
     RepoId::from_canonical("test://role_fold")
@@ -40,7 +40,7 @@ fn node(id: NodeId, cells: Vec<Cell>) -> Node {
     }
 }
 
-fn edge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+fn edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
     Edge {
         from,
         to,

@@ -9,15 +9,15 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category,
     node_kind,
 };
-use repo_graph_core::{
+use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
-use repo_graph_graph::nav::nav_route_path;
-use repo_graph_graph::{RepoGraph, build_typescript};
+use glia_graph::nav::nav_route_path;
+use glia_graph::{RepoGraph, build_typescript};
 
 fn repo() -> RepoId {
     RepoId::from_canonical("test://nav_links")
@@ -359,7 +359,7 @@ fn nav_route_handled_by_module_lifts_to_component() {
 
 #[test]
 fn navigates_to_carries_blast_radius() {
-    assert!(repo_graph_code_domain::profile::CODE_TABLES.carries(edge_category::NAVIGATES_TO));
+    assert!(glia_code_domain::profile::CODE_TABLES.carries(edge_category::NAVIGATES_TO));
 }
 
 #[test]

@@ -14,9 +14,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::Node;
-use repo_graph_projection_text::driver_utils::{
+use glia_code_domain::node_kind;
+use glia_core::Node;
+use glia_projection_text::driver_utils::{
     build_repo_graph, extract_code_cell, node_by_qname_index, read_json, write_json,
 };
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,7 @@ struct Summary {
 
 fn build_summary(
     node: &Node,
-    kind: Option<repo_graph_core::NodeKindId>,
+    kind: Option<glia_core::NodeKindId>,
     qname: &str,
     max_chars: usize,
 ) -> Summary {

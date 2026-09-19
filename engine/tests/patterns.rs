@@ -18,17 +18,17 @@ mod git_fixture;
 use std::collections::BTreeMap;
 
 use git_fixture::GitRepo;
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
-use repo_graph_engine::delta::graph_delta_vs_rev;
-use repo_graph_engine::generate_one;
-use repo_graph_engine::patterns::{
+use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::generate_one;
+use glia_engine::patterns::{
     Divergence, PatternArgs, PatternReport, Population, pattern_conformance,
     pattern_conformance_delta,
 };
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 const CONVENTION: &str = "handler>service>repository>db";
 const DIRECT_SIGNATURE: &str = "handler>repository>db";

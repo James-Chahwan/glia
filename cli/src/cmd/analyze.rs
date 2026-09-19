@@ -2,7 +2,7 @@
 //! cross-graph edges, the service-graph Mermaid, or the full JSON dump.
 
 use clap::ValueEnum;
-use repo_graph_engine::generate_one_opts;
+use glia_engine::generate_one_opts;
 
 use crate::cmd::arch::{drop_non_flow_links, print_service_mermaid};
 use crate::common::{build_options, print_json, print_summary_table};
@@ -57,7 +57,7 @@ pub(crate) fn run(args: Args) -> i32 {
         // Retired here rather than left beside `print_service_mermaid`: two
         // mermaid paths is how the dead one survived this long.
         AnalyzeFormat::Mermaid => {
-            let mut map = repo_graph_engine::service_map(&result.merged, &result.repo_labels);
+            let mut map = glia_engine::service_map(&result.merged, &result.repo_labels);
             // Same view, same default as `glia arch --mermaid`: flows only.
             // `glia arch --include-shared` is where the rest lives.
             drop_non_flow_links(&mut map);

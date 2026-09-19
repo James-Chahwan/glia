@@ -18,12 +18,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use repo_graph_activation::ActivationConfig;
-use repo_graph_activation::plan::{ActivatedView, ActivationPlan};
-use repo_graph_core::{NodeId, RepoId};
-use repo_graph_graph::{RepoGraph, build_python};
-use repo_graph_parser_python::{FileParse, parse_file};
-use repo_graph_projection_text::hooks::AccessPathSynth;
+use glia_activation::ActivationConfig;
+use glia_activation::plan::{ActivatedView, ActivationPlan};
+use glia_core::{NodeId, RepoId};
+use glia_graph::{RepoGraph, build_python};
+use glia_parser_python::{FileParse, parse_file};
+use glia_projection_text::hooks::AccessPathSynth;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 

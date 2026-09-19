@@ -13,12 +13,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_engine::GenerateResult;
-use repo_graph_engine::generate_one;
-use repo_graph_engine::persist::{default_layout_dir, persist_result};
-use repo_graph_store::{MANIFEST_NAME, is_gmap_stale};
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_engine::GenerateResult;
+use glia_engine::generate_one;
+use glia_engine::persist::{default_layout_dir, persist_result};
+use glia_store::{MANIFEST_NAME, is_gmap_stale};
 
 fn write(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {

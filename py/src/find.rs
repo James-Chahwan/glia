@@ -7,18 +7,18 @@ use pyo3::prelude::*;
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::absence::Answer;
-use repo_graph_engine::find::{FindOptions, FoundNode, find_nodes_with_live};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::{NodeId, NodeKindId};
+use glia_engine::absence::Answer;
+use glia_engine::find::{FindOptions, FoundNode, find_nodes_with_live};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 // `find`'s `top_k=20` below is a literal so `__text_signature__` shows it;
 // this keeps it the engine's default.
-const _: () = assert!(repo_graph_engine::find::DEFAULT_TOP_K == 20);
+const _: () = assert!(glia_engine::find::DEFAULT_TOP_K == 20);
 
 /// Node-kind names → ids, case-insensitively, as `glia find --kind` reads
 /// them. An unknown name is an error naming every valid one.
@@ -39,7 +39,7 @@ fn kinds_by_name(names: &[String]) -> Result<Vec<NodeKindId>, String> {
 }
 
 /// The whole body of [`PyGraph::find`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` covers it (see the crate doc). An empty
+/// `cargo test -p glia-py` covers it (see the crate doc). An empty
 /// `kinds` list filters nothing, as `glia find` with no `--kind`. `live` is
 /// the graph's cached `entrypoint_reachable` set (`PyGraph::live`).
 fn find_answer(
@@ -136,7 +136,7 @@ impl PyGraph {
         top_k: Option<usize>,
         scope: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let mut answer = repo_graph_engine::resolve_signal_located_with_live(
+        let mut answer = glia_engine::resolve_signal_located_with_live(
             &self.merged,
             self.live(),
             text,
@@ -154,7 +154,7 @@ impl PyGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_engine::find::find_nodes;
+    use glia_engine::find::find_nodes;
 
     fn built(tag: &str) -> MergedGraph {
         let root = std::env::temp_dir().join(format!("glia-ld2-find-{tag}-{}", std::process::id()));
@@ -167,7 +167,7 @@ mod tests {
         .expect("write fixture");
         std::fs::write(root.join("svc/other.py"), "def helper_two():\n    return 2\n")
             .expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         built.expect("build").merged
     }
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn find_is_the_engine_find_with_kind_names() {
         let merged = built("kinds");
-        let live = repo_graph_engine::entrypoint_reachable(&merged);
+        let live = glia_engine::entrypoint_reachable(&merged);
         let all = find_answer(&merged, &live, "helper", 20, &[], None, 0).expect("answer");
         let engine = find_nodes(&merged, "helper", &FindOptions::default());
         assert_eq!(all.results, engine.results);

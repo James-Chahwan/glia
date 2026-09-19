@@ -17,7 +17,7 @@
 //!    Flutter / React Native app generates (`android/`, `ios/`, …) are never
 //!    keyed: they fold into the app that owns them (LA.5).
 //! 3. [`service_map`] — the rendered answer: services, the links between them
-//!    (via `repo_graph_graph::cross_links`), and the honest residuals
+//!    (via `glia_graph::cross_links`), and the honest residuals
 //!    (`self_links`, `unlocated_nodes`).
 //!
 //! Nothing here reaches `MergedGraph`: the human repo label rides on
@@ -25,9 +25,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Confidence, EdgeCategoryId, Node, NodeId};
-use repo_graph_graph::{MergedGraph, cross_links};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, EdgeCategoryId, Node, NodeId};
+use glia_graph::{MergedGraph, cross_links};
 
 // ============================================================================
 // 1. node → file
@@ -514,7 +514,7 @@ pub struct ServiceLink {
 /// struct literal (LD.9):
 ///
 /// ```compile_fail
-/// let _ = repo_graph_engine::ServiceMap {
+/// let _ = glia_engine::ServiceMap {
 ///     keying: "",
 ///     services: vec![],
 ///     links: vec![],
@@ -699,7 +699,7 @@ pub fn service_map_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::{Cell, RepoId};
+    use glia_core::{Cell, RepoId};
 
     fn node(cells: Vec<Cell>) -> Node {
         Node {
@@ -710,7 +710,7 @@ mod tests {
         }
     }
 
-    fn cell(kind: repo_graph_core::CellTypeId, payload: CellPayload) -> Cell {
+    fn cell(kind: glia_core::CellTypeId, payload: CellPayload) -> Cell {
         Cell { kind, payload }
     }
 
@@ -804,7 +804,7 @@ mod tests {
     /// to `ProjectRoots`. A second repo still wins with `PerRepo`.
     #[test]
     fn default_keying_reads_project_anchors() {
-        use repo_graph_code_domain::project_roots::ProjectRoot;
+        use glia_code_domain::project_roots::ProjectRoot;
 
         let root_only = [ProjectRoot::new(String::new(), "go", "go.mod", Some("m".into()))];
         let nested = [
@@ -836,7 +836,7 @@ mod tests {
     /// that is not a platform dir stays its own root.
     #[test]
     fn platform_hosts_fold_into_their_app() {
-        use repo_graph_code_domain::project_roots::ProjectRoot;
+        use glia_code_domain::project_roots::ProjectRoot;
 
         let graph = |roots: &[ProjectRoot]| {
             MergedGraph::new(vec![crate::walk::build_project_graph(roots, RepoId(1))])
@@ -897,7 +897,7 @@ mod tests {
     /// what the graph fold answers from PROJECT nodes, whatever the pair order.
     #[test]
     fn platform_host_owners_matches_the_graph_fold_in_any_order() {
-        use repo_graph_code_domain::project_roots::ProjectRoot;
+        use glia_code_domain::project_roots::ProjectRoot;
 
         let stack = [
             ProjectRoot::new("mobile".into(), "dart", "pubspec.yaml", None),

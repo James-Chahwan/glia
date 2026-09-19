@@ -7,7 +7,7 @@
 //! an rkyv validation error. The pre-leap bytes are LG.6b's committed capture
 //! (`tests/fixtures/gmap_pre_leap/`), materialised into a tempdir exactly as its
 //! README says and never written in place. The preamble offsets the tests patch
-//! are the layout documented on `repo_graph_store::FORMAT_VERSION`:
+//! are the layout documented on `glia_store::FORMAT_VERSION`:
 //!
 //! ```text
 //! [0..8)   b"GLIAGMAP"      [8..12)  format_version u32 LE
@@ -16,9 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
-use repo_graph_graph::{MergedGraph, RepoGraph};
-use repo_graph_store::{
+use glia_core::{Confidence, Node, NodeId, RepoId};
+use glia_graph::{MergedGraph, RepoGraph};
+use glia_store::{
     FORMAT_VERSION, MANIFEST_NAME, MANIFEST_VERSION, MmapContainer, ShardedMmap, StoreError,
     is_gmap_stale, read_merged_sharded, write_merged_sharded, write_repo_graph,
 };
@@ -260,10 +260,10 @@ fn v2_round_trips() {
     let dir = tmp.path().join("layout");
     let merged = MergedGraph {
         graphs: vec![graph("test://lc1-a", &[10, 11]), graph("test://lc1-b", &[20])],
-        cross_edges: vec![repo_graph_core::Edge {
+        cross_edges: vec![glia_core::Edge {
             from: NodeId(10),
             to: NodeId(20),
-            category: repo_graph_code_domain::edge_category::HTTP_CALLS,
+            category: glia_code_domain::edge_category::HTTP_CALLS,
             confidence: Confidence::Strong,
             cells: Vec::new(),
         }],

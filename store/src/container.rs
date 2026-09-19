@@ -20,7 +20,7 @@ use std::{
 };
 
 use memmap2::{Mmap, MmapOptions};
-use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
 use rkyv::util::AlignedVec;
 
 use crate::error::StoreError;
@@ -901,7 +901,7 @@ mod tests {
                 Node {
                     id: NodeId(100),
                     repo: RepoId::from_canonical("test://cells"),
-                    confidence: repo_graph_core::Confidence::Strong,
+                    confidence: glia_core::Confidence::Strong,
                     cells: vec![Cell {
                         kind: CellTypeId(1),
                         payload: CellPayload::Text("fn main() {}".into()),
@@ -910,7 +910,7 @@ mod tests {
                 Node {
                     id: NodeId(200),
                     repo: RepoId::from_canonical("test://cells"),
-                    confidence: repo_graph_core::Confidence::Strong,
+                    confidence: glia_core::Confidence::Strong,
                     cells: vec![],
                 },
             ],

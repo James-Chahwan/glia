@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use repo_graph_engine::{
+use glia_engine::{
     GenerateResult, ServiceKeying, ServiceMap, default_keying, generate_many, generate_one,
     service_map, service_map_with,
 };
@@ -40,7 +40,7 @@ fn ids(map: &ServiceMap) -> Vec<&str> {
     map.services.iter().map(|s| s.id.as_str()).collect()
 }
 
-fn service<'a>(map: &'a ServiceMap, id: &str) -> &'a repo_graph_engine::ServiceSummary {
+fn service<'a>(map: &'a ServiceMap, id: &str) -> &'a glia_engine::ServiceSummary {
     map.services
         .iter()
         .find(|s| s.id == id)

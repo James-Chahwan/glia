@@ -3,13 +3,13 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{CodeNav, FileParse, edge_category, evidence};
-use repo_graph_core::{NodeId, RepoId};
+use glia_code_domain::{CodeNav, FileParse, edge_category, evidence};
+use glia_core::{NodeId, RepoId};
 
 /// The repo's `go.mod` set (LA.13), what [`parse_one_with_go_modules`] maps
 /// Go imports through. Re-exported so a caller can build one
 /// (`GoModules::from_entries`) without depending on the Go parser crate.
-pub use repo_graph_parser_go::GoModules;
+pub use glia_parser_go::GoModules;
 
 // ----------------------------------------------------------------------------
 // Language detection + per-language parser dispatch
@@ -139,51 +139,51 @@ pub(crate) fn parse_one_as(
 ) -> Result<FileParse, String> {
     let module_qname = module_qname.to_string();
     match lang {
-        "python" => repo_graph_parser_python::parse_file(source, path, &module_qname, repo)
+        "python" => glia_parser_python::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "go" => repo_graph_parser_go::parse_file_with_modules(source, path, &module_qname, go, repo)
+        "go" => glia_parser_go::parse_file_with_modules(source, path, &module_qname, go, repo)
             .map_err(|e| e.to_string()),
-        "typescript" | "js" => repo_graph_parser_typescript::parse_file(source, path, &module_qname, repo)
+        "typescript" | "js" => glia_parser_typescript::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "rust" => repo_graph_parser_rust::parse_file(source, path, &module_qname, repo)
+        "rust" => glia_parser_rust::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "java" => repo_graph_parser_java::parse_file(source, path, &module_qname, repo)
+        "java" => glia_parser_java::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "kotlin" => repo_graph_parser_kotlin::parse_file(source, path, &module_qname, repo)
+        "kotlin" => glia_parser_kotlin::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "csharp" => repo_graph_parser_csharp::parse_file(source, path, &module_qname, repo)
+        "csharp" => glia_parser_csharp::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "ruby" => repo_graph_parser_ruby::parse_file(source, path, &module_qname, repo)
+        "ruby" => glia_parser_ruby::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "php" => repo_graph_parser_php::parse_file(source, path, &module_qname, repo)
+        "php" => glia_parser_php::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "swift" => repo_graph_parser_swift::parse_file(source, path, &module_qname, repo)
+        "swift" => glia_parser_swift::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "c_cpp" => repo_graph_parser_c_cpp::parse_file(
+        "c_cpp" => glia_parser_c_cpp::parse_file(
             source,
             path,
             &module_qname,
-            repo_graph_parser_c_cpp::Dialect::from_path(path),
+            glia_parser_c_cpp::Dialect::from_path(path),
             repo,
         )
         .map_err(|e| e.to_string()),
-        "scala" => repo_graph_parser_scala::parse_file(source, path, &module_qname, repo)
+        "scala" => glia_parser_scala::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "clojure" => repo_graph_parser_clojure::parse_file(source, path, &module_qname, repo)
+        "clojure" => glia_parser_clojure::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "dart" => repo_graph_parser_dart::parse_file(source, path, &module_qname, repo)
+        "dart" => glia_parser_dart::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "elixir" => repo_graph_parser_elixir::parse_file(source, path, &module_qname, repo)
+        "elixir" => glia_parser_elixir::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "solidity" => repo_graph_parser_solidity::parse_file(source, path, &module_qname, repo)
+        "solidity" => glia_parser_solidity::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "terraform" => repo_graph_parser_terraform::parse_file(source, path, &module_qname, repo)
+        "terraform" => glia_parser_terraform::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "react" => repo_graph_parser_react::parse_file(source, path, &module_qname, repo)
+        "react" => glia_parser_react::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "angular" => repo_graph_parser_angular::parse_file(source, path, &module_qname, repo)
+        "angular" => glia_parser_angular::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "vue" => repo_graph_parser_vue::parse_file(source, path, &module_qname, repo)
+        "vue" => glia_parser_vue::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         _ => Err(format!("unsupported language: {lang}")),
     }
@@ -232,7 +232,7 @@ pub(crate) fn apply_cross_cutting_extractors(
     repo: RepoId,
     stats: &mut ExtractStats,
 ) {
-    use repo_graph_code_extractors::{
+    use glia_code_extractors::{
         anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
         nav_links, nav_routes, openapi_annot, queues, react, secrets_flags, services, trpc,
         ts_routes, vue, websocket,
@@ -558,7 +558,7 @@ pub(crate) fn apply_cross_cutting_extractors(
 fn sites_at(
     source: &str,
     sites: impl IntoIterator<Item = (NodeId, usize, Option<&'static str>)>,
-) -> Vec<repo_graph_code_extractors::anchor::Site> {
+) -> Vec<glia_code_extractors::anchor::Site> {
     let mut sites = sites.into_iter().peekable();
     if sites.peek().is_none() {
         return Vec::new();
@@ -571,7 +571,7 @@ fn sites_at(
     sites
         .map(|(target, offset, mode)| {
             let line = newlines.partition_point(|&nl| nl < offset.min(source.len()));
-            repo_graph_code_extractors::anchor::Site {
+            glia_code_extractors::anchor::Site {
                 target,
                 line: u32::try_from(line).unwrap_or(u32::MAX),
                 mode,

@@ -21,8 +21,8 @@ lost at a session boundary, so it is committed now.
 ## End of wave (in this order — every step has bitten us)
 
 1. Check commits and a clean tree. Read each commit's file list against its subject.
-2. `cargo test --workspace` and `cargo test -p repo-graph-engine --test byte_identical`.
-3. Rebuild the wheel: `cargo clean -p repo-graph-engine -p repo-graph-py`,
+2. `cargo test --workspace` and `cargo test -p glia-engine --test byte_identical`.
+3. Rebuild the wheel: `cargo clean -p glia-engine -p glia-py`,
    `maturin build -m py/Cargo.toml --release`, `pip install --force-reinstall --no-deps <wheel>`,
    then confirm `find <crates> -name '*.rs' -newer <installed .so>` prints nothing.
    `grade.py` reads the INSTALLED wheel — before this, the matrix is not a verdict.

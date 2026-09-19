@@ -74,7 +74,7 @@ pub(crate) fn run(args: Args) -> i32 {
 }
 
 fn cmd_docs(action: DocsCmd) -> i32 {
-    use repo_graph_doc_sources::confluence_rest::{self, Config};
+    use glia_doc_sources::confluence_rest::{self, Config};
     match action {
         DocsCmd::Sync { repo, space, include, exclude, site, email, token } => {
             let cfg = match Config::resolve(site, email, token) {
@@ -91,7 +91,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                     return 1;
                 }
             };
-            let filter = repo_graph_doc_sources::TitleFilter::new(&include, &exclude);
+            let filter = glia_doc_sources::TitleFilter::new(&include, &exclude);
             let fetched = pages.len();
             let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
             eprintln!(
@@ -106,8 +106,8 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 );
                 return 1;
             }
-            let records: Vec<_> = pages.iter().map(repo_graph_doc_sources::record_from_page).collect();
-            match repo_graph_doc_sources::write_snapshot(Path::new(&repo), &records) {
+            let records: Vec<_> = pages.iter().map(glia_doc_sources::record_from_page).collect();
+            match glia_doc_sources::write_snapshot(Path::new(&repo), &records) {
                 Ok(manifest) => {
                     println!("synced {} page(s) from space {space} → {}", records.len(), manifest.display());
                     println!("run `glia build {repo}` to ingest.");
@@ -138,7 +138,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             // conversion ran even when the push itself fails on credentials.
             let storage = if markdown {
                 let (s, st) =
-                    repo_graph_doc_sources::markdown::markdown_to_storage_with_stats(&body);
+                    glia_doc_sources::markdown::markdown_to_storage_with_stats(&body);
                 eprintln!(
                     "[docs] push markdown→storage: {} md bytes → {} storage bytes (h={} code={} link={} inline={})",
                     body.len(),

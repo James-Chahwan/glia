@@ -13,7 +13,7 @@
 //! Transport only: the capture, the parsing, the redaction, the snapshot
 //! formats and the `[history] sync` / `[tests] ingest` markers live in
 //! `glia_snapshots`. The helper each pyfunction delegates to is pyo3-free, so
-//! `cargo test -p repo-graph-py` covers it (see the crate doc).
+//! `cargo test -p glia-py` covers it (see the crate doc).
 
 use std::path::{Path, PathBuf};
 
@@ -261,7 +261,7 @@ mod tests {
             "head is the full sha: {}",
             summary.head
         );
-        let dir = repo_graph_code_domain::snapshots::history_dir(&top);
+        let dir = glia_code_domain::snapshots::history_dir(&top);
         assert!(
             dir.join("meta.json").is_file(),
             "snapshot written under {}",
@@ -346,7 +346,7 @@ mod tests {
                 r#"{{"reports":["{lcov}","{junit}"],"junit_files":1,"log_files":0,"lcov_files":1,"cases":3,"failed":1,"errors":0,"skipped":0,"passed":2,"stored":1,"redacted":0,"covered_files":1,"report_errors":[{{"report":"{cut}","reason":"document ends with 2 element(s) still open"}}]}}"#
             )
         );
-        let dir = repo_graph_code_domain::snapshots::tests_dir(&top);
+        let dir = glia_code_domain::snapshots::tests_dir(&top);
         let meta = std::fs::read_to_string(dir.join("meta.json")).expect("meta.json written");
         assert!(meta.contains(r#""run": "ci-42""#), "{meta}");
 

@@ -3,7 +3,7 @@
 //! `entrypoint_reachable` runs on every blast-radius query (its `live` flag).
 //! It used to scan the whole edge list for every node it dequeued -
 //! O(live x E), 1.6e9 edge checks on a 40,000-node live chain (6.7 s in a
-//! debug build). It now walks `repo_graph_activation::algo::reach` over a CSR
+//! debug build). It now walks `glia_activation::algo::reach` over a CSR
 //! index built once per call, so the same chain is linear. The budget sits far
 //! above what the index needs in a debug build and far below what the scan
 //! took, so the test fails on the quadratic walk without being timing-flaky on
@@ -12,10 +12,10 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_engine::entrypoint_reachable;
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_engine::entrypoint_reachable;
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 const N: usize = 40_000;
 const BUDGET: Duration = Duration::from_secs(1);

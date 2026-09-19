@@ -6,7 +6,7 @@
 //! language, the suggestions). An absence is an answer, so it exits 0; exit 2
 //! is a build failure.
 
-use repo_graph_engine::implementors::{HierarchyDirection, implementors};
+use glia_engine::implementors::{HierarchyDirection, implementors};
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;

@@ -7,10 +7,10 @@ use std::collections::HashSet;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_core::NodeId;
-use repo_graph_engine::absence::Answer;
-use repo_graph_engine::implementors::{HierarchyDirection, Implementor, implementors_with_live};
-use repo_graph_graph::MergedGraph;
+use glia_core::NodeId;
+use glia_engine::absence::Answer;
+use glia_engine::implementors::{HierarchyDirection, Implementor, implementors_with_live};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -28,7 +28,7 @@ fn direction_of(direction: &str) -> Result<HierarchyDirection, String> {
 }
 
 /// The whole body of [`PyGraph::implementors`], minus pyo3 — kept pyo3-free
-/// so `cargo test -p repo-graph-py` covers it (see the crate doc). `live` is
+/// so `cargo test -p glia-py` covers it (see the crate doc). `live` is
 /// the graph's cached `entrypoint_reachable` set (`PyGraph::live`).
 fn implementors_answer(
     merged: &MergedGraph,
@@ -108,10 +108,10 @@ mod tests {
              public string ByEmail(string email) { return email; }\n    }\n}\n",
         )
         .expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
-        let live = repo_graph_engine::entrypoint_reachable(&merged);
+        let live = glia_engine::entrypoint_reachable(&merged);
 
         let down =
             implementors_answer(&merged, &live, "Shop::IRepo", "down", true, 3).expect("answer");

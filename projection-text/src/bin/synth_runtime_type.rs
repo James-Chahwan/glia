@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_code_domain::node_kind;
-use repo_graph_projection_text::driver_utils::{build_repo_graph, extract_position_cell};
+use glia_code_domain::node_kind;
+use glia_projection_text::driver_utils::{build_repo_graph, extract_position_cell};
 
 #[derive(Parser, Debug)]
 #[command(about = "Graph-resolve where a failed attribute name IS defined (P3.1, cycle 1.1)")]

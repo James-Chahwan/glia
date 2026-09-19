@@ -5,8 +5,8 @@
 //! together with no static link — where THIS repo's graph is likely blind.
 //! `--json` stays the caveat array alone.
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_engine::gaps::{CochangeGap, cochange_gaps};
+use glia_code_domain::edge_category;
+use glia_engine::gaps::{CochangeGap, cochange_gaps};
 
 use crate::common::generate_for;
 
@@ -37,7 +37,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let report = repo_graph_engine::coverage_report(&result.merged);
+    let report = glia_engine::coverage_report(&result.merged);
     if json {
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
         return 0;

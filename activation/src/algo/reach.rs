@@ -9,7 +9,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use repo_graph_core::{EdgeCategoryId, NodeId};
+use glia_core::{EdgeCategoryId, NodeId};
 
 use super::{Adjacency, Inc, Walk};
 
@@ -156,13 +156,13 @@ pub fn reachable_by(adj: &Adjacency, sink: NodeId, sources: &[NodeId], max_depth
 mod tests {
     use super::*;
     use crate::algo::{CategorySet, ToyGraph, toy_edge};
-    use repo_graph_core::Edge;
+    use glia_core::Edge;
 
     /// The walks this module replaced, verbatim at 3193854, over an edge list.
     mod oracle {
         use std::collections::{HashSet, VecDeque};
 
-        use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
+        use glia_core::{Edge, EdgeCategoryId, NodeId};
 
         /// graph/src/blast.rs `MergedGraph::blast_radius`'s BFS, generalised
         /// from one seed to a seed list, recording discovery order (its

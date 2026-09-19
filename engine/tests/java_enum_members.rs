@@ -14,9 +14,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::generate_one;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::generate_one;
 
 const PKG: &str = "src::main::java::com::shop";
 

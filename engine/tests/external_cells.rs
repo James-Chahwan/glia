@@ -1,13 +1,13 @@
 //! LF.1a: `.glia/cells.jsonl` and `.glia/vectors.jsonl` are applied to their
-//! nodes at build, through `repo_graph_graph::cells`, and a build with a
+//! nodes at build, through `glia_graph::cells`, and a build with a
 //! sidecar is as byte-reproducible as one without.
 
 use std::path::Path;
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{Cell, CellPayload, CellTypeId};
-use repo_graph_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::cell_type;
+use glia_core::{Cell, CellPayload, CellTypeId};
+use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
+use glia_store::write_merged_sharded;
 
 const SOURCE: &str = "def charge(order_id):\n    return order_id\n";
 const CONV_ROW: &str = r#"{"qname":"a::charge","cell":"CONV","entry":{"source":"api","id":"000001","text":"retries are safe"}}"#;
@@ -165,8 +165,8 @@ fn sidecar_builds_are_byte_identical() {
 /// (LB.6) re-binds it to the moved node, reported as `Rekeyed`.
 #[test]
 fn moved_node_rebinds_through_its_hint() {
-    use repo_graph_graph::cells::{CellTarget, QnameIndex};
-    use repo_graph_graph::identity::{MoveTier, identity_of};
+    use glia_graph::cells::{CellTarget, QnameIndex};
+    use glia_graph::identity::{MoveTier, identity_of};
 
     let tmp = tempfile::tempdir().unwrap();
     // A body long enough to carry a hash (LB.6 hashes bodies of 40+ chars).

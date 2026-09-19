@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_core::Node;
-use repo_graph_projection_text::driver_utils::{
+use glia_core::Node;
+use glia_projection_text::driver_utils::{
     build_repo_graph, extract_position_cell, read_json, write_json,
 };
 use serde::{Deserialize, Serialize};
@@ -628,7 +628,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn qname_of_node(graph: &repo_graph_graph::RepoGraph, node: &Node) -> Option<String> {
+fn qname_of_node(graph: &glia_graph::RepoGraph, node: &Node) -> Option<String> {
     graph.nav.qname_by_id.get(&node.id).cloned()
 }
 

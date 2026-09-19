@@ -83,8 +83,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct ServicesOut {
     pub nodes: Vec<Node>,
@@ -1425,7 +1425,7 @@ fn split_depth0(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::node_kind;
+    use glia_code_domain::node_kind;
 
     fn repo() -> RepoId {
         RepoId(1)
@@ -2044,9 +2044,9 @@ class Plain {}
 
     /// Nav with one owner of `kind` at `qname` plus FUNCTION / METHOD children.
     fn nav_with_owner(
-        kind: repo_graph_core::NodeKindId,
+        kind: glia_core::NodeKindId,
         qname: &str,
-        children: &[(&str, repo_graph_core::NodeKindId)],
+        children: &[(&str, glia_core::NodeKindId)],
     ) -> (CodeNav, NodeId, NodeId, Vec<NodeId>) {
         let mut nav = CodeNav::default();
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "worker");

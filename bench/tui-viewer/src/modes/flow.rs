@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
-use repo_graph_core::NodeId;
+use glia_core::NodeId;
 
 use crate::layout;
 use crate::panels;

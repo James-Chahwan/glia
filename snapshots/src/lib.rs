@@ -3,7 +3,7 @@
 //! History and test reports are external, run-dependent inputs, so they enter
 //! glia the way Confluence docs do: a separate snapshot step writes files
 //! under `<repo>/.glia/`, and the deterministic build reads them back through
-//! `repo_graph_code_domain::snapshots`. The build never runs git; this crate
+//! `glia_code_domain::snapshots`. The build never runs git; this crate
 //! is the only glia code that spawns a process, and only when a sync is
 //! called.
 //!
@@ -23,8 +23,8 @@ mod lcov;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::snapshots::{TestCaseRecord, TestsMeta, write_history, write_tests};
-use repo_graph_code_domain::walk_gating::CONTROL_DIR;
+use glia_code_domain::snapshots::{TestCaseRecord, TestsMeta, write_history, write_tests};
+use glia_code_domain::walk_gating::CONTROL_DIR;
 use serde::Serialize;
 
 pub use ci_log::parse_ci_log;
@@ -66,7 +66,7 @@ pub fn history_sync(repo_root: &Path, opts: &HistoryOptions) -> Result<HistorySu
 /// The repo's project name (manifest label, else directory name).
 fn repo_label(root: &Path) -> String {
     let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    repo_graph_code_domain::project_roots::project_name(&canonical)
+    glia_code_domain::project_roots::project_name(&canonical)
         .unwrap_or_else(|| canonical.display().to_string())
 }
 

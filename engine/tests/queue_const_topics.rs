@@ -10,10 +10,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_many, generate_many_incremental};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId, NodeKindId};
+use glia_engine::{GenerateResult, generate_many, generate_many_incremental};
+use glia_graph::MergedGraph;
 
 fn fixture(name: &str, dirs: &[&str]) -> GenerateResult {
     let root = format!(

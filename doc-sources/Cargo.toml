@@ -1,5 +1,5 @@
 [package]
-name = "repo-graph-doc-sources"
+name = "glia-doc-sources"
 version = "0.4.17"
 edition = "2024"
 publish = false
@@ -10,7 +10,7 @@ publish = false
 # The CLI (`glia docs sync`) drives it; the engine ingests the produced snapshot.
 
 [dependencies]
-repo-graph-code-domain = { path = "../code-domain" }
+glia-code-domain = { path = "../code-domain" }
 # Storage-format XHTML → markdown conversion (pure, no network).
 quick-xml = "0.36"
 # `docsync` bin: (de)serialize the page manifest + emit DocRecord snapshot lines.

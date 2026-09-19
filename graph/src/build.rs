@@ -3,12 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget,
     UnresolvedRef, bare_module_qname, edge_category, node_kind,
 };
-use repo_graph_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
     EvidenceTally, emit_method_level_implements, enclosing_module, graph_evidence, push_edge,
@@ -1956,8 +1956,8 @@ impl CppCallScope {
 mod tests {
     use super::*;
     use crate::test_support::repo;
-    use repo_graph_code_domain::{GRAPH_TYPE, ImportTarget, edge_category};
-    use repo_graph_core::{Confidence, Node};
+    use glia_code_domain::{GRAPH_TYPE, ImportTarget, edge_category};
+    use glia_core::{Confidence, Node};
 
     #[test]
     fn empty_repo_builds_cleanly() {
@@ -2101,7 +2101,7 @@ mod tests {
             refs: vec![UnresolvedRef {
                 from: cls,
                 from_module: m,
-                qualifier: repo_graph_code_domain::CallQualifier::Bare("IUserService".to_string()),
+                qualifier: glia_code_domain::CallQualifier::Bare("IUserService".to_string()),
                 category: edge_category::IMPLEMENTS,
                 line: 0,
             }],
@@ -2181,7 +2181,7 @@ mod tests {
             let cls = NodeId::from_parts(GRAPH_TYPE, r, node_kind::CLASS, &cq);
             nav.record(cls, cls_name, &cq, node_kind::CLASS, Some(m));
             ids.push(cls);
-            edges.push(repo_graph_core::Edge {
+            edges.push(glia_core::Edge {
                 from: cls,
                 to: iface,
                 category: edge_category::IMPLEMENTS,
@@ -2228,7 +2228,7 @@ mod tests {
         file.refs.push(UnresolvedRef {
             from: route,
             from_module: m,
-            qualifier: repo_graph_code_domain::CallQualifier::Attribute {
+            qualifier: glia_code_domain::CallQualifier::Attribute {
                 base: "h".to_string(),
                 name: "GetById".to_string(),
             },
@@ -2247,7 +2247,7 @@ mod tests {
 
     // ---- LA.23d: Go split-file receivers ------------------------------------
 
-    fn gid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn gid(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
@@ -2258,7 +2258,7 @@ mod tests {
     /// item gets its parent -> item DEFINES edge.
     fn go_file(
         module: &str,
-        items: &[(repo_graph_core::NodeKindId, &str, Option<&str>)],
+        items: &[(glia_core::NodeKindId, &str, Option<&str>)],
     ) -> FileParse {
         let r = repo();
         let m = gid(node_kind::MODULE, module);
@@ -2273,7 +2273,7 @@ mod tests {
             let name = qname.rsplit("::").next().unwrap_or(qname);
             nav.record(id, name, qname, kind, Some(parent_id));
             nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
-            edges.push(repo_graph_core::Edge {
+            edges.push(glia_core::Edge {
                 from: parent_id,
                 to: id,
                 category: edge_category::DEFINES,
@@ -2293,7 +2293,7 @@ mod tests {
         }
     }
 
-    fn has_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> bool {
+    fn has_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> bool {
         g.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
     }
 
@@ -2575,7 +2575,7 @@ mod tests {
     #[test]
     fn go_implicit_implements_is_deterministic() {
         let shape = || {
-            let mut items: Vec<(repo_graph_core::NodeKindId, String, Option<String>)> = Vec::new();
+            let mut items: Vec<(glia_core::NodeKindId, String, Option<String>)> = Vec::new();
             for i in ["A", "B", "C", "D"] {
                 let q = format!("pkg::I{i}");
                 items.push((node_kind::INTERFACE, q.clone(), None));
@@ -3048,7 +3048,7 @@ mod tests {
     /// merged node shows whose cells it carries.
     fn cpp_file(
         module: &str,
-        items: &[(repo_graph_core::NodeKindId, &str, &str, Option<&str>)],
+        items: &[(glia_core::NodeKindId, &str, &str, Option<&str>)],
     ) -> FileParse {
         let r = repo();
         let m = gid(node_kind::MODULE, module);
@@ -3092,8 +3092,8 @@ mod tests {
 
     fn code_cell(module: &str, qname: &str) -> Cell {
         Cell {
-            kind: repo_graph_code_domain::cell_type::CODE,
-            payload: repo_graph_core::CellPayload::Text(format!("{module}|{qname}")),
+            kind: glia_code_domain::cell_type::CODE,
+            payload: glia_core::CellPayload::Text(format!("{module}|{qname}")),
         }
     }
 
@@ -3142,7 +3142,7 @@ mod tests {
         g: &'g RepoGraph,
         from: NodeId,
         to: NodeId,
-        category: repo_graph_core::EdgeCategoryId,
+        category: glia_core::EdgeCategoryId,
     ) -> &'g Edge {
         let hits: Vec<&Edge> = g
             .edges
@@ -3154,7 +3154,7 @@ mod tests {
     }
 
     fn rule_of(e: &Edge) -> (String, Option<String>) {
-        let ev = repo_graph_code_domain::evidence::Evidence::of(e).expect("EVIDENCE cell");
+        let ev = glia_code_domain::evidence::Evidence::of(e).expect("EVIDENCE cell");
         (ev.emitter, ev.rule)
     }
 
@@ -3566,7 +3566,7 @@ mod tests {
         assert_eq!(g.nav.children_of[&class], vec![run]);
         // The header parse's own DEFINES (no graph evidence) is the only one.
         let header_defines = only_edge(&g, class, run, edge_category::DEFINES);
-        assert!(repo_graph_code_domain::evidence::Evidence::of(header_defines).is_none());
+        assert!(glia_code_domain::evidence::Evidence::of(header_defines).is_none());
         only_edge(
             &g,
             gid(node_kind::MODULE, "src::w.cpp"),
@@ -3705,7 +3705,7 @@ mod tests {
         assert_eq!(g.nav.parent_of[&go], gid(node_kind::CLASS, "src::W"));
         for (from, to, line) in [(f, sq, 2), (go, twice, 7)] {
             let e = only_edge(&g, from, to, edge_category::CALLS);
-            let ev = repo_graph_code_domain::evidence::Evidence::of(e).expect("evidence");
+            let ev = glia_code_domain::evidence::Evidence::of(e).expect("evidence");
             assert_eq!(
                 (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
                 ("graph:c_includes", Some("include"), Some(line))

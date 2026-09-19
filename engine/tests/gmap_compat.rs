@@ -37,9 +37,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild};
-use repo_graph_engine::{BUILD_STAMP, ParseCache, generate_one, generate_one_incremental};
-use repo_graph_store::{MANIFEST_VERSION, read_manifest_lenient, write_merged_sharded};
+use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild};
+use glia_engine::{BUILD_STAMP, ParseCache, generate_one, generate_one_incremental};
+use glia_store::{MANIFEST_VERSION, read_manifest_lenient, write_merged_sharded};
 
 /// Build identity of the code that wrote the capture (the README's pin).
 const PRE_LEAP_STAMP: &str = "0.4.18+p3d23e8828e7ba01a";

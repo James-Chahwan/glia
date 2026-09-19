@@ -15,7 +15,7 @@
 //! Fired-on marker: the engine's
 //! `[effects] seeds=<S> reached=<R> effects=<E> (db=.. queue_produce=.. http_call=.. event_emit=.. other=..) writes=<W> config_seeds=<C>`.
 
-use repo_graph_engine::effects::{DEFAULT_MAX_DEPTH, EffectRow, Effects, EffectsArgs, effects};
+use glia_engine::effects::{DEFAULT_MAX_DEPTH, EffectRow, Effects, EffectsArgs, effects};
 
 use crate::cmd::resolve::print_absence;
 use crate::common::generate_for;

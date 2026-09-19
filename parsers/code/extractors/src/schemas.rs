@@ -16,8 +16,8 @@
 //! JSON Schema has no namespace: its root is named by `title`, `$id` or the
 //! file stem, and each `$defs` / `definitions` member is `<root>.<def>`.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 /// Everything the schema declarations in one file contribute to the graph.
 #[derive(Default)]
@@ -1241,7 +1241,7 @@ mod tests {
         out.nodes.iter().map(|n| out.nav.qname_by_id[&n.id].clone()).collect()
     }
 
-    fn cell(n: &Node, kind: repo_graph_core::CellTypeId) -> &str {
+    fn cell(n: &Node, kind: glia_core::CellTypeId) -> &str {
         match n.cells.iter().find(|c| c.kind == kind).map(|c| &c.payload) {
             Some(CellPayload::Json(j)) => j,
             other => panic!("expected a Json cell, got {other:?}"),

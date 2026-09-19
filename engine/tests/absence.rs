@@ -11,9 +11,9 @@
 //! and `resolve("zzz.py", diff)` were a bare `[]`, and a scope that removed
 //! every row was indistinguishable from "nothing there".
 
-use repo_graph_engine::absence::{Absence, Answer};
-use repo_graph_engine::find::{FindOptions, find_nodes};
-use repo_graph_engine::{GenerateResult, generate_one, governing_docs, resolve_signal_located};
+use glia_engine::absence::{Absence, Answer};
+use glia_engine::find::{FindOptions, find_nodes};
+use glia_engine::{GenerateResult, generate_one, governing_docs, resolve_signal_located};
 
 /// LD.1's fixture: `def helper` on line 4, `def main` (calls it) on line 8.
 const APP_PY: &str =

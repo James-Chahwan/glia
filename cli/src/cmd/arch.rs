@@ -38,7 +38,7 @@ pub(crate) fn run(args: Args) -> i32 {
         }
     };
     // The `[arch] …` fired_on marker is emitted here, inside the engine.
-    let mut map = repo_graph_engine::service_map(&result.merged, &result.repo_labels);
+    let mut map = glia_engine::service_map(&result.merged, &result.repo_labels);
     if !include_shared {
         drop_non_flow_links(&mut map);
     }
@@ -61,8 +61,8 @@ pub(crate) fn run(args: Args) -> i32 {
 /// Recomputes `inbound` / `outbound`: those count *surviving link rows*, so
 /// leaving them at the unfiltered value would print an `in`/`out` column that
 /// no visible row accounts for.
-pub(crate) fn drop_non_flow_links(map: &mut repo_graph_engine::ServiceMap) {
-    let flows: Vec<&'static str> = repo_graph_engine::arch::FLOW_MECHANISMS
+pub(crate) fn drop_non_flow_links(map: &mut glia_engine::ServiceMap) {
+    let flows: Vec<&'static str> = glia_engine::arch::FLOW_MECHANISMS
         .iter()
         .map(|c| edge_category_name(*c))
         .collect();
@@ -79,7 +79,7 @@ pub(crate) fn drop_non_flow_links(map: &mut repo_graph_engine::ServiceMap) {
     }
 }
 
-fn print_service_table(repo: &str, map: &repo_graph_engine::ServiceMap) {
+fn print_service_table(repo: &str, map: &glia_engine::ServiceMap) {
     println!("# glia arch `{repo}` (keying: {})", map.keying);
     println!();
     println!("| service | repo | languages | files | nodes | routes | endpoints | in | out |");
@@ -118,7 +118,7 @@ fn print_service_table(repo: &str, map: &repo_graph_engine::ServiceMap) {
     }
 }
 
-pub(crate) fn print_service_mermaid(map: &repo_graph_engine::ServiceMap) {
+pub(crate) fn print_service_mermaid(map: &glia_engine::ServiceMap) {
     // Mermaid ids must be `[A-Za-z0-9_]`, and a service id is a directory path
     // — so the id is positional (`svc{i}` over the already-sorted `services`)
     // and the real name lives in the label.
@@ -178,7 +178,7 @@ fn mermaid_label(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_engine::{ServiceLink, ServiceMap, ServiceSummary};
+    use glia_engine::{ServiceLink, ServiceMap, ServiceSummary};
 
     // The service-map types are `#[non_exhaustive]` (LD.9): outside the engine
     // they are built by `Default` plus field assignment, never by a literal.

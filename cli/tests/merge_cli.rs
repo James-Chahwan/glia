@@ -17,9 +17,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use repo_graph_engine::generate_many;
-use repo_graph_engine::persist::{default_layout_dir, load_layout, persist_result};
-use repo_graph_store::{MANIFEST_NAME, MANIFEST_VERSION};
+use glia_engine::generate_many;
+use glia_engine::persist::{default_layout_dir, load_layout, persist_result};
+use glia_store::{MANIFEST_NAME, MANIFEST_VERSION};
 
 /// `glia merge <backend> <frontend>` stdout, captured from the binary built at
 /// HEAD 2711871 before LC.10c touched `glia merge`. The positional source

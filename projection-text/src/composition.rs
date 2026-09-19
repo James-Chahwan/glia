@@ -29,9 +29,9 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_graph::RepoGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId};
+use glia_graph::RepoGraph;
 
 // ============================================================================
 // Public types
@@ -630,9 +630,9 @@ fn synth_id(qname: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::RepoId;
-    use repo_graph_parser_python::parse_file;
-    use repo_graph_graph::build_python;
+    use glia_core::RepoId;
+    use glia_parser_python::parse_file;
+    use glia_graph::build_python;
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://composition")

@@ -2,10 +2,10 @@
 
 use std::sync::OnceLock;
 
-use repo_graph_activation::algo::{self, Adjacency, Walk};
-use repo_graph_activation::plan::{ActivationPlan, FilterPredicate};
-use repo_graph_activation::profile::DomainTables;
-use repo_graph_core::{EdgeCategoryId, NodeId};
+use glia_activation::algo::{self, Adjacency, Walk};
+use glia_activation::plan::{ActivationPlan, FilterPredicate};
+use glia_activation::profile::DomainTables;
+use glia_core::{EdgeCategoryId, NodeId};
 
 use crate::merged::MergedGraph;
 
@@ -30,12 +30,12 @@ pub enum Reach {
 /// a struct literal outside this crate (LD.9):
 ///
 /// ```compile_fail
-/// let _ = repo_graph_graph::BlastHit {
-///     id: repo_graph_core::NodeId(0),
+/// let _ = glia_graph::BlastHit {
+///     id: glia_core::NodeId(0),
 ///     depth: 0,
-///     reason: repo_graph_core::EdgeCategoryId(0),
+///     reason: glia_core::EdgeCategoryId(0),
 ///     score: 0.0,
-///     seed: repo_graph_core::NodeId(0),
+///     seed: glia_core::NodeId(0),
 /// };
 /// ```
 #[derive(Clone, Debug)]
@@ -75,7 +75,7 @@ impl MergedGraph {
     /// edges that pull in unrelated code through shared containers and
     /// imports (handoff v6 P1, bullet 4: `impact` fanning out through
     /// `imports`) — and the ranking is `tables.activation_config(None)`. The
-    /// code domain passes `repo_graph_code_domain::profile::CODE_TABLES`; a
+    /// code domain passes `glia_code_domain::profile::CODE_TABLES`; a
     /// caller that needs another carry set passes its own tables.
     ///
     /// [`Self::blast_radius_filtered`] with no filters.
@@ -116,7 +116,7 @@ impl MergedGraph {
         tables: &DomainTables,
         filters: &[&dyn FilterPredicate<MergedGraph>],
     ) -> Vec<BlastHit> {
-        use repo_graph_activation::Direction;
+        use glia_activation::Direction;
         use std::collections::{HashMap, HashSet};
 
         // Deduplicated, first occurrence kept: the walk's start order and the
@@ -193,7 +193,7 @@ impl MergedGraph {
 }
 
 /// `GLIA_ALGO_DEBUG=1` turns on the `[reach] blast` line, read once - the
-/// variable that turns on `repo_graph_activation::algo`'s `[algo] adjacency`
+/// variable that turns on `glia_activation::algo`'s `[algo] adjacency`
 /// line, whose reader is private to that crate.
 fn reach_debug() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -206,9 +206,9 @@ mod tests {
     use std::collections::HashSet;
     use crate::test_support::{flow_graph, repo};
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::profile::CODE_TABLES;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-    use repo_graph_core::{Confidence, Edge, Node};
+    use glia_code_domain::profile::CODE_TABLES;
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+    use glia_core::{Confidence, Edge, Node};
 
     #[test]
     fn blast_radius_follows_semantic_edges_not_imports() {

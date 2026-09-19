@@ -1,5 +1,5 @@
 //! LE.1c — `glia delta`, the CLI surface of the engine's graph delta
-//! (`repo_graph_engine::delta::graph_delta_vs_rev`), driving the real binary
+//! (`glia_engine::delta::graph_delta_vs_rev`), driving the real binary
 //! over temporary git repos. These tests need a `git` binary: without one
 //! they FAIL with a message saying so, never skip.
 //!

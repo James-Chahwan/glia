@@ -12,10 +12,10 @@
 
 use std::collections::BTreeSet;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId};
-use repo_graph_engine::generate_many;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId};
+use glia_engine::generate_many;
+use glia_graph::MergedGraph;
 
 fn build() -> MergedGraph {
     let root = format!(

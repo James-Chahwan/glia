@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use repo_graph_store::{Inspection, NamedCount, inspect_path};
+use glia_store::{Inspection, NamedCount, inspect_path};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {

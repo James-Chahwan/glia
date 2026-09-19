@@ -1,7 +1,7 @@
 //! `glia resolve` (P3) — a failure/change signal (stacktrace, diff, test id)
 //! → the ranked, located nodes it points at.
 
-use repo_graph_engine::absence::Absence;
+use glia_engine::absence::Absence;
 
 use crate::common::generate_for;
 
@@ -50,7 +50,7 @@ pub(crate) fn run(args: Args) -> i32 {
         }
     };
     let mut answer =
-        repo_graph_engine::resolve_signal_located(&result.merged, signal, kind, top_k, scope);
+        glia_engine::resolve_signal_located(&result.merged, signal, kind, top_k, scope);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
     }

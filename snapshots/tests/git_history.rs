@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use glia_snapshots::{HistoryOptions, history_sync};
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::snapshots::{
     HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HistoryFile, META_FILE, history_dir, read_history,
 };
 

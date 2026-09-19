@@ -7,7 +7,7 @@
 //! channel, OpenAPI route vs Pact) with its verdict and declared changes.
 //! Without `--fields` the output is exactly the topic table it always was.
 
-use repo_graph_engine::contract_fields::{FieldChange, FieldDiffRow, FieldSide};
+use glia_engine::contract_fields::{FieldChange, FieldDiffRow, FieldSide};
 
 use crate::common::generate_for;
 
@@ -48,7 +48,7 @@ pub(crate) fn run(args: Args) -> i32 {
     };
     // Pairing, verdicts, sorting and the `[contracts] topics=…` line all live
     // in the engine; this is transport + rendering only.
-    let mut rows = repo_graph_engine::message_contracts(&result.merged);
+    let mut rows = glia_engine::message_contracts(&result.merged);
     if mismatch_only {
         rows.retain(|r| r.status == "mismatch");
     }
@@ -56,7 +56,7 @@ pub(crate) fn run(args: Args) -> i32 {
     // through message_contracts, a second `[contracts] topics=…`) before the
     // surface marker below.
     let fields = args.fields.then(|| {
-        let mut f = repo_graph_engine::contract_fields::contract_fields(&result.merged);
+        let mut f = glia_engine::contract_fields::contract_fields(&result.merged);
         if args.breaking_only {
             f.retain(|r| r.status == "breaking");
         }
@@ -102,7 +102,7 @@ type Locate<'a> = dyn Fn(u64, Option<&str>, Option<i64>) -> Option<String> + 'a;
 /// The topic table — the whole of `glia contracts` before `--fields`.
 fn print_topics(
     repo: &str,
-    rows: &[repo_graph_engine::MessageContractRow],
+    rows: &[glia_engine::MessageContractRow],
     mismatch_only: bool,
     located: &Locate<'_>,
 ) {
@@ -117,7 +117,7 @@ fn print_topics(
         println!("_(no {what})_");
         return;
     }
-    type Side = Option<repo_graph_engine::MessageContractSide>;
+    type Side = Option<glia_engine::MessageContractSide>;
     let side_type = |s: &Side| match s {
         None => "—".to_string(),
         Some(s) => s

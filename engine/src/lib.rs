@@ -23,7 +23,7 @@ mod route;
 mod walk;
 
 // 0.5.0 leap primitives: one public module each, reached by module path
-// (`repo_graph_engine::delta::graph_delta_vs_rev`), never flattened into the
+// (`glia_engine::delta::graph_delta_vs_rev`), never flattened into the
 // root. Each slot's owner fills its file; no later packet edits this list.
 pub mod absence;
 pub mod check;
@@ -55,7 +55,7 @@ mod http_owner;
 mod parallel;
 mod rekey;
 
-pub use repo_graph_graph::MergedGraph as ReExportedMergedGraph;
+pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
     ServiceKeying, ServiceLink, ServiceMap, ServiceSummary, default_keying, node_file,
@@ -65,7 +65,7 @@ pub use cache::{CacheStats, ParseCache};
 /// Build identity of THIS binary: `<release>+p<parser stamp>`. Re-exported so
 /// `cli` and `py` can report which code they contain without taking a direct
 /// dependency on the `stamp` crate.
-pub use repo_graph_stamp::{BUILD_STAMP, PARSER_STAMP, RELEASE, VERSION_LINE};
+pub use glia_stamp::{BUILD_STAMP, PARSER_STAMP, RELEASE, VERSION_LINE};
 
 // Facade: every `pub` item in these four modules is the crate's flat public
 // surface. A helper another module needs is `pub(crate)`, never `pub`. `arch`

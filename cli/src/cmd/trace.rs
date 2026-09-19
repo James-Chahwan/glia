@@ -2,7 +2,7 @@
 //! across service boundaries and print the ranked distinct paths it takes,
 //! each hop with its mechanism; `--to` asks for the paths between two nodes.
 
-use repo_graph_engine::trace::{TraceAnswer, TraceOptions, cross_stack_trace};
+use glia_engine::trace::{TraceAnswer, TraceOptions, cross_stack_trace};
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;
@@ -112,7 +112,7 @@ fn render(args: &Args, answer: &TraceAnswer) {
         println!();
         println!(
             "> truncated: the path search stopped at its step budget ({}); the ranking covers the paths found before it. Lower --depth to see them all.",
-            repo_graph_engine::trace::EXPANSION_BUDGET
+            glia_engine::trace::EXPANSION_BUDGET
         );
     }
 }

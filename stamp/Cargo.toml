@@ -1,5 +1,5 @@
 [package]
-name = "repo-graph-stamp"
+name = "glia-stamp"
 version.workspace = true
 edition = "2024"
 publish = false

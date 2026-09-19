@@ -68,8 +68,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use repo_graph_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
-use repo_graph_core::{Cell, CellPayload, Confidence, NodeId};
+use glia_code_domain::endpoint::{self, ClientEndpoint, HitExtras};
+use glia_core::{Cell, CellPayload, Confidence, NodeId};
 use tree_sitter::Node as TsNode;
 
 use crate::{
@@ -217,7 +217,7 @@ fn base_relative_path(tmpl: &str) -> String {
 /// An interface, enum or `object` is never a component.
 pub(crate) fn on_type(
     node: TsNode,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     id: NodeId,
     file: &File,
     acc: &mut Acc,
@@ -437,7 +437,7 @@ fn placeholders(content: &str) -> (String, bool) {
 mod tests {
     use super::*;
     use crate::{FileParse, edge_category, parse_file};
-    use repo_graph_core::RepoId;
+    use glia_core::RepoId;
 
     fn repo() -> RepoId {
         RepoId(1)
@@ -683,7 +683,7 @@ class HomeFragment : Fragment()
         let vm = NodeId::from_parts(crate::GRAPH_TYPE, repo(), node_kind::CLASS, "UsersViewModel");
         assert!(fp.refs.iter().any(|r| r.from == vm
             && r.category == edge_category::INJECTS
-            && r.qualifier == repo_graph_code_domain::CallQualifier::Bare("UserRepository".into())));
+            && r.qualifier == glia_code_domain::CallQualifier::Bare("UserRepository".into())));
     }
 
     #[test]

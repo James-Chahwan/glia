@@ -18,15 +18,15 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use repo_graph_activation::algo::reach::reachable;
-use repo_graph_activation::algo::{Adjacency, Walk};
-use repo_graph_activation::{ActivatedView, ActivationPlan, Direction};
-use repo_graph_core::{CellPayload, CellTypeId, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_store::{Header, MmapContainer, remove_cell, upsert_cell, write_container};
-use repo_graph_toy_domain::cell_type::{LABEL, SCREEN_TIME, TIMECODE};
-use repo_graph_toy_domain::edge_category::{CONTAINS_SHOT, FEATURES, NEXT_SHOT, SAME_OBJECT};
-use repo_graph_toy_domain::node_kind::{OBJECT, SCENE, SHOT};
-use repo_graph_toy_domain::{
+use glia_activation::algo::reach::reachable;
+use glia_activation::algo::{Adjacency, Walk};
+use glia_activation::{ActivatedView, ActivationPlan, Direction};
+use glia_core::{CellPayload, CellTypeId, EdgeCategoryId, NodeId, NodeKindId};
+use glia_store::{Header, MmapContainer, remove_cell, upsert_cell, write_container};
+use glia_toy_domain::cell_type::{LABEL, SCREEN_TIME, TIMECODE};
+use glia_toy_domain::edge_category::{CONTAINS_SHOT, FEATURES, NEXT_SHOT, SAME_OBJECT};
+use glia_toy_domain::node_kind::{OBJECT, SCENE, SHOT};
+use glia_toy_domain::{
     KindIs, NAV_SECTION, ReelNav, ScreenTimeSummary, TOY_PASSES, TOY_PROFILE, TOY_TABLES, ToyGraph,
     build, read_gmap,
 };
@@ -180,7 +180,7 @@ fn reel_end_to_end() {
     assert_eq!(back.kind_name(shot1), Some("SHOT"));
     assert_eq!(back.category_name(FEATURES), Some("FEATURES"));
     assert_eq!(back.cell_name(TIMECODE), Some("TIMECODE"));
-    let registry = |r: &[repo_graph_store::RegistryEntry]| -> Vec<(u32, String)> {
+    let registry = |r: &[glia_store::RegistryEntry]| -> Vec<(u32, String)> {
         r.iter().map(|e| (e.id, e.name.clone())).collect()
     };
     assert_eq!(
@@ -401,9 +401,9 @@ fn dependency_guard() {
     assert_eq!(
         deps,
         [
-            "repo-graph-activation",
-            "repo-graph-core",
-            "repo-graph-store"
+            "glia-activation",
+            "glia-core",
+            "glia-store"
         ]
     );
 

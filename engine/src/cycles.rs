@@ -39,13 +39,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_activation::algo::cycles::{strongly_connected, witness_cycle};
-use repo_graph_activation::algo::reach::bfs;
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{edge_category, endpoint, node_kind};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
-use repo_graph_graph::{MergedGraph, channel_of};
+use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
+use glia_activation::algo::reach::bfs;
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{edge_category, endpoint, node_kind};
+use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_graph::{MergedGraph, channel_of};
 
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::arch::{

@@ -46,12 +46,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, NodeId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::nav::is_nav_route;
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, NodeId};
+use glia_graph::MergedGraph;
+use glia_graph::nav::is_nav_route;
 
 use crate::answers::{Located, Locator};
 use crate::arch::{ServiceKeying, default_keying, service_of};
@@ -379,7 +379,7 @@ fn declared_op(id: NodeId, cells: &[Cell], loc: &Locator<'_>) -> Option<Declared
     let source = v.get("source")?.as_str()?;
     let source = *DECLARING_SOURCES.iter().find(|s| **s == source)?;
     let method = v.get("method")?.as_str()?.to_ascii_uppercase();
-    if !repo_graph_code_extractors::contracts::METHODS
+    if !glia_code_extractors::contracts::METHODS
         .iter()
         .any(|m| m.eq_ignore_ascii_case(&method))
     {
@@ -465,14 +465,14 @@ fn confidence_name(c: Confidence) -> &'static str {
 mod tests {
     use super::*;
 
-    fn text(kind: repo_graph_core::CellTypeId, s: &str) -> Cell {
+    fn text(kind: glia_core::CellTypeId, s: &str) -> Cell {
         Cell {
             kind,
             payload: CellPayload::Text(s.to_string()),
         }
     }
 
-    fn json(kind: repo_graph_core::CellTypeId, s: &str) -> Cell {
+    fn json(kind: glia_core::CellTypeId, s: &str) -> Cell {
         Cell {
             kind,
             payload: CellPayload::Json(s.to_string()),

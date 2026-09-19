@@ -6,14 +6,14 @@ use std::collections::BTreeMap;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::cycles::{CycleArgs, CycleRow, cycles, kinds_for};
-use repo_graph_graph::MergedGraph;
+use glia_engine::cycles::{CycleArgs, CycleRow, cycles, kinds_for};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::cycles`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` covers it (see the crate doc). An unknown
+/// `cargo test -p glia-py` covers it (see the crate doc). An unknown
 /// `kind` is an error naming the three kinds.
 fn cycle_rows(
     merged: &MergedGraph,
@@ -77,7 +77,7 @@ mod tests {
         ] {
             std::fs::write(root.join(rel), src).expect("write fixture");
         }
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
 

@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use repo_graph_engine::persist::{
+use glia_engine::persist::{
     LoadOutcome, default_layout_dir, load_or_rebuild, persist_result,
 };
-use repo_graph_engine::{BUILD_STAMP, GenerateResult, generate_many, generate_one};
-use repo_graph_store::{MANIFEST_VERSION, read_manifest_lenient};
+use glia_engine::{BUILD_STAMP, GenerateResult, generate_many, generate_one};
+use glia_store::{MANIFEST_VERSION, read_manifest_lenient};
 
 /// `GLIA_NO_PERSIST` is process-global and the rebuild reads it, so every test
 /// in this binary holds this lock for its whole run.

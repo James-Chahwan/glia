@@ -8,8 +8,8 @@
 //! - Writes `"summaries"` artifact: `Vec<SummaryEntry>`
 
 use anyhow::Result;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::Node;
+use glia_code_domain::node_kind;
+use glia_core::Node;
 use serde::{Deserialize, Serialize};
 
 use crate::driver_utils::{extract_code_cell, node_by_qname_index};
@@ -118,7 +118,7 @@ struct Summary {
 
 fn build_summary(
     node: &Node,
-    kind: Option<repo_graph_core::NodeKindId>,
+    kind: Option<glia_core::NodeKindId>,
     qname: &str,
     max_chars: usize,
 ) -> Summary {
@@ -155,13 +155,13 @@ fn build_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::RepoId;
-    use repo_graph_graph::build_python;
-    use repo_graph_parser_python::parse_file;
+    use glia_core::RepoId;
+    use glia_graph::build_python;
+    use glia_parser_python::parse_file;
 
     use crate::passes::Pipeline;
 
-    fn graph_for(source: &str) -> repo_graph_graph::RepoGraph {
+    fn graph_for(source: &str) -> glia_graph::RepoGraph {
         let repo = RepoId::from_canonical("test");
         let fp = parse_file(source, "m.py", "m", repo).unwrap();
         build_python(repo, vec![fp]).unwrap()

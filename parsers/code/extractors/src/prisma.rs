@@ -19,9 +19,9 @@
 //! model `User`). It needs this file's model list inside the TS parse, which
 //! is cross-file resolution and belongs in the graph crate, not here.
 
-use repo_graph_code_domain::data_entity::{orm, table_cell};
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::data_entity::{orm, table_cell};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::data_entities::DataEntityNodes;
 
@@ -245,8 +245,8 @@ fn is_identifier(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_code_domain::data_entity::table_of;
+    use glia_code_domain::cell_type;
+    use glia_code_domain::data_entity::table_of;
 
     const SCHEMA: &str = r#"// model Draft { id Int @id }
 generator client {

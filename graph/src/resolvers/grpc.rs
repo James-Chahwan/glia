@@ -6,7 +6,7 @@
 //! than one proto package, pairing it with every one of them is a wrong edge
 //! nobody can see, so the resolver narrows by the package evidence the client's
 //! file carries (its RPC_PACKAGE cell, see
-//! `repo_graph_code_extractors::grpc::client_package_evidence`) and DROPS the
+//! `glia_code_extractors::grpc::client_package_evidence`) and DROPS the
 //! pairing when that evidence does not single out one package. Precision first:
 //! in a repo whose client names no package, the right edge goes too.
 //!
@@ -17,10 +17,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_code_extractors::grpc::RpcPackageCell;
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_extractors::grpc::RpcPackageCell;
+use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;

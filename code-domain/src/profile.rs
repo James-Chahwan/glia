@@ -32,7 +32,7 @@
 //! over USES; RPC_CALL also over CALLS) and the outbound HTTP ENDPOINT
 //! (reached over the CALLS the HTTP client extractor anchors, or USES).
 
-use repo_graph_activation::profile::{
+use glia_activation::profile::{
     ActivationPreset, DomainTables, EffectSink, EntryRule, NamedEntry, Registries,
 };
 

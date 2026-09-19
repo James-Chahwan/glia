@@ -7,17 +7,17 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::glia_config::LoadedConfig;
-use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{
+use glia_code_domain::evidence::{self, Evidence};
+use glia_code_domain::glia_config::LoadedConfig;
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::{
     FileParse, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
 };
-use repo_graph_code_extractors::constants::ConstTable;
-use repo_graph_code_extractors::next_pages::{self, NextRoots, PageRouter};
-use repo_graph_code_extractors::{anchor, queue_topic, queues};
-use repo_graph_core::{CellPayload, NodeId, RepoId};
-use repo_graph_graph::rust_paths::RustCrate;
+use glia_code_extractors::constants::ConstTable;
+use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
+use glia_code_extractors::{anchor, queue_topic, queues};
+use glia_core::{CellPayload, NodeId, RepoId};
+use glia_graph::rust_paths::RustCrate;
 
 use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
@@ -343,7 +343,7 @@ fn apply_queue_const_topics(
     parse_errors: &mut Vec<String>,
 ) -> QueueConstStats {
     let mut stats = QueueConstStats::default();
-    let is_queue = |k: &repo_graph_core::NodeKindId| {
+    let is_queue = |k: &glia_core::NodeKindId| {
         *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER
     };
     // (language, module) -> the parses holding a queue node under that module,
@@ -449,8 +449,8 @@ fn queue_nodes_read_from(fp: &FileParse, position: &str) -> bool {
 /// every node's cell order is unchanged.
 ///
 /// The repo's own Cargo packages count as declared too (LA.1b): the Rust
-/// parser emits raw `use` paths, so `use repo_graph_engine::..` in a sibling
-/// crate reaches the filter as `repo_graph_engine`, which is not a dependency.
+/// parser emits raw `use` paths, so `use glia_engine::..` in a sibling
+/// crate reaches the filter as `glia_engine`, which is not a dependency.
 /// Only Rust crate names are seeded (`rust_crates` is the Cargo projects).
 ///
 /// A TS-family specifier a tsconfig `paths` key matches (`@core/auth.service`
@@ -504,8 +504,8 @@ fn filter_imports_cells(
 mod next_page_tests {
     use std::path::Path;
 
-    use repo_graph_code_domain::edge_category;
-    use repo_graph_graph::MergedGraph;
+    use glia_code_domain::edge_category;
+    use glia_graph::MergedGraph;
 
     use crate::build::{generate_one, generate_one_with_cache};
     use crate::cache::ParseCache;
@@ -552,7 +552,7 @@ mod next_page_tests {
     }
 
     fn write_store(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-        repo_graph_store::write_merged_sharded(m, dir).unwrap();
+        glia_store::write_merged_sharded(m, dir).unwrap();
         let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()

@@ -26,12 +26,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use repo_graph_activation::ActivationConfig;
-use repo_graph_activation::plan::{ActivatedView, ActivationPlan};
-use repo_graph_core::NodeId;
-use repo_graph_graph::RepoGraph;
-use repo_graph_projection_text::driver_utils::{build_repo_graph, reverse_qname_index};
-use repo_graph_projection_text::hooks::CallsiteArgflowSynth;
+use glia_activation::ActivationConfig;
+use glia_activation::plan::{ActivatedView, ActivationPlan};
+use glia_core::NodeId;
+use glia_graph::RepoGraph;
+use glia_projection_text::driver_utils::{build_repo_graph, reverse_qname_index};
+use glia_projection_text::hooks::CallsiteArgflowSynth;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]

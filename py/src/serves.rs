@@ -7,16 +7,16 @@ use std::collections::HashSet;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_core::NodeId;
-use repo_graph_engine::absence::Answer;
-use repo_graph_engine::serves::{Server, serves_with_live};
-use repo_graph_graph::MergedGraph;
+use glia_core::NodeId;
+use glia_engine::absence::Answer;
+use glia_engine::serves::{Server, serves_with_live};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::serves`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` covers it (see the crate doc). `live` is the
+/// `cargo test -p glia-py` covers it (see the crate doc). `live` is the
 /// graph's cached `entrypoint_reachable` set (`PyGraph::live`).
 fn serves_answer(
     merged: &MergedGraph,
@@ -85,10 +85,10 @@ mod tests {
              @app.route('/orders', methods=['POST'])\ndef create_order():\n    return {}\n",
         )
         .expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
-        let live = repo_graph_engine::entrypoint_reachable(&merged);
+        let live = glia_engine::entrypoint_reachable(&merged);
 
         let hit = serves_answer(&merged, &live, "POST /orders", "auto", 3).expect("answer");
         assert!(hit.absence.is_none());

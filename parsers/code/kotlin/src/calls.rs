@@ -97,8 +97,8 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{CallQualifier, CallSite, UnresolvedRef, endpoint, jvm};
-use repo_graph_core::{EdgeCategoryId, NodeId};
+use glia_code_domain::{CallQualifier, CallSite, UnresolvedRef, endpoint, jvm};
+use glia_core::{EdgeCategoryId, NodeId};
 use tree_sitter::Node as TsNode;
 
 use crate::{Acc, File, android, edge_category, line_at, named_child_of_kind, routes, text_of};
@@ -600,7 +600,7 @@ fn simple_type_name(user_type: TsNode, src: &[u8]) -> String {
 
 /// The `[kotlin] refs:` marker line over a repo's parses (cache-served files
 /// count too — everything is read off the `FileParse`s).
-pub(crate) fn marker(parses: &[repo_graph_code_domain::FileParse], repo_label: &str) -> String {
+pub(crate) fn marker(parses: &[glia_code_domain::FileParse], repo_label: &str) -> String {
     let calls: usize = parses.iter().map(|fp| fp.calls.len()).sum();
     let self_calls = parses
         .iter()
@@ -628,10 +628,10 @@ pub(crate) fn marker(parses: &[repo_graph_code_domain::FileParse], repo_label: &
 
 #[cfg(test)]
 mod tests {
-    use repo_graph_code_domain::{
+    use glia_code_domain::{
         CallQualifier, FileParse, UnresolvedRef, edge_category, node_kind,
     };
-    use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
+    use glia_core::{EdgeCategoryId, NodeId, RepoId};
 
     use crate::{GRAPH_TYPE, parse_file};
 
@@ -639,7 +639,7 @@ mod tests {
         parse_file(source, "svc.kt", "svc", RepoId(1)).unwrap()
     }
 
-    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, RepoId(1), kind, qname)
     }
 
@@ -1055,7 +1055,7 @@ class UserClient {
                 .find(|n| n.id == id(node_kind::ENDPOINT, q))
                 .expect("endpoint");
             match &n.cells[0].payload {
-                repo_graph_core::CellPayload::Json(s) => {
+                glia_core::CellPayload::Json(s) => {
                     serde_json::from_str::<serde_json::Value>(s).unwrap()
                 }
                 other => panic!("{other:?}"),

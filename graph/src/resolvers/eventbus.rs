@@ -20,9 +20,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{CodeNav, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Edge, NodeId, RepoId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{CodeNav, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, RuleTally, ServiceTarget, weakest};
 use crate::merged::MergedGraph;

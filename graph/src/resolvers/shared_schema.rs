@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
 
 use super::{CrossGraphResolver, weakest};
 use crate::merged::MergedGraph;
@@ -125,8 +125,8 @@ fn is_schema_type(qname: &str, kind: Option<NodeKindId>) -> bool {
 mod tests {
     use super::*;
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::Node;
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::Node;
 
     /// One repo shaped like a C# file: MODULE `Models` → PACKAGE `<ns>` →
     /// CLASS `OrderDto`. This is the nesting the resolver used to miss.

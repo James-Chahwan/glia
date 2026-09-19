@@ -1,18 +1,18 @@
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::jvm;
-use repo_graph_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::data_entity;
+use glia_code_domain::jvm;
+use glia_code_domain::di_stats::{self, DiShape};
 
 pub fn parse_file(
     source: &str,
@@ -1141,7 +1141,7 @@ fn visit_method(
 /// so we emit a REF, not a direct edge to a name-derived (phantom) NodeId.
 fn emit_heritage_ref(
     raw: &str,
-    category: repo_graph_core::EdgeCategoryId,
+    category: glia_core::EdgeCategoryId,
     from_id: NodeId,
     from_module: NodeId,
     line: u32,
@@ -1370,7 +1370,7 @@ fn visit_field_decl(
     if !(text.contains("static") && text.contains("final")) {
         return;
     }
-    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+    let has_doc = glia_doc::leading_doc(&node, src).is_some();
 
     let mut cursor = node.walk();
     for declarator in node.children_by_field_name("declarator", &mut cursor) {
@@ -2969,7 +2969,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -2982,10 +2982,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -3003,7 +3003,7 @@ mod tests {
     }
 
     /// Every qname the parse recorded for `kind`, sorted.
-    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+    fn qnames_of(fp: &FileParse, kind: glia_core::NodeKindId) -> Vec<&str> {
         let mut out: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -4979,7 +4979,7 @@ public enum Color {
         .unwrap()
     }
 
-    fn nid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn nid(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
@@ -4987,7 +4987,7 @@ public enum Color {
         fp: &FileParse,
         from: NodeId,
         to: NodeId,
-        cat: repo_graph_core::EdgeCategoryId,
+        cat: glia_core::EdgeCategoryId,
     ) -> bool {
         fp.edges
             .iter()

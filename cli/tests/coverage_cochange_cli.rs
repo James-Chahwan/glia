@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use repo_graph_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
+use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/history-cochange";
 const SNAPSHOT: &str = ".glia/history-snapshot";

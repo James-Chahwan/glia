@@ -12,12 +12,12 @@
 
 use std::path::Path;
 
-use repo_graph_activation::algo::GraphSource;
-use repo_graph_core::{
+use glia_activation::algo::GraphSource;
+use glia_core::{
     Cell, CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
     RepoId,
 };
-use repo_graph_store::{
+use glia_store::{
     Container, EncodedSection, Header, StoreError, read_to_owned, write_container,
 };
 
@@ -535,7 +535,7 @@ impl ReadBack {
     }
 }
 
-fn named(registry: &[repo_graph_store::RegistryEntry], id: u32) -> Option<&str> {
+fn named(registry: &[glia_store::RegistryEntry], id: u32) -> Option<&str> {
     registry
         .iter()
         .find(|e| e.id == id)

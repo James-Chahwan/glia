@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId};
-use repo_graph_engine::{GenerateResult, generate_one};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId};
+use glia_engine::{GenerateResult, generate_one};
 
 const FIXTURE_LIB: &str =
     include_str!("../../bench/substrate-gap/fixtures/rust-inline-mod-enum/src/lib.rs");
@@ -46,7 +46,7 @@ fn qnames(r: &GenerateResult) -> HashMap<NodeId, String> {
     qname
 }
 
-fn kind_of(r: &GenerateResult, qname: &str) -> Vec<repo_graph_core::NodeKindId> {
+fn kind_of(r: &GenerateResult, qname: &str) -> Vec<glia_core::NodeKindId> {
     let mut kinds: Vec<_> = r
         .merged
         .graphs

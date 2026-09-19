@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::evidence::Evidence;
+use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -268,8 +268,8 @@ impl RuleTally {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-    use repo_graph_core::{Confidence, Node};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+    use glia_core::{Confidence, Node};
 
     /// One `RepoGraph` of bare nodes `(kind, qname)` in repo `tag`, display
     /// name = qname. For the resolver modules' owner-segment tests.
@@ -340,7 +340,7 @@ mod tests {
         let cell = t.cell("suffix");
         assert_eq!(
             cell.payload,
-            repo_graph_core::CellPayload::Json(
+            glia_core::CellPayload::Json(
                 r#"{"emitter":"resolver:http","rule":"suffix","basis":"none"}"#.to_string()
             )
         );

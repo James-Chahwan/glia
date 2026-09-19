@@ -202,8 +202,8 @@ fn flows_json_rows_equal_the_engine_answer() {
     assert_eq!(markers, ["[flows] entries=2 flows=2 cross_service=1 depth<=6"]);
     let cli: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
 
-    let r = repo_graph_engine::generate_many(&[api.clone(), billing.clone()]).expect("generate_many");
-    let engine = repo_graph_engine::trace::entry_flows(&r.merged, &r.repo_labels, 6);
+    let r = glia_engine::generate_many(&[api.clone(), billing.clone()]).expect("generate_many");
+    let engine = glia_engine::trace::entry_flows(&r.merged, &r.repo_labels, 6);
     let engine = serde_json::to_value(&engine).expect("flows serialise");
     assert_eq!(cli, engine);
 

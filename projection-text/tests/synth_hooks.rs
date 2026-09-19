@@ -14,13 +14,13 @@
 
 use std::path::PathBuf;
 
-use repo_graph_activation::ActivationConfig;
-use repo_graph_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
-use repo_graph_core::{NodeId, RepoId};
-use repo_graph_graph::{RepoGraph, build_python};
-use repo_graph_parser_python::parse_file;
-use repo_graph_projection_text::composition::{render_cells, synth_paths};
-use repo_graph_projection_text::hooks::{ACCESS_PATH, AccessPathSynth};
+use glia_activation::ActivationConfig;
+use glia_activation::plan::{ActivatedView, ActivationPlan, SynthCell};
+use glia_core::{NodeId, RepoId};
+use glia_graph::{RepoGraph, build_python};
+use glia_parser_python::parse_file;
+use glia_projection_text::composition::{render_cells, synth_paths};
+use glia_projection_text::hooks::{ACCESS_PATH, AccessPathSynth};
 
 /// The runs a determinism test compares: each one builds its own graph, so
 /// every `HashMap` in it and in the pass gets a fresh `RandomState`.
@@ -136,17 +136,17 @@ mod research {
     use std::collections::HashMap;
     use std::process::{Command, Output};
 
-    use repo_graph_activation::plan::SynthHook;
-    use repo_graph_core::Node;
-    use repo_graph_projection_text::driver_utils::{
+    use glia_activation::plan::SynthHook;
+    use glia_core::Node;
+    use glia_projection_text::driver_utils::{
         build_repo_graph, extract_code_cell, extract_position_cell,
     };
-    use repo_graph_projection_text::hooks::{CALLSITE_ARGFLOW, CallsiteArgflowSynth};
-    use repo_graph_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
-    use repo_graph_projection_text::research::key_symbols::{
+    use glia_projection_text::hooks::{CALLSITE_ARGFLOW, CallsiteArgflowSynth};
+    use glia_projection_text::research::derived_notes::{DERIVED_NOTES, DerivedNotesSynth};
+    use glia_projection_text::research::key_symbols::{
         KEY_SYMBOLS, KeySymbolsSynth, SUMMARY, TestPatchFacts, cell_attr,
     };
-    use repo_graph_projection_text::synth_callsite_argflow::run;
+    use glia_projection_text::synth_callsite_argflow::run;
 
     const ID_START: u64 = 20_000_000;
 

@@ -27,7 +27,7 @@
 
 use std::io::Read;
 
-use repo_graph_engine::tests_for::{
+use glia_engine::tests_for::{
     DEFAULT_MAX_DEPTH, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
 };
 

@@ -2,7 +2,7 @@
 //! resolvers fire across the boundary; summary + optional JSON dump.
 //!
 //! LC.10c: members can also be pre-built `.gmap` layouts (`--gmap DIR`,
-//! `--workspace FILE`), merged by `repo_graph_engine::merge::merge_layouts`
+//! `--workspace FILE`), merged by `glia_engine::merge::merge_layouts`
 //! (LC.10b, which prints the `[merge] members=...` marker) without their
 //! sources checked out; `--layout DIR` writes the merged graph as a layout.
 //! Positional REPOS alone keep the source merge exactly as before.
@@ -13,9 +13,9 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::merge::{MergeMember, merge_layouts, persist_merge, read_workspace};
-use repo_graph_engine::persist::persist_result;
-use repo_graph_engine::{GenerateResult, generate_many_opts};
+use glia_engine::merge::{MergeMember, merge_layouts, persist_merge, read_workspace};
+use glia_engine::persist::persist_result;
+use glia_engine::{GenerateResult, generate_many_opts};
 
 use crate::common::{build_options, print_json, print_summary_table, write_json_to};
 

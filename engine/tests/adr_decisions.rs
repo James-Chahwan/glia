@@ -4,9 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload};
-use repo_graph_engine::{GenerateResult, generate_one};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{Cell, CellPayload};
+use glia_engine::{GenerateResult, generate_one};
 
 /// The committed substrate fixture this packet ships.
 fn fixture() -> PathBuf {
@@ -28,7 +28,7 @@ fn repo(tmp: &Path, files: &[(&str, &str)]) -> GenerateResult {
 }
 
 /// Qnames of every node of `kind`.
-fn qnames(r: &GenerateResult, kind: repo_graph_core::NodeKindId) -> Vec<String> {
+fn qnames(r: &GenerateResult, kind: glia_core::NodeKindId) -> Vec<String> {
     let mut out: Vec<String> = r
         .merged
         .graphs

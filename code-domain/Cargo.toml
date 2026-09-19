@@ -1,14 +1,14 @@
 [package]
-name = "repo-graph-code-domain"
+name = "glia-code-domain"
 version = "0.4.3"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../core" }
+glia-core = { path = "../core" }
 # The domain-profile SHAPE (`activation::profile`, LD.14a): code-domain fills
 # it with `profile::CODE_TABLES`. No cycle: activation depends on core only.
-repo-graph-activation = { path = "../activation" }
+glia-activation = { path = "../activation" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

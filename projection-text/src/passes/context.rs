@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
-use repo_graph_graph::RepoGraph;
+use glia_graph::RepoGraph;
 use serde_json::Value;
 
 pub struct PassContext {
@@ -73,8 +73,8 @@ impl PassContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::RepoId;
-    use repo_graph_graph::build_python;
+    use glia_core::RepoId;
+    use glia_graph::build_python;
     use serde::{Deserialize, Serialize};
 
     fn ctx() -> PassContext {

@@ -17,11 +17,11 @@
 
 use std::path::Path;
 
-use repo_graph_engine::{
+use glia_engine::{
     BlastAnswer, BlastOptions, GenerateResult, blast_radius, generate_one, governing_docs, locate_node,
     node_in_scope, project_roots, resolve_scope, resolve_seed, resolve_signal_located,
 };
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_graph::{MergedGraph, Reach};
 
 /// A three-subproject monorepo. `services/api` calls both into `shared` and
 /// within itself; `shared/util.py::call_shared` has three callers so it
@@ -383,8 +383,8 @@ fn project_roots_decodes_every_anchor_sorted_by_path() {
     // Everything is read back out of the graph, so a graph reopened from a
     // `.gmap` (pyo3 `load_from_gmap`) answers identically — no side channel.
     let td = tempfile::tempdir().unwrap();
-    repo_graph_store::write_merged_sharded(&r.merged, td.path()).expect("write .gmap");
-    let loaded = repo_graph_store::read_merged_sharded(td.path()).expect("read .gmap");
+    glia_store::write_merged_sharded(&r.merged, td.path()).expect("write .gmap");
+    let loaded = glia_store::read_merged_sharded(td.path()).expect("read .gmap");
     let reread = project_roots(&loaded);
     assert_eq!(
         serde_json::to_string(&reread).unwrap(),
@@ -440,7 +440,7 @@ fn a_label_scope_equals_its_path_scope() {
     );
     assert_eq!(qnames(&by_label, |a| &a.qname), path_q, "label scope == path scope");
     // Same set AND same ranking — label resolution runs before the filter.
-    let scores = |v: &[repo_graph_engine::BlastAnswer]| {
+    let scores = |v: &[glia_engine::BlastAnswer]| {
         v.iter().map(|a| (a.qname.clone(), a.score.to_bits())).collect::<Vec<_>>()
     };
     assert_eq!(scores(&by_label), scores(&by_path));

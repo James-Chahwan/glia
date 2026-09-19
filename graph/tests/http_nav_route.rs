@@ -5,9 +5,9 @@
 //! file was being edited by a sibling packet in the same working tree, and a
 //! `git commit --only` on it would have swept their tests into this commit.
 
-use repo_graph_code_domain::{CodeNav, cell_type, edge_category, node_kind, GRAPH_TYPE};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
-use repo_graph_graph::*;
+use glia_code_domain::{CodeNav, cell_type, edge_category, node_kind, GRAPH_TYPE};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_graph::*;
 
 fn repo_a() -> RepoId {
     RepoId::from_canonical("test://nav-route/a")
@@ -31,7 +31,7 @@ fn make_graph(repo: RepoId, nodes: Vec<Node>, nav: CodeNav) -> RepoGraph {
 
 fn make_node(
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     qname: &str,
     confidence: Confidence,
 ) -> (Node, NodeId) {
@@ -45,7 +45,7 @@ fn make_node(
     (node, id)
 }
 
-fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: repo_graph_core::NodeKindId) {
+fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: glia_core::NodeKindId) {
     nav.record(id, name, qname, kind, None);
 }
 

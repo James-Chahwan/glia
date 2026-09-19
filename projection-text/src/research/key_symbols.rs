@@ -18,10 +18,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use regex::Regex;
-use repo_graph_activation::plan::{ActivatedView, SynthCell, SynthHook};
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_graph::RepoGraph;
+use glia_activation::plan::{ActivatedView, SynthCell, SynthHook};
+use glia_code_domain::node_kind;
+use glia_core::{NodeId, NodeKindId};
+use glia_graph::RepoGraph;
 use serde::Deserialize;
 
 use crate::driver_utils::{
@@ -660,7 +660,7 @@ fn extract_issue_file_stems(issue: &str) -> HashSet<String> {
 /// 8.0 if the candidate's file basename matches (or contains as substring) a
 /// stem cited in the issue. Substring match handles renames like
 /// `seaborn/_core.py` → `seaborn/_oldcore.py` where `_core` ⊂ `_oldcore`.
-fn file_match_boost(node: &repo_graph_core::Node, stems: &HashSet<String>) -> f64 {
+fn file_match_boost(node: &glia_core::Node, stems: &HashSet<String>) -> f64 {
     if stems.is_empty() {
         return 0.0;
     }

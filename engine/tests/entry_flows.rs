@@ -15,8 +15,8 @@
 
 use std::path::Path;
 
-use repo_graph_engine::trace::{EntryFlow, TraceOptions, cross_stack_trace, entry_flows};
-use repo_graph_engine::{GenerateResult, generate_many, generate_one};
+use glia_engine::trace::{EntryFlow, TraceOptions, cross_stack_trace, entry_flows};
+use glia_engine::{GenerateResult, generate_many, generate_one};
 
 const CHECKOUT_TS: &str = "export async function placeOrder(body: unknown) {\n  return fetch('/orders', { method: 'POST', body: JSON.stringify(body) });\n}\n";
 const API_PY: &str = "import requests\nfrom kafka import KafkaProducer\nfrom flask import Flask\n\napp = Flask(__name__)\nproducer = KafkaProducer()\n\n\ndef audit(order):\n    return order\n\n\ndef bill(order):\n    return requests.post('/charge', json=order)\n\n\ndef enqueue(order):\n    producer.send('orders', order)\n\n\ndef save(order):\n    return audit(order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    save(order)\n    bill(order)\n    enqueue(order)\n    return order\n";
@@ -156,8 +156,8 @@ fn flows_follow_carry_edges_never_structure() {
     let structural = r.merged.all_edges().any(|e| {
         (e.from == create_order || e.to == create_order)
             && [
-                repo_graph_code_domain::edge_category::DEFINES,
-                repo_graph_code_domain::edge_category::CONTAINS,
+                glia_code_domain::edge_category::DEFINES,
+                glia_code_domain::edge_category::CONTAINS,
             ]
             .contains(&e.category)
     });

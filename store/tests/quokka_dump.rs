@@ -1,15 +1,15 @@
 //! One-shot dump of quokka-stack (Go backend + TS frontend) to /tmp/quokka-gmap/.
-//! Run: `cargo test -p repo-graph-store --test quokka_dump -- --nocapture`
+//! Run: `cargo test -p glia-store --test quokka_dump -- --nocapture`
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use repo_graph_core::RepoId;
-use repo_graph_graph::{build_go, build_typescript, HttpStackResolver, MergedGraph, RepoGraph};
-use repo_graph_parser_go as go;
-use repo_graph_parser_typescript as ts;
-use repo_graph_projection_text::{render_merged, render_repo_graph};
-use repo_graph_store::write_sharded;
+use glia_core::RepoId;
+use glia_graph::{build_go, build_typescript, HttpStackResolver, MergedGraph, RepoGraph};
+use glia_parser_go as go;
+use glia_parser_typescript as ts;
+use glia_projection_text::{render_merged, render_repo_graph};
+use glia_store::write_sharded;
 
 const GO_ROOT: &str = "/home/ivy/Code/quokka-stack/turps";
 const TS_ROOT: &str = "/home/ivy/Code/quokka_web";
@@ -249,12 +249,12 @@ fn dump_quokka_gmap() {
     }
 
     // --- Verify we can reopen.
-    let reopened = repo_graph_store::ShardedMmap::open(Path::new(OUTPUT_DIR)).unwrap();
+    let reopened = glia_store::ShardedMmap::open(Path::new(OUTPUT_DIR)).unwrap();
     let total_edges: usize = reopened.edges_iter().count();
     eprintln!("\nReopened: {total_edges} total edges across all shards");
 
     // --- Activation smoke test on the merged graph.
-    let defaults = repo_graph_code_domain::profile::CODE_TABLES.activation_config(None);
+    let defaults = glia_code_domain::profile::CODE_TABLES.activation_config(None);
 
     // Pick a known Go route as seed (any route node will do).
     let route_seeds: Vec<_> = merged
@@ -264,7 +264,7 @@ fn dump_quokka_gmap() {
             g.nav
                 .kind_by_id
                 .iter()
-                .filter(|(_, k)| **k == repo_graph_code_domain::node_kind::ROUTE)
+                .filter(|(_, k)| **k == glia_code_domain::node_kind::ROUTE)
                 .map(|(id, _)| *id)
         })
         .take(3)

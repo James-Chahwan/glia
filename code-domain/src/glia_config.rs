@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::path::Path;
 
-use repo_graph_core::{Confidence, EdgeCategoryId};
+use glia_core::{Confidence, EdgeCategoryId};
 use serde::Deserialize;
 /// Re-exported so consumers can name the span wrapper without depending on `toml`.
 pub use toml::Spanned;

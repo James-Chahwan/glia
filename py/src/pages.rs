@@ -3,17 +3,17 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::page_flow`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` can cover the binding (see the crate doc).
+/// `cargo test -p glia-py` can cover the binding (see the crate doc).
 fn page_flow_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
     // `graphs` is one entry per (repo, language), so count distinct repos.
     let repos: std::collections::BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
-    let flow = repo_graph_engine::pages::page_flow(merged);
+    let flow = glia_engine::pages::page_flow(merged);
     eprintln!("{}", flow.marker("pyo3", repos.len()));
     serde_json::to_string(&flow)
 }
@@ -66,7 +66,7 @@ mod tests {
              go() {\n    this.router.navigateByUrl('/gone');\n  }\n}\n",
         )
         .expect("write component");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
 

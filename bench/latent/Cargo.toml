@@ -1,5 +1,5 @@
 [package]
-name = "repo-graph-latent"
+name = "glia-latent"
 version = "0.4.13-dev"
 edition = "2024"
 publish = false

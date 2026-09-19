@@ -16,10 +16,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId};
-use repo_graph_engine::{generate_one, generate_one_incremental};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId};
+use glia_engine::{generate_one, generate_one_incremental};
+use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/module-same-group";
 
@@ -185,7 +185,7 @@ fn a_test_module_pairs_its_own_languages_sibling() {
 
 /// The whole store, file by file, for a byte comparison.
 fn store_bytes(merged: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
+    glia_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .expect("read store dir")
         .flatten()

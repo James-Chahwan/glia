@@ -5,12 +5,12 @@
 //! tests reuse id 1 on purpose: in code-domain it is MODULE / DEFINES / CODE,
 //! so any accidental code-domain lookup inside `inspect` names the wrong thing.
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{
     Cell, CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
     RepoId,
 };
-use repo_graph_store::{
+use glia_store::{
     Container, Header, NamedCount, RegistryEntry, StoreError, inspect_path, write_container,
 };
 
@@ -106,7 +106,7 @@ fn inspect_uses_header_names_not_code_domain() {
             "[inspect] {}: shards=1 graph_types=toy format={} kinds=1 categories=1 node_cells=1 \
              edge_cells=0 unregistered=0",
             path.display(),
-            repo_graph_store::FORMAT_VERSION
+            glia_store::FORMAT_VERSION
         )
     );
 }

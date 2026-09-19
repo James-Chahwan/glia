@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, NodeId, RepoId};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Confidence, NodeId, RepoId};
 
 use super::{CrossGraphResolver, emit_cross_repo_pairs};
 use crate::merged::MergedGraph;
@@ -75,8 +75,8 @@ impl CrossGraphResolver for MessageSchemaResolver {
 mod tests {
     use super::*;
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::{Edge, Node};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::{Edge, Node};
 
     /// One repo holding MESSAGE_TYPE nodes with the given qnames. The node id
     /// is salted with `file` so a test can put two nodes with one qname in

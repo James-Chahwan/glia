@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use glia_snapshots::{TestsIngestOptions, parse_ci_log, parse_junit, parse_lcov, tests_ingest};
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::snapshots::{
     MESSAGE_CAP, META_FILE, SECRET_NEEDLES, STATUS_ERROR, STATUS_FAILED, TESTS_CASES_FILE, TESTS_LCOV_FILE, TRACE_CAP,
     TestCaseRecord, read_tests, tests_dir,
 };
@@ -379,17 +379,17 @@ fn secrets_never_reach_the_snapshot_graph_or_dense_text() {
     assert!(snap.cases.iter().all(|c: &TestCaseRecord| c.redacted), "{:?}", snap.cases);
 
     // 2. The graph a build of this repo produces, the layout it writes and the dense text.
-    let built = repo_graph_engine::generate_one(r.to_str().unwrap()).unwrap();
+    let built = glia_engine::generate_one(r.to_str().unwrap()).unwrap();
     let graph_dump = format!("{:?}", built.merged);
     assert!(graph_dump.contains("charge"), "control: the build saw the repo");
     let layout = r.join(".glia/graph");
-    repo_graph_store::write_merged_sharded(&built.merged, &layout).unwrap();
+    glia_store::write_merged_sharded(&built.merged, &layout).unwrap();
     let gmap: Vec<u8> = files_under(&layout).iter().flat_map(|p| std::fs::read(p).unwrap()).collect();
     assert!(!gmap.is_empty(), "control: a layout was written");
     let dense = format!(
         "{}\n{}",
-        repo_graph_projection_text::render_merged(&built.merged),
-        repo_graph_projection_text::render_merged_full(&built.merged)
+        glia_projection_text::render_merged(&built.merged),
+        glia_projection_text::render_merged_full(&built.merged)
     );
     assert!(dense.contains("charge"), "control: the dense text renders the repo");
     for secret in secrets {

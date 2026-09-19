@@ -6,14 +6,14 @@
 //!
 //! Transport only: the build, the diff, the location of every row and the
 //! engine's `[delta] base=...` marker live in the engine. The helper the
-//! pyfunction delegates to is pyo3-free, so `cargo test -p repo-graph-py`
+//! pyfunction delegates to is pyo3-free, so `cargo test -p glia-py`
 //! covers it (see the crate doc); it prints this surface's marker,
 //! `[delta] surface=pyo3 rows=<n>`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::delta::{GraphDeltaAnswer, graph_delta_vs_rev};
+use glia_engine::delta::{GraphDeltaAnswer, graph_delta_vs_rev};
 
 use crate::convert::to_py;
 use crate::registry::ModuleFns;

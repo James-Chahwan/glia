@@ -2,7 +2,7 @@
 //!
 //! The blast walk used to scan the whole edge list for every node it
 //! dequeued - O(reached x E), 1.6e9 edge checks on a 40,000-node chain. It now
-//! walks `repo_graph_activation::algo::reach::bfs` over a CSR index built once
+//! walks `glia_activation::algo::reach::bfs` over a CSR index built once
 //! per call, so the walk is linear and the PPR ranking (O(iterations x E))
 //! dominates. The budget covers both and sits far below what the scan loop
 //! took in a debug build, so the test fails on the quadratic walk without
@@ -11,10 +11,10 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use repo_graph_code_domain::profile::CODE_TABLES;
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_graph::{MergedGraph, Reach, RepoGraph, SymbolTable};
+use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_graph::{MergedGraph, Reach, RepoGraph, SymbolTable};
 
 const N: usize = 40_000;
 const BUDGET: Duration = Duration::from_millis(1_500);

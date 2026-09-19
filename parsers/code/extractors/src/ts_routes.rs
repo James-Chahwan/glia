@@ -30,11 +30,11 @@
 
 use std::collections::BTreeMap;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, endpoint,
     node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
 use crate::anchor;
 
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     /// Every cell payload of `n`, as `(cell type, text)`.
-    fn cells(n: &Node) -> Vec<(repo_graph_core::CellTypeId, String)> {
+    fn cells(n: &Node) -> Vec<(glia_core::CellTypeId, String)> {
         n.cells
             .iter()
             .map(|c| match &c.payload {

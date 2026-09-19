@@ -3,8 +3,8 @@
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use repo_graph_engine::BlastOptions;
-use repo_graph_graph::Reach;
+use glia_engine::BlastOptions;
+use glia_graph::Reach;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -63,7 +63,7 @@ impl PyGraph {
         opts.live_only = live_only;
         opts.scope = scope.map(str::to_string);
         let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
-        let answer = repo_graph_engine::blast_radius(&self.merged, &queries, &opts);
+        let answer = glia_engine::blast_radius(&self.merged, &queries, &opts);
         to_py(py, serde_json::to_string(&answer))
     }
 }

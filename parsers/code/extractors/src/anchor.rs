@@ -66,14 +66,14 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::{CodeNav, FileParse, cell_type, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::evidence::{self, Evidence};
+use glia_code_domain::{CodeNav, FileParse, cell_type, edge_category, node_kind};
+use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
 };
 
 /// Where a marker node's needle actually fired, 0-indexed like every other
-/// POSITION in the repo (`repo_graph_doc::position_json`).
+/// POSITION in the repo (`glia_doc::position_json`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Anchor {
     pub node: NodeId,
@@ -775,8 +775,8 @@ pub fn report_config_read(stats: AccessStats, repo_label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::GRAPH_TYPE;
-    use repo_graph_core::RepoId;
+    use glia_code_domain::GRAPH_TYPE;
+    use glia_core::RepoId;
 
     fn repo() -> RepoId {
         RepoId(7)

@@ -3,9 +3,9 @@
 //! `RPC_CALL` (`rpc_call:<path>`) pairs to `RPC_PROCEDURE` (`rpc:<path>`) on an
 //! EXACT path. Three stacks emit the pair:
 //!
-//! - tRPC (`repo_graph_code_extractors::trpc`): `rpc:<router>.<procedure>`;
+//! - tRPC (`glia_code_extractors::trpc`): `rpc:<router>.<procedure>`;
 //! - Connect and Twirp (LA.17, `grpc::extract_proto_rpc_nodes` in
-//!   `repo_graph_code_extractors`): `rpc:<proto package>.<Service>.<Method>`,
+//!   `glia_code_extractors`): `rpc:<proto package>.<Service>.<Method>`,
 //!   the package omitted when the `.proto` declares none — Connect's own route
 //!   is `/<package>.<Service>/<Method>`, so the package keeps two same-named
 //!   services apart.
@@ -30,9 +30,9 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Edge, NodeId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Edge, NodeId};
 
 use super::{CrossGraphResolver, build_kind_index, weakest};
 use crate::merged::MergedGraph;
@@ -85,8 +85,8 @@ impl CrossGraphResolver for RpcStackResolver {
 mod tests {
     use super::*;
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::{Confidence, Node, NodeKindId, RepoId};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::{Confidence, Node, NodeKindId, RepoId};
 
     /// One repo holding `(kind, qname, confidence)` nodes, nav name = the path.
     fn graph(repo: RepoId, nodes: &[(NodeKindId, &str, Confidence)]) -> RepoGraph {
@@ -125,7 +125,7 @@ mod tests {
 
     const PROC: NodeKindId = node_kind::RPC_PROCEDURE;
     const CALL: NodeKindId = node_kind::RPC_CALL;
-    use repo_graph_core::Confidence::{Medium, Strong};
+    use glia_core::Confidence::{Medium, Strong};
 
     #[test]
     fn pairs_a_call_to_its_procedure_across_repos() {
@@ -174,7 +174,7 @@ mod tests {
             &[id(client, CALL, "rpc_call:user.list")],
             crate::blast::Reach::Forward,
             2,
-            &repo_graph_code_domain::profile::CODE_TABLES,
+            &glia_code_domain::profile::CODE_TABLES,
         );
         let proc_id = id(server, PROC, "rpc:user.list");
         let hit = hits.iter().find(|h| h.id == proc_id).map(|h| (h.depth, h.reason));

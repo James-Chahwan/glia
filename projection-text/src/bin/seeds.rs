@@ -18,11 +18,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_code_domain::node_kind;
-use repo_graph_code_domain::profile::CODE_TABLES;
-use repo_graph_core::NodeId;
-use repo_graph_graph::RepoGraph;
-use repo_graph_projection_text::driver_utils::{build_repo_graph, extract_position_cell, write_json};
+use glia_code_domain::node_kind;
+use glia_code_domain::profile::CODE_TABLES;
+use glia_core::NodeId;
+use glia_graph::RepoGraph;
+use glia_projection_text::driver_utils::{build_repo_graph, extract_position_cell, write_json};
 use serde::Serialize;
 
 #[derive(Parser, Debug)]

@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::endpoint::{
     ClientEndpoint, push_client_endpoint, route_qname, url_to_path,
 };
-use repo_graph_code_domain::line_of;
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::line_of;
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -253,9 +253,9 @@ fn visit_mod(node: TsNode, scope: &Scope, src: &[u8], file_rel: &str, repo: Repo
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
     let mut cells = vec![Cell {
         kind: cell_type::POSITION,
-        payload: CellPayload::Json(repo_graph_doc::position_json(&node, file_rel)),
+        payload: CellPayload::Json(glia_doc::position_json(&node, file_rel)),
     }];
-    if let Some(doc) = repo_graph_doc::leading_doc(&node, src) {
+    if let Some(doc) = glia_doc::leading_doc(&node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -420,7 +420,7 @@ fn visit_const_static(
         return;
     };
 
-    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+    let has_doc = glia_doc::leading_doc(&node, src).is_some();
     let value_is_literal = node.child_by_field_name("value").is_some_and(|v| {
         matches!(
             v.kind(),
@@ -1926,7 +1926,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -1939,10 +1939,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -2073,7 +2073,7 @@ mod tests {
 }
 "#;
 
-    fn nid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn nid(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
@@ -2081,7 +2081,7 @@ mod tests {
         fp: &FileParse,
         from: NodeId,
         to: NodeId,
-        cat: repo_graph_core::EdgeCategoryId,
+        cat: glia_core::EdgeCategoryId,
     ) -> bool {
         fp.edges
             .iter()
@@ -3075,7 +3075,7 @@ impl Svc {
     // ---- LA.35a: typed receivers ------------------------------------------------
 
     /// `local_types` of the fn / method with this qname.
-    fn locals(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> Vec<(String, String)> {
+    fn locals(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<(String, String)> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         let mut out: Vec<(String, String)> = fp
             .nav

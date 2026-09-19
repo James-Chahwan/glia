@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use repo_graph_code_domain::{GRAPH_TYPE, walk_gating};
-use repo_graph_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
-use repo_graph_graph::RepoGraph;
+use glia_code_domain::{GRAPH_TYPE, walk_gating};
+use glia_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_graph::RepoGraph;
 
 use crate::code_section::{decode_repo_graph, encode_repo_graph_counted};
 use crate::container::{
@@ -27,7 +27,7 @@ use crate::error::StoreError;
 /// for a repo - `manifest.json`, the per-language `.gmap` shards,
 /// `cross_stack.gmap`, the parse cache `parse_cache.bin` beside them, and a
 /// self-ignoring `.gitignore` - written by one writer
-/// (`repo_graph_engine::persist::persist_result`) for `glia build`, the git
+/// (`glia_engine::persist::persist_result`) for `glia build`, the git
 /// hooks and pyo3 alike, and read by `load_from_gmap` and the MCP. Everything
 /// else under `.glia/` is an INPUT glia reads (`docs-snapshot/`,
 /// `overlay.toml`), so the output gets its own subdirectory rather than
@@ -98,7 +98,7 @@ pub struct Manifest {
     #[serde(default)]
     pub engine_version: String,
     /// Build identity of the code that produced this layout:
-    /// `<release>+p<16 hex>` (`repo_graph_stamp::BUILD_STAMP`).
+    /// `<release>+p<16 hex>` (`glia_stamp::BUILD_STAMP`).
     /// `engine_version` above is the RELEASE, which does not move when a
     /// parser fix is merged — so a mismatch *here* is what forces a
     /// regenerate for a graph-shaping change made *within* a release
@@ -157,7 +157,7 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub external_inputs_by_repo: BTreeMap<u64, BTreeMap<String, String>>,
     /// The members a merge of pre-built layouts combined, in merge order
-    /// (LC.10b, `repo_graph_engine::merge`). Omitted for a layout one build
+    /// (LC.10b, `glia_engine::merge`). Omitted for a layout one build
     /// wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<MemberMeta>,
@@ -336,7 +336,7 @@ pub struct ShardEntry {
     /// xxhash64 of the shard's bytes, hex-encoded (16 lowercase hex chars).
     pub content_hash: String,
     /// The domain of the shard's graph (LC.10b): `"code"`
-    /// (`repo_graph_code_domain::GRAPH_TYPE`) for every shard the code build
+    /// (`glia_code_domain::GRAPH_TYPE`) for every shard the code build
     /// writes, another value for a foreign domain's shard ([`ForeignShard`]),
     /// which readers hash-check but never decode as code. Read as `"code"`
     /// when absent and omitted when `"code"`, so a code-only manifest keeps
@@ -551,7 +551,7 @@ fn write_sharded_with(
     let manifest = Manifest {
         schema_version: MANIFEST_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        build_stamp: repo_graph_stamp::BUILD_STAMP.to_string(),
+        build_stamp: glia_stamp::BUILD_STAMP.to_string(),
         shards: entries,
         cross,
         repos,
@@ -706,7 +706,7 @@ fn verified_bytes(entry: &ShardEntry, path: &Path) -> Result<Vec<u8>, StoreError
 /// build is recorded as fresh: the same window the mtime scan accepts for a
 /// source edited during a build.
 pub fn write_merged_sharded(
-    merged: &repo_graph_graph::MergedGraph,
+    merged: &glia_graph::MergedGraph,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
     write_merged_sharded_meta(merged, &LayoutMeta::default(), dir)
@@ -721,7 +721,7 @@ pub fn write_merged_sharded(
 /// `dir`, as [`RepoMeta::root`] is written), else none: see
 /// [`write_merged_sharded`].
 pub fn write_merged_sharded_meta(
-    merged: &repo_graph_graph::MergedGraph,
+    merged: &glia_graph::MergedGraph,
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
@@ -737,7 +737,7 @@ pub fn write_merged_sharded_meta(
 /// shard or manifest is written. [`read_merged_sharded_meta`] plus
 /// [`read_layout_extras`] read it back.
 pub fn write_merged_sharded_extras(
-    merged: &repo_graph_graph::MergedGraph,
+    merged: &glia_graph::MergedGraph,
     meta: &LayoutMeta,
     foreign: &[ForeignShard],
     members: &[MemberMeta],
@@ -789,7 +789,7 @@ fn inputs_by_repo(meta: &LayoutMeta, dir: &Path) -> BTreeMap<u64, BTreeMap<Strin
 /// an explicit `repo_root` (LF.1d), for a layout at a custom dir whose
 /// metadata does not name exactly one root.
 pub fn write_merged_sharded_for_repo(
-    merged: &repo_graph_graph::MergedGraph,
+    merged: &glia_graph::MergedGraph,
     meta: &LayoutMeta,
     dir: &Path,
     repo_root: &Path,
@@ -800,7 +800,7 @@ pub fn write_merged_sharded_for_repo(
 }
 
 fn write_merged_with(
-    merged: &repo_graph_graph::MergedGraph,
+    merged: &glia_graph::MergedGraph,
     meta: &LayoutMeta,
     dir: &Path,
     recorded: Recorded<'_>,
@@ -842,7 +842,7 @@ fn write_merged_with(
 /// the first 0.5.0 load of a 0.4.x layout says why it is regenerating.
 pub fn read_merged_sharded(
     dir: &Path,
-) -> Result<repo_graph_graph::MergedGraph, StoreError> {
+) -> Result<glia_graph::MergedGraph, StoreError> {
     read_merged_sharded_meta(dir).map(|(merged, _meta)| merged)
 }
 
@@ -860,7 +860,7 @@ pub fn read_merged_sharded(
 /// shard, and [`read_layout_extras`] hands back its bytes.
 pub fn read_merged_sharded_meta(
     dir: &Path,
-) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
+) -> Result<(glia_graph::MergedGraph, LayoutMeta), StoreError> {
     let result = read_merged_sharded_inner(dir);
     if let Err(e) = &result
         && let Some(reason) = e.rebuild_reason()
@@ -889,7 +889,7 @@ pub fn read_layout_extras(dir: &Path) -> Result<LayoutExtras, StoreError> {
 
 fn read_merged_sharded_inner(
     dir: &Path,
-) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
+) -> Result<(glia_graph::MergedGraph, LayoutMeta), StoreError> {
     let sharded = ShardedMmap::open(dir)?;
     let mut graphs = Vec::with_capacity(sharded.shards.len());
     for (_name, mmap) in &sharded.shards {
@@ -912,7 +912,7 @@ fn read_merged_sharded_inner(
     };
     let pass_undo = pass_undo_from_entries(&sharded.manifest.pass_undo)?;
     Ok((
-        repo_graph_graph::MergedGraph {
+        glia_graph::MergedGraph {
             graphs,
             cross_edges,
             pass_undo,
@@ -923,7 +923,7 @@ fn read_merged_sharded_inner(
 
 /// Cheap freshness check: is anything under `repo_path` that the BUILDER would
 /// look at newer than the manifest in `gmap_dir`? Directory gating is shared
-/// with the builder's walk (`repo_graph_code_domain::walk_gating`), so the scan
+/// with the builder's walk (`glia_code_domain::walk_gating`), so the scan
 /// skips exactly the
 /// trees the parse skips: VCS/editor metadata, the gmap dir itself, dependency
 /// and build-output directories, anything a `.gitignore` (root or nested)
@@ -977,7 +977,7 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
         return true;
     };
     if m.engine_version != env!("CARGO_PKG_VERSION")
-        || m.build_stamp != repo_graph_stamp::BUILD_STAMP
+        || m.build_stamp != glia_stamp::BUILD_STAMP
     {
         // Un-gated on purpose (not behind GLIA_STORE_VERBOSE): it fires rarely
         // and it is the only explanation a user gets for an expensive
@@ -986,7 +986,7 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
             "[gmap] stale: build stamp mismatch (manifest={}+{} build={}) — regenerating",
             m.engine_version,
             m.build_stamp,
-            repo_graph_stamp::BUILD_STAMP
+            glia_stamp::BUILD_STAMP
         );
         return true;
     }
@@ -1119,7 +1119,7 @@ fn first_changed_input<'a>(
 
 /// Walk `repo_path` for anything newer than the manifest, gating directories
 /// exactly as the builder's walk does — both call
-/// `repo_graph_code_domain::walk_gating`, so the two cannot drift. Before the
+/// `glia_code_domain::walk_gating`, so the two cannot drift. Before the
 /// shared gate the scan used its own six-name list, so it descended into trees
 /// the builder collapses (`dist`, `coverage`, every `.gitignore`d directory)
 /// and regenerated the whole gmap for files no parser ever reads — and each
@@ -1290,9 +1290,9 @@ pub fn upsert_cell_sharded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::CodeNav;
-    use repo_graph_core::{Node, RepoId};
-    use repo_graph_graph::SymbolTable;
+    use glia_code_domain::CodeNav;
+    use glia_core::{Node, RepoId};
+    use glia_graph::SymbolTable;
 
     #[test]
     fn upsert_cell_sharded_finds_correct_shard() {
@@ -1306,7 +1306,7 @@ mod tests {
             nodes: vec![Node {
                 id: NodeId(100),
                 repo,
-                confidence: repo_graph_core::Confidence::Strong,
+                confidence: glia_core::Confidence::Strong,
                 cells: vec![],
             }],
             edges: vec![],
@@ -1321,7 +1321,7 @@ mod tests {
             nodes: vec![Node {
                 id: NodeId(200),
                 repo,
-                confidence: repo_graph_core::Confidence::Strong,
+                confidence: glia_core::Confidence::Strong,
                 cells: vec![],
             }],
             edges: vec![],
@@ -1353,7 +1353,7 @@ mod tests {
         let m: Manifest =
             serde_json::from_slice(&std::fs::read(shard_dir.join(MANIFEST_NAME)).unwrap())
                 .unwrap();
-        assert_eq!(m.build_stamp, repo_graph_stamp::BUILD_STAMP);
+        assert_eq!(m.build_stamp, glia_stamp::BUILD_STAMP);
     }
 
     /// LC.5b: every graph shard with nav carries a `"code"` section,
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn shards_carry_the_code_section_and_upserts_keep_it() {
         use crate::code_section::{CODE_SECTION, code_section_of};
-        use repo_graph_code_domain::node_kind;
+        use glia_code_domain::node_kind;
 
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("layout");
@@ -1373,7 +1373,7 @@ mod tests {
         let node = |id: u64| Node {
             id: NodeId(id),
             repo,
-            confidence: repo_graph_core::Confidence::Strong,
+            confidence: glia_core::Confidence::Strong,
             cells: vec![],
         };
         let g = RepoGraph {
@@ -1389,8 +1389,8 @@ mod tests {
         let cross = vec![Edge {
             from: NodeId(101),
             to: NodeId(9),
-            category: repo_graph_code_domain::edge_category::HTTP_CALLS,
-            confidence: repo_graph_core::Confidence::Strong,
+            category: glia_code_domain::edge_category::HTTP_CALLS,
+            confidence: glia_core::Confidence::Strong,
             cells: Vec::new(),
         }];
         write_sharded(&[("a", &g)], &cross, &dir).unwrap();
@@ -1427,7 +1427,7 @@ mod tests {
     fn layout_meta_round_trips_through_the_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let g = empty_graph("test://lc7-meta");
-        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], ..Default::default() };
+        let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
             repos: vec![
                 RepoMeta { id: 9, label: "web".into(), root: Some("../web".into()) },
@@ -1461,7 +1461,7 @@ mod tests {
     #[test]
     fn pass_undo_round_trips_through_the_manifest() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut merged = repo_graph_graph::MergedGraph {
+        let mut merged = glia_graph::MergedGraph {
             graphs: vec![empty_graph("test://lc10a-undo")],
             ..Default::default()
         };
@@ -1519,7 +1519,7 @@ mod tests {
         assert!(m.repos.is_empty());
 
         let g = empty_graph("test://lc8-lenient");
-        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], ..Default::default() };
+        let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
             repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()) }],
             parse_errors: vec![],
@@ -1534,7 +1534,7 @@ mod tests {
         }
         let m = read_manifest_lenient(&v2).unwrap();
         assert_eq!(m.schema_version, MANIFEST_VERSION);
-        assert_eq!(m.build_stamp, repo_graph_stamp::BUILD_STAMP);
+        assert_eq!(m.build_stamp, glia_stamp::BUILD_STAMP);
         assert_eq!(m.repos, meta.repos);
 
         std::fs::write(v2.join(MANIFEST_NAME), b"{not json").unwrap();
@@ -1557,7 +1557,7 @@ mod tests {
             nodes: vec![Node {
                 id: NodeId(100),
                 repo,
-                confidence: repo_graph_core::Confidence::Strong,
+                confidence: glia_core::Confidence::Strong,
                 cells: vec![],
             }],
             edges: vec![],
@@ -1572,7 +1572,7 @@ mod tests {
             nodes: vec![Node {
                 id: NodeId(200),
                 repo,
-                confidence: repo_graph_core::Confidence::Strong,
+                confidence: glia_core::Confidence::Strong,
                 cells: vec![],
             }],
             edges: vec![],
@@ -1613,7 +1613,7 @@ mod tests {
             from: NodeId(1),
             to: NodeId(2),
             category: EdgeCategoryId(1),
-            confidence: repo_graph_core::Confidence::Strong,
+            confidence: glia_core::Confidence::Strong,
             cells: Vec::new(),
         }];
         write_sharded(&[("a", &g)], &cross, tmp.path()).unwrap();
@@ -1701,7 +1701,7 @@ mod tests {
         let mut v = read_json();
         let stamp = v["build_stamp"].as_str().unwrap_or("");
         assert!(!stamp.is_empty(), "manifest.json has no build_stamp: {v}");
-        assert_eq!(stamp, repo_graph_stamp::BUILD_STAMP);
+        assert_eq!(stamp, glia_stamp::BUILD_STAMP);
 
         // (2) Fresh layout from this build, no newer sources -> not stale.
         assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
@@ -1965,8 +1965,8 @@ mod tests {
     // LF.1d: `.glia` inputs by content, not by mtime
     // ------------------------------------------------------------------
 
-    fn one_graph(canonical: &str) -> repo_graph_graph::MergedGraph {
-        repo_graph_graph::MergedGraph { graphs: vec![empty_graph(canonical)], ..Default::default() }
+    fn one_graph(canonical: &str) -> glia_graph::MergedGraph {
+        glia_graph::MergedGraph { graphs: vec![empty_graph(canonical)], ..Default::default() }
     }
 
     fn manifest_json(dir: &Path) -> serde_json::Value {

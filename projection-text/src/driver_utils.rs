@@ -10,10 +10,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{CellPayload, Node, NodeId, RepoId};
-use repo_graph_graph::{RepoGraph, build_python};
-use repo_graph_parser_python::{FileParse, parse_file};
+use glia_code_domain::cell_type;
+use glia_core::{CellPayload, Node, NodeId, RepoId};
+use glia_graph::{RepoGraph, build_python};
+use glia_parser_python::{FileParse, parse_file};
 use walkdir::WalkDir;
 
 /// Walk a directory tree, parse every `.py` file, collect `FileParse`s.

@@ -12,15 +12,15 @@
 //!
 //! Transport only: the seeds, the radius, the location of every row and the
 //! `[diff-impact] mode=..` marker live in the engine. The helpers the pyo3
-//! entry points delegate to are pyo3-free, so `cargo test -p repo-graph-py`
+//! entry points delegate to are pyo3-free, so `cargo test -p glia-py`
 //! covers them (see the crate doc).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::BlastOptions;
-use repo_graph_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
-use repo_graph_graph::MergedGraph;
+use glia_engine::BlastOptions;
+use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_graph::MergedGraph;
 
 use crate::blast::reach_named;
 use crate::convert::to_py;
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn diff_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("diff");
-        let built = repo_graph_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
+        let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
         let a = diff_answer(&built.merged, DIFF, "backward", 4, None, false, None).expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [

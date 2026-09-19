@@ -10,10 +10,10 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::evidence::{Evidence, STAGES};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::cell_type;
+use glia_code_domain::evidence::{Evidence, STAGES};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::MergedGraph;
 
 fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures")
@@ -65,7 +65,7 @@ fn defects(m: &MergedGraph, label: &str) -> Vec<String> {
             out.push(format!(
                 "{label}: {} -[{}]-> {}: {p}",
                 qname(e.from),
-                repo_graph_code_domain::edge_category::name(e.category),
+                glia_code_domain::edge_category::name(e.category),
                 qname(e.to)
             ));
         }

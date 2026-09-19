@@ -10,9 +10,9 @@
 mod git_fixture;
 
 use git_fixture::GitRepo;
-use repo_graph_engine::diff_impact::{ChangedNode, DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
-use repo_graph_engine::{BlastOptions, generate_one};
-use repo_graph_graph::Reach;
+use glia_engine::diff_impact::{ChangedNode, DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_engine::{BlastOptions, generate_one};
+use glia_graph::Reach;
 
 const A_PY: &str = "def price(o):\n    total = o\n    total = total + 0\n    total = total * 1\n    return total\n\n\n\
 def place(o):\n    return price(o)\n";

@@ -12,11 +12,11 @@
 //! SQL table (`data_entity:sql:orders`) has no file, so web code reaching it
 //! never counts as reaching `services/api`.
 
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{Cell, CellPayload};
-use repo_graph_engine::check::{CheckReport, Violation, check};
-use repo_graph_engine::{generate_one, locate_node};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{Cell, CellPayload};
+use glia_engine::check::{CheckReport, Violation, check};
+use glia_engine::{generate_one, locate_node};
+use glia_graph::MergedGraph;
 
 const WEB_APP: &str =
     "from services.api.internal import charge\n\n\ndef pay(o):\n    return charge(o)\n";

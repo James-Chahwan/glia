@@ -1,7 +1,7 @@
 //! **gaps** (LF.2c): `PyGraph.gaps`, the ranked blind-spot report an overlay
 //! agent works from, and the module function `overlay_delta`, the measurement
 //! that decides whether an overlay edit is kept. Both are transport: the
-//! categories, ranking and markers live in `repo_graph_engine::gaps`.
+//! categories, ranking and markers live in `glia_engine::gaps`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -9,15 +9,15 @@ use std::path::PathBuf;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::gaps::{GapsOptions, GapsReport, OverlayDelta, gaps_report, overlay_delta};
-use repo_graph_graph::MergedGraph;
+use glia_engine::gaps::{GapsOptions, GapsReport, OverlayDelta, gaps_report, overlay_delta};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// The report behind [`PyGraph::gaps`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` can cover the binding (see the crate doc).
+/// `cargo test -p glia-py` can cover the binding (see the crate doc).
 /// `Err` names an unknown category.
 fn gaps_of(
     merged: &MergedGraph,
@@ -150,10 +150,10 @@ mod tests {
         )
         .expect("write");
         let paths = [web, api].map(|p| p.to_string_lossy().into_owned());
-        let built = repo_graph_engine::generate_many_opts(
+        let built = glia_engine::generate_many_opts(
             &paths,
             false,
-            &repo_graph_engine::BuildOptions::default().with_overlay(false),
+            &glia_engine::BuildOptions::default().with_overlay(false),
         );
         let delta = delta_of(&paths, false);
         let _ = std::fs::remove_dir_all(&root);

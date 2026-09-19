@@ -4,12 +4,12 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::evidence::{self, Basis, Evidence, STAGES};
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::evidence::{self, Basis, Evidence, STAGES};
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{Edge, EdgeCategoryId, NodeId};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded;
 
 /// The five-file shape: an intra-repo Python call through an import, a flask
 /// route, a TS fetch on line 2 of its file, and a README mentioning `bar`.
@@ -202,7 +202,7 @@ fn layout_bytes(dir: &Path) -> u64 {
 
 /// The cost of evidence on the glia self-build: the layout with every edge's
 /// cells against the same layout with them stripped. Run by hand:
-/// `cargo test -p repo-graph-engine --test edge_evidence -- --ignored --nocapture`.
+/// `cargo test -p glia-engine --test edge_evidence -- --ignored --nocapture`.
 #[test]
 #[ignore]
 fn evidence_size_budget_on_self() {

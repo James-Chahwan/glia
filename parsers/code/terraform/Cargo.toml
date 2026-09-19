@@ -1,12 +1,12 @@
 [package]
-name = "repo-graph-parser-terraform"
+name = "glia-parser-terraform"
 version = "0.4.9"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../../../core" }
-repo-graph-code-domain = { path = "../../../code-domain" }
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
 tree-sitter = "0.26"
 tree-sitter-hcl = "1.1"
 serde = { version = "1", features = ["derive"] }

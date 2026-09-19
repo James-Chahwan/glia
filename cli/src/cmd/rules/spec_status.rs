@@ -6,8 +6,8 @@
 //! `{rows, by_feature, governed_services, ungoverned_routes}`; `--status`
 //! narrows `rows` only.
 
-use repo_graph_engine::Located;
-use repo_graph_engine::spec_status::{
+use glia_engine::Located;
+use glia_engine::spec_status::{
     DECLARED_MISSING, IMPLEMENTED, SpecStatusRow, UNDECLARED, spec_status,
 };
 

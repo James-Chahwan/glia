@@ -14,8 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::walk_gating::{IdentitySource, repo_identity};
-use repo_graph_engine::{
+use glia_code_domain::walk_gating::{IdentitySource, repo_identity};
+use glia_engine::{
     GenerateResult, ParseCache, generate_many, generate_one, generate_one_with_cache,
 };
 

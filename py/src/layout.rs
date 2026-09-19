@@ -6,14 +6,14 @@ use std::path::Path;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::persist::{default_layout_dir, load_or_rebuild};
-use repo_graph_store::is_gmap_stale;
+use glia_engine::persist::{default_layout_dir, load_or_rebuild};
+use glia_store::is_gmap_stale;
 
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// Load a graph from a sharded `.gmap` directory, rebuilding it first when it
-/// cannot be served as it is (LC.8, `repo_graph_engine::persist::load_or_rebuild`).
+/// cannot be served as it is (LC.8, `glia_engine::persist::load_or_rebuild`).
 ///
 /// `dir` is a layout written by `PyGraph.save_to` / `save_to_default` /
 /// `glia build`. When it is current it loads as is: a `PyGraph` whose methods

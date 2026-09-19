@@ -1,12 +1,12 @@
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
-use repo_graph_code_domain::line_of;
+use glia_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
+use glia_code_domain::line_of;
 
 pub fn parse_file(
     source: &str,
@@ -881,7 +881,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -899,11 +899,11 @@ fn entity_cells_with_doc(node: &TsNode, src: &[u8], file_rel: &str, doc: DocChoi
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
     let text = match doc {
-        DocChoice::Leading => repo_graph_doc::leading_doc(node, src),
+        DocChoice::Leading => glia_doc::leading_doc(node, src),
         DocChoice::Text(t) if !t.is_empty() => Some(t),
         DocChoice::Text(_) | DocChoice::Hidden | DocChoice::Omit => None,
     };
@@ -921,7 +921,7 @@ fn entity_cells_with_doc(node: &TsNode, src: &[u8], file_rel: &str, doc: DocChoi
 // ---------------------------------------------------------------------------
 //
 // Elixir documentation is not a comment: it is a module attribute in the body,
-// which `repo_graph_doc::leading_doc` (a preceding-comment walk) never sees.
+// which `glia_doc::leading_doc` (a preceding-comment walk) never sees.
 // tree-sitter-elixir 0.3 parses `@doc "x"` as
 // `unary_operator(operator: "@", operand: call(target: identifier "doc",
 // arguments(string | sigil | boolean)))`.
@@ -1047,16 +1047,16 @@ fn quoted_text(node: TsNode, src: &[u8]) -> String {
 }
 
 /// Dedent, trim and collapse a doc body to one line (the shape
-/// `repo_graph_doc::leading_doc` produces: lines joined by single spaces), then
-/// cap at [`repo_graph_doc::DOC_MAX`] on a char boundary. Collapsing every
+/// `glia_doc::leading_doc` produces: lines joined by single spaces), then
+/// cap at [`glia_doc::DOC_MAX`] on a char boundary. Collapsing every
 /// whitespace run subsumes the heredoc dedent: each line's common indent goes
 /// with the rest of its leading whitespace.
 fn clean_doc(raw: &str) -> String {
     let joined = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if joined.len() <= repo_graph_doc::DOC_MAX {
+    if joined.len() <= glia_doc::DOC_MAX {
         return joined;
     }
-    let mut end = repo_graph_doc::DOC_MAX;
+    let mut end = glia_doc::DOC_MAX;
     while !joined.is_char_boundary(end) {
         end -= 1;
     }
@@ -1103,7 +1103,7 @@ mod tests {
 
     /// Every DOC text on the node(s) named `name` of `kind`, across all the
     /// `Node` entries sharing its id (multi-clause functions push one per clause).
-    fn docs_of(fp: &FileParse, kind: repo_graph_core::NodeKindId, name: &str) -> Vec<String> {
+    fn docs_of(fp: &FileParse, kind: glia_core::NodeKindId, name: &str) -> Vec<String> {
         let ids: Vec<NodeId> = fp
             .nav
             .name_by_id
@@ -1309,14 +1309,14 @@ end
 
     #[test]
     fn long_utf8_doc_capped_on_char_boundary() {
-        let body = "é".repeat(repo_graph_doc::DOC_MAX);
+        let body = "é".repeat(glia_doc::DOC_MAX);
         let source = format!("defmodule M do\n  @doc \"{body}\"\n  def a(x), do: x\nend\n");
         let fp = parse_file(&source, "lib/m.ex", "lib::m", repo()).unwrap();
         let docs = docs_of(&fp, node_kind::FUNCTION, "a");
         assert_eq!(docs.len(), 1);
-        assert!(docs[0].len() <= repo_graph_doc::DOC_MAX);
+        assert!(docs[0].len() <= glia_doc::DOC_MAX);
         assert!(docs[0].chars().all(|c| c == 'é'));
-        assert_eq!(docs[0].chars().count(), repo_graph_doc::DOC_MAX / 2);
+        assert_eq!(docs[0].chars().count(), glia_doc::DOC_MAX / 2);
     }
 
     #[test]

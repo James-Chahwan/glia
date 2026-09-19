@@ -13,7 +13,7 @@
 //! and the reason, never an archive-library message.
 //!
 //! LC.9 — one layout, one writer. [`default_layout_dir`] is `<repo>/.glia/graph`
-//! (`repo_graph_store::DEFAULT_GMAP_SUBDIR`) and [`persist_result`] is the
+//! (`glia_store::DEFAULT_GMAP_SUBDIR`) and [`persist_result`] is the
 //! writer `glia build` (so the git hooks), pyo3 `generate`'s auto-persist and
 //! `save_to_default` all call. On top of [`persist_layout`] it:
 //! - writes the dir's self-ignoring `.gitignore` (`*`), so the layout never
@@ -31,7 +31,7 @@
 //! What survives the round trip, and where it lives:
 //! - repo labels and roots, and the build's parse errors describe the LAYOUT
 //!   (a multi-repo build has several repos and one error list), so they go in
-//!   `manifest.json` ([`repo_graph_store::LayoutMeta`]);
+//!   `manifest.json` ([`glia_store::LayoutMeta`]);
 //! - `RepoGraph.properties` is per-graph code state, so it goes in each
 //!   shard's code section beside nav and symbols;
 //! - `MergedGraph::pass_undo` (LC.10a), the confidences a set-dependent
@@ -55,7 +55,7 @@
 //! from [`load_layout`], and `[gmap] rebuilt <dir> (<reason>)` from
 //! [`load_or_rebuild`] each time it rebuilds (written or not).
 //!
-//! Module slot declared by L0.2: reached as `repo_graph_engine::persist::<item>`,
+//! Module slot declared by L0.2: reached as `glia_engine::persist::<item>`,
 //! never flattened into the crate root.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,8 +63,8 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::{
+use glia_graph::MergedGraph;
+use glia_store::{
     CROSS_STACK_NAME, LEGACY_GMAP_SUBDIR, LayoutMeta, LenientManifest, MANIFEST_NAME,
     MANIFEST_VERSION, Manifest, RepoMeta, StoreError, default_gmap_dir, is_gmap_stale,
     read_manifest_lenient, read_merged_sharded_meta, write_merged_sharded_meta,
@@ -184,7 +184,7 @@ fn write_layout(
 }
 
 /// The layout directory for a repo: `<repo>/.glia/graph`
-/// (`repo_graph_store::default_gmap_dir`). The one place cli and py ask where
+/// (`glia_store::default_gmap_dir`). The one place cli and py ask where
 /// a repo's graph lives; nothing is created.
 pub fn default_layout_dir(repo: &Path) -> PathBuf {
     default_gmap_dir(repo)

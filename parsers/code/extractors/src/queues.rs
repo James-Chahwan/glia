@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CodeNav, FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, evidence,
     node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{self, Anchor};
 use crate::queue_topic::{self, TopicForm, TopicRule};
@@ -878,7 +878,7 @@ fn emit_queue_nodes(
     module_id: NodeId,
     repo: RepoId,
     patterns: &[(&str, QueueFramework, &[&str], TopicRule)],
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     prefix: &str,
     resolve: Option<TopicResolver<'_>>,
     counts: &mut ConstFoldCounts,
@@ -1062,7 +1062,7 @@ fn record_site(
     topic: &str,
     framework: &QueueFramework,
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     prefix: &str,
     confidence: Confidence,
     (line, offset): (usize, usize),
@@ -1109,7 +1109,7 @@ fn finish(
     path: &str,
     module_id: NodeId,
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
 ) -> QueueNodes {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -1719,7 +1719,7 @@ fn push_callbacks(
 /// a whole module's first or last path segment)? Over-approximate on purpose:
 /// a name that might be an import goes to the graph's resolver as a ref.
 fn import_binds(fp: &FileParse, name: &str) -> bool {
-    use repo_graph_code_domain::ImportTarget;
+    use glia_code_domain::ImportTarget;
     fp.imports.iter().any(|i| match &i.target {
         ImportTarget::Symbol {
             name: sym, alias, ..
@@ -1792,7 +1792,7 @@ pub fn bind_consumer_callbacks(
     module_id: NodeId,
     callbacks: &[ConsumerCallback],
 ) -> CallbackStats {
-    use repo_graph_code_domain::{CallQualifier, UnresolvedRef};
+    use glia_code_domain::{CallQualifier, UnresolvedRef};
     let mut stats = CallbackStats::default();
     if callbacks.is_empty() {
         return stats;
@@ -2170,7 +2170,7 @@ fn message_type_cell(source: &str, anchors: &[usize]) -> Option<Cell> {
 }
 
 /// Grep-able proof that a needle passed its gate and produced a node.
-/// `GLIA_QUEUE_DEBUG=1 cargo test -p repo-graph-code-extractors -- --nocapture
+/// `GLIA_QUEUE_DEBUG=1 cargo test -p glia-code-extractors -- --nocapture
 ///  2>&1 | grep "\\[queues\\] needle '"`
 ///
 /// A2.4: a node minted by an annotation / attribute row gets a second,
@@ -2820,7 +2820,7 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
         }
     }
 
-    fn cell_of(n: &Node, kind: repo_graph_core::CellTypeId) -> &Cell {
+    fn cell_of(n: &Node, kind: glia_core::CellTypeId) -> &Cell {
         n.cells
             .iter()
             .find(|c| c.kind == kind)
@@ -3756,9 +3756,9 @@ public class AuditFunction
         );
         anchor::attach(&mut fp, PATH, module, &mut anchors);
         if imports {
-            fp.imports.push(repo_graph_code_domain::ImportStmt {
+            fp.imports.push(glia_code_domain::ImportStmt {
                 from_module: "test".into(),
-                target: repo_graph_code_domain::ImportTarget::Module {
+                target: glia_code_domain::ImportTarget::Module {
                     path: "kafkajs".into(),
                     alias: None,
                 },
@@ -3953,7 +3953,7 @@ public class AuditFunction
         replace_queue_nodes(&mut fp, module_id(), "typescript", fold);
         let literal = file_parse_spanned(LITERAL_SRC, false, Some((1, 2)));
 
-        type Triple = (NodeId, NodeId, repo_graph_core::EdgeCategoryId);
+        type Triple = (NodeId, NodeId, glia_core::EdgeCategoryId);
         let triples = |fp: &FileParse| -> Vec<Triple> {
             fp.edges
                 .iter()
@@ -4272,7 +4272,7 @@ await myconsumer.run({ eachMessage: notMine });\n";
             .collect()
     }
 
-    fn refs_from(fp: &FileParse, from: NodeId) -> Vec<repo_graph_code_domain::CallQualifier> {
+    fn refs_from(fp: &FileParse, from: NodeId) -> Vec<glia_code_domain::CallQualifier> {
         fp.refs
             .iter()
             .filter(|r| r.from == from && r.category == edge_category::HANDLED_BY)
@@ -4323,7 +4323,7 @@ await myconsumer.run({ eachMessage: notMine });\n";
 
     #[test]
     fn member_on_import_binding_becomes_a_ref() {
-        use repo_graph_code_domain::{CallQualifier, ImportStmt, ImportTarget};
+        use glia_code_domain::{CallQualifier, ImportStmt, ImportTarget};
         // `handlers` is an import binding, so `handlers.onOrder` goes to the
         // resolver even though the enclosing class declares an `onOrder`;
         // `w.onOrder` is not, so it binds to the class's own method.
@@ -4399,7 +4399,7 @@ await myconsumer.run({ eachMessage: notMine });\n";
         let orders = qid(node_kind::QUEUE_CONSUMER, "queue_consumer:orders");
         let start = qid(node_kind::METHOD, "test::Svc::start");
         let on_payment = qid(node_kind::METHOD, "test::Svc::onPayment");
-        let on_order = repo_graph_code_domain::CallQualifier::Bare("onOrder".into());
+        let on_order = glia_code_domain::CallQualifier::Bare("onOrder".into());
         assert_eq!(handled(&fp, sentinel), vec![start]);
         assert_eq!(refs_from(&fp, sentinel), vec![on_order.clone()]);
         assert_eq!(handled(&fp, payments), vec![start, on_payment]);

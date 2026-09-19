@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use ratatui::Frame;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{Edge, NodeId, NodeKindId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::{Edge, NodeId, NodeKindId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 use crate::modes;
 
@@ -34,7 +34,7 @@ pub struct AppState {
     pub all_nodes: Vec<NodeId>,
     pub all_edges: Vec<Edge>,
     pub meta: HashMap<NodeId, NodeMeta>,
-    pub adjacency_out: HashMap<NodeId, Vec<(NodeId, repo_graph_core::EdgeCategoryId)>>,
+    pub adjacency_out: HashMap<NodeId, Vec<(NodeId, glia_core::EdgeCategoryId)>>,
     pub seeds: Vec<NodeId>,
     pub seed_idx: usize,
     pub reload_count: u32,
@@ -169,7 +169,7 @@ impl AppState {
 
         let seeds = collect_seed_candidates(&meta, &all_nodes);
 
-        let mut adjacency_out: HashMap<NodeId, Vec<(NodeId, repo_graph_core::EdgeCategoryId)>> =
+        let mut adjacency_out: HashMap<NodeId, Vec<(NodeId, glia_core::EdgeCategoryId)>> =
             HashMap::new();
         for e in &all_edges {
             adjacency_out
@@ -390,7 +390,7 @@ impl AppState {
     }
 
     /// Outgoing neighbours of `id` as (other_id, edge_category).
-    pub fn out_neighbours(&self, id: NodeId) -> Vec<(NodeId, repo_graph_core::EdgeCategoryId)> {
+    pub fn out_neighbours(&self, id: NodeId) -> Vec<(NodeId, glia_core::EdgeCategoryId)> {
         self.adjacency_out
             .get(&id)
             .cloned()
@@ -398,7 +398,7 @@ impl AppState {
     }
 
     /// Incoming neighbours of `id`. We don't cache these; build on demand.
-    pub fn in_neighbours(&self, id: NodeId) -> Vec<(NodeId, repo_graph_core::EdgeCategoryId)> {
+    pub fn in_neighbours(&self, id: NodeId) -> Vec<(NodeId, glia_core::EdgeCategoryId)> {
         self.all_edges
             .iter()
             .filter(|e| e.to == id)

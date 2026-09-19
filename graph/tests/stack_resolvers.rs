@@ -1,6 +1,6 @@
-use repo_graph_code_domain::{CodeNav, edge_category, node_kind, GRAPH_TYPE};
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
-use repo_graph_graph::*;
+use glia_code_domain::{CodeNav, edge_category, node_kind, GRAPH_TYPE};
+use glia_core::{Confidence, Node, NodeId, RepoId};
+use glia_graph::*;
 
 fn repo_a() -> RepoId {
     RepoId::from_canonical("test://resolver/a")
@@ -22,7 +22,7 @@ fn make_graph(repo: RepoId, nodes: Vec<Node>, nav: CodeNav) -> RepoGraph {
     }
 }
 
-fn make_node(repo: RepoId, kind: repo_graph_core::NodeKindId, qname: &str, confidence: Confidence) -> (Node, NodeId) {
+fn make_node(repo: RepoId, kind: glia_core::NodeKindId, qname: &str, confidence: Confidence) -> (Node, NodeId) {
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
     let node = Node {
         id,
@@ -33,7 +33,7 @@ fn make_node(repo: RepoId, kind: repo_graph_core::NodeKindId, qname: &str, confi
     (node, id)
 }
 
-fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: repo_graph_core::NodeKindId) {
+fn record(nav: &mut CodeNav, id: NodeId, name: &str, qname: &str, kind: glia_core::NodeKindId) {
     nav.record(id, name, qname, kind, None);
 }
 
@@ -111,10 +111,10 @@ fn grpc_resolver_method_level_matches_service() {
 // shared `use` lines.
 
 /// An `RPC_PACKAGE` cell with exactly the given JSON payload.
-fn rpc_package_cell(json: &str) -> repo_graph_core::Cell {
-    repo_graph_core::Cell {
-        kind: repo_graph_code_domain::cell_type::RPC_PACKAGE,
-        payload: repo_graph_core::CellPayload::Json(json.to_string()),
+fn rpc_package_cell(json: &str) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::RPC_PACKAGE,
+        payload: glia_core::CellPayload::Json(json.to_string()),
     }
 }
 
@@ -583,10 +583,10 @@ fn queue_resolver_unresolved_producer_cannot_reach_a_real_consumer() {
 // ---- A2.7: broker-family gating + wildcard subscriptions -------------------
 
 /// The A2.8 provenance cell, in the exact shape `queues::finish` writes.
-fn family_cell(family: &str) -> repo_graph_core::Cell {
-    repo_graph_core::Cell {
-        kind: repo_graph_code_domain::cell_type::CODE,
-        payload: repo_graph_core::CellPayload::Json(format!(
+fn family_cell(family: &str) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::CODE,
+        payload: glia_core::CellPayload::Json(format!(
             r#"{{"framework":"X","family":"{family}","sites":[{{"file":"src/a.go","line":3}}]}}"#
         )),
     }
@@ -595,7 +595,7 @@ fn family_cell(family: &str) -> repo_graph_core::Cell {
 /// One queue side: (topic, one family per CODE cell — empty = no cell at all).
 type QueueSide<'a> = (&'a str, &'a [&'a str]);
 
-fn queue_side(repo: RepoId, kind: repo_graph_core::NodeKindId, prefix: &str, sides: &[QueueSide]) -> RepoGraph {
+fn queue_side(repo: RepoId, kind: glia_core::NodeKindId, prefix: &str, sides: &[QueueSide]) -> RepoGraph {
     let mut nav = CodeNav::default();
     let mut nodes = Vec::new();
     for (topic, families) in sides {
@@ -747,7 +747,7 @@ fn queue_resolver_ignores_catchall() {
 
 /// Resolve one GraphQL operation against a set of resolver names in another
 /// repo; returns the GRAPHQL_CALLS edges plus the ids to check them against.
-fn graphql_pairs(op: &str, resolvers: &[&str]) -> (Vec<repo_graph_core::Edge>, NodeId, Vec<NodeId>) {
+fn graphql_pairs(op: &str, resolvers: &[&str]) -> (Vec<glia_core::Edge>, NodeId, Vec<NodeId>) {
     let mut nav_a = CodeNav::default();
     let mut resolver_nodes = Vec::new();
     let mut resolver_ids = Vec::new();
@@ -1046,10 +1046,10 @@ fn event_resolver_keeps_string_topics_exact() {
 // an unowned side, a transport-scoped side pairs across owners.
 
 /// The ORIGIN the extractor writes on a transport-scoped event side.
-fn transport_origin() -> repo_graph_core::Cell {
-    repo_graph_core::Cell {
-        kind: repo_graph_code_domain::cell_type::ORIGIN,
-        payload: repo_graph_core::CellPayload::Json(
+fn transport_origin() -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::ORIGIN,
+        payload: glia_core::CellPayload::Json(
             r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#.into(),
         ),
     }
@@ -1061,7 +1061,7 @@ fn event_side(
     nodes: &mut Vec<Node>,
     nav: &mut CodeNav,
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     qname: &str,
     transport: bool,
 ) -> NodeId {
@@ -1230,7 +1230,7 @@ fn cli_resolver_pairs_subcommand_from_argv_cell() {
 
     let mut nav_b = CodeNav::default();
     let (mut inv_node, inv_id) = make_node(repo_b(), node_kind::CLI_INVOCATION, "cli_invoke:mytool", Confidence::Medium);
-    inv_node.cells.push(repo_graph_code_extractors::cli::argv_cell(
+    inv_node.cells.push(glia_code_extractors::cli::argv_cell(
         "mytool",
         &[vec!["migrate".into(), "--yes".into()], vec!["--dry-run".into(), "seed".into()]],
     ));
@@ -1301,19 +1301,19 @@ fn all_resolvers_compose_cleanly() {
 /// A `ROUTE_METHOD` cell in the plain-Text shape parser-ruby / -java / -csharp /
 /// -dart emit. Fully qualified rather than imported so this block does not touch
 /// the file's shared `use` lines.
-fn route_method_cell(method: &str) -> repo_graph_core::Cell {
-    repo_graph_core::Cell {
-        kind: repo_graph_code_domain::cell_type::ROUTE_METHOD,
-        payload: repo_graph_core::CellPayload::Text(method.to_string()),
+fn route_method_cell(method: &str) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::ROUTE_METHOD,
+        payload: glia_core::CellPayload::Text(method.to_string()),
     }
 }
 
 /// The ORIGIN cell A3.4's client-router extractors stamp on a browser
 /// navigation ROUTE. Spelled as a literal on purpose — see `http_nav_route.rs`.
-fn nav_route_cell() -> repo_graph_core::Cell {
-    repo_graph_core::Cell {
-        kind: repo_graph_code_domain::cell_type::ORIGIN,
-        payload: repo_graph_core::CellPayload::Json(
+fn nav_route_cell() -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::ORIGIN,
+        payload: glia_core::CellPayload::Json(
             r#"{"provenance":"nav_route"}"#.to_string(),
         ),
     }
@@ -1350,7 +1350,7 @@ fn endpoint_repo(repo: RepoId, endpoints: &[(&str, &str, Confidence)]) -> RepoGr
     make_graph(repo, nodes, nav)
 }
 
-fn http_edges(merged: &MergedGraph) -> Vec<repo_graph_core::Edge> {
+fn http_edges(merged: &MergedGraph) -> Vec<glia_core::Edge> {
     merged
         .cross_edges
         .iter()
@@ -1365,7 +1365,7 @@ fn resolved(server: RepoGraph, client: RepoGraph) -> MergedGraph {
     merged
 }
 
-fn node_id(repo: RepoId, kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+fn node_id(repo: RepoId, kind: glia_core::NodeKindId, qname: &str) -> NodeId {
     NodeId::from_parts(GRAPH_TYPE, repo, kind, qname)
 }
 

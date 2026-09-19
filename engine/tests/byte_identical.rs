@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use repo_graph_engine::{generate_one, generate_one_with_cache, ParseCache};
-use repo_graph_store::write_merged_sharded;
+use glia_engine::{generate_one, generate_one_with_cache, ParseCache};
+use glia_store::write_merged_sharded;
 
 /// Multi-language fixture: two shards (python + go) plus markdown docs, so
 /// shard naming/order, cross edges, and the docs graph are all exercised.

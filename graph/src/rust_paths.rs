@@ -1,6 +1,6 @@
 //! Rust crate-path call resolution (LA.1a): `crate::`, `self::`, `super::`,
 //! `Self::`, child-module, same-module type and workspace-crate paths
-//! (`repo_graph_engine::service_map(..)`) become CALLS edges the generic
+//! (`glia_engine::service_map(..)`) become CALLS edges the generic
 //! symbol-table walker cannot reach.
 //!
 //! The Rust parser already extracts the whole path: `a::b::c()` arrives as
@@ -40,12 +40,12 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category,
     node_kind, recv_stats,
 };
-use repo_graph_core::{CellPayload, NodeId, NodeKindId};
+use glia_core::{CellPayload, NodeId, NodeKindId};
 
 use crate::calls::{
     graph_evidence, position_file, push_edge, receiver_type, unique_global_function,
@@ -59,7 +59,7 @@ use crate::types::RepoGraph;
 #[non_exhaustive]
 pub struct RustCrate {
     /// Path identifier: the package name with `-` -> `_`
-    /// (`repo-graph-engine` -> `repo_graph_engine`).
+    /// (`glia-engine` -> `glia_engine`).
     pub name: String,
     /// Package dir as a qname prefix (`engine`; `""` for a package at the repo root).
     pub dir: String,
@@ -2108,8 +2108,8 @@ mod tests {
 
     use crate::build::build_rust;
     use crate::test_support::repo;
-    use repo_graph_code_domain::{FileParse, GRAPH_TYPE};
-    use repo_graph_core::{Confidence, Node};
+    use glia_code_domain::{FileParse, GRAPH_TYPE};
+    use glia_core::{Confidence, Node};
 
     /// One parsed file, built by hand in the Rust parser's shapes.
     struct File {

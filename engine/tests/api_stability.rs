@@ -16,7 +16,7 @@
 //! "Makes public" means named by a `pub use` in lib.rs (an explicit list, a
 //! single path, or a `module::*` glob, followed through that module's own
 //! `pub use`s), or declared at the top level of a `pub mod` slot lib.rs
-//! declares (`repo_graph_engine::find::FoundNode`). A unit resolver struct
+//! declares (`glia_engine::find::FoundNode`). A unit resolver struct
 //! (`pub struct XResolver;` with an `impl CrossGraphResolver for XResolver`)
 //! passes by rule: the engine constructs it in the resolver pass, which the
 //! attribute would forbid. A re-export from another crate (stamp's constants,

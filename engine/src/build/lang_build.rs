@@ -8,13 +8,13 @@ use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::{
     FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
 };
-use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
-use repo_graph_graph::{GraphError, RepoGraph};
-use repo_graph_graph::rust_paths::RustCrate;
+use glia_core::{EdgeCategoryId, NodeId, RepoId};
+use glia_graph::{GraphError, RepoGraph};
+use glia_graph::rust_paths::RustCrate;
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 
@@ -91,7 +91,7 @@ pub(super) fn build_language_graphs(
     // A14.2 `[kotlin] entities:` fired_on, counted off the parses so
     // cache-served files count too; the kotlin crate owns the line.
     if let Some((_, kotlin)) = parses_by_lang.iter().find(|(lang, _)| *lang == JVM_GUEST) {
-        repo_graph_parser_kotlin::trace(kotlin, repo_label);
+        glia_parser_kotlin::trace(kotlin, repo_label);
     }
     // A7.0 `[di]` marker input: INJECTS refs per language, counted off the
     // parses themselves so cache-served files count too. The TS-family tags
@@ -150,7 +150,7 @@ pub(super) fn build_language_graphs(
     }
     if !ts_family.is_empty() {
         build_one("typescript", ts_family, |parses| {
-            repo_graph_graph::build_typescript(repo, parses, |from, spec| {
+            glia_graph::build_typescript(repo, parses, |from, spec| {
                 resolve_ts_source_aliased(from, spec, ts_aliases)
             })
         })
@@ -182,15 +182,15 @@ fn build_solo(
     rust_crates: &[RustCrate],
 ) -> Result<RepoGraph, GraphError> {
     match lang {
-        "python" => repo_graph_graph::build_python(repo, parses),
-        "go" => repo_graph_graph::build_go(repo, parses),
+        "python" => glia_graph::build_python(repo, parses),
+        "go" => glia_graph::build_go(repo, parses),
         "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" | "elixir" => {
-            repo_graph_graph::build_dotted(repo, parses)
+            glia_graph::build_dotted(repo, parses)
         }
-        "rust" => repo_graph_graph::build_rust(repo, parses, rust_crates),
-        "ruby" => repo_graph_graph::build_ruby(repo, parses),
-        "c_cpp" => repo_graph_graph::build_c_cpp(repo, parses, resolve_include_source),
-        _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
+        "rust" => glia_graph::build_rust(repo, parses, rust_crates),
+        "ruby" => glia_graph::build_ruby(repo, parses),
+        "c_cpp" => glia_graph::build_c_cpp(repo, parses, resolve_include_source),
+        _ => glia_graph::build_typescript(repo, parses, resolve_relative_source),
     }
 }
 
@@ -258,7 +258,7 @@ fn build_one(
     }
 }
 
-/// An edge's identity without its cells ([`repo_graph_core::Edge::key`]).
+/// An edge's identity without its cells ([`glia_core::Edge::key`]).
 type EdgeKey = (NodeId, NodeId, EdgeCategoryId);
 
 /// LC.3a: the keys, with multiplicity, of the parse edges that reach the graph
@@ -410,7 +410,7 @@ impl HeritageTally {
     }
 }
 
-fn is_heritage(category: repo_graph_core::EdgeCategoryId) -> bool {
+fn is_heritage(category: glia_core::EdgeCategoryId) -> bool {
     category == edge_category::INHERITS_FROM || category == edge_category::IMPLEMENTS
 }
 
@@ -932,12 +932,12 @@ mod tests {
         to: u64,
         category: EdgeCategoryId,
         ev: Option<evidence::Evidence>,
-    ) -> repo_graph_core::Edge {
-        let e = repo_graph_core::Edge::new(
+    ) -> glia_core::Edge {
+        let e = glia_core::Edge::new(
             NodeId(from),
             NodeId(to),
             category,
-            repo_graph_core::Confidence::Strong,
+            glia_core::Confidence::Strong,
         );
         match ev {
             Some(ev) => e.with_cell(ev.to_cell()),
@@ -1173,7 +1173,7 @@ mod ts_alias_tests {
     /// IMPORTS library cell while the real package stays.
     #[test]
     fn an_aliased_import_is_an_edge_and_leaves_the_library_cell() {
-        use repo_graph_core::CellPayload;
+        use glia_core::CellPayload;
 
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), "web/package.json", r#"{"name":"web","dependencies":{"@angular/core":"18.0.0"}}"#);

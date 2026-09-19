@@ -7,12 +7,12 @@
 //! used to skip), the post-pass provenance tagger leaves the contract ORIGIN
 //! alone, and `locate_node` answers with the declaring file and line.
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::{generate_one, locate_node};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellPayload, NodeId};
+use glia_engine::{generate_one, locate_node};
 
 /// Every MESSAGE_TYPE in the build as `(qname, id, ORIGIN payload)`, sorted.
-fn message_types(merged: &repo_graph_graph::MergedGraph) -> Vec<(String, NodeId, String)> {
+fn message_types(merged: &glia_graph::MergedGraph) -> Vec<(String, NodeId, String)> {
     let mut out = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {

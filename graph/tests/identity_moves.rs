@@ -6,13 +6,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::identity::{
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_graph::identity::{
     FileMove, Identity, IdentityIndex, MoveMap, MoveTier, Rebind, carry_file_tokens, detect_moves,
     detect_moves_with, identity_of,
 };
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 fn repo() -> RepoId {
     RepoId::from_canonical("test://identity_moves")

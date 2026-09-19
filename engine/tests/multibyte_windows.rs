@@ -19,8 +19,8 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_engine::generate_one;
+use glia_code_domain::node_kind;
+use glia_engine::generate_one;
 
 /// One anchor per cross-cutting extractor needle (54). Each is written next to
 /// a 4-byte char at every pad that puts a window cut inside it.

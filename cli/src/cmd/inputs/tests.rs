@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use glia_snapshots::{TestsIngestOptions, TestsSummary, tests_ingest};
-use repo_graph_code_domain::snapshots::tests_dir;
+use glia_code_domain::snapshots::tests_dir;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {

@@ -258,6 +258,418 @@ dependencies = [
 ]
 
 [[package]]
+name = "glia-activation"
+version = "0.4.6"
+dependencies = [
+ "glia-core",
+]
+
+[[package]]
+name = "glia-code-domain"
+version = "0.4.3"
+dependencies = [
+ "base64",
+ "glia-activation",
+ "glia-core",
+ "ignore",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-code-extractors"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "glia-core"
+version = "0.4.1"
+dependencies = [
+ "rkyv",
+ "serde",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-doc"
+version = "0.4.13"
+dependencies = [
+ "tree-sitter",
+]
+
+[[package]]
+name = "glia-engine"
+version = "0.4.18"
+dependencies = [
+ "bincode",
+ "glia-activation",
+ "glia-code-domain",
+ "glia-code-extractors",
+ "glia-core",
+ "glia-graph",
+ "glia-parser-angular",
+ "glia-parser-c-cpp",
+ "glia-parser-clojure",
+ "glia-parser-csharp",
+ "glia-parser-dart",
+ "glia-parser-elixir",
+ "glia-parser-go",
+ "glia-parser-java",
+ "glia-parser-kotlin",
+ "glia-parser-php",
+ "glia-parser-python",
+ "glia-parser-react",
+ "glia-parser-ruby",
+ "glia-parser-rust",
+ "glia-parser-scala",
+ "glia-parser-solidity",
+ "glia-parser-swift",
+ "glia-parser-terraform",
+ "glia-parser-typescript",
+ "glia-parser-vue",
+ "glia-stamp",
+ "glia-store",
+ "rayon",
+ "serde",
+ "serde_json",
+ "twox-hash",
+]
+
+[[package]]
+name = "glia-engram-export"
+version = "0.4.13"
+dependencies = [
+ "bincode",
+ "clap",
+ "engram-core",
+ "glia-code-domain",
+ "glia-core",
+ "glia-engine",
+ "glia-graph",
+ "serde_json",
+]
+
+[[package]]
+name = "glia-graph"
+version = "0.4.3"
+dependencies = [
+ "glia-activation",
+ "glia-code-domain",
+ "glia-code-extractors",
+ "glia-core",
+ "glia-parser-go",
+ "glia-parser-python",
+ "glia-parser-typescript",
+ "thiserror",
+]
+
+[[package]]
+name = "glia-parser-angular"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-c-cpp"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+]
+
+[[package]]
+name = "glia-parser-clojure"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-clojure-orchard",
+]
+
+[[package]]
+name = "glia-parser-csharp"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
+]
+
+[[package]]
+name = "glia-parser-dart"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-dart",
+]
+
+[[package]]
+name = "glia-parser-elixir"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-elixir",
+]
+
+[[package]]
+name = "glia-parser-go"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-go",
+]
+
+[[package]]
+name = "glia-parser-java"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-java",
+]
+
+[[package]]
+name = "glia-parser-kotlin"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "tree-sitter",
+ "tree-sitter-kotlin-ng",
+]
+
+[[package]]
+name = "glia-parser-php"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-php",
+]
+
+[[package]]
+name = "glia-parser-python"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-python",
+]
+
+[[package]]
+name = "glia-parser-react"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-ruby"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-ruby",
+]
+
+[[package]]
+name = "glia-parser-rust"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "glia-parser-scala"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-scala",
+]
+
+[[package]]
+name = "glia-parser-solidity"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-solidity",
+]
+
+[[package]]
+name = "glia-parser-swift"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-swift",
+]
+
+[[package]]
+name = "glia-parser-terraform"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-hcl",
+]
+
+[[package]]
+name = "glia-parser-typescript"
+version = "0.4.3"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-doc",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-parser-vue"
+version = "0.4.9"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-parser-typescript",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "glia-stamp"
+version = "0.4.18"
+
+[[package]]
+name = "glia-store"
+version = "0.4.18"
+dependencies = [
+ "glia-code-domain",
+ "glia-core",
+ "glia-graph",
+ "glia-stamp",
+ "memmap2",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "twox-hash",
+]
+
+[[package]]
 name = "globset"
 version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -499,418 +911,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cadadef317c2f20755a64d7fdc48f9e7178ee6b0e1f7fce33fa60f1d68a276e6"
 dependencies = [
  "bytecheck",
-]
-
-[[package]]
-name = "repo-graph-activation"
-version = "0.4.6"
-dependencies = [
- "repo-graph-core",
-]
-
-[[package]]
-name = "repo-graph-code-domain"
-version = "0.4.3"
-dependencies = [
- "base64",
- "ignore",
- "repo-graph-activation",
- "repo-graph-core",
- "rkyv",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "twox-hash",
-]
-
-[[package]]
-name = "repo-graph-code-extractors"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "repo-graph-core"
-version = "0.4.1"
-dependencies = [
- "rkyv",
- "serde",
- "thiserror",
- "twox-hash",
-]
-
-[[package]]
-name = "repo-graph-doc"
-version = "0.4.13"
-dependencies = [
- "tree-sitter",
-]
-
-[[package]]
-name = "repo-graph-engine"
-version = "0.4.18"
-dependencies = [
- "bincode",
- "rayon",
- "repo-graph-activation",
- "repo-graph-code-domain",
- "repo-graph-code-extractors",
- "repo-graph-core",
- "repo-graph-graph",
- "repo-graph-parser-angular",
- "repo-graph-parser-c-cpp",
- "repo-graph-parser-clojure",
- "repo-graph-parser-csharp",
- "repo-graph-parser-dart",
- "repo-graph-parser-elixir",
- "repo-graph-parser-go",
- "repo-graph-parser-java",
- "repo-graph-parser-kotlin",
- "repo-graph-parser-php",
- "repo-graph-parser-python",
- "repo-graph-parser-react",
- "repo-graph-parser-ruby",
- "repo-graph-parser-rust",
- "repo-graph-parser-scala",
- "repo-graph-parser-solidity",
- "repo-graph-parser-swift",
- "repo-graph-parser-terraform",
- "repo-graph-parser-typescript",
- "repo-graph-parser-vue",
- "repo-graph-stamp",
- "repo-graph-store",
- "serde",
- "serde_json",
- "twox-hash",
-]
-
-[[package]]
-name = "repo-graph-engram-export"
-version = "0.4.13"
-dependencies = [
- "bincode",
- "clap",
- "engram-core",
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-engine",
- "repo-graph-graph",
- "serde_json",
-]
-
-[[package]]
-name = "repo-graph-graph"
-version = "0.4.3"
-dependencies = [
- "repo-graph-activation",
- "repo-graph-code-domain",
- "repo-graph-code-extractors",
- "repo-graph-core",
- "repo-graph-parser-go",
- "repo-graph-parser-python",
- "repo-graph-parser-typescript",
- "thiserror",
-]
-
-[[package]]
-name = "repo-graph-parser-angular"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-c-cpp"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-c",
- "tree-sitter-cpp",
-]
-
-[[package]]
-name = "repo-graph-parser-clojure"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-clojure-orchard",
-]
-
-[[package]]
-name = "repo-graph-parser-csharp"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-c-sharp",
-]
-
-[[package]]
-name = "repo-graph-parser-dart"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-dart",
-]
-
-[[package]]
-name = "repo-graph-parser-elixir"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-elixir",
-]
-
-[[package]]
-name = "repo-graph-parser-go"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-go",
-]
-
-[[package]]
-name = "repo-graph-parser-java"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-java",
-]
-
-[[package]]
-name = "repo-graph-parser-kotlin"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "tree-sitter",
- "tree-sitter-kotlin-ng",
-]
-
-[[package]]
-name = "repo-graph-parser-php"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-php",
-]
-
-[[package]]
-name = "repo-graph-parser-python"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-python",
-]
-
-[[package]]
-name = "repo-graph-parser-react"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-ruby"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-ruby",
-]
-
-[[package]]
-name = "repo-graph-parser-rust"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "repo-graph-parser-scala"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-scala",
-]
-
-[[package]]
-name = "repo-graph-parser-solidity"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-solidity",
-]
-
-[[package]]
-name = "repo-graph-parser-swift"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-swift",
-]
-
-[[package]]
-name = "repo-graph-parser-terraform"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-hcl",
-]
-
-[[package]]
-name = "repo-graph-parser-typescript"
-version = "0.4.3"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-doc",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-parser-vue"
-version = "0.4.9"
-dependencies = [
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-parser-typescript",
- "serde",
- "serde_json",
- "thiserror",
- "tree-sitter",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "repo-graph-stamp"
-version = "0.4.18"
-
-[[package]]
-name = "repo-graph-store"
-version = "0.4.18"
-dependencies = [
- "memmap2",
- "repo-graph-code-domain",
- "repo-graph-core",
- "repo-graph-graph",
- "repo-graph-stamp",
- "rkyv",
- "serde",
- "serde_json",
- "thiserror",
- "twox-hash",
 ]
 
 [[package]]

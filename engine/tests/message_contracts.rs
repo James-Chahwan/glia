@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::{MessageContractRow, generate_many, generate_one, message_contracts};
+use glia_engine::{MessageContractRow, generate_many, generate_one, message_contracts};
 
 fn write(root: &Path, rel: &str, body: &str) {
     let p = root.join(rel);

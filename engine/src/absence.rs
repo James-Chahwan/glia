@@ -20,7 +20,7 @@
 //! lookup) and the `mechanisms_for_kind` table.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::absence::<item>`, never flattened into the
+//! reached as `glia_engine::absence::<item>`, never flattened into the
 //! crate root.
 //!
 //! fired_on marker, one line per absence built:
@@ -29,9 +29,9 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeKindId;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::NodeKindId;
+use glia_graph::MergedGraph;
 
 use crate::coverage::{CoverageNote, caveats_for, ext_to_language};
 use crate::find::FoundNode;
@@ -273,7 +273,7 @@ pub(crate) fn mechanisms_for_kind(kind: NodeKindId) -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::edge_category;
+    use glia_code_domain::edge_category;
 
     #[test]
     fn every_mechanism_is_an_edge_category_spelling() {

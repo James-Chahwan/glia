@@ -45,8 +45,8 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor};
 
@@ -166,7 +166,7 @@ fn push_node(
     out: &mut TrpcNodes,
     name: &str,
     qname: &str,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     confidence: Confidence,
     module_id: NodeId,
     repo: RepoId,

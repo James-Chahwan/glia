@@ -8,12 +8,12 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
-use repo_graph_engine::{
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_engine::{
     GenerateResult, ParseCache, generate_many, generate_one, generate_one_with_cache, service_map,
 };
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 fn build(fixture: &str, dirs: &[&str]) -> GenerateResult {
     let root = format!(
@@ -248,7 +248,7 @@ fn twirp_procedures_and_calls_pair() {
 
 #[test]
 fn arch_shows_rpc_links() {
-    assert!(repo_graph_engine::arch::FLOW_MECHANISMS.contains(&edge_category::RPC_CALLS));
+    assert!(glia_engine::arch::FLOW_MECHANISMS.contains(&edge_category::RPC_CALLS));
     let r = build("xcut-connect-rpc", &["server", "client", "web"]);
     let map = service_map(&r.merged, &r.repo_labels);
     let rpc: Vec<(&str, &str)> = map
@@ -286,7 +286,7 @@ fn write(dir: &Path, rel: &str, body: &str) {
 }
 
 fn store_bytes(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(m, dir).expect("store writes");
+    glia_store::write_merged_sharded(m, dir).expect("store writes");
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .expect("store dir")
         .flatten()

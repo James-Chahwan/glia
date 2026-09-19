@@ -14,11 +14,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_engine::trace::{EXPANSION_BUDGET, TraceAnswer, TraceOptions, cross_stack_trace};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_engine::trace::{EXPANSION_BUDGET, TraceAnswer, TraceOptions, cross_stack_trace};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 const CHECKOUT_TS: &str = "export async function placeOrder(body: unknown) {\n  return fetch('/orders', { method: 'POST', body: JSON.stringify(body) });\n}\n";
 const API_PY: &str = "import requests\nfrom kafka import KafkaProducer\nfrom flask import Flask\n\napp = Flask(__name__)\nproducer = KafkaProducer()\n\n\ndef audit(order):\n    return order\n\n\ndef bill(order):\n    return requests.post('/charge', json=order)\n\n\ndef enqueue(order):\n    producer.send('orders', order)\n\n\ndef save(order):\n    return audit(order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    save(order)\n    bill(order)\n    enqueue(order)\n    return order\n";
@@ -342,7 +342,7 @@ fn a_manifest_rooted_monorepo_crosses_services_where_glia_arch_does() {
     assert_eq!(p.cross_service_hops, 2);
 
     // The same links `glia arch` draws on this tree.
-    let map = repo_graph_engine::service_map(&m, &Default::default());
+    let map = glia_engine::service_map(&m, &Default::default());
     let links: Vec<(&str, &str, &str)> = map
         .links
         .iter()

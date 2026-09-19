@@ -3,11 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     ImportStmt, ImportTarget, bare_module_qname, edge_category, evidence, node_kind,
     same_stem_order,
 };
-use repo_graph_core::NodeId;
+use glia_core::NodeId;
 
 use crate::build::{DirImport, GoPackages};
 use crate::calls::{graph_evidence, push_edge, unique_global_function, unique_global_module};
@@ -613,9 +613,9 @@ mod tests {
     use super::*;
     use crate::build::{build_dotted, build_typescript};
     use crate::test_support::repo;
-    use repo_graph_code_domain::evidence::Evidence;
-    use repo_graph_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, cell_type};
-    use repo_graph_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeKindId};
+    use glia_code_domain::evidence::Evidence;
+    use glia_code_domain::{CallQualifier, CallSite, FileParse, GRAPH_TYPE, cell_type};
+    use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeKindId};
 
     #[test]
     fn relative_import_resolution() {

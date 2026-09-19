@@ -2,7 +2,7 @@
 //!
 //! `bfs` and `predecessors` used to scan the whole edge list for every node
 //! they dequeued — O(visited x E), 1.6e9 edge checks on a 40,000-node chain.
-//! They now walk a CSR index (`repo_graph_activation::algo::Adjacency`), so a
+//! They now walk a CSR index (`glia_activation::algo::Adjacency`), so a
 //! walk over a 40k chain is linear. The budget below sits well above what the
 //! index needs in a debug build and well below what the scan loop took, so the
 //! test fails on the quadratic walk without being timing-flaky on the linear
@@ -11,9 +11,9 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_graph::{RepoGraph, SymbolTable};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_graph::{RepoGraph, SymbolTable};
 
 const N: usize = 40_000;
 const BUDGET: Duration = Duration::from_secs(1);

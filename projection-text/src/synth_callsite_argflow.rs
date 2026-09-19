@@ -11,10 +11,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_graph::RepoGraph;
-use repo_graph_parser_python::extract_calls_with_args;
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_graph::RepoGraph;
+use glia_parser_python::extract_calls_with_args;
 
 use crate::driver_utils::{extract_code_cell, node_by_qname_index, reverse_qname_index};
 

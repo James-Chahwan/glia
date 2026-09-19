@@ -7,8 +7,8 @@
 //! vue-router tables (`{ path: '/x', component: X, children: [...] }`) are
 //! the shared route-table walker's (`crate::nav_routes`, LA.6b).
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_core::{Confidence, Node, NodeId, RepoId};
 
 pub struct VueNodes {
     pub nodes: Vec<Node>,
@@ -159,8 +159,8 @@ fn dedup(mut v: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CallQualifier, cell_type, edge_category};
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::{CallQualifier, cell_type, edge_category};
+    use glia_core::CellPayload;
 
     fn repo() -> RepoId {
         RepoId(1)

@@ -47,7 +47,7 @@
 //! are connected, never the reason one depends on the other.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::why::<item>`, never flattened into the
+//! reached as `glia_engine::why::<item>`, never flattened into the
 //! crate root.
 //!
 //! fired_on marker, one line per answered call:
@@ -56,11 +56,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence, plural};
 use crate::answers::Locator;
@@ -568,7 +568,7 @@ fn basis_name(b: Basis) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::evidence::STAGES;
+    use glia_code_domain::evidence::STAGES;
 
     #[test]
     fn every_documented_stage_has_a_tier() {

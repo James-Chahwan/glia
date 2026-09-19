@@ -30,10 +30,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId};
-use repo_graph_graph::RepoGraph;
-use repo_graph_projection_text::driver_utils::{build_repo_graph, write_json};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId};
+use glia_graph::RepoGraph;
+use glia_projection_text::driver_utils::{build_repo_graph, write_json};
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -256,9 +256,9 @@ fn collect_sinks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::RepoId;
-    use repo_graph_graph::build_python;
-    use repo_graph_parser_python::parse_file;
+    use glia_core::RepoId;
+    use glia_graph::build_python;
+    use glia_parser_python::parse_file;
 
     fn graph_for(src: &str) -> RepoGraph {
         let repo = RepoId::from_canonical("test");

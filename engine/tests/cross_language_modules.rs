@@ -14,10 +14,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId};
-use repo_graph_engine::{generate_one, generate_one_incremental};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId};
+use glia_engine::{generate_one, generate_one_incremental};
+use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/module-cross-language";
 
@@ -163,7 +163,7 @@ fn same_stem_files_of_two_build_groups_keep_separate_identities() {
 
 /// The whole store, file by file, for a byte comparison.
 fn store_bytes(merged: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
+    glia_store::write_merged_sharded(merged, dir).expect("write_merged_sharded");
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .expect("read store dir")
         .flatten()
@@ -247,10 +247,10 @@ fn the_requalified_file_counts_as_reparsed() {
     // MODULE qname is reported reparsed, the file that really was.
     let tmp = fixture_copy();
     let repo = repo_of(&tmp);
-    let mut cache = repo_graph_engine::ParseCache::new();
-    repo_graph_engine::generate_one_with_cache(&repo, &mut cache).expect("cold");
+    let mut cache = glia_engine::ParseCache::new();
+    glia_engine::generate_one_with_cache(&repo, &mut cache).expect("cold");
     std::fs::remove_file(Path::new(&repo).join("api/user.ts")).expect("rm user.ts");
-    repo_graph_engine::generate_one_with_cache(&repo, &mut cache).expect("warm");
+    glia_engine::generate_one_with_cache(&repo, &mut cache).expect("warm");
     let diff = cache.last_diff().expect("a recorded diff");
     assert!(diff.reparsed.contains(&"api/user.py".to_string()), "{diff:?}");
     assert!(!diff.reused.contains(&"api/user.py".to_string()), "{diff:?}");
@@ -263,7 +263,7 @@ fn the_requalified_file_counts_as_reparsed() {
 /// module's file, basis `file`; edges an endpoint locates keep their basis.
 #[test]
 fn synthetic_module_edges_are_placed_at_their_file() {
-    use repo_graph_code_domain::evidence::{Basis, Evidence};
+    use glia_code_domain::evidence::{Basis, Evidence};
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path().join("repo");

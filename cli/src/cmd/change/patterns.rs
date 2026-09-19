@@ -39,8 +39,8 @@
 //! in, beside the engine's `[patterns] experimental populations=..` line (and
 //! `[patterns] delta touched_nodes=..` in delta mode).
 
-use repo_graph_engine::delta::graph_delta_vs_rev;
-use repo_graph_engine::patterns::{
+use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::patterns::{
     DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, PatternArgs, PatternReport, Population,
     pattern_conformance, pattern_conformance_delta,
 };

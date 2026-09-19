@@ -10,16 +10,16 @@
 //!
 //! Transport only: the walk, the tiers, the location of every row and the
 //! `[tests-for] seeds=..` marker live in the engine. The helpers the pyo3
-//! entry points delegate to are pyo3-free, so `cargo test -p repo-graph-py`
+//! entry points delegate to are pyo3-free, so `cargo test -p glia-py`
 //! covers them (see the crate doc).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::tests_for::{
+use glia_engine::tests_for::{
     TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
 };
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -160,7 +160,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use repo_graph_engine::tests_for::DEFAULT_MAX_DEPTH;
+    use glia_engine::tests_for::DEFAULT_MAX_DEPTH;
 
     use super::*;
 
@@ -240,7 +240,7 @@ def place(order):\n    return price(order)\n";
     #[test]
     fn graph_helpers_return_the_documented_object() {
         let (_scratch, top) = shop("graph");
-        let built = repo_graph_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
+        let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
         let a = qname_answer(
             &built.merged,
             &["price".to_string()],

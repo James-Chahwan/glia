@@ -55,8 +55,8 @@
 //!   - CI variable definitions (GHA `env:`, GitLab CI variables) — reads
 //!     covered via shell `$VAR` if needed in v0.5+.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct ConfigNodes {
     pub nodes: Vec<Node>,
@@ -1366,7 +1366,7 @@ services:
     }
 
     /// Categories of every edge into the node with `qname`.
-    fn edge_to(out: &ConfigNodes, qname: &str) -> Vec<repo_graph_core::EdgeCategoryId> {
+    fn edge_to(out: &ConfigNodes, qname: &str) -> Vec<glia_core::EdgeCategoryId> {
         let Some(id) = out.nav.qname_by_id.iter().find(|(_, q)| *q == qname).map(|(id, _)| *id)
         else {
             return vec![];

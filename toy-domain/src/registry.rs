@@ -12,7 +12,7 @@
 /// Node kinds. Nodes carry no names: a node is addressed by its kind and its
 /// index in the reel (`shot 2`), kept in the domain's `ReelNav` section.
 pub mod node_kind {
-    use repo_graph_core::NodeKindId;
+    use glia_core::NodeKindId;
 
     pub const SCENE: NodeKindId = NodeKindId(1);
     pub const SHOT: NodeKindId = NodeKindId(2);
@@ -23,7 +23,7 @@ pub mod node_kind {
 
 /// Edge categories.
 pub mod edge_category {
-    use repo_graph_core::EdgeCategoryId;
+    use glia_core::EdgeCategoryId;
 
     /// scene -> shot: the shot belongs to the scene.
     pub const CONTAINS_SHOT: EdgeCategoryId = EdgeCategoryId(1);
@@ -45,7 +45,7 @@ pub mod edge_category {
 
 /// Cell types.
 pub mod cell_type {
-    use repo_graph_core::CellTypeId;
+    use glia_core::CellTypeId;
 
     /// On a shot: Json `{"start_ms":N,"end_ms":M}`.
     pub const TIMECODE: CellTypeId = CellTypeId(1);

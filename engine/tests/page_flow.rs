@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use repo_graph_engine::generate_one;
-use repo_graph_engine::pages::{PageFlow, page_flow};
+use glia_engine::generate_one;
+use glia_engine::pages::{PageFlow, page_flow};
 
 fn write(root: &Path, rel: &str, body: &str) {
     let path = root.join(rel);

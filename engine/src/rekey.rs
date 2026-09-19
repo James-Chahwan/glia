@@ -14,8 +14,8 @@
 //! Module slot declared by L0.2 so its owner edits only this file.
 //! Crate-private: cross-module items are `pub(crate)`.
 
-use repo_graph_code_domain::{CodeNav, FileParse};
-use repo_graph_core::NodeId;
+use glia_code_domain::{CodeNav, FileParse};
+use glia_core::NodeId;
 
 /// Move `old`'s place in the nav to `new`: drop its name/qname/kind, hand
 /// over its parent slot (keeping its position among the siblings) and its
@@ -134,13 +134,13 @@ pub(crate) fn rekey_node(fp: &mut FileParse, old: NodeId, new: NodeId, qname: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CallQualifier, CallSite, GRAPH_TYPE, UnresolvedRef, cell_type};
-    use repo_graph_code_domain::{edge_category, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, RepoId};
+    use glia_code_domain::{CallQualifier, CallSite, GRAPH_TYPE, UnresolvedRef, cell_type};
+    use glia_code_domain::{edge_category, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Edge, Node, RepoId};
 
     const REPO: RepoId = RepoId(11);
 
-    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, REPO, kind, qname)
     }
 
@@ -153,7 +153,7 @@ mod tests {
         }
     }
 
-    fn edge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+    fn edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
         Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
     }
 

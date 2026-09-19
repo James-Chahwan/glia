@@ -14,13 +14,13 @@
 
 use std::collections::HashMap;
 
-use repo_graph_activation::Direction;
-use repo_graph_engine::profile::CODE_PROFILE;
-use repo_graph_engine::{
+use glia_activation::Direction;
+use glia_engine::profile::CODE_PROFILE;
+use glia_engine::{
     BlastAnswer, BlastOptions, blast_radius, entrypoint_reachable, generate_many, resolve_signal_located,
 };
-use repo_graph_graph::{MergedGraph, Reach};
-use repo_graph_core::NodeId;
+use glia_graph::{MergedGraph, Reach};
+use glia_core::NodeId;
 
 fn fixture() -> MergedGraph {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/xstack-go-http");

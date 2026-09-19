@@ -10,15 +10,15 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::walk_gating::repo_identity;
-use repo_graph_engine::cache::content_hash;
-use repo_graph_engine::{GenerateResult, ParseCache, generate_many, generate_many_incremental};
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::walk_gating::repo_identity;
+use glia_engine::cache::content_hash;
+use glia_engine::{GenerateResult, ParseCache, generate_many, generate_many_incremental};
+use glia_store::write_merged_sharded;
 
 /// `<repo>/.glia/graph/parse_cache.bin` — the store's layout dir (which the
 /// engine's private `cache::gmap_dir` returns) + `CACHE_FILE`.
 fn sidecar(repo: &Path) -> PathBuf {
-    repo_graph_store::default_gmap_dir(repo).join("parse_cache.bin")
+    glia_store::default_gmap_dir(repo).join("parse_cache.bin")
 }
 
 const A_PY: &str = "import requests\n\ndef foo():\n    \"\"\"Frobnicates.\"\"\"\n    return requests.get(\"http://svc-b/api/items\")\n\ndef bar():\n    return foo()\n";

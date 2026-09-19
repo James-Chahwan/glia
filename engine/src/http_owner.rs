@@ -74,10 +74,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::{split_owner, with_owner};
-use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{FileParse, GRAPH_TYPE, node_kind};
-use repo_graph_core::{NodeId, NodeKindId, RepoId};
+use glia_code_domain::endpoint::{split_owner, with_owner};
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::{FileParse, GRAPH_TYPE, node_kind};
+use glia_core::{NodeId, NodeKindId, RepoId};
 
 use crate::arch::node_file;
 use crate::rekey::rekey_node;
@@ -550,8 +550,8 @@ fn module_file(fp: &FileParse) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{cell_type, edge_category};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node};
+    use glia_code_domain::{cell_type, edge_category};
+    use glia_core::{Cell, CellPayload, Confidence, Edge, Node};
 
     const REPO: RepoId = RepoId(5);
 

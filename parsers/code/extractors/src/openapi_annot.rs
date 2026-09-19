@@ -25,8 +25,8 @@
 //!
 //! Parsers EXTRACT: this reads one file's text plus its own `FileParse`.
 
-use repo_graph_code_domain::{FileParse, cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, NodeId, RepoId};
+use glia_code_domain::{FileParse, cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId, RepoId};
 
 use crate::anchor;
 use crate::contracts::{
@@ -1272,8 +1272,8 @@ fn word<'a>(t: &Tok<'a>) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::GRAPH_TYPE;
-    use repo_graph_core::{Cell, Confidence, Edge, Node};
+    use glia_code_domain::GRAPH_TYPE;
+    use glia_core::{Cell, Confidence, Edge, Node};
 
     const REPO: RepoId = RepoId(1);
 

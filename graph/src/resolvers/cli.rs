@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_code_extractors::cli::parse_argv_cell;
-use repo_graph_core::{Confidence, Edge, NodeId};
+use glia_code_domain::{edge_category, node_kind};
+use glia_code_extractors::cli::parse_argv_cell;
+use glia_core::{Confidence, Edge, NodeId};
 
 use super::{CrossGraphResolver, build_kind_index, weakest};
 use crate::merged::MergedGraph;
@@ -133,9 +133,9 @@ mod tests {
     /// and pairs, Weak, with the Symfony command `cli:app:sync-orders`.
     #[test]
     fn subcommand_token_may_contain_colon() {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_code_extractors::cli::argv_cell;
-        use repo_graph_core::{Node, RepoId};
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_code_extractors::cli::argv_cell;
+        use glia_core::{Node, RepoId};
 
         use crate::types::{RepoGraph, SymbolTable};
 

@@ -3,7 +3,7 @@
 //! with its located evidence. Exit 0 clean, 1 on a violation, 2 on a build
 //! failure or a rule that could not be evaluated. `--json` is the report.
 
-use repo_graph_engine::check::{
+use glia_engine::check::{
     CheckReport, FORBID_EDGE, MAX_EVIDENCE, Violation, ViolationEdge, check,
 };
 

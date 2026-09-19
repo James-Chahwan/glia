@@ -75,9 +75,9 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{CallQualifier, UnresolvedRef, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{CallQualifier, UnresolvedRef, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
 
 use crate::calls::{SiteFiles, graph_evidence, position_file};
 use crate::resolvers::{normalise_http_path, weakest};

@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, canonical_http_path, client_url_split, push_client_endpoint_with,
     route_qname,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -336,7 +336,7 @@ fn collect_ns(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
 // ============================================================================
 //
 // A Clojure docstring is not a comment: it is the string literal after the
-// name INSIDE the defining form, so `repo_graph_doc::leading_doc` (which walks
+// name INSIDE the defining form, so `glia_doc::leading_doc` (which walks
 // preceding comment siblings) never sees it. Clojure's own precedence, lowest
 // first: `^{:doc ".."}` metadata on the name symbol, then the docstring, then
 // an attr-map `{:doc ".."}` right after it (defn / defmacro / ns only). A
@@ -358,7 +358,7 @@ enum DocForm {
 }
 
 /// The docstring of a defining form, cleaned to the one-line shape
-/// `repo_graph_doc::leading_doc` produces. `None` when the form has none, so
+/// `glia_doc::leading_doc` produces. `None` when the form has none, so
 /// the caller falls back to the comment above it.
 fn form_docstring(list: TsNode, src: &[u8], form: DocForm) -> Option<String> {
     let vals: Vec<TsNode> = values(list).collect();
@@ -419,7 +419,7 @@ fn map_doc<'a>(map: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
 /// Decode a docstring's escapes (`\"`, `\\`, `\uXXXX`; `\n` `\t` `\r` `\f`
 /// `\b` are whitespace), collapse every whitespace run (the docstring's
 /// continuation-line indent included) to one space, and cap at
-/// [`repo_graph_doc::DOC_MAX`] bytes on a char boundary.
+/// [`glia_doc::DOC_MAX`] bytes on a char boundary.
 fn clean_docstring(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars();
@@ -445,10 +445,10 @@ fn clean_docstring(raw: &str) -> String {
         }
     }
     let joined = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    if joined.len() <= repo_graph_doc::DOC_MAX {
+    if joined.len() <= glia_doc::DOC_MAX {
         return joined;
     }
-    let mut end = repo_graph_doc::DOC_MAX;
+    let mut end = glia_doc::DOC_MAX;
     while !joined.is_char_boundary(end) {
         end -= 1;
     }
@@ -994,7 +994,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -1009,10 +1009,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str, doc: Option<String>) 
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = doc.or_else(|| repo_graph_doc::leading_doc(node, src)) {
+    if let Some(doc) = doc.or_else(|| glia_doc::leading_doc(node, src)) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -1172,7 +1172,7 @@ mod tests {
     (count (:body r))))
 "#;
 
-    fn kind_count(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> usize {
+    fn kind_count(fp: &FileParse, kind: glia_core::NodeKindId) -> usize {
         fp.nav.kind_by_id.values().filter(|k| **k == kind).count()
     }
 
@@ -1193,7 +1193,7 @@ mod tests {
     }
 
     fn ep_id(method: &str, path: &str) -> NodeId {
-        repo_graph_code_domain::endpoint::endpoint_id(repo(), method, path)
+        glia_code_domain::endpoint::endpoint_id(repo(), method, path)
     }
 
     fn has_calls(fp: &FileParse, from: NodeId, to: NodeId) -> bool {
@@ -1409,7 +1409,7 @@ mod tests {
     // ---- LA.7b: docstrings ----
 
     /// The DOC cell of the node `(kind, qname)`, if any.
-    fn doc_of(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> Option<String> {
+    fn doc_of(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Option<String> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         let node = fp.nodes.iter().find(|n| n.id == id)?;
         node.cells.iter().find_map(|c| match (&c.payload, c.kind == cell_type::DOC) {
@@ -1574,12 +1574,12 @@ mod tests {
             Some("Line one. Says \"hi\" é end.")
         );
         // Capped at DOC_MAX on a char boundary.
-        let long = "é".repeat(repo_graph_doc::DOC_MAX);
+        let long = "é".repeat(glia_doc::DOC_MAX);
         let source = format!("(defn g \"{long}\" [x] x)\n");
         let fp = parse_file(&source, "src/e.clj", "src::e", repo()).unwrap();
         let doc = doc_of(&fp, node_kind::FUNCTION, "src::e::g").unwrap_or_default();
-        assert!(doc.len() <= repo_graph_doc::DOC_MAX);
-        assert_eq!(doc.chars().count(), repo_graph_doc::DOC_MAX / 2);
+        assert!(doc.len() <= glia_doc::DOC_MAX);
+        assert_eq!(doc.chars().count(), glia_doc::DOC_MAX / 2);
     }
 
     #[test]

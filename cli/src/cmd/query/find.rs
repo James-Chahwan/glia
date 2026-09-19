@@ -4,9 +4,9 @@
 //! `--json` is the LD.8a envelope `{results, absence}`; an empty table prints
 //! the absence block under `_(no match)_`.
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeKindId;
-use repo_graph_engine::find::{DEFAULT_TOP_K, FindOptions, find_nodes};
+use glia_code_domain::node_kind;
+use glia_core::NodeKindId;
+use glia_engine::find::{DEFAULT_TOP_K, FindOptions, find_nodes};
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;

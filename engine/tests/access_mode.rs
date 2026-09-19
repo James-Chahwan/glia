@@ -7,11 +7,11 @@
 //! the build owns its directory. Run with `-- --nocapture` to see the
 //! `[data-access]` marker.
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Edge, NodeId, NodeKindId};
-use repo_graph_engine::{ParseCache, generate_one, generate_one_with_cache};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Edge, NodeId, NodeKindId};
+use glia_engine::{ParseCache, generate_one, generate_one_with_cache};
+use glia_graph::MergedGraph;
 use std::path::Path;
 
 const ORDERS_TS: &str =
@@ -192,7 +192,7 @@ fn cached_parses_carry_the_same_rehomed_edges() {
 }
 
 fn store_bytes(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(m, dir).unwrap();
+    glia_store::write_merged_sharded(m, dir).unwrap();
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()

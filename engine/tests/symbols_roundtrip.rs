@@ -12,11 +12,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one;
-use repo_graph_graph::{MergedGraph, RepoGraph};
-use repo_graph_store::{read_merged_sharded, write_merged_sharded};
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_engine::generate_one;
+use glia_graph::{MergedGraph, RepoGraph};
+use glia_store::{read_merged_sharded, write_merged_sharded};
 
 type Table = BTreeMap<u64, BTreeMap<String, u64>>;
 

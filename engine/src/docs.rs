@@ -5,11 +5,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{
     CodeNav, DocProvenance, DocRecord, GRAPH_TYPE, edge_category, node_kind,
 };
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 /// Repo-root markdown files worth ingesting as documentation.
 fn is_wellknown_doc(rel: &str) -> bool {
@@ -112,7 +112,7 @@ struct DocChunk {
     /// pre-heading preamble. Identity hints order sections by it.
     start_line: u32,
     /// 0-indexed row of the chunk's last non-blank line, inclusive - the same
-    /// convention as every code POSITION cell (`repo-graph-doc::position_json`).
+    /// convention as every code POSITION cell (`glia-doc::position_json`).
     /// A heading followed directly by another heading ends on its own row; the
     /// blank rows before the next heading (or EOF) are not part of the chunk.
     end_line: u32,
@@ -258,9 +258,9 @@ impl DocSource for SnapshotDocSource {
 /// carries the prose in a CODE cell, a POSITION cell (md path + line range), and
 /// an ORIGIN cell `provenance=documentation`. The exporter maps the kind to
 /// `Content::Proposition`. (glia-v5 G18)
-pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<repo_graph_graph::RepoGraph> {
-    use repo_graph_code_domain::{DocSourceKind, cell_type};
-    use repo_graph_core::{Cell, CellPayload};
+pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<glia_graph::RepoGraph> {
+    use glia_code_domain::{DocSourceKind, cell_type};
+    use glia_core::{Cell, CellPayload};
 
     fn esc(s: &str) -> String {
         s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -336,7 +336,7 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
                     .unwrap_or("doc");
                 format!("{container}::{stem}")
             }
-            None => repo_graph_code_domain::dir_stem_qname(path),
+            None => glia_code_domain::dir_stem_qname(path),
         };
 
         let chunks = chunk_markdown(text);
@@ -396,7 +396,7 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
     if nodes.is_empty() {
         return None;
     }
-    Some(repo_graph_graph::RepoGraph {
+    Some(glia_graph::RepoGraph {
         repo,
         nodes,
         edges,
@@ -494,7 +494,7 @@ mod docs_tests {
     /// qname they had.
     #[test]
     fn doc_sections_are_scoped_by_their_directory() {
-        use repo_graph_code_domain::{DocProvenance, DocSourceKind};
+        use glia_code_domain::{DocProvenance, DocSourceKind};
         let file = |rel: &str| DocRecord {
             rel_path: rel.to_string(),
             text: "# Guide\nintro\n## Setup\nrun it\n".to_string(),

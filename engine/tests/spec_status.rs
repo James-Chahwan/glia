@@ -9,8 +9,8 @@
 
 use std::path::Path;
 
-use repo_graph_engine::generate_one;
-use repo_graph_engine::spec_status::{
+use glia_engine::generate_one;
+use glia_engine::spec_status::{
     DECLARED_MISSING, IMPLEMENTED, SpecStatus, SpecStatusRow, UNDECLARED, spec_status,
 };
 
@@ -22,7 +22,7 @@ fn write(root: &Path, rel: &str, body: &str) {
     std::fs::write(path, body).expect("write");
 }
 
-fn build(root: &Path) -> repo_graph_engine::GenerateResult {
+fn build(root: &Path) -> glia_engine::GenerateResult {
     generate_one(root.to_str().expect("utf-8 temp path")).expect("build")
 }
 
@@ -46,7 +46,7 @@ fn shape(s: &SpecStatus) -> Vec<(Option<&str>, &str, &str, &str)> {
         .collect()
 }
 
-fn at(l: &Option<repo_graph_engine::Located>) -> Option<(String, i64)> {
+fn at(l: &Option<glia_engine::Located>) -> Option<(String, i64)> {
     let l = l.as_ref()?;
     Some((l.file.clone()?, l.line?))
 }
@@ -367,7 +367,7 @@ fn pact_is_not_a_declaration() {
             .unwrap_or_default()
     };
     let pact_documents_a_route = merged.all_edges().any(|e| {
-        e.category == repo_graph_code_domain::edge_category::DOCUMENTS
+        e.category == glia_code_domain::edge_category::DOCUMENTS
             && qname(e.from).starts_with("contract::")
             && qname(e.to).ends_with("/users")
     });

@@ -1,13 +1,13 @@
 [package]
-name = "repo-graph-parser-vue"
+name = "glia-parser-vue"
 version = "0.4.9"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../../../core" }
-repo-graph-code-domain = { path = "../../../code-domain" }
-repo-graph-parser-typescript = { path = "../typescript" }
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
+glia-parser-typescript = { path = "../typescript" }
 tree-sitter = "0.26"
 tree-sitter-typescript = "0.23"
 serde = { version = "1", features = ["derive"] }

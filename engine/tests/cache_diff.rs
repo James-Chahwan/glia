@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use repo_graph_engine::cache::{CacheDiff, content_hash};
-use repo_graph_engine::{ParseCache, generate_one_with_cache};
+use glia_engine::cache::{CacheDiff, content_hash};
+use glia_engine::{ParseCache, generate_one_with_cache};
 
 fn write(dir: &Path, name: &str, text: &str) {
     std::fs::write(dir.join(name), text).expect("write fixture file");

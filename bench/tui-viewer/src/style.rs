@@ -1,7 +1,7 @@
 //! kind → glyph + tier classification + score → intensity mapping.
 
-use repo_graph_code_domain::node_kind::*;
-use repo_graph_core::NodeKindId;
+use glia_code_domain::node_kind::*;
+use glia_core::NodeKindId;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Tier {

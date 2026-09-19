@@ -7,10 +7,10 @@
 //! `locate_node`, whose return shape and line base LD.1 changes — so this test
 //! holds in either landing order.
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_many, node_file, service_map};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::{GenerateResult, generate_many, node_file, service_map};
+use glia_graph::MergedGraph;
 
 fn build() -> GenerateResult {
     let root = format!(

@@ -6,12 +6,12 @@
 //! misses an agent asks for next (the route under another verb, the parent
 //! path's routes; the topic's producers).
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_many;
-use repo_graph_engine::serves::serves;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_engine::generate_many;
+use glia_engine::serves::serves;
+use glia_graph::MergedGraph;
 
 const API: &str = "from flask import Flask\nfrom kafka import KafkaProducer\n\napp = Flask(__name__)\nproducer = KafkaProducer()\n\n\ndef audit(order):\n    return order\n\n\ndef publish(order):\n    producer.send('orders', order)\n\n\ndef save(order):\n    return audit(order)\n\n\n@app.route('/orders', methods=['POST'])\ndef create_order():\n    order = {}\n    save(order)\n    publish(order)\n    return order\n";
 const WEB: &str = "export async function placeOrder(body: unknown) {\n  return fetch('/orders', { method: 'POST', body: JSON.stringify(body) });\n}\n";

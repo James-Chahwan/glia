@@ -101,7 +101,7 @@
 //! list of routes reaching data is produced.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::patterns::<item>`, never flattened into the
+//! reached as `glia_engine::patterns::<item>`, never flattened into the
 //! crate root.
 //!
 //! fired_on marker, one line per answer:
@@ -111,15 +111,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_activation::algo::delta::{EdgeKey, GraphDelta};
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::nav::{is_nav_route, nav_route_path};
-use repo_graph_graph::roles::roles_in;
+use glia_activation::algo::delta::{EdgeKey, GraphDelta};
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
+use glia_graph::nav::{is_nav_route, nav_route_path};
+use glia_graph::roles::roles_in;
 
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::arch::{default_keying, service_of};

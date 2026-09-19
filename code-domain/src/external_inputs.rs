@@ -31,7 +31,7 @@
 //! objects, one per `(source, id)`, sorted by `(source, id)`, serialized
 //! compactly with sorted keys ([`merge_entry`]). A VECTOR cell is
 //! `CellPayload::Bytes`. The one resolver and apply function live in the graph
-//! crate (`repo_graph_graph::cells`), so the build, a live in-memory write and
+//! crate (`glia_graph::cells`), so the build, a live in-memory write and
 //! a persisted write-through bind a row to the same node.
 //!
 //! CONSTRAINT ENTRIES (the rule schema `glia check`, LE.8, reads through
@@ -50,7 +50,7 @@ use std::path::Path;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use repo_graph_core::{CellPayload, CellTypeId};
+use glia_core::{CellPayload, CellTypeId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

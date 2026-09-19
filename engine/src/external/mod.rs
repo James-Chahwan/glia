@@ -58,9 +58,9 @@ pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
 
 use std::path::PathBuf;
 
-use repo_graph_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE};
-use repo_graph_core::RepoId;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE};
+use glia_core::RepoId;
+use glia_graph::MergedGraph;
 
 use crate::passes;
 

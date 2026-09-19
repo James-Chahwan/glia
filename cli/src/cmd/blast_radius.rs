@@ -4,8 +4,8 @@
 //! the seed whose wave reached it, and a seed another seed reaches in one
 //! hop is listed as linked, never dropped.
 
-use repo_graph_engine::{BlastOptions, BlastRadius};
-use repo_graph_graph::Reach;
+use glia_engine::{BlastOptions, BlastRadius};
+use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{ImpactDirection, generate_for};
@@ -69,7 +69,7 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
     let queries: Vec<&str> = args.qnames.iter().map(String::as_str).collect();
-    let mut answer = repo_graph_engine::blast_radius(&result.merged, &queries, &opts);
+    let mut answer = glia_engine::blast_radius(&result.merged, &queries, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
     }

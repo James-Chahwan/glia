@@ -29,7 +29,7 @@ does not apply, and `maturin build` alone can repackage a stale `.so`, which is 
 the `clean` is for:
 
 ```bash
-cargo clean -p repo-graph-engine -p repo-graph-py
+cargo clean -p glia-engine -p glia-py
 maturin build
 pip install --force-reinstall target/wheels/<wheel>
 ```

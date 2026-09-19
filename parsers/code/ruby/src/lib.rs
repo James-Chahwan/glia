@@ -1,11 +1,11 @@
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::data_entity;
+use glia_code_domain::endpoint::{
     ClientEndpoint, abs_path, join_path, push_client_endpoint, url_to_path,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -1407,7 +1407,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -1420,10 +1420,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),

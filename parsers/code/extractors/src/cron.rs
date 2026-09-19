@@ -43,10 +43,10 @@
 //! (descriptors such as `@daily` become their 5-field expansion) so a robfig
 //! `@hourly` job and a manifest's `0 * * * *` share one identity.
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, line_of, node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct CronNodes {
     pub nodes: Vec<Node>,
@@ -235,7 +235,7 @@ pub fn extract_cron_nodes(
                 repo,
                 confidence: Confidence::Medium,
                 cells: vec![Cell {
-                    kind: repo_graph_code_domain::cell_type::CODE,
+                    kind: glia_code_domain::cell_type::CODE,
                     payload: CellPayload::Json(payload),
                 }],
             });

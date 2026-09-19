@@ -6,10 +6,10 @@
 
 use std::path::PathBuf;
 
-use repo_graph_core::RepoId;
-use repo_graph_graph::build_go;
-use repo_graph_parser_go::parse_file;
-use repo_graph_projection_text::render_repo_graph;
+use glia_core::RepoId;
+use glia_graph::build_go;
+use glia_parser_go::parse_file;
+use glia_projection_text::render_repo_graph;
 
 const MODULE_PREFIX: &str = "example.com/backend";
 
@@ -24,7 +24,7 @@ fn repo() -> RepoId {
     RepoId::from_canonical("test://http_stack_smoke/backend")
 }
 
-fn build() -> repo_graph_graph::RepoGraph {
+fn build() -> glia_graph::RepoGraph {
     let files = [
         ("users/users.go", "users"),
         ("server/server.go", "server"),

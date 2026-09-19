@@ -10,16 +10,16 @@ name = "glia"
 path = "src/main.rs"
 
 [dependencies]
-repo-graph-engine = { path = "../engine" }
-repo-graph-graph = { path = "../graph" }
+glia-engine = { path = "../engine" }
+glia-graph = { path = "../graph" }
 # algo::reach for `glia impact`'s walk (LD.15b).
-repo-graph-activation = { path = "../activation" }
-repo-graph-store = { path = "../store" }
-repo-graph-core = { path = "../core" }
-repo-graph-code-domain = { path = "../code-domain" }
+glia-activation = { path = "../activation" }
+glia-store = { path = "../store" }
+glia-core = { path = "../core" }
+glia-code-domain = { path = "../code-domain" }
 # Tier-4 doc adapters (Confluence REST + snapshot). Network I/O lives here, not
 # in the engine — the CLI drives `docs sync`/`docs push`; `build` stays offline.
-repo-graph-doc-sources = { path = "../doc-sources" }
+glia-doc-sources = { path = "../doc-sources" }
 # The history snapshot writer (`glia history sync`, LF.5d): runs the local git
 # and writes <repo>/.glia/history-snapshot/. Like docs sync, the snapshot step
 # is a CLI command; `build` never syncs and stays offline.

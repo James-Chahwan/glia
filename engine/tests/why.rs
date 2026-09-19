@@ -6,12 +6,12 @@
 //! unrecognized subcommand and `glia analyze --format json` edges carried
 //! only `{category, from, intra, to}`.
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
-use repo_graph_engine::why::{EdgeWhy, WhyAnswer, why_edge};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
+use glia_engine::why::{EdgeWhy, WhyAnswer, why_edge};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 const SHOP: &str = "def price(o):\n    return o\n\n\ndef place(o):\n    return price(o)\n";
 

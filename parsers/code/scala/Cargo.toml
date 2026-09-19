@@ -1,13 +1,13 @@
 [package]
-name = "repo-graph-parser-scala"
+name = "glia-parser-scala"
 version = "0.4.9"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../../../core" }
-repo-graph-code-domain = { path = "../../../code-domain" }
-repo-graph-doc = { path = "../docs" }
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
+glia-doc = { path = "../docs" }
 tree-sitter = "0.26"
 tree-sitter-scala = "0.25"
 serde = { version = "1", features = ["derive"] }

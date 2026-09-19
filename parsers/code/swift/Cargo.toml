@@ -1,13 +1,13 @@
 [package]
-name = "repo-graph-parser-swift"
+name = "glia-parser-swift"
 version = "0.4.9"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../../../core" }
-repo-graph-code-domain = { path = "../../../code-domain" }
-repo-graph-doc = { path = "../docs" }
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
+glia-doc = { path = "../docs" }
 tree-sitter = "0.26"
 tree-sitter-swift = "0.7"
 serde = { version = "1", features = ["derive"] }

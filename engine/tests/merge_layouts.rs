@@ -1,5 +1,5 @@
 //! LC.10b: merge pre-built layouts into the graph one build of every member
-//! would give (`repo_graph_engine::merge`).
+//! would give (`glia_engine::merge`).
 //!
 //! Measured before LC.10b: there was no layout-level merge. `glia merge` over
 //! two layout dirs walks them as source trees and fails with
@@ -13,15 +13,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_engine::merge::{
+use glia_code_domain::edge_category;
+use glia_code_domain::evidence::Evidence;
+use glia_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+use glia_engine::merge::{
     ForeignShard, MergeMember, MergeResult, merge_layouts, persist_merge, read_workspace,
 };
-use repo_graph_engine::persist::{layout_meta, load_layout, persist_layout, persist_result};
-use repo_graph_engine::{GenerateResult, generate_many};
-use repo_graph_store::{
+use glia_engine::persist::{layout_meta, load_layout, persist_layout, persist_result};
+use glia_engine::{GenerateResult, generate_many};
+use glia_store::{
     Container, Header, MANIFEST_NAME, encode_section, inspect_path, read_layout_extras,
     read_merged_sharded_meta, write_container, write_merged_sharded_extras,
 };
@@ -188,8 +188,8 @@ fn merge_equals_building_together() {
     assert_eq!(
         manifest(&out_m)["members"],
         serde_json::json!([
-            {"name": "api", "source": "gmap", "build_stamp": repo_graph_engine::BUILD_STAMP},
-            {"name": "web", "source": "gmap", "build_stamp": repo_graph_engine::BUILD_STAMP},
+            {"name": "api", "source": "gmap", "build_stamp": glia_engine::BUILD_STAMP},
+            {"name": "web", "source": "gmap", "build_stamp": glia_engine::BUILD_STAMP},
         ])
     );
 

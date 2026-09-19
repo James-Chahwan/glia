@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use repo_graph_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta};
+use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta};
 use serde::Serialize;
 
 /// Options for [`crate::history_sync`].

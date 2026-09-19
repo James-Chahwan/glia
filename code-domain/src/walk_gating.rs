@@ -4,7 +4,7 @@
 //! Two consumers must agree or the graph lies about itself:
 //!   * `engine::walk` — the builder's walk. It parses what it descends into and
 //!     emits one REGION node (with an ORIGIN `provenance`) per collapse.
-//!   * `repo_graph_store::is_gmap_stale` — the freshness check. It must scan
+//!   * `glia_store::is_gmap_stale` — the freshness check. It must scan
 //!     exactly the tree the builder would read, or it regenerates the whole
 //!     gmap for files no parser ever opens.
 //!
@@ -116,7 +116,7 @@ impl Gate {
 /// covers it, so the walk never parses under it and never turns it into a
 /// REGION, and the store's mtime scan never descends into it. Its readers
 /// open their files directly, never through the walk; the store tracks the
-/// inputs by content instead (`repo_graph_store::external_inputs_fingerprint`),
+/// inputs by content instead (`glia_store::external_inputs_fingerprint`),
 /// which is gitignore-blind by design.
 ///
 /// Name-based like the rest of [`is_hard_skip`], so a nested `pkg/.glia` is

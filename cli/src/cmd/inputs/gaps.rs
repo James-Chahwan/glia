@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use repo_graph_engine::gaps::{
+use glia_engine::gaps::{
     CATEGORIES, GapRow, GapsOptions, OverlayDelta, gaps_report, overlay_delta,
 };
 

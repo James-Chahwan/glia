@@ -21,7 +21,7 @@ use std::borrow::Cow;
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
-use repo_graph_code_domain::snapshots::{SOURCE_JUNIT, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
+use glia_code_domain::snapshots::{SOURCE_JUNIT, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
 use serde::Serialize;
 
 use crate::MAX_REPORT_BYTES;

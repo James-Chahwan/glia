@@ -10,9 +10,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::generate_one;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId};
+use glia_engine::generate_one;
 
 const FIXTURE: &str = "fixtures/dart-top-level-bodies";
 

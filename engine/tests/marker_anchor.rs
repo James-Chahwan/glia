@@ -8,14 +8,14 @@
 //! HANDLED_BY inbound), or a CONTAINS from its module when no function
 //! encloses it. Run with `-- --nocapture` to see the `[marker-anchor]` marker.
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::{
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::{
     BlastOptions, ParseCache, blast_radius, generate_many, generate_one, generate_one_with_cache,
     locate_node, node_file, service_map,
 };
-use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
-use repo_graph_graph::MergedGraph;
+use glia_engine::trace::{TraceOptions, cross_stack_trace};
+use glia_graph::MergedGraph;
 use std::path::Path;
 
 fn fixture(rel: &str) -> String {
@@ -275,7 +275,7 @@ fn owner_edges_are_emitted_in_a_stable_order() {
                 g.nav
                     .kind_by_id
                     .get(id)
-                    .is_some_and(|k| repo_graph_code_extractors::anchor::is_marker_kind(*k))
+                    .is_some_and(|k| glia_code_extractors::anchor::is_marker_kind(*k))
             })
         };
         m.graphs
@@ -321,7 +321,7 @@ fn queue_producer_is_used_by_its_function() {
     // edge on the producer was the structural CONTAINS, so a forward blast
     // from the publishing function was empty.
     let mut forward = BlastOptions::default();
-    forward.direction = repo_graph_graph::Reach::Forward;
+    forward.direction = glia_graph::Reach::Forward;
     let answer = blast_radius(&m, &["svc::bus::publishOrder"], &forward);
     assert!(answer.unresolved.is_empty(), "seed resolves");
     let hits = answer.results;
@@ -373,7 +373,7 @@ fn copy_tree(from: &Path, to: &Path) {
 }
 
 fn store_bytes(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-    repo_graph_store::write_merged_sharded(m, dir).unwrap();
+    glia_store::write_merged_sharded(m, dir).unwrap();
     let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()

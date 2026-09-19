@@ -1,7 +1,7 @@
 //! Inspect an emitted `.engram-gmap`: version, field coverage, edge-kind +
 //! provenance histograms. Verification tool for the v3 contract.
 //!
-//!   cargo run -p repo-graph-engram-export --example inspect -- <path.engram-gmap>
+//!   cargo run -p glia-engram-export --example inspect -- <path.engram-gmap>
 
 use std::collections::BTreeMap;
 

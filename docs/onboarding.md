@@ -10,7 +10,7 @@ If you haven't read the neuropil onboarding yet, read that one first — it fram
 
 **glia is a cross-language, cross-service code graph engine.** Rust workspace. You point it at one repo or many, it walks them with tree-sitter, runs ~30 framework extractors and 13 cross-graph resolvers, and emits a unified graph: every function/class/route/CLI command/DB table/IaC resource as a node, every call/handles-by/import/HTTP-stack/queue-flow/shared-schema as an edge. Output is a zero-copy `.gmap` binary, a dense-text projection for LLM context windows, JSON, or a pyo3 wheel.
 
-**neuropil is the consumer.** Sibling repo. It path-depends on glia's crates (`repo-graph-{core,code-domain,graph,store,activation,projection-text,engine}`) and renders the graph as the 3D scene you've already toured. The MCP server at `github.com/James-Chahwan/repo-graph` wraps the same wheel and exposes it to LLM agents.
+**neuropil is the consumer.** Sibling repo. It path-depends on glia's crates (`glia-{core,code-domain,graph,store,activation,projection-text,engine}`) and renders the graph as the 3D scene you've already toured. The MCP server at `github.com/James-Chahwan/repo-graph` wraps the same wheel and exposes it to LLM agents.
 
 Together they answer: *"if a graph of the whole codebase exists as a first-class artefact, what do LLMs, IDEs, impact analyses, and observability surfaces look like when they read from it instead of grepping?"*
 
@@ -52,7 +52,7 @@ Three angles that map to your background:
 
 **Rule:** treat them as separate Claude Code sessions. When work crosses repos, write a short spec in `~/.claude/plans/` and let the sibling session pick it up. We've learned the hard way that one agent juggling both gets confused.
 
-The crate prefix `repo-graph-*` is intentional and locked — that's the PyPI/crates.io brand. The repo is named `glia`; the crates aren't. v0.5.0 may eventually unify; not in v0.4.x.
+Since 0.5.0 every library crate is `glia-*` (Rust paths `glia_*`), matching the repo and the `glia` binary; before it they were `repo-graph-*`. The rename is table-driven and replayable: `python3 dev-notes/rename-0.5.0.py --check` lists anything still on the old names.
 
 Only `py/` publishes to PyPI (as `repo-graph-py`). Everything else is internal workspace.
 
@@ -88,7 +88,7 @@ glia/
 │   │   └── scripts/       run_cycle_loop.sh + analyzers.
 │   ├── latent/            candle-fork model + forward_input_embed hook. EXCLUDED from
 │   │                      default workspace (cargo build skips candle download).
-│   │                      Build with `cargo build -p repo-graph-latent`.
+│   │                      Build with `cargo build -p glia-latent`.
 │   ├── 3d-viewer/         experimental 3D viewer (excluded).
 │   └── tui-viewer/        experimental TUI (excluded).
 ├── tests/                 fixture-driven smoke tests: http_stack_smoke, go_smoke, ts_smoke, ...
@@ -185,7 +185,7 @@ Three threads to know about:
 
 3. **scratch/lens + scratch/latent — the parked research arm.** This is the deep end and it's yours to engage with as much as you want.
    - **`scratch/lens/`** — logit-lens crate. Two `LensRuntime` impls: `FakeRuntime` (synthetic embeddings, end-to-end pipeline testing) and `LlamaCppRuntime` (real residual capture via `ggml_backend_sched_eval_callback`). The cb_eval quirks list (`CODE_RULES.md §11`) is non-obvious — per-ubatch accumulation, late-layer row-count variance, KV-cache clearing between passes, type-aware dequant for Q4_K_M. Read those rules before touching the runtime.
-   - **`scratch/latent/`** — candle-forked qwen2 with `forward_input_embed` hook. The arm that injected graph-derived pooled vectors into the embedding stream. **Single-instance SOLVE on marshmallow-1359 with Qwen 2.5 Coder 7B Q4**, reproduces deterministically via the gold-aligned auto-driver. Excluded from default workspace; build explicitly with `cargo build -p repo-graph-latent`.
+   - **`scratch/latent/`** — candle-forked qwen2 with `forward_input_embed` hook. The arm that injected graph-derived pooled vectors into the embedding stream. **Single-instance SOLVE on marshmallow-1359 with Qwen 2.5 Coder 7B Q4**, reproduces deterministically via the gold-aligned auto-driver. Excluded from default workspace; build explicitly with `cargo build -p glia-latent`.
    - **Why parked:** the N=50 follow-up surfaced ~80% of apply-then-test failures were infra (pytest collection, import errors, wheel mismatches), not model output quality. Clean cross-instance results need apply/test-runner hardening. Bench inference subsequently moved from candle to llama.cpp (`scratch/latent/out/run_llama_pathB.py`, ~7× faster CPU decode + GBNF-constrained decoding). The candle fork stays for replay.
    - **The open research question (verbatim from `README.md`):** *"Given a graph + a problem + a query, what's the correct distillation over composition / sage-filtering / synthesised cells / pooled vectors that lets a 7B model do what a 70B model can do? There's a shape out there connecting static reasoning, query-specific context selection, and capability lifting. It hasn't fully connected yet."*
 
@@ -250,10 +250,10 @@ python -c "import repo_graph; print(repo_graph.__version__)"
 
 # Tests
 cargo test --workspace             # workspace-wide; the tests/ dir has the fixture smokes
-cargo test -p repo-graph-graph http_stack_smoke   # targeted
+cargo test -p glia-graph http_stack_smoke   # targeted
 
 # Latent-injection arm (opt-in — pulls candle)
-cargo build -p repo-graph-latent
+cargo build -p glia-latent
 
 # Cycle loop (the SWE-bench end-to-end)
 cd scratch/lens
@@ -352,7 +352,7 @@ Standard guardrails, lifted from `CLAUDE.md` + `CODE_RULES.md`. Don't fight thes
 - **`scratch/lens/manifests/holdout.json`** — the 10-instance sacred holdout. Loop-set ∩ holdout = ∅ asserted at cycle start. Adding instances is fine; using them in the loop set is abort-level.
 - **Append-only files.** `cycle_log.md`, `results_history.jsonl`, `marshmallow_log.md`, per-cycle results. Corrections = new entries with `CORRECTED:` markers. Never overwrite.
 - **`scratch/latent/` is excluded from the default workspace** for a reason — pulls candle, multi-GB download. Build it explicitly when needed; don't add it to the default `cargo build`.
-- **Only `py/` publishes to PyPI** (as `repo-graph-py`). Everything else is internal. Don't touch the `repo-graph-*` crate name prefix — that's the brand and it's locked.
+- **Only `py/` publishes to PyPI** (as `repo-graph-py`). Everything else is internal. Library crates are `glia-*`; a new crate takes that prefix.
 - **No `unwrap()` / `panic!()`** in non-test code. Propagate via `?`.
 - **clap arg names are kebab-case on the CLI** even when the Rust field is snake_case. `repo_canonical` → `--repo-canonical`. Subprocess invocations of synth bins MUST use the kebab form or clap exits with code 2. Burned us in cycle 0.6.
 - **`required-features = ["research"]`** on every `synth_*` `[[bin]]` entry — otherwise the pyo3 wheel build accidentally pulls clap/serde/regex/walkdir.

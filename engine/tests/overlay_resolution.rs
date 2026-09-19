@@ -18,9 +18,9 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Confidence, NodeId, RepoId};
-use repo_graph_engine::{BuildOptions, GenerateResult, generate_many_opts};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, NodeId, RepoId};
+use glia_engine::{BuildOptions, GenerateResult, generate_many_opts};
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/xcut-overlay-const-mount";
 
@@ -44,7 +44,7 @@ fn repo_of_dir(r: &GenerateResult, dir: &str) -> RepoId {
 }
 
 /// Every node of kind `kind` named `qname`, as (id, repo, confidence).
-fn nodes(r: &GenerateResult, kind: repo_graph_core::NodeKindId, qname: &str) -> Vec<(NodeId, RepoId, Confidence)> {
+fn nodes(r: &GenerateResult, kind: glia_core::NodeKindId, qname: &str) -> Vec<(NodeId, RepoId, Confidence)> {
     let mut out: Vec<(NodeId, RepoId, Confidence)> = Vec::new();
     for g in &r.merged.graphs {
         for n in &g.nodes {
@@ -60,7 +60,7 @@ fn nodes(r: &GenerateResult, kind: repo_graph_core::NodeKindId, qname: &str) -> 
 }
 
 /// The one node of `kind` named `qname` in `repo`.
-fn node_in(r: &GenerateResult, kind: repo_graph_core::NodeKindId, qname: &str, repo: RepoId) -> NodeId {
+fn node_in(r: &GenerateResult, kind: glia_core::NodeKindId, qname: &str, repo: RepoId) -> NodeId {
     let hits: Vec<NodeId> =
         nodes(r, kind, qname).into_iter().filter(|(_, rp, _)| *rp == repo).map(|(id, _, _)| id).collect();
     assert_eq!(hits.len(), 1, "one {qname} in {repo:?}");

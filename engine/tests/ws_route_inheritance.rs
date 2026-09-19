@@ -9,10 +9,10 @@
 //! Run with `-- --nocapture` to see the fired_on line:
 //!   `[ws-resolve] 2 pairs (exact=0 suffix=0 param=0 inherited=2) dropped-generic=1`
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::generate_many;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{NodeId, NodeKindId};
+use glia_engine::generate_many;
+use glia_graph::MergedGraph;
 
 fn build(fixture: &str) -> MergedGraph {
     let base = format!(

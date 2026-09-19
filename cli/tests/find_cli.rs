@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use repo_graph_engine::find::{FindOptions, find_nodes};
+use glia_engine::find::{FindOptions, find_nodes};
 
 const USERS_PY: &str = "def get_user(uid):\n    return load(uid)\n\n\ndef load(uid):\n    return {\"id\": uid}\n\n\nclass UserService:\n    def get_user(self, uid):\n        return get_user(uid)\n\n\ndef user_service_helper():\n    return UserService()\n";
 const USERS_TS: &str = "export function getUser(id: string) {\n  return fetch(`/users/${id}`);\n}\n\nexport function getUsers() {\n  return fetch('/users');\n}\n";
@@ -88,7 +88,7 @@ fn json_equals_the_engine_order_across_processes() {
     );
     let cli = rows(&out);
 
-    let merged = repo_graph_engine::generate_many(&[api.clone(), web.clone()])
+    let merged = glia_engine::generate_many(&[api.clone(), web.clone()])
         .expect("generate_many")
         .merged;
     let engine = find_nodes(&merged, "user", &FindOptions::default()).results;

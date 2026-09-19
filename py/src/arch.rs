@@ -3,18 +3,18 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::service_map`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` can cover the binding (see the crate doc).
+/// `cargo test -p glia-py` can cover the binding (see the crate doc).
 fn service_map_json(
     merged: &MergedGraph,
     repo_labels: &std::collections::BTreeMap<u64, String>,
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&repo_graph_engine::service_map(merged, repo_labels))
+    serde_json::to_string(&glia_engine::service_map(merged, repo_labels))
 }
 
 #[pymethods]
@@ -27,7 +27,7 @@ impl PyGraph {
     /// `{language, edge_category, note, verify, edges_found}`. Returns a list
     /// of dicts.
     fn coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let report = repo_graph_engine::coverage_report(&self.merged);
+        let report = glia_engine::coverage_report(&self.merged);
         to_py(py, serde_json::to_string(&report))
     }
 
@@ -39,7 +39,7 @@ impl PyGraph {
     /// a graph from `load_from_gmap` answers exactly like a fresh one.
     /// Returns a list of dicts.
     fn project_roots(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let roots = repo_graph_engine::project_roots(&self.merged);
+        let roots = glia_engine::project_roots(&self.merged);
         to_py(py, serde_json::to_string(&roots))
     }
 
@@ -54,7 +54,7 @@ impl PyGraph {
     /// dict; `keying` says which rule produced the service ids.
     ///
     /// Transport only — the keying and the link aggregation live in
-    /// `repo_graph_engine::arch`, shared with `glia analyze`, so the CLI and
+    /// `glia_engine::arch`, shared with `glia analyze`, so the CLI and
     /// MCP answers cannot drift apart.
     ///
     /// A graph from `load_from_gmap` carries the repo labels its layout's

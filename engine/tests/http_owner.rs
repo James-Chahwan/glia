@@ -11,13 +11,13 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::{
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::{
     GenerateResult, ParseCache, generate_one, generate_one_incremental, generate_one_with_cache,
     service_map,
 };
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 fn write(dir: &Path, rel: &str, text: &str) {
     let path = dir.join(rel);
@@ -203,7 +203,7 @@ fn incremental_matches_clean() {
 
     let write_gmap = |r: &GenerateResult, name: &str| {
         let out = td.path().join(name);
-        repo_graph_store::write_merged_sharded(&r.merged, &out).expect("write .gmap");
+        glia_store::write_merged_sharded(&r.merged, &out).expect("write .gmap");
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&out)
             .unwrap()
             .flatten()

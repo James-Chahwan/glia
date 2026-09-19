@@ -18,9 +18,9 @@
 
 use std::path::PathBuf;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Confidence, NodeId, RepoId};
-use repo_graph_graph::{
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, NodeId, RepoId};
+use glia_graph::{
     CrossGraphResolver, HttpStackResolver, MergedGraph, build_go, build_typescript,
 };
 
@@ -38,7 +38,7 @@ fn frontend_repo() -> RepoId {
     RepoId::from_canonical("test://http_stack_smoke/frontend")
 }
 
-fn parse_backend() -> repo_graph_graph::RepoGraph {
+fn parse_backend() -> glia_graph::RepoGraph {
     let root = fixture_root().join("backend");
     let files = [
         ("users/users.go", "users"),
@@ -48,18 +48,18 @@ fn parse_backend() -> repo_graph_graph::RepoGraph {
         .iter()
         .map(|(rel, pkg)| {
             let src = std::fs::read_to_string(root.join(rel)).unwrap();
-            repo_graph_parser_go::parse_file(&src, rel, pkg, BACKEND_MODULE_PREFIX, backend_repo())
+            glia_parser_go::parse_file(&src, rel, pkg, BACKEND_MODULE_PREFIX, backend_repo())
                 .unwrap()
         })
         .collect();
     build_go(backend_repo(), parses).unwrap()
 }
 
-fn parse_frontend() -> repo_graph_graph::RepoGraph {
+fn parse_frontend() -> glia_graph::RepoGraph {
     let root = fixture_root().join("frontend");
     let rel = "src/app/user.service.ts";
     let src = std::fs::read_to_string(root.join(rel)).unwrap();
-    let parse = repo_graph_parser_typescript::parse_file(
+    let parse = glia_parser_typescript::parse_file(
         &src,
         rel,
         "src::app::user_service",
@@ -73,7 +73,7 @@ fn parse_frontend() -> repo_graph_graph::RepoGraph {
 /// LB.11a: a Go ROUTE is one node per (method, path), `<METHOD> <path>`.
 fn route_id(method: &str, path: &str) -> NodeId {
     NodeId::from_parts(
-        repo_graph_parser_go::GRAPH_TYPE,
+        glia_parser_go::GRAPH_TYPE,
         backend_repo(),
         node_kind::ROUTE,
         &format!("{method} {path}"),
@@ -82,14 +82,14 @@ fn route_id(method: &str, path: &str) -> NodeId {
 
 fn endpoint_id(method: &str, path: &str) -> NodeId {
     NodeId::from_parts(
-        repo_graph_parser_typescript::GRAPH_TYPE,
+        glia_parser_typescript::GRAPH_TYPE,
         frontend_repo(),
         node_kind::ENDPOINT,
         &format!("endpoint:{method}:{path}"),
     )
 }
 
-fn route_method_cells(g: &repo_graph_graph::RepoGraph, id: NodeId) -> Vec<String> {
+fn route_method_cells(g: &glia_graph::RepoGraph, id: NodeId) -> Vec<String> {
     g.nodes
         .iter()
         .filter(|n| n.id == id)

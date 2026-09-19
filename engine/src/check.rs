@@ -50,13 +50,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_activation::algo::cycles::{strongly_connected, witness_cycle};
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource};
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Edge, EdgeCategoryId, NodeId};
+use glia_graph::MergedGraph;
 
 use crate::answers::{Locator, in_scope, project_roots};
 use crate::cycles::module_import_graph;

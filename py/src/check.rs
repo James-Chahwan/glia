@@ -3,15 +3,15 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::check`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` covers it (see the crate doc).
+/// `cargo test -p glia-py` covers it (see the crate doc).
 fn check_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&repo_graph_engine::check::check(merged))
+    serde_json::to_string(&glia_engine::check::check(merged))
 }
 
 #[pymethods]
@@ -74,7 +74,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().expect("a parent dir")).expect("mkdir");
             std::fs::write(p, src).expect("write fixture");
         }
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let built = built.expect("build");
 

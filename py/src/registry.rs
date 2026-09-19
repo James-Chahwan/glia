@@ -4,7 +4,7 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_domain::{cell_type, edge_category, node_kind};
 
 /// One module's contribution to the Python module: `add` puts its
 /// `#[pyfunction]`s on `m`. Each module that owns `#[pyfunction]`s ends with
@@ -47,7 +47,7 @@ fn cell_type_names() -> Vec<(u32, String)> {
 /// `main` / `test*` name rule included) is `nodes_json`'s `entry`.
 #[pyfunction]
 fn entry_kinds() -> Vec<(u32, String)> {
-    repo_graph_engine::profile::entry_kinds()
+    glia_engine::profile::entry_kinds()
         .into_iter()
         .map(|(id, n)| (id.0, n.to_string()))
         .collect()
@@ -59,14 +59,14 @@ fn version() -> &'static str {
 }
 
 /// Build identity of THIS wheel: `<release>+p<16 hex>`, where the hex half is a
-/// content hash of every graph-shaping source file (repo_graph_stamp). Two
+/// content hash of every graph-shaping source file (glia_stamp). Two
 /// wheels with the same `version()` but different `build_stamp()` contain
 /// different parsers — which is how you catch a stale `.so` that maturin
 /// repackaged without rebuilding. `version()` above stays the bare release:
 /// the repo-graph wrapper and bench/substrate-gap/run.py read it.
 #[pyfunction]
 fn build_stamp() -> &'static str {
-    repo_graph_engine::BUILD_STAMP
+    glia_engine::BUILD_STAMP
 }
 
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -94,7 +94,7 @@ mod tests {
         assert_eq!(ids, [5, 11, 47, 48, 13, 15, 17, 19, 21, 37, 28]);
         assert!(kinds.contains(&(13, "QUEUE_CONSUMER".to_string())), "{kinds:?}");
         for (id, name) in &kinds {
-            assert_eq!(node_kind::name(repo_graph_core::NodeKindId(*id)), name);
+            assert_eq!(node_kind::name(glia_core::NodeKindId(*id)), name);
         }
     }
 
@@ -104,12 +104,12 @@ mod tests {
     #[test]
     fn build_stamp_is_the_release_plus_the_parser_stamp() {
         let stamp = build_stamp();
-        assert_eq!(stamp, repo_graph_engine::BUILD_STAMP);
+        assert_eq!(stamp, glia_engine::BUILD_STAMP);
         let hex = stamp
             .strip_prefix(version())
             .and_then(|rest| rest.strip_prefix("+p"))
             .unwrap_or_default();
-        assert_eq!(hex, repo_graph_engine::PARSER_STAMP, "build_stamp() = {stamp:?}");
+        assert_eq!(hex, glia_engine::PARSER_STAMP, "build_stamp() = {stamp:?}");
         assert_eq!(hex.len(), 16, "build_stamp() = {stamp:?}");
     }
 }

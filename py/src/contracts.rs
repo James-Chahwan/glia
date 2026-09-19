@@ -3,18 +3,18 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::contracts`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` can cover the binding (see the crate doc).
+/// `cargo test -p glia-py` can cover the binding (see the crate doc).
 fn contracts_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
     // `graphs` is one entry per (repo, language), so count distinct repos.
     let repos: std::collections::BTreeSet<u64> = merged.graphs.iter().map(|g| g.repo.0).collect();
     eprintln!("[contracts] surface=pyo3 repos={}", repos.len());
-    serde_json::to_string(&repo_graph_engine::message_contracts(merged))
+    serde_json::to_string(&glia_engine::message_contracts(merged))
 }
 
 /// The whole body of [`PyGraph::contract_fields`], minus pyo3 (see
@@ -24,7 +24,7 @@ fn contracts_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
 /// `[contract-fields] pairs=…` line first (only when it found rows), then this
 /// surface's marker, always.
 fn contract_fields_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
-    let rows = repo_graph_engine::contract_fields::contract_fields(merged);
+    let rows = glia_engine::contract_fields::contract_fields(merged);
     eprintln!("[contract-fields] surface=pyo3 rows={}", rows.len());
     serde_json::to_string(&rows)
 }
@@ -78,7 +78,7 @@ mod tests {
         let publisher = "package svc\n\nimport \"github.com/nats-io/nats.go\"\n\n\
             func Publish(nc *nats.Conn) error {\n\treturn nc.Publish(\"orders\", nil)\n}\n";
         std::fs::write(root.join("publisher.go"), publisher).expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
 
@@ -127,7 +127,7 @@ mod tests {
                     .to_string()
             })
             .collect();
-        let merged = repo_graph_engine::generate_many(&dirs)
+        let merged = glia_engine::generate_many(&dirs)
             .expect("build")
             .merged;
 

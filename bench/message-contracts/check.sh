@@ -67,8 +67,8 @@ print("PASS: 1 match (orders/OrderCreated), 1 mismatch (shipments/ShipmentCreate
 PY
 
 # pyo3 surface. Imports the INSTALLED wheel, never the working tree — after a
-# Rust change, rebuild it first (`cargo clean -p repo-graph-engine -p
-# repo-graph-py` before `maturin build`, or maturin can repackage a stale .so).
+# Rust change, rebuild it first (`cargo clean -p glia-engine -p
+# glia-py` before `maturin build`, or maturin can repackage a stale .so).
 # A missing wheel or a wheel without contracts() FAILS: skipping would be a
 # dead gate.
 GLIA_NO_PERSIST=1 python3 - "$tmp" > "$py" 2>"$pyerr" <<'PY' || { cat "$py"; sed -n '1,20p' "$pyerr"; exit 1; }

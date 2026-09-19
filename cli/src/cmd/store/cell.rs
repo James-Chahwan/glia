@@ -1,7 +1,7 @@
 //! `glia cell set / rm / ls` (LF.1c) — the CLI surface of the cell write API,
 //! and the one surface that audits the sidecars.
 //!
-//! `set` and `rm` go through `repo_graph_store::write_cell` /
+//! `set` and `rm` go through `glia_store::write_cell` /
 //! `remove_cell_entry` for the repo's default layout dir (`.glia/graph`), so
 //! a write lands where a pyo3 or MCP write lands: `.glia/cells.jsonl`
 //! (`.glia/vectors.jsonl` for a VECTOR) under `.glia/cells.lock`, and the
@@ -42,18 +42,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Subcommand};
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, b64_decode, canonical, cell_type_id,
     read_rows,
 };
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one_opts;
-use repo_graph_engine::persist::default_layout_dir;
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
-use repo_graph_graph::identity::{IdentityIndex, Rebind, identity_of};
-use repo_graph_store::{CellRemoval, CellWriteOutcome, WriteThrough, remove_cell_entry, write_cell};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::NodeId;
+use glia_engine::generate_one_opts;
+use glia_engine::persist::default_layout_dir;
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_graph::identity::{IdentityIndex, Rebind, identity_of};
+use glia_store::{CellRemoval, CellWriteOutcome, WriteThrough, remove_cell_entry, write_cell};
 use serde_json::{Value, json};
 
 use crate::common::build_options;

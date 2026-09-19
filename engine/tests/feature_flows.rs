@@ -28,15 +28,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_engine::feature_flows::{
+use glia_code_domain::node_kind;
+use glia_engine::feature_flows::{
     FeatureFlow, FlowEntry, FlowGrouping, FlowOptions, default_flows_dir, feature_flows,
     feature_key, render_flow_yaml, write_feature_flows,
 };
-use repo_graph_engine::profile::CODE_PROFILE;
-use repo_graph_engine::trace::entry_flows;
-use repo_graph_engine::{GenerateResult, generate_many};
-use repo_graph_graph::Reach;
+use glia_engine::profile::CODE_PROFILE;
+use glia_engine::trace::entry_flows;
+use glia_engine::{GenerateResult, generate_many};
+use glia_graph::Reach;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/flows_stack")

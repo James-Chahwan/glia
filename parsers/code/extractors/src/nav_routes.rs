@@ -44,11 +44,11 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
     node_kind,
 };
-use repo_graph_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, RepoId};
 
 use crate::react::nav_route_origin_cell;
 

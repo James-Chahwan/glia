@@ -11,8 +11,8 @@
 
 use std::path::PathBuf;
 
-use repo_graph_engine::generate_one_opts;
-use repo_graph_engine::persist::{default_layout_dir, persist_result};
+use glia_engine::generate_one_opts;
+use glia_engine::persist::{default_layout_dir, persist_result};
 
 use crate::common::build_options;
 
@@ -39,7 +39,7 @@ pub(crate) fn run(args: Args) -> i32 {
     if args.no_incremental {
         // An explicit clean build also discards the sidecar — otherwise the
         // next default-on build would reuse the cache the user was escaping.
-        if let Err(e) = repo_graph_engine::ParseCache::purge(repo) {
+        if let Err(e) = glia_engine::ParseCache::purge(repo) {
             eprintln!("warning: could not remove parse cache: {e}");
         }
     }

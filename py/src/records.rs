@@ -4,11 +4,11 @@ use pyo3::prelude::*;
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{Confidence, Node, NodeId};
-use repo_graph_engine::profile::CODE_PROFILE;
-use repo_graph_graph::roles::roles_in;
-use repo_graph_graph::{MergedGraph, RepoGraph};
+use glia_code_domain::node_kind;
+use glia_core::{Confidence, Node, NodeId};
+use glia_engine::profile::CODE_PROFILE;
+use glia_graph::roles::roles_in;
+use glia_graph::{MergedGraph, RepoGraph};
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
@@ -57,7 +57,7 @@ impl PyGraph {
 }
 
 /// The body of `PyGraph::nodes_json`, pyo3-free so `cargo test -p
-/// repo-graph-py` can exercise it (see the crate doc's link note). `live` is
+/// glia-py` can exercise it (see the crate doc's link note). `live` is
 /// the graph's `entrypoint_reachable` set. Prints LD.6's
 /// `[live] annotate surface=nodes_json rows=<n> live=<l> entry_kinds=<k>`,
 /// the engine's `answers::live_marker` format.
@@ -100,7 +100,7 @@ fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
     // GR-1: surface the node's source span from its POSITION cell.
     // Stored rows are 0-based (tree-sitter); emit 1-based inclusive.
     // Nodes without a span (synthetic / cross-stack) carry null.
-    let span = match repo_graph_projection_text::node_position(n) {
+    let span = match glia_projection_text::node_position(n) {
         Some(p) => format!(
             r#","path":"{}","start_line":{},"end_line":{}"#,
             escape_json(&p.file),
@@ -132,9 +132,9 @@ fn node_record_json(g: &RepoGraph, n: &Node, live: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{node_record_json, nodes_json_string};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
-    use repo_graph_graph::{RepoGraph, SymbolTable};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use glia_graph::{RepoGraph, SymbolTable};
 
     /// LB.3b: every record carries `roles`, read through `roles_in` — a CLASS
     /// folded from an `@Injectable` names SERVICE, a plain FUNCTION an empty
@@ -186,11 +186,11 @@ mod tests {
         std::fs::create_dir_all(&root).expect("temp dir");
         let app = "import os\n\n\ndef helper(x):\n    return x + 1\n\n\ndef main():\n    return helper(2)\n";
         std::fs::write(root.join("app.py"), app).expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
 
-        let live = repo_graph_engine::entrypoint_reachable(&merged);
+        let live = glia_engine::entrypoint_reachable(&merged);
         let v: serde_json::Value =
             serde_json::from_str(&nodes_json_string(&merged, &live)).expect("valid JSON");
         let mut spans: Vec<(String, i64, Option<i64>)> = v
@@ -201,7 +201,7 @@ mod tests {
                 let start = n["start_line"].as_i64()?;
                 let id = NodeId(n["id"].as_u64()?);
                 let qname = n["qname"].as_str()?.to_string();
-                Some((qname, start, repo_graph_engine::locate_node(&merged, id).line))
+                Some((qname, start, glia_engine::locate_node(&merged, id).line))
             })
             .collect();
         spans.sort();

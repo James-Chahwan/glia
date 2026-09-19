@@ -10,9 +10,9 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId};
-use repo_graph_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId};
+use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);

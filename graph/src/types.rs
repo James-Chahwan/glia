@@ -3,8 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{CallSite, CodeNav, UnresolvedRef};
-use repo_graph_core::{Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CallSite, CodeNav, UnresolvedRef};
+use glia_core::{Edge, Node, NodeId, RepoId};
 
 // ============================================================================
 // Output graph

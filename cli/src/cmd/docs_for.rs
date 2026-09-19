@@ -40,7 +40,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let mut docs = repo_graph_engine::governing_docs(&result.merged, qname, scope);
+    let mut docs = glia_engine::governing_docs(&result.merged, qname, scope);
     if let Some(a) = docs.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
     }

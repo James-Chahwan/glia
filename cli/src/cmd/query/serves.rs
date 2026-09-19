@@ -4,7 +4,7 @@
 //! the caveat rows, the near misses) under `_(nothing serves it)_`. An absence
 //! is an answer, so it exits 0; exit 2 is a build failure.
 
-use repo_graph_engine::serves::serves;
+use glia_engine::serves::serves;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;

@@ -14,13 +14,13 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_code_domain::walk_gating::repo_identity;
-use repo_graph_core::{NodeKindId, RepoId};
-use repo_graph_engine::{
+use glia_code_domain::node_kind;
+use glia_code_domain::walk_gating::repo_identity;
+use glia_core::{NodeKindId, RepoId};
+use glia_engine::{
     GenerateResult, ParseCache, generate_many, generate_one, generate_one_with_cache,
 };
-use repo_graph_store::write_merged_sharded;
+use glia_store::write_merged_sharded;
 
 /// Worker stack for the test pools: the engine pool's own size.
 const STACK: usize = 16 << 20;

@@ -9,10 +9,10 @@
 
 use std::collections::HashSet;
 
-use repo_graph_activation::algo::reach::Reached;
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::{MergedGraph, Reach, RepoGraph, SymbolTable};
+use glia_activation::algo::reach::Reached;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+use glia_graph::{MergedGraph, Reach, RepoGraph, SymbolTable};
 
 const CALLS: EdgeCategoryId = edge_category::CALLS;
 const HTTP_CALLS: EdgeCategoryId = edge_category::HTTP_CALLS;

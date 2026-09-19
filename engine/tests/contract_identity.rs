@@ -13,11 +13,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, dir_stem_qname, node_kind};
-use repo_graph_code_extractors::contracts::contract_op_qname;
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::{generate_one, governing_docs};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, dir_stem_qname, node_kind};
+use glia_code_extractors::contracts::contract_op_qname;
+use glia_core::{CellPayload, NodeId};
+use glia_engine::{generate_one, governing_docs};
+use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "contract-per-file-identity";
 

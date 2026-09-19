@@ -3,14 +3,14 @@ name = "glia-snapshots"
 version.workspace = true
 edition = "2024"
 publish = false
-description = "External-input snapshot writers (git history, test reports). The only glia code that spawns a process: it runs the local git and writes <repo>/.glia/*-snapshot/, which the deterministic build reads through repo-graph-code-domain::snapshots."
+description = "External-input snapshot writers (git history, test reports). The only glia code that spawns a process: it runs the local git and writes <repo>/.glia/*-snapshot/, which the deterministic build reads through glia-code-domain::snapshots."
 
 # Reads git by running the user's `git` binary (std::process::Command): no
 # libgit2 C build in the wheel matrix, no gix dependency tree, and nothing runs
 # unless a sync is called. The build never depends on this crate.
 
 [dependencies]
-repo-graph-code-domain = { path = "../code-domain" }
+glia-code-domain = { path = "../code-domain" }
 serde = { version = "1", features = ["derive"] }
 # JUnit XML reports (LF.6a), read with the streaming Reader: never a DOM.
 # Already the workspace's XML parser (doc-sources), so no new crate is fetched.
@@ -20,6 +20,6 @@ quick-xml = "0.36"
 tempfile = "3"
 # LF.6a's leak test builds a repo that holds an ingested test snapshot and
 # checks that no secret reaches the graph, the .gmap or the dense text.
-repo-graph-engine = { path = "../engine" }
-repo-graph-store = { path = "../store" }
-repo-graph-projection-text = { path = "../projection-text" }
+glia-engine = { path = "../engine" }
+glia-store = { path = "../store" }
+glia-projection-text = { path = "../projection-text" }

@@ -11,10 +11,10 @@
 
 use std::path::Path;
 
-use repo_graph_core::NodeId;
-use repo_graph_engine::find::{FindOptions, FoundNode, find_nodes};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::MergedGraph;
+use glia_core::NodeId;
+use glia_engine::find::{FindOptions, FoundNode, find_nodes};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::MergedGraph;
 
 const USERS_PY: &str = "def get_user(uid):\n    return load(uid)\n\n\ndef load(uid):\n    return {\"id\": uid}\n\n\nclass UserService:\n    def get_user(self, uid):\n        return get_user(uid)\n\n\ndef user_service_helper():\n    return UserService()\n";
 const USERS_TS: &str = "export function getUser(id: string) {\n  return fetch(`/users/${id}`);\n}\n\nexport function getUsers() {\n  return fetch('/users');\n}\n";
@@ -245,7 +245,7 @@ fn kinds_filter_before_ranking_and_top_k_truncates_after() {
     let dir = tempfile::tempdir().unwrap();
     let m = two_repo_build(dir.path());
     let mut o = FindOptions::default();
-    o.kinds = Some(vec![repo_graph_code_domain::node_kind::FUNCTION]);
+    o.kinds = Some(vec![glia_code_domain::node_kind::FUNCTION]);
     let rows = find_nodes(&m, "user", &o).results;
     assert!(!rows.is_empty());
     assert!(rows.iter().all(|r| r.kind == "FUNCTION"), "{rows:#?}");

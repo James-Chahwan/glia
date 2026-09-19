@@ -24,7 +24,7 @@
 //! language parsers and the prisma extractor) and the one reader share only
 //! this crate, and the graph crate keeps `serde_json` out of its dependencies.
 
-use repo_graph_core::{Cell, CellPayload};
+use glia_core::{Cell, CellPayload};
 
 use crate::cell_type;
 

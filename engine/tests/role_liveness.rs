@@ -4,13 +4,13 @@
 //! cell, not a COMPONENT node, so an entrypoint test on kind + name alone
 //! stopped seeding it and everything it injects read `live: false`. The
 //! entrypoint test now also reads the node's roles through
-//! `repo_graph_graph::roles::roles_in`.
+//! `glia_graph::roles::roles_in`.
 
 use std::path::PathBuf;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_engine::{BlastOptions, blast_radius, entrypoint_reachable, generate_one};
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_code_domain::node_kind;
+use glia_engine::{BlastOptions, blast_radius, entrypoint_reachable, generate_one};
+use glia_graph::{MergedGraph, Reach};
 
 fn build(name: &str) -> MergedGraph {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -2,7 +2,7 @@
 //! by LD.13 and LD.14a; extended by LD.14b, LD.6, LE.3a and LE.4d.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::profile::<item>`, never flattened into the
+//! reached as `glia_engine::profile::<item>`, never flattened into the
 //! crate root.
 //!
 //! LD.13: [`CODE_PASSES`] is every build pass the code domain runs over an
@@ -42,11 +42,11 @@
 //! GRAPHQL_RESOLVER, CRON_JOB), and [`entry_kinds`] lists its kinds for the
 //! consumers that kept their own copy.
 
-use repo_graph_activation::passes::{PassRegistry, PassSpec, Stage};
-use repo_graph_activation::profile::DomainProfile;
-use repo_graph_code_domain::{cell_type, evidence, node_kind};
-use repo_graph_core::NodeKindId;
-use repo_graph_graph::{
+use glia_activation::passes::{PassRegistry, PassSpec, Stage};
+use glia_activation::profile::DomainProfile;
+use glia_code_domain::{cell_type, evidence, node_kind};
+use glia_core::NodeKindId;
+use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
     MergedGraph, MessageSchemaResolver, PackageResolver, QueueStackResolver, RpcStackResolver,
@@ -237,11 +237,11 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     },
 ]);
 
-/// The code domain's profile: [`CODE_TABLES`](repo_graph_code_domain::profile::CODE_TABLES)
+/// The code domain's profile: [`CODE_TABLES`](glia_code_domain::profile::CODE_TABLES)
 /// plus [`CODE_PASSES`]. A `static` (a `const` would copy it at every use);
 /// its initializer reads only consts.
 pub static CODE_PROFILE: DomainProfile<MergedGraph, CodeBuildCtx> = DomainProfile {
-    tables: repo_graph_code_domain::profile::CODE_TABLES,
+    tables: glia_code_domain::profile::CODE_TABLES,
     passes: CODE_PASSES,
 };
 
@@ -289,7 +289,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
-    use repo_graph_core::{Cell, CellTypeId};
+    use glia_core::{Cell, CellTypeId};
 
     use super::*;
 
@@ -347,9 +347,9 @@ mod tests {
     /// deliberate change to liveness, blast radius or PPR ranking.
     #[test]
     fn code_profile_matches_head_tables() {
-        use repo_graph_activation::{ActivationConfig, Direction, Specificity};
-        use repo_graph_code_domain::{edge_category as ec, node_kind as nk};
-        use repo_graph_core::{EdgeCategoryId, NodeKindId};
+        use glia_activation::{ActivationConfig, Direction, Specificity};
+        use glia_code_domain::{edge_category as ec, node_kind as nk};
+        use glia_core::{EdgeCategoryId, NodeKindId};
         use std::collections::HashMap;
 
         let t = &CODE_PROFILE.tables;
@@ -542,7 +542,7 @@ mod tests {
             ("graphql_op", &[nk::GRAPHQL_OPERATION], &[ec::USES]),
         ];
         assert_eq!(sinks, expect);
-        assert_eq!(t.graph_type, repo_graph_code_domain::GRAPH_TYPE);
+        assert_eq!(t.graph_type, glia_code_domain::GRAPH_TYPE);
     }
 
     fn workspace() -> PathBuf {

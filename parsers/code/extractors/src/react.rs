@@ -11,8 +11,8 @@
 //! This is pattern-based — intentional to stay zero-AST-dependency like the
 //! other cross-cutting extractors.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
 /// A3.4 — the ORIGIN cell that marks a ROUTE node as a *browser navigation*
 /// target rather than a server endpoint.
@@ -348,7 +348,7 @@ createBrowserRouter([
 
     /// `(route qname, handler)` for every LA.6b HANDLED_BY ref, sorted.
     fn handled_by(r: &crate::nav_routes::NavRouteOut) -> Vec<(&str, &str)> {
-        use repo_graph_code_domain::{CallQualifier, edge_category};
+        use glia_code_domain::{CallQualifier, edge_category};
         let mut out: Vec<(&str, &str)> = r
             .refs
             .iter()

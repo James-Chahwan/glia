@@ -30,7 +30,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_graph_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId};
+use glia_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId};
 
 /// One snapshot of a graph: its nodes (a repeated id is one node, see the
 /// module docs) and its edges, borrowed.
@@ -262,7 +262,7 @@ fn strength(c: Confidence) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::{Cell, RepoId};
+    use glia_core::{Cell, RepoId};
 
     const CODE: u32 = 1;
     const POS: u32 = 3;

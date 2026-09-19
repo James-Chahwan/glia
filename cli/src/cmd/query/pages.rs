@@ -4,7 +4,7 @@
 //! whatever it finds. `--json` is the `PageFlow` object
 //! `{pages, links, dead, unlinked}`; `--dead-only` empties the other three.
 
-use repo_graph_engine::pages::page_flow;
+use glia_engine::pages::page_flow;
 
 use crate::common::generate_for;
 

@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use repo_graph_code_domain::snapshots::{META_FILE, TESTS_CASES_FILE, TESTS_LCOV_FILE, tests_dir};
+use glia_code_domain::snapshots::{META_FILE, TESTS_CASES_FILE, TESTS_LCOV_FILE, tests_dir};
 use serde_json::Value;
 
 /// A pytest-style JUnit report: 3 cases, `test_boom` failed, 2 passed.

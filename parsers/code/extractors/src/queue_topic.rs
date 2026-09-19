@@ -301,7 +301,7 @@ pub fn line_of(source: &str, offset: usize) -> usize {
 /// Same shape as `cron.rs`'s private `escape_json`; the two are deliberately
 /// NOT shared yet because unifying them means editing `cron.rs`, which belongs
 /// to another packet's file set this wave. See the `followups` note: one
-/// `repo_graph_code_domain` helper should replace both.
+/// `glia_code_domain` helper should replace both.
 ///
 /// Backslash FIRST, then the quote — reversing the order would double-escape
 /// the backslash it just inserted. Windows paths (`src\\a.ts`) are exactly why

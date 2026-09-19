@@ -32,10 +32,10 @@ mod rpc_needles;
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::walk_gating::{RepoIdentity, repo_identity};
-use repo_graph_core::RepoId;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::walk_gating::{RepoIdentity, repo_identity};
+use glia_core::RepoId;
+use glia_graph::MergedGraph;
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
@@ -53,7 +53,7 @@ use rpc_needles::RpcContext;
 /// field is not a break (LD.9, `engine/tests/api_stability.rs`):
 ///
 /// ```compile_fail
-/// let _ = repo_graph_engine::GenerateResult {
+/// let _ = glia_engine::GenerateResult {
 ///     merged: Default::default(),
 ///     total_nodes: 0,
 ///     total_edges: 0,
@@ -704,7 +704,7 @@ mod cache_tests {
     fn ident(key: &str) -> RepoIdentity {
         RepoIdentity {
             key: key.to_string(),
-            source: repo_graph_code_domain::walk_gating::IdentitySource::Directory,
+            source: glia_code_domain::walk_gating::IdentitySource::Directory,
         }
     }
 

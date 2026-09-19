@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::{FileParse, attach_imports_cell};
-use repo_graph_code_extractors::anchor;
-use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
-use repo_graph_core::{NodeId, RepoId};
+use glia_code_domain::evidence::{self, Evidence};
+use glia_code_domain::{FileParse, attach_imports_cell};
+use glia_code_extractors::anchor;
+use glia_code_extractors::grpc::{self, ProtoServiceRef};
+use glia_core::{NodeId, RepoId};
 
 use crate::extract::{detect_language, merge_nav};
 use crate::route::ModuleQnames;
@@ -344,10 +344,10 @@ mod rpc_needle_tests {
     use super::*;
     use std::path::Path;
 
-    use repo_graph_code_domain::walk_gating::repo_identity;
-    use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-    use repo_graph_core::{Cell, EdgeCategoryId as CategoryId};
-    use repo_graph_graph::MergedGraph;
+    use glia_code_domain::walk_gating::repo_identity;
+    use glia_code_domain::{cell_type, edge_category, node_kind};
+    use glia_core::{Cell, EdgeCategoryId as CategoryId};
+    use glia_graph::MergedGraph;
 
     use crate::build::{generate_many, generate_one, generate_one_with_cache};
     use crate::cache::ParseCache;
@@ -477,13 +477,13 @@ mod rpc_needle_tests {
         };
         assert_eq!(
             position(&greeter_cells),
-            Some(repo_graph_core::CellPayload::Json(
+            Some(glia_core::CellPayload::Json(
                 r#"{"file":"main.go","start_line":9,"end_line":9}"#.to_string()
             ))
         );
         assert_eq!(
             position(&orders_cells),
-            Some(repo_graph_core::CellPayload::Json(
+            Some(glia_core::CellPayload::Json(
                 r#"{"file":"main.go","start_line":10,"end_line":10}"#.to_string()
             ))
         );
@@ -503,7 +503,7 @@ mod rpc_needle_tests {
     }
 
     fn write_store(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
-        repo_graph_store::write_merged_sharded(m, dir).unwrap();
+        glia_store::write_merged_sharded(m, dir).unwrap();
         let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
@@ -564,7 +564,7 @@ mod rpc_needle_tests {
             .map(|c| c.payload);
         assert_eq!(
             position,
-            Some(repo_graph_core::CellPayload::Json(
+            Some(glia_core::CellPayload::Json(
                 r#"{"file":"main.go","start_line":10,"end_line":10}"#.to_string()
             ))
         );

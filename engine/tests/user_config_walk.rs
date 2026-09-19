@@ -13,11 +13,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellPayload, NodeId, NodeKindId};
-use repo_graph_engine::persist::{default_layout_dir, persist_result};
-use repo_graph_engine::{GenerateResult, generate_one};
-use repo_graph_store::{MANIFEST_NAME, is_gmap_stale};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellPayload, NodeId, NodeKindId};
+use glia_engine::persist::{default_layout_dir, persist_result};
+use glia_engine::{GenerateResult, generate_one};
+use glia_store::{MANIFEST_NAME, is_gmap_stale};
 
 fn write(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {

@@ -39,8 +39,8 @@ const HASHED_FILES: &[&str] = &["Cargo.lock"];
 const MIN_INPUTS: usize = 30;
 
 fn die(msg: &str) -> ! {
-    println!("cargo:warning=repo-graph-stamp: {msg}");
-    println!("cargo:warning=repo-graph-stamp: refusing to emit a stamp that cannot invalidate caches");
+    println!("cargo:warning=glia-stamp: {msg}");
+    println!("cargo:warning=glia-stamp: refusing to emit a stamp that cannot invalidate caches");
     std::process::exit(1)
 }
 
@@ -133,7 +133,7 @@ fn main() {
         } else {
             // Not fatal (an sdist may prune it), but never silent: a missing
             // Cargo.lock means a tree-sitter grammar bump stops moving the stamp.
-            println!("cargo:warning=repo-graph-stamp: {name} not found — grammar bumps will not move the stamp");
+            println!("cargo:warning=glia-stamp: {name} not found — grammar bumps will not move the stamp");
         }
     }
 

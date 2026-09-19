@@ -3,21 +3,21 @@
 
 use pyo3::prelude::*;
 
-use repo_graph_core::NodeId;
+use glia_core::NodeId;
 
 use crate::graph::PyGraph;
 
 #[pymethods]
 impl PyGraph {
     fn dense_text(&self) -> String {
-        repo_graph_projection_text::render_merged(&self.merged)
+        glia_projection_text::render_merged(&self.merged)
     }
 
     /// Same as `dense_text()` but preserves full cell bodies (source code is
     /// not truncated to a one-line preview). Use for LLM context construction
     /// where the model needs the actual function body, not a signature stub.
     fn dense_text_full(&self) -> String {
-        repo_graph_projection_text::render_merged_full(&self.merged)
+        glia_projection_text::render_merged_full(&self.merged)
     }
 
     /// Scoped dense sigil text for just `node_ids` (+ structural glue), not the
@@ -28,9 +28,9 @@ impl PyGraph {
         let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
         let sub = self.merged.subset(&ids);
         if full {
-            repo_graph_projection_text::render_merged_full(&sub)
+            glia_projection_text::render_merged_full(&sub)
         } else {
-            repo_graph_projection_text::render_merged(&sub)
+            glia_projection_text::render_merged(&sub)
         }
     }
 
@@ -39,7 +39,7 @@ impl PyGraph {
     fn prose(&self, node_ids: Vec<u64>) -> String {
         let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
         let sub = self.merged.subset(&ids);
-        repo_graph_projection_text::render_prose(&sub)
+        glia_projection_text::render_prose(&sub)
     }
 
     /// Spreading activation (PPR) from `seed_ids`. `profile` (WP-F / GR-5)
@@ -55,7 +55,7 @@ impl PyGraph {
     ) -> Vec<(u64, f64)> {
         let seeds: Vec<NodeId> = seed_ids.into_iter().map(NodeId).collect();
         let mut config =
-            repo_graph_code_domain::profile::CODE_TABLES.activation_config(profile.as_deref());
+            glia_code_domain::profile::CODE_TABLES.activation_config(profile.as_deref());
         if let Some(k) = top_k {
             config.top_k = k;
         }

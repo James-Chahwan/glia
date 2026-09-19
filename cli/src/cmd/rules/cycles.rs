@@ -4,7 +4,7 @@
 //! kind. A report, not a gate (LE.8's `check` is the gate): it exits 0
 //! whatever it finds; exit 2 is a build failure. `--json` is the row list.
 
-use repo_graph_engine::cycles::{
+use glia_engine::cycles::{
     CALL_LOOP, CycleArgs, CycleHop, CycleRow, EVENT_LOOP, IMPORT, IMPORT_CYCLE, POSSIBLE_LOOP,
     cycles, kinds_for,
 };

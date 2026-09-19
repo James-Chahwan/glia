@@ -31,11 +31,11 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::GenerateResult;
-use repo_graph_engine::feature_flows::{
+use glia_engine::GenerateResult;
+use glia_engine::feature_flows::{
     FlowGrouping, FlowOptions, INDEX_FILE, default_flows_dir, feature_flows, write_feature_flows,
 };
-use repo_graph_engine::trace::{DEFAULT_DEPTH, EntryFlow, entry_flows};
+use glia_engine::trace::{DEFAULT_DEPTH, EntryFlow, entry_flows};
 
 use crate::common::generate_for;
 

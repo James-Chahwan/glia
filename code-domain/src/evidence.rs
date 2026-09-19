@@ -42,7 +42,7 @@
 //! edge's endpoints through [`Evidence::fill`], never overwriting a location an
 //! emitter recorded.
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::{cell_type, edge_category, endpoint, node_kind};
 
@@ -325,7 +325,7 @@ pub fn default_basis(category: EdgeCategoryId, to_kind: Option<NodeKindId>) -> B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::{Confidence, NodeId};
+    use glia_core::{Confidence, NodeId};
 
     fn edge() -> Edge {
         Edge::new(
@@ -336,7 +336,7 @@ mod tests {
         )
     }
 
-    fn json(kind: repo_graph_core::CellTypeId, s: &str) -> Cell {
+    fn json(kind: glia_core::CellTypeId, s: &str) -> Cell {
         Cell {
             kind,
             payload: CellPayload::Json(s.to_string()),

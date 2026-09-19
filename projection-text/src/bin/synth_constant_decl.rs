@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_projection_text::driver_utils::{read_json, write_json};
+use glia_projection_text::driver_utils::{read_json, write_json};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 

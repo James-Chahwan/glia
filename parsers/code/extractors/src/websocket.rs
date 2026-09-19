@@ -55,8 +55,8 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 use crate::queue_topic::{LOOKAHEAD_LINES, MAX_HITS_PER_NEEDLE, MAX_REGION, clip};

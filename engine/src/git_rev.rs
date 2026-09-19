@@ -17,7 +17,7 @@
 //!   collapses a checked-out submodule into a nested-repo REGION with no nodes
 //!   in it, and the delta drops REGIONs from both sides;
 //! - the untracked external inputs under `<repo>/.glia`: every file the store
-//!   fingerprints as an input (`repo_graph_store::external_inputs_fingerprint`:
+//!   fingerprints as an input (`glia_store::external_inputs_fingerprint`:
 //!   the layout dir and the parse cache excluded) that neither the rev nor the
 //!   index tracks, so a docs / history / test snapshot the rev never held is
 //!   read by both builds and is no delta. A control file the rev tracks
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use repo_graph_code_domain::walk_gating::CONTROL_DIR;
+use glia_code_domain::walk_gating::CONTROL_DIR;
 
 /// A rev as the caller gave it and the commit it resolved to.
 pub(crate) struct Rev {
@@ -377,7 +377,7 @@ fn read_frame(reader: &mut impl BufRead, oid: &str) -> Result<Vec<u8>, String> {
 /// Copy every `.glia` input of the working tree that neither the rev
 /// (`tracked`) nor the index tracks into `root`; returns how many.
 fn copy_untracked_inputs(repo: &Path, root: &Path, tracked: &BTreeSet<String>) -> Result<usize, String> {
-    let inputs = repo_graph_store::external_inputs_fingerprint(repo);
+    let inputs = glia_store::external_inputs_fingerprint(repo);
     if inputs.is_empty() {
         return Ok(0);
     }
@@ -406,7 +406,7 @@ fn copy_untracked_inputs(repo: &Path, root: &Path, tracked: &BTreeSet<String>) -
 
 /// The renames git sees between `rev` and the working tree, as
 /// `(old_path, new_path)` relative to `repo` (`diff --relative -M`): the
-/// declared tier of `repo_graph_graph::identity::detect_moves_with`. A file
+/// declared tier of `glia_graph::identity::detect_moves_with`. A file
 /// moved without `git mv` is untracked at its new path and is not listed;
 /// move detection still pairs it by body or name. Empty when the diff fails.
 pub(crate) fn declared_renames(repo: &Path, rev: &Rev) -> Vec<(String, String)> {

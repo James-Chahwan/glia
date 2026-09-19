@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::str::Split;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
+use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -366,7 +366,7 @@ fn seg_walk(mut t: Split<'_, char>, mut p: Split<'_, char>, syn: Segmented) -> b
 
 #[cfg(test)]
 mod tests {
-    use repo_graph_code_domain::{edge_category, node_kind};
+    use glia_code_domain::{edge_category, node_kind};
 
     use super::super::tests::{channel_graph, cross_pairs};
     use super::*;

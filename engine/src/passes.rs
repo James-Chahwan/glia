@@ -7,10 +7,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::evidence::{self, Basis, Evidence, Location};
-use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
-use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::evidence::{self, Basis, Evidence, Location};
+use glia_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
+use glia_core::{Confidence, Edge, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 
 /// LC.2 fired_on marker, one line per build, un-gated:
 ///   `[edge-cells] intra=<intra edges> cross=<cross edges> with_cells=<k>`
@@ -89,11 +89,11 @@ impl FillStats {
 /// exactly. None for every other node.
 fn synthetic_module_file(
     kind: Option<NodeKindId>,
-    cells: &[repo_graph_core::Cell],
+    cells: &[glia_core::Cell],
     qname: Option<&String>,
     name: Option<&String>,
 ) -> Option<String> {
-    use repo_graph_code_domain::cell_type;
+    use glia_code_domain::cell_type;
     if kind != Some(node_kind::MODULE) || cells.iter().any(|c| c.kind == cell_type::IMPORTS) {
         return None;
     }
@@ -203,8 +203,8 @@ pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
 /// lowest NodeId, and an ambiguous bare name is stamped `Weak` instead of
 /// claiming `Medium` for a coin flip.
 pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
 
     let mut idx = DocSymbolIndex::default();
     for g in &merged.graphs {
@@ -367,7 +367,7 @@ struct ChannelOp {
 /// The edges `link_contract_routes` adds, without touching the graph. Split out
 /// so the unit tests can assert edges and counters on a hand-built merge.
 fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) {
-    use repo_graph_graph::HttpRouteMatcher;
+    use glia_graph::HttpRouteMatcher;
 
     let mut stats = ContractLinkStats::default();
     // Collect the ops first: almost no build has a contract file, and those
@@ -469,8 +469,8 @@ impl<'a> QueueSides<'a> {
     /// a channel literally called `kafka` cannot pair with every Kafka file
     /// whose topic failed to parse.
     fn build(merged: &'a MergedGraph) -> Self {
-        use repo_graph_code_domain::endpoint::split_owner;
-        use repo_graph_code_extractors::queues::UNRESOLVED_PREFIX;
+        use glia_code_domain::endpoint::split_owner;
+        use glia_code_extractors::queues::UNRESOLVED_PREFIX;
 
         let mut ix = QueueSides::default();
         for g in &merged.graphs {
@@ -565,9 +565,9 @@ fn weaker(a: Confidence, b: Confidence) -> Confidence {
 /// The parsed ORIGIN payload of a contract op, or `None` when the node is not
 /// one (markdown sections have no ORIGIN here; other ORIGIN payloads say a
 /// different provenance).
-fn contract_origin(cells: &[repo_graph_core::Cell]) -> Option<serde_json::Value> {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::CellPayload;
+fn contract_origin(cells: &[glia_core::Cell]) -> Option<serde_json::Value> {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
 
     let json = cells.iter().find_map(|c| match &c.payload {
         CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j.as_str()),
@@ -618,14 +618,14 @@ fn channel_op(v: &serde_json::Value) -> Option<ChannelOp> {
 /// The HTTP contract operation a DOC_SECTION's cells declare (test seam for
 /// [`contract_origin`] + [`http_op`]).
 #[cfg(test)]
-fn contract_op(cells: &[repo_graph_core::Cell]) -> Option<ContractOp> {
+fn contract_op(cells: &[glia_core::Cell]) -> Option<ContractOp> {
     http_op(&contract_origin(cells)?)
 }
 
 /// One of the verbs an OpenAPI path item may declare — literally the allow-list
 /// the contract extractor gates emission on.
 fn is_http_verb(method: &str) -> bool {
-    repo_graph_code_extractors::contracts::METHODS
+    glia_code_extractors::contracts::METHODS
         .iter()
         .any(|m| m.eq_ignore_ascii_case(method))
 }
@@ -706,8 +706,8 @@ fn resolve_doc_mention(
 }
 
 /// Node kinds a doc section can meaningfully document.
-fn is_doc_linkable_symbol(kind: repo_graph_core::NodeKindId) -> bool {
-    use repo_graph_code_domain::node_kind as nk;
+fn is_doc_linkable_symbol(kind: glia_core::NodeKindId) -> bool {
+    use glia_code_domain::node_kind as nk;
     kind == nk::FUNCTION
         || kind == nk::METHOD
         || kind == nk::CLASS
@@ -765,8 +765,8 @@ fn is_identifier(s: &str) -> bool {
 /// `EventBusResolver` pairs `event_*`), so they are NOT dropped here — only
 /// categorised. (glia-v2 G6/G9/G11)
 pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
-    use repo_graph_code_domain::{cell_type, node_kind};
-    use repo_graph_core::{Cell, CellPayload};
+    use glia_code_domain::{cell_type, node_kind};
+    use glia_core::{Cell, CellPayload};
 
     for g in &mut merged.graphs {
         let nodes = &mut g.nodes;
@@ -817,9 +817,9 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
 /// Pull the `file` path out of a node's POSITION cell. Lightweight string
 /// scan of the `{"file":"...","start_line":..}` payload — avoids a serde_json
 /// dependency in the engine crate.
-fn position_file(cells: &[repo_graph_core::Cell]) -> Option<String> {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::CellPayload;
+fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
     for c in cells {
         if c.kind != cell_type::POSITION {
             continue;
@@ -1126,8 +1126,8 @@ struct TestCellPayload<'a> {
 /// LC.10b) rewrites each cell in place and drops the ones its edges no longer
 /// support. BTreeMaps only: the output does not depend on hash order.
 pub(crate) fn fill_test_cells(merged: &mut MergedGraph) -> TestCellStats {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::{Cell, CellPayload};
+    use glia_code_domain::cell_type;
+    use glia_core::{Cell, CellPayload};
 
     let mut stats = TestCellStats::default();
 
@@ -1496,9 +1496,9 @@ mod passes_tests {
     // A10.2 — link_contract_routes, on a hand-built merge
     // ------------------------------------------------------------------
 
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type};
-    use repo_graph_core::{Cell, CellPayload, Node, NodeKindId, RepoId};
-    use repo_graph_graph::RepoGraph;
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type};
+    use glia_core::{Cell, CellPayload, Node, NodeKindId, RepoId};
+    use glia_graph::RepoGraph;
 
     /// A merge under construction: nodes + nav for one repo.
     struct Hand {
@@ -1960,8 +1960,8 @@ mod passes_tests {
     /// test language with no file-import order pairs every sibling.
     #[test]
     fn a_test_pairs_the_same_stem_sibling_its_language_loads() {
-        use repo_graph_code_domain::GRAPH_TYPE;
-        use repo_graph_core::RepoId;
+        use glia_code_domain::GRAPH_TYPE;
+        use glia_core::RepoId;
         let repo = RepoId::from_canonical("test://lb13");
         let module = |qname: &str, key: &str, qualified: bool, ext: &str| TestsModule {
             id: NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, qname),
@@ -1992,8 +1992,8 @@ mod passes_tests {
 
     #[test]
     fn position_file_extraction() {
-        use repo_graph_code_domain::cell_type;
-        use repo_graph_core::{Cell, CellPayload};
+        use glia_code_domain::cell_type;
+        use glia_core::{Cell, CellPayload};
         let cells = vec![Cell {
             kind: cell_type::POSITION,
             payload: CellPayload::Json(
@@ -2012,9 +2012,9 @@ mod passes_tests {
     /// original record.
     #[test]
     fn http_demotion_records_only_its_own_changes() {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_core::{Node, NodeKindId, RepoId};
-        use repo_graph_graph::{RepoGraph, SymbolTable};
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::{Node, NodeKindId, RepoId};
+        use glia_graph::{RepoGraph, SymbolTable};
         use Confidence::{Medium, Strong, Weak};
 
         let repo = RepoId::from_canonical("test://lc10a");

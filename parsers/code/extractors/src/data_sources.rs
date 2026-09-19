@@ -11,8 +11,8 @@
 //! risk is bounded by the medium confidence tier and by keeping patterns
 //! distinctive (`pg.` not `pg`, `sqlx::` not `sqlx`, etc.).
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataSourceKind {
@@ -129,7 +129,7 @@ const PATTERNS: &[(&str, DataSourceKind, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::GRAPH_TYPE;
+    use glia_code_domain::GRAPH_TYPE;
 
     fn module_id(repo: RepoId) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "test")

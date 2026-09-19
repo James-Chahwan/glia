@@ -1,5 +1,5 @@
 [package]
-name = "repo-graph-engine"
+name = "glia-engine"
 version.workspace = true
 edition = "2024"
 publish = false
@@ -8,33 +8,33 @@ description = "Pure-Rust orchestration: walk a repo, run language parsers + cros
 [dependencies]
 # Build identity (RELEASE + PARSER_STAMP) for the parse-cache accept check.
 # Leaf crate with no deps of its own, so this costs nothing in the build DAG.
-repo-graph-stamp = { path = "../stamp" }
-repo-graph-core = { path = "../core" }
-repo-graph-code-domain = { path = "../code-domain" }
-repo-graph-graph = { path = "../graph" }
+glia-stamp = { path = "../stamp" }
+glia-core = { path = "../core" }
+glia-code-domain = { path = "../code-domain" }
+glia-graph = { path = "../graph" }
 # Direction enum for the P3 resolve/blast answer-shaping (activation config).
-repo-graph-activation = { path = "../activation" }
-repo-graph-code-extractors = { path = "../parsers/code/extractors" }
-repo-graph-parser-python = { path = "../parsers/code/python" }
-repo-graph-parser-go = { path = "../parsers/code/go" }
-repo-graph-parser-typescript = { path = "../parsers/code/typescript" }
-repo-graph-parser-rust = { path = "../parsers/code/rust" }
-repo-graph-parser-java = { path = "../parsers/code/java" }
-repo-graph-parser-kotlin = { path = "../parsers/code/kotlin" }
-repo-graph-parser-csharp = { path = "../parsers/code/csharp" }
-repo-graph-parser-ruby = { path = "../parsers/code/ruby" }
-repo-graph-parser-php = { path = "../parsers/code/php" }
-repo-graph-parser-swift = { path = "../parsers/code/swift" }
-repo-graph-parser-c-cpp = { path = "../parsers/code/c_cpp" }
-repo-graph-parser-scala = { path = "../parsers/code/scala" }
-repo-graph-parser-clojure = { path = "../parsers/code/clojure" }
-repo-graph-parser-dart = { path = "../parsers/code/dart" }
-repo-graph-parser-elixir = { path = "../parsers/code/elixir" }
-repo-graph-parser-solidity = { path = "../parsers/code/solidity" }
-repo-graph-parser-terraform = { path = "../parsers/code/terraform" }
-repo-graph-parser-react = { path = "../parsers/code/react" }
-repo-graph-parser-angular = { path = "../parsers/code/angular" }
-repo-graph-parser-vue = { path = "../parsers/code/vue" }
+glia-activation = { path = "../activation" }
+glia-code-extractors = { path = "../parsers/code/extractors" }
+glia-parser-python = { path = "../parsers/code/python" }
+glia-parser-go = { path = "../parsers/code/go" }
+glia-parser-typescript = { path = "../parsers/code/typescript" }
+glia-parser-rust = { path = "../parsers/code/rust" }
+glia-parser-java = { path = "../parsers/code/java" }
+glia-parser-kotlin = { path = "../parsers/code/kotlin" }
+glia-parser-csharp = { path = "../parsers/code/csharp" }
+glia-parser-ruby = { path = "../parsers/code/ruby" }
+glia-parser-php = { path = "../parsers/code/php" }
+glia-parser-swift = { path = "../parsers/code/swift" }
+glia-parser-c-cpp = { path = "../parsers/code/c_cpp" }
+glia-parser-scala = { path = "../parsers/code/scala" }
+glia-parser-clojure = { path = "../parsers/code/clojure" }
+glia-parser-dart = { path = "../parsers/code/dart" }
+glia-parser-elixir = { path = "../parsers/code/elixir" }
+glia-parser-solidity = { path = "../parsers/code/solidity" }
+glia-parser-terraform = { path = "../parsers/code/terraform" }
+glia-parser-react = { path = "../parsers/code/react" }
+glia-parser-angular = { path = "../parsers/code/angular" }
+glia-parser-vue = { path = "../parsers/code/vue" }
 # WP-D incremental parse cache: hash sources (xxhash64, same primitive as the
 # store) + (de)serialize cached FileParses (bincode — transient sidecar).
 serde = { version = "1", features = ["derive"] }
@@ -44,7 +44,7 @@ twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
 # The one persist / load module (`persist`, LC.7) that py and cli share, so
 # neither calls the store for a layout. One-way: the store depends on core,
 # code-domain, graph and stamp, never on the engine, so there is no cycle.
-repo-graph-store = { path = "../store" }
+glia-store = { path = "../store" }
 # LG.1a: the per-file route / parse / extract runs on the engine's own rayon
 # pool (`parallel`): order-preserving indexed collect, work stealing over
 # skewed file sizes, a worker stack size we set. Its crossbeam deps were

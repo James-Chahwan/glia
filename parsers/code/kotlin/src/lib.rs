@@ -67,11 +67,11 @@ mod spring;
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{CallSite, UnresolvedRef};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CallSite, UnresolvedRef};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError, cell_type,
     edge_category, node_kind,
 };
@@ -420,7 +420,7 @@ fn visit_property(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     let literal_init = !getter
         && named_child_of_kind(node, &["property_delegate"]).is_none()
         && initializer(node).is_some_and(|e| is_plain_literal(e, file.src));
-    if literal_init && !is_const && repo_graph_doc::leading_doc(&node, file.src).is_none() {
+    if literal_init && !is_const && glia_doc::leading_doc(&node, file.src).is_none() {
         return;
     }
     let kind = if owner.in_type {
@@ -442,7 +442,7 @@ fn declare(
     node: TsNode,
     name: &str,
     qname: &str,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     parent: NodeId,
     file: &File,
     acc: &mut Acc,
@@ -592,7 +592,7 @@ fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
 
-/// CODE + POSITION (canonical 0-indexed JSON via `repo_graph_doc`), plus DOC
+/// CODE + POSITION (canonical 0-indexed JSON via `glia_doc`), plus DOC
 /// for a declaration that carries a leading doc comment.
 fn cells_of(node: &TsNode, src: &[u8], file_rel: &str, with_doc: bool) -> Vec<Cell> {
     let mut cells = vec![
@@ -602,10 +602,10 @@ fn cells_of(node: &TsNode, src: &[u8], file_rel: &str, with_doc: bool) -> Vec<Ce
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if with_doc && let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if with_doc && let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -623,7 +623,7 @@ mod tests {
     }
 
     /// Every qname the parse recorded for `kind`, sorted.
-    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+    fn qnames_of(fp: &FileParse, kind: glia_core::NodeKindId) -> Vec<&str> {
         let mut out: Vec<&str> = fp
             .nav
             .kind_by_id

@@ -11,13 +11,13 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::snapshots::{
     LcovFileRecord, META_FILE, TESTS_CASES_FILE, TESTS_LCOV_FILE, TestsMeta, data_hash, tests_dir, write_tests,
 };
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, NodeId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{Cell, CellPayload, NodeId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 use serde_json::Value;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/test-reports-coverage";

@@ -29,8 +29,8 @@
 //!     Deployment.metadata.labels — needs label-set comparison)
 //!   - Ingress → Service routing (host-path-rules)
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, infra, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, infra, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct IacNodes {
     pub nodes: Vec<Node>,

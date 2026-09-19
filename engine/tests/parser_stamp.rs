@@ -10,7 +10,7 @@
 //! sidecar bytes so it asserts on what is actually written to disk, not on an
 //! in-process constant.
 
-use repo_graph_engine::{ParseCache, generate_one_incremental};
+use glia_engine::{ParseCache, generate_one_incremental};
 
 const RELEASE: &str = env!("CARGO_PKG_VERSION");
 
@@ -58,7 +58,7 @@ fn cache_stamp_binds_to_parser_sources_not_just_release() {
 
     generate_one_incremental(repo_str).expect("incremental build");
 
-    let sidecar = repo_graph_store::default_gmap_dir(repo).join("parse_cache.bin");
+    let sidecar = glia_store::default_gmap_dir(repo).join("parse_cache.bin");
     let bytes = std::fs::read(&sidecar).expect("parse_cache.bin was written");
     let stamp = read_sidecar_stamp(&bytes);
 

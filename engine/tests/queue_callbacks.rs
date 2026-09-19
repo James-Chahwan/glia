@@ -10,11 +10,11 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Edge, NodeId};
-use repo_graph_engine::{BlastOptions, blast_radius, generate_one};
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Edge, NodeId};
+use glia_engine::{BlastOptions, blast_radius, generate_one};
+use glia_graph::{MergedGraph, Reach};
 
 fn fixture(name: &str) -> String {
     format!(
@@ -204,8 +204,8 @@ fn a_folded_topic_rebinds_its_callback_and_drops_the_sentinel() {
         "LE.4c's owner edge is re-anchored on the folded id"
     );
     assert!(ids(&m, "queue_consumer:unresolved:kafka").is_empty());
-    let sentinel = repo_graph_core::NodeId::from_parts(
-        repo_graph_code_domain::GRAPH_TYPE,
+    let sentinel = glia_core::NodeId::from_parts(
+        glia_code_domain::GRAPH_TYPE,
         m.graphs[0].repo,
         node_kind::QUEUE_CONSUMER,
         "queue_consumer:unresolved:kafka",

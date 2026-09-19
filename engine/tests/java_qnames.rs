@@ -13,8 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::{BlastOptions, blast_radius, generate_one, locate_node};
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_engine::{BlastOptions, blast_radius, generate_one, locate_node};
+use glia_graph::{MergedGraph, Reach};
 
 const MODULE: &str = "src::main::java::com::example::billing::InvoiceService";
 const TOTAL: &str = "src::main::java::com::example::billing::InvoiceService::total";

@@ -5,9 +5,9 @@
 //! with CALLS / INJECTS rows and gives no tier, and says nothing at all for a
 //! PHP interface (no heritage edge is extracted there).
 
-use repo_graph_engine::generate_one;
-use repo_graph_engine::implementors::{HierarchyDirection, Implementor, implementors};
-use repo_graph_graph::MergedGraph;
+use glia_engine::generate_one;
+use glia_engine::implementors::{HierarchyDirection, Implementor, implementors};
+use glia_graph::MergedGraph;
 
 use HierarchyDirection::{Down, Up};
 

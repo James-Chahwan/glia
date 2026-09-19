@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor, line_of};
 
@@ -13,7 +13,7 @@ pub struct ProtoRpc {
     pub client_streaming: bool,
     pub server_streaming: bool,
     /// 0-indexed source line of the `rpc` keyword (same convention as
-    /// `repo_graph_docs::position_json`).
+    /// `glia_doc::position_json`).
     pub line: u32,
 }
 
@@ -242,7 +242,7 @@ fn json_str(s: &str) -> String {
 
 fn position_cell(path: &str, start_line: u32, end_line: u32) -> Cell {
     Cell {
-        kind: repo_graph_code_domain::cell_type::POSITION,
+        kind: glia_code_domain::cell_type::POSITION,
         payload: CellPayload::Json(format!(
             r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
             json_str(path),
@@ -290,7 +290,7 @@ pub fn extract_grpc_service_nodes(
         let svc_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_SERVICE, &qname);
         let mut cells = vec![
             Cell {
-                kind: repo_graph_code_domain::cell_type::INTENT,
+                kind: glia_code_domain::cell_type::INTENT,
                 payload: CellPayload::Text(format!(
                     "gRPC service {} with {} methods",
                     svc.service_name,
@@ -301,7 +301,7 @@ pub fn extract_grpc_service_nodes(
         ];
         if let Some(p) = &pkg_payload {
             cells.push(Cell {
-                kind: repo_graph_code_domain::cell_type::RPC_PACKAGE,
+                kind: glia_code_domain::cell_type::RPC_PACKAGE,
                 payload: CellPayload::Json(p.clone()),
             });
         }
@@ -340,7 +340,7 @@ pub fn extract_grpc_service_nodes(
                 cells: vec![
                     position_cell(path, rpc.line, rpc.line),
                     Cell {
-                        kind: repo_graph_code_domain::cell_type::INTENT,
+                        kind: glia_code_domain::cell_type::INTENT,
                         payload: CellPayload::Text(signature),
                     },
                 ],
@@ -349,7 +349,7 @@ pub fn extract_grpc_service_nodes(
             edges.push(Edge {
                 from: svc_id,
                 to: m_id,
-                category: repo_graph_code_domain::edge_category::DEFINES,
+                category: glia_code_domain::edge_category::DEFINES,
                 confidence: Confidence::Strong,
                 cells: Vec::new(),
             });
@@ -635,7 +635,7 @@ fn client_evidence_cell(source: &str) -> Option<Cell> {
         return None;
     }
     Some(Cell {
-        kind: repo_graph_code_domain::cell_type::RPC_PACKAGE,
+        kind: glia_code_domain::cell_type::RPC_PACKAGE,
         payload: CellPayload::Json(serde_json::json!({ "imports": imports }).to_string()),
     })
 }
@@ -1814,7 +1814,7 @@ pub fn extract_proto_rpc_nodes(
             let span = method.and_then(|m| {
                 m.cells
                     .iter()
-                    .find(|c| c.kind == repo_graph_code_domain::cell_type::POSITION)
+                    .find(|c| c.kind == glia_code_domain::cell_type::POSITION)
             });
             let position = span
                 .cloned()
@@ -1823,13 +1823,13 @@ pub fn extract_proto_rpc_nodes(
                 Some(m) => out.edges.push(edge(
                     id,
                     m.id,
-                    repo_graph_code_domain::edge_category::HANDLED_BY,
+                    glia_code_domain::edge_category::HANDLED_BY,
                 )),
                 None => {
                     out.edges.push(edge(
                         module_id,
                         id,
-                        repo_graph_code_domain::edge_category::CONTAINS,
+                        glia_code_domain::edge_category::CONTAINS,
                     ));
                     out.counts.unowned += 1;
                 }
@@ -1904,10 +1904,10 @@ pub fn extract_proto_rpc_nodes(
                         edge(
                             module_id,
                             id,
-                            repo_graph_code_domain::edge_category::CONTAINS,
+                            glia_code_domain::edge_category::CONTAINS,
                         )
                     } else {
-                        edge(owner, id, repo_graph_code_domain::edge_category::USES)
+                        edge(owner, id, glia_code_domain::edge_category::USES)
                     });
                 }
             }
@@ -2001,7 +2001,7 @@ service Users {
         let svc_cells = &result.nodes[0].cells;
         let pos = svc_cells
             .iter()
-            .find(|c| c.kind == repo_graph_code_domain::cell_type::POSITION)
+            .find(|c| c.kind == glia_code_domain::cell_type::POSITION)
             .expect("service carries a POSITION cell");
         match &pos.payload {
             CellPayload::Json(j) => {
@@ -2013,7 +2013,7 @@ service Users {
         }
         let pkg = svc_cells
             .iter()
-            .find(|c| c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE)
+            .find(|c| c.kind == glia_code_domain::cell_type::RPC_PACKAGE)
             .expect("service carries an RPC_PACKAGE cell");
         match &pkg.payload {
             CellPayload::Json(j) => {
@@ -2043,7 +2043,7 @@ service Users {
             methods[0]
                 .cells
                 .iter()
-                .any(|c| c.kind == repo_graph_code_domain::cell_type::POSITION),
+                .any(|c| c.kind == glia_code_domain::cell_type::POSITION),
             "each rpc METHOD is located at its declaration line"
         );
         assert!(
@@ -2057,7 +2057,7 @@ service Users {
         let defines: Vec<&Edge> = result
             .edges
             .iter()
-            .filter(|e| e.category == repo_graph_code_domain::edge_category::DEFINES)
+            .filter(|e| e.category == glia_code_domain::edge_category::DEFINES)
             .collect();
         assert_eq!(defines.len(), 2, "service DEFINES each rpc METHOD");
         assert!(defines.iter().all(|e| e.from == svc_id));
@@ -2417,7 +2417,7 @@ let db = makeDbClient(uri);
     /// A node of `kind` named `name` spanning `start..=end`, recorded in `nav`.
     fn parse_node(
         nav: &mut CodeNav,
-        kind: repo_graph_core::NodeKindId,
+        kind: glia_core::NodeKindId,
         name: &str,
         qname: &str,
         span: (u32, u32),
@@ -2478,7 +2478,7 @@ let db = makeDbClient(uri);
             .cells
             .iter()
             .filter_map(|c| match &c.payload {
-                CellPayload::Json(j) if c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE => {
+                CellPayload::Json(j) if c.kind == glia_code_domain::cell_type::RPC_PACKAGE => {
                     RpcPackageCell::parse(j)
                 }
                 _ => None,
@@ -2507,7 +2507,7 @@ let db = makeDbClient(uri);
         out.nodes
             .iter()
             .flat_map(|n| n.cells.iter())
-            .filter(|c| c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE)
+            .filter(|c| c.kind == glia_code_domain::cell_type::RPC_PACKAGE)
             .map(|c| match &c.payload {
                 CellPayload::Json(j) => RpcPackageCell::parse(j).expect("evidence decodes"),
                 other => panic!("RPC_PACKAGE must be Json, got {other:?}"),
@@ -2596,7 +2596,7 @@ let db = makeDbClient(uri);
         let payload = out.nodes[0]
             .cells
             .iter()
-            .find_map(|c| match (&c.payload, c.kind == repo_graph_code_domain::cell_type::RPC_PACKAGE) {
+            .find_map(|c| match (&c.payload, c.kind == glia_code_domain::cell_type::RPC_PACKAGE) {
                 (CellPayload::Json(j), true) => Some(j.clone()),
                 _ => None,
             })
@@ -2682,7 +2682,7 @@ let db = makeDbClient(uri);
         )
     }
 
-    fn rpc_qnames(out: &ProtoRpcNodes, kind: repo_graph_core::NodeKindId) -> Vec<String> {
+    fn rpc_qnames(out: &ProtoRpcNodes, kind: glia_core::NodeKindId) -> Vec<String> {
         out.nodes
             .iter()
             .filter(|n| out.nav.kind_by_id[&n.id] == kind)
@@ -2690,13 +2690,13 @@ let db = makeDbClient(uri);
             .collect()
     }
 
-    fn rpc_id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn rpc_id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
     fn edges_of(
         out: &ProtoRpcNodes,
-        cat: repo_graph_core::EdgeCategoryId,
+        cat: glia_core::EdgeCategoryId,
     ) -> Vec<(NodeId, NodeId)> {
         out.edges
             .iter()
@@ -2712,14 +2712,14 @@ let db = makeDbClient(uri);
             .cells
             .iter()
             .find_map(|c| match &c.payload {
-                CellPayload::Json(j) if c.kind == repo_graph_code_domain::cell_type::POSITION => {
+                CellPayload::Json(j) if c.kind == glia_code_domain::cell_type::POSITION => {
                     Some(j.clone())
                 }
                 _ => None,
             })
     }
 
-    use repo_graph_code_domain::edge_category as ec;
+    use glia_code_domain::edge_category as ec;
 
     #[test]
     fn connect_handler_emits_one_procedure_per_rpc_owned_by_impl_method() {

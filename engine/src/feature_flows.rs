@@ -7,7 +7,7 @@
 //! surface `generate-repo-map.py` produced by regex.
 //!
 //! Module slot declared by L0.2, reached as
-//! `repo_graph_engine::feature_flows::<item>`, never flattened into the crate
+//! `glia_engine::feature_flows::<item>`, never flattened into the crate
 //! root. Named `feature_flows` because LD.4b's [`crate::trace::entry_flows`]
 //! owns the word "flows" (the `glia flows` rows and the `[flows]` marker).
 //!
@@ -114,12 +114,12 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{edge_category as ec, node_kind as nk};
-use repo_graph_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::nav::nav_route_path;
-use repo_graph_graph::{MergedGraph, channel_of};
+use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{edge_category as ec, node_kind as nk};
+use glia_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::nav::nav_route_path;
+use glia_graph::{MergedGraph, channel_of};
 
 use crate::VERSION_LINE;
 use crate::answers::{Located, Locator, in_scope, resolve_scope};

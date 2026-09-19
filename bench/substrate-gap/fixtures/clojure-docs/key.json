@@ -27,5 +27,5 @@
       "note": "(defprotocol Greeter \"docstring\" ...)"
     }
   ],
-  "note": "LA.7b. Baseline HEAD: defn / ns / defprotocol docstrings produce no DOC; a `;;` leading comment produces DOC `;; leading comment` with the marker still attached (the `;` strip is unit-tested in repo-graph-doc; `(def banner \"not a doc\")` staying docless is unit-tested in the clojure parser)."
+  "note": "LA.7b. Baseline HEAD: defn / ns / defprotocol docstrings produce no DOC; a `;;` leading comment produces DOC `;; leading comment` with the marker still attached (the `;` strip is unit-tested in glia-doc; `(def banner \"not a doc\")` staying docless is unit-tested in the clojure parser)."
 }

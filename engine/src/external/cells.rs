@@ -1,6 +1,6 @@
 //! The cell-sidecar stage (LF.1a): `.glia/cells.jsonl` (checked in) and
 //! `.glia/vectors.jsonl` (local) applied to their nodes at build, through the
-//! graph crate's one resolver and apply function (`repo_graph_graph::cells`),
+//! graph crate's one resolver and apply function (`glia_graph::cells`),
 //! so a build binds a row exactly as a live write and a persisted
 //! write-through do.
 //!
@@ -16,13 +16,13 @@
 //! [`MAX_DETAIL_LINES`] per repo:
 //!   `[cells] rejected|orphaned|ambiguous|rekeyed <file> qname=<q> cell=<C> ...`.
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::cell_type;
+use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, WRITABLE, read_rows,
 };
-use repo_graph_core::{CellTypeId, NodeId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_core::{CellTypeId, NodeId};
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
 
 use super::RepoInputs;
 
@@ -170,7 +170,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("glia_sidecar_none_{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let input = RepoInputs {
-            repo: repo_graph_core::RepoId::from_canonical("test://none"),
+            repo: glia_core::RepoId::from_canonical("test://none"),
             root: d.clone(),
             label: "none".into(),
             config: None,

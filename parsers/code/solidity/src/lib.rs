@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_doc::DocTag;
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_doc::DocTag;
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -130,7 +130,7 @@ fn visit_contract(
     parent_id: NodeId,
     module_id: NodeId,
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     local_interfaces: &HashSet<String>,
     acc: &mut Acc,
 ) {
@@ -385,7 +385,7 @@ fn visit_state_variable(
     };
     let name = text_of(name_node, src);
 
-    let doc = repo_graph_doc::leading_doc(&node, src);
+    let doc = glia_doc::leading_doc(&node, src);
     // Noise gate: skip only when undocumented AND initialized to a literal
     // primitive (`uint256 x = 0;`). An UNINITIALIZED public state var
     // (`uint256 public feeBasisPoints;`) is meaningful storage — keep it even
@@ -632,7 +632,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -650,10 +650,10 @@ fn entity_cells(
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -726,8 +726,8 @@ fn is_natspec_comment(raw: &str) -> bool {
 /// word stays in the text. `@inheritdoc Base` keeps `Base` — the base
 /// contract / interface, usually declared in another file.
 fn natspec_cell(node: &TsNode, src: &[u8], stats: &mut NatspecStats) -> Option<Cell> {
-    let lines = repo_graph_doc::leading_doc_lines_where(node, src, is_natspec_comment)?;
-    let mut tags = repo_graph_doc::split_doc_tags(&lines, "notice");
+    let lines = glia_doc::leading_doc_lines_where(node, src, is_natspec_comment)?;
+    let mut tags = glia_doc::split_doc_tags(&lines, "notice");
     if tags.is_empty() {
         return None;
     }
@@ -1075,7 +1075,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
     /// The payload of `cell` on the non-MODULE node named `name`, if any (the
     /// module of `contracts/Vault.sol` is also called `Vault`).
-    fn cell_on(fp: &FileParse, name: &str, cell: repo_graph_core::CellTypeId) -> Option<String> {
+    fn cell_on(fp: &FileParse, name: &str, cell: glia_core::CellTypeId) -> Option<String> {
         let id = fp
             .nav
             .name_by_id

@@ -27,8 +27,8 @@
 use std::collections::HashSet;
 
 use regex::Regex;
-use repo_graph_activation::plan::{ActivatedView, SynthCell, SynthHook};
-use repo_graph_graph::RepoGraph;
+use glia_activation::plan::{ActivatedView, SynthCell, SynthHook};
+use glia_graph::RepoGraph;
 
 use crate::hooks::{ACCESS_PATH, CALLSITE_ARGFLOW};
 use crate::research::key_symbols::{KEY_SYMBOLS, SUMMARY};

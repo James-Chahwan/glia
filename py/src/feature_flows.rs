@@ -21,7 +21,7 @@
 //!
 //! Transport only: grouping, the files, the `[feature-flows] features=..` and
 //! `[feature-flows] wrote ..` markers live in the engine. The helpers the pyo3
-//! entry points delegate to are pyo3-free, so `cargo test -p repo-graph-py`
+//! entry points delegate to are pyo3-free, so `cargo test -p glia-py`
 //! covers them (see the crate doc).
 
 use std::collections::BTreeMap;
@@ -30,10 +30,10 @@ use std::path::{Path, PathBuf};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::feature_flows::{
+use glia_engine::feature_flows::{
     FlowGrouping, FlowOptions, default_flows_dir, feature_flows, write_feature_flows,
 };
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -214,8 +214,8 @@ impl PyGraph {
 mod tests {
     use std::path::PathBuf;
 
-    use repo_graph_engine::GenerateResult;
-    use repo_graph_engine::feature_flows::DEFAULT_DEPTH;
+    use glia_engine::GenerateResult;
+    use glia_engine::feature_flows::DEFAULT_DEPTH;
 
     use super::*;
 
@@ -245,7 +245,7 @@ mod tests {
     }
 
     fn build() -> GenerateResult {
-        repo_graph_engine::generate_many(&[fixture("web"), fixture("api")]).expect("build")
+        glia_engine::generate_many(&[fixture("web"), fixture("api")]).expect("build")
     }
 
     /// LG.3c: the helper behind `PyGraph.feature_flows` returns the engine's

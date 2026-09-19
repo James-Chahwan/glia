@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_engine::BUILD_STAMP;
-use repo_graph_store::{
+use glia_engine::BUILD_STAMP;
+use glia_store::{
     MANIFEST_VERSION, default_gmap_dir, is_gmap_stale, read_manifest_lenient, read_merged_sharded,
 };
 

@@ -43,16 +43,16 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, ENTRY_SOURCES, VECTORS_FILE, VectorRow, WRITABLE, WritePayload,
     b64_encode, canonical, check_vector, read_rows, remove_entry, validate_entry, write_rows,
 };
-use repo_graph_code_domain::snapshots::redact_untrusted;
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellTypeId, NodeId, RepoId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
-use repo_graph_graph::identity::identity_of;
+use glia_code_domain::snapshots::redact_untrusted;
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellTypeId, NodeId, RepoId};
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_graph::identity::identity_of;
 use serde::Serialize;
 use serde_json::{Map, Value};
 

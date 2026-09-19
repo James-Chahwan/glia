@@ -56,16 +56,16 @@
 //! — grep token `[implementors] target=`.
 //!
 //! Module slot declared by L0.2; its API is reached as
-//! `repo_graph_engine::implementors::<item>`, never flattened into the crate
+//! `glia_engine::implementors::<item>`, never flattened into the crate
 //! root.
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_activation::algo::reach::bfs;
-use repo_graph_activation::algo::{Adjacency, CategorySet, Walk};
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::reach::bfs;
+use glia_activation::algo::{Adjacency, CategorySet, Walk};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Confidence, EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
 use crate::answers::{Locator, entrypoint_reachable, live_marker};

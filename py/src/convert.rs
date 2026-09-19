@@ -31,7 +31,7 @@ pub(crate) fn escape_json(s: &str) -> String {
     // replaced let every other control character below 0x20 through raw, so a
     // single stray 0x01 in one symbol name or file path made `json.loads`
     // raise `Invalid control character` for the entire graph (audit #16).
-    repo_graph_projection_text::escape_json_string(s)
+    glia_projection_text::escape_json_string(s)
 }
 
 /// An engine answer, as native Python objects (the convention above). Pass
@@ -92,13 +92,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp dir");
         std::fs::write(root.join("app.py"), "def helper(x):\n    return x + 1\n").expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
-        let answer = repo_graph_engine::find::find_nodes(
+        let answer = glia_engine::find::find_nodes(
             &merged,
             "helper",
-            &repo_graph_engine::find::FindOptions::default(),
+            &glia_engine::find::FindOptions::default(),
         );
         let row = answer.results.first().expect("helper is found");
         let text = serde_json::to_string(row).expect("serialises");

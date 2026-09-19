@@ -10,14 +10,14 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::{
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellPayload, NodeId};
+use glia_engine::{
     BlastOptions, BuildOptions, GenerateResult, ParseCache, blast_radius, entrypoint_reachable,
     generate_one, generate_one_opts, generate_one_with_cache,
 };
-use repo_graph_graph::{MergedGraph, Reach};
-use repo_graph_store::{read_merged_sharded, write_merged_sharded};
+use glia_graph::{MergedGraph, Reach};
+use glia_store::{read_merged_sharded, write_merged_sharded};
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/overlay-entrypoints";
 const OVERLAY: &str = include_str!("../../bench/substrate-gap/fixtures/overlay-entrypoints/.glia/overlay.toml");

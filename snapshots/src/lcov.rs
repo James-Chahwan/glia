@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use repo_graph_code_domain::snapshots::LcovFileRecord;
+use glia_code_domain::snapshots::LcovFileRecord;
 
 /// Parse one lcov tracefile. `rel` is the `SF:` path relative to `repo_root`
 /// (its canonical form, or as given), or the `SF:` path itself when already

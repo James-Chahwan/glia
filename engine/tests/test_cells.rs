@@ -11,11 +11,11 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{Cell, CellPayload};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::cell_type;
+use glia_core::{Cell, CellPayload};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded;
 use serde_json::Value;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/py-test-cells";
@@ -232,7 +232,7 @@ fn no_tests_edges_no_cells_no_marker() {
     write(&repo, "shop/pricing.py", "def price(order):\n    return len(order)\n\n\ndef place(order):\n    return price(order)\n");
     let m = build(&repo);
     assert!(
-        !m.all_edges().any(|e| e.category == repo_graph_code_domain::edge_category::TESTS),
+        !m.all_edges().any(|e| e.category == glia_code_domain::edge_category::TESTS),
         "no TESTS edge in a tree without tests"
     );
     // The marker is gated on the same count (TestCellStats::marker is None

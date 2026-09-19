@@ -24,8 +24,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{CallSite, UnresolvedRef, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_code_domain::{CallSite, UnresolvedRef, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::types::RepoGraph;
 
@@ -377,8 +377,8 @@ mod tests {
     use super::*;
     use crate::test_support::repo;
     use crate::types::SymbolTable;
-    use repo_graph_code_domain::{CallQualifier, CodeNav, GRAPH_TYPE};
-    use repo_graph_core::{Confidence, Edge, Node};
+    use glia_code_domain::{CallQualifier, CodeNav, GRAPH_TYPE};
+    use glia_core::{Confidence, Edge, Node};
 
     fn node(id: NodeId) -> Node {
         Node {

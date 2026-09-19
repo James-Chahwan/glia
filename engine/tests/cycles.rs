@@ -14,9 +14,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_graph_engine::cycles::{CycleArgs, CycleRow, cycles, kinds_for};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_engine::cycles::{CycleArgs, CycleRow, cycles, kinds_for};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 const EV_ORDERS: &str = "import { EventEmitter } from \"events\";\nexport const bus = new EventEmitter();\nexport function placeOrder(o) { bus.emit(\"order.placed\", o); }\nexport function registerOrderHandlers() { bus.on(\"payment.settled\", (p) => { retryOrder(p); }); }\nfunction retryOrder(p) { placeOrder(p); }\n";
 const EV_BILLING: &str = "import { EventEmitter } from \"events\";\nexport const bus = new EventEmitter();\nexport function registerBillingHandlers() { bus.on(\"order.placed\", (o) => { settle(o); }); }\nfunction settle(o) { bus.emit(\"payment.settled\", o); }\n";

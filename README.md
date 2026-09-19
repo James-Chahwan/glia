@@ -224,7 +224,7 @@ The latent arm itself lives in `bench/latent/`, excluded from the default worksp
 
 ```
 cargo build                       # core glia, no candle
-cargo build -p repo-graph-latent  # opt in to the parked arm
+cargo build -p glia-latent  # opt in to the parked arm
 ```
 
 Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API verified) but research follow-up, not a v0.4.x deliverable.

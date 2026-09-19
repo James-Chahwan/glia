@@ -12,11 +12,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use repo_graph_code_domain::{
+use glia_code_domain::{
     CallSite, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_core::{CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::{RepoGraph, SymbolTable};
+use glia_core::{CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_graph::{RepoGraph, SymbolTable};
 
 use crate::container::{
     Container, EncodedSection, Header, MmapContainer, encode_file, encode_section, write_atomic,

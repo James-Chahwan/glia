@@ -1,4 +1,4 @@
-//! repo-graph-parser-typescript — tree-sitter TypeScript → `repo_graph_core` types.
+//! glia-parser-typescript — tree-sitter TypeScript → `glia_core` types.
 //!
 //! Single-file scan: emit Module/Class/Interface/Function/Method nodes with
 //! Code/Position cells, intra-file `defines` and `calls` edges. Cross-file
@@ -11,19 +11,19 @@
 //! `const foo = () => {...}` and `const foo = function(){...}` are treated as
 //! top-level Function nodes identical to `function foo() {}`.
 //!
-//! All code-domain primitives live in `repo-graph-code-domain` and are
+//! All code-domain primitives live in `glia-code-domain` and are
 //! re-exported from this crate for convenience.
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::di_stats::{self, DiShape};
-use repo_graph_code_domain::endpoint;
-use repo_graph_code_domain::evidence;
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::data_entity;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint;
+use glia_code_domain::evidence;
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -1041,7 +1041,7 @@ fn visit_exported_const(
 
     // Resolve the doc once from the lexical_declaration (leading_doc hops up to
     // the export_statement wrapper to find the JSDoc above it).
-    let doc = repo_graph_doc::leading_doc(&n, src);
+    let doc = glia_doc::leading_doc(&n, src);
 
     let mut cursor = n.walk();
     for declarator in n.named_children(&mut cursor) {
@@ -1653,7 +1653,7 @@ fn downgrade(c: Confidence) -> Confidence {
 }
 
 /// The TS-local ENDPOINT_HIT writer. Field order and the trailing optional
-/// `raw` mirror `repo_graph_code_domain::endpoint`'s writer, so a TS and a Dart
+/// `raw` mirror `glia_code_domain::endpoint`'s writer, so a TS and a Dart
 /// endpoint carry the same payload shape; `raw` is skipped when `None`, which
 /// keeps every un-normalised payload byte-identical.
 ///
@@ -2283,7 +2283,7 @@ fn build_cells(n: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         payload: CellPayload::Json(position_json(n, file_rel)),
     };
     let mut cells = vec![code, pos];
-    if let Some(doc) = repo_graph_doc::leading_doc(n, src) {
+    if let Some(doc) = glia_doc::leading_doc(n, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -2339,7 +2339,7 @@ fn child_text<'a>(n: TsNode, field: &str, src: &'a [u8]) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::EdgeCategoryId;
+    use glia_core::EdgeCategoryId;
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://ts_smoke")
@@ -2351,7 +2351,7 @@ mod tests {
     /// row for the graph crate.
     #[test]
     fn intra_file_calls_carry_the_call_row_and_the_file_tag() {
-        use repo_graph_code_domain::evidence::{Basis, Evidence};
+        use glia_code_domain::evidence::{Basis, Evidence};
         let src = "import { far } from \"./far\";\n\nfunction near() {\n  return 1;\n}\n\n\
                    export function run() {\n  const x = 2;\n  far();\n  return near() + x;\n}\n";
         for (path, tag) in [
@@ -3331,7 +3331,7 @@ export interface Catalog extends Readable { count(): number; }
 
     // ---- LA.30c: enums -------------------------------------------------------
 
-    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 

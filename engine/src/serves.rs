@@ -31,15 +31,15 @@
 //! — grep token `[serves] mechanism=`.
 //!
 //! Module slot declared by L0.2; its API is reached as
-//! `repo_graph_engine::serves::<item>`, never flattened into the crate root.
+//! `glia_engine::serves::<item>`, never flattened into the crate root.
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Confidence, NodeId};
-use repo_graph_graph::{HttpRouteMatcher, MergedGraph};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{edge_category, node_kind};
+use glia_code_extractors::queues::is_framework_tag;
+use glia_core::{Confidence, NodeId};
+use glia_graph::{HttpRouteMatcher, MergedGraph};
 
 use crate::absence::{self, Answer, mechanisms_for_kind};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
@@ -359,7 +359,7 @@ fn queue(merged: &MergedGraph, live: &HashSet<NodeId>, topic: &str) -> Answer<Se
 /// `prefix<topic>`, once per id, graphs and nodes in build order.
 fn queue_nodes<'m>(
     merged: &'m MergedGraph,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     prefix: &str,
 ) -> Vec<(NodeId, &'m str, Confidence)> {
     let mut seen: HashSet<NodeId> = HashSet::new();

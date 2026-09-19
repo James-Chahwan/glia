@@ -46,8 +46,8 @@
 
 use std::borrow::Cow;
 
-use repo_graph_code_domain::line_of;
-use repo_graph_core::{NodeId, RepoId};
+use glia_code_domain::line_of;
+use glia_core::{NodeId, RepoId};
 
 use crate::nav_routes::{NavRouteOut, RouteRecord, emit_nav_routes};
 
@@ -552,8 +552,8 @@ pub fn graft_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CallQualifier, GRAPH_TYPE, cell_type, edge_category, node_kind};
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::{CallQualifier, GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use glia_core::CellPayload;
 
     fn route(rel: &str) -> Option<(String, bool)> {
         page_route(rel).map(|r| (r.path, r.catchall))

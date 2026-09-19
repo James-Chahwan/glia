@@ -51,14 +51,14 @@
 
 use std::collections::BTreeSet;
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE, Origin};
-use repo_graph_code_domain::snapshots::redact_untrusted;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Edge, NodeId};
-use repo_graph_graph::cells::{CellTarget, QnameIndex};
-use repo_graph_graph::nav::is_nav_route;
-use repo_graph_graph::{MergedGraph, RouteMounts};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE, Origin};
+use glia_code_domain::snapshots::redact_untrusted;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Edge, NodeId};
+use glia_graph::cells::{CellTarget, QnameIndex};
+use glia_graph::nav::is_nav_route;
+use glia_graph::{MergedGraph, RouteMounts};
 
 use super::RepoInputs;
 use crate::answers::{Locator, in_scope, resolve_scope};
@@ -107,7 +107,7 @@ struct OriginJson<'a> {
 struct Bound {
     from: NodeId,
     to: NodeId,
-    category: repo_graph_core::EdgeCategoryId,
+    category: glia_core::EdgeCategoryId,
     origin: Origin,
     ordinal: usize,
     line: u32,
@@ -366,9 +366,9 @@ fn mount_scope(merged: &MergedGraph, scope: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use repo_graph_code_domain::glia_config::parse_str;
-    use repo_graph_core::Confidence;
-    use repo_graph_graph::MergedGraph;
+    use glia_code_domain::glia_config::parse_str;
+    use glia_core::Confidence;
+    use glia_graph::MergedGraph;
 
     use super::*;
 
@@ -459,7 +459,7 @@ category = "USES"
         assert_eq!(counts(&t), [5, 1, 2, 1, 1, 0, 1], "{t:?}");
         assert_eq!(merged.cross_edges.len(), before + 1);
         let e = merged.cross_edges.last().expect("the applied edge");
-        assert_eq!(e.confidence, repo_graph_core::Confidence::Medium);
+        assert_eq!(e.confidence, glia_core::Confidence::Medium);
         let ev = Evidence::of(e).expect("evidence");
         assert_eq!(ev.rule.as_deref(), Some("edge#4"), "the dropped CONTAINS stanza is edge#1");
         assert_eq!(ev.line, Some(17), "0-based line of the 4th [[edge]] header");

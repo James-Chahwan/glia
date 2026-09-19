@@ -14,9 +14,9 @@
 
 use std::path::PathBuf;
 
-use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
-use repo_graph_graph::build_typescript;
-use repo_graph_parser_typescript::{FileParse, GRAPH_TYPE, edge_category, node_kind, parse_file};
+use glia_core::{EdgeCategoryId, NodeId, RepoId};
+use glia_graph::build_typescript;
+use glia_parser_typescript::{FileParse, GRAPH_TYPE, edge_category, node_kind, parse_file};
 
 fn fixture_root() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

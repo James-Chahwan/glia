@@ -1,5 +1,5 @@
 [package]
-name = "repo-graph-toy-domain"
+name = "glia-toy-domain"
 version.workspace = true
 edition = "2024"
 publish = false
@@ -11,9 +11,9 @@ description = "Test-only second domain ('toy-reel': scenes, shots, objects) prov
 # header-driven rests on the toy registry reusing code's ids, not on link-time
 # isolation.)
 [dependencies]
-repo-graph-core = { path = "../core" }
-repo-graph-activation = { path = "../activation" }
-repo-graph-store = { path = "../store" }
+glia-core = { path = "../core" }
+glia-activation = { path = "../activation" }
+glia-store = { path = "../store" }
 
 [dev-dependencies]
 tempfile = "3"

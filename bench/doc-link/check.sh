@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-cargo run -q -p repo-graph-doc-sources --bin docsync -- \
+cargo run -q -p glia-doc-sources --bin docsync -- \
     bench/doc-link/fixture-repo bench/doc-link/pages/pages.jsonl
 
 tmp="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$tmp" "$err"' EXIT

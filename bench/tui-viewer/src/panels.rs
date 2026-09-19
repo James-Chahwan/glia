@@ -9,8 +9,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use repo_graph_code_domain::edge_category;
-use repo_graph_core::{EdgeCategoryId, NodeId};
+use glia_code_domain::edge_category;
+use glia_core::{EdgeCategoryId, NodeId};
 
 use crate::state::AppState;
 use crate::style::{glyph, kind_label, tier_of};
@@ -87,9 +87,9 @@ pub fn info(
                 .find(|n| n.id == id)
                 .map(|n| n.confidence)
             {
-                Some(repo_graph_core::Confidence::Strong) => "strong",
-                Some(repo_graph_core::Confidence::Medium) => "medium",
-                Some(repo_graph_core::Confidence::Weak) => "weak",
+                Some(glia_core::Confidence::Strong) => "strong",
+                Some(glia_core::Confidence::Medium) => "medium",
+                Some(glia_core::Confidence::Weak) => "weak",
                 None => "?",
             };
             let score = scores.get(&id).copied().unwrap_or(0.0);

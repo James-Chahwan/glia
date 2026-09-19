@@ -46,10 +46,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::external_inputs::{merge_entry, validate_entry};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, NodeId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::external_inputs::{merge_entry, validate_entry};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, NodeId};
+use glia_graph::MergedGraph;
 use serde_json::{Map, Value};
 
 use crate::docs::is_adr_path;

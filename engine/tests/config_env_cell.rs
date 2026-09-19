@@ -10,10 +10,10 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::CellPayload;
-use repo_graph_engine::generate_one;
-use repo_graph_store::{read_merged_sharded, write_merged_sharded};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::CellPayload;
+use glia_engine::generate_one;
+use glia_store::{read_merged_sharded, write_merged_sharded};
 
 fn write_fixture(dir: &Path) {
     // `.env.example` (not `.env`: glia's own repo gitignores that name).
@@ -42,7 +42,7 @@ fn write_fixture(dir: &Path) {
 /// Every ENV-cell payload in the graph for the CONFIG_KEY named `qname`.
 /// Mirrors what `PyGraph.node_cells` does, except that it scans EVERY graph
 /// rather than stopping at the first one holding that id.
-fn env_payloads(merged: &repo_graph_graph::MergedGraph, qname: &str) -> Vec<String> {
+fn env_payloads(merged: &glia_graph::MergedGraph, qname: &str) -> Vec<String> {
     let mut out = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {

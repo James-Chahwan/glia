@@ -36,9 +36,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Confidence, Edge, NodeId};
 
 use super::http::route_path;
 use super::{CrossGraphResolver, RuleTally, rule_evidence, weakest};
@@ -432,8 +432,8 @@ fn ws_pair(c: &[String], h: &[String]) -> WsPair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::{EdgeCategoryId, Node, NodeKindId, RepoId};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::{EdgeCategoryId, Node, NodeKindId, RepoId};
 
     fn pair(c: &str, h: &str) -> WsPair {
         ws_pair(&ws_segments(c), &ws_segments(h))

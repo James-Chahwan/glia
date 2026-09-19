@@ -30,10 +30,10 @@
 
 use std::io::Read;
 
-use repo_graph_engine::BlastOptions;
-use repo_graph_engine::delta::DeltaEdge;
-use repo_graph_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
-use repo_graph_graph::Reach;
+use glia_engine::BlastOptions;
+use glia_engine::delta::DeltaEdge;
+use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::{ImpactDirection, build_options, generate_for};

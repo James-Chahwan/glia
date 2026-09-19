@@ -25,10 +25,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_one, generate_one_incremental, service_map};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::{GenerateResult, generate_one, generate_one_incremental, service_map};
+use glia_graph::MergedGraph;
 
 fn bench_fixture(name: &str) -> PathBuf {
     PathBuf::from(format!(
@@ -383,7 +383,7 @@ fn incremental_matches_clean() {
 
     let write_gmap = |r: &GenerateResult, name: &str| {
         let out = td.path().join(name);
-        repo_graph_store::write_merged_sharded(&r.merged, &out).expect("write .gmap");
+        glia_store::write_merged_sharded(&r.merged, &out).expect("write .gmap");
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&out)
             .unwrap()
             .flatten()

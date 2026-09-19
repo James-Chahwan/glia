@@ -9,12 +9,12 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{cell_type, edge_category};
-use repo_graph_core::{CellPayload, Confidence, Edge, EdgeCategoryId, RepoId};
-use repo_graph_engine::{BuildOptions, GenerateResult, generate_many_opts};
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{cell_type, edge_category};
+use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, RepoId};
+use glia_engine::{BuildOptions, GenerateResult, generate_many_opts};
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded;
 
 const REPORT_TS: &str = include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/web/src/report.ts");
 const REPORT_PY: &str = include_str!("../../bench/substrate-gap/fixtures/xcut-overlay-edges/api/report.py");
@@ -49,7 +49,7 @@ fn build(repos: &[String], overlay: bool) -> GenerateResult {
 }
 
 /// The qname of every node, and the repo it sits in.
-fn qname(m: &MergedGraph, id: repo_graph_core::NodeId) -> Option<(RepoId, String)> {
+fn qname(m: &MergedGraph, id: glia_core::NodeId) -> Option<(RepoId, String)> {
     m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).map(|q| (g.repo, q.clone())))
 }
 

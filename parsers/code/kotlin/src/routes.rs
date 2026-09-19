@@ -84,8 +84,8 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use repo_graph_code_domain::endpoint;
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::endpoint;
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::Node as TsNode;
 
 use crate::{
@@ -327,7 +327,7 @@ fn emit_ktor_route(
                 },
                 Cell {
                     kind: cell_type::POSITION,
-                    payload: CellPayload::Json(repo_graph_doc::position_json(&call, file.rel)),
+                    payload: CellPayload::Json(glia_doc::position_json(&call, file.rel)),
                 },
             ],
         });
@@ -506,7 +506,7 @@ fn emit_text_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
 
 #[cfg(test)]
 mod tests {
-    use repo_graph_code_domain::FileParse;
+    use glia_code_domain::FileParse;
 
     use super::*;
 

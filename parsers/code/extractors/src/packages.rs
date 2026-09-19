@@ -29,8 +29,8 @@
 //!   - Version-pinning analysis (we extract the name, not the constraint)
 //!   - Org-internal-package routing (per TODO; depends on workflow story)
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct PackageNodes {
     pub nodes: Vec<Node>,

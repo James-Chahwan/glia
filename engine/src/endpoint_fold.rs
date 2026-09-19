@@ -55,11 +55,11 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use repo_graph_code_domain::endpoint::{endpoint_qname, url_split};
-use repo_graph_code_domain::glia_config::Origin;
-use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_code_extractors::constants::{ConstTable, fold_interpolations};
-use repo_graph_core::{CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_code_domain::endpoint::{endpoint_qname, url_split};
+use glia_code_domain::glia_config::Origin;
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
+use glia_code_extractors::constants::{ConstTable, fold_interpolations};
+use glia_core::{CellPayload, Confidence, Node, NodeId, RepoId};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -470,8 +470,8 @@ impl Serialize for Fields {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::edge_category;
-    use repo_graph_core::{Cell, Confidence, Edge};
+    use glia_code_domain::edge_category;
+    use glia_core::{Cell, Confidence, Edge};
 
     fn repo() -> RepoId {
         RepoId(7)
@@ -820,7 +820,7 @@ mod tests {
         let calls: Vec<_> = m
             .cross_edges
             .iter()
-            .filter(|e| e.category == repo_graph_code_domain::edge_category::HTTP_CALLS)
+            .filter(|e| e.category == glia_code_domain::edge_category::HTTP_CALLS)
             .collect();
         // Before A11.4: 4 (each endpoint paired with both services).
         assert_eq!(calls.len(), 2, "{calls:?}");
@@ -910,7 +910,7 @@ mod tests {
         assert!(
             m.cross_edges.iter().any(|e| e.from == ep
                 && e.to == route
-                && e.category == repo_graph_code_domain::edge_category::HTTP_CALLS),
+                && e.category == glia_code_domain::edge_category::HTTP_CALLS),
             "HTTP_CALLS endpoint:GET:/users -> GET /users"
         );
         let payloads: Vec<&str> = m

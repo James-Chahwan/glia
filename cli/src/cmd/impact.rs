@@ -1,10 +1,10 @@
 //! `glia impact` — reachability walk: which entities does <qname> depend on /
 //! get hit by, over every edge category, as depth-tagged tables.
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one_opts;
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_core::NodeId;
+use glia_engine::generate_one_opts;
+use glia_graph::MergedGraph;
 
 use crate::common::{ImpactDirection, build_options, edge_category_name, lookup_node_info};
 

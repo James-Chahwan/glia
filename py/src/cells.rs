@@ -6,9 +6,9 @@
 //! path from the persisted layout) stays coherent without a rebuild:
 //! `.glia/cells.jsonl` (`.glia/vectors.jsonl` for a VECTOR), the durable home
 //! every build applies; the repo's default layout `<repo>/.glia/graph`,
-//! rewritten only while it is fresh (`repo_graph_store::write_cell`); and, for
+//! rewritten only while it is fresh (`glia_store::write_cell`); and, for
 //! `set_cell`, the live `PyGraph`, bound through the same resolver
-//! (`repo_graph_graph::cells`), so the in-memory graph equals the next build.
+//! (`glia_graph::cells`), so the in-memory graph equals the next build.
 //!
 //! `set_cell` finds the repo that owns the node in the graph itself and its
 //! root in the graph's `repo_roots` (a fresh build's paths, or the roots a
@@ -25,7 +25,7 @@
 //!
 //! The helpers the bindings delegate to are pyo3-free (`cell_write`,
 //! `set_cell_in`, `write_cell_at`, `remove_cell_in`, `remove_cell_at`,
-//! `node_cell_bytes_of`, `marker`) so `cargo test -p repo-graph-py` covers
+//! `node_cell_bytes_of`, `marker`) so `cargo test -p glia-py` covers
 //! them (see the crate doc).
 
 use std::collections::BTreeMap;
@@ -35,14 +35,14 @@ use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::external_inputs::{CellWrite, cell_type_id};
-use repo_graph_core::{CellPayload, NodeId, RepoId};
-use repo_graph_engine::persist::default_layout_dir;
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
-use repo_graph_graph::identity::identity_of;
-use repo_graph_store::{
+use glia_code_domain::cell_type;
+use glia_code_domain::external_inputs::{CellWrite, cell_type_id};
+use glia_core::{CellPayload, NodeId, RepoId};
+use glia_engine::persist::default_layout_dir;
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_graph::identity::identity_of;
+use glia_store::{
     CellRemoval, CellWriteOutcome, apply_cell_removal, remove_cell_entry,
     write_cell as store_write_cell,
 };
@@ -357,7 +357,7 @@ inventory::submit! { ModuleFns { name: "cells", add: register } }
 mod tests {
     use std::path::PathBuf;
 
-    use repo_graph_store::{WriteThrough, is_gmap_stale, read_merged_sharded, write_merged_sharded};
+    use glia_store::{WriteThrough, is_gmap_stale, read_merged_sharded, write_merged_sharded};
 
     use super::*;
 
@@ -372,8 +372,8 @@ mod tests {
         root
     }
 
-    fn built(root: &Path) -> repo_graph_engine::GenerateResult {
-        repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path")).expect("build")
+    fn built(root: &Path) -> glia_engine::GenerateResult {
+        glia_engine::generate_one(root.to_str().expect("utf-8 temp path")).expect("build")
     }
 
     fn conv(text: &str) -> CellWrite {

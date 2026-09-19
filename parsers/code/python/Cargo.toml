@@ -1,12 +1,12 @@
 [package]
-name = "repo-graph-parser-python"
+name = "glia-parser-python"
 version = "0.4.3"
 edition = "2024"
 publish = false
 
 [dependencies]
-repo-graph-core = { path = "../../../core" }
-repo-graph-code-domain = { path = "../../../code-domain" }
+glia-core = { path = "../../../core" }
+glia-code-domain = { path = "../../../code-domain" }
 tree-sitter = "0.26"
 tree-sitter-python = "0.25"
 serde = { version = "1", features = ["derive"] }

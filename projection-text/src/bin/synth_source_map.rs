@@ -30,9 +30,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeKindId;
-use repo_graph_projection_text::driver_utils::{
+use glia_code_domain::node_kind;
+use glia_core::NodeKindId;
+use glia_projection_text::driver_utils::{
     build_repo_graph, extract_position_cell, read_json,
 };
 use serde::Deserialize;

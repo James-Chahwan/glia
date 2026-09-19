@@ -12,11 +12,11 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{Confidence, NodeId};
-use repo_graph_engine::persist::{layout_meta, load_layout, persist_layout};
-use repo_graph_engine::{GenerateResult, generate_many};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::{Confidence, NodeId};
+use glia_engine::persist::{layout_meta, load_layout, persist_layout};
+use glia_engine::{GenerateResult, generate_many};
+use glia_graph::MergedGraph;
 
 const ENDPOINT: &str = "endpoint:GET:/users";
 

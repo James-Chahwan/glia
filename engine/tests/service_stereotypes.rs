@@ -10,11 +10,11 @@
 
 use std::fs;
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::NodeKindId;
-use repo_graph_engine::{generate_one, locate_node};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::roles::roles_in;
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::NodeKindId;
+use glia_engine::{generate_one, locate_node};
+use glia_graph::MergedGraph;
+use glia_graph::roles::roles_in;
 
 const FILES: &[(&str, &str)] = &[
     (

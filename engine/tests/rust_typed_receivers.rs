@@ -16,9 +16,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_core::NodeId;
-use repo_graph_engine::{GenerateResult, generate_one};
+use glia_code_domain::edge_category;
+use glia_core::NodeId;
+use glia_engine::{GenerateResult, generate_one};
 
 fn fixture() -> String {
     concat!(

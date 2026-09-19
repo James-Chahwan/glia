@@ -8,12 +8,12 @@
 //! `nav::nav_route_path`, never a ROUTE qname literal, so the test survives a
 //! change of the nav qname shape.
 
-use repo_graph_code_domain::{CallQualifier, edge_category, node_kind};
-use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one;
-use repo_graph_graph::RepoGraph;
-use repo_graph_graph::nav::nav_route_path;
-use repo_graph_graph::roles::roles_in;
+use glia_code_domain::{CallQualifier, edge_category, node_kind};
+use glia_core::NodeId;
+use glia_engine::generate_one;
+use glia_graph::RepoGraph;
+use glia_graph::nav::nav_route_path;
+use glia_graph::roles::roles_in;
 
 fn write(root: &std::path::Path, rel: &str, body: &str) {
     let path = root.join(rel);

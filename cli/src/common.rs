@@ -7,11 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use clap::ValueEnum;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::{BuildOptions, GenerateResult, generate_many_opts, generate_one_opts};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::roles::roles_in;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{NodeId, NodeKindId};
+use glia_engine::{BuildOptions, GenerateResult, generate_many_opts, generate_one_opts};
+use glia_graph::MergedGraph;
+use glia_graph::roles::roles_in;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub(crate) enum ImpactDirection {
@@ -207,7 +207,7 @@ pub(crate) fn node_kind_name(k: NodeKindId) -> &'static str {
     node_kind::name(k)
 }
 
-pub(crate) fn edge_category_name(c: repo_graph_core::EdgeCategoryId) -> &'static str {
+pub(crate) fn edge_category_name(c: glia_core::EdgeCategoryId) -> &'static str {
     // Delegate to the canonical code-domain table (WP-I).
     edge_category::name(c)
 }

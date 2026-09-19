@@ -4,9 +4,9 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::{is_canonical_http_path, split_owner};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
+use glia_code_domain::endpoint::{is_canonical_http_path, split_owner};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -1721,8 +1721,8 @@ mod tests {
     /// bare Express catch-all stays unpaired.
     #[test]
     fn resolver_pairs_client_templates_with_folded_route_placeholders() {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_core::Node;
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::Node;
 
         let r = crate::test_support::repo();
         let mut nav = CodeNav::default();
@@ -1925,8 +1925,8 @@ mod tests {
     /// A10.2 — one RepoGraph holding both ROUTE qname shapes, a NAV route and
     /// an `ANY` route, for the public matcher.
     fn matcher_graph() -> (RepoGraph, [NodeId; 4]) {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_core::Node;
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::Node;
 
         let r = crate::test_support::repo();
         let mut nav = CodeNav::default();
@@ -2005,8 +2005,8 @@ mod tests {
     /// /users` is `exact`, an `ANY /posts` reached by GET is `any`.
     #[test]
     fn route_match_names_its_tier() {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_core::Node;
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::Node;
 
         let r = crate::test_support::repo();
         let mut nav = CodeNav::default();
@@ -2078,10 +2078,10 @@ mod tests {
     /// One repo holding `(kind, qname, cells)` nodes, and their ids in order.
     fn repo_graph(
         repo: RepoId,
-        specs: Vec<(repo_graph_core::NodeKindId, &str, Vec<Cell>)>,
+        specs: Vec<(glia_core::NodeKindId, &str, Vec<Cell>)>,
     ) -> (RepoGraph, Vec<NodeId>) {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-        use repo_graph_core::Node;
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::Node;
 
         let mut nav = CodeNav::default();
         let mut nodes = Vec::new();
@@ -2713,7 +2713,7 @@ mod tests {
                 .filter(|e| e.category == edge_category::HTTP_CALLS)
                 .map(|e| {
                     let from = m.graphs[0].nav.qname_by_id.get(&e.from).cloned().unwrap_or_default();
-                    let rule = repo_graph_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule);
+                    let rule = glia_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule);
                     (from, e.to, e.confidence, rule)
                 })
                 .collect();

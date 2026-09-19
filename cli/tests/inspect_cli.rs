@@ -71,15 +71,15 @@ fn inspect_names_kinds_from_the_file() {
     let repo = s.0.join("repo");
     copy_tree(&fixture, &repo);
     let layout = s.0.join("layout");
-    let built = repo_graph_engine::generate_one(repo.to_str().expect("utf-8 path"))
+    let built = glia_engine::generate_one(repo.to_str().expect("utf-8 path"))
         .expect("generate py_smoke");
-    let manifest = repo_graph_store::write_merged_sharded(&built.merged, &layout)
+    let manifest = glia_store::write_merged_sharded(&built.merged, &layout)
         .expect("write layout");
     let layout_arg = layout.to_str().expect("utf-8 path");
 
     let (code, json, stderr) = glia(&["inspect", layout_arg, "--json"]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(json["manifest_schema"], repo_graph_store::MANIFEST_VERSION);
+    assert_eq!(json["manifest_schema"], glia_store::MANIFEST_VERSION);
     let shards = json["shards"].as_array().expect("shards");
     assert_eq!(shards.len(), manifest.shards.len() + manifest.cross.iter().count());
     assert!(shards.iter().all(|s| s["graph_type"] == "code"), "{json}");

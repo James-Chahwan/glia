@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use repo_graph_core::{CellTypeId, EdgeCategoryId, NodeKindId};
+use glia_core::{CellTypeId, EdgeCategoryId, NodeKindId};
 
 use crate::ActivationConfig;
 use crate::passes::{PassRegistry, PassReport};

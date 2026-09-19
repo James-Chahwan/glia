@@ -642,7 +642,7 @@ pub const REDACTED: &str = "***";
 /// have to hit.
 ///
 /// STOPGAP COPY. A13.7's list and helpers are private to
-/// `repo-graph-code-extractors` (`parsers/code/extractors/src/config.rs`, and
+/// `glia-code-extractors` (`parsers/code/extractors/src/config.rs`, and
 /// a copy in `constants.rs`), a crate above this one that LF.6a may not edit.
 /// `snapshots/tests/test_reports.rs::secret_denylist_is_a13_7s` fails on any
 /// drift between the three lists. REMOVAL: make `config.rs` and `constants.rs`

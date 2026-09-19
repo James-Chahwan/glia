@@ -1,5 +1,5 @@
 //! LA.11 — `glia docs sync` / `glia docs push` end to end, driving the real
-//! binary against the loopback Confluence stub (`repo_graph_doc_sources::stub`).
+//! binary against the loopback Confluence stub (`glia_doc_sources::stub`).
 //!
 //! Safety: the child always runs with `current_dir` = a fresh scratch dir (so a
 //! developer's `./.env` is never read) and with `CONFLUENCE_*` removed from its
@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use repo_graph_doc_sources::stub::{Canned, StubServer};
+use glia_doc_sources::stub::{Canned, StubServer};
 
 /// A scratch dir under the system temp dir, created fresh and removed on drop.
 /// (`cli` has no dev-dependencies, so no `tempfile`.)

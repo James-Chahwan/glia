@@ -28,7 +28,7 @@ impl PyGraph {
         scope: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
         let mut docs =
-            repo_graph_engine::governing_docs_with_live(&self.merged, self.live(), qname, scope);
+            glia_engine::governing_docs_with_live(&self.merged, self.live(), qname, scope);
         if let Some(a) = docs.absence.as_mut() {
             a.unparsed_files = self.parse_errors.len();
         }

@@ -22,8 +22,8 @@
 use anyhow::{Context, Result, anyhow};
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
-use repo_graph_latent::ForwardEmbeds;
-use repo_graph_latent::qwen2_hacked::ModelWeights;
+use glia_latent::ForwardEmbeds;
+use glia_latent::qwen2_hacked::ModelWeights;
 use serde::Deserialize;
 use std::io::Write as _;
 use tokenizers::Tokenizer;

@@ -51,12 +51,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::snapshots::{HISTORY_DIR, HistorySnapshot, META_FILE, read_history};
-use repo_graph_code_domain::walk_gating::CONTROL_DIR;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::snapshots::{HISTORY_DIR, HistorySnapshot, META_FILE, read_history};
+use glia_code_domain::walk_gating::CONTROL_DIR;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+use glia_graph::MergedGraph;
 
 use super::RepoInputs;
 
@@ -384,7 +384,7 @@ fn blame_cells(merged: &MergedGraph, repo: RepoId, ing: &Ingest) -> BTreeMap<u64
 
 #[cfg(test)]
 mod tests {
-    use repo_graph_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta};
+    use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta};
 
     use super::*;
 
@@ -420,7 +420,7 @@ mod tests {
         let snapshot = snap;
         let dir = std::env::temp_dir().join(format!("glia_history_fold_{}_{tag}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        repo_graph_code_domain::snapshots::write_history(&dir, snapshot.meta.clone(), &snapshot.commits, &snapshot.blame)
+        glia_code_domain::snapshots::write_history(&dir, snapshot.meta.clone(), &snapshot.commits, &snapshot.blame)
             .expect("write snapshot");
         let repo = RepoId::from_canonical("test://history-fold");
         let merged = module_graph(repo, &modules);
@@ -432,7 +432,7 @@ mod tests {
 
     /// One graph of MODULE nodes with the given ids, each located at its file.
     fn module_graph(repo: RepoId, modules: &BTreeMap<String, NodeId>) -> MergedGraph {
-        let mut g = repo_graph_graph::RepoGraph {
+        let mut g = glia_graph::RepoGraph {
             repo,
             nodes: Vec::new(),
             edges: Vec::new(),

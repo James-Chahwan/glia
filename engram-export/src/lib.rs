@@ -1,4 +1,4 @@
-//! repo-graph-engram-export — write a resolved glia graph as an
+//! glia-engram-export — write a resolved glia graph as an
 //! `engram_core::Gmap` bincode file: engram's "Path A" structural seed.
 //!
 //! This is an **additional** output artifact. glia's native sharded `.gmap`
@@ -42,9 +42,9 @@ use std::io;
 use std::path::Path;
 
 use engram_core::{Content, EdgeKind, Gmap, GmapEdge, GmapNode, SpanRef};
-use repo_graph_code_domain::{cell_type, edge_category as ec, node_kind};
-use repo_graph_core::{Cell, CellPayload, EdgeCategoryId, NodeId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category as ec, node_kind};
+use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId};
+use glia_graph::MergedGraph;
 
 /// Counts surfaced after an export so callers can flag lossy runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -332,7 +332,7 @@ fn doc_cell(cells: &[Cell]) -> Option<String> {
 
 /// Skip-list (license headers, TODO-only) + 500-char cap on a char boundary.
 /// Applied to DOC-cell content: AST-extracted comment docs arrive pre-cleaned
-/// from the shared `repo-graph-doc` helper, but Python docstrings come through
+/// from the shared `glia-doc` helper, but Python docstrings come through
 /// the parser's DOC cell uncapped, so this re-bounds them.
 fn clean_and_cap_doc(s: String) -> Option<String> {
     let s = s.trim();
@@ -636,9 +636,9 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::CodeNav;
-    use repo_graph_core::{Confidence, Node, NodeKindId, RepoId};
-    use repo_graph_graph::RepoGraph;
+    use glia_code_domain::CodeNav;
+    use glia_core::{Confidence, Node, NodeKindId, RepoId};
+    use glia_graph::RepoGraph;
 
     /// Verification #1 from the spec: a hand-built `Gmap` survives a
     /// bincode round-trip byte-for-byte, proving the contract bytes are
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn doc_cell_clean_and_cap() {
         // DOC-cell content (e.g. a Python docstring) is re-bounded by the
-        // exporter; AST comment docs arrive pre-cleaned from repo-graph-doc.
+        // exporter; AST comment docs arrive pre-cleaned from glia-doc.
         let cells = vec![Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text("Sends the verification email.".into()),
@@ -783,7 +783,7 @@ mod tests {
                     cells: vec![],
                 },
             ],
-            edges: vec![repo_graph_core::Edge {
+            edges: vec![glia_core::Edge {
                 from: login,
                 to: query,
                 category: ec::CALLS,

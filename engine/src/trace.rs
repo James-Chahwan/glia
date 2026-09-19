@@ -5,7 +5,7 @@
 //!
 //! Moved here from `answers` by LD.4a; LD.4b extends it with entry flows
 //! ([`entry_flows`], below). Module slot declared by L0.2, reached as
-//! `repo_graph_engine::trace::<item>`, never flattened into the crate root.
+//! `glia_engine::trace::<item>`, never flattened into the crate root.
 //!
 //! # The answer
 //!
@@ -101,11 +101,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
-use repo_graph_code_domain::{edge_category, endpoint};
-use repo_graph_core::{EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::roles::roles_in;
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_code_domain::{edge_category, endpoint};
+use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::roles::roles_in;
+use glia_graph::{MergedGraph, Reach};
 
 use crate::absence::{self, Absence};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};

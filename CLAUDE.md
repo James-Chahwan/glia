@@ -67,8 +67,8 @@ The facade rules:
    `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
    `pub mod` with an explicit, partial flat list.
 2. **Every new 0.5.0 primitive is a public module slot**, reached by module path —
-   `repo_graph_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
-   `::profile::CODE_PROFILE`, `repo_graph_graph::roles::roles_in` — never flattened into
+   `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
+   `::profile::CODE_PROFILE`, `glia_graph::roles::roles_in` — never flattened into
    the root. The slot's owner fills its file; no later packet edits a facade (only
    LD.11a, the crate rename, touches `engine/src/lib.rs`).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
@@ -95,7 +95,7 @@ engine/src/   lib.rs        facade (rules above)
               coverage.rs   coverage_report          answers.rs   the P3 primitives
               cache.rs      incremental parse cache  arch.rs      service_map (glia arch)
               endpoint_fold.rs  client base-URL fold onto the ENDPOINT path
-  public slots (repo_graph_engine::<slot>::<item>), owner (+ extenders):
+  public slots (glia_engine::<slot>::<item>), owner (+ extenders):
               pages LA.6e              persist LC.7 (+LC.8, LC.9, LC.10a)   merge LC.10b
               find LD.3b (+LD.6, LD.8a) absence LD.8a        trace LD.4a (+LD.4b)
               implementors LD.7c       serves LD.8b
@@ -115,7 +115,7 @@ graph/src/    lib.rs        facade (rules above)
               resolvers/    one module per mechanism (http, grpc, queue, graphql,
                             websocket, eventbus, shared_schema, db, cron, config,
                             iac, package, cli) + mod.rs
-  public slots (repo_graph_graph::<slot>::<item>):
+  public slots (glia_graph::<slot>::<item>):
               rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
               nav LA.6a   is_nav_route / nav_route_path, and the NAVIGATES_TO resolver
@@ -127,8 +127,8 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     glia_config LF.2a (+LG.3d)   profile LD.14a (+LD.14b, LD.6, LE.4d)
                     snapshots LF.5a (+LF.6a)
 
-py/src/       lib.rs        #[pymodule]: add_class PyGraph, then every registered
-                            ModuleFns sorted by name — never edited for a new API
+py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
+                            then add_class PyGraph — never edited for a new API
               graph.rs      #[pyclass] PyGraph (fields pub(crate)) + its core methods
               registry.rs   the ModuleFns inventory type + registry / version functions
               convert.rs    escape_json (LD.2 adds the JSON -> Python converter)
@@ -159,8 +159,10 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
 - **py:** pyo3 `multiple-pymethods` lets each module carry its own
   `#[pymethods] impl PyGraph`; a module that owns `#[pyfunction]`s ends with a
   `register()` plus `inventory::submit! { ModuleFns { .. } }`. A new API goes in its
-  primitive's module. Helpers that tests exercise stay pyo3-free (a unit test naming a
-  `#[pyclass]` fails to link under `extension-module`).
+  primitive's module. Helpers that tests exercise stay pyo3-free: the test harness never
+  initialises Python (py/src/lib.rs "Link note"). `extension-module` is deliberately not a
+  Cargo feature of py/ (maturin turns it on for wheels via pyproject.toml); re-adding it
+  there stops the unit tests linking.
 - **cli:** a new command adds one variant and one match arm to its area's `mod.rs` and
   its own `cli/src/cmd/<area>/<name>.rs` (`Args` + `run`).
 - **Snapshot ownership:** the packet that claims `py/src/<m>.rs` owns
@@ -314,9 +316,11 @@ behind `glia arch`), `pages::page_flow` (behind `glia pages`).
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
 - **0.5.0** — finish the **glia** rename; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain.
-  Already renamed: the repo and the `glia` binary (`cli/Cargo.toml`). Still `repo-graph-*`:
-  every library crate name and the PyPI package (`repo-graph-py`) — renaming those breaks
-  downstream pins, so it is a 0.5.0 gate, not a drive-by.
+  Renamed: the repo, the `glia` binary (`cli/Cargo.toml`) and every library crate —
+  packages `glia-*`, Rust paths `glia_*` (LD.11a, table-driven by
+  `dev-notes/rename-0.5.0.py`; `--check` lists anything left on the old names). Still
+  `repo-graph-py` / `repo_graph_py`: the PyPI package and the Python module (LD.11b); py's
+  cargo package is already `glia-py`.
 
 ## Memory
 

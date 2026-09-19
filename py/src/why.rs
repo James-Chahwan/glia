@@ -6,14 +6,14 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::why::{WhyAnswer, why_edge};
-use repo_graph_graph::MergedGraph;
+use glia_engine::why::{WhyAnswer, why_edge};
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::why`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` covers it (see the crate doc). An absence
+/// `cargo test -p glia-py` covers it (see the crate doc). An absence
 /// counts the build's unparsed files.
 fn why_answer(
     merged: &MergedGraph,
@@ -84,7 +84,7 @@ mod tests {
              def checkout(o):\n    return place(o)\n",
         )
         .expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
 

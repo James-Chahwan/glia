@@ -25,8 +25,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellPayload, CellTypeId, Node, NodeId, NodeKindId};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellPayload, CellTypeId, Node, NodeId, NodeKindId};
 
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;

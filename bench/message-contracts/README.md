@@ -55,7 +55,7 @@ cargo run -p glia-cli -- contracts bench/message-contracts/svc \
 
 The pyo3 half imports the **installed** `repo_graph_py` wheel, not the working
 tree. After a Rust change, rebuild the wheel before trusting that half. Run
-`cargo clean -p repo-graph-engine -p repo-graph-py` before `maturin build`,
+`cargo clean -p glia-engine -p glia-py` before `maturin build`,
 otherwise maturin can repackage a stale `.so`. The script **fails** if the
 wheel is missing or has no `contracts()`. It never skips that half.
 

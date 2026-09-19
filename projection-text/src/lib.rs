@@ -1,4 +1,4 @@
-//! repo-graph-projection-text — dense text projection of a `RepoGraph` or
+//! glia-projection-text — dense text projection of a `RepoGraph` or
 //! `MergedGraph`, following the sigil notation in `reference_format_spec.md`.
 //!
 //! v0.4.7 compression:
@@ -31,13 +31,13 @@ pub mod research;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use repo_graph_code_domain::profile::CODE_TABLES;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{
     CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
 };
-use repo_graph_graph::roles::roles_in;
-use repo_graph_graph::{MergedGraph, RepoGraph};
+use glia_graph::roles::roles_in;
+use glia_graph::{MergedGraph, RepoGraph};
 
 const LEGEND: &str = "\
 [LEGEND]
@@ -100,7 +100,7 @@ pub fn render_merged_full(m: &MergedGraph) -> String {
 
 /// Human-readable prose projection (WP-C / GR-3): one short block per node —
 /// `KIND qname [file:start-end]` followed by up to 3 lines of its doc (or code
-/// preview). Pair with [`repo_graph_graph::MergedGraph::subset`] to render a
+/// preview). Pair with [`glia_graph::MergedGraph::subset`] to render a
 /// ranked slice from `activate` as a primed prose anchor instead of the whole
 /// graph.
 pub fn render_prose(m: &MergedGraph) -> String {
@@ -130,10 +130,10 @@ pub fn render_prose(m: &MergedGraph) -> String {
 }
 
 /// Doc text for a node if it has one, else a preview of its code cell.
-fn node_doc_or_code(node: &repo_graph_core::Node) -> Option<&str> {
+fn node_doc_or_code(node: &glia_core::Node) -> Option<&str> {
     let mut code = None;
     for c in &node.cells {
-        if let repo_graph_core::CellPayload::Text(s) = &c.payload {
+        if let glia_core::CellPayload::Text(s) = &c.payload {
             if c.kind == cell_type::DOC {
                 return Some(s.as_str());
             }
@@ -518,7 +518,7 @@ fn has_multi_file_code(n: &Node) -> bool {
 
 fn render_module_files(out: &mut String, n: &Node, full_bodies: bool) {
     let mut files: Vec<String> = Vec::new();
-    let mut other_cells: Vec<&repo_graph_core::Cell> = Vec::new();
+    let mut other_cells: Vec<&glia_core::Cell> = Vec::new();
 
     for cell in &n.cells {
         if cell.kind == cell_type::POSITION
@@ -550,7 +550,7 @@ fn extract_filename(json: &str) -> Option<String> {
     path.rsplit('/').next().map(|s| s.to_string())
 }
 
-fn render_cell(out: &mut String, cell: &repo_graph_core::Cell, full_bodies: bool) {
+fn render_cell(out: &mut String, cell: &glia_core::Cell, full_bodies: bool) {
     let label = cell_label(cell.kind);
     if cell.kind == cell_type::POSITION
         && let CellPayload::Json(j) = &cell.payload
@@ -612,9 +612,9 @@ pub struct NodePosition {
 /// Parse the POSITION cell off a node into a typed [`NodePosition`], or `None`
 /// for nodes with no source span (synthetic / cross-stack endpoints). Shared so
 /// every consumer reads spans the same way instead of re-scraping JSON.
-pub fn node_position(node: &repo_graph_core::Node) -> Option<NodePosition> {
+pub fn node_position(node: &glia_core::Node) -> Option<NodePosition> {
     let json = node.cells.iter().find_map(|c| match &c.payload {
-        repo_graph_core::CellPayload::Json(j) if c.kind == cell_type::POSITION => {
+        glia_core::CellPayload::Json(j) if c.kind == cell_type::POSITION => {
             Some(j.as_str())
         }
         _ => None,
@@ -718,7 +718,7 @@ fn one_line_preview(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::{Cell, RepoId};
+    use glia_core::{Cell, RepoId};
 
     /// L0.1 guard — `cell_label_arms_are_registered`. `cell_label` matches raw
     /// cell numbers, so an arm written from a stale packet number (the leap
@@ -989,7 +989,7 @@ mod tests {
     fn star_sigil_is_the_entry_table() {
         let repo = RepoId::from_canonical("test://entry-star");
         let mut nodes = Vec::new();
-        let mut nav = repo_graph_code_domain::CodeNav::default();
+        let mut nav = glia_code_domain::CodeNav::default();
         let mut add = |kind, qname: &str, cells: Vec<Cell>| {
             let id = NodeId::from_parts("code", repo, kind, qname);
             let name = qname.rsplit("::").next().unwrap_or(qname);

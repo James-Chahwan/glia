@@ -1,4 +1,4 @@
-//! repo-graph-core — domain-agnostic knowledge graph primitives.
+//! glia-core — domain-agnostic knowledge graph primitives.
 //!
 //! Strict Node shape: `{id, repo, confidence, cells}`. Navigation lives in
 //! domain-owned indices stored in the container, not in Node fields — this
@@ -14,25 +14,25 @@
 //!
 //! Nothing here names a code concept. The old code-flow enum and struct were
 //! never archived or read, and the manifest-reading project-name helper lives in
-//! `repo_graph_code_domain::project_roots::project_name` (LD.10). The
+//! `glia_code_domain::project_roots::project_name` (LD.10). The
 //! `compile_fail` doctests below keep them out; this one is their control: the
 //! same path shapes compile against items that do exist.
 //!
 //! ```
-//! let _ = repo_graph_core::Confidence::Strong;
-//! let _ = repo_graph_core::GraphType("code".into()).as_str().len();
+//! let _ = glia_core::Confidence::Strong;
+//! let _ = glia_core::GraphType("code".into()).as_str().len();
 //! ```
 //!
 //! ```compile_fail
-//! let _ = repo_graph_core::FlowKind::Http;
+//! let _ = glia_core::FlowKind::Http;
 //! ```
 //!
 //! ```compile_fail
-//! let _ = repo_graph_core::project_name(std::path::Path::new("."));
+//! let _ = glia_core::project_name(std::path::Path::new("."));
 //! ```
 //!
 //! ```compile_fail
-//! let _ = repo_graph_core::GraphType::code();
+//! let _ = glia_core::GraphType::code();
 //! ```
 
 use core::hash::Hasher;

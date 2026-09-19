@@ -2,7 +2,7 @@
 //! `#[pymethods] impl PyGraph` block per primitive module (pyo3
 //! `multiple-pymethods`). This block holds the graph's own accessors: parse
 //! state, counts, raw cells, and persistence. Every `PyGraph` is made by
-//! [`PyGraph::from_result`] and saved over `repo_graph_engine::persist` (LC.7):
+//! [`PyGraph::from_result`] and saved over `glia_engine::persist` (LC.7):
 //! `save_to` through `persist_layout`, `save_to_default` through the single
 //! layout writer `persist_graph` (LC.9), so a saved-then-loaded graph carries
 //! the same labels, roots, parse errors and properties as the fresh one. These
@@ -18,11 +18,11 @@ use std::sync::OnceLock;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::GenerateResult;
-use repo_graph_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded_for_repo;
+use glia_core::{CellPayload, NodeId};
+use glia_engine::GenerateResult;
+use glia_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded_for_repo;
 
 #[pyclass]
 pub(crate) struct PyGraph {
@@ -69,7 +69,7 @@ pub(crate) fn default_dir_refusal(overlay_applied: bool) -> Option<&'static str>
 
 impl PyGraph {
     /// The one constructor: every field from an engine result, fresh or
-    /// loaded (`repo_graph_engine::persist::load_layout`), overlay applied.
+    /// loaded (`glia_engine::persist::load_layout`), overlay applied.
     pub(crate) fn from_result(r: GenerateResult) -> Self {
         Self {
             merged: r.merged,
@@ -84,7 +84,7 @@ impl PyGraph {
     /// The live set of this graph: `entrypoint_reachable`, computed on the
     /// first call and cached (see the `live` field).
     pub(crate) fn live(&self) -> &HashSet<NodeId> {
-        self.live.get_or_init(|| repo_graph_engine::entrypoint_reachable(&self.merged))
+        self.live.get_or_init(|| glia_engine::entrypoint_reachable(&self.merged))
     }
 
     /// `self` marked with whether its build applied the overlay.
@@ -218,8 +218,8 @@ impl PyGraph {
 #[cfg(test)]
 mod tests {
     use super::default_dir_refusal;
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_code_domain::external_inputs::WRITABLE;
+    use glia_code_domain::cell_type;
+    use glia_code_domain::external_inputs::WRITABLE;
 
     /// LD.6 guard: `PyGraph.live` is cached for the graph's lifetime, and the
     /// only mutating methods (`set_cell` / `remove_cell`) write WRITABLE cells

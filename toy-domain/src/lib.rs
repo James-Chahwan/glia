@@ -1,4 +1,4 @@
-//! repo-graph-toy-domain — a test-only second domain, `toy-reel`, proving the
+//! glia-toy-domain — a test-only second domain, `toy-reel`, proving the
 //! domain seam end to end without shipping a domain (0.5.0 is "prep for cross
 //! domain"; dev-notes/next-leap-0.5.0.md section 3).
 //!

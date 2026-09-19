@@ -24,15 +24,15 @@
 //! index_nodes=<n>` line to stderr; `neighbours` is one edge scan and prints
 //! nothing (the wrapper calls it per node).
 //!
-//! The bodies live in pyo3-free helpers so `cargo test -p repo-graph-py`
+//! The bodies live in pyo3-free helpers so `cargo test -p glia-py`
 //! covers them (see the crate doc).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_core::{EdgeCategoryId, NodeId};
-use repo_graph_graph::{MergedGraph, Reach};
+use glia_code_domain::edge_category;
+use glia_core::{EdgeCategoryId, NodeId};
+use glia_graph::{MergedGraph, Reach};
 
 use crate::graph::PyGraph;
 
@@ -270,7 +270,7 @@ mod tests {
             "import os\n\n\ndef helper(x):\n    return x + 1\n\n\ndef main():\n    return helper(2)\n",
         )
         .expect("write fixture");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(&root);
         let merged = built.expect("build").merged;
         let id = |qname: &str| -> u64 {

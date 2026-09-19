@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::data_entity::table_of;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Cell, Confidence, Edge, NodeId, NodeKindId, RepoId};
+use glia_code_domain::data_entity::table_of;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Cell, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
 use super::{CrossGraphResolver, RuleTally, emit_cross_repo_pairs, rule_evidence};
 use crate::merged::MergedGraph;
@@ -409,8 +409,8 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::Node;
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::Node;
     use crate::types::{RepoGraph, SymbolTable};
 
     /// Build a single-node RepoGraph holding one DATA_ENTITY for `qname` in
@@ -626,9 +626,9 @@ mod tests {
     fn db_resolver_joins_table_cell_to_sql_table() {
         // An ORM model keyed on its MODEL name, carrying the table it maps to,
         // joins the service that names the table directly.
-        let cell = repo_graph_code_domain::data_entity::table_cell(
+        let cell = glia_code_domain::data_entity::table_cell(
             "app_users",
-            repo_graph_code_domain::data_entity::orm::JPA,
+            glia_code_domain::data_entity::orm::JPA,
         );
         let g_a = graph_with_entity_cells(RepoId(11), "data_entity:sql:User", vec![cell]);
         let g_b = graph_with_entity(RepoId(12), "data_entity:sql:app_users");
@@ -646,9 +646,9 @@ mod tests {
     fn db_resolver_table_cell_keeps_model_off_its_default_plural() {
         // `User` mapped to `app_users` is NOT the `users` table another
         // service reads: the cell replaces the qname tail in the key.
-        let cell = repo_graph_code_domain::data_entity::table_cell(
+        let cell = glia_code_domain::data_entity::table_cell(
             "app_users",
-            repo_graph_code_domain::data_entity::orm::ELOQUENT,
+            glia_code_domain::data_entity::orm::ELOQUENT,
         );
         let g_a = graph_with_entity_cells(RepoId(11), "data_entity:sql:User", vec![cell]);
         let g_b = graph_with_entity(RepoId(12), "data_entity:sql:users");
@@ -662,9 +662,9 @@ mod tests {
         // Additivity guard: two repos naming the SAME qname pair exactly as
         // before A13.1, even when only one of them carries a table cell and
         // their fold keys therefore differ.
-        let cell = repo_graph_code_domain::data_entity::table_cell(
+        let cell = glia_code_domain::data_entity::table_cell(
             "app_users",
-            repo_graph_code_domain::data_entity::orm::JPA,
+            glia_code_domain::data_entity::orm::JPA,
         );
         let g_a = graph_with_entity_cells(RepoId(11), "data_entity:sql:User", vec![cell]);
         let g_b = graph_with_entity(RepoId(12), "data_entity:sql:User");
@@ -797,9 +797,9 @@ mod tests {
         assert_eq!((k.flavor.as_str(), k.canonical.as_str()), ("sql", "order"));
         assert!(k.prefixless);
 
-        let cell = repo_graph_code_domain::data_entity::table_cell(
+        let cell = glia_code_domain::data_entity::table_cell(
             "shop.order_lines",
-            repo_graph_code_domain::data_entity::orm::DJANGO,
+            glia_code_domain::data_entity::orm::DJANGO,
         );
         let k = join_key("data_entity:sql:Order", &[cell]);
         assert_eq!((k.flavor.as_str(), k.canonical.as_str()), ("sql", "order_line"));

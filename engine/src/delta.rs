@@ -29,12 +29,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use repo_graph_activation::algo::delta::{DeltaOptions, DeltaSide, EdgeKey, GraphDelta, graph_delta};
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::identity::detect_moves_with;
+use glia_activation::algo::delta::{DeltaOptions, DeltaSide, EdgeKey, GraphDelta, graph_delta};
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Confidence, Edge, NodeId};
+use glia_graph::MergedGraph;
+use glia_graph::identity::detect_moves_with;
 
 use crate::answers::{Located, Locator};
 use crate::build::{GenerateResult, generate_one_as};
@@ -162,7 +162,7 @@ pub fn located_delta(before: &MergedGraph, after: &MergedGraph) -> (GraphDelta, 
 
 /// The delta `after - before` with every row named and located.
 /// `renames` are repo-relative `(old_path, new_path)` pairs the caller's VCS
-/// declared (`repo_graph_graph::identity::detect_moves_with`'s FACT tier);
+/// declared (`glia_graph::identity::detect_moves_with`'s FACT tier);
 /// LB.6's documented limits (a file moved AND renamed AND edited without a
 /// declared rename, a symbol renamed inside a moved file) come out as removed
 /// + added.

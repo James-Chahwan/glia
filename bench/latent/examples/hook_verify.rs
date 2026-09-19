@@ -14,7 +14,7 @@
 use anyhow::{Context, Result, anyhow};
 use candle_core::{Device, Tensor};
 use candle_core::quantized::gguf_file;
-use repo_graph_latent::{ForwardEmbeds, qwen2_hacked::ModelWeights};
+use glia_latent::{ForwardEmbeds, qwen2_hacked::ModelWeights};
 use tokenizers::Tokenizer;
 
 fn load(path: &str, device: &Device) -> Result<ModelWeights> {

@@ -21,7 +21,7 @@
 //! `[migrations]` marker for now; the write-mode edge cell arrives with LC.2
 //! (LE.4).
 
-use repo_graph_core::{NodeId, RepoId};
+use glia_core::{NodeId, RepoId};
 
 use crate::data_entities::{
     DataEntityFlavor, DataEntityNodes, EntitySink, blank_sql_noise, canonical_sql_name,
@@ -588,7 +588,7 @@ fn respell_django_models(source: &str, hits: &mut [DslTable]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{GRAPH_TYPE, node_kind};
+    use glia_code_domain::{GRAPH_TYPE, node_kind};
 
     fn module_id(repo: RepoId) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "db::migrations::m")

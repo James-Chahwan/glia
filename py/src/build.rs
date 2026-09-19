@@ -21,9 +21,9 @@
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::{Confidence, RepoId};
-use repo_graph_engine::{BuildOptions, GenerateResult, ParseCache, parse_one};
+use glia_code_domain::node_kind;
+use glia_core::{Confidence, RepoId};
+use glia_engine::{BuildOptions, GenerateResult, ParseCache, parse_one};
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
@@ -48,7 +48,7 @@ impl Inputs<'_> {
 }
 
 /// The whole build behind `generate` / `generate_many`, minus pyo3 — kept
-/// pyo3-free so `cargo test -p repo-graph-py` covers it (see the crate doc).
+/// pyo3-free so `cargo test -p glia-py` covers it (see the crate doc).
 ///
 /// `incremental=false` is PURE: no parse-cache read, write or purge, and no
 /// layout write. `incremental=true` loads and saves each repo's own sidecar
@@ -69,8 +69,8 @@ fn build_result(
         eprintln!("[overlay] disabled (overlay=False): not persisting to the default gmap dir");
     }
     let result = match inputs {
-        Inputs::One(path) => repo_graph_engine::generate_one_opts(path, incremental, opts),
-        Inputs::Many(paths) => repo_graph_engine::generate_many_opts(paths, incremental, opts),
+        Inputs::One(path) => glia_engine::generate_one_opts(path, incremental, opts),
+        Inputs::Many(paths) => glia_engine::generate_many_opts(paths, incremental, opts),
     }?;
     checked(result)
 }
@@ -281,7 +281,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&empty);
         std::fs::create_dir_all(&empty).expect("temp dir");
         let path = empty.to_str().expect("utf-8 temp path").to_string();
-        let mut nothing = repo_graph_engine::generate_one(&path).expect("build");
+        let mut nothing = glia_engine::generate_one(&path).expect("build");
         let _ = std::fs::remove_dir_all(&empty);
         assert!(nothing.merged.graphs.iter().all(|g| g.nodes.is_empty()));
         nothing.parse_errors.push("app.py: boom".into());
@@ -292,7 +292,7 @@ mod tests {
 
         let root = python_repo("errors");
         let path = root.to_str().expect("utf-8 temp path").to_string();
-        let mut some = repo_graph_engine::generate_one(&path).expect("build");
+        let mut some = glia_engine::generate_one(&path).expect("build");
         let _ = std::fs::remove_dir_all(&root);
         some.parse_errors.push("other.py: boom".into());
         assert!(checked(some).is_ok(), "a graph with nodes passes its parse errors through");

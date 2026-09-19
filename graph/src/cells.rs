@@ -12,15 +12,15 @@
 //! ambiguous row is reported and never applied. The row shapes and entry
 //! rules live in `code_domain::external_inputs`.
 //!
-//! Module slot declared by L0.3: reached as `repo_graph_graph::cells::<item>`.
+//! Module slot declared by L0.3: reached as `glia_graph::cells::<item>`.
 
 use std::collections::{BTreeMap, HashMap};
 
-use repo_graph_code_domain::external_inputs::{
+use glia_code_domain::external_inputs::{
     CellWrite, WRITABLE, WritePayload, check_vector, merge_entry, validate_entry,
 };
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 
 use crate::identity::{IdentityIndex, MoveTier, Rebind};
 use crate::merged::MergedGraph;
@@ -188,7 +188,7 @@ pub fn apply_cell_write(
     Ok(target)
 }
 
-fn cell_name(c: repo_graph_core::CellTypeId) -> String {
+fn cell_name(c: glia_core::CellTypeId) -> String {
     cell_type::ALL
         .iter()
         .find(|(id, _)| *id == c)
@@ -199,8 +199,8 @@ fn cell_name(c: repo_graph_core::CellTypeId) -> String {
 mod tests {
     use std::collections::HashSet;
 
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
-    use repo_graph_core::{Confidence, Node};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE};
+    use glia_core::{Confidence, Node};
 
     use super::*;
     use crate::test_support::{flow_graph, repo};

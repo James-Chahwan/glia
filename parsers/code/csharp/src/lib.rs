@@ -1,23 +1,23 @@
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
 // Shared route-template primitives (A4.0). `join_path` deliberately does NOT
 // force a leading slash, so every composed ASP.NET path goes through
 // `abs_path` explicitly.
-use repo_graph_code_domain::endpoint;
+use glia_code_domain::endpoint;
 // Client-side HTTP (A4.3). The ENDPOINT shape is shared, never re-derived
 // per-parser, so HttpStackResolver pairs a C# caller to a route from ANY
 // language exactly as it does a TS `fetch`.
-use repo_graph_code_domain::endpoint::{ClientEndpoint, push_client_endpoint};
+use glia_code_domain::endpoint::{ClientEndpoint, push_client_endpoint};
 // A7: every INJECTS ref is counted by shape for the `[di]` fired-on line.
-use repo_graph_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::di_stats::{self, DiShape};
 // A13.11: the EF Core table cell shares one writer with every ORM parser, so
 // `DbResolver`'s `table_of` reads a C# model exactly as it reads a JPA one.
-use repo_graph_code_domain::data_entity::{orm, table_cell};
+use glia_code_domain::data_entity::{orm, table_cell};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -870,7 +870,7 @@ fn is_interface_name(raw: &str) -> bool {
 /// bases (e.g. `ControllerBase`) simply stay unresolved, which is fine.
 fn emit_heritage_ref(
     raw: &str,
-    category: repo_graph_core::EdgeCategoryId,
+    category: glia_core::EdgeCategoryId,
     from_id: NodeId,
     module_id: NodeId,
     line: u32,
@@ -1281,7 +1281,7 @@ fn visit_field_decl(
     if !(is_const || is_static_readonly) {
         return;
     }
-    let has_doc = repo_graph_doc::leading_doc(&node, src).is_some();
+    let has_doc = glia_doc::leading_doc(&node, src).is_some();
 
     // field_declaration → variable_declaration → variable_declarator(s).
     let mut fcursor = node.walk();
@@ -1362,7 +1362,7 @@ const HTTP_VERB_ATTRS: [(&str, &str); 7] = [
 /// Composition follows ASP.NET's real rule: an action template with a leading
 /// `/` (or `~/`) OVERRIDES the controller prefix; anything else is appended to
 /// it. The emitted path is always absolute, because `index_route_node` in
-/// repo-graph-graph refuses to index a route whose path does not start with
+/// glia-graph refuses to index a route whose path does not start with
 /// `/` — a relative ASP.NET route is invisible to every HTTP client resolver.
 ///
 /// Returns the number of routes emitted (the fired-on marker's count).
@@ -2225,7 +2225,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -2238,10 +2238,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -3219,7 +3219,7 @@ public class OrderClient {
     // LB.7d: type identity per namespace form
     // ------------------------------------------------------------------
 
-    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<&str> {
+    fn qnames_of(fp: &FileParse, kind: glia_core::NodeKindId) -> Vec<&str> {
         let mut out: Vec<&str> = fp
             .nav
             .kind_by_id
@@ -3231,7 +3231,7 @@ public class OrderClient {
         out
     }
 
-    fn id_of(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id_of(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 
@@ -3561,7 +3561,7 @@ public class Startup {
             .map(|n| {
                 (
                     fp.nav.name_by_id.get(&n.id).cloned().unwrap_or_default(),
-                    repo_graph_code_domain::data_entity::table_of(&n.cells),
+                    glia_code_domain::data_entity::table_of(&n.cells),
                 )
             })
             .collect();

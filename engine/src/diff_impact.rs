@@ -66,9 +66,9 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_graph::MergedGraph;
 
 use crate::absence;
 use crate::answers::{BlastOptions, BlastRadius, Located, Locator, blast_radius_seeded};
@@ -258,7 +258,7 @@ fn rev_candidates(rev: &RevDelta) -> Vec<NodeId> {
     let (old, new) = (CodeText::new(&rev.before.merged), CodeText::new(&rev.after.merged));
     let moved_to: std::collections::HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (b, a)).collect();
     let was: std::collections::HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
-    let carries = |k: &&repo_graph_activation::algo::delta::EdgeKey| CODE_PROFILE.tables.carries(k.category);
+    let carries = |k: &&glia_activation::algo::delta::EdgeKey| CODE_PROFILE.tables.carries(k.category);
     let mut ids: Vec<NodeId> = Vec::new();
     ids.extend(d.added_nodes.iter().copied());
     ids.extend(d.moved_nodes.iter().map(|&(_, a)| a));

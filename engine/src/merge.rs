@@ -35,22 +35,22 @@
 //! plus `[merge] caveat: <text>` per caveat and, from [`persist_merge`],
 //! `[merge] wrote <dir> writer=<w> shards=<s> foreign=<f> members=<n>`.
 //!
-//! Module slot declared by L0.2: reached as `repo_graph_engine::merge::<item>`,
+//! Module slot declared by L0.2: reached as `glia_engine::merge::<item>`,
 //! never flattened into the crate root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::Edge;
-use repo_graph_graph::{MergedGraph, RepoGraph};
-use repo_graph_store::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::node_kind;
+use glia_core::Edge;
+use glia_graph::{MergedGraph, RepoGraph};
+use glia_store::{
     LayoutExtras, MANIFEST_NAME, MemberMeta, read_layout_extras, read_manifest_lenient,
     write_merged_sharded_extras,
 };
 
-pub use repo_graph_store::ForeignShard;
+pub use glia_store::ForeignShard;
 
 use crate::arch::repo_label_map;
 use crate::persist::{

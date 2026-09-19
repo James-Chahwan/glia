@@ -15,7 +15,7 @@ resolver = "3"
 # `glia-export-engram` bin, so `cli` rejoins the workspace (CI-clean). Leaving
 # engram-export in the workspace would break `cargo metadata` for everything and
 # fail every wheel build. Run the exporter from `engram-export/` when Engram is
-# present: `cargo run -p repo-graph-engram-export --bin glia-export-engram`.
+# present: `cargo run -p glia-engram-export --bin glia-export-engram`.
 exclude = ["bench", "engram-export"]
 
 members = [

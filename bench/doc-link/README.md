@@ -21,7 +21,7 @@ half the byte-identical build gate cares about.
 
 ```sh
 # 1. sync: storage-format pages → deterministic snapshot the engine ingests
-cargo run -p repo-graph-doc-sources --bin docsync -- \
+cargo run -p glia-doc-sources --bin docsync -- \
     bench/doc-link/fixture-repo bench/doc-link/pages/pages.jsonl
 # → writes bench/doc-link/fixture-repo/.glia/docs-snapshot/manifest.jsonl (gitignored)
 

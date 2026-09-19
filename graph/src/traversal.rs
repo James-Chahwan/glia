@@ -3,7 +3,7 @@
 //! activation.
 //!
 //! Both graphs are [`GraphSource`]s, so the domain-agnostic algorithms in
-//! `repo_graph_activation::algo` run over them; the BFS walks here are thin
+//! `glia_activation::algo` run over them; the BFS walks here are thin
 //! calls into `algo::reach` over a per-call CSR `Adjacency` (LD.15a). The
 //! `MergedGraph` walks (LD.3a) see every repo's edges AND `cross_edges`, so a
 //! walk from a client function crosses HTTP_CALLS / QUEUE_FLOWS into the repo
@@ -11,9 +11,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_activation::algo::reach::Reached;
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_activation::algo::reach::Reached;
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::blast::Reach;
 use crate::merged::MergedGraph;
@@ -57,7 +57,7 @@ impl RepoGraph {
     /// Cost is O(V + E) per call: it builds a CSR `Adjacency` over this
     /// graph's edges of the `follow` categories, then walks it. A caller
     /// issuing many walks over one graph builds the `Adjacency` once and
-    /// calls `repo_graph_activation::algo::reach` directly.
+    /// calls `glia_activation::algo::reach` directly.
     pub fn predecessors(
         &self,
         sink: NodeId,
@@ -114,10 +114,10 @@ impl RepoGraph {
     pub fn activate(
         &self,
         seeds: &[NodeId],
-        config: &repo_graph_activation::ActivationConfig,
-    ) -> repo_graph_activation::ActivationResult {
+        config: &glia_activation::ActivationConfig,
+    ) -> glia_activation::ActivationResult {
         let node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
-        repo_graph_activation::activate(&node_ids, &self.edges, seeds, config)
+        glia_activation::activate(&node_ids, &self.edges, seeds, config)
     }
 }
 
@@ -209,7 +209,7 @@ impl GraphSource for MergedGraph {
 /// `[traverse] op=<op> walk=<Forward|Backward|Both> seeds=<n> reached=<n> index_nodes=<n>`
 /// line to stderr (`reached` is the walk's reached count; for `reachable_by`
 /// the sources hit). A caller issuing many walks over one filter builds the
-/// `Adjacency` once and calls `repo_graph_activation::algo::reach` directly.
+/// `Adjacency` once and calls `glia_activation::algo::reach` directly.
 /// `neighbours` is one edge scan with no index and no line: it is called per
 /// node.
 impl MergedGraph {
@@ -322,15 +322,15 @@ impl MergedGraph {
     pub fn activate(
         &self,
         seeds: &[NodeId],
-        config: &repo_graph_activation::ActivationConfig,
-    ) -> repo_graph_activation::ActivationResult {
+        config: &glia_activation::ActivationConfig,
+    ) -> glia_activation::ActivationResult {
         let node_ids: Vec<NodeId> = self
             .graphs
             .iter()
             .flat_map(|g| g.nodes.iter().map(|n| n.id))
             .collect();
         let edges: Vec<Edge> = self.all_edges().cloned().collect();
-        repo_graph_activation::activate(&node_ids, &edges, seeds, config)
+        glia_activation::activate(&node_ids, &edges, seeds, config)
     }
 }
 
@@ -340,7 +340,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{flow_graph, repo};
-    use repo_graph_code_domain::{GRAPH_TYPE, edge_category, node_kind};
+    use glia_code_domain::{GRAPH_TYPE, edge_category, node_kind};
 
     #[test]
     fn predecessors_walks_backward_along_chosen_categories() {
@@ -400,7 +400,7 @@ mod tests {
             from: c,
             to: ghost,
             category: edge_category::CALLS,
-            confidence: repo_graph_core::Confidence::Strong,
+            confidence: glia_core::Confidence::Strong,
             cells: Vec::new(),
         };
         g.edges.push(to_ghost.clone());

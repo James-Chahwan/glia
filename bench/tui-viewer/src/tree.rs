@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{CellPayload, NodeId};
+use glia_code_domain::cell_type;
+use glia_core::{CellPayload, NodeId};
 
 use crate::state::{AppState, TreeRow};
 use crate::style::{glyph, heat_glyph, kind_label};
@@ -93,7 +93,7 @@ fn render_row<'a>(
         }
         TreeRow::Node { id, score, .. } => {
             let meta = app.meta.get(id);
-            let kind = meta.map(|m| m.kind).unwrap_or(repo_graph_core::NodeKindId(0));
+            let kind = meta.map(|m| m.kind).unwrap_or(glia_core::NodeKindId(0));
             let name = meta.map(|m| m.name.as_str()).unwrap_or("");
             let heat = heat_glyph(*score);
             let kg = glyph(kind);
@@ -207,7 +207,7 @@ fn render_pane(f: &mut Frame, area: Rect, lines: Vec<Line>) {
     f.render_widget(widget, area);
 }
 
-fn cell_label(k: repo_graph_core::CellTypeId) -> &'static str {
+fn cell_label(k: glia_core::CellTypeId) -> &'static str {
     match k {
         x if x == cell_type::CODE => "CODE",
         x if x == cell_type::DOC => "DOC",

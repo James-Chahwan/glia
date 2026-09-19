@@ -22,7 +22,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use repo_graph_code_domain::snapshots::{SOURCE_LOG, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
+use glia_code_domain::snapshots::{SOURCE_LOG, STATUS_ERROR, STATUS_FAILED, TestCaseRecord};
 
 /// Trace lines are kept up to this many bytes per case (the stored trace is
 /// capped at `TRACE_CAP` chars, at most 16 KiB of UTF-8).

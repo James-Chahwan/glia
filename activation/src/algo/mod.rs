@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
+use glia_core::{Edge, EdgeCategoryId, NodeId};
 
 use crate::profile::DomainTables;
 
@@ -277,7 +277,7 @@ pub(crate) fn toy_edge(from: u64, to: u64, category: u32) -> Edge {
         from: NodeId(from),
         to: NodeId(to),
         category: EdgeCategoryId(category),
-        confidence: repo_graph_core::Confidence::Strong,
+        confidence: glia_core::Confidence::Strong,
         cells: Vec::new(),
     }
 }

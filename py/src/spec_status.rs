@@ -6,19 +6,19 @@ use std::collections::BTreeMap;
 
 use pyo3::prelude::*;
 
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::spec_status`], minus pyo3 — kept pyo3-free so
-/// `cargo test -p repo-graph-py` can cover the binding (see the crate doc).
+/// `cargo test -p glia-py` can cover the binding (see the crate doc).
 fn spec_status_json(
     merged: &MergedGraph,
     repo_labels: &BTreeMap<u64, String>,
     feature: Option<&str>,
 ) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&repo_graph_engine::spec_status::spec_status(
+    serde_json::to_string(&glia_engine::spec_status::spec_status(
         merged,
         repo_labels,
         feature,
@@ -87,7 +87,7 @@ mod tests {
              @app.get(\"/health\")\ndef health():\n    return {}\n",
         )
         .expect("write app");
-        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let built = glia_engine::generate_one(root.to_str().expect("utf-8 temp path"));
         let _ = std::fs::remove_dir_all(root);
         let built = built.expect("build");
 

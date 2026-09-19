@@ -11,8 +11,8 @@
 //! children: [...] }`) are the shared route-table walker's
 //! (`crate::nav_routes`, LA.6b).
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 pub struct AngularNodes {
     pub nodes: Vec<Node>,
@@ -174,8 +174,8 @@ fn extract_class_name(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CallQualifier, cell_type, edge_category};
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::{CallQualifier, cell_type, edge_category};
+    use glia_core::CellPayload;
 
     fn repo() -> RepoId {
         RepoId(1)

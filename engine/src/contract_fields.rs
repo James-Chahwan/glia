@@ -36,9 +36,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, NodeId};
-use repo_graph_graph::{MergedGraph, normalise_http_path};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, NodeId};
+use glia_graph::{MergedGraph, normalise_http_path};
 use serde_json::Value;
 
 use crate::{Locator, MessageContractSide, message_contracts};

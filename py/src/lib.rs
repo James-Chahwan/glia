@@ -1,4 +1,4 @@
-//! pyo3 bindings for `repo-graph-engine`. The orchestration logic
+//! pyo3 bindings for `glia-engine`. The orchestration logic
 //! (file walking, per-language parsing, cross-cutting extraction, resolver
 //! execution, post-passes) lives in the `engine` crate and is shared with
 //! the `glia` CLI. This crate is intentionally thin — only the Python-facing
@@ -16,7 +16,7 @@
 //! **Why tests only reach pyo3-free helpers.** The unit-test harness never
 //! initialises a Python interpreter, so the whole body of a binding lives in
 //! a helper that touches no pyo3 type (`arch::service_map_json`,
-//! `contracts::contracts_json`) — the way `cargo test -p repo-graph-py`
+//! `contracts::contracts_json`) — the way `cargo test -p glia-py`
 //! covers this binding at all.
 //!
 //! **Link note.** `extension-module` is deliberately NOT a Cargo feature of

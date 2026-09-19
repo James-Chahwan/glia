@@ -4,7 +4,7 @@
 //!
 //! Read-only over what LA.6a-6d put in the graph:
 //!
-//! - a **page** is a ROUTE that `repo_graph_graph::nav::is_nav_route` marks,
+//! - a **page** is a ROUTE that `glia_graph::nav::is_nav_route` marks,
 //!   its path read by `nav_route_path` (both LA.6a's, never re-derived here),
 //!   located by the handler it is HANDLED_BY;
 //! - a **link** is a `NAVIGATES_TO` edge from anything but a ROUTE. A
@@ -28,11 +28,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{CallQualifier, edge_category, node_kind};
-use repo_graph_core::{Confidence, NodeId};
-use repo_graph_graph::nav::{is_nav_route, nav_route_path};
-use repo_graph_graph::{MergedGraph, normalise_http_path};
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{CallQualifier, edge_category, node_kind};
+use glia_core::{Confidence, NodeId};
+use glia_graph::nav::{is_nav_route, nav_route_path};
+use glia_graph::{MergedGraph, normalise_http_path};
 
 use crate::answers::Locator;
 
@@ -361,7 +361,7 @@ fn confidence_name(c: Confidence) -> &'static str {
 /// STOPGAP: this mirrors the private `wildcard` / `classify` pair in
 /// `graph/src/nav.rs` (its `Shape::Root`), which the graph crate does not
 /// export and this packet may not edit. Removal: export a
-/// `repo_graph_graph::nav::is_root_catchall(path)` from that classifier, call
+/// `glia_graph::nav::is_root_catchall(path)` from that classifier, call
 /// it here and delete this function and its test.
 fn is_root_catchall(path: &str) -> bool {
     let segs: Vec<&str> = path.trim().split('/').filter(|s| !s.is_empty()).collect();

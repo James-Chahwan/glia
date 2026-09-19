@@ -26,7 +26,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let roots = repo_graph_engine::project_roots(&result.merged);
+    let roots = glia_engine::project_roots(&result.merged);
     eprintln!("[projects] surface=cli roots={}", roots.len());
     if json {
         println!("{}", serde_json::to_string(&roots).unwrap_or_default());

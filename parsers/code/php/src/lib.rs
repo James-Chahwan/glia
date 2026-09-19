@@ -1,13 +1,13 @@
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
 
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::di_stats::{self, DiShape};
-use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
-use repo_graph_code_domain::line_of;
-pub use repo_graph_code_domain::{
+use glia_code_domain::data_entity;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
+use glia_code_domain::line_of;
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -2086,7 +2086,7 @@ fn php_string_inner(node: TsNode, src: &[u8]) -> String {
 
 /// `"…/users/$id"` -> `…/users/${…}`. Every non-literal child of the
 /// `encapsed_string` becomes the `${…}` wildcard that
-/// `normalise_http_path` (repo-graph-graph) collapses to `{}`, so an
+/// `normalise_http_path` (glia-graph) collapses to `{}`, so an
 /// interpolated client path pairs with route `/users/{id}`.
 fn php_encapsed_template(node: TsNode, src: &[u8]) -> String {
     let mut out = String::new();
@@ -2328,7 +2328,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -2341,10 +2341,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -2388,7 +2388,7 @@ class UserService {
     }
 
     /// Every qname of one node kind in a parse, sorted.
-    fn qnames_of(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> Vec<String> {
+    fn qnames_of(fp: &FileParse, kind: glia_core::NodeKindId) -> Vec<String> {
         let mut v: Vec<String> = fp
             .nav
             .kind_by_id

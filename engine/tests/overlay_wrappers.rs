@@ -10,17 +10,17 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, NodeKindId};
-use repo_graph_engine::gaps::{
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, NodeKindId};
+use glia_engine::gaps::{
     GapsOptions, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report, overlay_delta,
 };
-use repo_graph_engine::{
+use glia_engine::{
     BuildOptions, GenerateResult, ParseCache, generate_many, generate_many_opts, generate_one,
     generate_one_with_cache,
 };
-use repo_graph_store::write_merged_sharded;
+use glia_store::write_merged_sharded;
 
 const API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/users\", methods=[\"POST\"])\ndef create_user():\n    return {}\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n\n\n@app.route(\"/orders/<int:oid>\", methods=[\"DELETE\"])\ndef delete_order(oid):\n    return {}\n";
 
@@ -125,7 +125,7 @@ fn has_edge(r: &GenerateResult, from: &str, to: &str, category: EdgeCategoryId) 
     edges(r, category).iter().any(|(f, t)| f == from && t == to)
 }
 
-fn json_cells(cells: &[Cell], kind: repo_graph_core::CellTypeId) -> Vec<serde_json::Value> {
+fn json_cells(cells: &[Cell], kind: glia_core::CellTypeId) -> Vec<serde_json::Value> {
     cells
         .iter()
         .filter(|c| c.kind == kind)
@@ -844,7 +844,7 @@ fn nonliteral_name_is_skipped() {
 #[test]
 fn missing_name_arg_is_a_config_error() {
     let overlay = "version = 1\n\n[[wrapper]]\ncall = \"NewCollection\"\nkind = \"data_entity\"\nflavor = \"nosql\"\n";
-    let cfg = repo_graph_code_domain::glia_config::parse_str(overlay);
+    let cfg = glia_code_domain::glia_config::parse_str(overlay);
     assert_eq!(cfg.errors.len(), 1, "{:?}", cfg.errors);
     assert!(
         cfg.errors[0].starts_with(".glia/overlay.toml:3: [[wrapper]]")

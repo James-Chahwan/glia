@@ -7,13 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::gaps::{
+use glia_engine::gaps::{
     AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, FACT, GapRow, GapsOptions,
     GapsReport, HEURISTIC, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE,
     UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
     overlay_delta,
 };
-use repo_graph_engine::{GenerateResult, generate_many, generate_one};
+use glia_engine::{GenerateResult, generate_many, generate_one};
 
 const CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
 const API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n";

@@ -6,13 +6,13 @@
 //! profiling against the sub-10ms target (#4 from neuropil substrate
 //! priorities).
 //!
-//! Run via: `cargo bench -p repo-graph-activation`
+//! Run via: `cargo bench -p glia-activation`
 
 use std::collections::HashMap;
 use std::time::Instant;
 
-use repo_graph_activation::{activate, ActivationConfig};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
+use glia_activation::{activate, ActivationConfig};
+use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
 fn build_grid(n: usize, density: usize) -> (Vec<NodeId>, Vec<Edge>) {
     // Synthetic graph: n nodes arranged in a ring with random short edges.

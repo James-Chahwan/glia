@@ -8,10 +8,10 @@
 //! qname is scoped by the handler file's directory + stem. Run with
 //! `-- --nocapture` to see the `[openapi-annot]` / `[contract-link]` markers.
 
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, CellTypeId, NodeId, NodeKindId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, CellTypeId, NodeId, NodeKindId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 fn build(rel: &str) -> MergedGraph {
     let dir = format!(

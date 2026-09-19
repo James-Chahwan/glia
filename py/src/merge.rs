@@ -1,5 +1,5 @@
 //! `merge_gmaps` (LC.10c): the Python surface of the gmap merge
-//! (`repo_graph_engine::merge`, LC.10b) — combine pre-built `.gmap` layouts
+//! (`glia_engine::merge`, LC.10b) — combine pre-built `.gmap` layouts
 //! into one `PyGraph` without their sources checked out. `glia merge --gmap`
 //! is the CLI surface of the same merge.
 
@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::GenerateResult;
-use repo_graph_engine::merge::{MergeMember, merge_layouts, persist_merge};
+use glia_engine::GenerateResult;
+use glia_engine::merge::{MergeMember, merge_layouts, persist_merge};
 
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
@@ -17,7 +17,7 @@ use crate::registry::ModuleFns;
 /// Merge the pre-built `.gmap` layouts at `dirs` (in order) into the graph one
 /// build of all of them gives: each layout is loaded as it is, the
 /// cross-service resolvers and post-passes re-run over the union, and repo
-/// labels are recomputed over it (`repo_graph_engine::merge::merge_layouts`).
+/// labels are recomputed over it (`glia_engine::merge::merge_layouts`).
 /// Returns a `PyGraph` carrying the union's labels, roots and parse errors.
 ///
 /// Each member is named by its directory's basename, a trailing `.glia/graph`
@@ -42,7 +42,7 @@ fn merge_gmaps(dirs: Vec<String>, out: Option<String>) -> PyResult<PyGraph> {
         .map_err(|e| PyValueError::new_err(format!("merge_gmaps: {e}")))
 }
 
-/// The whole of `merge_gmaps` minus pyo3, so `cargo test -p repo-graph-py`
+/// The whole of `merge_gmaps` minus pyo3, so `cargo test -p glia-py`
 /// covers it (see the crate doc).
 fn merge_gmap_dirs(dirs: &[String], out: Option<&str>) -> Result<GenerateResult, String> {
     let members: Vec<MergeMember> = dirs
@@ -92,8 +92,8 @@ inventory::submit! { ModuleFns { name: "merge", add: register } }
 mod tests {
     use super::*;
 
-    use repo_graph_engine::generate_many;
-    use repo_graph_engine::persist::{
+    use glia_engine::generate_many;
+    use glia_engine::persist::{
         LoadOutcome, default_layout_dir, load_or_rebuild, persist_result,
     };
 
@@ -175,7 +175,7 @@ mod tests {
         assert!(!r.merged.cross_edges.is_empty(), "the union resolves the HTTP link");
 
         let manifest: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(out.join(repo_graph_store::MANIFEST_NAME)).expect("manifest written"),
+            &std::fs::read(out.join(glia_store::MANIFEST_NAME)).expect("manifest written"),
         )
         .expect("manifest json");
         let names: Vec<(&str, &str)> = manifest["members"]

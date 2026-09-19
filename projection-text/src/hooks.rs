@@ -15,8 +15,8 @@
 //! the hook writes what it wrote when it called the pass directly. The pass
 //! functions stay public for callers that do not use a plan.
 
-use repo_graph_activation::plan::{ActivatedView, SynthCell, SynthHook};
-use repo_graph_graph::RepoGraph;
+use glia_activation::plan::{ActivatedView, SynthCell, SynthHook};
+use glia_graph::RepoGraph;
 
 use crate::composition::{render_cells, synth_paths};
 

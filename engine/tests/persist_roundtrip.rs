@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::persist::{layout_meta, load_layout, persist_layout};
-use repo_graph_engine::{GenerateResult, generate_many, service_map};
+use glia_engine::persist::{layout_meta, load_layout, persist_layout};
+use glia_engine::{GenerateResult, generate_many, service_map};
 
 /// Two repos under one scratch dir: a Flask route plus a class with an
 /// `@property` accessor, and a TypeScript client fetching that route.
@@ -93,7 +93,7 @@ fn properties_survive_the_gmap() {
     persist(&r, &dir);
     let l = load_layout(&dir).unwrap();
     assert_eq!(l.merged.graphs.len(), r.merged.graphs.len());
-    let as_set = |g: &repo_graph_graph::RepoGraph| -> BTreeSet<u64> {
+    let as_set = |g: &glia_graph::RepoGraph| -> BTreeSet<u64> {
         g.properties.iter().map(|id| id.0).collect()
     };
     for (i, (fresh, loaded)) in r.merged.graphs.iter().zip(&l.merged.graphs).enumerate() {
@@ -141,7 +141,7 @@ fn in_repo_layout_root_is_dot_dot() {
     let tmp = tempfile::tempdir().unwrap();
     let (api, web) = two_repo_fixture(tmp.path());
     let r = build(&api, &web);
-    let dir = repo_graph_store::default_gmap_dir(&api);
+    let dir = glia_store::default_gmap_dir(&api);
     assert!(!dir.exists());
     let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, &dir);
     let roots: BTreeSet<Option<String>> = meta.repos.iter().map(|m| m.root.clone()).collect();

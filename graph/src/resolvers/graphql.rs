@@ -9,9 +9,9 @@
 
 use std::collections::HashMap;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::Edge;
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::Edge;
 
 use super::{CrossGraphResolver, build_kind_index, weakest};
 use crate::merged::MergedGraph;
@@ -88,9 +88,11 @@ impl CrossGraphResolver for GraphQLStackResolver {
     }
 }
 
-/// Resolver names the extractor mints from a decorator or type-level needle
-/// (`RESOLVER_PATTERNS` in parsers/code/extractors/src/graphql.rs), lowercased.
-/// They name a root TYPE, never a field, so nothing may key off them.
+/// Type-level resolver names, lowercased. Since LA.38 the extractor mints only
+/// the root types (`ROOT_TYPES` / `ROOT_DECORATORS` in
+/// parsers/code/extractors/src/graphql.rs: query / mutation / subscription);
+/// the other entries are the pre-LA.38 decorator nouns, kept as a guard. They
+/// name a root TYPE, never a field, so nothing may key off them.
 const GQL_TYPE_LEVEL: &[&str] = &[
     "query",
     "mutation",

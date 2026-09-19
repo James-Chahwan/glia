@@ -77,9 +77,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use repo_graph_code_domain::di_stats::{self, DiShape};
-use repo_graph_code_domain::{CallQualifier, UnresolvedRef, endpoint, jvm};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::{CallQualifier, UnresolvedRef, endpoint, jvm};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use tree_sitter::Node as TsNode;
 
 use crate::{
@@ -632,13 +632,13 @@ fn first_type_argument(user_type: TsNode, src: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{FileParse, parse_file};
-    use repo_graph_core::RepoId;
+    use glia_core::RepoId;
 
     fn repo() -> RepoId {
         RepoId(1)
     }
 
-    fn id_of(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id_of(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         assert!(
             fp.nodes.iter().any(|n| n.id == id),

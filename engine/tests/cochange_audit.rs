@@ -12,14 +12,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use repo_graph_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
-use repo_graph_engine::gaps::{
+use glia_code_domain::snapshots::{HistoryCommit, HistoryFile, HistoryMeta, write_history};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
+use glia_engine::gaps::{
     COCHANGE_NO_EDGE, CochangeGap, GapsOptions, HEURISTIC, cochange_gaps, gaps_report,
 };
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 const A_PY: &str = include_str!("../../bench/substrate-gap/fixtures/history-cochange/svc/a.py");
 const B_PY: &str = include_str!("../../bench/substrate-gap/fixtures/history-cochange/svc/b.py");

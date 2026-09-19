@@ -15,7 +15,7 @@
 
 use std::collections::VecDeque;
 
-use repo_graph_core::{EdgeCategoryId, NodeId};
+use glia_core::{EdgeCategoryId, NodeId};
 
 use super::Adjacency;
 
@@ -156,7 +156,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
     use std::time::{Duration, Instant};
 
-    use repo_graph_core::Edge;
+    use glia_core::Edge;
 
     use super::*;
     use crate::algo::reach::{bfs, reachable};

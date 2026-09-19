@@ -12,13 +12,13 @@
 
 use std::path::PathBuf;
 
-use repo_graph_code_domain::{CodeNav, edge_category, node_kind};
-use repo_graph_core::{
+use glia_code_domain::{CodeNav, edge_category, node_kind};
+use glia_core::{
     Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId,
 };
-use repo_graph_graph::{RepoGraph, SymbolTable, build_go};
-use repo_graph_parser_go::parse_file;
-use repo_graph_store::{
+use glia_graph::{RepoGraph, SymbolTable, build_go};
+use glia_parser_go::parse_file;
+use glia_store::{
     CROSS_STACK_NAME, MANIFEST_NAME, MANIFEST_VERSION, ShardedMmap, write_sharded,
 };
 

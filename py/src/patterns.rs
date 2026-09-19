@@ -1,5 +1,5 @@
 //! **patterns** (LE.7b, EXPERIMENTAL): the pattern-conformance engine
-//! (`repo_graph_engine::patterns`, LE.7a) — route handlers grouped per
+//! (`glia_engine::patterns`, LE.7a) — route handlers grouped per
 //! service, each handler's role chain to its first effect sink as a
 //! signature, a population's most frequent signature as its convention, and
 //! every handler off it a located DIVERGENCE (tier heuristic).
@@ -15,7 +15,7 @@
 //!
 //! Transport only: populations, signatures, verdicts and locations live in
 //! the engine. The helpers the pyo3 entry points delegate to are pyo3-free,
-//! so `cargo test -p repo-graph-py` covers them (see the crate doc); they
+//! so `cargo test -p glia-py` covers them (see the crate doc); they
 //! print this surface's marker,
 //! `[patterns] experimental surface=pyo3 mode=<graph|delta>`.
 
@@ -24,11 +24,11 @@ use std::collections::BTreeMap;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::delta::graph_delta_vs_rev;
-use repo_graph_engine::patterns::{
+use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::patterns::{
     PatternArgs, PatternReport, pattern_conformance, pattern_conformance_delta,
 };
-use repo_graph_graph::MergedGraph;
+use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn graph_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("graph", 6);
-        let built = repo_graph_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
+        let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
         let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None).expect("report");
         let v = value(&r);
         for key in ["experimental", "populations", "divergences", "skipped_small", "delta_mode"] {

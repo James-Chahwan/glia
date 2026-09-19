@@ -9,10 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_core::{CellPayload, CellTypeId, Confidence, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::{RepoGraph, build_go};
-use repo_graph_parser_go::parse_file;
-use repo_graph_store::{
+use glia_core::{CellPayload, CellTypeId, Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_graph::{RepoGraph, build_go};
+use glia_parser_go::parse_file;
+use glia_store::{
     CODE_SECTION, Container, EncodedSection, Header, MmapContainer, RegistryEntry, StoreError,
     code_section_of, decode_repo_graph, encode_repo_graph, encode_section, qname_of, read_to_owned,
     remove_cell, upsert_cell, write_container,

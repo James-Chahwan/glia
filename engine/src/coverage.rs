@@ -3,9 +3,9 @@
 // into declared ones so the graph+grep fallback is deliberate, not lucky.
 // ============================================================================
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_core::CellPayload;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::edge_category;
+use glia_core::CellPayload;
+use glia_graph::MergedGraph;
 
 /// A known extraction limitation for a language/edge-category. Advisory: an
 /// agent that sees this should verify that dimension with grep rather than trust
@@ -308,7 +308,7 @@ fn languages_present(merged: &MergedGraph) -> std::collections::HashSet<&'static
     for g in &merged.graphs {
         for n in &g.nodes {
             for c in &n.cells {
-                if c.kind != repo_graph_code_domain::cell_type::POSITION {
+                if c.kind != glia_code_domain::cell_type::POSITION {
                     continue;
                 }
                 if let CellPayload::Json(s) | CellPayload::Text(s) = &c.payload {
@@ -473,9 +473,9 @@ mod tests {
     /// One MODULE node whose POSITION cell names `file` — all
     /// `languages_present` reads, so no parse is needed.
     fn graph_with_file(file: &str) -> MergedGraph {
-        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-        use repo_graph_core::{Cell, Confidence, Node, NodeId, RepoId};
-        use repo_graph_graph::{RepoGraph, SymbolTable};
+        use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+        use glia_core::{Cell, Confidence, Node, NodeId, RepoId};
+        use glia_graph::{RepoGraph, SymbolTable};
         let repo = RepoId::from_canonical("test://coverage");
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "Sample");
         let g = RepoGraph {

@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 

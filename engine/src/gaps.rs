@@ -68,16 +68,16 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
-use repo_graph_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
-use repo_graph_graph::MergedGraph;
-use repo_graph_graph::cells::{CellTarget, QnameIndex};
-use repo_graph_graph::nav::{is_nav_route, nav_route_path};
-use repo_graph_graph::normalise_http_path;
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
+use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_extractors::queues::is_framework_tag;
+use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_graph::MergedGraph;
+use glia_graph::cells::{CellTarget, QnameIndex};
+use glia_graph::nav::{is_nav_route, nav_route_path};
+use glia_graph::normalise_http_path;
 
 use crate::answers::{Locator, entrypoint_reachable};
 use crate::build::{BuildOptions, generate_many_opts, generate_one_opts};
@@ -1480,7 +1480,7 @@ fn rejected_edge_lines(cfg: &LoadedConfig) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::glia_config::parse_str;
+    use glia_code_domain::glia_config::parse_str;
 
     #[test]
     fn endpoint_parts_strip_owner_and_prefix() {

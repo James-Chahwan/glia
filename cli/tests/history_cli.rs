@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::snapshots::{
     HISTORY_BLAME_FILE, HISTORY_COMMITS_FILE, HISTORY_GENERATOR, META_FILE, history_dir,
 };
 use serde_json::Value;

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -12,7 +12,7 @@ pub use repo_graph_code_domain::{
 // now live in code_domain::endpoint, shared with ts_routes' Express scan. An
 // empty receiver (a `..get` cascade) is not a client, so it still falls
 // through to ROUTE emission in `scan_dart_routes`.
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, ident_before, is_http_client_receiver,
     normalise_client_path, push_client_endpoint_with,
 };
@@ -678,7 +678,7 @@ fn heritage_type_heads<'a>(clause: TsNode, src: &'a [u8]) -> Vec<&'a str> {
 
 fn emit_heritage_ref(
     raw: &str,
-    category: repo_graph_core::EdgeCategoryId,
+    category: glia_core::EdgeCategoryId,
     from_id: NodeId,
     module_id: NodeId,
     line: u32,
@@ -933,7 +933,7 @@ fn visit_top_level_consts(
     // prev-sibling of this list (the `_top_level_definition` rule is hidden).
     // Anchor doc detection at that keyword so `leading_doc` reaches the comment.
     let doc_anchor = const_keyword_sibling(list).unwrap_or(list);
-    let doc = repo_graph_doc::leading_doc(&doc_anchor, src);
+    let doc = glia_doc::leading_doc(&doc_anchor, src);
     let has_doc = doc.is_some();
 
     let mut cursor = list.walk();
@@ -1965,7 +1965,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -1988,10 +1988,10 @@ fn span_cells(first: &TsNode, last: &TsNode, src: &[u8], file_rel: &str) -> Vec<
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json_span(first, last, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json_span(first, last, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(first, src) {
+    if let Some(doc) = glia_doc::leading_doc(first, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -2008,10 +2008,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -3151,7 +3151,7 @@ abstract class A {
         out
     }
 
-    fn cell_text(fp: &FileParse, id: NodeId, kind: repo_graph_core::CellTypeId) -> String {
+    fn cell_text(fp: &FileParse, id: NodeId, kind: glia_core::CellTypeId) -> String {
         fp.nodes
             .iter()
             .filter(|n| n.id == id)

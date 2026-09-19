@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, anyhow};
 use candle_core::{Device, Tensor};
 use candle_core::quantized::gguf_file;
-use repo_graph_latent::qwen2_hacked::ModelWeights;
+use glia_latent::qwen2_hacked::ModelWeights;
 use std::io::Write as _;
 use tokenizers::Tokenizer;
 

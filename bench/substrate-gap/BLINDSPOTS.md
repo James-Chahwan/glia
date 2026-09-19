@@ -116,7 +116,7 @@ Each fix is proven when its eval cell flips 0→1 in `results.jsonl` (fired_on
 marker); the full matrix is the regression guard. `results.jsonl` is machine-local;
 the committed proof of record is `legacy-latest.json` (`run.py --no-log --emit`
 writes it, `--check` fails naming any cell that moved since). Rebuild the wheel — `cargo clean -p
-repo-graph-engine -p repo-graph-py && maturin build && pip install --force-reinstall
+glia-engine -p glia-py && maturin build && pip install --force-reinstall
 target/wheels/<wheel>`. There is no venv on this machine, so the `develop` flow does
 not apply, and the `clean` is load-bearing — see the stale-`.so` warning in the
 PROGRESS LOG below. Then `run.py` + `cargo test` +
@@ -161,7 +161,7 @@ Waves (all verified, determinism-green, regression-guarded by the full matrix):
 Blind 48 → 21 → 12 → 4 → 1 → 0.
 
 Rebuild note: `maturin build` can reuse a stale `.so` — run `cargo clean -p
-repo-graph-engine -p repo-graph-py` before it, or mtime-check the installed `.so`.
+glia-engine -p glia-py` before it, or mtime-check the installed `.so`.
 
 **FIXED (27 cells), all verified (determinism byte-gate green; only pre-existing
 py_smoke fails; TS-family cells regression-checked):**

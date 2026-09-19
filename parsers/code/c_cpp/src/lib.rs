@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
@@ -879,7 +879,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -892,10 +892,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -959,11 +959,11 @@ namespace app {
         let fp = parse_file(source, "src/app.cpp", "src::app.cpp", Dialect::Cpp, repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::PACKAGE).count(), 1);
     }
-    fn count(fp: &FileParse, kind: repo_graph_core::NodeKindId) -> usize {
+    fn count(fp: &FileParse, kind: glia_core::NodeKindId) -> usize {
         fp.nav.kind_by_id.values().filter(|k| **k == kind).count()
     }
 
-    fn id_named(fp: &FileParse, kind: repo_graph_core::NodeKindId, name: &str) -> Option<NodeId> {
+    fn id_named(fp: &FileParse, kind: glia_core::NodeKindId, name: &str) -> Option<NodeId> {
         fp.nav
             .kind_by_id
             .iter()
@@ -1109,14 +1109,14 @@ namespace app {
         assert_eq!(fp.nav.name_by_id[&module], "Widget");
         assert_eq!(fp.nav.qname_by_id[&module], "src::Widget.h");
         assert_eq!(
-            repo_graph_code_domain::bare_module_qname("src::Widget.h", &fp.nav.name_by_id[&module]).as_deref(),
+            glia_code_domain::bare_module_qname("src::Widget.h", &fp.nav.name_by_id[&module]).as_deref(),
             Some("src::Widget")
         );
         assert_eq!(module_name("", "src::x.c"), "x.c");
     }
 
     /// The id of the `kind` node at `qname`, when the parse recorded it.
-    fn node_at(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> Option<NodeId> {
+    fn node_at(fp: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Option<NodeId> {
         let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
         (fp.nav.kind_by_id.get(&id) == Some(&kind) && fp.nav.qname_by_id.get(&id).map(String::as_str) == Some(qname))
             .then_some(id)

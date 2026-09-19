@@ -1,14 +1,14 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with,
 };
 
@@ -151,7 +151,7 @@ struct TopLevelTypes {
 /// whether it is private / fileprivate (file-scoped).
 struct Declared<'a> {
     name: &'a str,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     file_private: bool,
 }
 
@@ -249,7 +249,7 @@ fn is_file_private(node: TsNode, src: &[u8]) -> bool {
         })
 }
 
-fn swift_type_kind(node: TsNode) -> repo_graph_core::NodeKindId {
+fn swift_type_kind(node: TsNode) -> glia_core::NodeKindId {
     // tree-sitter-swift 0.7 uses `class_declaration` for class/struct/enum/actor.
     // The keyword is the first unnamed child.
     let mut cursor = node.walk();
@@ -284,7 +284,7 @@ fn visit_type(
     scope: &str,
     parent_id: NodeId,
     repo: RepoId,
-    kind: repo_graph_core::NodeKindId,
+    kind: glia_core::NodeKindId,
     acc: &mut Acc,
 ) -> bool {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -781,7 +781,7 @@ fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(root, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(root, file_rel)),
         },
     ]
 }
@@ -794,10 +794,10 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         },
         Cell {
             kind: cell_type::POSITION,
-            payload: CellPayload::Json(repo_graph_doc::position_json(node, file_rel)),
+            payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
         },
     ];
-    if let Some(doc) = repo_graph_doc::leading_doc(node, src) {
+    if let Some(doc) = glia_doc::leading_doc(node, src) {
         cells.push(Cell {
             kind: cell_type::DOC,
             payload: CellPayload::Text(doc),
@@ -843,7 +843,7 @@ struct Point {
         assert!(!qnames.iter().any(|q| q.starts_with("Sources::Models::")), "{qnames:?}");
     }
 
-    fn id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
     }
 

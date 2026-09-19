@@ -4,7 +4,7 @@
 //! `.ai/repo-graph/`) and the flat `glia build` layout (`layout-glia-build/`).
 //!
 //! `pre_leap_fixture_is_intact` pins the FIXTURE, not the current format: it
-//! deliberately uses no `repo_graph_store` constant, so it keeps passing after
+//! deliberately uses no `glia_store` constant, so it keeps passing after
 //! LC.1 bumps `FORMAT_VERSION` / `MANIFEST_VERSION`. LC.1 / LC.8 / LC.9 read
 //! these bytes to prove old directories are reported stale and rebuilt; they
 //! never rewrite them.
@@ -21,9 +21,9 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_store::{
+use glia_code_domain::cell_type;
+use glia_core::{CellPayload, NodeId};
+use glia_store::{
     MANIFEST_VERSION, MmapContainer, ShardedMmap, StoreError, is_gmap_stale,
     read_manifest_lenient, read_merged_sharded, read_merged_sharded_meta, read_to_owned,
     remove_cell, upsert_cell, upsert_cell_sharded,

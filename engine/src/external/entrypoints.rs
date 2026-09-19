@@ -43,10 +43,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_code_domain::glia_config::LoadedConfig;
-use repo_graph_core::{Cell, CellPayload, NodeId, RepoId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::cell_type;
+use glia_code_domain::glia_config::LoadedConfig;
+use glia_core::{Cell, CellPayload, NodeId, RepoId};
+use glia_graph::MergedGraph;
 use serde_json::{Map, Value};
 
 use super::RepoInputs;
@@ -196,9 +196,9 @@ fn report(label: &str, t: &Tally) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{CodeNav, node_kind};
-    use repo_graph_core::{Confidence, Node, NodeKindId};
-    use repo_graph_graph::RepoGraph;
+    use glia_code_domain::{CodeNav, node_kind};
+    use glia_core::{Confidence, Node, NodeKindId};
+    use glia_graph::RepoGraph;
 
     fn graph(repo: RepoId, qnames: &[(NodeKindId, &str)]) -> RepoGraph {
         let mut nav = CodeNav::default();

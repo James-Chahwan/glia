@@ -16,7 +16,7 @@ use std::path::Path;
 
 use clap::Subcommand;
 use glia_snapshots::{HistoryOptions, history_sync};
-use repo_graph_code_domain::snapshots::history_dir;
+use glia_code_domain::snapshots::history_dir;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {

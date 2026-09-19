@@ -6,7 +6,7 @@
 //! wrapper) branch on `needs_rebuild` instead of matching variants, so a new
 //! on-disk failure mode only has to be classified here.
 
-use repo_graph_core::NodeId;
+use glia_core::NodeId;
 
 use crate::container::FORMAT_VERSION;
 

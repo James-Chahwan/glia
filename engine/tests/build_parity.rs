@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! GLIA_PARITY_REPOS=<dir>:<dir>:… GLIA_PARITY_OUT=<out> \
-//!   cargo test -p repo-graph-engine --test build_parity -- --ignored --nocapture 2> <out>.stderr
+//!   cargo test -p glia-engine --test build_parity -- --ignored --nocapture 2> <out>.stderr
 //! ```
 //!
 //! For each repo `i` (0-based, in argument order) it writes
@@ -19,8 +19,8 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::{GenerateResult, generate_many, generate_one};
-use repo_graph_store::write_merged_sharded;
+use glia_engine::{GenerateResult, generate_many, generate_one};
+use glia_store::write_merged_sharded;
 
 fn report(tag: &str, r: &GenerateResult) {
     eprintln!(

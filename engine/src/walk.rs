@@ -4,13 +4,13 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::glia_config::{self, ProjectDecl, Spanned};
-use repo_graph_code_domain::project_roots::{self, ProjectRoot};
-use repo_graph_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_code_extractors::contracts::sniff_json_contract;
-use repo_graph_code_extractors::schemas::sniff_json_schema;
-use repo_graph_core::{Confidence, Node, NodeId, RepoId};
+use glia_code_domain::glia_config::{self, ProjectDecl, Spanned};
+use glia_code_domain::project_roots::{self, ProjectRoot};
+use glia_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_code_extractors::contracts::sniff_json_contract;
+use glia_code_extractors::schemas::sniff_json_schema;
+use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::extract::detect_language;
 
@@ -36,7 +36,7 @@ pub(crate) type WalkResult = (
 );
 
 /// The engine's own output directories: the layout `<root>/.glia/graph`
-/// (`repo_graph_store::DEFAULT_GMAP_SUBDIR`, where the store writes the gmap and
+/// (`glia_store::DEFAULT_GMAP_SUBDIR`, where the store writes the gmap and
 /// `cache.rs` keeps `parse_cache.bin`) and the 0.4.x layout `<root>/.ai/repo-graph`
 /// (`LEGACY_GMAP_SUBDIR`, which a 0.4.x wrapper may still write). Skipped
 /// outright, like `store::scan_for_newer` skips them by prefix: otherwise a repo
@@ -492,7 +492,7 @@ fn walk_dir(
             }
             // A13.9: `is_bypass_path` admits a migration `.sql`; one over the
             // cap is skipped, and says so.
-            if repo_graph_code_extractors::migrations::is_migration_path(&rel_str)
+            if glia_code_extractors::migrations::is_migration_path(&rel_str)
                 && std::fs::metadata(&path).is_ok_and(|m| m.len() > MIGRATION_SQL_CAP)
             {
                 eprintln!("[migrations] skipped file={rel_str} over_cap={MIGRATION_SQL_CAP}");
@@ -512,9 +512,9 @@ fn walk_dir(
 /// Build a one-node-per-region graph from the collapsed [`RegionAnchor`]s. Each
 /// node carries an `ORIGIN` cell `{provenance, region}` so consumers filter by
 /// coordinate instead of string-matching keys. (glia-v2 G1/G10)
-pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> repo_graph_graph::RepoGraph {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::{Cell, CellPayload};
+pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> glia_graph::RepoGraph {
+    use glia_code_domain::cell_type;
+    use glia_core::{Cell, CellPayload};
 
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
@@ -537,7 +537,7 @@ pub(crate) fn build_region_graph(regions: &[RegionAnchor], repo: RepoId) -> repo
         });
         nav.record(id, &r.region, &qname, node_kind::REGION, None);
     }
-    repo_graph_graph::RepoGraph {
+    glia_graph::RepoGraph {
         repo,
         nodes,
         edges: Vec::new(),
@@ -564,9 +564,9 @@ pub(crate) fn project_qname(rel_path: &str) -> String {
 /// `{provenance:"project_root", ecosystem, manifest, label, path}`. Because the
 /// nodes have ZERO edges, blast radius, trace and liveness cannot fan out
 /// through them.
-pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> repo_graph_graph::RepoGraph {
-    use repo_graph_code_domain::cell_type;
-    use repo_graph_core::{Cell, CellPayload};
+pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> glia_graph::RepoGraph {
+    use glia_code_domain::cell_type;
+    use glia_core::{Cell, CellPayload};
 
     let mut nodes = Vec::with_capacity(roots.len());
     let mut nav = CodeNav::default();
@@ -595,7 +595,7 @@ pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> repo_g
         nav.record(id, &r.label, &qname, node_kind::PROJECT, None);
     }
     eprintln!("[roots] emitted {} PROJECT nodes", nodes.len());
-    repo_graph_graph::RepoGraph {
+    glia_graph::RepoGraph {
         repo,
         nodes,
         edges: Vec::new(),
@@ -618,13 +618,13 @@ fn is_bypass_path(path: &str) -> bool {
     is_dockerfile_path(path)
         || is_dotenv_path(path)
         || is_angular_template_path(path)
-        || repo_graph_code_extractors::packages::is_manifest_path(path)
+        || glia_code_extractors::packages::is_manifest_path(path)
         // A13.9: a migration `.sql` (Flyway name, `.up.sql`, `db/migrate/`,
         // `migrations/`). Any other `.sql` stays unread.
-        || repo_graph_code_extractors::migrations::is_migration_path(path)
+        || glia_code_extractors::migrations::is_migration_path(path)
         // A13.16: a Prisma schema (`schema.prisma`, or any `.prisma` of a
         // prismaSchemaFolder), the file that declares the stack's data model.
-        || repo_graph_code_extractors::prisma::is_prisma_schema(path)
+        || glia_code_extractors::prisma::is_prisma_schema(path)
 }
 
 /// LA.6c: an Angular CLI component template (`home.component.html`). Read only
@@ -885,7 +885,7 @@ mod walk_tests {
         let mut accessed: Vec<(String, String)> = Vec::new();
         for g in &r.merged.graphs {
             for e in &g.edges {
-                if e.category != repo_graph_code_domain::edge_category::ACCESSES_DATA {
+                if e.category != glia_code_domain::edge_category::ACCESSES_DATA {
                     continue;
                 }
                 let from = g.nav.qname_by_id.get(&e.from).cloned().unwrap_or_default();
@@ -1160,9 +1160,9 @@ mod walk_tests {
                     .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
                     .map(move |n| {
                         let origin = match &n.cells[..] {
-                            [c] if c.kind == repo_graph_code_domain::cell_type::ORIGIN => {
+                            [c] if c.kind == glia_code_domain::cell_type::ORIGIN => {
                                 match &c.payload {
-                                    repo_graph_core::CellPayload::Json(j) => j.clone(),
+                                    glia_core::CellPayload::Json(j) => j.clone(),
                                     other => panic!("ORIGIN must be JSON, got {other:?}"),
                                 }
                             }
@@ -1231,7 +1231,7 @@ mod walk_tests {
         assert!(!apisvc.is_empty(), "the control seed has a real neighbour (main)");
 
         // Same shard slot from both entry points (regions, projects, docs).
-        let slot = |m: &repo_graph_graph::MergedGraph| {
+        let slot = |m: &glia_graph::MergedGraph| {
             m.graphs.iter().position(|g| {
                 g.nodes.first().is_some_and(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
             })

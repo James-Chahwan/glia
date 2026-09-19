@@ -148,11 +148,11 @@ fn flows_without_feature_flags_is_ld4b_unchanged() {
     let s = Scratch::new("ld4b");
     let out = s.flows(&["--json"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let built = repo_graph_engine::generate_many(&[s.web(), s.api()]).expect("build");
-    let want = repo_graph_engine::trace::entry_flows(
+    let built = glia_engine::generate_many(&[s.web(), s.api()]).expect("build");
+    let want = glia_engine::trace::entry_flows(
         &built.merged,
         &built.repo_labels,
-        repo_graph_engine::trace::DEFAULT_DEPTH,
+        glia_engine::trace::DEFAULT_DEPTH,
     );
     assert_eq!(
         stdout(&out),
@@ -271,7 +271,7 @@ fn features_without_out_writes_the_default_dir() {
     let s = Scratch::new("default");
     let out = s.flows(&["--features"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    let dir = repo_graph_engine::feature_flows::default_flows_dir(Path::new(&s.web()));
+    let dir = glia_engine::feature_flows::default_flows_dir(Path::new(&s.web()));
     assert_eq!(
         stdout(&out),
         format!("{}\n", dir.join("index.json").display())

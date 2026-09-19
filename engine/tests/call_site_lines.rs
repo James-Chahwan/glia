@@ -14,11 +14,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Edge, NodeId, NodeKindId};
-use repo_graph_engine::generate_one;
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{Edge, NodeId, NodeKindId};
+use glia_engine::generate_one;
+use glia_graph::MergedGraph;
 
 /// (language, [(repo-relative path, source)]).
 type Program = (&'static str, &'static [(&'static str, &'static str)]);
@@ -384,7 +384,7 @@ fn every_ref_edge_points_at_its_reference() {
             if let Err(why) = checked {
                 failures.push(format!(
                     "{lang}: {} {from_name} -> {name}: {why}",
-                    repo_graph_code_domain::edge_category::name(e.category)
+                    glia_code_domain::edge_category::name(e.category)
                 ));
             }
         }
@@ -429,7 +429,7 @@ fn node_index(m: &MergedGraph) -> HashMap<NodeId, (NodeKindId, String, Option<St
         for n in &g.nodes {
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else { continue };
             let name = g.nav.name_by_id.get(&n.id).cloned().unwrap_or_default();
-            let file = repo_graph_code_domain::evidence::locate(&n.cells).map(|(f, _)| f);
+            let file = glia_code_domain::evidence::locate(&n.cells).map(|(f, _)| f);
             out.entry(n.id).or_insert((kind, name, file));
         }
     }

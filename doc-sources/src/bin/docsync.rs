@@ -12,7 +12,7 @@
 //!    "version":"3","body_file":"ordering.xhtml"}
 //! `body_file` is resolved relative to the `pages.jsonl` file.
 
-use repo_graph_doc_sources::{Page, record_from_page, write_snapshot};
+use glia_doc_sources::{Page, record_from_page, write_snapshot};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 

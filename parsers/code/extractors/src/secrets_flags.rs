@@ -25,7 +25,7 @@
 //! `flags:` definitions — lives in config.rs's `extract_yaml_env_defs`, which
 //! already walks every yaml file once.
 
-use repo_graph_core::{NodeId, RepoId};
+use glia_core::{NodeId, RepoId};
 
 use crate::config::{ConfigDef, ConfigNodes, Side, build_nodes};
 
@@ -210,7 +210,7 @@ pub fn extract_feature_flags(source: &str, module_id: NodeId, repo: RepoId) -> C
 /// `refs` counts secret keys on either side, `providers` their distinct
 /// providers, `flags` / `flag_defs` flag keys read / declared.
 pub fn marker(outs: &[&ConfigNodes], src: &str) -> Option<String> {
-    use repo_graph_code_domain::edge_category;
+    use glia_code_domain::edge_category;
     use std::collections::BTreeSet;
     let (mut refs, mut providers) = (BTreeSet::new(), BTreeSet::new());
     let (mut flags, mut flag_defs) = (BTreeSet::new(), BTreeSet::new());
@@ -518,8 +518,8 @@ fn gcp_ref(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_code_domain::{GRAPH_TYPE, cell_type, edge_category, node_kind};
-    use repo_graph_core::CellPayload;
+    use glia_code_domain::{GRAPH_TYPE, cell_type, edge_category, node_kind};
+    use glia_core::CellPayload;
 
     fn module_id(repo: RepoId) -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, "test")

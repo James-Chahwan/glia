@@ -7,7 +7,7 @@
 //! (path or not), 2 on a build failure, an unknown node or an unknown
 //! category.
 
-use repo_graph_engine::why::{EdgeWhy, why_edge};
+use glia_engine::why::{EdgeWhy, why_edge};
 
 use crate::cmd::resolve::print_absence;
 use crate::common::generate_for;

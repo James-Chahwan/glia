@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
-use repo_graph_parser_python::{
+use glia_core::{EdgeCategoryId, NodeId, RepoId};
+use glia_parser_python::{
     CallQualifier, FileParse, GRAPH_TYPE, ImportTarget, cell_type, edge_category, node_kind,
     parse_file,
 };

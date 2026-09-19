@@ -1,7 +1,7 @@
 //! LF.1c — `glia cell set / rm / ls`, the CLI surface of the cell write API
-//! (`repo_graph_store::write_cell` / `remove_cell_entry`), and `ls --check`,
+//! (`glia_store::write_cell` / `remove_cell_entry`), and `ls --check`,
 //! which binds every sidecar row through the build's one resolver
-//! (`repo_graph_graph::cells::QnameIndex`) against a fresh build.
+//! (`glia_graph::cells::QnameIndex`) against a fresh build.
 //!
 //! Each test drives the real binary over a scratch repo. The fired_on markers
 //! are grep-able:

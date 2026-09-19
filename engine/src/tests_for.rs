@@ -98,11 +98,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use repo_graph_activation::algo::reach;
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::reach;
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
@@ -326,7 +326,7 @@ fn rev_seeds(rev: &crate::delta::RevDelta) -> Vec<NodeId> {
         .collect();
     let moved_to: HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (b, a)).collect();
     let was: HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
-    let walked = |c: &CodeText<'_>, k: &repo_graph_activation::algo::delta::EdgeKey| {
+    let walked = |c: &CodeText<'_>, k: &glia_activation::algo::delta::EdgeKey| {
         TEST_REACH.contains(&k.category)
             && !(k.category == edge_category::TESTS
                 && c.kind.get(&k.from) == Some(&node_kind::MODULE))
@@ -830,7 +830,7 @@ impl TestIndex {
 }
 
 /// ORIGIN provenance `test_fixture` (`passes::tag_synthetic_provenance`).
-fn is_test_fixture(cells: &[repo_graph_core::Cell]) -> bool {
+fn is_test_fixture(cells: &[glia_core::Cell]) -> bool {
     cells
         .iter()
         .filter(|c| c.kind == cell_type::ORIGIN)

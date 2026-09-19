@@ -83,13 +83,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use repo_graph_code_domain::external_inputs::merge_entry;
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::external_inputs::merge_entry;
+use glia_code_domain::snapshots::{
     LcovFileRecord, SOURCE_JUNIT, TestCaseRecord, read_tests, redact_untrusted,
 };
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{Cell, CellPayload, Node, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{Cell, CellPayload, Node, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 use serde_json::{Map, Value};
 
 use super::RepoInputs;

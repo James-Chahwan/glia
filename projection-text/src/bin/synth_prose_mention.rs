@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_projection_text::driver_utils::build_repo_graph;
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_projection_text::driver_utils::build_repo_graph;
 
 #[derive(Parser, Debug)]
 #[command(about = "Derive a directive from issue prose mentions (B2, cycle 0.6)")]
@@ -167,7 +167,7 @@ fn extract_mentions(text: &str) -> Vec<String> {
 }
 
 fn build_tail_index<'g>(
-    graph: &'g repo_graph_graph::RepoGraph,
+    graph: &'g glia_graph::RepoGraph,
 ) -> BTreeMap<&'g str, Vec<(NodeId, &'g str)>> {
     let mut out: BTreeMap<&str, Vec<(NodeId, &str)>> = BTreeMap::new();
     for n in &graph.nodes {

@@ -14,10 +14,10 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::node_kind;
-use repo_graph_core::NodeId;
-use repo_graph_engine::{GenerateResult, generate_one};
-use repo_graph_graph::identity::{
+use glia_code_domain::node_kind;
+use glia_core::NodeId;
+use glia_engine::{GenerateResult, generate_one};
+use glia_graph::identity::{
     FileMove, IdentityIndex, MoveTier, Rebind, detect_moves, detect_moves_with, identity_of,
 };
 

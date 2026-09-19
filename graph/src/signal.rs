@@ -11,8 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::cell_type;
-use repo_graph_core::{Node, NodeId};
+use glia_code_domain::cell_type;
+use glia_core::{Node, NodeId};
 
 use crate::merged::MergedGraph;
 
@@ -429,7 +429,7 @@ fn parse_diff_frames(text: &str) -> Vec<(String, u32)> {
 fn position_of(node: &Node) -> Option<(String, u32, u32)> {
     for c in &node.cells {
         if c.kind == cell_type::POSITION {
-            if let repo_graph_core::CellPayload::Json(j) = &c.payload {
+            if let glia_core::CellPayload::Json(j) = &c.payload {
                 let file = json_str_field(j, "file")?;
                 let start = json_num_field(j, "start_line")?;
                 let end = json_num_field(j, "end_line")?;
@@ -498,8 +498,8 @@ mod tests {
     use super::*;
     use crate::test_support::repo;
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence};
 
     fn graph_with_positioned_fn() -> (MergedGraph, NodeId) {
         let r = repo();
@@ -633,19 +633,19 @@ mod tests {
         let callers: Vec<NodeId> = (0..3)
             .map(|i| id_of(node_kind::FUNCTION, &format!("m::b::c{i}"), &format!("c{i}")))
             .collect();
-        let edge = |from, to, category| repo_graph_core::Edge {
+        let edge = |from, to, category| glia_core::Edge {
             from,
             to,
             category,
             confidence: Confidence::Strong,
             cells: Vec::new(),
         };
-        let mut edges: Vec<repo_graph_core::Edge> = callers
+        let mut edges: Vec<glia_core::Edge> = callers
             .iter()
-            .map(|&c| edge(c, busier, repo_graph_code_domain::edge_category::CALLS))
+            .map(|&c| edge(c, busier, glia_code_domain::edge_category::CALLS))
             .collect();
         edges.extend(
-            callers.iter().map(|&c| edge(module, c, repo_graph_code_domain::edge_category::IMPORTS)),
+            callers.iter().map(|&c| edge(module, c, glia_code_domain::edge_category::IMPORTS)),
         );
         let g = RepoGraph {
             repo: r,

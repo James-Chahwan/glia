@@ -14,7 +14,7 @@
 //
 // This is sidecar HYGIENE, not a `.gmap` determinism fix: graph build order comes
 // from the name-sorted walk (`walk::walk_source_files`) and the sorted
-// `parses_by_lang` (`build::build_graphs_for_repo`), never from this map, and
+// `parses_by_lang` (`build::assemble::build_graphs_for_repo`), never from this map, and
 // `engine/tests/byte_identical.rs` already held with the HashMap. What it buys is
 // "same input, same bytes", which makes the sidecar diffable and
 // content-addressable — what a future Engram `--since` diff would stand on.
@@ -24,8 +24,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::{CodeNav, FileParse};
-use repo_graph_core::NodeId;
+use glia_code_domain::{CodeNav, FileParse};
+use glia_core::NodeId;
 
 /// Build identity a cache must match to be reused: `<release>+p<parser stamp>`
 /// (see the `stamp` crate).
@@ -40,7 +40,7 @@ use repo_graph_core::NodeId;
 /// incremental consumer serving the pre-fix `FileParse`, while `bench/substrate-gap`
 /// (which builds cold) reported the cell fixed. `BUILD_STAMP` folds in a content
 /// hash of every graph-shaping source, so a parser change invalidates on its own.
-pub(crate) const CACHE_VERSION: &str = repo_graph_stamp::BUILD_STAMP;
+pub(crate) const CACHE_VERSION: &str = glia_stamp::BUILD_STAMP;
 const CACHE_FILE: &str = "parse_cache.bin";
 
 /// Staging file name `save` writes through before the atomic rename.
@@ -89,10 +89,10 @@ fn on_disk_equals(path: &Path, bytes: &[u8]) -> bool {
 }
 
 /// Conventional cache location: the repo's layout directory
-/// (`repo_graph_store::default_gmap_dir`, `<repo>/.glia/graph`), so the parse
+/// (`glia_store::default_gmap_dir`, `<repo>/.glia/graph`), so the parse
 /// cache sits beside the gmap it is invalidated with.
 fn gmap_dir(repo_path: &str) -> PathBuf {
-    repo_graph_store::default_gmap_dir(Path::new(repo_path))
+    glia_store::default_gmap_dir(Path::new(repo_path))
 }
 
 /// xxhash64 of a source string — the same primitive the store uses for shard
@@ -250,7 +250,7 @@ pub struct ParseCache {
     /// Repo identity key the cached parses were built under — the exact string
     /// fed to `RepoId::from_canonical`: `git:<remote>[/<rel>]`,
     /// `gitdir:<name>[/<rel>]` or `dir:<basename>`
-    /// (`repo_graph_code_domain::walk_gating::repo_identity`, LB.1). Every
+    /// (`glia_code_domain::walk_gating::repo_identity`, LB.1). Every
     /// cached `FileParse` has that RepoId baked into its NodeIds, but the
     /// per-file content hash can't see it — so a cache pointed at another
     /// identity must discard, or reused nodes silently carry the old one
@@ -597,10 +597,10 @@ mod tests {
     /// (inserted in `order`), one row in each Vec, so a field serialized out
     /// of place or dropped changes the bytes.
     fn rich_parse(n: u64, order: &[u64]) -> FileParse {
-        use repo_graph_code_domain::{
+        use glia_code_domain::{
             CallQualifier, CallSite, ImportStmt, ImportTarget, UnresolvedRef, edge_category, node_kind,
         };
-        use repo_graph_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId};
+        use glia_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId};
         let mut p = FileParse::default();
         let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text("code".into()) };
         let node = Node { id: NodeId(1), repo: RepoId(7), confidence: Confidence::Strong, cells: vec![cell] };

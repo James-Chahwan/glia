@@ -13,8 +13,8 @@ mod git_fixture;
 use std::path::Path;
 
 use git_fixture::GitRepo;
-use repo_graph_engine::generate_one;
-use repo_graph_engine::tests_for::{
+use glia_engine::generate_one;
+use glia_engine::tests_for::{
     MAX_SEEDS, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
 };
 
@@ -61,7 +61,7 @@ fn shop_files() -> Vec<(&'static str, &'static str)> {
 }
 
 /// A tempdir holding `files`, and its graph.
-fn build(files: &[(&str, &str)]) -> (tempfile::TempDir, repo_graph_engine::GenerateResult) {
+fn build(files: &[(&str, &str)]) -> (tempfile::TempDir, glia_engine::GenerateResult) {
     let dir = tempfile::tempdir().expect("temp dir");
     write_all(dir.path(), files);
     let g = generate_one(dir.path().to_str().expect("utf-8 temp path")).expect("build");

@@ -8,10 +8,10 @@
 //! Run with `-- --nocapture` to see the `[ws] handlers|clients framework=...`
 //! fired_on lines.
 
-use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_engine::{generate_many, generate_one};
-use repo_graph_graph::MergedGraph;
+use glia_code_domain::{edge_category, node_kind};
+use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
+use glia_engine::{generate_many, generate_one};
+use glia_graph::MergedGraph;
 
 fn bench(rel: &str) -> String {
     format!(

@@ -9,16 +9,16 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::evidence::{Basis, Evidence};
-use repo_graph_code_domain::profile::CODE_TABLES;
-use repo_graph_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history};
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Confidence, Edge, NodeId};
-use repo_graph_engine::{
+use glia_code_domain::evidence::{Basis, Evidence};
+use glia_code_domain::profile::CODE_TABLES;
+use glia_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, HistoryMeta, write_history};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, Edge, NodeId};
+use glia_engine::{
     BlastOptions, BuildOptions, blast_radius, entrypoint_reachable, generate_one, generate_one_opts,
 };
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded;
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/history-cochange";
 const A_PY: &str = include_str!("../../bench/substrate-gap/fixtures/history-cochange/svc/a.py");

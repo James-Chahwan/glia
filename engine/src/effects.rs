@@ -86,7 +86,7 @@
 //! value or taint flow: ACCESS_MODE is the SQL verb at the access site.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
-//! reached as `repo_graph_engine::effects::<item>`, never flattened into the
+//! reached as `glia_engine::effects::<item>`, never flattened into the
 //! crate root.
 //!
 //! fired_on marker, one line per answered call:
@@ -95,11 +95,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
-use repo_graph_code_domain::evidence::Evidence;
-use repo_graph_code_domain::{cell_type, edge_category, node_kind};
-use repo_graph_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
-use repo_graph_graph::MergedGraph;
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};

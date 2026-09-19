@@ -2,12 +2,12 @@
 //! it owns (the A11.1 const table and its LF.2d overlay pins, the A12.1
 //! `[msgtype]` census, the quiet-panic scope that covers the whole assembly).
 
-use repo_graph_code_domain::endpoint::split_owner;
-use repo_graph_code_domain::glia_config::LoadedConfig;
-use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{cell_type, di_stats, node_kind};
-use repo_graph_code_extractors::constants::ConstTable;
-use repo_graph_core::RepoId;
+use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::glia_config::LoadedConfig;
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::{cell_type, di_stats, node_kind};
+use glia_code_extractors::constants::ConstTable;
+use glia_core::RepoId;
 
 use super::BuildOptions;
 use super::grafts;
@@ -136,7 +136,7 @@ pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
-) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
+) -> (Vec<glia_graph::RepoGraph>, Vec<String>) {
     let RepoBuildCtx { repo, repo_label, go, ts_aliases, rpc, roots, config, opts } = *ctx;
     // Keep caught per-file panics off stderr: the default hook would print
     // (with a backtrace) for every bad file even though it becomes a
@@ -224,7 +224,7 @@ pub(super) fn build_graphs_for_repo(
 /// `typed` counts nodes carrying a `cell_type::MESSAGE_TYPE` cell, `tag_topics`
 /// the identity-free framework tags that can never carry a contract. Counted
 /// off the built graphs, so cache-served files count too; silent otherwise.
-fn msgtype_marker(graphs: &[repo_graph_graph::RepoGraph], repo_label: &str) {
+fn msgtype_marker(graphs: &[glia_graph::RepoGraph], repo_label: &str) {
     let (mut queue_nodes, mut typed, mut tags) = (0usize, 0usize, 0usize);
     for g in graphs {
         for n in &g.nodes {
@@ -241,7 +241,7 @@ fn msgtype_marker(graphs: &[repo_graph_graph::RepoGraph], repo_label: &str) {
             // The LB.8 owner segment is not part of the topic.
             if let Some(q) = g.nav.qname_by_id.get(&n.id)
                 && let Some((_, topic)) = split_owner(q).0.split_once(':')
-                && repo_graph_code_extractors::queues::is_framework_tag(topic)
+                && glia_code_extractors::queues::is_framework_tag(topic)
             {
                 tags += 1;
             }

@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use repo_graph_core::CellTypeId;
+use glia_core::CellTypeId;
 
 /// When a pass runs. Stages run in declaration order (`Resolve` < `Post` <
 /// `Finalize`), which is also their `Ord`.

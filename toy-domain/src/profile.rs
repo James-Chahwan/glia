@@ -10,12 +10,12 @@
 
 use std::collections::HashMap;
 
-use repo_graph_activation::passes::{PassRegistry, PassSpec, Stage};
-use repo_graph_activation::profile::{
+use glia_activation::passes::{PassRegistry, PassSpec, Stage};
+use glia_activation::profile::{
     ActivationPreset, DomainProfile, DomainTables, EntryRule, Registries,
 };
-use repo_graph_activation::{ActivatedView, FilterPredicate, SynthCell, SynthHook};
-use repo_graph_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId, canonical_edge_cmp};
+use glia_activation::{ActivatedView, FilterPredicate, SynthCell, SynthHook};
+use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId, canonical_edge_cmp};
 
 use crate::reel::{GRAPH_TYPE, ToyGraph};
 use crate::registry::cell_type::{self as ct, SCREEN_TIME};

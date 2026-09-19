@@ -20,9 +20,9 @@
 //! easy thing to get wrong (twice, or not at all), and `is_some()` would not
 //! catch an off-by-one.
 
-use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
-use repo_graph_engine::{Locator, generate_many, locate_node};
-use repo_graph_graph::MergedGraph;
+use glia_engine::trace::{TraceOptions, cross_stack_trace};
+use glia_engine::{Locator, generate_many, locate_node};
+use glia_graph::MergedGraph;
 
 /// Three services under one tempdir:
 /// - `web/`    — a TS client (`fetch('/users')`, call on line 2) and
@@ -166,9 +166,9 @@ fn trace_hops_into_http_nodes_carry_a_location() {
 /// 2 s even in a debug build, and each must be the right node.
 #[test]
 fn locator_answers_do_not_rescan_nodes() {
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-    use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
-    use repo_graph_graph::{RepoGraph, SymbolTable};
+    use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+    use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+    use glia_graph::{RepoGraph, SymbolTable};
 
     const N: usize = 20_000;
     let repo = RepoId::from_canonical("test://locator-scale");

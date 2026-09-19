@@ -1,4 +1,4 @@
-//! repo-graph-activation — domain-agnostic Personalized PageRank.
+//! glia-activation — domain-agnostic Personalized PageRank.
 //!
 //! Implements spreading activation via power-iteration PPR, adapted from
 //! the HippoRAG insight (arXiv 2405.14831) but stripped of NER/OpenIE/
@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
+use glia_core::{Edge, EdgeCategoryId, NodeId};
 
 /// Build-pass composition (LD.13): the stage-ordered registry a domain
 /// declares its build passes in. Build-time, unlike the PPR below, so this
@@ -29,7 +29,7 @@ pub mod profile;
 pub use profile::{ActivationPreset, DomainProfile, DomainTables, EntryRule, NamedEntry, Registries};
 
 /// Domain-agnostic graph algorithms (LD.15a), reached by module path
-/// (`repo_graph_activation::algo::reach::bfs`): [`algo::GraphSource`], the
+/// (`glia_activation::algo::reach::bfs`): [`algo::GraphSource`], the
 /// CSR [`algo::Adjacency`] index, and reachability in [`algo::reach`].
 pub mod algo;
 
@@ -288,7 +288,7 @@ pub(crate) fn ppr_vector<'e>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::{Confidence, EdgeCategoryId, NodeId};
+    use glia_core::{Confidence, EdgeCategoryId, NodeId};
 
     const CAT_CALLS: EdgeCategoryId = EdgeCategoryId(4);
     const CAT_CONTAINS: EdgeCategoryId = EdgeCategoryId(2);

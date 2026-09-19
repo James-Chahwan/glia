@@ -10,15 +10,15 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::snapshots::{
+use glia_code_domain::snapshots::{
     META_FILE, SOURCE_JUNIT, SOURCE_LOG, STATUS_FAILED, TESTS_CASES_FILE, TESTS_LCOV_FILE, TestCaseRecord,
     TestsMeta, data_hash, tests_dir, write_tests,
 };
-use repo_graph_code_domain::{cell_type, node_kind};
-use repo_graph_core::{CellPayload, NodeId};
-use repo_graph_engine::{BuildOptions, generate_one, generate_one_opts};
-use repo_graph_graph::MergedGraph;
-use repo_graph_store::write_merged_sharded;
+use glia_code_domain::{cell_type, node_kind};
+use glia_core::{CellPayload, NodeId};
+use glia_engine::{BuildOptions, generate_one, generate_one_opts};
+use glia_graph::MergedGraph;
+use glia_store::write_merged_sharded;
 use serde_json::Value;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/test-reports-fail";
@@ -301,7 +301,7 @@ fn deterministic() {
         ..failed(Some("tests.test_app"), &format!("test_list_orders[{i}]"))
     }));
     snapshot(d.path(), Some("r1"), &cases);
-    let cells = |m: &MergedGraph| -> Vec<Vec<Vec<repo_graph_core::Cell>>> {
+    let cells = |m: &MergedGraph| -> Vec<Vec<Vec<glia_core::Cell>>> {
         m.graphs.iter().map(|g| g.nodes.iter().map(|n| n.cells.clone()).collect()).collect()
     };
     let first = build(d.path());

@@ -1,4 +1,4 @@
-//! repo-graph-parser-python — tree-sitter Python → `repo_graph_core` types.
+//! glia-parser-python — tree-sitter Python → `glia_core` types.
 //!
 //! Single-file scan: emit Module/Class/Function/Method nodes with Code/Doc/
 //! Position cells, intra-file `defines` and `calls` edges. Cross-file refs
@@ -7,22 +7,22 @@
 //! resolver.
 //!
 //! All code-domain primitives (constants, `FileParse`, `CodeNav`,
-//! `ImportStmt`, `CallSite`, `ParseError`) live in `repo-graph-code-domain`
+//! `ImportStmt`, `CallSite`, `ParseError`) live in `glia-code-domain`
 //! and are re-exported from this crate for convenience.
 
 use std::collections::HashMap;
 
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
-pub use repo_graph_code_domain::{
+pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use repo_graph_code_domain::data_entity;
-use repo_graph_code_domain::evidence;
-use repo_graph_code_domain::di_stats::{self, DiShape};
-use repo_graph_code_domain::endpoint::{
+use glia_code_domain::data_entity;
+use glia_code_domain::evidence;
+use glia_code_domain::di_stats::{self, DiShape};
+use glia_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
 
@@ -3029,7 +3029,7 @@ fn collect_call_arg_info(call: TsNode, src: &[u8]) -> Option<CallArgInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use repo_graph_core::EdgeCategoryId;
+    use glia_core::EdgeCategoryId;
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://py_smoke")
@@ -3852,7 +3852,7 @@ class Field:
             .nodes
             .iter()
             .find(|n| n.id == id)
-            .and_then(|n| repo_graph_code_domain::data_entity::table_of(&n.cells))
+            .and_then(|n| glia_code_domain::data_entity::table_of(&n.cells))
     }
 
     fn data_entity_count(parse: &FileParse) -> usize {

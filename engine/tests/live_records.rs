@@ -7,16 +7,16 @@
 //! CRON_JOB, GRPC_SERVER and RPC_PROCEDURE, so a queue worker's or a GraphQL
 //! resolver's code read as dead.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
-use repo_graph_engine::find::{FindOptions, find_nodes};
-use repo_graph_engine::profile::{CODE_PROFILE, entry_kinds};
-use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
-use repo_graph_engine::{
+use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
+use glia_engine::find::{FindOptions, find_nodes};
+use glia_engine::profile::{CODE_PROFILE, entry_kinds};
+use glia_engine::trace::{TraceOptions, cross_stack_trace};
+use glia_engine::{
     entrypoint_reachable, generate_many, governing_docs, resolve_signal_located,
     resolve_signal_located_with_live,
 };
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
 fn repo() -> RepoId {
     RepoId::from_canonical("test://live-records")
@@ -168,7 +168,7 @@ fn resolve_rows_carry_live() {
     }
     // The `_with_live` form over the same set is the same answer.
     let again = resolve_signal_located_with_live(&m, &live, "app.py", "diff", None, None);
-    let flags = |rows: &[repo_graph_engine::LocatedNode]| -> Vec<(String, bool)> {
+    let flags = |rows: &[glia_engine::LocatedNode]| -> Vec<(String, bool)> {
         rows.iter().map(|r| (r.qname.clone(), r.live)).collect()
     };
     assert_eq!(flags(&again.results), flags(&res.results));

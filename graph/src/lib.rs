@@ -1,4 +1,4 @@
-//! repo-graph-graph — per-repo graph construction + resolver + traversal.
+//! glia-graph — per-repo graph construction + resolver + traversal.
 //!
 //! Consumes `FileParse` outputs from the language parsers, merges them into a
 //! single `RepoGraph` for the repo, resolves cross-file imports and calls
@@ -26,7 +26,7 @@ mod traversal;
 mod types;
 
 // 0.5.0 leap primitives: one public module each, reached by module path
-// (`repo_graph_graph::roles::roles_in`), never flattened into the root.
+// (`glia_graph::roles::roles_in`), never flattened into the root.
 pub mod cells;
 pub mod identity;
 pub mod nav;

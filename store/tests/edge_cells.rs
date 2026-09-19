@@ -2,10 +2,10 @@
 //! file's bytes do not depend on the order the resolvers pushed edges in once
 //! same-key edges carry different cells.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
-use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
-use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
-use repo_graph_store::{CROSS_STACK_NAME, read_merged_sharded, write_merged_sharded};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
+use glia_store::{CROSS_STACK_NAME, read_merged_sharded, write_merged_sharded};
 
 fn repo_a() -> RepoId {
     RepoId::from_canonical("test://edge_cells/a")
@@ -15,7 +15,7 @@ fn repo_b() -> RepoId {
     RepoId::from_canonical("test://edge_cells/b")
 }
 
-fn node(repo: RepoId, kind: repo_graph_core::NodeKindId, qname: &str, nav: &mut CodeNav) -> Node {
+fn node(repo: RepoId, kind: glia_core::NodeKindId, qname: &str, nav: &mut CodeNav) -> Node {
     let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
     let name = qname.rsplit("::").next().unwrap_or(qname);
     nav.record(id, name, qname, kind, None);
