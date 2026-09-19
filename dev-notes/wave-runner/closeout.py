@@ -28,6 +28,10 @@ SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
 # The wheel's name changes with the release and with the 0.5.0 rename; take the newest.
 WHEELS = ROOT / "target/wheels"
+# --leap installs and grades the leap wheel in its own venv. The user-site wheel
+# (/usr/bin/python3) stays the pre-leap build: James's repo-graph MCP server imports
+# it, and the leap's pyo3 breaks would take that server down in every repo.
+LEAP_PY = os.path.expanduser(os.environ.get("GLIA_LEAP_PY", "~/.venvs/glia-leap/bin/python"))
 CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
 
 
@@ -100,6 +104,7 @@ def main():
     gates, lines = [], []
     say = lambda s: (print(s), lines.append(s))
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
+    py = LEAP_PY if leap else "python3"   # every command that imports repo_graph_py
 
     res = journal_results(run)
     got = {r["packet"].split("—")[0].strip(): r for r in res}
@@ -141,22 +146,22 @@ def main():
     sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
     wheel = max(WHEELS.glob("*.whl"), key=lambda p: p.stat().st_mtime)
-    sh(f"pip install --force-reinstall --no-deps -q {wheel}")
-    so, _ = sh("python3 -c \"import repo_graph_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(repo_graph_py.__file__),'*.so'))[0])\"")
+    sh(f"{py} -m pip install --force-reinstall --no-deps -q {wheel}")
+    so, _ = sh(f"{py} -c \"import repo_graph_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(repo_graph_py.__file__),'*.so'))[0])\"")
     stale, _ = sh(f"find {' '.join(CRATES)} -name '*.rs' -newer {so.strip()}")
-    stamp, _ = sh("python3 -c 'import repo_graph_py as r; print(r.build_stamp())'")
+    stamp, _ = sh(f"{py} -c 'import repo_graph_py as r; print(r.build_stamp())'")
     say(f"== wheel: build rc={rc}, stale={len(stale.split())}, stamp {stamp.strip()}")
     if rc or stale.strip():
         gates.append("wheel rebuild/stale")
     # LD.2: the pyo3 surface behaves as its convention says, over the wheel just installed.
     # One file per py/src module; each ends on `[surface] <module>: N checks, M failed`.
     for t in sorted((ROOT / "py/tests/surface").glob("test_*.py")):
-        out, rc = sh(f"python3 {t.relative_to(ROOT)} 2>&1")
+        out, rc = sh(f"{py} {t.relative_to(ROOT)} 2>&1")
         say(f"== pyo3 surface {t.stem}: {(out.strip().splitlines() or ['(no output)'])[-1]}")
         if rc:
             gates.append(f"pyo3 surface ({t.stem})")
 
-    rp, _ = sh("python3 run.py --no-log 2>/dev/null", cwd=SG)
+    rp, _ = sh(f"{py} run.py --no-log 2>/dev/null", cwd=SG)
     fixtures = len([p for p in (SG / "fixtures").iterdir() if (p / "key.json").exists()])
     bs, bsl = section(rp, "BLIND SPOTS (recall 0.00)")
     mn, mnl = section(rp, "MISSING NODES")
@@ -177,15 +182,15 @@ def main():
     if ge:
         gates.append(f"grader errors: {gel}")
 
-    sh("python3 run.py --no-log --emit >/dev/null 2>&1", cwd=SG)
-    _, lchk = sh("python3 run.py --no-log --check >/dev/null 2>&1", cwd=SG)
+    sh(f"{py} run.py --no-log --emit >/dev/null 2>&1", cwd=SG)
+    _, lchk = sh(f"{py} run.py --no-log --check >/dev/null 2>&1", cwd=SG)
     if lchk:
         gates.append("run.py --check (legacy-latest.json)")
-    mo, _ = sh("python3 matrix.py --emit 2>&1", cwd=SG)
+    mo, _ = sh(f"{py} matrix.py --emit 2>&1", cwd=SG)
     m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown", mo)
-    _, chk = sh("python3 matrix.py --check >/dev/null 2>&1", cwd=SG)
-    tm, _ = sh("python3 test_matrix.py 2>&1 | tail -1", cwd=SG)
-    tg, _ = sh("python3 test_grade.py 2>&1 | tail -1", cwd=SG)
+    _, chk = sh(f"{py} matrix.py --check >/dev/null 2>&1", cwd=SG)
+    tm, _ = sh(f"{py} test_matrix.py 2>&1 | tail -1", cwd=SG)
+    tg, _ = sh(f"{py} test_grade.py 2>&1 | tail -1", cwd=SG)
     full, part, none_, unk = map(int, m.groups()) if m else (0, 0, 0, 0)
     covered = 480 - unk
     say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/480 | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
