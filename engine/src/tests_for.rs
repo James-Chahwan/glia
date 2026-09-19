@@ -353,15 +353,16 @@ fn rev_seeds(rev: &crate::delta::RevDelta) -> Vec<NodeId> {
 }
 
 /// One graph's node CODE texts, kinds and nav children (the first graph that
-/// names a node gives its kind), for [`rev_seeds`]' own-text rule.
-struct CodeText<'a> {
+/// names a node gives its kind), for [`rev_seeds`]' own-text rule. Shared
+/// with LE.2's `diff_impact`, whose rev mode seeds from the same delta.
+pub(crate) struct CodeText<'a> {
     code: HashMap<NodeId, Vec<&'a str>>,
     kind: HashMap<NodeId, NodeKindId>,
     children: HashMap<NodeId, BTreeSet<u64>>,
 }
 
 impl<'a> CodeText<'a> {
-    fn new(m: &'a MergedGraph) -> Self {
+    pub(crate) fn new(m: &'a MergedGraph) -> Self {
         let mut code: HashMap<NodeId, Vec<&'a str>> = HashMap::new();
         let mut kind: HashMap<NodeId, NodeKindId> = HashMap::new();
         let mut children: HashMap<NodeId, BTreeSet<u64>> = HashMap::new();
@@ -392,7 +393,7 @@ impl<'a> CodeText<'a> {
         }
     }
 
-    fn is_container(&self, id: NodeId) -> bool {
+    pub(crate) fn is_container(&self, id: NodeId) -> bool {
         self.children.get(&id).is_some_and(|k| !k.is_empty())
     }
 
@@ -400,7 +401,7 @@ impl<'a> CodeText<'a> {
     /// whitespace dropped (the blank lines around an added function are not a
     /// change of its module), sorted and deduplicated. Children are cut
     /// longest first (ties by text), so the result never depends on map order.
-    fn own_text(&self, id: NodeId) -> Vec<String> {
+    pub(crate) fn own_text(&self, id: NodeId) -> Vec<String> {
         let mut kids: Vec<&str> = self
             .children
             .get(&id)

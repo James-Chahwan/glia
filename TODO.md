@@ -13,7 +13,6 @@ the plan records the evidence for each (`git log -- TODO.md`). The open items th
 These stay here so each packet can find its line. The packet ticks or removes the box when it lands.
 
 - [x] **Synth bins gating.** The synth bins sit behind the `research` feature (renamed from `driver` by LD.12b). The hook traits and one `ActivatedView` landed in LD.12a; composition and callsite-argflow run as `SynthHook`s since LD.12b, key symbols since LD.12d and derived notes since LD.12e, whose `synth_plan` bin runs all four in one `ActivationPlan` over one graph load.
-- [ ] **`glia impact` from a file or diff.** `impact` takes a qname. Seeding it with changed files or a pasted diff is LE.2 (diff_impact).
 - [ ] **Effect classification.** Reshaped as effects(A): data, config and queue sites anchored to their functions (LE.4a–c), then the effect sinks downstream of a node (LE.4d).
 - [ ] **DB: ORM breadth and migrations.** JPA/Hibernate, EF Core, GORM, ActiveRecord, Eloquent, TypeORM, Prisma and Django implicit tables are A13.10–A13.17. Migration files and DDL are A13.9 (Batch C).
 

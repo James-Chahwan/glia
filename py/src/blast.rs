@@ -79,8 +79,9 @@ fn seed_queries(qnames: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     })
 }
 
-/// The `direction` argument: `forward` | `backward` | `both`.
-fn reach_named(direction: &str) -> Result<Reach, String> {
+/// The `direction` argument: `forward` | `backward` | `both`. Shared with
+/// `diff_impact`, which takes the same keyword.
+pub(crate) fn reach_named(direction: &str) -> Result<Reach, String> {
     match direction {
         "forward" => Ok(Reach::Forward),
         "backward" => Ok(Reach::Backward),

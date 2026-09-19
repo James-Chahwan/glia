@@ -1,0 +1,3 @@
+# pyo3 surface of py/src/diff_impact.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.diff_impact(diff_text: &str, direction: &str = "both", depth: usize = 4, top_k: Option<usize> = None, live_only: bool = false, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
+fn diff_impact_vs_rev(repo_path: &str, base: &str = "HEAD", direction: &str = "both", depth: usize = 4, top_k: Option<usize> = None, live_only: bool = false, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
