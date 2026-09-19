@@ -44,6 +44,7 @@ stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of ever
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
 py/                 pyo3 bindings — the only Rust crate published to PyPI (as repo-graph-py)
+toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh
 ```
 

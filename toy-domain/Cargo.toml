@@ -1,0 +1,19 @@
+[package]
+name = "repo-graph-toy-domain"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Test-only second domain ('toy-reel': scenes, shots, objects) proving the domain seam end to end: own registries, a header-described .gmap with its own section, a profile with build passes, activation hooks. Never a dependency of a shipped crate."
+
+# Exactly these three: the domain-free layers a domain builds on. No
+# code-domain, graph, engine or parser crate - `tests/end_to_end.rs` holds the
+# list. (store links the code stack transitively; the proof that decoding is
+# header-driven rests on the toy registry reusing code's ids, not on link-time
+# isolation.)
+[dependencies]
+repo-graph-core = { path = "../core" }
+repo-graph-activation = { path = "../activation" }
+repo-graph-store = { path = "../store" }
+
+[dev-dependencies]
+tempfile = "3"

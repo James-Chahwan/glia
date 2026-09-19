@@ -1315,6 +1315,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo-graph-toy-domain"
+version = "0.4.18"
+dependencies = [
+ "repo-graph-activation",
+ "repo-graph-core",
+ "repo-graph-store",
+ "tempfile",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

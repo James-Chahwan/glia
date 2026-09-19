@@ -57,6 +57,9 @@ members = [
     # External-input snapshot writers (git history): the only crate that spawns
     # a process. The build never depends on it; it writes .glia/*-snapshot/.
     "snapshots",
+    # Test-only second domain (publish = false) proving the domain seam; no
+    # crate may depend on it (its end_to_end test guards that).
+    "toy-domain",
 ]
 
 # Single release version for the crates that must move in lockstep: the wheel
