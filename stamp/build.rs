@@ -17,12 +17,17 @@ use std::path::{Component, Path, PathBuf};
 
 /// Crates whose source can change node/edge/cell content or `FileParse` shape.
 ///
+/// `activation` is hashed since LD.13: besides the query-time PPR it holds the
+/// build-pass registry (`activation::passes`) that orders every resolver and
+/// post-pass of a build, and so the stored cross edges and cells.
+///
 /// Deliberately NOT `py`, `cli` or `doc-sources`: they are transport and
 /// orchestration wrappers that cannot change stored bytes, and including `cli`
 /// would invalidate every user's parse cache on a CLI tweak. Deliberately NOT
-/// `projection-text` or `activation`: both are query-time projections over an
-/// already-built graph, not inputs to it.
-const HASHED_ROOTS: &[&str] = &["core", "code-domain", "graph", "engine", "store", "parsers"];
+/// `projection-text`: a query-time projection over an already-built graph,
+/// not an input to it.
+const HASHED_ROOTS: &[&str] =
+    &["core", "code-domain", "graph", "engine", "store", "parsers", "activation"];
 
 /// Committed files outside any crate `src` that still change parse output.
 /// `Cargo.lock` is the only thing that captures a tree-sitter GRAMMAR bump —

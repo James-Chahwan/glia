@@ -13,6 +13,13 @@ use std::collections::HashMap;
 
 use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
 
+/// Build-pass composition (LD.13): the stage-ordered registry a domain
+/// declares its build passes in. Build-time, unlike the PPR below, so this
+/// crate is one of PARSER_STAMP's hashed roots.
+pub mod passes;
+
+pub use passes::{PassRegistry, PassReport, PassSpec, Stage};
+
 // ============================================================================
 // Config
 // ============================================================================

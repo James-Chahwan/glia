@@ -26,7 +26,9 @@ snapshots/          External-input snapshot writers (git history, test reports) 
                     code-domain::snapshots
 store/              .gmap binary format — rkyv + mmap, sharded layout
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
-activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights
+activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights;
+                    also the domain-free build-pass registry (`passes`: Stage, PassSpec,
+                    PassRegistry) — build-time, so PARSER_STAMP hashes it
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
@@ -76,14 +78,16 @@ engine/src/   lib.rs        facade (rules above)
               walk.rs       repo walk, gitignore, region graph
               route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache
               extract.rs    detect_language, parse_one, parse_one_with, cross-cutting extractors
-              build/        mod.rs         GenerateResult, generate_one* / generate_many* pipeline
+              build/        mod.rs         GenerateResult, generate_one* / generate_many* pipeline;
+                                           assemble_many (generate_many before its passes run)
                             assemble.rs    build_graphs_for_repo, build_const_table, SuppressPanicHook
                             grafts.rs      apply_post_cache — every post-cache graft goes here
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
                             lang_build.rs  build_language_graphs — per-language build + markers;
                                            rust_crates (the Cargo packages build_rust resolves against)
-                            resolvers.rs   run_all_resolvers
-              docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge
+              docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge, the post-pass fns
+              profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 6 post-passes,
+                            evidence fill + determinism sort); run_code_passes is the whole build tail
               coverage.rs   coverage_report          answers.rs   the P3 primitives
               cache.rs      incremental parse cache  arch.rs      service_map (glia arch)
               endpoint_fold.rs  client base-URL fold onto the ENDPOINT path
@@ -230,8 +234,12 @@ If the language needs routes (HTTP, gRPC, queues, etc.), the extractor belongs i
 Create **`graph/src/resolvers/<name>.rs`** and implement `CrossGraphResolver` there, then
 add exactly two lines to `graph/src/resolvers/mod.rs` — `mod <name>;` and
 `pub use <name>::<Name>Resolver;`. Nothing goes in `graph/src/lib.rs`; add the resolver to
-its `pub use resolvers::{…}` list only if it must be public. Register it so `MergedGraph`
-calls it during cross-repo resolution (`run_all_resolvers` in `engine/src/build.rs`).
+its `pub use resolvers::{…}` list only if it must be public. Register it by adding one
+`resolver!("<name>", <Name>Resolver)` `Resolve`-stage `PassSpec` to `CODE_PASSES` in
+`engine/src/profile.rs` (LD.13); its cross edges are stamped `resolver:<name>`. Any new build
+pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
+`populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
+and `populates_is_exact` tests pin the order and the declared cell types.
 `resolvers/http.rs` is the canonical example. Shipped: HTTP, gRPC, Queue, GraphQL,
 WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
 `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.

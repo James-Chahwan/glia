@@ -10,12 +10,15 @@
 //! - [`rpc_needles`] — the build-wide proto service set and the gRPC
 //!   client / server needle passes.
 //! - [`lang_build`] — the deterministic per-language `build_*` dispatch.
-//! - [`resolvers`] — cross-graph resolver registration.
+//!
+//! The build tail (cross-graph resolvers, post-passes, evidence fill, the
+//! determinism sort) is the code domain's pass registry,
+//! [`crate::profile::CODE_PASSES`], run by one
+//! [`crate::profile::run_code_passes`] call (LD.13).
 
 mod assemble;
 mod grafts;
 mod lang_build;
-mod resolvers;
 mod rpc_needles;
 
 use std::path::{Path, PathBuf};
@@ -26,11 +29,10 @@ use repo_graph_graph::MergedGraph;
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
-use crate::passes::post_passes;
+use crate::profile::run_code_passes;
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
 use assemble::build_graphs_for_repo;
-pub(crate) use resolvers::run_all_resolvers;
 use rpc_needles::RpcContext;
 
 /// One build's output. Outside this crate it comes from [`generate_one`] /
@@ -144,8 +146,7 @@ fn generate_one_inner(
         graphs.push(docs);
     }
     let mut merged = MergedGraph::new(graphs);
-    run_all_resolvers(&mut merged);
-    post_passes(&mut merged);
+    run_code_passes(&mut merged);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
@@ -184,6 +185,39 @@ pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult
 type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity);
 
 fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<GenerateResult, String> {
+    let Assembled { mut merged, parse_errors, label_inputs, repo_roots } =
+        assemble_many(repo_paths, incremental)?;
+    run_code_passes(&mut merged);
+    let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
+    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
+        + merged.cross_edges.len();
+    Ok(GenerateResult {
+        merged,
+        total_nodes,
+        total_edges,
+        parse_errors,
+        repo_labels: crate::arch::repo_label_map(&label_inputs),
+        repo_roots,
+    })
+}
+
+/// A multi-repo build before its passes run: every repo's graphs merged in
+/// slot order, no cross edge yet. [`generate_many_inner`] runs
+/// [`crate::profile::CODE_PASSES`] over `merged`; a test can run them one at
+/// a time instead.
+pub(crate) struct Assembled {
+    pub(crate) merged: MergedGraph,
+    pub(crate) parse_errors: Vec<String>,
+    /// `(RepoId.0, path as given)` per built repo, in argument order: the
+    /// input of [`crate::arch::repo_label_map`].
+    pub(crate) label_inputs: Vec<(u64, String)>,
+    pub(crate) repo_roots: std::collections::BTreeMap<u64, String>,
+}
+
+/// Walk, parse and build every repo of a multi-repo build and merge the
+/// graphs (phases 1 and 2 of `generate_many`), without running a pass. Errs
+/// when no path produced a graph.
+pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<Assembled, String> {
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
@@ -271,18 +305,10 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
             all_errors.first().cloned().unwrap_or_default(),
         ));
     }
-    let mut merged = MergedGraph::new(all_graphs);
-    run_all_resolvers(&mut merged);
-    post_passes(&mut merged);
-    let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
-    Ok(GenerateResult {
-        merged,
-        total_nodes,
-        total_edges,
+    Ok(Assembled {
+        merged: MergedGraph::new(all_graphs),
         parse_errors: all_errors,
-        repo_labels: crate::arch::repo_label_map(&label_inputs),
+        label_inputs,
         repo_roots,
     })
 }

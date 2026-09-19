@@ -153,8 +153,8 @@ fn emit_cross_repo_pairs(
 
 /// The evidence a tiered resolver attaches to a cross edge it emitted:
 /// `resolver:<resolver>` plus the rule (tier, pass or branch) that paired it.
-/// `resolver` is the name the engine's `run_all_resolvers` stamps
-/// (`engine/src/build/resolvers.rs` `run!`), so an edge reads the same
+/// `resolver` is the pass name the engine's Resolve stage stamps
+/// (`engine/src/profile.rs` `CODE_PASSES`, `resolver!`), so an edge reads the same
 /// emitter whether the resolver or the stamp attached it; the stamp never
 /// overrides an evidence already present. No location: the engine's fill
 /// pass places it from the edge's endpoints.

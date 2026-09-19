@@ -1,7 +1,7 @@
 //! LC.3c: a cross edge from a tiered resolver names the rule that paired it.
 //!
-//! LC.3a stamps every cross edge `resolver:<name>` in the engine's
-//! `run_all_resolvers`; the six resolvers with more than one matching rule
+//! LC.3a stamps every cross edge `resolver:<name>` in the engine's Resolve
+//! stage (`CODE_PASSES`, LD.13); the six resolvers with more than one matching rule
 //! attach that evidence themselves, with the rule, and the stamp never
 //! overrides it. Each test runs one resolver over hand-built graphs and reads
 //! the EVIDENCE cell off each edge: the emitter must equal the engine's stamp

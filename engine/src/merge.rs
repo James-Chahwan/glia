@@ -53,11 +53,10 @@ use repo_graph_store::{
 pub use repo_graph_store::ForeignShard;
 
 use crate::arch::repo_label_map;
-use crate::build::run_all_resolvers;
-use crate::passes::post_passes;
 use crate::persist::{
     LoadOutcome, default_layout_dir, layout_meta, load_layout, load_or_rebuild, write_self_ignore,
 };
+use crate::profile::run_code_passes;
 use crate::{BUILD_STAMP, GenerateResult};
 
 /// The default file name of a workspace manifest ([`read_workspace`]).
@@ -308,8 +307,7 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
 
     let code_shards = graphs.len();
     let mut merged = MergedGraph::new(graphs);
-    run_all_resolvers(&mut merged);
-    post_passes(&mut merged);
+    run_code_passes(&mut merged);
     let kept_member_edges = kept.len();
     merged.cross_edges.extend(kept);
     merged.sort_cross_edges();

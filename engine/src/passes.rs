@@ -1,6 +1,8 @@
 //! Post-passes over the merged graph: the doc linker, synthetic-node
-//! provenance tagging, TESTS edges, and the confidence demotions — plus the
-//! deterministic cross-edge sort that locks the written bytes.
+//! provenance tagging, TESTS edges, and the confidence demotions, plus the
+//! evidence fill that precedes the deterministic cross-edge sort. They run as
+//! `Post` / `Finalize` specs of the code domain's pass registry
+//! ([`crate::profile::CODE_PASSES`], LD.13), which owns their order.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -9,32 +11,10 @@ use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
-pub(crate) fn post_passes(merged: &mut MergedGraph) {
-    downgrade_test_paths(merged);
-    demote_unmatched_http_nodes(merged);
-    emit_tests_edges(merged);
-    link_doc_sections(merged);
-    link_contract_routes(merged);
-    tag_synthetic_provenance(merged);
-    // LC.3a: locate every edge's evidence, after every pass that adds an edge
-    // and before the sort, whose canonical order compares cells. A stage
-    // added after `post_passes` runs this and the sort again.
-    fill_evidence_sites(merged).report();
-    // Deterministic cross-edge order: several resolvers emit pairs by
-    // iterating HashMap indexes (per-process seed), so the edge SET was stable
-    // but its Vec order — and therefore cross_stack.gmap's bytes — flapped
-    // across processes and even clean-vs-incremental in one process (audit
-    // 2026-06-10 #6). One sort here covers all resolvers and post-passes. The
-    // order is total (LC.2): same-key edges that differ only in their cells
-    // still land in one order, so the bytes cannot flap once edges carry cells.
-    merged.sort_cross_edges();
-    edge_cells_marker(merged);
-}
-
 /// LC.2 fired_on marker, one line per build, un-gated:
 ///   `[edge-cells] intra=<intra edges> cross=<cross edges> with_cells=<k>`
 /// `k` counts edges of either kind carrying at least one cell.
-fn edge_cells_marker(merged: &MergedGraph) {
+pub(crate) fn edge_cells_marker(merged: &MergedGraph) {
     let intra: usize = merged.graphs.iter().map(|g| g.edges.len()).sum();
     let with_cells = merged.all_edges().filter(|e| !e.cells.is_empty()).count();
     eprintln!(
@@ -221,7 +201,7 @@ pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
 /// that member instead of whichever same-named symbol happened to hold the
 /// lowest NodeId, and an ambiguous bare name is stamped `Weak` instead of
 /// claiming `Medium` for a coin flip.
-fn link_doc_sections(merged: &mut MergedGraph) {
+pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     use repo_graph_code_domain::cell_type;
     use repo_graph_core::CellPayload;
 
@@ -316,9 +296,9 @@ fn link_doc_sections(merged: &mut MergedGraph) {
 /// [`channel_edges`]. It prints its own `[contract-link] channels=` line so
 /// neither half ever rewrites the other's marker.
 ///
-/// Runs after the resolvers and before the cross-edge sort in `post_passes`, so
-/// the new edges are covered by that sort and the written bytes stay stable.
-fn link_contract_routes(merged: &mut MergedGraph) {
+/// Runs after the resolvers and before the Finalize stage (`sort_cross_edges`),
+/// so the new edges are covered by that sort and the written bytes stay stable.
+pub(crate) fn link_contract_routes(merged: &mut MergedGraph) {
     let (edges, stats) = contract_route_edges(merged);
     if stats.ops > 0 {
         eprintln!(
@@ -783,7 +763,7 @@ fn is_identifier(s: &str) -> bool {
 /// the cross-repo resolvers (`PackageResolver` pairs `package:npm:*`,
 /// `EventBusResolver` pairs `event_*`), so they are NOT dropped here — only
 /// categorised. (glia-v2 G6/G9/G11)
-fn tag_synthetic_provenance(merged: &mut MergedGraph) {
+pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
     use repo_graph_code_domain::{cell_type, node_kind};
     use repo_graph_core::{Cell, CellPayload};
 
@@ -899,7 +879,7 @@ struct TestsEdgeStats {
     camel: usize,
 }
 
-fn emit_tests_edges(merged: &mut MergedGraph) {
+pub(crate) fn emit_tests_edges(merged: &mut MergedGraph) {
     let (edges, stats) = tests_module_edges(merged);
     // A6.7 fired_on marker: `... 2>&1 | grep '^\[tests\] module TESTS edges:'`
     if stats.snake + stats.camel > 0 {
@@ -1023,10 +1003,13 @@ fn common_prefix_len(a: &[&str], b: &[&str]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
-fn downgrade_test_paths(merged: &mut MergedGraph) {
+/// Weak for every node under a test / fixture / example path segment.
+pub(crate) fn downgrade_test_paths(merged: &mut MergedGraph) {
     for g in &mut merged.graphs {
         for n in &mut g.nodes {
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+            // Legacy tolerance: LB.11b found no emitter minting a `route:`
+            // qname any more; kept so an old-shape qname is never downgraded.
             if qname.starts_with("route:") {
                 continue;
             }
@@ -1056,7 +1039,7 @@ fn downgrade_test_paths(merged: &mut MergedGraph) {
 /// Markers: `[passes] http demotions: <n> (undo recorded)` when it recorded
 /// any, `[passes] http demotions: <m> not undoable (instances disagree)` when
 /// an id had mixed instances.
-fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
+pub(crate) fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
     use std::collections::HashSet;
     let mut matched: HashSet<NodeId> = HashSet::new();
     for e in &merged.cross_edges {

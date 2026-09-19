@@ -51,7 +51,7 @@ impl CrossGraphResolver for HttpStackResolver {
         let (index, stripped, owners) = build_route_index(&merged.graphs, &prefixes, &mut stats);
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
-        // resolver sits in `run_all_resolvers` does not matter.
+        // resolver sits in the Resolve stage of CODE_PASSES does not matter.
         let (aliases, project_aliases) = build_service_alias_index(&merged.graphs, &owners);
         let mut edges = Vec::new();
         for ep in collect_endpoints(&merged.graphs) {
