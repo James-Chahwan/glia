@@ -6,7 +6,7 @@
 //! Split out of `build_graphs_for_repo`.
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
@@ -14,8 +14,8 @@ use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
 use crate::extract::{
-    ExtractStats, apply_cross_cutting_extractors, detect_language, merge_nav, parse_one_with,
-    path_to_qname, synthetic_module_qname,
+    ExtractStats, apply_cross_cutting_extractors, build_group, detect_language, merge_nav,
+    parse_one_as, path_to_qname, synthetic_module_qname,
 };
 use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 
@@ -34,6 +34,12 @@ pub(crate) fn parse_repo_files(
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut parse_errors = Vec::new();
+    // LB.9b: which code files name their MODULE by file name. Planned from the
+    // walked list before any parse, so a cache hit is checked against it.
+    let modules = ModuleQnames::plan(files);
+    // LB.9b: cached parses rejected because the plan renamed their MODULE (a
+    // same-stem file of another build group appeared or vanished).
+    let mut requalified: Vec<String> = Vec::new();
     // A5.1 `[proto]` marker counters.
     let mut proto_files = 0usize;
     let mut proto_services = 0usize;
@@ -283,20 +289,18 @@ pub(crate) fn parse_repo_files(
         }
 
         // LA.6c: an Angular `.component.html` template (admitted by the walk)
-        // holds its component's navigation links. It shares the MODULE qname
-        // of its `.component.ts` (`path_to_qname` strips only the last
-        // extension), so the refs go out from that module under the `angular`
-        // key, into the TS-family graph where the nav routes and the
-        // component's page live. A bare `FileParse`, never
+        // holds its component's navigation links. It borrows the MODULE id
+        // of its `.component.ts`, so the refs go out from that module under
+        // the `angular` key, into the TS-family graph where the nav routes
+        // and the component's page live. A bare `FileParse`, never
         // `stash_synthetic_parse`: that mints a MODULE node, and this id is
         // the `.component.ts` parse's. Before detect_language, which has no
-        // html arm. The one non-code branch that keeps the CODE form
-        // (`path_to_qname`, not `synthetic_module_id`, LB.9a): it borrows the
-        // `.component.ts` MODULE id, and the file-name form would orphan
-        // every link it reads.
+        // html arm. The one non-code branch that keeps the CODE form (not
+        // `synthetic_module_id`, LB.9a): the file-name form would orphan every
+        // link it reads. The id is the LB.9b plan's for the `.component.ts`
+        // sibling, so a component named by its file name keeps its links.
         if is_angular_template_path(path) {
-            let module_id =
-                NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+            let module_id = modules.module_id(&angular_component_source(path, &modules), repo);
             match catch_unwind(AssertUnwindSafe(|| {
                 repo_graph_code_extractors::nav_links::extract_template_links(source, module_id)
             })) {
@@ -494,6 +498,12 @@ pub(crate) fn parse_repo_files(
             continue;
         }
 
+        // Every branch above routed its own files, so `parser_route` is
+        // `Some(lang)` here; reading it as the gate keeps the LB.9b plan
+        // (built from `parser_route`) and this loop on one routing.
+        let Some(lang) = parser_route(path) else { continue };
+        let module_qname = modules.module_qname(path);
+
         // WP-D incremental: reuse the cached parse if the source is unchanged;
         // only changed / new files pay tree-sitter.
         let hash = cache.is_some().then(|| cache::content_hash(source));
@@ -503,6 +513,16 @@ pub(crate) fn parse_repo_files(
         let cached_fp = match hash {
             Some(h) => cache.as_deref().and_then(|c| c.get(path, h, lang)),
             None => None,
+        };
+        // LB.9b: a parse cached under this file's other MODULE form (a
+        // sibling of another build group appeared or vanished since) is stale
+        // although its content is not.
+        let cached_fp = match cached_fp {
+            Some(fp) if cached_under_other_form(&fp, path, &module_qname) => {
+                requalified.push(path.clone());
+                None
+            }
+            other => other,
         };
         if let Some(fp) = cached_fp {
             live_paths.insert(path.clone());
@@ -515,17 +535,22 @@ pub(crate) fn parse_repo_files(
         // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
         // kill an N-file repo build — log it, skip it, keep going.
         let parse_result = catch_unwind(AssertUnwindSafe(|| {
-            let mut fp = parse_one_with(source, path, lang, repo, go_module_prefix)?;
+            let mut fp =
+                parse_one_as(source, path, lang, repo, go_module_prefix, &module_qname)?;
             // LC.3a: the edges present now are the parser's own. Stamped here,
             // inside the closure and before the extractors, so the parse cache
             // stores the stamp and a cache hit replays it.
             evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = modules.module_id(path, repo);
+            // LB.9b: a MODULE named by its file name keeps its stem as nav
+            // name (`user` for `api::user.py`), the name `bare_module_qname`
+            // reads the bare path back from. Before the cache put, so a cache
+            // hit replays it.
+            if modules.is_qualified(path)
+                && let Some(name) = fp.nav.name_by_id.get_mut(&module_id)
+            {
+                *name = module_stem(path);
+            }
             let mut stats = ExtractStats::default();
             apply_cross_cutting_extractors(
                 &mut fp, source, path, lang, module_id, repo, &mut stats,
@@ -575,7 +600,15 @@ pub(crate) fn parse_repo_files(
     // parseable) this build, and emit the greppable marker so a cycle can
     // confirm the cache engaged.
     if let Some(c) = cache.as_deref_mut() {
-        let diff = c.diff(&current);
+        let mut diff = c.diff(&current);
+        // LB.9b: `diff` classifies by content hash, so a parse rejected for
+        // its MODULE qname reads as reused there; it was reparsed.
+        if !requalified.is_empty() {
+            diff.reused.retain(|p| !requalified.contains(p));
+            diff.reparsed.extend(requalified.iter().cloned());
+            diff.reparsed.sort();
+            diff.reparsed.dedup();
+        }
         for (path, h, lang, fp) in pending {
             c.put(path, h, lang, fp);
         }
@@ -709,6 +742,13 @@ pub(crate) fn parse_repo_files(
         );
     }
 
+    // LB.9b fired_on marker: code files of two or more build groups share a
+    // directory and a stem, so each names its MODULE by its file name. Only
+    // printed when the plan qualified a file.
+    if let Some(line) = modules.marker(repo_label) {
+        eprintln!("{line}");
+    }
+
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
     let contract_ops =
@@ -766,6 +806,163 @@ pub(crate) fn parse_repo_files(
     }
 
     (parses_by_lang, parse_errors)
+}
+
+/// Where the router sends `path`: the language tag iff [`parse_repo_files`]
+/// hands the file to a language parser, `None` for every file a non-code
+/// branch takes (yaml, Dockerfile, package manifest, dotenv, migration
+/// `.sql`, `.prisma`, `.component.html` template, `.json` contract / JSON
+/// Schema, `.proto`, `.graphql`, `.avsc`) or nothing reads. The predicates
+/// run in the loop's own order, and the loop's language branch reads this
+/// function as its gate, so the LB.9b plan and the loop cannot disagree.
+pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str());
+    if matches!(ext, Some("yml" | "yaml"))
+        || is_dockerfile_path(path)
+        || repo_graph_code_extractors::packages::is_manifest_path(path)
+        || is_dotenv_path(path)
+        || repo_graph_code_extractors::migrations::is_migration_path(path)
+        || repo_graph_code_extractors::prisma::is_prisma_schema(path)
+        || is_angular_template_path(path)
+        || ext.is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        return None;
+    }
+    match detect_language(path)? {
+        "proto" | "graphql" | "avro" => None,
+        lang => Some(lang),
+    }
+}
+
+/// LB.9b: which code files name their MODULE by their full file name.
+///
+/// `path_to_qname` drops the extension, so `api/user.py` and `api/user.ts`
+/// are both `api::user`. Each build group is its own `RepoGraph`, which
+/// resolves its own imports fine, but the merged graph then holds two nodes
+/// per NodeId and every call, import and TESTS edge of either language lands
+/// on the shared id. A `path_to_qname` key claimed by language-parser files
+/// ([`parser_route`]) of two or more build groups
+/// ([`crate::extract::build_group`]) qualifies EVERY file of that key: its
+/// MODULE is `<dir>::<file name>` (`api::user.py`) and every symbol under it
+/// follows. Its nav name stays the stem, and each language graph aliases the
+/// bare path to it (`repo_graph_graph` `build_symbol_table`), so bare-path
+/// imports still bind. Same-group pairs (`Widget.h` + `Widget.cpp`,
+/// `util.js` + `util.ts`) keep their shared MODULE.
+///
+/// A pure function of the walked file list, BTree collections only, so the
+/// router, the post-cache grafts and a warm cache all agree on every id.
+#[derive(Debug, Default)]
+pub(crate) struct ModuleQnames {
+    /// Paths whose MODULE is named by file name.
+    qualified: BTreeSet<String>,
+    /// `path_to_qname` keys claimed by two or more build groups.
+    stems: usize,
+    /// ... of which one group holds two or more files (`util.js` + `util.ts`
+    /// beside `util.py`): that group's bare alias is ambiguous and is not
+    /// registered.
+    same_group_dupes: usize,
+}
+
+impl ModuleQnames {
+    /// Plan the MODULE qnames of one repo's walked `files`.
+    pub(crate) fn plan(files: &[(String, String)]) -> Self {
+        let mut by_key: BTreeMap<String, BTreeMap<&'static str, Vec<&str>>> = BTreeMap::new();
+        for (path, _) in files {
+            if let Some(lang) = parser_route(path) {
+                by_key
+                    .entry(path_to_qname(path))
+                    .or_default()
+                    .entry(build_group(lang))
+                    .or_default()
+                    .push(path);
+            }
+        }
+        let mut plan = Self::default();
+        for groups in by_key.values().filter(|g| g.len() > 1) {
+            plan.stems += 1;
+            if groups.values().any(|paths| paths.len() > 1) {
+                plan.same_group_dupes += 1;
+            }
+            plan.qualified
+                .extend(groups.values().flatten().map(|p| (*p).to_string()));
+        }
+        plan
+    }
+
+    /// The MODULE qname of `path`: `<dir>::<file name>` when qualified,
+    /// [`path_to_qname`] otherwise.
+    pub(crate) fn module_qname(&self, path: &str) -> String {
+        if self.is_qualified(path) {
+            synthetic_module_qname(path)
+        } else {
+            path_to_qname(path)
+        }
+    }
+
+    pub(crate) fn is_qualified(&self, path: &str) -> bool {
+        self.qualified.contains(path)
+    }
+
+    /// The MODULE id of `path` under this plan.
+    pub(crate) fn module_id(&self, path: &str, repo: RepoId) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &self.module_qname(path))
+    }
+
+    /// fired_on marker, once per repo with a qualified file:
+    ///   `[modules] cross-language stems: files={f} stems={s} same-group-ambiguous={a} repo=<label>`
+    fn marker(&self, repo_label: &str) -> Option<String> {
+        (!self.qualified.is_empty()).then(|| {
+            format!(
+                "[modules] cross-language stems: files={} stems={} same-group-ambiguous={} repo={repo_label}",
+                self.qualified.len(),
+                self.stems,
+                self.same_group_dupes
+            )
+        })
+    }
+}
+
+/// The stem a code file's MODULE is named by: the last segment of
+/// [`path_to_qname`] (`api/user.py` -> `user`, `a/b.test.ts` -> `b.test`).
+fn module_stem(path: &str) -> String {
+    let q = path_to_qname(path);
+    q.rsplit("::").next().unwrap_or(&q).to_string()
+}
+
+/// The component source an Angular `.component.html` template belongs to:
+/// its `.component.ts`, or a `.component.tsx` the plan named by file name.
+/// Unqualified, both have the template's own code-form MODULE qname.
+fn angular_component_source(template: &str, modules: &ModuleQnames) -> String {
+    let stem = template.strip_suffix(".html").unwrap_or(template);
+    let tsx = format!("{stem}.tsx");
+    let ts = format!("{stem}.ts");
+    if !modules.is_qualified(&ts) && modules.is_qualified(&tsx) {
+        tsx
+    } else {
+        ts
+    }
+}
+
+/// Was `fp`, the cached parse of `path`, built under the MODULE form the LB.9b
+/// plan did NOT pick this build (its first node, the MODULE, is
+/// `api::user.py` where the plan now says `api::user`, or back)? Only the
+/// plan's own renaming is checked: the cache stays keyed on (path, content
+/// hash, language) and trusts everything else it holds.
+fn cached_under_other_form(fp: &FileParse, path: &str, planned: &str) -> bool {
+    let code_form = path_to_qname(path);
+    let other = if planned == code_form {
+        synthetic_module_qname(path)
+    } else {
+        code_form
+    };
+    other != planned
+        && fp
+            .nodes
+            .first()
+            .and_then(|n| fp.nav.qname_by_id.get(&n.id))
+            .is_some_and(|q| *q == other)
 }
 
 /// Best-effort string extraction from a panic payload returned by
@@ -1205,6 +1402,176 @@ mod tests {
         );
         assert!(ops[1].1.contains(r#""feature":"002-admin""#), "{}", ops[1].1);
         assert!(ops[3].1.contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#), "{}", ops[3].1);
+    }
+
+    // ---- LB.9b: MODULEs named by file name across build groups ----------
+
+    fn files_of(paths: &[&str]) -> Vec<(String, String)> {
+        paths.iter().map(|p| (p.to_string(), String::new())).collect()
+    }
+
+    fn qualified(paths: &[&str]) -> Vec<String> {
+        let plan = ModuleQnames::plan(&files_of(paths));
+        paths
+            .iter()
+            .filter(|p| plan.is_qualified(p))
+            .map(|p| p.to_string())
+            .collect()
+    }
+
+    /// The router sends exactly the files `parser_route` names to a language
+    /// parser, under the tag it names: the LB.9b plan reads the same routing.
+    #[test]
+    fn parser_route_matches_the_loop() {
+        let files: Vec<(String, String)> = [
+            ("setup.py", "from setuptools import setup\nsetup(name='x')\n"),
+            ("package.json", r#"{"name": "web", "dependencies": {"react": "18.0.0"}}"#),
+            (
+                "openapi.json",
+                r#"{"openapi":"3.0.0","paths":{"/orders":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+            ),
+            ("web/x.component.html", "<a routerLink=\"/home\">h</a>\n"),
+            (
+                "web/x.component.ts",
+                "import { Component } from '@angular/core';\n\
+                 @Component({ selector: 'app-x', templateUrl: './x.component.html' })\n\
+                 export class XComponent {}\n",
+            ),
+            ("a.proto", "syntax = \"proto3\";\nmessage A { string id = 1; }\n"),
+            ("b.graphql", "type Query {\n  b: String\n}\n"),
+            ("c.avsc", "{\"type\": \"record\", \"name\": \"C\", \"fields\": []}\n"),
+            ("svc/Dockerfile.go", "FROM alpine\nENV PORT=9090\n"),
+            ("svc/app.yaml", "port: 8080\n"),
+            (".env", "KEY=1\n"),
+            ("db/migrations/V1__init.sql", "CREATE TABLE users (id INT);\n"),
+            ("f.py", "def f():\n    return 1\n"),
+            ("g.ts", "export function g() { return 1; }\n"),
+            ("h.dart", "int h() => 1;\n"),
+            ("k.kt", "fun k(): Int = 1\n"),
+            ("m.go", "package main\n\nfunc m() {}\n"),
+            ("README.md", "# readme\n"),
+        ]
+        .iter()
+        .map(|(p, s)| (p.to_string(), s.to_string()))
+        .collect();
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut routed: Vec<(&str, String)> = Vec::new();
+        for (lang, fps) in &parses {
+            if SYNTHETIC_MODULE_KEYS.contains(lang) {
+                continue;
+            }
+            for fp in fps.iter().filter(|fp| !fp.nodes.is_empty()) {
+                let (file, _) = evidence::locate(&fp.nodes[0].cells).expect("a located MODULE");
+                routed.push((lang, file));
+            }
+        }
+        routed.sort();
+        let mut expected: Vec<(&str, String)> = files
+            .iter()
+            .filter_map(|(p, _)| parser_route(p).map(|lang| (lang, p.clone())))
+            .collect();
+        expected.sort();
+        assert_eq!(routed, expected);
+        assert_eq!(expected.len(), 7, "setup.py f.py g.ts h.dart k.kt m.go x.component.ts");
+    }
+
+    #[test]
+    fn the_plan_qualifies_cross_group_stems_only() {
+        assert_eq!(
+            qualified(&["api/user.py", "api/user.ts", "api/main.py"]),
+            ["api/user.py", "api/user.ts"]
+        );
+        // One build group each: the TS family, a C/C++ header + impl.
+        assert!(qualified(&["a/x.js", "a/x.ts"]).is_empty());
+        assert!(qualified(&["src/W.h", "src/W.cpp"]).is_empty());
+        assert!(qualified(&["web/x.component.ts", "web/x.ts", "web/x.vue"]).is_empty());
+        // Kotlin joins Java's graph (A14.2).
+        assert!(qualified(&["jvm/A.java", "jvm/A.kt"]).is_empty());
+        // yaml never routes to a parser.
+        assert!(qualified(&["c/app.py", "c/app.yaml"]).is_empty());
+        // Different directories never share a key.
+        assert!(qualified(&["a/user.py", "b/user.ts"]).is_empty());
+        // Three groups, one of them holding two files.
+        let plan = ModuleQnames::plan(&files_of(&["u.py", "u.ts", "u.js", "v.go"]));
+        assert_eq!((plan.qualified.len(), plan.stems, plan.same_group_dupes), (3, 1, 1));
+        assert_eq!(
+            plan.marker("r").as_deref(),
+            Some("[modules] cross-language stems: files=3 stems=1 same-group-ambiguous=1 repo=r")
+        );
+        assert_eq!(ModuleQnames::plan(&files_of(&["v.go"])).marker("r"), None);
+        // A root-level file's qualified name is its file name.
+        let plan = ModuleQnames::plan(&files_of(&["x.py", "x.go"]));
+        assert_eq!(plan.module_qname("x.py"), "x.py");
+        assert_eq!(plan.module_qname("api/user.py"), "api::user");
+        assert_eq!(
+            plan.module_id("x.go", RepoId(1)),
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "x.go")
+        );
+    }
+
+    #[test]
+    fn a_qualified_parse_names_its_symbols_under_the_file_name() {
+        let files: Vec<(String, String)> = vec![
+            ("api/user.py".to_string(), "def validate(x):\n    return x\n".to_string()),
+            (
+                "api/user.ts".to_string(),
+                "export function validate(x: number) { return x; }\n".to_string(),
+            ),
+        ];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        for (lang, qname) in [("python", "api::user.py"), ("typescript", "api::user.ts")] {
+            let fp = &parses[lang][0];
+            let module = fp.nodes[0].id;
+            assert_eq!(
+                module,
+                NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname)
+            );
+            assert_eq!(fp.nav.qname_by_id[&module], qname);
+            assert_eq!(fp.nav.name_by_id[&module], "user", "the stem stays the name");
+            let validate = format!("{qname}::validate");
+            assert!(
+                fp.nav.qname_by_id.values().any(|q| *q == validate),
+                "{lang}: {:?}",
+                fp.nav.qname_by_id
+            );
+        }
+    }
+
+    #[test]
+    fn a_template_borrows_its_qualified_components_module() {
+        // A `.component.ts` qualified by a same-stem file of another group:
+        // the template's refs go out from the planned MODULE id.
+        let files: Vec<(String, String)> = vec![
+            (
+                "web/x.component.html".to_string(),
+                "<a routerLink=\"/home\">h</a>\n".to_string(),
+            ),
+            ("web/x.component.py".to_string(), "def f():\n    return 1\n".to_string()),
+            (
+                "web/x.component.ts".to_string(),
+                "import { Component } from '@angular/core';\n\
+                 @Component({ selector: 'app-x', templateUrl: './x.component.html' })\n\
+                 export class XComponent {}\n"
+                    .to_string(),
+            ),
+        ];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let ts_module =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "web::x.component.ts");
+        assert!(
+            parses["angular"]
+                .iter()
+                .any(|fp| fp.nodes.first().map(|n| n.id) == Some(ts_module))
+        );
+        let template = parses["angular"]
+            .iter()
+            .find(|fp| fp.nodes.is_empty())
+            .expect("the template's bare parse");
+        assert_eq!(template.refs.len(), 1);
+        assert_eq!(template.refs[0].from_module, ts_module);
     }
 
     /// LB.9a: every non-code branch names its MODULE by the full file name,

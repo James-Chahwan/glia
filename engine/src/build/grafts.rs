@@ -10,7 +10,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
-    FileParse, GRAPH_TYPE, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
+    FileParse, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
 };
 use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_code_extractors::next_pages::{self, NextRoots, PageRouter};
@@ -20,8 +20,9 @@ use repo_graph_graph::rust_paths::RustCrate;
 
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
-use crate::extract::{detect_language, merge_nav, path_to_qname};
+use crate::extract::{detect_language, merge_nav};
 use crate::http_owner;
+use crate::route::ModuleQnames;
 
 /// Run every post-cache graft over one repo's parses, in order: the A11.2
 /// endpoint fold, the LA.6d Next.js page graft, the LA.4 queue-topic const
@@ -51,6 +52,10 @@ pub(super) fn apply_post_cache(
     parse_errors: &mut Vec<String>,
     repo_label: &str,
 ) {
+    // LB.9b: the router's MODULE plan, recomputed from the same walked list
+    // (a pure function of it), so every graft below finds a file's parse by
+    // the MODULE id the router gave it.
+    let modules = ModuleQnames::plan(files);
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse.
@@ -58,14 +63,14 @@ pub(super) fn apply_post_cache(
         .report(repo_label);
     // LA.6d: Next.js file-system pages. Before the owner pass, so a grafted
     // page is owner-qualified like every other nav ROUTE.
-    graft_next_pages(parses_by_lang, files, repo, parse_errors).report(repo_label);
+    graft_next_pages(parses_by_lang, files, repo, &modules, parse_errors).report(repo_label);
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
-    apply_queue_const_topics(parses_by_lang, files, repo, const_table, parse_errors)
+    apply_queue_const_topics(parses_by_lang, files, repo, &modules, const_table, parse_errors)
         .report(repo_label);
 
-    let rpc_added = apply_rpc_needles(parses_by_lang, files, repo, rpc, parse_errors);
+    let rpc_added = apply_rpc_needles(parses_by_lang, files, repo, &modules, rpc, parse_errors);
     // A5.2 fired_on marker, once per repo. Printed whenever the build knows a
     // proto service or this repo holds a client stub.
     let grpc_clients = parses_by_lang
@@ -175,7 +180,8 @@ impl NextPageStats {
 /// dropping the `next` dependency can never leave a stale page behind.
 ///
 /// The parse is found the `apply_rpc_needles` way: under the file's
-/// `detect_language` key, the one whose first node is the file's MODULE. No
+/// `detect_language` key, the one whose first node is the file's MODULE (the
+/// LB.9b plan's id, `modules`). No
 /// match (the file failed to parse) means no module to hang the page on, and
 /// the page is skipped. Deterministic: roots are sorted, `files` is
 /// walk-sorted, one ROUTE per page file, no HashMap order reaches a parse.
@@ -183,6 +189,7 @@ fn graft_next_pages(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     repo: RepoId,
+    modules: &ModuleQnames,
     parse_errors: &mut Vec<String>,
 ) -> NextPageStats {
     let mut stats = NextPageStats::default();
@@ -205,8 +212,7 @@ fn graft_next_pages(
         let Some(parses) = parses_by_lang.get_mut(lang) else {
             continue;
         };
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+        let module_id = modules.module_id(path, repo);
         let Some(fp) = parses
             .iter_mut()
             .find(|fp| fp.nodes.first().is_some_and(|n| n.id == module_id))
@@ -290,6 +296,7 @@ fn apply_queue_const_topics(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     repo: RepoId,
+    modules: &ModuleQnames,
     consts: &ConstTable,
     parse_errors: &mut Vec<String>,
 ) -> QueueConstStats {
@@ -321,8 +328,7 @@ fn apply_queue_const_topics(
         let Some(lang) = detect_language(path) else {
             continue;
         };
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+        let module_id = modules.module_id(path, repo);
         let Some(candidates) = holders.get(&(lang, module_id)) else {
             continue;
         };

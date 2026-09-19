@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::evidence::{self, Evidence};
-use repo_graph_code_domain::{FileParse, GRAPH_TYPE, attach_imports_cell, node_kind};
+use repo_graph_code_domain::{FileParse, attach_imports_cell};
 use repo_graph_code_extractors::anchor;
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
 use repo_graph_core::{NodeId, RepoId};
 
-use crate::extract::{detect_language, merge_nav, path_to_qname};
+use crate::extract::{detect_language, merge_nav};
+use crate::route::ModuleQnames;
 
 /// Every gRPC service a `.proto` declares anywhere in this build (A5.2). The
 /// client-needle pass keys on it, so a client repo with no `.proto` of its own
@@ -44,7 +45,10 @@ impl RpcContext {
 /// stale service set. Running after the cache keeps incremental == clean.
 ///
 /// Every code parser emits the file's MODULE node first, and that is how a
-/// parse is paired back to its source. Returns the GRPC_CLIENT nodes it added.
+/// parse is paired back to its source: by the MODULE id of the router's LB.9b
+/// plan (`modules`), which names a file by its file name when a same-stem file
+/// of another build group sits beside it. Returns the GRPC_CLIENT nodes it
+/// added.
 ///
 /// A5.8: the added clients are anchored here too (POSITION + the owning
 /// method's USES edge), because the per-file anchor pass in
@@ -65,6 +69,7 @@ pub(super) fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
     repo: RepoId,
+    modules: &ModuleQnames,
     rpc: &RpcContext,
     parse_errors: &mut Vec<String>,
 ) -> RpcNeedleCounts {
@@ -87,8 +92,7 @@ pub(super) fn apply_rpc_needles(
             continue;
         }
         let Some(parses) = parses_by_lang.get_mut(lang) else { continue };
-        let module_id =
-            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+        let module_id = modules.module_id(path, repo);
         // No match = the file failed to parse; there is no module to hang a marker on.
         let Some(fp) = parses
             .iter_mut()
@@ -236,7 +240,7 @@ mod rpc_needle_tests {
     use std::path::Path;
 
     use repo_graph_code_domain::walk_gating::repo_identity;
-    use repo_graph_code_domain::{cell_type, edge_category};
+    use repo_graph_code_domain::{cell_type, edge_category, node_kind};
     use repo_graph_core::{Cell, EdgeCategoryId as CategoryId};
     use repo_graph_graph::MergedGraph;
 

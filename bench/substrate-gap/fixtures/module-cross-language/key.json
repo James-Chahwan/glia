@@ -1,0 +1,83 @@
+{
+  "framework": "module-cross-language",
+  "language": "python+typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.9b identity fixture (legacy-only, no matrix cell). api/user.py and api/user.ts share a directory and a stem but belong to different build groups, so each MODULE is named by its file name (api::user.py, api::user.ts) and every symbol under it follows; each language still imports the bare path (from api.user import validate; import './user') through a per-graph alias. HEAD: both files are MODULE api::user and both validate functions are FUNCTION api::user::validate - one NodeId each, so the Python and TypeScript call graphs merge.",
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "api::user.py"
+    },
+    {
+      "kind": "MODULE",
+      "name": "api::user.ts"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "api::user.py::validate"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "api::user.ts::validate"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "api::main::run",
+      "to": "api::user.py::validate",
+      "category": "CALLS"
+    },
+    {
+      "from": "api::index::run",
+      "to": "api::user.ts::validate",
+      "category": "CALLS"
+    },
+    {
+      "from": "api::main",
+      "to": "api::user.py",
+      "category": "IMPORTS",
+      "note": "Python bare-path import resolves through the per-graph alias"
+    },
+    {
+      "from": "api::index",
+      "to": "api::user.ts",
+      "category": "IMPORTS",
+      "note": "TypeScript './user' resolves through the per-graph alias"
+    },
+    {
+      "from": "api::user.py::validate",
+      "to": "api::user.py::helper",
+      "category": "CALLS"
+    },
+    {
+      "from": "tests::test_user",
+      "to": "api::user.py",
+      "category": "TESTS",
+      "note": "TESTS pairing keys on the module stem, not the qualified segment"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "api::main::run",
+      "to": "api::user.ts::validate",
+      "category": "CALLS"
+    },
+    {
+      "from": "api::index::run",
+      "to": "api::user.py::validate",
+      "category": "CALLS"
+    },
+    {
+      "from": "tests::test_user",
+      "to": "api::user.ts",
+      "category": "TESTS",
+      "note": "a Python test never pairs the same-stem TypeScript module"
+    },
+    {
+      "kind": "MODULE",
+      "name": "api::user"
+    }
+  ]
+}

@@ -12,17 +12,18 @@ use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
 use repo_graph_graph::RepoGraph;
 use repo_graph_graph::rust_paths::RustCrate;
 
-use crate::extract::path_to_qname;
+use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 
-/// TS-family lang tags (typescript/angular/react/vue) share ONE module + symbol
-/// space in a repo: an Angular component (`.component.ts` → "angular") injects a
-/// service (`.service.ts` → "typescript"), and imports cross those tags. Build
-/// them as a single graph so intra-repo ref/import resolution works across the
-/// tag boundary (Pattern E DI, Pattern B imports). Other `_`-arm langs
-/// (dart/swift/c_cpp/solidity/terraform) keep separate graphs — distinct symbol
-/// spaces that must not cross-resolve. ts_family accumulates in the sorted lang
-/// order and is built last, so graph/shard order stays deterministic.
-const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
+// TS-family lang tags (typescript/angular/react/vue, `extract::TS_FAMILY`)
+// share ONE module + symbol space in a repo: an Angular component
+// (`.component.ts` → "angular") injects a service (`.service.ts` →
+// "typescript"), and imports cross those tags. They build as a single graph
+// (their `extract::build_group` is "typescript") so intra-repo ref/import
+// resolution works across the tag boundary (Pattern E DI, Pattern B imports).
+// Other `_`-arm langs (dart/swift/c_cpp/solidity/terraform) keep separate
+// graphs — distinct symbol spaces that must not cross-resolve. ts_family
+// accumulates in the sorted lang order and is built last, so graph/shard order
+// stays deterministic. The LB.9b module plan reads the same `build_group`.
 
 /// A14.2: the JVM family. `.kt` parses under its own `kotlin` tag (its own
 /// parser), but Kotlin and Java share one symbol space — a Kotlin controller
@@ -55,7 +56,8 @@ pub(super) fn build_language_graphs(
     // `write_sharded` (repo-<hash>-NN.gmap). Random order made every shard's
     // content hash flap across processes, so the write-side skip-unchanged-
     // shards optimization never fired (audit 2026-06-10 #5).
-    let mut parses_by_lang: Vec<(&str, Vec<FileParse>)> = parses_by_lang.into_iter().collect();
+    let mut parses_by_lang: Vec<(&'static str, Vec<FileParse>)> =
+        parses_by_lang.into_iter().collect();
     parses_by_lang.sort_unstable_by_key(|(lang, _)| *lang);
     // A14.2 `[kotlin] entities:` fired_on, counted off the parses so
     // cache-served files count too; the kotlin crate owns the line.
@@ -99,7 +101,7 @@ pub(super) fn build_language_graphs(
     recv_stats::reset();
     let mut ts_family: Vec<FileParse> = Vec::new();
     for (lang, parses) in parses_by_lang {
-        if TS_FAMILY.contains(&lang) {
+        if build_group(lang) == "typescript" {
             ts_family.extend(parses);
             continue;
         }
@@ -381,8 +383,11 @@ pub(super) fn rust_crates(files: &[(String, String)], roots: &[ProjectRoot]) -> 
 /// Move the `kotlin` parses onto the end of the `java` entry when both exist
 /// (see [`JVM_HOST`]). `parses_by_lang` is sorted, so the Java entry keeps its
 /// slot and the Kotlin one disappears; with no Java, nothing moves.
-fn join_jvm_family(parses_by_lang: &mut Vec<(&str, Vec<FileParse>)>) {
-    let Some(guest) = parses_by_lang.iter().position(|(lang, _)| *lang == JVM_GUEST) else {
+fn join_jvm_family(parses_by_lang: &mut Vec<(&'static str, Vec<FileParse>)>) {
+    let Some(guest) = parses_by_lang
+        .iter()
+        .position(|(lang, _)| *lang != JVM_HOST && build_group(lang) == JVM_HOST)
+    else {
         return;
     };
     let Some(host) = parses_by_lang.iter().position(|(lang, _)| *lang == JVM_HOST) else {

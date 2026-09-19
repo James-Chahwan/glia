@@ -947,7 +947,15 @@ impl LocalModuleIndex {
             match *kind {
                 node_kind::MODULE | node_kind::PACKAGE => {
                     if let Some(qname) = fp.nav.qname_by_id.get(id) {
-                        self.add_path(qname, is_package);
+                        // LB.9b: a MODULE named by its file name
+                        // (`api::user.py`) declares its bare path
+                        // (`api::user`), so the extension never becomes a
+                        // local import segment (`import_segments` splits on
+                        // `.`, which would declare `py` / `ts` local).
+                        let bare = name
+                            .filter(|_| !is_package)
+                            .and_then(|n| bare_module_qname(qname, n));
+                        self.add_path(bare.as_deref().unwrap_or(qname), is_package);
                     }
                     if let Some(name) = name {
                         *self.modules.entry(name.clone()).or_default() += 1;
@@ -1148,6 +1156,28 @@ pub struct FileParse {
     /// filter method→class hops to only those that are syntactically valid
     /// attribute reads.
     pub properties: std::collections::HashSet<NodeId>,
+}
+
+/// LB.9b: the stem-form qname of a code MODULE named by its full file name.
+///
+/// When code files of two build groups share a directory and a stem
+/// (`api/user.py` + `api/user.ts`), the engine names each MODULE by its file
+/// name (`api::user.py`, `api::user.ts`) and keeps the stem as its nav name
+/// (`user`). For such a MODULE this returns the qname its imports name
+/// (`api::user`); for every other qname it returns None: a normal code
+/// module's last segment IS its name, and a non-code MODULE's name is its
+/// whole file name (LB.9a, `api::user.proto` named `user.proto`).
+pub fn bare_module_qname(qname: &str, name: &str) -> Option<String> {
+    let (dir, last) = qname.rsplit_once("::").unwrap_or(("", qname));
+    let ext = last.strip_prefix(name)?.strip_prefix('.')?;
+    if name.is_empty() || ext.is_empty() || ext.contains(['.', ':']) {
+        return None;
+    }
+    Some(if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}::{name}")
+    })
 }
 
 /// Code-domain navigation indices — what the strict `Node` shape pushed out of
@@ -2691,6 +2721,47 @@ mod tests {
             fp.nav.record(id, name, qname, *kind, None);
         }
         fp
+    }
+
+    // ---- LB.9b: MODULEs named by file name ---------------------------------
+
+    #[test]
+    fn bare_module_qname_strips_only_a_file_named_modules_extension() {
+        assert_eq!(bare_module_qname("api::user.py", "user"), Some("api::user".to_string()));
+        // A normal module: its last segment is its name.
+        assert_eq!(bare_module_qname("api::user", "user"), None);
+        // A non-code MODULE (LB.9a): named by its whole file name.
+        assert_eq!(bare_module_qname("api::user.proto", "user.proto"), None);
+        // A dotted stem keeps its dots; only the one extension goes.
+        assert_eq!(
+            bare_module_qname("api::user.test.ts", "user.test"),
+            Some("api::user.test".to_string())
+        );
+        assert_eq!(bare_module_qname("x.py", "x"), Some("x".to_string()));
+        // Two extensions past the name, or no name at all: not a file-named MODULE.
+        assert_eq!(bare_module_qname("api::user.test.ts", "user"), None);
+        assert_eq!(bare_module_qname("api::.py", ""), None);
+        assert_eq!(bare_module_qname("api::users.py", "user"), None);
+    }
+
+    #[test]
+    fn a_file_named_module_declares_its_bare_path() {
+        // `api/user.py` beside `api/user.ts`: MODULE `api::user.py`, nav name
+        // `user`. Its local paths are the bare form's, never `py`.
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo_graph_core::RepoId(1),
+            node_kind::MODULE,
+            "api::user.py",
+        );
+        let mut fp = FileParse::default();
+        fp.nav.record(id, "user", "api::user.py", node_kind::MODULE, None);
+        let mut local = LocalModuleIndex::default();
+        local.add_parse(&fp);
+        assert!(local.is_local_path("api.user"));
+        assert!(local.is_local_path("user"));
+        assert!(!local.is_local_path("py"), "the extension is not a local module");
+        assert!(!local.is_local_path("user.py"));
     }
 
     fn index_of(decls: &[(NodeKindId, &str)]) -> LocalModuleIndex {

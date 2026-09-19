@@ -51,6 +51,26 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
     }
 }
 
+/// TS-family lang tags (typescript / angular / react / vue) share ONE module
+/// and symbol space in a repo, so they build as one graph
+/// (`build::lang_build`) and form one [`build_group`].
+pub(crate) const TS_FAMILY: &[&str] = &["angular", "react", "typescript", "vue"];
+
+/// The build group of a language-parser tag: the tags whose parses resolve
+/// inside ONE per-repo `RepoGraph`. The TS family is `typescript`, Kotlin joins
+/// Java's JVM graph (A14.2), every other tag is its own group. The graph
+/// grouping (`build::lang_build`) and the LB.9b module plan
+/// (`route::ModuleQnames`) both read it, so they cannot drift apart.
+pub(crate) fn build_group(lang: &'static str) -> &'static str {
+    if TS_FAMILY.contains(&lang) {
+        "typescript"
+    } else if lang == "kotlin" {
+        "java"
+    } else {
+        lang
+    }
+}
+
 /// Parse a single file with the appropriate language parser. Public so the
 /// pyo3 wrapper's `parse_file_to_json` can call directly without going
 /// through the full repo-walk pipeline.
@@ -73,7 +93,22 @@ pub fn parse_one_with(
     repo: RepoId,
     go_module_prefix: &str,
 ) -> Result<FileParse, String> {
-    let module_qname = path_to_qname(path);
+    parse_one_as(source, path, lang, repo, go_module_prefix, &path_to_qname(path))
+}
+
+/// [`parse_one_with`] under an explicit MODULE qname. The router passes the
+/// LB.9b plan's qname (`route::ModuleQnames::module_qname`): the file-name
+/// form (`api::user.py`) when a file of another build group shares the
+/// stem, [`path_to_qname`] otherwise. Every symbol qname follows it.
+pub(crate) fn parse_one_as(
+    source: &str,
+    path: &str,
+    lang: &str,
+    repo: RepoId,
+    go_module_prefix: &str,
+    module_qname: &str,
+) -> Result<FileParse, String> {
+    let module_qname = module_qname.to_string();
     match lang {
         "python" => repo_graph_parser_python::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),

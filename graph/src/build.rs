@@ -1,12 +1,12 @@
 //! Per-language graph builders plus the shared merge / nav / symbol-table
 //! passes they all run.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, ImportTarget, UnresolvedRef,
-    edge_category, node_kind,
+    bare_module_qname, edge_category, node_kind,
 };
 use repo_graph_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
@@ -307,6 +307,7 @@ fn build_symbol_table(g: &mut RepoGraph) {
             g.symbols.module_by_qname.insert(qname.clone(), *id);
         }
     }
+    register_bare_module_aliases(g);
 
     // module_symbols: for each module, bare name → node id for its top-level defs.
     // Walk children_of; if parent kind == MODULE, child goes in module_symbols.
@@ -542,6 +543,36 @@ fn under_bound_method(nav: &CodeNav, bound: &HashSet<NodeId>, mut id: NodeId) ->
     false
 }
 
+/// LB.9b: a MODULE the engine named by its file name (`api::user.py`, because
+/// `api/user.ts` shares its stem in another build group) is still imported by
+/// its bare path (`from api.user import validate`, `import './user'`). Each
+/// language graph has its own symbol table, so `api::user` here can only mean
+/// this graph's file: register it as an alias of that MODULE.
+///
+/// An alias is registered only when exactly ONE file-named MODULE of this
+/// graph has that bare form (`util.js` + `util.ts` beside a `util.py` leave
+/// `./util` unresolved in the TypeScript graph rather than guess), and never
+/// over a real MODULE qname. Decided by counts over a BTreeMap, so HashMap
+/// order cannot pick a winner. The alias persists with the symbol table.
+fn register_bare_module_aliases(g: &mut RepoGraph) {
+    let mut bare: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
+    for (qname, id) in &g.symbols.module_by_qname {
+        let Some(name) = g.nav.name_by_id.get(id) else {
+            continue;
+        };
+        if let Some(b) = bare_module_qname(qname, name) {
+            bare.entry(b).or_default().push(*id);
+        }
+    }
+    for (b, ids) in bare {
+        if let [id] = ids[..]
+            && !g.symbols.module_by_qname.contains_key(&b)
+        {
+            g.symbols.module_by_qname.insert(b, id);
+        }
+    }
+}
+
 /// A Go node's package: a package is a directory and a MODULE qname is the
 /// file path, so it is the MODULE qname minus its last `::` segment
 /// (`svc::users::store` -> `svc::users`, a root-level file -> `""`).
@@ -636,14 +667,27 @@ impl GoPackages {
     /// Index the MODULEs of `g` (after [`build_symbol_table`]) by package
     /// directory, and the imports by importing file and local name.
     fn build(g: &RepoGraph, imports: &[ImportStmt]) -> Self {
-        let mut modules: Vec<(&str, NodeId)> =
-            g.symbols.module_by_qname.iter().map(|(q, id)| (q.as_str(), *id)).collect();
-        modules.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        // One entry per MODULE, under the qname its package reads: a file
+        // named by its file name (LB.9b, `infra::main.go`) is its bare form
+        // (`infra::main`), so its stem still reads `_test` / dir-named, and
+        // its bare alias in `module_by_qname` is not a second member.
+        let mut modules: Vec<(String, NodeId)> = g
+            .symbols
+            .module_by_qname
+            .iter()
+            .filter(|(q, id)| g.nav.qname_by_id.get(*id) == Some(*q))
+            .map(|(q, id)| {
+                let bare = g.nav.name_by_id.get(id).and_then(|n| bare_module_qname(q, n));
+                (bare.unwrap_or_else(|| q.clone()), *id)
+            })
+            .collect();
+        modules.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
         let mut by_dir: HashMap<String, Vec<NodeId>> = HashMap::new();
         let mut dir_named: HashMap<String, NodeId> = HashMap::new();
         let mut dir_of: HashMap<NodeId, String> = HashMap::new();
         let mut tests: HashSet<NodeId> = HashSet::new();
-        for (qname, id) in modules {
+        for (qname, id) in &modules {
+            let (qname, id) = (qname.as_str(), *id);
             let dir = go_package_dir(qname);
             let stem = qname.rsplit("::").next().unwrap_or(qname);
             by_dir.entry(dir.to_string()).or_default().push(id);
@@ -2083,5 +2127,124 @@ mod tests {
             assert_eq!(pk.import_target("", m("a::store::zeta")), DirImport::Bound(importer));
             assert_eq!(pk.import_target("", importer), DirImport::OnlyImporter);
         }
+    }
+
+    // ---- LB.9b: bare-path aliases of file-named MODULEs ---------------------
+
+    /// A MODULE `qname` with nav name `name` (a file-named MODULE's name is
+    /// its stem) plus FUNCTION children `fns` (simple names).
+    fn named_module(qname: &str, name: &str, fns: &[&str]) -> FileParse {
+        let r = repo();
+        let m = gid(node_kind::MODULE, qname);
+        let mut fp = FileParse::default();
+        fp.nodes.push(Node { id: m, repo: r, confidence: Confidence::Strong, cells: vec![] });
+        fp.nav.record(m, name, qname, node_kind::MODULE, None);
+        for f in fns {
+            let q = format!("{qname}::{f}");
+            let id = gid(node_kind::FUNCTION, &q);
+            fp.nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            fp.nav.record(id, f, &q, node_kind::FUNCTION, Some(m));
+        }
+        fp
+    }
+
+    /// `api/main.py`: `from api.user import validate`.
+    fn py_importer() -> FileParse {
+        let mut main = named_module("api::main", "main", &[]);
+        main.imports = vec![ImportStmt {
+            from_module: "api::main".to_string(),
+            target: ImportTarget::Symbol {
+                module: "api.user".to_string(),
+                name: "validate".to_string(),
+                alias: None,
+                level: 0,
+            },
+            line: 0,
+        }];
+        main
+    }
+
+    #[test]
+    fn a_file_named_module_answers_to_its_bare_path() {
+        let g = build_python(
+            repo(),
+            vec![py_importer(), named_module("api::user.py", "user", &["validate"])],
+        )
+        .unwrap();
+        let user = gid(node_kind::MODULE, "api::user.py");
+        assert_eq!(g.symbols.module_by_qname.get("api::user"), Some(&user));
+        assert_eq!(g.symbols.module_by_qname.get("api::user.py"), Some(&user));
+        assert!(
+            has_edge(&g, gid(node_kind::MODULE, "api::main"), user, edge_category::IMPORTS),
+            "the bare-path import binds the file-named MODULE"
+        );
+        let bound = g.symbols.module_import_bindings[&gid(node_kind::MODULE, "api::main")]
+            .get("validate")
+            .copied();
+        assert_eq!(bound, Some(gid(node_kind::FUNCTION, "api::user.py::validate")));
+    }
+
+    #[test]
+    fn two_file_named_modules_with_one_bare_path_register_no_alias() {
+        // `util.js` + `util.ts` beside a `util.py`: both TS files are
+        // file-named and share `a::util`; neither is guessed.
+        let g = build_python(
+            repo(),
+            vec![
+                named_module("a::util.js", "util", &[]),
+                named_module("a::util.ts", "util", &[]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(g.symbols.module_by_qname.get("a::util"), None);
+        assert_eq!(g.symbols.module_by_qname.len(), 2);
+    }
+
+    #[test]
+    fn a_real_module_keeps_its_qname_over_an_alias() {
+        let g = build_python(
+            repo(),
+            vec![
+                named_module("api::user", "user", &[]),
+                named_module("api::user.py", "user", &[]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            g.symbols.module_by_qname.get("api::user"),
+            Some(&gid(node_kind::MODULE, "api::user"))
+        );
+    }
+
+    #[test]
+    fn go_packages_read_a_file_named_module_once_by_its_bare_form() {
+        // `infra/main.go` + `infra/main.tf`, `infra/main_test.go` + `.py`:
+        // one member each, the test file still a test, the alias not a member.
+        let (g, _, _, stats) = build_go_passes(
+            repo(),
+            vec![
+                named_module("infra::main.go", "main", &[]),
+                named_module("infra::main_test.go", "main_test", &[]),
+            ],
+        );
+        assert_eq!(g.symbols.module_by_qname.len(), 4, "two MODULEs, two aliases");
+        assert_eq!(stats.dirs, 1);
+        assert_eq!(stats.multi_file, 1);
+        let (mut g2, imports, _, _) = merge_parses(
+            repo(),
+            vec![
+                named_module("infra::main.go", "main", &[]),
+                named_module("infra::main_test.go", "main_test", &[]),
+                named_module("cmd::run", "run", &[]),
+            ],
+        );
+        build_symbol_table(&mut g2);
+        let pk = GoPackages::build(&g2, &imports);
+        assert_eq!(pk.by_dir["infra"].len(), 2);
+        assert!(pk.tests.contains(&gid(node_kind::MODULE, "infra::main_test.go")));
+        assert_eq!(
+            pk.import_target("infra", gid(node_kind::MODULE, "cmd::run")),
+            DirImport::Bound(gid(node_kind::MODULE, "infra::main.go"))
+        );
     }
 }

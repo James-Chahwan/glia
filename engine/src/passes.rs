@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use repo_graph_code_domain::evidence::{self, Basis, Evidence, Location};
-use repo_graph_code_domain::{edge_category, node_kind};
+use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
@@ -57,6 +57,9 @@ pub(crate) struct FillStats {
     pub(crate) to_node: usize,
     pub(crate) file: usize,
     pub(crate) none: usize,
+    /// ... of `file`: edges no endpoint located, placed at the file of their
+    /// non-code MODULE endpoint ([`synthetic_module_file`]).
+    pub(crate) module_file: usize,
     /// Edges with evidence per emitter, sorted by name.
     pub(crate) emitters: BTreeMap<String, usize>,
 }
@@ -81,7 +84,41 @@ impl FillStats {
             self.none,
             emitters.join(",")
         );
+        // LB.9b fired_on marker: edges of a non-code MODULE (manifest, yaml,
+        // Dockerfile, dotenv, ...) that no endpoint POSITION could place,
+        // placed at that module's file (basis `file`) instead of `none`.
+        if self.module_file > 0 {
+            eprintln!(
+                "[evidence-file] synthetic MODULE edges placed at their file: {}",
+                self.module_file
+            );
+        }
     }
+}
+
+/// LB.9b: the repo-relative file of a non-code MODULE, for an edge
+/// [`Evidence::fill`] could not place. A synthetic parse (yaml, Dockerfile,
+/// package manifest, dotenv, migration, Prisma, ...) mints its MODULE with no
+/// POSITION cell, so an edge between it and an unlocated node (a manifest's
+/// DEPENDS_ON a package) ended at basis `none` although the stage knew the
+/// file. Its qname is the file path in LB.9a's form (`web::package.json`,
+/// `route::synthetic_module_qname`), named by its full file name, and it
+/// carries no IMPORTS cell (the router gives one to every node of a
+/// language parse, whose MODULE is located anyway), so the path reads back
+/// exactly. None for every other node.
+fn synthetic_module_file(
+    kind: Option<NodeKindId>,
+    cells: &[repo_graph_core::Cell],
+    qname: Option<&String>,
+    name: Option<&String>,
+) -> Option<String> {
+    use repo_graph_code_domain::cell_type;
+    if kind != Some(node_kind::MODULE) || cells.iter().any(|c| c.kind == cell_type::IMPORTS) {
+        return None;
+    }
+    let (qname, name) = (qname?, name?);
+    (qname.rsplit("::").next() == Some(name.as_str()) && !name.is_empty())
+        .then(|| qname.replace("::", "/"))
 }
 
 /// LC.3a: complete every edge's EVIDENCE location from its endpoints
@@ -96,14 +133,26 @@ impl FillStats {
 /// adds an edge and before the cross-edge sort (cells are part of LC.2's
 /// canonical order).
 pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
-    let mut at: HashMap<NodeId, (Option<Location>, Option<NodeKindId>)> = HashMap::new();
+    // id -> (location, kind, the LB.9b file fallback of an unlocated
+    // non-code MODULE).
+    type At = (Option<Location>, Option<NodeKindId>, Option<String>);
+    let mut at: HashMap<NodeId, At> = HashMap::new();
     for g in &merged.graphs {
         for n in &g.nodes {
             at.entry(n.id).or_insert_with(|| {
-                (
-                    evidence::locate(&n.cells),
-                    g.nav.kind_by_id.get(&n.id).copied(),
-                )
+                let loc = evidence::locate(&n.cells);
+                let kind = g.nav.kind_by_id.get(&n.id).copied();
+                let fallback = if loc.is_none() {
+                    synthetic_module_file(
+                        kind,
+                        &n.cells,
+                        g.nav.qname_by_id.get(&n.id),
+                        g.nav.name_by_id.get(&n.id),
+                    )
+                } else {
+                    None
+                };
+                (loc, kind, fallback)
             });
         }
     }
@@ -133,6 +182,18 @@ pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
                 from.and_then(|f| f.0.as_ref()),
                 to.and_then(|t| t.0.as_ref()),
             );
+            // LB.9b: neither endpoint located, but one is a non-code MODULE
+            // whose file the qname names: basis `file` there, not `none`.
+            if ev.basis == Basis::None
+                && ev.line.is_none()
+                && let Some(file) = from
+                    .and_then(|f| f.2.as_ref())
+                    .or_else(|| to.and_then(|t| t.2.as_ref()))
+            {
+                ev.file = Some(file.clone());
+                ev.basis = Basis::File;
+                stats.module_file += 1;
+            }
             if ev != before {
                 evidence::attach(e, ev.clone());
             }
@@ -852,29 +913,51 @@ fn emit_tests_edges(merged: &mut MergedGraph) {
     merged.cross_edges.extend(edges);
 }
 
+/// One MODULE as the TESTS pairing sees it.
+struct TestsModule {
+    id: NodeId,
+    /// The qname its tail is read from: a MODULE named by its file name
+    /// (LB.9b, `api::user.py`) is its bare form (`api::user`), so its stem,
+    /// not its extension, is the tail.
+    key: String,
+    /// Named by its file name: a same-stem file of another build group sits
+    /// beside it.
+    qualified: bool,
+    /// Its `merged.graphs` index.
+    graph: usize,
+}
+
 /// Pair each test MODULE with the module(s) it tests by stripping the test
 /// affix off its qname tail and looking the stem up among module tails.
 fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
     let mut edges = Vec::new();
     let mut stats = TestsEdgeStats::default();
-    let mut modules_by_tail: HashMap<String, Vec<(NodeId, String)>> = HashMap::new();
-    let mut module_info: Vec<(NodeId, String)> = Vec::new();
-    for g in &merged.graphs {
+    let mut modules_by_tail: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut module_info: Vec<TestsModule> = Vec::new();
+    for (graph, g) in merged.graphs.iter().enumerate() {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::MODULE) {
                 continue;
             }
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-            module_info.push((n.id, qname.clone()));
-            if let Some(tail) = qname.rsplit("::").next() {
+            let bare = g
+                .nav
+                .name_by_id
+                .get(&n.id)
+                .and_then(|name| bare_module_qname(qname, name));
+            let qualified = bare.is_some();
+            let key = bare.unwrap_or_else(|| qname.clone());
+            if let Some(tail) = key.rsplit("::").next() {
                 modules_by_tail
                     .entry(tail.to_string())
                     .or_default()
-                    .push((n.id, qname.clone()));
+                    .push(module_info.len());
             }
+            module_info.push(TestsModule { id: n.id, key, qualified, graph });
         }
     }
-    for (from_id, qname) in &module_info {
+    for test in &module_info {
+        let qname = test.key.as_str();
         if !is_test_module_qname(qname) {
             continue;
         }
@@ -885,14 +968,16 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
         }
         let Some(candidates) = modules_by_tail.get(stripped) else { continue };
         let snake = strip_snake_test_affixes(tail) != tail;
-        for to_id in select_test_targets(*from_id, qname, candidates) {
+        let candidates: Vec<&TestsModule> =
+            candidates.iter().filter_map(|&i| module_info.get(i)).collect();
+        for to_id in select_test_targets(test, &candidates) {
             if snake {
                 stats.snake += 1;
             } else {
                 stats.camel += 1;
             }
             edges.push(
-                Edge::new(*from_id, to_id, edge_category::TESTS, Confidence::Strong)
+                Edge::new(test.id, to_id, edge_category::TESTS, Confidence::Strong)
                     .with_cell(Evidence::emitter("pass:tests").rule("name_match").to_cell()),
             );
         }
@@ -900,19 +985,23 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
     (edges, stats)
 }
 
-fn select_test_targets(
-    from_id: NodeId,
-    test_qname: &str,
-    candidates: &[(NodeId, String)],
-) -> Vec<NodeId> {
+/// The modules a test module tests, among the same-tail `candidates`: the
+/// ones sharing the longest directory prefix with it, at most three.
+///
+/// LB.9b: a candidate named by its file name (`api::user.py` beside
+/// `api/user.ts`) is kept only when it sits in the test module's own graph:
+/// a Python test never pairs the TypeScript module that merely shares its
+/// stem. Every other pairing is unchanged.
+fn select_test_targets(test: &TestsModule, candidates: &[&TestsModule]) -> Vec<NodeId> {
     const MAX_TEST_TARGETS: usize = 3;
-    let test_parent: Vec<&str> = qname_parent_segments(test_qname);
+    let test_parent: Vec<&str> = qname_parent_segments(&test.key);
     let mut scored: Vec<(usize, NodeId)> = candidates
         .iter()
-        .filter(|(id, _)| *id != from_id)
-        .map(|(id, qn)| {
-            let cand_parent = qname_parent_segments(qn);
-            (common_prefix_len(&test_parent, &cand_parent), *id)
+        .filter(|c| c.id != test.id)
+        .filter(|c| !c.qualified || c.graph == test.graph)
+        .map(|c| {
+            let cand_parent = qname_parent_segments(&c.key);
+            (common_prefix_len(&test_parent, &cand_parent), c.id)
         })
         .collect();
     if scored.is_empty() {
