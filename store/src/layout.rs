@@ -795,6 +795,12 @@ fn first_changed_input<'a>(
 /// builder/store divergence the shared gate exists to close. A `.gitignore`
 /// edit is itself an un-ignored file, so changing the rules still marks stale.
 ///
+/// The user's `[walk] skip` patterns (`.glia/overlay.toml`, LF.3a) gate the
+/// scan too: the stack is built by `IgnoreStack::for_repo`, the same
+/// `with_config` constructor the walk uses, so an excluded directory is a gated
+/// region here and an excluded file is never checked. An edit to the skip list
+/// changes the `.glia` fingerprint, so it marks stale on its own.
+///
 /// Returns true at the first newer entry; worst case O(N) over the un-gated
 /// tree.
 fn scan_for_newer(
@@ -823,7 +829,9 @@ fn scan_for_newer(
     let mut stale = false;
     // Each entry owns its ancestors' matcher layers (a Vec of Arcs, so the
     // per-directory clone is O(depth) pointer copies).
-    let mut stack = vec![(root, walk_gating::IgnoreStack::default())];
+    // LF.3a: rooted at the canonical root, the spelling every path below uses.
+    let base = walk_gating::IgnoreStack::for_repo(&root);
+    let mut stack = vec![(root, base)];
     'walk: while let Some((dir, mut ignores)) = stack.pop() {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
@@ -867,7 +875,8 @@ fn scan_for_newer(
             } else if ftype.is_file() {
                 // The builder never reads a gitignored file, so its churn (a
                 // log, a local `.env`, a `*.min.js` rebuild) is not graph churn.
-                if ignores.is_ignored(&path, false) {
+                // Nor a file a user `[walk] skip` pattern excludes (LF.3a).
+                if ignores.is_ignored(&path, false) || ignores.is_excluded(&path, false) {
                     continue;
                 }
                 checked += 1;
@@ -1523,6 +1532,48 @@ mod tests {
             is_gmap_stale(&gmap_dir, &repo_dir),
             "a nested rule must not leak to a sibling tree"
         );
+    }
+
+    /// LF.3a: the user's `[walk] skip` gates the scan exactly as it gates the
+    /// walk. Churn under an excluded directory, or in an excluded file, is not
+    /// graph churn; a file beside them still is. The control repo with no
+    /// overlay goes stale on the very same edit.
+    #[test]
+    fn stale_scan_honours_config_skip() {
+        let setup = |overlay: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo_dir = dir.path().join("repo");
+            let gmap_dir = default_gmap_dir(&repo_dir);
+            write_file(&repo_dir.join("app.py"), "def main():\n    return 1\n");
+            write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 1\n");
+            write_file(&repo_dir.join("src/api.gen.py"), "x = 1\n");
+            if overlay {
+                write_file(
+                    &repo_dir.join(".glia/overlay.toml"),
+                    "version = 1\n[walk]\nskip = [\"legacy\", \"*.gen.py\"]\n",
+                );
+            }
+            write_merged_sharded(&one_graph("test://config-skip"), &gmap_dir).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            (dir, gmap_dir, repo_dir)
+        };
+
+        let (_tmp, gmap_dir, repo_dir) = setup(true);
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "fresh right after the write");
+        write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 2\n");
+        write_file(&repo_dir.join("legacy/sub/new.py"), "y = 1\n");
+        write_file(&repo_dir.join("src/api.gen.py"), "x = 2\n");
+        assert!(
+            !is_gmap_stale(&gmap_dir, &repo_dir),
+            "churn under a [walk] skip pattern must not mark stale"
+        );
+        write_file(&repo_dir.join("app.py"), "def main():\n    return 2\n");
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "an un-skipped file still marks stale");
+
+        let (_tmp, gmap_dir, repo_dir) = setup(false);
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        write_file(&repo_dir.join("legacy/sub/old.py"), "def legacy_thing():\n    return 2\n");
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "control: without the config it is source");
     }
 
     // ------------------------------------------------------------------
