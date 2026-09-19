@@ -25,6 +25,10 @@ repo-graph-engine = { path = "../engine" }
 repo-graph-projection-text = { path = "../projection-text" }
 repo-graph-activation = { path = "../activation" }
 repo-graph-store = { path = "../store" }
+# The snapshot writers behind `history_sync` (LF.5d): runs the local git, no
+# network I/O (unlike doc-sources, which py deliberately does not depend on).
+# The build never calls it; the wrapper syncs before generate().
+glia-snapshots = { path = "../snapshots" }
 # Parse POSITION cell JSON + build answer records for the P3 primitives
 # (blast_radius/resolve). Already in the tree via the engine.
 serde_json = "1"

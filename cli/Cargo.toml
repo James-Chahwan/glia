@@ -20,5 +20,9 @@ repo-graph-code-domain = { path = "../code-domain" }
 # Tier-4 doc adapters (Confluence REST + snapshot). Network I/O lives here, not
 # in the engine — the CLI drives `docs sync`/`docs push`; `build` stays offline.
 repo-graph-doc-sources = { path = "../doc-sources" }
+# The history snapshot writer (`glia history sync`, LF.5d): runs the local git
+# and writes <repo>/.glia/history-snapshot/. Like docs sync, the snapshot step
+# is a CLI command; `build` never syncs and stays offline.
+glia-snapshots = { path = "../snapshots" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"

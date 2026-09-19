@@ -27,6 +27,9 @@ on:
       - "engine/**"
       - "store/**"
       - "stamp/**"
+      # `py` depends on `snapshots` (history_sync, LF.5d): a PR touching only
+      # that crate must still build a wheel.
+      - "snapshots/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/wheels-py.yml"

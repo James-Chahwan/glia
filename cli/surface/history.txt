@@ -1,0 +1,12 @@
+# CLI surface of `glia history`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia history subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+cmd glia history sync
+  arg blame pos=- long=blame short=- required=false num_args=0 action=SetTrue default=false value_names=BLAME global=false hidden=false
+  arg blame_max_files pos=- long=blame-max-files short=- required=false num_args=1 action=Set default=300 value_names=BLAME_MAX_FILES global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg max_commits pos=- long=max-commits short=- required=false num_args=1 action=Set default=2000 value_names=MAX_COMMITS global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg since pos=- long=since short=- required=false num_args=1 action=Set default=- value_names=SINCE global=false hidden=false

@@ -352,6 +352,7 @@ name = "glia-cli"
 version = "0.4.18"
 dependencies = [
  "clap",
+ "glia-snapshots",
  "repo-graph-activation",
  "repo-graph-code-domain",
  "repo-graph-core",
@@ -1275,6 +1276,7 @@ dependencies = [
 name = "repo-graph-py"
 version = "0.4.18"
 dependencies = [
+ "glia-snapshots",
  "inventory",
  "proc-macro2",
  "pyo3",

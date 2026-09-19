@@ -8,6 +8,7 @@
 use clap::Subcommand;
 
 mod gaps;
+mod history;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum InputsCmd {
@@ -17,10 +18,16 @@ pub(crate) enum InputsCmd {
     /// each with the overlay section that could repair it. `--overlay-delta`
     /// measures an overlay edit instead (two builds). A report: exits 0.
     Gaps(gaps::Args),
+    /// Git history snapshot (LF.5d): `history sync` reads the repo's local git
+    /// and writes `<repo>/.glia/history-snapshot/`, which the next build
+    /// ingests (churn ATTN, CO_CHANGES); the build itself never syncs. Exits
+    /// 1 when the sync fails.
+    History(history::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
     match c {
         InputsCmd::Gaps(a) => gaps::run(a),
+        InputsCmd::History(a) => history::run(a),
     }
 }

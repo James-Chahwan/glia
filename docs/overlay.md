@@ -117,7 +117,8 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
 ## What the overlay cannot do
 
 - It cannot add a node kind, edge category or cell type. Only locked registry ids exist.
-- It cannot declare structural edges (`DEFINES`, `CONTAINS`) or history edges (`CO_CHANGES`).
+- It cannot declare structural edges (`DEFINES`, `CONTAINS`) or history edges (`CO_CHANGES`;
+  those come from the history snapshot, below).
 - It cannot un-skip a directory the walk hard-skips, or un-collapse a collapsed region.
 - It cannot bypass secret redaction: a pinned constant goes through the same secret and
   value gates as one read from source.
@@ -138,3 +139,19 @@ On every build that finds the file, stderr carries
 `[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N) errors=E`.
 The counts are skip patterns for `walk`, qname patterns for `entrypoints`, keys for
 `constants`, and stanzas for every other section.
+
+## History snapshot
+
+Git history is a build input too, but not an overlay section. `glia history sync <repo>`
+(pyo3: `history_sync(repo_path)`) reads the repo's local git (no fetch, no remote, no author
+or committer identity) and writes `.glia/history-snapshot/` (`commits.jsonl`, `blame.jsonl`,
+`meta.json`), replacing the previous one. The next build ingests it: churn ATTN cells on
+MODULE nodes, blame-recency ATTN on symbols (with `--blame`), and heuristic `CO_CHANGES` edges
+between modules that change together. The build itself never runs git, so re-sync when HEAD
+moves. Flags: `--max-commits N` (default 2000), `--since <date>` (passed to `git log --since`),
+`--blame`, `--blame-max-files N` (default 300). The snapshot is local and regenerable: when
+`.glia/.gitignore` is absent, the sync creates one that lists it.
+
+The sync prints `[history] sync repo=<label> head=<12 hex> commits=N files=N renames=N binary=N
+blame_files=N runs=N window=max:N[,since:<date>] surface=cli|pyo3` on stderr (one line), and a
+build that reads the snapshot prints `[history] ingest repo=<label> ...`.
