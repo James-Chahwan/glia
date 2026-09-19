@@ -1,0 +1,20 @@
+{
+  "framework": "go-overlay-data-wrapper",
+  "language": "go",
+  "dirs": ["."],
+  "note": "LG.3d: a project-local generic collection constructor (quokka turps NewCollection[T](client, database, \"name\"), 12 repositories) mints no DATA_ENTITY; the overlay [[wrapper]] kind data_entity declares it, and the site mints the extractor's data_entity:nosql:<name> with an ACCESSES_DATA edge from the enclosing function. The commented-out call, the definition site and the non-literal forward in NewNamedCollection must mint nothing. Baseline 2026-09-19 (HEAD c0edf47, installed wheel = W25 code): the loader rejects the stanza (unknown field `flavor`, whole file ignored): DATA_ENTITY 0/1, ACCESSES_DATA 0/1, ORIGIN 0/1, forbid 0.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:chat_previews"}
+  ],
+  "expect_edges": [
+    {"from": "NewChatPreviewRepository", "to": "data_entity:nosql:chat_previews", "category": "ACCESSES_DATA"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "data_entity:nosql:chat_previews", "cell": "ORIGIN", "contains": "overlay:human"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "legacy_previews"},
+    {"kind": "DATA_ENTITY", "name": "name"},
+    {"kind": "DATA_ENTITY", "name": "database"}
+  ]
+}

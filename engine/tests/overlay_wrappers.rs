@@ -636,3 +636,251 @@ fn fixture_key_holds() {
         "the receiver stanza is the second"
     );
 }
+
+// ---------------------------------------------------------------------------
+// LG.3d: `kind = "data_entity"` — a project-local table / collection
+// constructor mints the DATA_ENTITY the extractor would, function-level.
+// Pre-fix baseline (HEAD dc961c0, fixture go-overlay-data-wrapper): the
+// loader rejected the stanza (`unknown field flavor`, whole file ignored), so
+// DATA_ENTITY 0/1, ACCESSES_DATA 0/1, ORIGIN 0/1.
+// ---------------------------------------------------------------------------
+
+const COLLECTION_GO: &str = "package repositories\n\nimport (\n\t\"go.mongodb.org/mongo-driver/mongo\"\n)\n\ntype Collection[T any] struct {\n\tinner *mongo.Collection\n}\n\nfunc NewCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {\n\treturn &Collection[T]{inner: client.Database(database).Collection(name)}\n}\n";
+
+const REPOSITORY_GO: &str = "package repositories\n\nimport (\n\t\"go.mongodb.org/mongo-driver/mongo\"\n)\n\ntype ChatPreview struct {\n\tRoomID string\n}\n\ntype ChatPreviewRepository struct {\n\tcollection *Collection[ChatPreview]\n}\n\nfunc NewChatPreviewRepository(client *mongo.Client, database string) *ChatPreviewRepository {\n\t// NewCollection[ChatPreview](client, database, \"legacy_previews\") was the old name.\n\treturn &ChatPreviewRepository{collection: NewCollection[ChatPreview](client, database, \"chat_previews\")}\n}\n";
+
+const COLLECTION_STANZA: &str = "version = 1\n\n[[wrapper]]\ncall = \"NewCollection\"\nkind = \"data_entity\"\nflavor = \"nosql\"\nname_arg = 2\norigin = \"human\"\n";
+
+/// One repo of `files`, built with `overlay` (when given) as its overlay.
+fn build_repo(tag: &str, files: &[(&str, &str)], overlay: Option<&str>) -> GenerateResult {
+    let root = tmp(tag);
+    for (rel, body) in files {
+        write(&root, rel, body);
+    }
+    if let Some(o) = overlay {
+        write(&root, ".glia/overlay.toml", o);
+    }
+    let built = generate_one(&s(&root));
+    std::fs::remove_dir_all(&root).ok();
+    built.expect("build")
+}
+
+/// `(qname, name)` of every DATA_ENTITY node instance, sorted.
+fn entities(r: &GenerateResult) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = r
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::DATA_ENTITY))
+                .map(move |n| {
+                    (
+                        g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default(),
+                        g.nav.name_by_id.get(&n.id).cloned().unwrap_or_default(),
+                    )
+                })
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The ACCESSES_DATA sources into `entity`, by qname, sorted.
+fn accessors(r: &GenerateResult, entity: &str) -> Vec<String> {
+    edges(r, edge_category::ACCESSES_DATA)
+        .into_iter()
+        .filter(|(_, t)| t == entity)
+        .map(|(f, _)| f)
+        .collect()
+}
+
+#[test]
+fn data_entity_wrapper_mints_function_level_access() {
+    // A direct driver call in a second file names the same collection: the
+    // wrapper site and the extractor hit collapse onto one node.
+    let direct = "package repositories\n\nimport (\n\t\"go.mongodb.org/mongo-driver/mongo\"\n)\n\nfunc CountPreviews(client *mongo.Client) {\n\tclient.Database(\"app\").Collection(\"chat_previews\")\n}\n";
+    let r = build_repo(
+        "entity",
+        &[
+            ("collection.go", COLLECTION_GO),
+            ("chat_preview_repository.go", REPOSITORY_GO),
+            ("count.go", direct),
+        ],
+        Some(COLLECTION_STANZA),
+    );
+    let q = "data_entity:nosql:chat_previews";
+    assert_eq!(
+        entities(&r),
+        [(q.to_string(), "chat_previews".to_string())],
+        "one node: the wrapper and the extractor agree on the qname; no legacy_previews / name / database"
+    );
+    let (n, kind) = node(&r, q).expect("node");
+    assert_eq!(kind, node_kind::DATA_ENTITY);
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({"provenance": "overlay:human", "rule": "wrapper#1"})]
+    );
+    let pos = json_cells(&n.cells, cell_type::POSITION);
+    assert!(
+        pos.iter()
+            .any(|p| p["file"] == "chat_preview_repository.go" && p["start_line"] == 16),
+        "0-based line of the wrapper site: {pos:?}"
+    );
+
+    // Function-level: the wrapper edge leaves NewChatPreviewRepository, the
+    // extractor's leaves CountPreviews; no module edge for either.
+    let from = accessors(&r, q);
+    assert_eq!(from.len(), 2, "{from:?}");
+    assert!(from[0].ends_with("NewChatPreviewRepository"), "{from:?}");
+    assert!(from[1].ends_with("CountPreviews"), "{from:?}");
+    let wrapper_edge = r
+        .merged
+        .all_edges()
+        .find(|e| {
+            e.category == edge_category::ACCESSES_DATA
+                && qname_of(&r, e.from).ends_with("NewChatPreviewRepository")
+        })
+        .expect("wrapper edge");
+    assert_eq!(
+        wrapper_edge.confidence,
+        Confidence::Medium,
+        "a human stanza"
+    );
+    let ev = Evidence::of(wrapper_edge).expect("EVIDENCE");
+    assert_eq!(
+        (
+            ev.emitter.as_str(),
+            ev.rule.as_deref(),
+            ev.file.as_deref(),
+            ev.line
+        ),
+        (
+            "overlay:wrapper",
+            Some("wrapper#1"),
+            Some("chat_preview_repository.go"),
+            Some(16)
+        )
+    );
+}
+
+#[test]
+fn generic_brackets_do_not_hide_a_call() {
+    let ts = "export function create<T>(db: unknown, schema: string, name: string): T {\n  return db as T;\n}\n\nexport function users() {\n  return create<User>(db, 'app', \"users\");\n}\n";
+    let overlay = format!(
+        "{COLLECTION_STANZA}\n[[wrapper]]\ncall = \"create\"\nkind = \"data_entity\"\nflavor = \"sql\"\nname_arg = 2\n"
+    );
+    let r = build_repo(
+        "generic",
+        &[
+            ("collection.go", COLLECTION_GO),
+            ("chat_preview_repository.go", REPOSITORY_GO),
+            ("web/users.ts", ts),
+        ],
+        Some(&overlay),
+    );
+    let names: Vec<String> = entities(&r).into_iter().map(|(q, _)| q).collect();
+    assert_eq!(
+        names,
+        ["data_entity:nosql:chat_previews", "data_entity:sql:users"],
+        "`NewCollection[ChatPreview](` and `create<User>(` are both calls"
+    );
+    assert!(
+        accessors(&r, "data_entity:sql:users")
+            .iter()
+            .any(|f| f.ends_with("users::users"))
+    );
+    let (n, _) = node(&r, "data_entity:sql:users").expect("node");
+    assert_eq!(n.confidence, Confidence::Weak, "an llm stanza");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({"provenance": "overlay:llm", "rule": "wrapper#2"})]
+    );
+}
+
+#[test]
+fn commented_and_definition_sites_mint_nothing() {
+    // The definition `func NewCollection[T any](..., name string)` and the
+    // commented `legacy_previews` call: only the live call mints.
+    let r = build_repo(
+        "entity-defs",
+        &[
+            ("collection.go", COLLECTION_GO),
+            ("chat_preview_repository.go", REPOSITORY_GO),
+        ],
+        Some(COLLECTION_STANZA),
+    );
+    assert_eq!(
+        entities(&r),
+        [(
+            "data_entity:nosql:chat_previews".to_string(),
+            "chat_previews".to_string()
+        )]
+    );
+    // Without the overlay the constructor names nothing at all.
+    let off = build_repo(
+        "entity-off",
+        &[
+            ("collection.go", COLLECTION_GO),
+            ("chat_preview_repository.go", REPOSITORY_GO),
+        ],
+        None,
+    );
+    assert!(entities(&off).is_empty(), "{:?}", entities(&off));
+}
+
+#[test]
+fn nonliteral_name_is_skipped() {
+    let named = "package repositories\n\nfunc NewNamedCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {\n\treturn NewCollection[T](client, database, name)\n}\n\nfunc Concat(client *mongo.Client, database string, id string) {\n\tNewCollection[T](client, database, \"rooms_\"+id)\n}\n";
+    let r = build_repo(
+        "entity-nonlit",
+        &[("collection.go", COLLECTION_GO), ("named.go", named)],
+        Some(COLLECTION_STANZA),
+    );
+    assert!(entities(&r).is_empty(), "{:?}", entities(&r));
+}
+
+#[test]
+fn missing_name_arg_is_a_config_error() {
+    let overlay = "version = 1\n\n[[wrapper]]\ncall = \"NewCollection\"\nkind = \"data_entity\"\nflavor = \"nosql\"\n";
+    let cfg = repo_graph_code_domain::glia_config::parse_str(overlay);
+    assert_eq!(cfg.errors.len(), 1, "{:?}", cfg.errors);
+    assert!(
+        cfg.errors[0].starts_with(".glia/overlay.toml:3: [[wrapper]]")
+            && cfg.errors[0].contains("name_arg"),
+        "{}",
+        cfg.errors[0]
+    );
+    assert!(cfg.config.wrapper.is_empty(), "the stanza is dropped");
+    let r = build_repo(
+        "entity-noarg",
+        &[
+            ("collection.go", COLLECTION_GO),
+            ("chat_preview_repository.go", REPOSITORY_GO),
+        ],
+        Some(overlay),
+    );
+    assert!(entities(&r).is_empty(), "{:?}", entities(&r));
+}
+
+/// The substrate-gap fixture `go-overlay-data-wrapper`, built here so its
+/// key holds on this tree before the wheel `grade.py` reads is rebuilt.
+#[test]
+fn data_fixture_key_holds() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/go-overlay-data-wrapper");
+    let r = generate_one(&s(&root)).expect("fixture builds");
+    let q = "data_entity:nosql:chat_previews";
+    assert_eq!(entities(&r), [(q.to_string(), "chat_previews".to_string())]);
+    let from = accessors(&r, q);
+    assert!(
+        from.len() == 1 && from[0].ends_with("NewChatPreviewRepository"),
+        "{from:?}"
+    );
+    let (n, _) = node(&r, q).expect("node");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({"provenance": "overlay:human", "rule": "wrapper#1"})]
+    );
+}

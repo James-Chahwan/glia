@@ -8,7 +8,7 @@
 //! |---|---|---|---|
 //! | `[walk]`, `[[project]]`, `[entrypoints]` | user config | LF.3a / LF.3b | still applied |
 //! | `[[constraint]]`, `[[decision]]`, `[[note]]` | declared knowledge | LF.4a | still applied |
-//! | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay (inference) | LF.2d / LF.2e / LF.2b | skipped |
+//! | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay (inference) | LF.2d / LF.2e (+LG.3d) / LF.2b | skipped |
 //!
 //! Loading never panics and never bails a build (pipeline stages emit empty):
 //! - file absent -> `None`;
@@ -54,7 +54,12 @@ pub const SECTIONS: [&str; 10] = [
 pub const REJECTED_EDGE_CATEGORIES: &[EdgeCategoryId] =
     &[edge_category::DEFINES, edge_category::CONTAINS, edge_category::CO_CHANGES];
 /// `[[wrapper]] kind` values.
-pub const WRAPPER_KINDS: &[&str] = &["http", "queue_producer", "queue_consumer"];
+pub const WRAPPER_KINDS: &[&str] = &["http", "queue_producer", "queue_consumer", "data_entity"];
+/// `[[wrapper]] flavor` values for `kind = "data_entity"`: the middle segment
+/// of the `data_entity:<flavor>:<name>` qname the data-entity extractor mints.
+pub const DATA_ENTITY_FLAVORS: &[&str] = &["sql", "nosql", "graph"];
+/// The flavor a `data_entity` wrapper takes when it names none.
+pub const DEFAULT_DATA_ENTITY_FLAVOR: &str = "nosql";
 /// `[[constraint]] kind` values.
 pub const CONSTRAINT_KINDS: &[&str] = &["forbid_edge", "no_cycle", "invariant"];
 /// Accepted fixed `[[wrapper]] method` values (case-insensitive).
@@ -148,7 +153,9 @@ pub struct RoutePrefixDecl {
 }
 
 /// `[[wrapper]]`: call sites of `call(...)` (or, with `receiver = true`, of
-/// `call.<verb>(...)`) are HTTP / queue sinks with the declared argument layout.
+/// `call.<verb>(...)`) are HTTP / queue sinks, or (LG.3d, `kind =
+/// "data_entity"`) the constructor of a data entity handle, with the declared
+/// argument layout.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WrapperDecl {
@@ -167,6 +174,14 @@ pub struct WrapperDecl {
     pub topic_arg: Option<usize>,
     #[serde(default)]
     pub broker: Option<String>,
+    /// `kind = "data_entity"` only: one of [`DATA_ENTITY_FLAVORS`]; default
+    /// [`DEFAULT_DATA_ENTITY_FLAVOR`] (see [`WrapperDecl::entity_flavor`]).
+    #[serde(default)]
+    pub flavor: Option<String>,
+    /// `kind = "data_entity"` only, and required there: the argument holding
+    /// the entity (table / collection / label) name.
+    #[serde(default)]
+    pub name_arg: Option<usize>,
     /// Optional filter on the engine's language names (`typescript`, `python`,
     /// ...). Empty = every language.
     #[serde(default)]
@@ -181,6 +196,8 @@ pub enum WrapperKind {
     Http,
     QueueProducer,
     QueueConsumer,
+    /// A project-local table / collection constructor (LG.3d).
+    DataEntity,
 }
 
 impl WrapperDecl {
@@ -190,6 +207,7 @@ impl WrapperDecl {
             "http" => Some(WrapperKind::Http),
             "queue_producer" => Some(WrapperKind::QueueProducer),
             "queue_consumer" => Some(WrapperKind::QueueConsumer),
+            "data_entity" => Some(WrapperKind::DataEntity),
             _ => None,
         }
     }
@@ -197,6 +215,14 @@ impl WrapperDecl {
     /// The path argument index: a receiver form defaults it to 0.
     pub fn path_arg_index(&self) -> Option<usize> {
         if self.receiver { Some(self.path_arg.unwrap_or(0)) } else { self.path_arg }
+    }
+
+    /// The `data_entity` flavor as its [`DATA_ENTITY_FLAVORS`] spelling:
+    /// the declared one, else [`DEFAULT_DATA_ENTITY_FLAVOR`]. `None` only for
+    /// a flavor the loader already dropped the stanza for.
+    pub fn entity_flavor(&self) -> Option<&'static str> {
+        let f = self.flavor.as_deref().unwrap_or(DEFAULT_DATA_ENTITY_FLAVOR);
+        DATA_ENTITY_FLAVORS.iter().find(|k| **k == f).copied()
     }
 }
 
@@ -632,7 +658,12 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
     let Some(kind) = w.wrapper_kind() else {
         return Err(format!("kind {:?} is not one of {}", w.kind, WRAPPER_KINDS.join(" | ")));
     };
-    for (name, arg) in [("method_arg", w.method_arg), ("path_arg", w.path_arg), ("topic_arg", w.topic_arg)] {
+    for (name, arg) in [
+        ("method_arg", w.method_arg),
+        ("path_arg", w.path_arg),
+        ("topic_arg", w.topic_arg),
+        ("name_arg", w.name_arg),
+    ] {
         if arg.is_some_and(|a| a > MAX_ARG_INDEX) {
             return Err(format!("{name} must be <= {MAX_ARG_INDEX}"));
         }
@@ -648,6 +679,9 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
         && !HTTP_METHODS.contains(&m.to_ascii_uppercase().as_str())
     {
         return Err(format!("method {m:?} is not one of {}", HTTP_METHODS.join(" | ")));
+    }
+    if kind != WrapperKind::DataEntity && (w.flavor.is_some() || w.name_arg.is_some()) {
+        return Err(format!("kind {} takes no flavor / name_arg (those are kind data_entity's)", w.kind));
     }
     match kind {
         WrapperKind::Http => {
@@ -676,6 +710,29 @@ fn check_wrapper(w: &WrapperDecl) -> Result<(), String> {
             }
             if w.topic_arg.is_none() {
                 return Err(format!("kind {} needs topic_arg", w.kind));
+            }
+        }
+        WrapperKind::DataEntity => {
+            if w.receiver {
+                return Err("receiver = true requires kind http".into());
+            }
+            if w.method.is_some()
+                || w.method_arg.is_some()
+                || w.path_arg.is_some()
+                || w.topic_arg.is_some()
+                || w.broker.is_some()
+            {
+                return Err("kind data_entity takes no method / method_arg / path_arg / topic_arg / broker".into());
+            }
+            if w.name_arg.is_none() {
+                return Err("kind data_entity needs name_arg".into());
+            }
+            if w.entity_flavor().is_none() {
+                return Err(format!(
+                    "flavor {:?} is not one of {}",
+                    w.flavor.as_deref().unwrap_or(""),
+                    DATA_ENTITY_FLAVORS.join(" | ")
+                ));
             }
         }
     }
@@ -767,7 +824,7 @@ by = "james"
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [2, 1, 2, 2, 1, 3, 1, 1, 1, 1]);
+        assert_eq!(counts, [2, 1, 2, 2, 1, 4, 1, 1, 1, 1]);
     }
 
     #[test]
@@ -856,6 +913,8 @@ by = "james"
             "call = \"api\"\nkind = \"http\"\nreceiver = true",
             "call = \"api.request\"\nkind = \"http\"\nmethod = \"get\"\npath_arg = 0\nlanguages = [\"typescript\"]",
             "call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 0\nbroker = \"nats\"",
+            "call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2",
+            "call = \"Table\"\nkind = \"data_entity\"\nflavor = \"sql\"\nname_arg = 0\norigin = \"human\"",
         ];
         let bad = [
             ("call = \"api\"\nkind = \"http\"\nreceiver = true\nmethod = \"GET\"", "receiver"),
@@ -868,6 +927,13 @@ by = "james"
             ("call = \"publish\"\nkind = \"queue_producer\"\nreceiver = true\ntopic_arg = 0", "receiver"),
             ("call = \"req uest\"\nkind = \"http\"\nreceiver = true", "bare callee"),
             ("call = \"api\"\nkind = \"http\"\nreceiver = true\nlanguages = [\"TypeScript\"]", "language"),
+            ("call = \"NewCollection\"\nkind = \"data_entity\"", "needs name_arg"),
+            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 9", "<= 8"),
+            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nflavor = \"kv\"", "kv"),
+            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\ntopic_arg = 0", "data_entity takes no"),
+            ("call = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\nreceiver = true", "receiver"),
+            ("call = \"publish\"\nkind = \"queue_producer\"\ntopic_arg = 0\nname_arg = 1", "flavor / name_arg"),
+            ("call = \"request\"\nkind = \"http\"\nmethod = \"GET\"\npath_arg = 0\nflavor = \"sql\"", "flavor / name_arg"),
         ];
         for body in ok {
             let l = parse_str(&format!("version = 1\n[[wrapper]]\n{body}\n"));
@@ -882,6 +948,16 @@ by = "james"
         let r = parse_str(&format!("version = 1\n[[wrapper]]\n{}\n", ok[0]));
         let w = r.config.wrapper[0].get_ref();
         assert_eq!((w.wrapper_kind(), w.path_arg_index()), (Some(WrapperKind::Http), Some(0)));
+        // data_entity: the flavor defaults to nosql; a declared one is kept.
+        for (body, flavor, origin) in [(ok[3], "nosql", Origin::Llm), (ok[4], "sql", Origin::Human)] {
+            let r = parse_str(&format!("version = 1\n[[wrapper]]\n{body}\n"));
+            let w = r.config.wrapper[0].get_ref();
+            assert_eq!(
+                (w.wrapper_kind(), w.entity_flavor(), w.origin),
+                (Some(WrapperKind::DataEntity), Some(flavor), origin),
+                "{body}"
+            );
+        }
     }
 
     #[test]

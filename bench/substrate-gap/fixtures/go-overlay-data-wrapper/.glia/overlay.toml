@@ -1,0 +1,8 @@
+version = 1
+
+[[wrapper]]
+call = "NewCollection"
+kind = "data_entity"
+flavor = "nosql"
+name_arg = 2
+origin = "human"

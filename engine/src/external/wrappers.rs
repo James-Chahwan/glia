@@ -14,10 +14,16 @@
 //!   case-insensitively so C#'s `Get(` and Dart's `get(` both read; the path
 //!   is argument `path_arg`, default 0);
 //! - `kind = "queue_producer"` / `"queue_consumer"`: `topic_arg`, and an
-//!   optional `broker` (a queue family tag: `kafka`, `nats`, ...).
+//!   optional `broker` (a queue family tag: `kafka`, `nats`, ...);
+//! - `kind = "data_entity"` (LG.3d): `name_arg` and a `flavor` (`sql` /
+//!   `nosql` / `graph`, default `nosql`), a project-local table / collection
+//!   constructor such as quokka's `NewCollection[T](client, db, "rooms")`,
+//!   whose driver call (`.Collection(name)`) the data-entity extractor sees
+//!   only with a variable.
 //!
 //! SITES. A hit is `<call>(` (receiver: `<call>.<verb>(`), with an optional
-//! `<...>` type-argument list before the paren (`api.get<Order[]>(`), where
+//! generic argument list, `<...>` or `[...]`, directly before the paren
+//! (`api.get<Order[]>(`, `NewCollection[chatModels.ChatPreview](`), where
 //! the byte before `<call>` is not an identifier byte (`xrequest(` does not
 //! match; `this.request(` / `this.api.get(` do) and, for the plain form, the
 //! name ends at the paren (`requestId(` does not match). Per needle (one per
@@ -40,10 +46,14 @@
 //!   commas. An identity argument must be exactly ONE string literal (an
 //!   optional `name=` / `name:` label and an `f` / `r` / `b` / `u` / `$` /
 //!   `@` prefix are allowed; a Ruby / Elixir `:symbol` for a method or a
-//!   topic). Anything else (`request(v, p)`, `BASE + '/users'`) carries no
-//!   identity and mints nothing (`skipped_nonliteral`). A literal method that
-//!   is not an HTTP verb, an empty path or a topic `fold_topic` rejects is
-//!   `skipped_invalid`.
+//!   topic or an entity name). Anything else (`request(v, p)`,
+//!   `BASE + '/users'`, a `{placeholder}` in a topic or entity name) carries
+//!   no identity and mints nothing (`skipped_nonliteral`). A literal method
+//!   that is not an HTTP verb, an empty path, a topic `fold_topic` rejects,
+//!   or an entity name that is empty, longer than [`MAX_ENTITY_NAME`] bytes
+//!   or holds whitespace, a control character or `/` is `skipped_invalid`.
+//!   The extractor's noise-word gate is NOT applied to an entity name: the
+//!   stanza is an explicit declaration.
 //!
 //! WHY NOT `queue_topic::scan`. The packet named it as the argument reader;
 //! it is the TOPIC reader: `fold_topic` trims trailing `)` / `]` / `}` and
@@ -66,7 +76,16 @@
 //!   `queue_consumer:<topic>`, POSITION at the first site, a CODE cell
 //!   `{"framework":<broker|"wrapper">,["family":<broker>,]"sites":[...]}`),
 //!   the module CONTAINS edge and the owner edge (`owner -USES-> producer`,
-//!   `consumer -HANDLED_BY-> owner`).
+//!   `consumer -HANDLED_BY-> owner`);
+//! - data_entity: the DATA_ENTITY `data_entity:<flavor>:<name>`, the qname
+//!   (and nav name, and module parent) the data-entity extractor mints, so a
+//!   wrapper site and a driver call collapse onto one node and `DbResolver` /
+//!   SHARES_DATA_ENTITY pair it; POSITION at its first site in the file, and
+//!   one `owner -ACCESSES_DATA-> entity` edge per owner (function-level; no
+//!   module edge is added, and an extractor edge is left as it is). An
+//!   owner edge the parse already holds (the extractor's module edge for a
+//!   module-level site, a second site in one function) is a `duplicate`; a
+//!   node it already holds is re-used and keeps its cells.
 //!
 //! A minted node takes the stanza's confidence (`Origin::confidence`: `llm`
 //! Weak, `human` Medium) and an ORIGIN cell
@@ -83,7 +102,8 @@
 //! first; the http half BEFORE the endpoint fold (so a `${X}` wrapper path
 //! folds like any other) and the queue half after the LA.4 queue const fold
 //! (which rebuilds a file's queue nodes from the queue scan and would drop a
-//! wrapper node minted earlier), both above the LB.8 owner pass, so minted
+//! wrapper node minted earlier); the data_entity sites mint in that late
+//! (`Phase::Queue`) half too. All above the LB.8 owner pass, so minted
 //! nodes are owner-qualified, and above the A16.4 IMPORTS filter, which
 //! rewrites the raw IMPORTS cell they take here. Post-cache, so cached parses
 //! get it too and the cache never holds a wrapper node. Only when the build
@@ -93,7 +113,7 @@
 //!
 //! Marker, once per repo whose overlay keeps a `[[wrapper]]` stanza (the
 //! fired_on line):
-//!   `[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> receiver=<r>)`
+//!   `[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> data_entity=<e> receiver=<r>)`
 //! `sites = minted + duplicate + skipped_*`; `minted` counts sites that added
 //! a sink (a node, or an edge to one), split by kind; `receiver` counts the
 //! http ones read through a client receiver; `skipped_invalid` also counts
@@ -128,8 +148,12 @@ const DEF_KEYWORDS: &[&str] = &["function", "def", "fn", "func", "fun"];
 /// A line whose trimmed text starts with one of these is a comment.
 const COMMENT_STARTS: &[&str] = &["//", "#", "*", "--", "/*"];
 
-/// Longest `<...>` type-argument list stepped over between a callee and `(`.
+/// Longest `<...>` / `[...]` generic argument list stepped over between a
+/// callee and `(`.
 const MAX_TYPE_ARGS: usize = 256;
+
+/// Longest data_entity name, in bytes (the stanza-id bound).
+const MAX_ENTITY_NAME: usize = 128;
 
 /// Call sites recorded in a queue node's CODE cell (the queue scanner's cap).
 const MAX_SITES: usize = 16;
@@ -157,10 +181,14 @@ impl Stanza<'_> {
         format!("wrapper#{}", self.ordinal)
     }
 
+    /// The data_entity sites mint in the late half: the grafts call only
+    /// these two phases, and nothing between them touches a DATA_ENTITY.
     fn phase(&self) -> Phase {
         match self.kind {
             WrapperKind::Http => Phase::Http,
-            WrapperKind::QueueProducer | WrapperKind::QueueConsumer => Phase::Queue,
+            WrapperKind::QueueProducer | WrapperKind::QueueConsumer | WrapperKind::DataEntity => {
+                Phase::Queue
+            }
         }
     }
 
@@ -186,6 +214,10 @@ enum Read {
     },
     Queue {
         topic: String,
+    },
+    /// A data_entity name, verbatim.
+    Entity {
+        name: String,
     },
 }
 
@@ -224,6 +256,7 @@ pub(crate) struct WrapperTally {
     pub(crate) http: usize,
     pub(crate) queue_producer: usize,
     pub(crate) queue_consumer: usize,
+    pub(crate) data_entity: usize,
     pub(crate) receiver: usize,
 }
 
@@ -234,7 +267,7 @@ impl WrapperTally {
             Read::Comment => self.skipped_comment += 1,
             Read::NonLiteral => self.skipped_nonliteral += 1,
             Read::Invalid => self.skipped_invalid += 1,
-            Read::Http { .. } | Read::Queue { .. } => {}
+            Read::Http { .. } | Read::Queue { .. } | Read::Entity { .. } => {}
         }
     }
 
@@ -245,6 +278,7 @@ impl WrapperTally {
         self.http += m.http;
         self.queue_producer += m.queue_producer;
         self.queue_consumer += m.queue_consumer;
+        self.data_entity += m.data_entity;
         self.receiver += m.receiver;
     }
 }
@@ -344,7 +378,10 @@ impl<'c> WrapperPass<'c> {
                     self.stanzas
                         .get(s.stanza)
                         .is_some_and(|st| st.phase() == phase)
-                        && matches!(s.read, Read::Http { .. } | Read::Queue { .. })
+                        && matches!(
+                            s.read,
+                            Read::Http { .. } | Read::Queue { .. } | Read::Entity { .. }
+                        )
                 })
                 .collect();
             if sites.is_empty() {
@@ -372,7 +409,11 @@ impl<'c> WrapperPass<'c> {
             let stanzas = &self.stanzas;
             let minted = catch_unwind(AssertUnwindSafe(|| match phase {
                 Phase::Http => mint_http(fp, &sites, stanzas, &at),
-                Phase::Queue => mint_queue(fp, &sites, stanzas, &at),
+                Phase::Queue => {
+                    let mut t = mint_queue(fp, &sites, stanzas, &at);
+                    t.add_mint(mint_entities(fp, &sites, stanzas, &at));
+                    t
+                }
             }));
             match minted {
                 Ok(m) => self.tally.add_mint(m),
@@ -385,7 +426,7 @@ impl<'c> WrapperPass<'c> {
     pub(crate) fn report(&self, repo_label: &str) {
         let t = &self.tally;
         eprintln!(
-            "[overlay] wrappers repo={repo_label} stanzas={} sites={} minted={} duplicate={} skipped_nonliteral={} skipped_comment={} skipped_invalid={} (http={} queue_producer={} queue_consumer={} receiver={})",
+            "[overlay] wrappers repo={repo_label} stanzas={} sites={} minted={} duplicate={} skipped_nonliteral={} skipped_comment={} skipped_invalid={} (http={} queue_producer={} queue_consumer={} data_entity={} receiver={})",
             t.stanzas,
             t.sites,
             t.minted,
@@ -396,6 +437,7 @@ impl<'c> WrapperPass<'c> {
             t.http,
             t.queue_producer,
             t.queue_consumer,
+            t.data_entity,
             t.receiver
         );
     }
@@ -496,7 +538,7 @@ fn call_hits(source: &str, call: &str, receiver: bool) -> Vec<Hit> {
         } else {
             None
         };
-        if b.get(at) == Some(&b'<') {
+        if matches!(b.get(at), Some(b'<' | b'[')) {
             match skip_type_args(b, at) {
                 Some(end) => at = end,
                 None => continue,
@@ -521,21 +563,28 @@ fn call_hits(source: &str, call: &str, receiver: bool) -> Vec<Hit> {
     out
 }
 
-/// The byte after a balanced `<...>` starting at `at`, on one line and within
-/// [`MAX_TYPE_ARGS`] bytes; `None` for anything that is not a type-argument
-/// list (a comparison, an arrow type).
+/// The byte after a balanced generic argument list starting at `at`: `<...>`
+/// (TypeScript / Java / C# / Dart) or `[...]` (Go, Scala), nested lists of
+/// either kind matched pairwise (`<Order[]>`, `[map[string]int]`), ASCII, on
+/// one line and within [`MAX_TYPE_ARGS`] bytes. `None` for anything that is
+/// not a generic argument list (a comparison, an arrow type, a mismatched or
+/// unclosed bracket).
 fn skip_type_args(b: &[u8], at: usize) -> Option<usize> {
-    let mut depth = 0usize;
+    let mut open: Vec<u8> = Vec::new();
     for (k, &c) in b.get(at..)?.iter().enumerate().take(MAX_TYPE_ARGS) {
         match c {
-            b'<' => depth += 1,
-            b'>' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
+            b'<' | b'[' => open.push(c),
+            b'>' | b']' => {
+                let want = if c == b'>' { b'<' } else { b'[' };
+                if open.pop()? != want {
+                    return None;
+                }
+                if open.is_empty() {
                     return Some(at + k + 1);
                 }
             }
             b'\n' | b'\r' | b';' | b'(' | b')' | b'=' => return None,
+            _ if !c.is_ascii() => return None,
             _ => {}
         }
     }
@@ -735,6 +784,30 @@ fn read_args(region: &str, verb: Option<&'static str>, st: &Stanza<'_>) -> Read 
                 None => Read::Invalid,
             }
         }
+        WrapperKind::DataEntity => match arg(st.decl.name_arg) {
+            None => Read::NonLiteral,
+            Some(lit) => entity_read(lit.body),
+        },
+    }
+}
+
+/// A data_entity name literal: a `{placeholder}` names no entity; the name
+/// is kept verbatim when it is 1..=[`MAX_ENTITY_NAME`] bytes with no
+/// whitespace, control character or `/`.
+fn entity_read(body: &str) -> Read {
+    if body.contains('{') {
+        return Read::NonLiteral;
+    }
+    if body.is_empty()
+        || body.len() > MAX_ENTITY_NAME
+        || body
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '/')
+    {
+        return Read::Invalid;
+    }
+    Read::Entity {
+        name: body.to_string(),
     }
 }
 
@@ -1139,7 +1212,7 @@ fn mint_queue(
         let (kind, prefix) = match st.kind {
             WrapperKind::QueueProducer => (node_kind::QUEUE_PRODUCER, "queue_producer:"),
             WrapperKind::QueueConsumer => (node_kind::QUEUE_CONSUMER, "queue_consumer:"),
-            WrapperKind::Http => continue,
+            WrapperKind::Http | WrapperKind::DataEntity => continue,
         };
         let qname = format!("{prefix}{topic}");
         let id = NodeId::from_parts(GRAPH_TYPE, at.repo, kind, &qname);
@@ -1239,6 +1312,70 @@ fn mint_queue(
     t
 }
 
+/// The data_entity half (LG.3d): per site, the DATA_ENTITY the data-entity
+/// extractor would mint for `(flavor, name)` and the ACCESSES_DATA edge from
+/// the innermost METHOD / FUNCTION holding the site (the module when none).
+fn mint_entities(
+    fp: &mut FileParse,
+    sites: &[&Site],
+    stanzas: &[Stanza<'_>],
+    at: &FileAt<'_>,
+) -> WrapperTally {
+    let mut t = WrapperTally::default();
+    let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
+    let mut known: HashSet<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
+    let mut owned: HashSet<(NodeId, NodeId)> = fp
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::ACCESSES_DATA)
+        .map(|e| (e.from, e.to))
+        .collect();
+    let mut fresh: Vec<Node> = Vec::new();
+    for site in sites {
+        let (Some(st), Read::Entity { name }) = (stanzas.get(site.stanza), &site.read) else {
+            continue;
+        };
+        // The loader drops a stanza whose flavor is not one of the three.
+        let Some(flavor) = st.decl.entity_flavor() else {
+            t.skipped_invalid += 1;
+            continue;
+        };
+        let qname = format!("data_entity:{flavor}:{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, at.repo, node_kind::DATA_ENTITY, &qname);
+        let owner = anchor::owner_of_line(&idx, site.line0).unwrap_or(at.module_id);
+        if !owned.insert((owner, id)) {
+            t.duplicate += 1;
+            continue;
+        }
+        let origin = st.decl.origin;
+        if known.insert(id) {
+            fresh.push(Node {
+                id,
+                repo: at.repo,
+                confidence: origin.confidence(),
+                cells: vec![
+                    anchor::position_cell(at.path, site.line0),
+                    origin_cell(origin, &st.rule()),
+                ],
+            });
+            fp.nav
+                .record(id, name, &qname, node_kind::DATA_ENTITY, Some(at.module_id));
+        }
+        let mut e = Edge::new(owner, id, edge_category::ACCESSES_DATA, origin.confidence());
+        evidence::attach(
+            &mut e,
+            Evidence::emitter(EMITTER)
+                .rule(st.rule())
+                .at(at.path, site.line0),
+        );
+        fp.edges.push(e);
+        t.minted += 1;
+        t.data_entity += 1;
+    }
+    graft_nodes(fp, fresh, at.lang);
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,10 +1384,12 @@ mod tests {
     fn sites(overlay: &str, source: &str, lang: &str) -> Vec<Site> {
         let cfg = parse_str(overlay);
         assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
-        let files = vec![(
-            format!("src/a.{}", if lang == "python" { "py" } else { "ts" }),
-            source.to_string(),
-        )];
+        let ext = match lang {
+            "python" => "py",
+            "go" => "go",
+            _ => "ts",
+        };
+        let files = vec![(format!("src/a.{ext}"), source.to_string())];
         let mut errors = Vec::new();
         let pass = WrapperPass::scan(Some(&cfg), &files, &mut errors).expect("a wrapper stanza");
         assert!(errors.is_empty(), "{errors:?}");
@@ -1402,6 +1541,70 @@ mod tests {
             .collect();
         assert_eq!(got.first(), Some(&http("GET", "/ü/é")));
         assert_eq!(got.get(1), Some(&Read::Comment));
+    }
+
+    const COLLECTION: &str = "version = 1\n[[wrapper]]\ncall = \"NewCollection\"\nkind = \"data_entity\"\nname_arg = 2\n";
+
+    fn entity(name: &str) -> Read {
+        Read::Entity { name: name.into() }
+    }
+
+    #[test]
+    fn entity_names_are_read_verbatim_and_checked() {
+        let long = "x".repeat(MAX_ENTITY_NAME + 1);
+        let src = format!(
+            "package r\n\n\
+             func NewCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {{\n\treturn nil\n}}\n\
+             func A() {{ NewCollection[ChatPreview](c, d, \"chat_previews\") }}\n\
+             func B() {{ NewCollection[map[string]int](c, d, `raw.maps`) }}\n\
+             // NewCollection[ChatPreview](c, d, \"legacy_previews\")\n\
+             func C(name string) {{ NewCollection[T](c, d, name) }}\n\
+             func D() {{ NewCollection[T](c, d, \"a b\"); NewCollection[T](c, d, \"a/b\"); NewCollection[T](c, d, \"\") }}\n\
+             func E() {{ NewCollection[T](c, d, \"{long}\"); NewCollection[T](c, d, \"rooms_{{id}}\") }}\n\
+             func F() {{ NewCollection(c, d, \"plain\"); NewCollection [T](c, d, \"spaced\"); NewCollection[T>(c, d, \"mismatched\") }}\n"
+        );
+        let got: Vec<Read> = sites(COLLECTION, &src, "go")
+            .into_iter()
+            .map(|s| s.read)
+            .collect();
+        assert_eq!(
+            got,
+            [
+                entity("chat_previews"),
+                entity("raw.maps"),
+                Read::Comment,
+                Read::NonLiteral,
+                Read::Invalid,
+                Read::Invalid,
+                Read::Invalid,
+                Read::Invalid,
+                Read::NonLiteral,
+                entity("plain"),
+            ]
+        );
+    }
+
+    #[test]
+    fn generic_lists_are_ascii_bounded_and_balanced() {
+        let b = |s: &str| skip_type_args(s.as_bytes(), 0);
+        assert_eq!(b("[ChatPreview]("), Some(13));
+        assert_eq!(b("<Map<string, Order[]>>("), Some(22));
+        assert_eq!(b("[map[string]int]("), Some(16));
+        for bad in ["[T>(", "<T](", "[T", "<T\n>(", "<Ü>(", "[a=b]("] {
+            assert_eq!(b(bad), None, "{bad:?}");
+        }
+        // A comparison closes its `<...>` run, but no `(` follows directly.
+        assert!(call_hits("ok = less<b && c > (d);", "less", false).is_empty());
+        assert!(call_hits("ok = less < b && c > (d);", "less", false).is_empty());
+        let long = format!("<{}>(", "T".repeat(MAX_TYPE_ARGS));
+        assert_eq!(b(&long), None, "longer than MAX_TYPE_ARGS");
+        // Every kind gets the tolerance: a TypeScript generic http helper.
+        let src = "export async function f() { return request<User[]>('GET', '/users'); }\n";
+        let got: Vec<Read> = sites(REQUEST, src, "typescript")
+            .into_iter()
+            .map(|s| s.read)
+            .collect();
+        assert_eq!(got, [http("GET", "/users")]);
     }
 
     #[test]

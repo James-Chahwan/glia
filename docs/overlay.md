@@ -65,6 +65,12 @@ topic_arg = 0
 broker = "nats"                           # optional framework tag
 languages = ["typescript"]                # optional: engine language names; empty = all
 
+[[wrapper]]                               # NewCollection[Room](c, db, "rooms") -> DATA_ENTITY data_entity:nosql:rooms
+call = "NewCollection"
+kind = "data_entity"
+flavor = "nosql"                          # sql | nosql | graph; default nosql
+name_arg = 2                              # required: the argument holding the table / collection name
+
 [[edge]]
 from = "web::src::report::loadReport"
 to = "api::report::build_report"
@@ -95,6 +101,60 @@ by = "james"
 Stanza ids are 1-128 characters with no control characters, unique within their section.
 Every `*_arg` is a 0-based positional index, at most 8.
 
+## `[[wrapper]]`: call sites of a project's own helpers
+
+A wrapper stanza names a callee (`call`: a bare or dotted name such as `request`,
+`api.request` or `NewCollection`). Every call site of it mints the node a direct call
+to the framework would have minted, with an edge from the function that holds the site
+(the file's module when no function does).
+
+| `kind` | identity from | mints |
+|---|---|---|
+| `http` | `method_arg` or a fixed `method`, plus `path_arg`; or `receiver = true` (`api.get('/x')`: the member verb is the method, the path is `path_arg`, default 0) | the client ENDPOINT, `owner -CALLS-> endpoint` |
+| `queue_producer` / `queue_consumer` | `topic_arg`, optional `broker` | `queue_producer:<topic>` / `queue_consumer:<topic>`, `owner -USES-> producer` / `consumer -HANDLED_BY-> owner` |
+| `data_entity` | `name_arg` (required), `flavor` = `sql` / `nosql` / `graph` (default `nosql`) | DATA_ENTITY `data_entity:<flavor>:<name>`, `owner -ACCESSES_DATA-> entity` |
+
+`data_entity` is for a project-local constructor that every repository goes through,
+where the table or collection name is an argument and the database driver call inside
+the constructor sees only a variable:
+
+```go
+func NewCollection[T any](client *mongo.Client, database string, name string) *Collection[T] {
+	return &Collection[T]{inner: client.Database(database).Collection(name)}
+}
+
+func NewChatPreviewRepository(client *mongo.Client, database string) *ChatPreviewRepository {
+	return &ChatPreviewRepository{collection: NewCollection[ChatPreview](client, database, "chat_previews")}
+}
+```
+
+With `call = "NewCollection"`, `kind = "data_entity"`, `name_arg = 2`, the call site mints
+`data_entity:nosql:chat_previews` with an ACCESSES_DATA edge from
+`NewChatPreviewRepository`. The qname is the one the data-entity extractor gives a direct
+`.Collection("chat_previews")` call, so a wrapper site and a driver call collapse onto one
+node, and the cross-service DB resolver pairs it like any other entity. A `sql` wrapper
+works the same way (`Table("orders")` -> `data_entity:sql:orders`).
+
+Rules shared by every kind:
+
+- A generic argument list between the name and the paren is stepped over:
+  `NewCollection[ChatPreview](`, `create<User>(`, `api.get<Order[]>(`. It must follow the
+  name directly (no space), stay on one line and close within 256 bytes, so `a < b && c > (d)`
+  is never a call.
+- The definition of the callee is not a call site (`func NewCollection[T any](...)`,
+  `function request(...)`, a typed parameter list that opens a body).
+- A call in a comment is counted as `skipped_comment` and mints nothing.
+- The identity argument must be exactly one string literal (a Ruby / Elixir `:symbol`
+  also works for a method, a topic or an entity name). Anything else (a variable,
+  a concatenation, a `${x}` placeholder in a topic or entity name) is `skipped_nonliteral`.
+- A `data_entity` name must be at most 128 bytes with no whitespace, control character
+  or `/`; otherwise the site is `skipped_invalid`.
+
+Every build whose overlay keeps a wrapper stanza prints one line:
+`[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> data_entity=<e> receiver=<r>)`.
+A `duplicate` is a site whose node and owner edge the file already holds (an extractor
+caught the same call, or two stanzas match one call).
+
 ## Validation
 
 Every table rejects unknown keys, so a typo is an error, not a silently ignored line. Errors
@@ -107,7 +167,8 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
   - an `[[edge]]` category that is not an edge category name, or is `DEFINES`, `CONTAINS`
     or `CO_CHANGES`
   - a `route_prefix` that does not start with `/` or contains whitespace
-  - a wrapper whose argument layout does not fit its kind
+  - a wrapper whose argument layout does not fit its kind (a `data_entity` wrapper without
+    `name_arg`, or with a `flavor` other than `sql` / `nosql` / `graph`)
   - an unknown constraint kind, or one missing its required fields
   - a duplicate id
   - a constant name outside `[A-Za-z_][A-Za-z0-9_.]*`
