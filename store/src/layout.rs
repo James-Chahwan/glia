@@ -142,6 +142,31 @@ struct SchemaProbe {
     schema_version: u32,
 }
 
+/// The fields of a `manifest.json` that say why a layout cannot be served and
+/// where its repos live, parsed from a manifest of ANY schema (LC.8): a 0.4.x
+/// manifest (schema 1, no `repos`) or one whose shards no longer open still
+/// yields its schema number and build stamp, so a loader can name the reason
+/// for a rebuild and find the roots to rebuild from. Every other field is
+/// ignored.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[non_exhaustive]
+pub struct LenientManifest {
+    pub schema_version: u32,
+    /// `""` when the manifest predates the field (pre-0.4.19).
+    #[serde(default)]
+    pub build_stamp: String,
+    /// Empty for a manifest written without layout metadata (every 0.4.x one).
+    #[serde(default)]
+    pub repos: Vec<RepoMeta>,
+}
+
+/// [`LenientManifest`] of the layout at `dir`. `None` when `manifest.json` is
+/// missing, unreadable, not JSON, or has no numeric `schema_version`.
+pub fn read_manifest_lenient(dir: &Path) -> Option<LenientManifest> {
+    let bytes = std::fs::read(dir.join(MANIFEST_NAME)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// Read `<dir>/manifest.json`, checking the schema number first.
 fn read_manifest(dir: &Path) -> Result<Manifest, StoreError> {
     let bytes = std::fs::read(dir.join(MANIFEST_NAME))?;
@@ -222,12 +247,13 @@ pub fn write_sharded_meta(
         let content_hash = hex_xxhash64(&bytes);
 
         // Skip-when-unchanged: write only if the prior manifest didn't
-        // already report this hash for this shard name AND the file exists.
-        let unchanged = prior_manifest.as_ref().map(|m| {
-            m.shards.iter().any(|e| e.name == *name
-                && e.content_hash == content_hash
-                && dir.join(&e.path).exists())
-        }).unwrap_or(false);
+        // already report this hash for this shard name AND the file on disk
+        // still holds exactly these bytes. Existence alone is not enough: a
+        // shard damaged after its write keeps its name and its manifest entry,
+        // and a rebuild must replace it (LC.8), not skip it forever.
+        let unchanged = prior_manifest.as_ref().is_some_and(|m| {
+            m.shards.iter().any(|e| e.name == *name && e.content_hash == content_hash)
+        }) && on_disk_is(&shard_path, &bytes);
         if !unchanged {
             write_atomic(&shard_path, &bytes)?;
         } else {
@@ -248,10 +274,11 @@ pub fn write_sharded_meta(
         let mut container = Container::for_cross_edges(cross_edges.to_vec());
         let bytes = encode_file(&mut container, &[])?;
         let content_hash = hex_xxhash64(&bytes);
-        let unchanged = prior_manifest.as_ref()
+        let unchanged = prior_manifest
+            .as_ref()
             .and_then(|m| m.cross.as_ref())
-            .map(|c| c.content_hash == content_hash && dir.join(&c.path).exists())
-            .unwrap_or(false);
+            .is_some_and(|c| c.content_hash == content_hash)
+            && on_disk_is(&shard_path, &bytes);
         if !unchanged {
             write_atomic(&shard_path, &bytes)?;
         } else {
@@ -304,6 +331,13 @@ pub fn write_sharded_meta(
         );
     }
     Ok(manifest)
+}
+
+/// Does `path` hold exactly `bytes`? The length is checked before the read,
+/// so a changed shard of another size costs one `stat`.
+fn on_disk_is(path: &Path, bytes: &[u8]) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() == bytes.len() as u64)
+        && std::fs::read(path).is_ok_and(|b| b == bytes)
 }
 
 /// A sharded layout opened zero-copy. Each per-shard `.gmap` is its own mmap'd
@@ -876,6 +910,51 @@ mod tests {
         assert_eq!(empty, LayoutMeta::default());
     }
 
+    /// LC.8: the lenient read yields schema, stamp and roots from any schema,
+    /// and nothing from a missing or unparseable manifest.
+    #[test]
+    fn lenient_manifest_reads_any_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_manifest_lenient(tmp.path()), None, "no manifest");
+
+        let v1 = tmp.path().join("v1");
+        std::fs::create_dir_all(&v1).unwrap();
+        std::fs::write(
+            v1.join(MANIFEST_NAME),
+            r#"{"schema_version":1,"engine_version":"0.4.18",
+               "build_stamp":"0.4.18+p3d23e8828e7ba01a",
+               "shards":[{"name":"repo-7","path":"repo-7.gmap","content_hash":"00"}]}"#,
+        )
+        .unwrap();
+        let m = read_manifest_lenient(&v1).unwrap();
+        assert_eq!((m.schema_version, m.build_stamp.as_str()), (1, "0.4.18+p3d23e8828e7ba01a"));
+        assert!(m.repos.is_empty());
+
+        let g = empty_graph("test://lc8-lenient");
+        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], cross_edges: vec![] };
+        let meta = LayoutMeta {
+            repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()) }],
+            parse_errors: vec![],
+        };
+        let v2 = tmp.path().join("v2");
+        write_merged_sharded_meta(&merged, &meta, &v2).unwrap();
+        // Unreadable shards do not matter: only the manifest is read.
+        for e in std::fs::read_dir(&v2).unwrap().flatten() {
+            if e.file_name().to_string_lossy().ends_with(".gmap") {
+                std::fs::write(e.path(), b"garbage").unwrap();
+            }
+        }
+        let m = read_manifest_lenient(&v2).unwrap();
+        assert_eq!(m.schema_version, MANIFEST_VERSION);
+        assert_eq!(m.build_stamp, repo_graph_stamp::BUILD_STAMP);
+        assert_eq!(m.repos, meta.repos);
+
+        std::fs::write(v2.join(MANIFEST_NAME), b"{not json").unwrap();
+        assert_eq!(read_manifest_lenient(&v2), None, "unparseable");
+        std::fs::write(v2.join(MANIFEST_NAME), br#"{"shards":[]}"#).unwrap();
+        assert_eq!(read_manifest_lenient(&v2), None, "no schema_version");
+    }
+
     #[test]
     fn write_sharded_skips_unchanged_shards_on_rewrite() {
         // Phase 1 incremental rebuild test: write a sharded layout twice
@@ -933,6 +1012,34 @@ mod tests {
         assert_eq!(mtime_a_before, mtime_a_after, "shard a was rewritten despite unchanged input");
         assert_eq!(mtime_b_before, mtime_b_after, "shard b was rewritten despite unchanged input");
         assert_eq!(mtime_m_before, mtime_m_after, "manifest was rewritten despite unchanged input");
+    }
+
+    /// LC.8: a shard damaged after its write keeps its manifest entry, so the
+    /// manifest alone says "unchanged". The rewrite must check the bytes on
+    /// disk and replace it, or a rebuild never repairs the layout.
+    #[test]
+    fn write_sharded_rewrites_a_damaged_shard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = empty_graph("test://lc8-damaged");
+        let cross = vec![Edge {
+            from: NodeId(1),
+            to: NodeId(2),
+            category: EdgeCategoryId(1),
+            confidence: repo_graph_core::Confidence::Strong,
+        }];
+        write_sharded(&[("a", &g)], &cross, tmp.path()).unwrap();
+        let good_a = std::fs::read(tmp.path().join("a.gmap")).unwrap();
+        let good_x = std::fs::read(tmp.path().join(CROSS_STACK_NAME)).unwrap();
+        std::fs::write(tmp.path().join("a.gmap"), &good_a[..good_a.len() / 2]).unwrap();
+        let mut flipped = good_x.clone();
+        flipped[0] ^= 0xff;
+        std::fs::write(tmp.path().join(CROSS_STACK_NAME), &flipped).unwrap();
+        assert!(read_merged_sharded(tmp.path()).is_err(), "damaged layout must not load");
+
+        write_sharded(&[("a", &g)], &cross, tmp.path()).unwrap();
+        assert_eq!(std::fs::read(tmp.path().join("a.gmap")).unwrap(), good_a);
+        assert_eq!(std::fs::read(tmp.path().join(CROSS_STACK_NAME)).unwrap(), good_x);
+        read_merged_sharded(tmp.path()).unwrap();
     }
 
     #[test]

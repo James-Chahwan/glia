@@ -1,4 +1,4 @@
 # pyo3 surface of py/src/layout.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
 fn default_gmap_dir(repo_path: &str) -> String
 fn is_stale(gmap_dir: &str, repo_path: &str) -> bool
-fn load_from_gmap(dir: &str) -> PyResult<PyGraph>
+fn load_from_gmap(dir: &str, repo_path: Option<&str> = None, rebuild: bool = true) -> PyResult<PyGraph>

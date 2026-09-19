@@ -6,26 +6,41 @@ use std::path::Path;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_engine::persist::{default_layout_dir, load_layout};
+use repo_graph_engine::persist::{default_layout_dir, load_or_rebuild};
 use repo_graph_store::is_gmap_stale;
 
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
-/// Load a previously-generated graph from a sharded `.gmap` directory.
-/// `dir` must contain `manifest.json` + the per-shard `.gmap` files written by
-/// `PyGraph.save_to` / `save_to_default` / `generate`'s auto-persist. Returns a
-/// `PyGraph` whose downstream methods (node_count, dense_text, activate,
-/// service_map, …) behave like the fresh `generate()` result that was saved:
-/// repo labels, repo roots, parse errors and `RepoGraph.properties` are all
-/// persisted (LC.7). A layout written without that metadata loads with none,
-/// so `service_map` names its repos `repo<id>`. The error text is the engine's
-/// `LoadError`, ending "rebuild the graph" when regenerating is the fix.
+/// Load a graph from a sharded `.gmap` directory, rebuilding it first when it
+/// cannot be served as it is (LC.8, `repo_graph_engine::persist::load_or_rebuild`).
+///
+/// `dir` is a layout written by `PyGraph.save_to` / `save_to_default` /
+/// `generate`'s auto-persist / `glia build`. When it is current it loads as
+/// is: a `PyGraph` whose methods (node_count, dense_text, activate,
+/// service_map, …) behave like the fresh `generate()` result that was saved,
+/// with repo labels, roots, parse errors and `RepoGraph.properties` (LC.7).
+///
+/// When it is not (an older format, another glia build, sources changed since
+/// the write, a damaged or missing shard, or no layout at all) and `rebuild`
+/// is true, it is rebuilt from `repo_path`, or when that is None from the repo
+/// roots its manifest records (every layout 0.5.0 writes records them), and
+/// the rebuilt graph is WRITTEN BACK into `dir`, replacing the old layout,
+/// unless `GLIA_NO_PERSIST=1` (then nothing is written: not the layout, not
+/// the parse cache). A single-repo rebuild reads and saves the repo's parse
+/// cache. Each rebuild prints `[gmap] rebuilt <dir> (<reason>)` to stderr.
+///
+/// Raises ValueError when the layout needs a rebuild it cannot do (no
+/// `repo_path` and no recorded root, `rebuild=False`, a recorded root that no
+/// longer exists) with text `<dir>: needs rebuild (<reason>); <what to do>`,
+/// or when the layout cannot be read for a reason a rebuild would not fix
+/// (permissions).
 #[pyfunction]
-fn load_from_gmap(dir: &str) -> PyResult<PyGraph> {
-    load_layout(Path::new(dir))
-        .map(PyGraph::from_result)
-        .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))
+#[pyo3(signature = (dir, repo_path=None, rebuild=true))]
+fn load_from_gmap(dir: &str, repo_path: Option<&str>, rebuild: bool) -> PyResult<PyGraph> {
+    load_or_rebuild(Path::new(dir), repo_path.map(Path::new), rebuild)
+        .map(|(result, _outcome)| PyGraph::from_result(result))
+        .map_err(|e| PyValueError::new_err(format!("load_from_gmap: {e}")))
 }
 
 /// Conventional gmap directory path for a repo: `<repo>/.glia/graph` (0.4.x:
