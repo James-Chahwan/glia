@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/why.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.why(from_qname: &str, to_qname: &str, category: Option<&str> = None) -> PyResult<Py<PyAny>>

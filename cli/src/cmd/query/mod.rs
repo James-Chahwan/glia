@@ -13,6 +13,7 @@ mod flows;
 mod implementors;
 mod pages;
 mod serves;
+mod why;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueryCmd {
@@ -45,6 +46,13 @@ pub(crate) enum QueryCmd {
     /// reached it and its handlers; nothing serving it is a FACT with the
     /// mechanism's caveats and near misses. An answer either way: exits 0.
     Serves(serves::Args),
+    /// Why (LE.5): every edge from one node to another, each with the
+    /// extractor or resolver that emitted it, its rule, call site and
+    /// confidence, tiered fact (read at a site), derived (paired by a resolver
+    /// or pass) or heuristic (a name-only guess, an overlay or git history).
+    /// With no direct edge: a shortest carry path as a witness, and the
+    /// absence. Exits 0 found, 1 not found, 2 on an error.
+    Why(why::Args),
 }
 
 pub(crate) fn run(c: QueryCmd) -> i32 {
@@ -54,5 +62,6 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
+        QueryCmd::Why(a) => why::run(a),
     }
 }
