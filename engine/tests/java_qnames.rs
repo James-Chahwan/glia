@@ -13,8 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
-use repo_graph_engine::{blast_radius_by_qname, generate_one, locate_node};
-use repo_graph_graph::MergedGraph;
+use repo_graph_engine::{BlastOptions, blast_radius, generate_one, locate_node};
+use repo_graph_graph::{MergedGraph, Reach};
 
 const MODULE: &str = "src::main::java::com::example::billing::InvoiceService";
 const TOTAL: &str = "src::main::java::com::example::billing::InvoiceService::total";
@@ -82,8 +82,11 @@ fn no_qname_doubles_the_file_stem() {
 #[test]
 fn blast_radius_by_the_package_scoped_method_qname() {
     let (_tmp, merged) = build();
-    let hits = blast_radius_by_qname(&merged, TOTAL, "forward", 4, None, false, None)
-        .expect("the package-scoped method qname resolves");
+    let mut forward = BlastOptions::default();
+    forward.direction = Reach::Forward;
+    let answer = blast_radius(&merged, &[TOTAL], &forward);
+    assert!(answer.unresolved.is_empty(), "the package-scoped method qname resolves");
+    let hits = answer.results;
     let round = hits
         .iter()
         .find(|h| h.qname == "src::main::java::com::example::billing::InvoiceService::round")

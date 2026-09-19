@@ -23,7 +23,7 @@ def main() -> int:
             c.check(f"find keeps {n['qname']}'s id exact",
                     hit and type(hit[0]["id"]) is int and hit[0]["id"] == n["id"], (hit[:1], n["id"]))
         by_id = {n["id"]: n["qname"] for n in nodes}
-        blast = g.blast_radius("app::helper")
+        blast = g.blast_radius("app::helper")["results"]
         c.check("blast ids: exact ints of nodes_json",
                 all(type(r["id"]) is int and by_id.get(r["id"]) == r["qname"] for r in blast))
         c.check("blast carries an id above 2**63", any(r["id"] >= 2**63 for r in blast))

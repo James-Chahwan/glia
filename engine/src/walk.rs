@@ -989,7 +989,7 @@ mod walk_tests {
     fn project_roots_become_edgeless_project_nodes() {
         use std::collections::HashSet;
 
-        use crate::answers::blast_radius_by_qname;
+        use crate::answers::{BlastOptions, blast_radius};
         use crate::build::{generate_many, generate_one};
 
         let root = walk_tmp("projects");
@@ -1087,11 +1087,11 @@ mod walk_tests {
         let func = m.resolve_name("apisvc").unwrap();
         assert!(!ids.contains(&func), "the degree-0 PROJECT must lose pick_primary");
         for seed in ["apisvc", "main", "core_fn", "webEntry"] {
-            let hits = blast_radius_by_qname(m, seed, "both", 4, None, false, None).unwrap();
+            let hits = blast_radius(m, &[seed], &BlastOptions::default()).results;
             assert!(hits.iter().all(|h| h.kind != "PROJECT"), "{seed}: {:?}",
                 hits.iter().map(|h| &h.qname).collect::<Vec<_>>());
         }
-        let apisvc = blast_radius_by_qname(m, "apisvc", "both", 4, None, false, None).unwrap();
+        let apisvc = blast_radius(m, &["apisvc"], &BlastOptions::default()).results;
         assert!(!apisvc.is_empty(), "the control seed has a real neighbour (main)");
 
         // Same shard slot from both entry points (regions, projects, docs).

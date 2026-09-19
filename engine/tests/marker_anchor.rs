@@ -11,7 +11,7 @@
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 use repo_graph_engine::{
-    ParseCache, blast_radius_by_qname, generate_many, generate_one, generate_one_with_cache,
+    BlastOptions, ParseCache, blast_radius, generate_many, generate_one, generate_one_with_cache,
     locate_node, node_file, service_map,
 };
 use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
@@ -320,16 +320,11 @@ fn queue_producer_is_used_by_its_function() {
     // The point of the packet: code reaches the queue sink. At HEAD the only
     // edge on the producer was the structural CONTAINS, so a forward blast
     // from the publishing function was empty.
-    let hits = blast_radius_by_qname(
-        &m,
-        "svc::bus::publishOrder",
-        "forward",
-        4,
-        None,
-        false,
-        None,
-    )
-    .expect("seed resolves");
+    let mut forward = BlastOptions::default();
+    forward.direction = repo_graph_graph::Reach::Forward;
+    let answer = blast_radius(&m, &["svc::bus::publishOrder"], &forward);
+    assert!(answer.unresolved.is_empty(), "seed resolves");
+    let hits = answer.results;
     assert!(
         hits.iter()
             .any(|h| h.qname == "queue_producer:orders" && h.reason == "USES"),

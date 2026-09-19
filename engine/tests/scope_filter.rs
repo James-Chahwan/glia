@@ -1,7 +1,7 @@
 //! A8.3 — `scope: Option<&str>` on the P3 answer-shaped primitives.
 //!
 //! Proves the two ORDERING claims, not merely that a filter exists:
-//!   - `blast_radius_by_qname` scopes BEFORE `truncate(top_k)`, so a scoped
+//!   - `blast_radius` scopes BEFORE `truncate(top_k)`, so a scoped
 //!     `--top-k` spends its budget in scope instead of on whatever PPR liked
 //!     globally (the fixture is built so the globally top-ranked node is OUT of
 //!     scope — filter-after-truncate would return nothing);
@@ -18,9 +18,10 @@
 use std::path::Path;
 
 use repo_graph_engine::{
-    GenerateResult, blast_radius_by_qname, generate_one, governing_docs, locate_node,
+    BlastAnswer, BlastOptions, GenerateResult, blast_radius, generate_one, governing_docs, locate_node,
     node_in_scope, project_roots, resolve_scope, resolve_seed, resolve_signal_located,
 };
+use repo_graph_graph::{MergedGraph, Reach};
 
 /// A three-subproject monorepo. `services/api` calls both into `shared` and
 /// within itself; `shared/util.py::call_shared` has three callers so it
@@ -95,13 +96,13 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
     let m = &result.merged;
 
     // (a) unscoped reaches across into shared/; scoped to services/api it does not.
-    let all = blast_radius_by_qname(m, "handle", "both", 4, None, false, None).unwrap();
+    let all = blast(m, "handle", Reach::Both, None, None);
     assert!(
         all.iter().any(|a| a.file.as_deref() == Some("shared/util.py")),
         "unscoped radius should reach shared/util.py; got {:?}",
         all.iter().map(|a| (&a.qname, &a.file)).collect::<Vec<_>>()
     );
-    let scoped = blast_radius_by_qname(m, "handle", "both", 4, None, false, Some(SCOPE)).unwrap();
+    let scoped = blast(m, "handle", Reach::Both, None, Some(SCOPE));
     assert!(
         !scoped.is_empty(),
         "scoped radius should keep the in-scope nodes"
@@ -122,7 +123,7 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
         "precondition: the globally top-ranked node should be out of scope; got {:?}",
         all[0].file
     );
-    let one = blast_radius_by_qname(m, "handle", "both", 4, Some(1), false, Some(SCOPE)).unwrap();
+    let one = blast(m, "handle", Reach::Both, Some(1), Some(SCOPE));
     assert_eq!(
         one.len(),
         1,
@@ -133,7 +134,7 @@ fn blast_radius_scope_filters_and_runs_before_truncate() {
 
     // (c) BOUNDARY: a prefix that stops mid-segment must not match.
     let boundary =
-        blast_radius_by_qname(m, "handle", "both", 4, None, false, Some("services/ap")).unwrap();
+        blast(m, "handle", Reach::Both, None, Some("services/ap"));
     assert!(
         boundary
             .iter()
@@ -323,6 +324,24 @@ fn project_fixture() -> (tempfile::TempDir, GenerateResult) {
     (td, result)
 }
 
+/// One seed's blast-radius rows: LD.5's multi-seed `blast_radius` asked one
+/// query, which must resolve.
+fn blast(
+    m: &MergedGraph,
+    q: &str,
+    direction: Reach,
+    top_k: Option<usize>,
+    scope: Option<&str>,
+) -> Vec<BlastAnswer> {
+    let mut opts = BlastOptions::default();
+    opts.direction = direction;
+    opts.top_k = top_k;
+    opts.scope = scope.map(str::to_string);
+    let answer = blast_radius(m, &[q], &opts);
+    assert!(answer.unresolved.is_empty(), "{q} resolves");
+    answer.results
+}
+
 fn qnames<T>(v: &[T], q: impl Fn(&T) -> &str) -> Vec<String> {
     let mut out: Vec<String> = v.iter().map(|x| q(x).to_string()).collect();
     out.sort();
@@ -402,7 +421,7 @@ fn a_label_scope_equals_its_path_scope() {
     let (_td, r) = project_fixture();
     let m = &r.merged;
 
-    let all = blast_radius_by_qname(m, "webEntry", "both", 4, None, false, None).unwrap();
+    let all = blast(m, "webEntry", Reach::Both, None, None);
     let all_q = qnames(&all, |a| &a.qname);
     assert!(
         all_q.iter().any(|q| q.contains("runAll")) && all_q.iter().any(|q| q.contains("helper")),
@@ -410,9 +429,9 @@ fn a_label_scope_equals_its_path_scope() {
     );
 
     let by_path =
-        blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("apps/web")).unwrap();
+        blast(m, "webEntry", Reach::Both, None, Some("apps/web"));
     let by_label =
-        blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("@shop/web")).unwrap();
+        blast(m, "webEntry", Reach::Both, None, Some("@shop/web"));
     let path_q = qnames(&by_path, |a| &a.qname);
     assert!(!path_q.is_empty(), "the in-scope helper must survive");
     assert!(
@@ -427,8 +446,7 @@ fn a_label_scope_equals_its_path_scope() {
     assert_eq!(scores(&by_label), scores(&by_path));
 
     // The ROOT project's label resolves to `.`, i.e. the whole repo.
-    let root = blast_radius_by_qname(m, "webEntry", "both", 4, None, false, Some("shop-monorepo"))
-        .unwrap();
+    let root = blast(m, "webEntry", Reach::Both, None, Some("shop-monorepo"));
     assert_eq!(qnames(&root, |a| &a.qname), all_q, "`.` scopes to everything");
 
     // A second primitive, through the same applier: `resolve` filters its
@@ -492,7 +510,7 @@ fn ambiguous_fixture() -> (tempfile::TempDir, GenerateResult) {
 fn ambiguous_seed_prefers_the_in_scope_candidate() {
     let (_td, result) = ambiguous_fixture();
     let m = &result.merged;
-    let scoped = blast_radius_by_qname(m, "handle", "both", 4, None, false, Some(SCOPE)).unwrap();
+    let scoped = blast(m, "handle", Reach::Both, None, Some(SCOPE));
     assert_eq!(
         qnames(&scoped, |a| &a.qname),
         ["services::api::handler::api_helper"],
@@ -500,22 +518,12 @@ fn ambiguous_seed_prefers_the_in_scope_candidate() {
          whose whole radius the scope then filters away"
     );
     // A label-free path scope and the qname seed agree.
-    let by_qname = blast_radius_by_qname(
-        m,
-        "services::api::handler::handle",
-        "both",
-        4,
-        None,
-        false,
-        Some(SCOPE),
-    )
-    .unwrap();
+    let by_qname = blast(m, "services::api::handler::handle", Reach::Both, None, Some(SCOPE));
     assert_eq!(qnames(&by_qname, |a| &a.qname), qnames(&scoped, |a| &a.qname));
     // Scope never overrides an explicit qname: the web `handle` stays the seed
     // and its (web-only) radius is filtered to nothing.
     let pinned =
-        blast_radius_by_qname(m, "services::web::views::handle", "both", 4, None, false, Some(SCOPE))
-            .unwrap();
+        blast(m, "services::web::views::handle", Reach::Both, None, Some(SCOPE));
     assert!(
         pinned.is_empty(),
         "an explicit qname is never re-seeded; got {:?}",
@@ -538,9 +546,9 @@ fn out_of_scope_seed_still_answers() {
     assert_eq!(resolve_seed(m, "shared_fn", None), Some(seed));
     assert_eq!(locate_node(m, seed).qname, "shared::util::shared_fn");
     let scoped =
-        blast_radius_by_qname(m, "shared_fn", "backward", 4, None, false, Some(SCOPE)).unwrap();
+        blast(m, "shared_fn", Reach::Backward, None, Some(SCOPE));
     assert_eq!(qnames(&scoped, |a| &a.qname), ["services::api::handler::api_user"]);
-    let all = blast_radius_by_qname(m, "shared_fn", "backward", 4, None, false, None).unwrap();
+    let all = blast(m, "shared_fn", Reach::Backward, None, None);
     let all_q = qnames(&all, |a| &a.qname);
     assert!(
         all_q.contains(&"services::api::handler::api_user".to_string())
@@ -553,7 +561,7 @@ fn out_of_scope_seed_still_answers() {
 fn unscoped_seed_is_unchanged() {
     let (_td, result) = ambiguous_fixture();
     let m = &result.merged;
-    let all = blast_radius_by_qname(m, "handle", "both", 4, None, false, None).unwrap();
+    let all = blast(m, "handle", Reach::Both, None, None);
     assert_eq!(
         qnames(&all, |a| &a.qname),
         [

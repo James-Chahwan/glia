@@ -12,14 +12,14 @@ use repo_graph_code_extractors::queues::is_framework_tag;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
-use crate::absence::{self, Answer};
+use crate::absence::{self, Absence, Answer};
 use crate::find::{self, FindOptions};
 use crate::profile::CODE_PROFILE;
 
-/// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
-/// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
-/// Produced by [`blast_radius_by_qname`], never built by a struct literal
-/// outside this crate (LD.9):
+/// One node in a blast-radius answer: identity, kind, why it is here
+/// (`reason`), PPR `score`, `file`:`line`, `live`, and the `seed` whose wave
+/// reached it. Serialized straight to pyo3/CLI. Produced by [`blast_radius`],
+/// never built by a struct literal outside this crate (LD.9):
 ///
 /// ```compile_fail
 /// let _ = repo_graph_engine::BlastAnswer {
@@ -33,9 +33,10 @@ use crate::profile::CODE_PROFILE;
 ///     live: false,
 ///     file: None,
 ///     line: None,
+///     seed: String::new(),
 /// };
 /// ```
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct BlastAnswer {
     pub id: u64,
@@ -52,6 +53,10 @@ pub struct BlastAnswer {
     pub file: Option<String>,
     /// 1-based (see [`Located`]).
     pub line: Option<i64>,
+    /// The qname of the seed whose wave reached this node first (LD.5): with
+    /// one seed, that seed; with several, the root of the node's parent chain
+    /// in the one multi-seed walk.
+    pub seed: String,
 }
 
 /// Types whose liveness a live METHOD they declare implies (A7.8): the
@@ -281,76 +286,388 @@ pub fn resolve_seed(merged: &MergedGraph, q: &str, scope: Option<&str>) -> Optio
     pick
 }
 
-/// `blast_radius`, resolved from a qname/name and fully located — the P3 answer
-/// that `find`→`impact`→`activate`→`read×N` collapses to. `direction` ∈
-/// {`forward`, `backward`, `both`}. Err on an unknown qname or bad direction.
+/// What a [`blast_radius`] walks and keeps. Start from `default()` (both
+/// directions, depth 4, every row, dead rows flagged not dropped, no scope)
+/// and set fields: `#[non_exhaustive]` rules out a struct literal outside
+/// this crate.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BlastOptions {
+    /// Which way the radius spreads from the seeds.
+    pub direction: Reach,
+    /// Maximum hops along carry edges, counted from the nearest seed.
+    pub depth: usize,
+    /// Keep the first `top_k` rows, cut after `scope`; `None` keeps all.
+    pub top_k: Option<usize>,
+    /// Drop the rows no entry point reaches ([`entrypoint_reachable`])
+    /// instead of flagging them `live: false`.
+    pub live_only: bool,
+    /// A repo-relative path or a project label (A8.3 / A8.6): keeps the rows
+    /// located under it, BEFORE the `top_k` cut, and prefers an in-scope
+    /// candidate when a bare name is ambiguous ([`resolve_seed`]).
+    pub scope: Option<String>,
+}
+
+impl Default for BlastOptions {
+    fn default() -> Self {
+        BlastOptions {
+            direction: Reach::Both,
+            depth: 4,
+            top_k: None,
+            live_only: false,
+            scope: None,
+        }
+    }
+}
+
+/// One seed of a [`BlastRadius`], located, with the other seeds one carry
+/// edge away from it in the walk's direction (`linked_seeds`, by qname, in
+/// seed order): with `Forward` the seeds it reaches in one hop, with
+/// `Backward` the seeds that reach it in one hop, with `Both` either. A seed
+/// is never a result row, so this is where "one changed symbol calls another"
+/// is kept — the fact a union of per-seed answers drops.
+#[derive(serde::Serialize, Debug, Clone)]
+#[non_exhaustive]
+pub struct BlastSeed {
+    /// What the caller asked for: the query as given, or the display string
+    /// an id-seeded caller passed.
+    pub query: String,
+    pub id: u64,
+    pub qname: String,
+    pub kind: &'static str,
+    pub file: Option<String>,
+    /// 1-based (see [`Located`]).
+    pub line: Option<i64>,
+    pub linked_seeds: Vec<String>,
+}
+
+/// A multi-seed blast radius (LD.5): the seeds, the queries that named no
+/// node, the ranked located rows (each with the `seed` whose wave reached it
+/// first), and — exactly when `results` is empty — why (LD.8a).
+#[derive(serde::Serialize, Debug, Clone)]
+#[non_exhaustive]
+pub struct BlastRadius {
+    /// One per distinct node, in query order.
+    pub seeds: Vec<BlastSeed>,
+    /// Queries no node answers to, in query order, each once. Never an error.
+    pub unresolved: Vec<String>,
+    pub results: Vec<BlastAnswer>,
+    /// `Some` iff `results` is empty.
+    pub absence: Option<Absence>,
+}
+
+/// **blast_radius** (P3, LD.5): the complete, deduped, edge-category-aware,
+/// PPR-ranked, LOCATED closure around every node `queries` names — the
+/// answer `find`→`impact`→`activate`→`read×N` collapses to, for a whole
+/// change set in one call.
 ///
-/// `scope` (A8.3) restricts the answer to nodes whose file lives under that
-/// repo-relative path, applied BEFORE `top_k` truncation so a scoped `--top-k`
-/// spends its whole budget in scope instead of on whatever PPR liked globally.
-/// A node with no locatable file (DOC_SPACE, a handler-less route — see
-/// [`node_in_scope`]) is KEPT, never dropped. ENDPOINT / ROUTE nodes are
-/// located (A3.6) and scoped by where they are defined. `scope` narrows
-/// WITHIN a repo — under a multi-repo merge each repo's POSITION paths are
-/// relative to its OWN root. The seed is [`resolve_seed`] under the same
-/// `scope` (LA.14): an ambiguous bare name starts from its in-scope candidate.
-pub fn blast_radius_by_qname(
+/// Each query resolves through [`resolve_seed`] under `opts.scope` (qname,
+/// then name; the scope a preference among ambiguous candidates, LA.14). A
+/// query that names no node goes to `unresolved` and the rest still answer;
+/// two queries naming one node are one seed, the first query kept. Then
+/// [`blast_radius_seeded`] runs ONE walk and ONE PPR over all the seeds:
+/// depths from the nearest seed, scores from one run so they compare, each
+/// row attributed to the seed whose wave reached it first (seeds expand in
+/// query order), no seed ever a row, and `linked_seeds` naming the seeds one
+/// carry edge apart.
+///
+/// Rows: `scope` keeps those located under it BEFORE the `top_k` cut (A8.3;
+/// a row with no locatable file — DOC_SPACE, a handler-less route — is KEPT,
+/// and `scope` narrows WITHIN a repo: under a multi-repo merge each repo's
+/// paths are relative to its OWN root); `live` is [`entrypoint_reachable`]
+/// and `live_only` drops the dead rows inside the ranking plan (LD.12c);
+/// each row is located through one [`Locator`] (LD.1).
+///
+/// An empty answer carries its [`Absence`]: `unknown_symbol` when every query
+/// is unresolved (suggestions for the first), `no_edges` when the seeds
+/// resolved but no carry edge leads anywhere (mechanisms from the seeds'
+/// kinds; a MODULE / PACKAGE seed is told that structural edges are not
+/// carry edges), `no_match` when `scope`, `live_only`, `top_k = Some(0)` or
+/// `depth = 0` removed every row.
+///
+/// fired_on marker, once per answer:
+/// `[blast] seeds=S unresolved=U reached=R linked_seeds=L walk=W` — `R` is
+/// the closure the walk reached (before `live_only`, `scope` and `top_k`),
+/// `L` the seed-to-seed links. Grep token `[blast] seeds=`.
+pub fn blast_radius(merged: &MergedGraph, queries: &[&str], opts: &BlastOptions) -> BlastRadius {
+    let scope = opts.scope.as_deref();
+    let mut seeds: Vec<(String, NodeId)> = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for &q in queries {
+        match resolve_seed(merged, q, scope) {
+            Some(id) => seeds.push((q.to_string(), id)),
+            None if !unresolved.iter().any(|u| u == q) => unresolved.push(q.to_string()),
+            None => {}
+        }
+    }
+    if unresolved.is_empty() {
+        return blast_radius_seeded(merged, &seeds, opts);
+    }
+    radius(merged, &seeds, unresolved, opts)
+}
+
+/// [`blast_radius`] from node ids the caller already holds — `(display
+/// query, id)` per seed — so a caller with ids (LE.2's diff impact: changed
+/// nodes, two of which can share a qname) never re-resolves them by name.
+/// Everything past resolution is here: [`blast_radius`] only resolves its
+/// queries, then lands in this answer (or, when some query is unresolved, in
+/// the same answer with `unresolved` filled).
+pub(crate) fn blast_radius_seeded(
     merged: &MergedGraph,
-    qname: &str,
-    direction: &str,
-    max_depth: usize,
-    top_k: Option<usize>,
-    live_only: bool,
-    scope: Option<&str>,
-) -> Result<Vec<BlastAnswer>, String> {
-    let seed = resolve_seed(merged, qname, scope)
-        .ok_or_else(|| format!("no node with qname/name `{qname}`"))?;
-    let reach = match direction {
-        "forward" => Reach::Forward,
-        "backward" => Reach::Backward,
-        "both" => Reach::Both,
-        o => return Err(format!("direction must be forward|backward|both, got `{o}`")),
-    };
-    let live = entrypoint_reachable(merged);
-    // `live_only` is a filter on the ranking plan: it drops rows from the
-    // ranked closure and keeps the rest in order, so scope and `top_k` below
-    // see what the post-sort filter they replaced saw.
-    let live_filter = LiveFilter(&live);
-    let filters: Vec<&dyn FilterPredicate<MergedGraph>> =
-        if live_only { vec![&live_filter] } else { Vec::new() };
-    let hits = merged.blast_radius_filtered(seed, reach, max_depth, &CODE_PROFILE.tables, &filters);
-    let loc = Locator::new(merged);
-    let out: Vec<BlastAnswer> = hits
+    seeds: &[(String, NodeId)],
+    opts: &BlastOptions,
+) -> BlastRadius {
+    radius(merged, seeds, Vec::new(), opts)
+}
+
+/// The one multi-seed answer behind [`blast_radius`] and
+/// [`blast_radius_seeded`].
+fn radius(
+    merged: &MergedGraph,
+    seeds: &[(String, NodeId)],
+    unresolved: Vec<String>,
+    opts: &BlastOptions,
+) -> BlastRadius {
+    // One seed per node, the first display query kept.
+    let mut distinct: HashSet<NodeId> = HashSet::new();
+    let seeds: Vec<(&str, NodeId)> = seeds
         .iter()
-        .map(|h| {
-            let at = loc.locate(h.id);
-            BlastAnswer {
-                id: h.id.0,
+        .filter(|(_, id)| distinct.insert(*id))
+        .map(|(q, id)| (q.as_str(), *id))
+        .collect();
+    let ids: Vec<NodeId> = seeds.iter().map(|&(_, id)| id).collect();
+
+    let mut out: Vec<BlastAnswer> = Vec::new();
+    let mut reached = 0usize;
+    let mut dead = 0usize;
+    let mut kept_in_scope = 0usize;
+    let mut blast_seeds: Vec<BlastSeed> = Vec::with_capacity(seeds.len());
+    if !ids.is_empty() {
+        let loc = Locator::new(merged);
+        let live = entrypoint_reachable(merged);
+        // `live_only` is a filter on the ranking plan: it drops rows from the
+        // ranked closure and keeps the rest in order, so scope and `top_k`
+        // below see what the post-sort filter they replaced saw.
+        let live_filter = LiveFilter::new(&live);
+        let filters: Vec<&dyn FilterPredicate<MergedGraph>> =
+            if opts.live_only { vec![&live_filter] } else { Vec::new() };
+        let hits = merged.blast_radius_filtered(
+            &ids,
+            opts.direction,
+            opts.depth,
+            &CODE_PROFILE.tables,
+            &filters,
+        );
+        dead = live_filter.dropped.get();
+        reached = hits.len() + dead;
+
+        let linked = linked_seeds(merged, &ids, opts);
+        for &(query, id) in &seeds {
+            let at = loc.locate(id);
+            blast_seeds.push(BlastSeed {
+                query: query.to_string(),
+                id: id.0,
                 qname: at.qname,
-                name: at.name,
                 kind: at.kind,
-                reason: edge_category::name(h.reason),
-                depth: h.depth,
-                score: h.score,
-                live: live.contains(&h.id),
                 file: at.file,
                 line: at.line,
-            }
-        })
-        .collect();
-    // Scope BEFORE the cut: filtering after `truncate` would spend the budget
-    // on out-of-scope nodes and return fewer (or zero) in-scope answers.
-    let mut out = apply_scope(&loc, out, scope, |a| NodeId(a.id), "blast_radius");
-    if let Some(k) = top_k {
-        out.truncate(k);
+                linked_seeds: Vec::new(),
+            });
+        }
+        for (i, links) in linked.iter().enumerate() {
+            blast_seeds[i].linked_seeds =
+                links.iter().map(|&j| blast_seeds[j].qname.clone()).collect();
+        }
+        let seed_qname: HashMap<NodeId, &str> = ids
+            .iter()
+            .zip(&blast_seeds)
+            .map(|(&id, s)| (id, s.qname.as_str()))
+            .collect();
+
+        out = hits
+            .iter()
+            .map(|h| {
+                let at = loc.locate(h.id);
+                BlastAnswer {
+                    id: h.id.0,
+                    qname: at.qname,
+                    name: at.name,
+                    kind: at.kind,
+                    reason: edge_category::name(h.reason),
+                    depth: h.depth,
+                    score: h.score,
+                    live: live.contains(&h.id),
+                    file: at.file,
+                    line: at.line,
+                    seed: seed_qname.get(&h.seed).map(|q| q.to_string()).unwrap_or_default(),
+                }
+            })
+            .collect();
+        // Scope BEFORE the cut: filtering after `truncate` would spend the
+        // budget on out-of-scope nodes and return fewer (or zero) in-scope
+        // answers.
+        out = apply_scope(&loc, out, opts.scope.as_deref(), |a| NodeId(a.id), "blast_radius");
+        kept_in_scope = out.len();
+        if let Some(k) = opts.top_k {
+            out.truncate(k);
+        }
     }
-    Ok(out)
+
+    let links: usize = blast_seeds.iter().map(|s| s.linked_seeds.len()).sum();
+    // fired_on marker (LD.5).
+    eprintln!(
+        "[blast] seeds={} unresolved={} reached={reached} linked_seeds={links} walk={:?}",
+        blast_seeds.len(),
+        unresolved.len(),
+        opts.direction
+    );
+
+    let absence = out.is_empty().then(|| {
+        blast_absence(merged, &blast_seeds, &unresolved, opts, reached, dead, kept_in_scope)
+    });
+    BlastRadius {
+        seeds: blast_seeds,
+        unresolved,
+        results: out,
+        absence,
+    }
+}
+
+/// Why a [`blast_radius`] came back empty. `reached` is the walk's closure,
+/// `dead` the rows `live_only` dropped from it, `kept_in_scope` the rows
+/// `scope` kept.
+fn blast_absence(
+    merged: &MergedGraph,
+    seeds: &[BlastSeed],
+    unresolved: &[String],
+    opts: &BlastOptions,
+    reached: usize,
+    dead: usize,
+    kept_in_scope: usize,
+) -> Absence {
+    const P: &str = "blast_radius";
+    if seeds.is_empty() {
+        let Some(first) = unresolved.first() else {
+            let note = "no seed was given, so nothing is in radius".to_string();
+            return absence::empty(merged, P, "", "no_match", note, &[], None);
+        };
+        let near_opts = FindOptions {
+            top_k: absence::SUGGESTIONS,
+            ..FindOptions::default()
+        };
+        let near = find::search(merged, first, &near_opts).rows;
+        return absence::unknown_symbol(merged, P, first, &[], &near);
+    }
+    let query = seeds.iter().map(|s| s.query.as_str()).collect::<Vec<_>>().join(", ");
+    let named = seeds.iter().map(|s| format!("`{}`", s.qname)).collect::<Vec<_>>().join(", ");
+    let named = if seeds.len() == 1 { named } else { format!("any of {named}") };
+    if opts.depth == 0 {
+        let note = format!("depth 0 follows no edge, so nothing is in radius of {named}");
+        return absence::empty(merged, P, &query, "no_match", note, &[], None);
+    }
+    if reached == 0 {
+        let mut mechanisms: Vec<&'static str> = Vec::new();
+        for s in seeds {
+            let kind = merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.kind_by_id.get(&NodeId(s.id)).copied());
+            for m in kind.map(absence::mechanisms_for_kind).unwrap_or(&[]) {
+                if !mechanisms.contains(m) {
+                    mechanisms.push(m);
+                }
+            }
+        }
+        let how = match opts.direction {
+            Reach::Forward => "leaves",
+            Reach::Backward => "reaches",
+            _ => "touches",
+        };
+        let mut note = format!("no carry edge {how} {named} in this graph");
+        let containers: Vec<String> = seeds
+            .iter()
+            .filter(|s| {
+                s.kind == node_kind::name(node_kind::MODULE)
+                    || s.kind == node_kind::name(node_kind::PACKAGE)
+            })
+            .map(|s| format!("`{}`", s.qname))
+            .collect();
+        if !containers.is_empty() {
+            note.push_str(&format!(
+                "; {} {}: structural IMPORTS/CONTAINS/DEFINES are not carry edges, so seed a symbol inside it",
+                containers.join(", "),
+                absence::plural(containers.len(), "is a container", "are containers")
+            ));
+        }
+        let files: BTreeSet<&str> = seeds.iter().filter_map(|s| s.file.as_deref()).collect();
+        let seed_file = if files.len() == 1 { files.first().copied() } else { None };
+        return absence::empty(merged, P, &query, "no_edges", note, &mechanisms, seed_file);
+    }
+    if dead == reached {
+        let note = format!(
+            "{reached} {} in radius of {named}, none reachable from an entry point (live_only)",
+            absence::plural(reached, "node", "nodes")
+        );
+        return absence::empty(merged, P, &query, "no_match", note, &[], None);
+    }
+    if kept_in_scope == 0
+        && let Some(s) = opts.scope.as_deref()
+    {
+        return absence::scope_emptied(merged, P, &query, reached - dead, s);
+    }
+    let note = format!(
+        "top_k 0 keeps none of the {kept_in_scope} {} in radius of {named}",
+        absence::plural(kept_in_scope, "row", "rows")
+    );
+    absence::empty(merged, P, &query, "no_match", note, &[], None)
+}
+
+/// Per seed (by index into `ids`), the other seeds one carry edge away in
+/// `opts.direction`, in seed order: one pass over every edge. Empty at depth
+/// 0, which follows no edge.
+fn linked_seeds(merged: &MergedGraph, ids: &[NodeId], opts: &BlastOptions) -> Vec<Vec<usize>> {
+    let mut links: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); ids.len()];
+    if ids.len() < 2 || opts.depth == 0 {
+        return links.into_iter().map(|s| s.into_iter().collect()).collect();
+    }
+    let index: HashMap<NodeId, usize> = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let carry = CategorySet::of(CODE_PROFILE.tables.carry_edges);
+    let (fwd, bwd) = match opts.direction {
+        Reach::Forward => (true, false),
+        Reach::Backward => (false, true),
+        _ => (true, true),
+    };
+    for e in merged.all_edges() {
+        if !carry.contains(e.category) || e.from == e.to {
+            continue;
+        }
+        let (Some(&from), Some(&to)) = (index.get(&e.from), index.get(&e.to)) else {
+            continue;
+        };
+        if fwd {
+            links[from].insert(to);
+        }
+        if bwd {
+            links[to].insert(from);
+        }
+    }
+    links.into_iter().map(|s| s.into_iter().collect()).collect()
 }
 
 /// `live_only` as an activation-plan filter (LD.12c): keeps a node only when
 /// it is in the [`entrypoint_reachable`] set it borrows. Its drops are counted
-/// under `live` on the `[activation] plan` debug line.
-struct LiveFilter<'a>(&'a HashSet<NodeId>);
+/// under `live` on the `[activation] plan` debug line, and in `dropped`, so an
+/// answer `live_only` emptied says so (LD.5).
+struct LiveFilter<'a> {
+    live: &'a HashSet<NodeId>,
+    dropped: std::cell::Cell<usize>,
+}
+
+impl<'a> LiveFilter<'a> {
+    fn new(live: &'a HashSet<NodeId>) -> Self {
+        LiveFilter { live, dropped: std::cell::Cell::new(0) }
+    }
+}
 
 impl FilterPredicate<MergedGraph> for LiveFilter<'_> {
     fn name(&self) -> &'static str {
@@ -358,7 +675,11 @@ impl FilterPredicate<MergedGraph> for LiveFilter<'_> {
     }
 
     fn keep(&self, _: &MergedGraph, id: NodeId, _: f64) -> bool {
-        self.0.contains(&id)
+        let keep = self.live.contains(&id);
+        if !keep {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+        keep
     }
 }
 
@@ -707,7 +1028,7 @@ pub fn governing_docs_with_live(
 ///
 /// **`line` is 1-based** — the first line of the node's span as an editor
 /// shows it; `None` when no tier places the node. This is the ONE line
-/// convention of every answer record (`blast_radius_by_qname`,
+/// convention of every answer record (`blast_radius`,
 /// `cross_stack_trace`, `resolve_signal_located`, `governing_docs`,
 /// `message_contracts`) and of the pyo3 `nodes_json` span. POSITION cells keep
 /// storing 0-based tree-sitter rows; [`Locator::locate`] converts, once, at its
@@ -2369,5 +2690,46 @@ mod live_tests {
         // Implementers: Repo (via IRepo) and Repo::find (via IRepo::find).
         // Owners: Ctrl (via get); IRepo and Repo were already live.
         assert_eq!((w.owners, w.implementers), (1, 2));
+    }
+}
+
+#[cfg(test)]
+mod blast_seeded_tests {
+    //! LD.5: the id-seeded entry LE.2's diff impact calls. Integration tests
+    //! (engine/tests/blast_multi_seed.rs) cannot reach a `pub(crate)` fn.
+
+    use super::{BlastOptions, blast_radius, blast_radius_seeded};
+    use crate::build::generate_many;
+
+    const APP_PY: &str = "def audit(order):\n    return order\n\n\ndef save(order):\n    return audit(order)\n\n\ndef create_order():\n    order = {}\n    save(order)\n    return order\n";
+
+    #[test]
+    fn seeded_by_id_is_the_query_answer_under_its_display_string() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let api = dir.path().join("api");
+        std::fs::create_dir_all(&api).expect("api dir");
+        std::fs::write(api.join("app.py"), APP_PY).expect("write app.py");
+        let m = generate_many(&[api.display().to_string()]).expect("builds").merged;
+        let save = m.node_id_by_qname("app::save").expect("app::save");
+        let opts = BlastOptions::default();
+
+        let by_query = blast_radius(&m, &["app::save"], &opts);
+        let by_id = blast_radius_seeded(&m, &[("x".to_string(), save)], &opts);
+        assert!(!by_id.results.is_empty());
+        let json = |r: &super::BlastRadius| serde_json::to_value(&r.results).expect("rows");
+        assert_eq!(json(&by_id), json(&by_query), "same rows, order, scores and seed");
+        assert_eq!(by_id.seeds[0].query, "x", "the display string is kept");
+        assert_eq!(by_id.seeds[0].qname, "app::save");
+        assert!(by_id.results.iter().all(|r| r.seed == "app::save"), "rows name the qname, not the display");
+        assert!(by_id.unresolved.is_empty() && by_id.absence.is_none());
+
+        // One id twice is one seed, the first display kept; no seeds is an
+        // empty answer with an absence, never a walk.
+        let twice = blast_radius_seeded(&m, &[("a".into(), save), ("b".into(), save)], &opts);
+        assert_eq!(twice.seeds.len(), 1);
+        assert_eq!(twice.seeds[0].query, "a");
+        assert_eq!(json(&twice), json(&by_query));
+        let none = blast_radius_seeded(&m, &[], &opts);
+        assert!(none.results.is_empty() && none.absence.is_some());
     }
 }

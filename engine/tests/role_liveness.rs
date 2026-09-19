@@ -9,8 +9,8 @@
 use std::path::PathBuf;
 
 use repo_graph_code_domain::node_kind;
-use repo_graph_engine::{blast_radius_by_qname, entrypoint_reachable, generate_one};
-use repo_graph_graph::MergedGraph;
+use repo_graph_engine::{BlastOptions, blast_radius, entrypoint_reachable, generate_one};
+use repo_graph_graph::{MergedGraph, Reach};
 
 fn build(name: &str) -> MergedGraph {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,16 +25,11 @@ fn build(name: &str) -> MergedGraph {
 fn component_role_seeds_liveness() {
     let merged = build("angular-injects");
 
-    let hits = blast_radius_by_qname(
-        &merged,
-        "users.component::UsersComponent",
-        "forward",
-        4,
-        None,
-        false,
-        None,
-    )
-    .expect("blast radius");
+    let mut forward = BlastOptions::default();
+    forward.direction = Reach::Forward;
+    let answer = blast_radius(&merged, &["users.component::UsersComponent"], &forward);
+    assert!(answer.unresolved.is_empty(), "the component resolves");
+    let hits = answer.results;
     let service = hits
         .iter()
         .find(|h| h.qname == "user.service::UserService")

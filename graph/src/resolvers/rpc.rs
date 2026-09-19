@@ -171,7 +171,7 @@ mod tests {
         let mut merged = MergedGraph::new(vec![g_srv, g_web]);
         merged.run(&RpcStackResolver);
         let hits = merged.blast_radius(
-            id(client, CALL, "rpc_call:user.list"),
+            &[id(client, CALL, "rpc_call:user.list")],
             crate::blast::Reach::Forward,
             2,
             &repo_graph_code_domain::profile::CODE_TABLES,

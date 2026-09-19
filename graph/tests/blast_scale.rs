@@ -63,7 +63,7 @@ fn chain(n: usize) -> (MergedGraph, Vec<NodeId>) {
 fn blast_radius_forward_40k_chain() {
     let (m, ids) = chain(N);
     let t = Instant::now();
-    let hits = m.blast_radius(ids[0], Reach::Forward, usize::MAX, &CODE_TABLES);
+    let hits = m.blast_radius(&[ids[0]], Reach::Forward, usize::MAX, &CODE_TABLES);
     let took = t.elapsed();
     assert_eq!(hits.len(), N - 1);
     let last = hits.iter().find(|h| h.id == ids[N - 1]).expect("the chain's tail is in the radius");
@@ -78,7 +78,7 @@ fn blast_radius_depth_and_direction_on_a_short_chain() {
     let (m, ids) = chain(5);
     let depth_of = |reach, depth| {
         let mut got: Vec<(NodeId, usize)> =
-            m.blast_radius(ids[2], reach, depth, &CODE_TABLES).iter().map(|h| (h.id, h.depth)).collect();
+            m.blast_radius(&[ids[2]], reach, depth, &CODE_TABLES).iter().map(|h| (h.id, h.depth)).collect();
         got.sort_by_key(|(id, _)| id.0);
         got
     };

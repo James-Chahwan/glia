@@ -85,14 +85,15 @@ fn answers_report_1_based_lines() {
 
     // blast-radius --json: the caller `app::main` sits on line 8.
     let v = json(&glia(&repo.0, &["blast-radius", d, "app::helper", "--json"]));
-    let main_row = v
+    let main_row = v["results"]
         .as_array()
-        .expect("a JSON array")
+        .expect("a `results` array (LD.5: {seeds, unresolved, results, absence})")
         .iter()
         .find(|r| r["qname"] == "app::main")
         .unwrap_or_else(|| panic!("app::main is in helper's blast radius: {v}"));
     assert_eq!(main_row["file"], "app.py", "{v}");
     assert_eq!(main_row["line"], 8, "1-based `def main` line: {v}");
+    assert_eq!(v["seeds"][0]["line"], 4, "the seed is located too, 1-based: {v}");
 
     // blast-radius table: the printed location is the same 1-based line.
     let out = glia(&repo.0, &["blast-radius", d, "app::helper"]);

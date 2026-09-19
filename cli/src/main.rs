@@ -54,9 +54,11 @@ enum Cmd {
     /// Reachability walk: which entities does <qname> depend on / get hit by.
     Impact(cmd::impact::Args),
     /// Blast radius (P3): the complete, edge-category-aware, PPR-ranked, located
-    /// closure around <qname> — what it affects / what affects it, across service
-    /// boundaries, in one call. Excludes structural import/contain edges so the
-    /// radius doesn't fan out through shared containers.
+    /// closure around one or more <qname>s — what they affect / what affects
+    /// them, across service boundaries, in one call; many seeds are one walk
+    /// and one ranking, each row naming its seed. Excludes structural
+    /// import/contain edges so the radius doesn't fan out through shared
+    /// containers.
     BlastRadius(cmd::blast_radius::Args),
     /// Docs-for (tier-4 P3): the doc sections that DOCUMENTS <qname> — "what are
     /// the rules for X?" — located.

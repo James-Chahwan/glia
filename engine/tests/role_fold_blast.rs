@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 use repo_graph_code_domain::{cell_type, node_kind};
 use repo_graph_core::{CellPayload, NodeKindId};
-use repo_graph_engine::{blast_radius_by_qname, generate_one};
-use repo_graph_graph::MergedGraph;
+use repo_graph_engine::{BlastOptions, blast_radius, generate_one};
+use repo_graph_graph::{MergedGraph, Reach};
 use repo_graph_graph::roles::{ROLE_KINDS, roles_in};
 
 fn fixture(name: &str) -> String {
@@ -31,29 +31,24 @@ fn build(name: &str) -> MergedGraph {
 #[test]
 fn blast_radius_from_a_component_lands_on_the_located_service_class() {
     let merged = build("angular-injects");
-    for direction in ["forward", "both"] {
-        let hits = blast_radius_by_qname(
-            &merged,
-            "users.component::UsersComponent",
-            direction,
-            4,
-            None,
-            false,
-            None,
-        )
-        .expect("blast radius");
+    for direction in [Reach::Forward, Reach::Both] {
+        let mut opts = BlastOptions::default();
+        opts.direction = direction;
+        let answer = blast_radius(&merged, &["users.component::UsersComponent"], &opts);
+        assert!(answer.unresolved.is_empty(), "{direction:?}: the component resolves");
+        let hits = answer.results;
         assert_eq!(
             hits.len(),
             1,
-            "{direction}: exactly one hit, got {:?}",
+            "{direction:?}: exactly one hit, got {:?}",
             hits.iter().map(|h| (&h.kind, &h.qname)).collect::<Vec<_>>()
         );
         let hit = &hits[0];
-        assert_eq!(hit.kind, "CLASS", "{direction}");
-        assert_eq!(hit.qname, "user.service::UserService", "{direction}");
-        assert_eq!(hit.reason, "INJECTS", "{direction}");
-        assert_eq!(hit.file.as_deref(), Some("user.service.ts"), "{direction}");
-        assert!(hit.line.is_some(), "{direction}: the class is located");
+        assert_eq!(hit.kind, "CLASS", "{direction:?}");
+        assert_eq!(hit.qname, "user.service::UserService", "{direction:?}");
+        assert_eq!(hit.reason, "INJECTS", "{direction:?}");
+        assert_eq!(hit.file.as_deref(), Some("user.service.ts"), "{direction:?}");
+        assert!(hit.line.is_some(), "{direction:?}: the class is located");
     }
 }
 

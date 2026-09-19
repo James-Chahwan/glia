@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use repo_graph_activation::Direction;
 use repo_graph_engine::profile::CODE_PROFILE;
 use repo_graph_engine::{
-    BlastAnswer, blast_radius_by_qname, entrypoint_reachable, generate_many, resolve_signal_located,
+    BlastAnswer, BlastOptions, blast_radius, entrypoint_reachable, generate_many, resolve_signal_located,
 };
 use repo_graph_graph::{MergedGraph, Reach};
 use repo_graph_core::NodeId;
@@ -40,26 +40,37 @@ fn rows(answer: &[BlastAnswer]) -> Vec<Row> {
 
 const SEED: &str = "GET /users";
 
+/// The rows of LD.5's `blast_radius` from [`SEED`] alone, which must resolve.
+fn blast(m: &MergedGraph, direction: Reach, top_k: Option<usize>, live_only: bool) -> Vec<BlastAnswer> {
+    let mut opts = BlastOptions::default();
+    opts.direction = direction;
+    opts.top_k = top_k;
+    opts.live_only = live_only;
+    let answer = blast_radius(m, &[SEED], &opts);
+    assert!(answer.unresolved.is_empty(), "seed resolves");
+    answer.results
+}
+
 #[test]
 fn live_only_is_an_order_preserving_filter() {
     let m = fixture();
-    for dir in ["forward", "backward", "both"] {
-        let all = blast_radius_by_qname(&m, SEED, dir, 4, None, false, None).expect("seed resolves");
-        let live = blast_radius_by_qname(&m, SEED, dir, 4, None, true, None).expect("seed resolves");
+    for dir in [Reach::Forward, Reach::Backward, Reach::Both] {
+        let all = blast(&m, dir, None, false);
+        let live = blast(&m, dir, None, true);
         let expected: Vec<Row> = rows(&all).into_iter().filter(|r| r.5).collect();
-        assert_eq!(rows(&live), expected, "{dir}: live_only == the full answer's live rows, same order");
+        assert_eq!(rows(&live), expected, "{dir:?}: live_only == the full answer's live rows, same order");
         // `top_k` still cuts after the filter: the first live row, not the
         // first row filtered afterwards.
-        let one = blast_radius_by_qname(&m, SEED, dir, 4, Some(1), true, None).expect("seed resolves");
-        assert_eq!(rows(&one), expected.into_iter().take(1).collect::<Vec<_>>(), "{dir}: live + top_k 1");
+        let one = blast(&m, dir, Some(1), true);
+        assert_eq!(rows(&one), expected.into_iter().take(1).collect::<Vec<_>>(), "{dir:?}: live + top_k 1");
     }
     // Both ways from the ROUTE: the client ENDPOINT, the chi handler and the
     // client function that calls the endpoint. Only the handler is reachable
     // from an entrypoint.
-    let both = blast_radius_by_qname(&m, SEED, "both", 4, None, false, None).expect("seed resolves");
+    let both = blast(&m, Reach::Both, None, false);
     let qnames: Vec<&str> = both.iter().map(|a| a.qname.as_str()).collect();
     assert_eq!(qnames, ["endpoint:GET:/users", "main::listUsers", "client::FetchUsers"]);
-    let live = blast_radius_by_qname(&m, SEED, "both", 4, None, true, None).expect("seed resolves");
+    let live = blast(&m, Reach::Both, None, true);
     let live_q: Vec<&str> = live.iter().map(|a| a.qname.as_str()).collect();
     assert_eq!(live_q, ["main::listUsers"], "--live-only drops the two dead rows");
 }
@@ -68,7 +79,7 @@ fn live_only_is_an_order_preserving_filter() {
 /// per closure node, sorted by (score desc, id asc).
 fn legacy_blast_ranking(m: &MergedGraph, seed: NodeId, reach: Reach) -> Vec<(NodeId, u64)> {
     let closure: Vec<NodeId> =
-        m.blast_radius(seed, reach, 4, &CODE_PROFILE.tables).iter().map(|h| h.id).collect();
+        m.blast_radius(&[seed], reach, 4, &CODE_PROFILE.tables).iter().map(|h| h.id).collect();
     let mut config = CODE_PROFILE.tables.activation_config(None);
     config.direction = match reach {
         Reach::Forward => Direction::Forward,
@@ -91,13 +102,13 @@ fn blast_ranking_is_the_legacy_activate_lookup_bit_for_bit() {
     let seed = m.qnames_exact(SEED).first().copied().expect("the ROUTE's qname is `GET /users`");
     for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
         let plan: Vec<(NodeId, u64)> = m
-            .blast_radius(seed, reach, 4, &CODE_PROFILE.tables)
+            .blast_radius(&[seed], reach, 4, &CODE_PROFILE.tables)
             .iter()
             .map(|h| (h.id, h.score.to_bits()))
             .collect();
         assert_eq!(plan, legacy_blast_ranking(&m, seed, reach), "{reach:?}");
     }
-    let both = m.blast_radius(seed, Reach::Both, 4, &CODE_PROFILE.tables);
+    let both = m.blast_radius(&[seed], Reach::Both, 4, &CODE_PROFILE.tables);
     assert_eq!(both.len(), 3, "the closure the parity case ranks");
 }
 

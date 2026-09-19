@@ -16,13 +16,16 @@ This pulls `repo-graph-py` as a dependency and gives you the `repo-graph` CLI.
 
 Every function and `PyGraph` method follows these rules (since 0.5.0, LD.2):
 
-- **Answers are native Python objects.** `find`, `resolve`, `governing_docs`
-  and `service_map` return a `dict`; `blast_radius`, `cross_stack_trace`,
+- **Answers are native Python objects.** `find`, `resolve`, `governing_docs`,
+  `blast_radius` and `service_map` return a `dict`; `cross_stack_trace`,
   `coverage`, `project_roots` and `contracts` return a `list` of `dict`;
   `page_flow` returns a `dict`. The keys are exactly the engine struct's
   fields, in field order. An envelope answer (`find`, `resolve`,
   `governing_docs`) is `{"results": [...], "absence": None | {...}}`: an empty
-  answer says why in `absence`, including `unparsed_files`.
+  answer says why in `absence`, including `unparsed_files`. `blast_radius`
+  (LD.5) takes one qname or a list of them and answers
+  `{"seeds", "unresolved", "results", "absence"}`: one walk and one ranking
+  over every seed, each row naming its `seed`.
 - **A name ending in `_json` returns a JSON string.** Only the bulk dumps:
   `nodes_json`, `edges_json`, `parse_file_to_json`. Call `json.loads` on them.
 - **Pair-shaped data is a list of tuples.** `activate`, `node_cells`,

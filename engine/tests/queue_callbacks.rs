@@ -13,8 +13,8 @@ use std::path::Path;
 use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{Edge, NodeId};
-use repo_graph_engine::{blast_radius_by_qname, generate_one};
-use repo_graph_graph::MergedGraph;
+use repo_graph_engine::{BlastOptions, blast_radius, generate_one};
+use repo_graph_graph::{MergedGraph, Reach};
 
 fn fixture(name: &str) -> String {
     format!(
@@ -175,10 +175,11 @@ fn go_fixture_binds_functions_literals_and_method_values() {
 fn blast_radius_continues_from_the_consumer_into_its_handler() {
     // The consumer's forward closure now reaches the handler's own callee.
     let m = build(&fixture("xcut-queue-consumer-callbacks"));
-    let blast =
-        blast_radius_by_qname(&m, "queue_consumer:payments", "forward", 4, None, false, None)
-            .expect("seed resolves");
-    let reached: Vec<&str> = blast.iter().map(|b| b.qname.as_str()).collect();
+    let mut forward = BlastOptions::default();
+    forward.direction = Reach::Forward;
+    let blast = blast_radius(&m, &["queue_consumer:payments"], &forward);
+    assert!(blast.unresolved.is_empty(), "seed resolves");
+    let reached: Vec<&str> = blast.results.iter().map(|b| b.qname.as_str()).collect();
     assert!(reached.contains(&"svc::worker::handlePayment"), "{reached:?}");
     assert!(reached.contains(&"svc::worker::settle"), "{reached:?}");
 }

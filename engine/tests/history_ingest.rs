@@ -15,7 +15,7 @@ use repo_graph_code_domain::snapshots::{BlameFile, HistoryCommit, HistoryFile, H
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{CellPayload, Confidence, Edge, NodeId};
 use repo_graph_engine::{
-    BuildOptions, blast_radius_by_qname, entrypoint_reachable, generate_one, generate_one_opts,
+    BlastOptions, BuildOptions, blast_radius, entrypoint_reachable, generate_one, generate_one_opts,
 };
 use repo_graph_graph::MergedGraph;
 use repo_graph_store::write_merged_sharded;
@@ -298,11 +298,10 @@ fn cochange_is_not_carried() {
 
     for q in ["svc::a", "svc::a::a", "svc::c"] {
         let radius = |m: &MergedGraph| -> Vec<(String, &'static str)> {
-            let mut rows: Vec<(String, &'static str)> = blast_radius_by_qname(m, q, "both", 4, None, false, None)
-                .unwrap_or_else(|e| panic!("{q}: {e}"))
-                .into_iter()
-                .map(|r| (r.qname, r.reason))
-                .collect();
+            let answer = blast_radius(m, &[q], &BlastOptions::default());
+            assert!(answer.unresolved.is_empty(), "{q} resolves");
+            let mut rows: Vec<(String, &'static str)> =
+                answer.results.into_iter().map(|r| (r.qname, r.reason)).collect();
             rows.sort();
             rows
         };
