@@ -1,0 +1,25 @@
+{
+  "framework": "go-nested-modules",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "imports",
+  "cells": ["go/imports"],
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "svc/internal/store/store"},
+    {"kind": "MODULE", "name": "svc-b/client/client"}
+  ],
+  "expect_edges": [
+    {"from": "svc/cmd/main", "to": "svc/internal/store/store", "category": "IMPORTS", "note": "own module: svc/go.mod maps example.com/svc/... under svc/"},
+    {"from": "svc/cmd/main", "to": "svc-b/client/client", "category": "IMPORTS", "note": "sibling module in the same repo (go.work / replace layout): svc-b/go.mod"},
+    {"from": "svc/cmd/main/main", "to": "svc/internal/store/store/Save", "category": "CALLS"},
+    {"from": "svc/cmd/main/main", "to": "svc-b/client/client/Get", "category": "CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "svc/cmd/main", "cell": "IMPORTS", "contains": "github.com/google/uuid", "note": "the one real third-party module"}
+  ],
+  "forbid": [
+    {"from": "svc/cmd/main", "to": "svc-b/internal/store/store", "category": "IMPORTS", "note": "example.com/svc/internal/store is svc's package, never svc-b's same-named one"},
+    {"from": "svc/cmd/main/main", "to": "svc-b/internal/store/store/Save", "category": "CALLS", "note": "same guard at call level"}
+  ],
+  "note": "LA.13. No go.mod at the walked root, two nested go.mod roots whose module paths share the prefix `example.com/svc` (the `/`-boundary case). Baseline (leap wheel after W25, HEAD c0edf47): only the root go.mod is read, so both intra-repo imports stay raw library paths: IMPORTS 1/2 and CALLS 1/2 (svc-b/client binds only by LA.13b's unique-tail fallback; the own-module store import is ambiguous between the two store dirs) and main's IMPORTS cell leaks example.com/svc-b/client and example.com/svc/internal. The cell row is a keep-guard (contains cannot say 'nothing else'); the exact-equality gate is engine/tests/go_modules.rs imports_cell_lists_only_third_party."
+}

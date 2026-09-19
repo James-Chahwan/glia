@@ -35,19 +35,35 @@ use repo_graph_code_domain::endpoint::{
 // Public entry point
 // ============================================================================
 
-/// Parse one Go source file.
+/// Parse one Go source file under a single `go.mod` at the repo root.
 ///
 /// `package_qname` is the repo-local `::`-separated path for the package
 /// (e.g. `svc::users` for `<repo>/svc/users/*.go`).
 ///
-/// `module_import_prefix` is the `module` line from `go.mod` (e.g.
+/// `module_import_prefix` is the `module` line from the root `go.mod` (e.g.
 /// `github.com/foo/bar`) — used to map absolute Go import paths onto
-/// repo-local qnames. Pass `""` for a packageless / single-file parse.
+/// repo-local qnames. Pass `""` for a packageless / single-file parse. A repo
+/// with nested `go.mod`s goes through [`parse_file_with_modules`] (LA.13).
 pub fn parse_file(
     source: &str,
     file_rel_path: &str,
     package_qname: &str,
     module_import_prefix: &str,
+    repo: RepoId,
+) -> Result<FileParse, ParseError> {
+    let go = GoModules::root_only(module_import_prefix);
+    parse_file_with_modules(source, file_rel_path, package_qname, &go, repo)
+}
+
+/// [`parse_file`] under every `go.mod` of the repo (LA.13): an import path
+/// under any of their module paths maps onto the repo-local qname of that
+/// module's root directory ([`GoModules`]), everything else stays a raw
+/// external path.
+pub fn parse_file_with_modules(
+    source: &str,
+    file_rel_path: &str,
+    package_qname: &str,
+    go: &GoModules,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
     let mut parser = Parser::new();
@@ -106,7 +122,7 @@ pub fn parse_file(
         match child.kind() {
             "package_clause" => { /* already known; nothing to emit */ }
             "import_declaration" => {
-                collect_imports(child, src, package_qname, module_import_prefix, &mut acc);
+                collect_imports(child, src, package_qname, go, &mut acc);
             }
             "function_declaration" => {
                 visit_function(
@@ -484,9 +500,9 @@ fn embedded_iface_qualifier(term: TsNode, src: &[u8]) -> Option<CallQualifier> {
 ///
 /// A qualified `pkg.T` types nothing when the graph's bare-name lookup would
 /// land on the wrong `T`:
-/// * `pkg` is an import outside the go.mod module (`c net.Conn`): no repo
-///   type is `net.Conn`, but the unique-name fallback would bind a repo's own
-///   `Conn` (LA.18d's `external_pkgs`; with no module prefix every import is
+/// * `pkg` is an import outside the repo's go.mod modules (`c net.Conn`): no
+///   repo type is `net.Conn`, but the unique-name fallback would bind a repo's
+///   own `Conn` (LA.18d's `external_pkgs`; with no go.mod every import is
 ///   external, so every qualified field is skipped);
 /// * `T` is also a type of this file (the wrapper shape `type Logger struct
 ///   { l *zap.Logger }`): the module lookup would turn every delegating call
@@ -898,6 +914,174 @@ fn extract_type_name(type_node: TsNode, src: &[u8]) -> String {
 }
 
 // ============================================================================
+// Go module map (LA.13)
+// ============================================================================
+
+/// Every `go.mod` of a repo, as the Go parser maps import paths through them
+/// (LA.13). A repo can hold several modules (a monorepo of services, a
+/// `go.work` / `replace` layout, a nested module under `tools/`), and none
+/// need sit at the repo root: an import is in-repo when it lies under ANY of
+/// their module paths, and its repo-local qname is that module's root
+/// directory joined with the path below the module
+/// (`example.com/svc/internal/store` under `svc/go.mod` ->
+/// `svc::internal::store`).
+///
+/// Built from `(root dir, module path)` pairs ([`GoModules::from_entries`]) and
+/// kept sorted by root dir, so a lookup and [`GoModules::context_key`] never
+/// depend on discovery order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GoModules {
+    mods: Vec<GoModule>,
+}
+
+/// One `go.mod`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GoModule {
+    /// Repo-relative dir holding the go.mod, `/`-separated, `""` at the root.
+    root_dir: String,
+    /// The same dir as a qname prefix (`services::api`), `""` at the root.
+    root_qname: String,
+    /// Its `module` line (`example.com/svc`).
+    module_path: String,
+}
+
+impl GoModules {
+    /// One `go.mod` at the repo root with module path `prefix` (the pre-LA.13
+    /// model); `""` is no module at all.
+    pub fn root_only(prefix: &str) -> Self {
+        Self::from_entries(vec![(String::new(), prefix.to_string())])
+    }
+
+    /// From `(root dir, module path)` pairs: the root dir repo-relative with
+    /// `/` separators (`""` or `.` for the repo root). Entries with an empty
+    /// module path are dropped; the rest are sorted by root dir, then module
+    /// path, and exact duplicates removed.
+    pub fn from_entries(entries: Vec<(String, String)>) -> Self {
+        let mut mods: Vec<GoModule> = entries
+            .into_iter()
+            .filter_map(|(dir, module)| {
+                let module = module.trim();
+                if module.is_empty() {
+                    return None;
+                }
+                let dir = dir
+                    .split(['/', '\\'])
+                    .filter(|s| !s.is_empty() && *s != ".")
+                    .collect::<Vec<_>>()
+                    .join("/");
+                Some(GoModule {
+                    root_qname: dir.replace('/', "::"),
+                    root_dir: dir,
+                    module_path: module.to_string(),
+                })
+            })
+            .collect();
+        mods.sort_by(|a, b| {
+            a.root_dir
+                .cmp(&b.root_dir)
+                .then_with(|| a.module_path.cmp(&b.module_path))
+        });
+        mods.dedup();
+        Self { mods }
+    }
+
+    /// The module set as one string, `<root dir>=<module path>` joined by `;`
+    /// in root order (`""` when empty). A parse cache keys on it: any go.mod
+    /// added, removed, moved or re-pathed changes how unchanged `.go` files
+    /// map their imports.
+    pub fn context_key(&self) -> String {
+        self.mods
+            .iter()
+            .map(|m| format!("{}={}", m.root_dir, m.module_path))
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.mods.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.mods.len()
+    }
+
+    /// `(root dir, module path)` per module, in root order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        self.mods
+            .iter()
+            .map(|m| (m.root_dir.as_str(), m.module_path.as_str()))
+    }
+
+    /// The repo-local qname an import of `import_path` from the file whose
+    /// package qname is `package_qname` names, or `None` for an import no
+    /// module of the repo holds (stdlib, third-party).
+    ///
+    /// A module holds a path equal to its module path or below it at a `/`
+    /// boundary, so module `example.com/svc` never claims
+    /// `example.com/svc-b/client`. Of the modules holding the import, the
+    /// longest module path wins: Go excludes a nested module's directory from
+    /// the module around it, so `example.com/root/api/v2/users` is package
+    /// `users` of the module `example.com/root/api/v2` rooted at `api/`, never
+    /// the dir `api/v2/users` of `example.com/root`. Two go.mods declaring the
+    /// same module path (a vendored copy, an example dir) are decided by the
+    /// importing file's OWN module, the nearest go.mod enclosing it, else by
+    /// the first root dir: never by discovery order.
+    ///
+    /// `Some("")` is the repo-root module's own path, which names no package
+    /// directory.
+    fn map_import(&self, package_qname: &str, import_path: &str) -> Option<String> {
+        let rest_of = |m: &GoModule| -> Option<String> {
+            let rest = if import_path == m.module_path {
+                ""
+            } else {
+                import_path
+                    .strip_prefix(m.module_path.as_str())?
+                    .strip_prefix('/')?
+            };
+            Some(
+                rest.split('/')
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )
+        };
+        // (module, path below it, does it enclose the importer)
+        let mut best: Option<(&GoModule, String, bool)> = None;
+        for m in &self.mods {
+            let Some(rel) = rest_of(m) else { continue };
+            let own = encloses(&m.root_qname, package_qname);
+            let better = match &best {
+                None => true,
+                Some((b, _, b_own)) => {
+                    m.module_path.len() > b.module_path.len()
+                        || (m.module_path.len() == b.module_path.len()
+                            && own
+                            && (!b_own || m.root_qname.len() > b.root_qname.len()))
+                }
+            };
+            if better {
+                best = Some((m, rel, own));
+            }
+        }
+        let (m, rel, _) = best?;
+        Some(match (m.root_qname.is_empty(), rel.is_empty()) {
+            (true, _) => rel,
+            (false, true) => m.root_qname.clone(),
+            (false, false) => format!("{}::{rel}", m.root_qname),
+        })
+    }
+}
+
+/// Is the dir qname `root` (`""` = the repo root) `qname` itself or one of its
+/// `::`-segment ancestors?
+fn encloses(root: &str, qname: &str) -> bool {
+    root.is_empty()
+        || qname
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
+// ============================================================================
 // Import collection
 // ============================================================================
 
@@ -905,7 +1089,7 @@ fn collect_imports(
     decl: TsNode,
     src: &[u8],
     package_qname: &str,
-    module_import_prefix: &str,
+    go: &GoModules,
     acc: &mut Acc,
 ) {
     // import_declaration may wrap an import_spec_list or a single import_spec.
@@ -913,13 +1097,13 @@ fn collect_imports(
     for child in decl.named_children(&mut cursor) {
         match child.kind() {
             "import_spec" => {
-                record_import(child, src, package_qname, module_import_prefix, acc);
+                record_import(child, src, package_qname, go, acc);
             }
             "import_spec_list" => {
                 let mut inner = child.walk();
                 for spec in child.named_children(&mut inner) {
                     if spec.kind() == "import_spec" {
-                        record_import(spec, src, package_qname, module_import_prefix, acc);
+                        record_import(spec, src, package_qname, go, acc);
                     }
                 }
             }
@@ -932,7 +1116,7 @@ fn record_import(
     spec: TsNode,
     src: &[u8],
     package_qname: &str,
-    module_import_prefix: &str,
+    go: &GoModules,
     acc: &mut Acc,
 ) {
     // import_spec children: optional name (alias) + path (interpreted_string_literal).
@@ -963,16 +1147,15 @@ fn record_import(
         }
     }
 
-    // LA.18d: remember the local name of every import outside the go.mod
-    // module, so a func-literal handler's `pkg.Fn(..)` through it is not
-    // mistaken for an in-repo callee. With no module prefix every import is
+    // LA.13: the repo-local qname of an import under any of the repo's go.mod
+    // modules, `None` for a stdlib / third-party path.
+    let local = go.map_import(package_qname, &path_str);
+
+    // LA.18d: remember the local name of every import outside the repo's
+    // go.mod modules, so a func-literal handler's `pkg.Fn(..)` through it is
+    // not mistaken for an in-repo callee. With no go.mod every import is
     // external. Blank and dot imports bind no selector base.
-    let in_module = !module_import_prefix.is_empty()
-        && (path_str == module_import_prefix
-            || path_str
-                .strip_prefix(module_import_prefix)
-                .is_some_and(|rest| rest.starts_with('/')));
-    if !in_module {
+    if local.is_none() {
         match alias.as_deref() {
             Some("_") | Some(".") => {}
             Some(local) => {
@@ -986,19 +1169,16 @@ fn record_import(
         }
     }
 
-    // If the import lies within the go.mod module, convert to repo-local qname.
-    let qname = if !module_import_prefix.is_empty() && path_str.starts_with(module_import_prefix) {
-        let rel = path_str.trim_start_matches(module_import_prefix).trim_start_matches('/');
-        if rel.is_empty() {
-            // `import "github.com/foo/bar"` with module == "github.com/foo/bar" —
-            // degenerate; ignore.
-            return;
-        }
-        rel.replace('/', "::")
-    } else {
+    let qname = match local {
+        // The repo-root module's own path (`import "github.com/foo/bar"` with
+        // module == "github.com/foo/bar" at the root): no package dir to
+        // name; ignore, as before LA.13. A nested module's path names its
+        // root dir, which is a package.
+        Some(q) if q.is_empty() => return,
+        Some(q) => q,
         // External import (stdlib or third-party). Keep the raw path for now;
         // cross-repo resolution is a v0.4.4 concern.
-        path_str.replace('/', "::")
+        None => path_str.replace('/', "::"),
     };
 
     acc.imports.push(ImportStmt {
@@ -4585,5 +4765,115 @@ type UserService struct {
         }
         let t = || Some("T".to_string());
         assert_eq!(got, vec![t(), t(), t(), None, None, None, None, None, t()]);
+    }
+
+    // ---- LA.13: per-go.mod module map ----------------------------------------
+
+    fn nested() -> GoModules {
+        GoModules::from_entries(vec![
+            ("svc-b".into(), "example.com/svc-b".into()),
+            ("svc".into(), "example.com/svc".into()),
+        ])
+    }
+
+    #[test]
+    fn go_modules_map_at_a_slash_boundary() {
+        let go = nested();
+        // Own module: svc/go.mod maps under svc/.
+        assert_eq!(
+            go.map_import("svc::cmd::main", "example.com/svc/internal/store"),
+            Some("svc::internal::store".to_string())
+        );
+        // Module `example.com/svc` never claims `example.com/svc-b/...`.
+        assert_eq!(
+            go.map_import("svc::cmd::main", "example.com/svc-b/client"),
+            Some("svc-b::client".to_string())
+        );
+        assert_eq!(go.map_import("svc::cmd::main", "example.com/svcx/y"), None);
+        assert_eq!(go.map_import("svc::cmd::main", "github.com/google/uuid"), None);
+        // A nested module's own path names its root dir.
+        assert_eq!(go.map_import("svc::cmd::main", "example.com/svc"), Some("svc".to_string()));
+        // Root-only: HEAD semantics, the root module's own path is degenerate.
+        let root = GoModules::root_only("example.com/app");
+        assert_eq!(root.map_import("x::y", "example.com/app/x"), Some("x".to_string()));
+        assert_eq!(root.map_import("x::y", "example.com/app"), Some(String::new()));
+        assert_eq!(root.map_import("x::y", "example.com/apple/x"), None);
+        assert!(GoModules::root_only("").is_empty());
+    }
+
+    #[test]
+    fn go_modules_pick_the_longest_module_then_the_own_one() {
+        // Two go.mods declaring one module path: the importer's own wins.
+        let go = GoModules::from_entries(vec![
+            ("a".into(), "example.com/m".into()),
+            ("b".into(), "example.com/m".into()),
+        ]);
+        assert_eq!(go.map_import("b::main", "example.com/m/p"), Some("b::p".to_string()));
+        assert_eq!(go.map_import("a::main", "example.com/m/p"), Some("a::p".to_string()));
+        // An importer in neither: the first root by dir, never HashMap order.
+        assert_eq!(go.map_import("c::main", "example.com/m/p"), Some("a::p".to_string()));
+        // A file of a nested module still reaches the module around it.
+        let go = GoModules::from_entries(vec![
+            (String::new(), "example.com/root".into()),
+            ("tools".into(), "example.com/tools".into()),
+        ]);
+        assert_eq!(
+            go.map_import("tools::gen::main", "example.com/root/pkg/util"),
+            Some("pkg::util".to_string())
+        );
+        assert_eq!(
+            go.map_import("cmd::main", "example.com/tools/gen"),
+            Some("tools::gen".to_string())
+        );
+        // A longer module path beats a shorter one that also holds the import.
+        let go = GoModules::from_entries(vec![
+            (String::new(), "example.com/root".into()),
+            ("api".into(), "example.com/root/api/v2".into()),
+        ]);
+        assert_eq!(
+            go.map_import("web::main", "example.com/root/api/v2/users"),
+            Some("api::users".to_string())
+        );
+    }
+
+    #[test]
+    fn go_modules_context_key_is_order_free() {
+        let a = nested();
+        let b = GoModules::from_entries(vec![
+            ("svc".into(), "example.com/svc".into()),
+            ("./svc-b/".into(), "example.com/svc-b".into()),
+            ("svc".into(), "example.com/svc".into()),
+            ("empty".into(), String::new()),
+        ]);
+        assert_eq!(a, b);
+        assert_eq!(a.context_key(), "svc=example.com/svc;svc-b=example.com/svc-b");
+        assert_eq!(GoModules::root_only("example.com/app").context_key(), "=example.com/app");
+        assert_eq!(GoModules::default().context_key(), "");
+        let pairs: Vec<(&str, &str)> = a.iter().collect();
+        assert_eq!(pairs, vec![("svc", "example.com/svc"), ("svc-b", "example.com/svc-b")]);
+    }
+
+    #[test]
+    fn nested_modules_turn_intra_repo_imports_local() {
+        const MAIN: &str = "package main\n\nimport (\n\t\"github.com/google/uuid\"\n\t\"example.com/svc/internal/store\"\n\t\"example.com/svc-b/client\"\n)\n\nfunc main() {\n\t_ = uuid.New()\n\tstore.Save()\n\tclient.Get()\n}\n";
+        let parse =
+            parse_file_with_modules(MAIN, "svc/cmd/main.go", "svc::cmd::main", &nested(), repo())
+                .unwrap();
+        let paths: Vec<&str> = parse
+            .imports
+            .iter()
+            .filter_map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => Some(path.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["github.com::google::uuid", "svc::internal::store", "svc-b::client"]
+        );
+        // Root-only parse of the same file: both intra-repo imports stay raw.
+        let raw = parse_file(MAIN, "svc/cmd/main.go", "svc::cmd::main", "", repo()).unwrap();
+        assert!(raw.imports.iter().any(|i| matches!(&i.target,
+            ImportTarget::Module { path, .. } if path == "example.com::svc::internal::store")));
     }
 }

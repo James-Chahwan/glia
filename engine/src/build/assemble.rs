@@ -16,12 +16,12 @@ use super::grafts;
 use super::lang_build;
 use super::rpc_needles::RpcContext;
 use crate::cache::ParseCache;
-use crate::extract::detect_language;
+use crate::extract::{GoModules, detect_language};
 use crate::route::parse_repo_files;
 
 /// The repo-scope name -> literal table (A11.1), built from every walked file
-/// with a source language. Like `read_go_module_prefix` it is a cross-file
-/// fact the engine gathers, but unlike the go.mod prefix it is NOT
+/// with a source language. Like the go.mod set (`go_modules_for`) it is a
+/// cross-file fact the engine gathers, but unlike the go.mod set it is NOT
 /// handed to the per-file extractors: their output is cached by the file's own
 /// content hash, and a table lookup depends on other files. A consumer runs
 /// after the cache, as `apply_rpc_needles` does, so incremental == clean.
@@ -87,7 +87,8 @@ fn pin_overlay_constants(
 
 /// `repo_label` is the repo path as the caller was given it. It only prefixes
 /// the `[incremental]` marker, so a multi-repo build prints one attributable
-/// line per repo; it never reaches the graph. `rpc` is the build-wide proto
+/// line per repo; it never reaches the graph. `go` is the repo's go.mod set
+/// (LA.13), handed to every Go parse. `rpc` is the build-wide proto
 /// service set (A5.2). `roots` are the walk's project roots (A8.4), the owner
 /// vocabulary of the LB.4a HTTP owner segment. `config` is the repo's loaded
 /// `.glia/overlay.toml` (`RepoInputs::config`) and `opts` the build's options:
@@ -98,7 +99,7 @@ fn pin_overlay_constants(
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     repo: RepoId,
-    go_module_prefix: &str,
+    go: &GoModules,
     cache: Option<&mut ParseCache>,
     repo_label: &str,
     rpc: &RpcContext,
@@ -116,7 +117,7 @@ pub(super) fn build_graphs_for_repo(
     di_stats::reset();
 
     let (mut parses_by_lang, mut parse_errors) =
-        parse_repo_files(files, repo, go_module_prefix, cache, repo_label);
+        parse_repo_files(files, repo, go, cache, repo_label);
 
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`

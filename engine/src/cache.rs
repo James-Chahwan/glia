@@ -259,10 +259,15 @@ pub struct ParseCache {
     /// keeps its cache. (Until LB.1 this held `file://<repo_path>`, and any
     /// respelling discarded a valid sidecar.)
     repo_canonical: String,
-    /// `go.mod` module path the cached parses were built under. It changes how
-    /// every `.go` file parses (internal-vs-library imports, WP-G) without
-    /// changing any `.go` content hash (audit 2026-06-10 #3).
-    go_prefix: String,
+    /// The go.mod module set the cached parses were built under: the
+    /// module-set key from `GoModules::context_key` (`<root dir>=<module>;..`,
+    /// LA.13). It changes how every `.go` file parses (internal-vs-library
+    /// imports, WP-G) without changing any `.go` content hash (audit
+    /// 2026-06-10 #3), so any go.mod added, removed or edited discards the
+    /// cache. (Until LA.13 this held the root go.mod's bare module path; bincode
+    /// does not encode field names, so the sidecar layout is unchanged and an
+    /// old sidecar simply discards once.)
+    go_modules: String,
     entries: BTreeMap<String, CacheEntry>,
     #[serde(skip)]
     pub stats: CacheStats,
@@ -278,7 +283,7 @@ impl Default for ParseCache {
         Self {
             stamp: CACHE_VERSION.to_string(),
             repo_canonical: String::new(),
-            go_prefix: String::new(),
+            go_modules: String::new(),
             entries: BTreeMap::new(),
             stats: CacheStats::default(),
             last_diff: None,
@@ -294,21 +299,22 @@ impl ParseCache {
     /// Discard every entry if the build context differs from the one the cache
     /// was written under, then adopt the new context. The context is the repo
     /// identity KEY (not its path — see `repo_canonical`) plus the go.mod
-    /// module. Per-file content hashes can't see either value, so a mismatch
-    /// means every entry is suspect. Called at the top of each build — covers
-    /// the disk sidecar AND a long-lived in-memory cache (neuropil) being
-    /// pointed at a different repo.
-    pub fn validate_context(&mut self, repo_canonical: &str, go_prefix: &str) {
-        if self.repo_canonical != repo_canonical || self.go_prefix != go_prefix {
+    /// module set (`go_context`, `GoModules::context_key`; `""` for a repo
+    /// with no go.mod). Per-file content hashes can't see either value, so a
+    /// mismatch means every entry is suspect. Called at the top of each build —
+    /// covers the disk sidecar AND a long-lived in-memory cache (neuropil)
+    /// being pointed at a different repo.
+    pub fn validate_context(&mut self, repo_canonical: &str, go_context: &str) {
+        if self.repo_canonical != repo_canonical || self.go_modules != go_context {
             if !self.entries.is_empty() {
                 eprintln!(
-                    "[incremental] build context changed (repo identity or go.mod module), discarding {} cached parses",
+                    "[incremental] build context changed (repo identity or go.mod module set), discarding {} cached parses",
                     self.entries.len()
                 );
             }
             self.entries.clear();
             repo_canonical.clone_into(&mut self.repo_canonical);
-            go_prefix.clone_into(&mut self.go_prefix);
+            go_context.clone_into(&mut self.go_modules);
         }
     }
 
@@ -665,7 +671,7 @@ mod tests {
         c.put("a".into(), 1, "rust", one.clone());
         let mut derived = bincode::serialize(&c.stamp).expect("stamp");
         derived.extend(bincode::serialize(&c.repo_canonical).expect("repo"));
-        derived.extend(bincode::serialize(&c.go_prefix).expect("go"));
+        derived.extend(bincode::serialize(&c.go_modules).expect("go"));
         derived.extend(bincode::serialize(&1u64).expect("n entries"));
         derived.extend(bincode::serialize("a").expect("key"));
         derived.extend(bincode::serialize(&1u64).expect("hash"));

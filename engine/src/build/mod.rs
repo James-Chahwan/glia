@@ -32,12 +32,14 @@ mod rpc_needles;
 
 use std::path::{Path, PathBuf};
 
+use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::walk_gating::{RepoIdentity, repo_identity};
 use repo_graph_core::RepoId;
 use repo_graph_graph::MergedGraph;
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
+use crate::extract::GoModules;
 use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
 use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
@@ -195,24 +197,24 @@ fn generate_one_inner(
     repo_id_marker(&ident, identity_root);
     let repo_labels = crate::arch::repo_label_map(&[(repo.0, identity_root.to_string())]);
     let repo_roots = std::collections::BTreeMap::from([(repo.0, identity_root.to_string())]);
-    // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
-    // prefixes are A8.7.
+    // Project roots (A8.4) become PROJECT nodes below (A8.5); each root's
+    // go.mod joins the repo's Go module map (A8.7 / LA.13).
     let (files, regions, md, roots) = walk_source_files(&root);
     // External inputs (LF.1a): `.glia/overlay.toml` loaded once, before any
     // graph is built.
     let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string())];
-    let go_prefix = read_go_module_prefix(&root);
+    let go = go_modules_for(&root, &roots, repo_path);
     // Cached parses are only valid under the exact repo identity + go.mod
-    // module they were built with — neither is visible to per-file hashes.
+    // set they were built with — neither is visible to per-file hashes.
     if let Some(c) = cache.as_deref_mut() {
-        c.validate_context(&ident.key, &go_prefix);
+        c.validate_context(&ident.key, &go.context_key());
     }
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
     let (mut graphs, mut parse_errors) = build_graphs_for_repo(
         &files,
         repo,
-        &go_prefix,
+        &go,
         cache,
         repo_path,
         &rpc,
@@ -393,15 +395,15 @@ pub(crate) fn assemble_many_with(
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
         repo_roots.entry(repo.0).or_insert_with(|| path.clone());
-        let go_prefix = read_go_module_prefix(&root);
+        let go = go_modules_for(&root, &roots, path);
         let mut cache = incremental.then(|| ParseCache::load(path));
         if let Some(c) = cache.as_mut() {
-            c.validate_context(&ident.key, &go_prefix);
+            c.validate_context(&ident.key, &go.context_key());
         }
         let (graphs, parse_errors) = build_graphs_for_repo(
             &files,
             repo,
-            &go_prefix,
+            &go,
             cache.as_mut(),
             path,
             &rpc,
@@ -499,18 +501,68 @@ fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String
     lines
 }
 
-/// Read the `module` path from a repo's `go.mod` (e.g. `github.com/foo/bar`),
-/// or `""` if there's no go.mod. The Go parser uses it to tell internal package
-/// imports from external libraries (WP-G / #6).
-fn read_go_module_prefix(root: &Path) -> String {
-    std::fs::read_to_string(root.join("go.mod"))
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .map(str::trim)
-                .find_map(|l| l.strip_prefix("module ").map(|m| m.trim().to_string()))
+/// The repo's Go module map (LA.13): the `go.mod` of every project root the
+/// walk found (A8.4), the repo root's included, each with its `module` path.
+/// The Go parser maps an import under any of them onto that module's root dir
+/// and treats the rest as libraries (WP-G / #6; before LA.13 only
+/// `<root>/go.mod` was read, so a repo whose go.mods are all nested kept every
+/// internal import raw).
+///
+/// Every root's dir is checked, not only the `go` ecosystem's: a dir holding
+/// both a `package.json` and a `go.mod` is an `npm` root by manifest
+/// precedence, and its Go module is no less real. A go.mod with no `module`
+/// line is skipped.
+///
+/// fired_on marker, once per repo with at least one module (the first four,
+/// then `+K more`; the repo root's dir prints as `.`):
+///   `[go-modules] N module roots (svc=example.com/svc svc-b=example.com/svc-b) repo=<label>`
+fn go_modules_for(
+    root: &Path,
+    roots: &[ProjectRoot],
+    repo_label: &str,
+) -> GoModules {
+    let entries: Vec<(String, String)> = roots
+        .iter()
+        .filter_map(|r| {
+            let module = read_go_module_path(&root.join(&r.rel_path))?;
+            Some((r.rel_path.clone(), module))
         })
-        .unwrap_or_default()
+        .collect();
+    let go = GoModules::from_entries(entries);
+    if !go.is_empty() {
+        let shown: Vec<String> = go
+            .iter()
+            .take(4)
+            .map(|(dir, module)| {
+                format!("{}={module}", if dir.is_empty() { "." } else { dir })
+            })
+            .collect();
+        let more = go.len().saturating_sub(4);
+        let more = if more > 0 { format!(" +{more} more") } else { String::new() };
+        eprintln!(
+            "[go-modules] {} module root{} ({}{more}) repo={repo_label}",
+            go.len(),
+            if go.len() == 1 { "" } else { "s" },
+            shown.join(" ")
+        );
+    }
+    go
+}
+
+/// The `module` path of `<dir>/go.mod` (`module example.com/svc`, also quoted
+/// or with a trailing `//` comment), or `None` without a go.mod or a module
+/// line.
+fn read_go_module_path(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("go.mod")).ok()?;
+    text.lines().map(str::trim).find_map(|l| {
+        let rest = l.strip_prefix("module")?;
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let module = rest.split("//").next().unwrap_or("").trim();
+        let module = module.trim_matches(|c| c == '"' || c == '`');
+        (!module.is_empty()).then(|| module.to_string())
+    })
 }
 
 #[cfg(test)]

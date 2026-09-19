@@ -14,8 +14,8 @@ use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
 use crate::extract::{
-    ExtractStats, apply_cross_cutting_extractors, build_group, detect_language, merge_nav,
-    parse_one_as, path_to_qname, synthetic_module_qname,
+    ExtractStats, GoModules, apply_cross_cutting_extractors, build_group, detect_language,
+    merge_nav, parse_one_as, path_to_qname, synthetic_module_qname,
 };
 use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 
@@ -24,11 +24,12 @@ use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 /// language tag and the per-file errors. `.proto` files are no longer a
 /// separate bucket — they stash under the `"proto"` lang tag like any other
 /// synthetic parse (A5.1), so they get a MODULE node and a file position.
-/// `repo_label` only prefixes the `[incremental]` marker (A1.4).
+/// `repo_label` only prefixes the `[incremental]` marker (A1.4). `go` is the
+/// repo's go.mod set every Go file maps its imports through (LA.13).
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
-    go_module_prefix: &str,
+    go: &GoModules,
     mut cache: Option<&mut ParseCache>,
     repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
@@ -536,7 +537,7 @@ pub(crate) fn parse_repo_files(
         // kill an N-file repo build — log it, skip it, keep going.
         let parse_result = catch_unwind(AssertUnwindSafe(|| {
             let mut fp =
-                parse_one_as(source, path, lang, repo, go_module_prefix, &module_qname)?;
+                parse_one_as(source, path, lang, repo, go, &module_qname)?;
             // LC.3a: the edges present now are the parser's own. Stamped here,
             // inside the closure and before the extractors, so the parse cache
             // stores the stamp and a cache hit replays it.
@@ -1160,7 +1161,8 @@ mod tests {
 
     fn route(path: &str, source: &str) -> HashMap<&'static str, Vec<FileParse>> {
         let files = vec![(path.to_string(), source.to_string())];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         parses
     }
@@ -1238,7 +1240,8 @@ mod tests {
                 "model Event {\n  id String @id\n}\n".to_string(),
             ),
         ];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let fps = &parses["prisma"];
         assert_eq!(fps.len(), 1, "the model-less datasource file stashes nothing");
@@ -1464,7 +1467,8 @@ mod tests {
         .into_iter()
         .map(|(p, s)| (p.to_string(), s.to_string()))
         .collect();
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let mut ops: Vec<(String, String)> = parses
             .values()
@@ -1551,7 +1555,8 @@ mod tests {
         .iter()
         .map(|(p, s)| (p.to_string(), s.to_string()))
         .collect();
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let mut routed: Vec<(&str, String)> = Vec::new();
         for (lang, fps) in &parses {
@@ -1667,7 +1672,8 @@ mod tests {
                 "export function validate(x: number) { return x; }\n".to_string(),
             ),
         ];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         for (lang, qname) in [("python", "api::user.py"), ("typescript", "api::user.ts")] {
             let fp = &parses[lang][0];
@@ -1730,7 +1736,8 @@ mod tests {
                 "#include \"Widget.h\"\nint make() { return 0; }\n".to_string(),
             ),
         ];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let fps = &parses["c_cpp"];
         assert_eq!(fps.len(), 2);
@@ -1765,7 +1772,8 @@ mod tests {
                     .to_string(),
             ),
         ];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let ts_module =
             NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "web::x.component.ts");
@@ -1927,7 +1935,8 @@ mod tests {
                 "<a routerLink=\"/home\">h</a>\n".to_string(),
             ),
         ];
-        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        let (parses, errors) =
+            parse_repo_files(&files, RepoId(1), &GoModules::default(), None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         let ts_module = parses
             .values()

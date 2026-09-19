@@ -6,6 +6,11 @@ use std::path::Path;
 use repo_graph_code_domain::{CodeNav, FileParse, edge_category, evidence};
 use repo_graph_core::{NodeId, RepoId};
 
+/// The repo's `go.mod` set (LA.13), what [`parse_one_with_go_modules`] maps
+/// Go imports through. Re-exported so a caller can build one
+/// (`GoModules::from_entries`) without depending on the Go parser crate.
+pub use repo_graph_parser_go::GoModules;
+
 // ----------------------------------------------------------------------------
 // Language detection + per-language parser dispatch
 // ----------------------------------------------------------------------------
@@ -86,12 +91,28 @@ pub fn parse_one(
 /// Like [`parse_one`] but with the Go `module` prefix (from `go.mod`) so the Go
 /// parser recognises internal package imports as internal instead of leaking
 /// their names into `Symbol.imports` (WP-G / #6). Non-Go languages ignore it.
+/// The prefix is ONE go.mod at the repo root; a repo with nested go.mods goes
+/// through [`parse_one_with_go_modules`].
 pub fn parse_one_with(
     source: &str,
     path: &str,
     lang: &str,
     repo: RepoId,
     go_module_prefix: &str,
+) -> Result<FileParse, String> {
+    parse_one_with_go_modules(source, path, lang, repo, &GoModules::root_only(go_module_prefix))
+}
+
+/// Like [`parse_one_with`] under every `go.mod` of the repo (LA.13): a Go
+/// import under any of their module paths maps onto the repo-local qname of
+/// that module's root dir, as the repo build maps it. Non-Go languages ignore
+/// `go`.
+pub fn parse_one_with_go_modules(
+    source: &str,
+    path: &str,
+    lang: &str,
+    repo: RepoId,
+    go: &GoModules,
 ) -> Result<FileParse, String> {
     // LB.10a: every C/C++ MODULE is named by its full file name, so a
     // single-file parse names it exactly as the repo build does.
@@ -100,7 +121,7 @@ pub fn parse_one_with(
     } else {
         path_to_qname(path)
     };
-    parse_one_as(source, path, lang, repo, go_module_prefix, &module_qname)
+    parse_one_as(source, path, lang, repo, go, &module_qname)
 }
 
 /// [`parse_one_with`] under an explicit MODULE qname. The router passes the
@@ -113,14 +134,14 @@ pub(crate) fn parse_one_as(
     path: &str,
     lang: &str,
     repo: RepoId,
-    go_module_prefix: &str,
+    go: &GoModules,
     module_qname: &str,
 ) -> Result<FileParse, String> {
     let module_qname = module_qname.to_string();
     match lang {
         "python" => repo_graph_parser_python::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "go" => repo_graph_parser_go::parse_file(source, path, &module_qname, go_module_prefix, repo)
+        "go" => repo_graph_parser_go::parse_file_with_modules(source, path, &module_qname, go, repo)
             .map_err(|e| e.to_string()),
         "typescript" | "js" => repo_graph_parser_typescript::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
