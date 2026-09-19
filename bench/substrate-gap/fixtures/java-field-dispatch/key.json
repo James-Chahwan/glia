@@ -1,0 +1,19 @@
+{
+  "framework": "java-field-dispatch",
+  "language": "java",
+  "dirs": ["."],
+  "cells": ["java/calls"],
+  "note": "A6.2c: a call on a declared field binds through the field's type. `repo.find(id)` is an Attribute receiver (Java reads a field unqualified); AuditService is a @Service, so its SERVICE overlay must stay folded into the CLASS (LB.3a) for the type to bind uniquely. Qname patterns are substrings, so LB.2's un-doubled class segment moves no row.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "UserRepo", "note": "dependency type"},
+    {"kind": "CLASS", "name": "AuditService", "note": "@Service dependency type, one node after the LB.3a fold"},
+    {"kind": "METHOD", "name": "get", "note": "caller"},
+    {"kind": "METHOD", "name": "find", "note": "callee on the field's declared type"},
+    {"kind": "METHOD", "name": "log", "note": "callee on the @Service field's declared type"}
+  ],
+  "expect_edges": [
+    {"from": "UserService", "to": "UserRepo", "category": "IMPORTS", "note": "import com.example.data.UserRepo, the positive control"},
+    {"from": "UserService/get", "to": "UserRepo/find", "category": "CALLS", "note": "repo.find(id): Attribute base is a field of UserService"},
+    {"from": "UserService/get", "to": "AuditService/log", "category": "CALLS", "note": "audit.log(\"x\"): field typed by a @Service class"}
+  ]
+}

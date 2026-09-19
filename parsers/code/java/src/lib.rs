@@ -868,6 +868,7 @@ fn visit_type_member(
         "field_declaration" => {
             visit_field_decl(child, src, file_rel, owner.qname, owner.id, repo, acc);
             emit_field_inject(child, src, owner.id, owner.module_id, acc);
+            collect_field_types(child, src, owner.id, acc);
             0
         }
         "class_declaration"
@@ -1435,6 +1436,35 @@ fn emit_field_inject(
     };
     if let Some(name) = injectable_type_name(ty, src) {
         push_inject_ref(class_id, module_id, name, acc);
+    }
+}
+
+/// A6.2c: record every declared field's type on its owning type, whatever its
+/// annotations, so `resolve_calls`' receiver-type pass (A6.2a) binds
+/// `repo.find(id)` / `this.repo.find(id)` to `find` on the field's type.
+/// `private final UserRepo repo, backup;` records both declarators.
+///
+/// Only a plain `type_identifier` / `scoped_type_identifier` (`UserRepo`,
+/// `com.x.UserRepo` -> `UserRepo`) is recorded. A `generic_type` is skipped
+/// even where `injectable_type_name` unwraps it: `Provider<UserRepo> repo`
+/// has `Provider`'s methods, so `repo.get()` must not bind to `UserRepo::get`.
+/// Primitives, arrays and the boxed / value-type denylist record nothing.
+fn collect_field_types(field: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let Some(ty) = field.child_by_field_name("type") else {
+        return;
+    };
+    if !matches!(ty.kind(), "type_identifier" | "scoped_type_identifier") {
+        return;
+    }
+    let Some(type_name) = injectable_type_name(ty, src) else {
+        return;
+    };
+    let mut c = field.walk();
+    for decl in field.children_by_field_name("declarator", &mut c) {
+        if let Some(name) = decl.child_by_field_name("name") {
+            acc.nav
+                .record_field_type(class_id, text_of(name, src), &type_name);
+        }
     }
 }
 
@@ -4528,5 +4558,109 @@ public class Limits {
             fp.refs
         );
         assert!(uses_edges(&fp).is_empty());
+    }
+
+    /// A6.2c: the id of the one CLASS the parse recorded under `name`.
+    fn class_id_named(fp: &FileParse, name: &str) -> NodeId {
+        let ids: Vec<NodeId> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(id, k)| {
+                **k == node_kind::CLASS
+                    && fp.nav.name_by_id.get(*id).map(String::as_str) == Some(name)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids.len(), 1, "one CLASS {name}: {ids:?}");
+        ids[0]
+    }
+
+    #[test]
+    fn field_declaration_records_field_type() {
+        let fp = parse_file(
+            "public class S { private final UserRepo repo; }",
+            "S.java",
+            "S",
+            repo(),
+        )
+        .unwrap();
+        let s = class_id_named(&fp, "S");
+        assert_eq!(fp.nav.field_types[&s]["repo"], "UserRepo");
+        assert_eq!(fp.nav.field_types[&s].len(), 1);
+    }
+
+    #[test]
+    fn every_declarator_records_its_field_type_without_an_inject_annotation() {
+        let source = r#"
+package com.example.svc;
+
+public class S {
+    private final UserRepo primary, backup;
+    protected com.example.audit.AuditLog audit;
+    @Autowired OrderRepo orders;
+    static final Clock CLOCK = Clock.systemUTC();
+    class Inner { private final UserRepo repo; }
+}
+"#;
+        let fp = parse_file(source, "S.java", "S", repo()).unwrap();
+        let s = class_id_named(&fp, "S");
+        let mut got: Vec<(&str, &str)> = fp.nav.field_types[&s]
+            .iter()
+            .map(|(f, t)| (f.as_str(), t.as_str()))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![
+                ("CLOCK", "Clock"),
+                ("audit", "AuditLog"),
+                ("backup", "UserRepo"),
+                ("orders", "OrderRepo"),
+                ("primary", "UserRepo"),
+            ]
+        );
+        // A nested type's field is keyed by the nested type, not its host.
+        let inner = class_id_named(&fp, "Inner");
+        assert_eq!(fp.nav.field_types[&inner]["repo"], "UserRepo");
+        assert_eq!(fp.nav.field_types[&inner].len(), 1);
+    }
+
+    #[test]
+    fn primitive_value_and_array_fields_record_nothing() {
+        let source = r#"
+public class S {
+    private int count;
+    private boolean on;
+    private String name;
+    private Integer boxed;
+    private UserRepo[] repos;
+}
+"#;
+        let fp = parse_file(source, "S.java", "S", repo()).unwrap();
+        assert!(
+            fp.nav.field_types.is_empty(),
+            "no method table to bind against: {:?}",
+            fp.nav.field_types
+        );
+    }
+
+    /// A7.2 guard: a DI wrapper's receiver has the wrapper's methods, so
+    /// `repo.get()` on a `Provider<UserRepo>` must never bind `UserRepo::get`.
+    #[test]
+    fn generic_field_types_record_nothing() {
+        let source = r#"
+public class S {
+    private final Provider<UserRepo> repo;
+    private final Optional<UserRepo> maybe;
+    private final List<UserRepo> all;
+}
+"#;
+        let fp = parse_file(source, "S.java", "S", repo()).unwrap();
+        assert!(
+            fp.nav.field_types.is_empty(),
+            "generic_type is skipped: {:?}",
+            fp.nav.field_types
+        );
     }
 }
