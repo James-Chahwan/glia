@@ -1,0 +1,18 @@
+{
+  "framework": "ts-tsconfig-paths",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/imports"],
+  "note": "A6.8: tsconfig `paths` aliases. tsconfig.json is JSONC (block comment holding a URL, a line comment, a trailing comma) and never reaches the walk's file list, so the engine reads it off the repo / project root. Baseline at HEAD 3f427fb: IMPORTS 0/1 (the alias specifier was treated as an npm package) and the importer's IMPORTS cell listed `@core/auth.service` as a library.",
+  "expect_nodes": [
+    {"kind": "MODULE", "name": "page", "note": "importer, src/app/feature/page.ts"},
+    {"kind": "MODULE", "name": "auth.service", "note": "alias target, src/app/core/auth.service.ts"},
+    {"kind": "CLASS", "name": "AuthService", "note": "the imported symbol"}
+  ],
+  "expect_edges": [
+    {"from": "app/feature/page", "to": "app/core/auth.service", "category": "IMPORTS", "note": "import from '@core/auth.service' - baseUrl ./src + paths '@core/*': ['app/core/*']"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "app/feature/page", "cell": "IMPORTS", "contains": "[\"@angular/core\"]", "note": "the alias names an in-repo module, so only the real npm package stays in the library cell"}
+  ]
+}

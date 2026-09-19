@@ -975,6 +975,12 @@ pub struct LocalModuleIndex {
     /// (MODULE `Helper`, CLASS `Helper::Helper`); one shared count would make
     /// every Java class ambiguous.
     modules: std::collections::BTreeMap<String, usize>,
+    /// A6.8: the literal before the `*` of every tsconfig `paths` wildcard key
+    /// (`@core/*` -> `@core/`). A TS-family specifier starting with one names
+    /// an in-repo module, not a package ([`Self::is_alias_import`]).
+    alias_prefixes: std::collections::BTreeSet<String>,
+    /// A6.8: every wildcard-free tsconfig `paths` key (`@env`), matched whole.
+    alias_exact: std::collections::BTreeSet<String>,
 }
 
 /// Split an import path or qname on every separator the parsers use (`::`,
@@ -1063,6 +1069,43 @@ impl LocalModuleIndex {
         !segs.is_empty() && self.paths.contains(&segs.join("::"))
     }
 
+    /// A6.8: declare a tsconfig `compilerOptions.paths` key local, as written
+    /// (`@core/*`, `@env`). A key with a `*` declares every specifier that
+    /// starts with its literal prefix (`@core/`); a key without one declares
+    /// exactly itself. A key with an empty literal prefix (`*`, the catch-all
+    /// that maps bare specifiers into `node_modules`) declares nothing: it
+    /// would make every package local. The aliases of every tsconfig the
+    /// build read are declared repo-wide: a TS file under one project root
+    /// importing a real package spelt like another root's alias would lose
+    /// that package from its cell.
+    pub fn add_alias_prefix(&mut self, key: &str) {
+        let key = key.trim();
+        match key.split_once('*') {
+            Some((prefix, _)) => {
+                if !prefix.is_empty() {
+                    self.alias_prefixes.insert(prefix.to_string());
+                }
+            }
+            None => {
+                if !key.is_empty() {
+                    self.alias_exact.insert(key.to_string());
+                }
+            }
+        }
+    }
+
+    /// A6.8: true if the raw import `specifier` (quotes allowed) matches a
+    /// declared tsconfig alias ([`Self::add_alias_prefix`]). Asked of the
+    /// specifier, never of its [`library_name`]: that keeps only the first
+    /// segment(s), so `~/lib/x` under `~/*` is the library `~`, which no longer
+    /// shows the `~/` the alias names.
+    pub fn is_alias_import(&self, specifier: &str) -> bool {
+        let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+        !spec.is_empty()
+            && (self.alias_exact.contains(spec)
+                || self.alias_prefixes.iter().any(|p| spec.starts_with(p.as_str())))
+    }
+
     /// True if exactly one declaration in the repo carries `name`. An item
     /// declaration (class, struct, …) wins over a module of the same name.
     pub fn is_local_symbol(&self, name: &str) -> bool {
@@ -1082,6 +1125,13 @@ impl LocalModuleIndex {
 /// would drop `firebase`.
 fn symbol_evidence_applies(lang: &str) -> bool {
     matches!(lang, "java" | "kotlin" | "scala" | "rust")
+}
+
+/// A6.8: the language tags whose imports resolve through tsconfig `paths`
+/// (the TS family, as [`library_name`] groups them). A Python `import config`
+/// is never a TS alias, whatever a tsconfig in the repo declares.
+fn ts_alias_applies(lang: &str) -> bool {
+    matches!(lang, "typescript" | "javascript" | "react" | "angular" | "vue")
 }
 
 /// The form of a candidate library name that is looked up in the index. A
@@ -1127,6 +1177,7 @@ fn filter_library_names(
         };
         let Some(lib) = library_name(path, lang) else { continue };
         let is_local = local.is_local_path(local_lookup_key(&lib, lang))
+            || (ts_alias_applies(lang) && local.is_alias_import(path))
             || (symbol_evidence_applies(lang) && symbol.is_some_and(|n| local.is_local_symbol(n)));
         if is_local {
             dropped.insert(lib);
@@ -2997,6 +3048,41 @@ mod tests {
         let local = index_of(&[(node_kind::MODULE, "myapp::auth"), (node_kind::MODULE, "myapp::users")]);
         let imports = vec![symbol_import("myapp.users", "User"), module_import("requests")];
         assert_eq!(library_names_filtered(&imports, "python", &local), vec!["requests".to_string()]);
+    }
+
+    /// A6.8: a TS specifier a tsconfig `paths` key matches names an in-repo
+    /// module, so it leaves the library cell, while a real package stays. The
+    /// match is on the specifier: `~/lib/polyfills` is the library `~`.
+    #[test]
+    fn filtered_drops_ts_path_aliases() {
+        let mut local = index_of(&[(node_kind::MODULE, "src::app::core::auth.service")]);
+        for key in ["@core/*", "@env", "~/*", "*", ""] {
+            local.add_alias_prefix(key);
+        }
+        let imports = vec![
+            symbol_import("@core/auth.service", "AuthService"),
+            symbol_import("@env", "environment"),
+            module_import("~/lib/polyfills"),
+            symbol_import("@angular/core", "Injectable"),
+            symbol_import("@environment/prod", "config"),
+            module_import("rxjs"),
+        ];
+        assert_eq!(
+            library_names(&imports, "typescript"),
+            ["@angular/core", "@core/auth.service", "@env", "@environment/prod", "rxjs", "~"],
+            "the leak this fixes"
+        );
+        assert_eq!(
+            library_names_filtered(&imports, "typescript", &local),
+            ["@angular/core", "@environment/prod", "rxjs"],
+            "an exact key is matched whole: `@environment/prod` is not `@env`"
+        );
+        assert!(local.is_alias_import("\"@core/x\""), "quotes are the parser's, not the key's");
+        assert!(!local.is_alias_import("lodash"), "the catch-all `*` declared nothing");
+        assert!(!local.is_alias_import(""));
+        // Only the TS family resolves through tsconfig.
+        let py = vec![module_import("@env")];
+        assert_eq!(library_names_filtered(&py, "python", &local), ["@env"]);
     }
 
     #[test]

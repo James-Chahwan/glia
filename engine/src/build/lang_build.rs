@@ -1,9 +1,12 @@
 //! The per-language graph build of `build_graphs_for_repo`: a deterministic
 //! language order, the `build_*` dispatch, one shared TS-family graph, and the
-//! relative-import resolvers the `build_typescript` arm takes (and the
-//! `#include` resolver `build_c_cpp` takes).
+//! import resolvers the `build_typescript` arm takes (relative, plus the A6.8
+//! tsconfig `paths` aliases for the TS family) and the `#include` resolver
+//! `build_c_cpp` takes.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
@@ -44,12 +47,15 @@ const JVM_GUEST: &str = "kotlin";
 /// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
 /// to `parse_errors`. Prints the A6.2a `[recv]` and A6.3 `[heritage]` markers
 /// for `repo_label`.
-/// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a).
+/// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a);
+/// `ts_aliases` the TS family's import resolver ([`resolve_ts_source_aliased`],
+/// A6.8).
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
     repo: RepoId,
     repo_label: &str,
     rust_crates: &[RustCrate],
+    ts_aliases: &TsAliasSet,
     parse_errors: &mut Vec<String>,
 ) -> (Vec<RepoGraph>, Vec<(&'static str, usize)>) {
     let mut graphs = Vec::new();
@@ -134,7 +140,9 @@ pub(super) fn build_language_graphs(
     }
     if !ts_family.is_empty() {
         let unattributed = unattributed_parse_edges(&ts_family);
-        let graph = repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source);
+        let graph = repo_graph_graph::build_typescript(repo, ts_family, |from, spec| {
+            resolve_ts_source_aliased(from, spec, ts_aliases)
+        });
         recv_bound.push(("typescript", recv_stats::take()));
         match graph {
             Ok(mut g) => {
@@ -448,6 +456,282 @@ fn resolve_ts_source(from_module: &str, specifier: &str) -> Option<String> {
     Some(segs.join("::"))
 }
 
+// ---------------------------------------------------------------------------
+// A6.8: tsconfig `paths` aliases
+// ---------------------------------------------------------------------------
+
+/// The files one project dir's aliases are read from, in order: the first
+/// that declares `compilerOptions.paths` wins (`tsconfig.base.json` is Nx's
+/// workspace-root convention).
+const TSCONFIG_FILES: [&str; 2] = ["tsconfig.json", "tsconfig.base.json"];
+
+/// A6.8: one tsconfig's `compilerOptions.paths`, as the TS-family import
+/// resolver maps a non-relative specifier through it
+/// ([`resolve_ts_source_aliased`]). A tsconfig never reaches the walk's file
+/// list (the `.json` sniff does not admit it), so it is read off each project
+/// dir, like a go.mod ([`TsAliasSet::read`]).
+///
+/// v1 limitations: only the FIRST target of each `paths` array is used, so a
+/// repo relying on a fallback target does not bind (never mis-binds); an
+/// `extends` chain is not followed (a file takes the aliases of the nearest
+/// enclosing dir whose tsconfig declares `paths`, [`TsAliasSet::scope_of`]);
+/// an alias naming a directory gets no implicit `index.ts` (the relative
+/// resolver has none either); a `baseUrl` with no `paths` maps nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TsAliases {
+    /// The tsconfig's dir, repo-relative, `/`-separated, `""` at the root.
+    dir: String,
+    /// The same dir as a module qname prefix, `""` at the root.
+    dir_qname: String,
+    /// The file the aliases came from ([`TSCONFIG_FILES`]).
+    file: &'static str,
+    /// `compilerOptions.baseUrl` as written, `.` when absent (TS 4.1+ then
+    /// resolves `paths` against the tsconfig's own dir).
+    base_url: String,
+    /// `(key, first target)`, in match order: every wildcard-free key first
+    /// (TS matches those exactly before any pattern), then the wildcard keys
+    /// by longest literal prefix, then by key.
+    entries: Vec<(String, String)>,
+}
+
+impl TsAliases {
+    /// The module qname `spec` names through the first key that matches it,
+    /// or `None`: no key matches, or the best match's target leaves the repo.
+    fn map(&self, spec: &str) -> Option<String> {
+        let target = self.entries.iter().find_map(|(key, target)| match key.split_once('*') {
+            None => (key == spec).then(|| target.clone()),
+            Some((prefix, suffix)) => spec
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_suffix(suffix))
+                .map(|star| target.replacen('*', star, 1)),
+        })?;
+        ts_path_qname(&format!("{}/{}/{target}", self.dir, self.base_url))
+    }
+
+    /// The tsconfig's repo-relative path, for the marker.
+    fn shown_path(&self) -> String {
+        if self.dir.is_empty() {
+            self.file.to_string()
+        } else {
+            format!("{}/{}", self.dir, self.file)
+        }
+    }
+}
+
+/// A6.8: every project dir's tsconfig `paths` of one repo: the repo root and
+/// each walked project root (A8.4), so an Angular app under `web/` resolves
+/// through `web/tsconfig.json`. Only dirs that declare `paths` are kept,
+/// sorted by dir.
+#[derive(Debug, Clone, Default)]
+pub(super) struct TsAliasSet {
+    scopes: Vec<TsAliases>,
+}
+
+impl TsAliasSet {
+    /// Read the aliases of the repo root and of every project root under
+    /// `root` ([`read_tsconfig_paths`]).
+    ///
+    /// fired_on marker, once per tsconfig that declares `paths`:
+    ///   `[tsconfig] <n> path aliases (baseUrl=<b>) file=<repo-relative path> repo=<label>`
+    pub(super) fn read(root: &Path, roots: &[ProjectRoot], repo_label: &str) -> Self {
+        let dirs: BTreeSet<&str> = std::iter::once("")
+            .chain(roots.iter().map(|r| r.rel_path.as_str()))
+            .collect();
+        let mut scopes = Vec::new();
+        for dir in dirs {
+            let mut aliases = read_tsconfig_paths(&root.join(dir));
+            if aliases.entries.is_empty() {
+                continue;
+            }
+            aliases.dir = dir.to_string();
+            aliases.dir_qname = dir.replace('/', "::");
+            eprintln!(
+                "[tsconfig] {} path aliases (baseUrl={}) file={} repo={repo_label}",
+                aliases.entries.len(),
+                aliases.base_url,
+                aliases.shown_path()
+            );
+            scopes.push(aliases);
+        }
+        Self { scopes }
+    }
+
+    /// The aliases a module resolves through: the deepest scope whose dir
+    /// holds it.
+    fn scope_of(&self, from_module: &str) -> Option<&TsAliases> {
+        self.scopes
+            .iter()
+            .filter(|s| {
+                s.dir_qname.is_empty()
+                    || from_module
+                        .strip_prefix(s.dir_qname.as_str())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            })
+            .max_by_key(|s| s.dir_qname.len())
+    }
+
+    /// Every `paths` key of every scope, as written (`@core/*`), for the
+    /// A16.4 IMPORTS-cell filter (`LocalModuleIndex::add_alias_prefix`).
+    pub(super) fn keys(&self) -> impl Iterator<Item = &str> + '_ {
+        self.scopes.iter().flat_map(|s| s.entries.iter().map(|(k, _)| k.as_str()))
+    }
+}
+
+/// A6.8: the `paths` of `<dir>/tsconfig.json`, else of
+/// `<dir>/tsconfig.base.json` when the first declares none. Written per dir so
+/// the per-project-root pass ([`TsAliasSet::read`]) calls it once per root.
+/// Never fails: a missing file or one with no `paths` gives no aliases; a file
+/// that is not JSONC prints `[tsconfig] unparsed file=<path>` and gives none.
+pub(super) fn read_tsconfig_paths(dir: &Path) -> TsAliases {
+    for file in TSCONFIG_FILES {
+        let path = dir.join(file);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match parse_tsconfig_paths(&text) {
+            Some((base_url, entries)) if !entries.is_empty() => {
+                return TsAliases { file, base_url, entries, ..TsAliases::default() };
+            }
+            Some(_) => {}
+            None => eprintln!("[tsconfig] unparsed file={}", path.display()),
+        }
+    }
+    TsAliases::default()
+}
+
+/// `(baseUrl, paths entries in match order)` of one tsconfig's text, or `None`
+/// when it is not JSONC. A key with an empty array or a non-string first
+/// target is skipped.
+fn parse_tsconfig_paths(text: &str) -> Option<(String, Vec<(String, String)>)> {
+    let v: serde_json::Value = serde_json::from_str(&strip_jsonc(text)).ok()?;
+    let opts = v.get("compilerOptions");
+    let base_url = opts
+        .and_then(|o| o.get("baseUrl"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .unwrap_or(".")
+        .to_string();
+    let mut entries: Vec<(String, String)> = opts
+        .and_then(|o| o.get("paths"))
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, targets)| {
+            let first = targets.as_array()?.first()?.as_str()?.trim();
+            let key = key.trim();
+            (!key.is_empty() && !first.is_empty()).then(|| (key.to_string(), first.to_string()))
+        })
+        .collect();
+    let rank = |key: &str| match key.split_once('*') {
+        None => (false, Reverse(0)),
+        Some((prefix, _)) => (true, Reverse(prefix.len())),
+    };
+    entries.sort_by(|a, b| rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0)));
+    Some((base_url, entries))
+}
+
+/// tsconfig is JSONC: `//` and `/* */` comments and trailing commas, which
+/// serde_json rejects. Drops all three outside string literals, so the `//`
+/// of a URL inside a string (or inside a comment) survives or goes with it.
+fn strip_jsonc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            if c == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                // A line comment: skip to its newline, which is kept.
+                if chars.by_ref().any(|n| n == '\n') {
+                    out.push('\n');
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                out.push(' ');
+            }
+            '}' | ']' => {
+                // A trailing comma: the last significant char before the close.
+                let end = out.trim_end().len();
+                if out[..end].ends_with(',') {
+                    out.truncate(end - 1);
+                }
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A repo-relative `/`-path (`web/./src/app/x.ts`) as the module qname
+/// `path_to_qname` gives its file (`web::src::app::x`): `.` segments dropped,
+/// `..` climbs, a source extension on the last segment stripped. `None` when
+/// it climbs out of the repo or names nothing.
+fn ts_path_qname(path: &str) -> Option<String> {
+    let mut segs: Vec<&str> = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segs.pop()?;
+            }
+            p => segs.push(p),
+        }
+    }
+    let last = segs.pop()?;
+    let stem = [".ts", ".tsx", ".js", ".jsx"]
+        .iter()
+        .find_map(|e| last.strip_suffix(e))
+        .unwrap_or(last);
+    if stem.is_empty() {
+        return None;
+    }
+    segs.push(stem);
+    Some(segs.join("::"))
+}
+
+/// A6.8: the TS-family import resolver. A `.`-leading specifier goes to
+/// [`resolve_ts_source`] unchanged; any other maps through the tsconfig
+/// `paths` of the importer's scope (`@core/auth.service` under
+/// `"@core/*": ["app/core/*"]` with `baseUrl` `./src` ->
+/// `src::app::core::auth.service`). An unmatched bare specifier is a package:
+/// `None`. A mapped qname no module has binds nothing: `resolve_imports_ts`
+/// looks it up strictly.
+pub(super) fn resolve_ts_source_aliased(
+    from_module: &str,
+    specifier: &str,
+    aliases: &TsAliasSet,
+) -> Option<String> {
+    let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+    if spec.starts_with('.') {
+        return resolve_ts_source(from_module, specifier);
+    }
+    aliases.scope_of(from_module)?.map(spec)
+}
+
 /// Relative-import resolver for the non-TS `_`-arm languages (dart / swift /
 /// solidity / terraform). Handles dotted specifiers (`./x`, `../a/b`) AND bare
 /// filenames that carry a source extension (`import 'models.dart'`) — both
@@ -619,5 +903,227 @@ mod tests {
         let mut t = vec![tally("go", 0, 0), tally("python", 0, 0)];
         assert_eq!(heritage_marker(&mut t, "fx"), None);
         assert_eq!(heritage_marker(&mut [], "fx"), None);
+    }
+}
+
+#[cfg(test)]
+mod ts_alias_tests {
+    use super::*;
+
+    /// A tsconfig as Angular CLI writes it: JSONC, `baseUrl` `./src`.
+    const ANGULAR: &str = r#"/* To learn more see: https://angular.dev/reference/configs */
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    // non-relative imports resolve from ./src
+    "baseUrl": "./src",
+    "paths": {
+      "@core/*": ["app/core/*"],
+      "@env": ["environments/environment.ts"],
+    },
+    "outDir": "./dist//out", /* a `//` inside a string is not a comment */
+  },
+}
+"#;
+
+    /// One scope per `(dir, tsconfig text)`, as `TsAliasSet::read` builds it.
+    fn set_of(scopes: &[(&str, &str)]) -> TsAliasSet {
+        let scopes = scopes
+            .iter()
+            .map(|(dir, text)| {
+                let (base_url, entries) = parse_tsconfig_paths(text).expect("jsonc");
+                TsAliases {
+                    dir: dir.to_string(),
+                    dir_qname: dir.replace('/', "::"),
+                    file: "tsconfig.json",
+                    base_url,
+                    entries,
+                }
+            })
+            .collect();
+        TsAliasSet { scopes }
+    }
+
+    #[test]
+    fn a_wildcard_alias_maps_through_base_url() {
+        let aliases = set_of(&[("", ANGULAR)]);
+        let page = "src::app::feature::page";
+        assert_eq!(
+            resolve_ts_source_aliased(page, "@core/auth.service", &aliases),
+            Some("src::app::core::auth.service".to_string())
+        );
+        assert_eq!(
+            resolve_ts_source_aliased(page, "'@core/auth.service'", &aliases).as_deref(),
+            Some("src::app::core::auth.service"),
+            "the parser's quotes"
+        );
+        assert_eq!(
+            resolve_ts_source_aliased(page, "@env", &aliases).as_deref(),
+            Some("src::environments::environment"),
+            "an exact key; the target's extension goes"
+        );
+        assert_eq!(resolve_ts_source_aliased(page, "@angular/core", &aliases), None);
+        assert_eq!(resolve_ts_source_aliased(page, "@environment", &aliases), None, "exact is whole");
+        assert_eq!(resolve_ts_source_aliased(page, "rxjs", &aliases), None);
+        // No tsconfig: every bare specifier is a package, as before A6.8.
+        assert_eq!(resolve_ts_source_aliased(page, "@core/x", &TsAliasSet::default()), None);
+    }
+
+    #[test]
+    fn a_relative_specifier_is_resolve_ts_source_unchanged() {
+        let aliases = set_of(&[("", ANGULAR)]);
+        for (from, spec) in [
+            ("src::app::feature::page", "./page.module"),
+            ("src::app::feature::page", "../core/auth.service"),
+            ("src::app::feature::page", "../../../x.ts"),
+            ("src::main", "\"./util.js\""),
+            ("main", "../escape"),
+            ("main", "."),
+        ] {
+            assert_eq!(
+                resolve_ts_source_aliased(from, spec, &aliases),
+                resolve_ts_source(from, spec),
+                "{from} {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_parse() {
+        let (base_url, entries) = parse_tsconfig_paths(ANGULAR).expect("jsonc");
+        assert_eq!(base_url, "./src");
+        assert_eq!(
+            entries,
+            [
+                ("@env".to_string(), "environments/environment.ts".to_string()),
+                ("@core/*".to_string(), "app/core/*".to_string()),
+            ],
+            "exact keys first"
+        );
+        let stripped = strip_jsonc(ANGULAR);
+        assert!(stripped.contains("./dist//out"), "a `//` inside a string stays: {stripped}");
+        assert!(!stripped.contains("angular.dev"), "a block comment goes");
+        // No `compilerOptions.paths` is no aliases, not a parse failure; bad
+        // JSON is a failure; `baseUrl` defaults to the tsconfig's dir.
+        assert_eq!(parse_tsconfig_paths("{ // x\n}"), Some((".".to_string(), vec![])));
+        assert_eq!(parse_tsconfig_paths("{ \"compilerOptions\": "), None);
+        let (base_url, _) =
+            parse_tsconfig_paths(r#"{"compilerOptions":{"paths":{"~/*":["./src/*"]}}}"#).unwrap();
+        assert_eq!(base_url, ".");
+    }
+
+    /// Exact keys before patterns, then the longest literal prefix (the TS
+    /// rule); only a `paths` array's first target; never out of the repo.
+    #[test]
+    fn match_order_first_target_and_repo_bounds() {
+        let aliases = set_of(&[(
+            "",
+            r#"{"compilerOptions":{"paths":{
+                "@app/*": ["libs/app/*"],
+                "@app/shared/*": ["libs/shared/src/*", "fallback/*"],
+                "@app/config": ["config/index.ts"],
+                "*.svg": ["assets/*.svg"],
+                "@up/*": ["../../outside/*"]
+            }}}"#,
+        )]);
+        let from = "apps::web::main";
+        let r = |spec| resolve_ts_source_aliased(from, spec, &aliases);
+        assert_eq!(r("@app/shared/button").as_deref(), Some("libs::shared::src::button"));
+        assert_eq!(r("@app/home").as_deref(), Some("libs::app::home"));
+        assert_eq!(r("@app/config").as_deref(), Some("config::index"), "exact beats `@app/*`");
+        assert_eq!(r("logo.svg").as_deref(), Some("assets::logo.svg"), "prefix + suffix pattern");
+        assert_eq!(r("@up/x"), None, "climbs out of the repo");
+    }
+
+    /// A file resolves through the deepest project dir whose tsconfig
+    /// declares `paths`; that dir anchors the targets.
+    #[test]
+    fn the_nearest_scope_wins_and_anchors_targets() {
+        let web = r#"{"compilerOptions":{"baseUrl":"./","paths":{"@app/core":["src/app/core/index.ts"]}}}"#;
+        let root = r#"{"compilerOptions":{"paths":{"@lib/*":["libs/*"]}}}"#;
+        let aliases = set_of(&[("", root), ("web", web)]);
+        assert_eq!(
+            resolve_ts_source_aliased("web::src::app::page", "@app/core", &aliases).as_deref(),
+            Some("web::src::app::core::index")
+        );
+        assert_eq!(
+            resolve_ts_source_aliased("web::src::app::page", "@lib/x", &aliases),
+            None,
+            "a nested tsconfig's `paths` replace the root's"
+        );
+        assert_eq!(
+            resolve_ts_source_aliased("webapp::main", "@lib/x", &aliases).as_deref(),
+            Some("libs::x"),
+            "`webapp` is not under `web`"
+        );
+        assert_eq!(resolve_ts_source_aliased("api::main", "@app/core", &aliases), None);
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn read_falls_back_to_tsconfig_base_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "tsconfig.json", r#"{"extends":"./tsconfig.base.json"}"#);
+        write(
+            tmp.path(),
+            "tsconfig.base.json",
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@org/ui":["libs/ui/src/index.ts"]}}}"#,
+        );
+        let a = read_tsconfig_paths(tmp.path());
+        assert_eq!(a.file, "tsconfig.base.json");
+        assert_eq!(a.entries.len(), 1);
+        assert_eq!(read_tsconfig_paths(&tmp.path().join("missing")), TsAliases::default());
+    }
+
+    /// End to end, in a nested Angular project root (the quokka-stack shape):
+    /// the alias import is an IMPORTS edge, and it leaves the importer's
+    /// IMPORTS library cell while the real package stays.
+    #[test]
+    fn an_aliased_import_is_an_edge_and_leaves_the_library_cell() {
+        use repo_graph_core::CellPayload;
+
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "web/package.json", r#"{"name":"web","dependencies":{"@angular/core":"18.0.0"}}"#);
+        write(
+            tmp.path(),
+            "web/tsconfig.json",
+            "{\n  // Angular CLI\n  \"compilerOptions\": {\"baseUrl\": \"./\", \"paths\": {\"@app/core\": [\"src/app/core/index.ts\"],}}\n}\n",
+        );
+        write(tmp.path(), "web/src/app/core/index.ts", "export class AuthService {}\n");
+        write(
+            tmp.path(),
+            "web/src/app/page.ts",
+            "import { Injectable } from '@angular/core';\nimport { AuthService } from '@app/core';\nexport class Page { constructor(private a: AuthService) {} }\n",
+        );
+        let result = crate::build::generate_one(tmp.path().to_str().unwrap()).unwrap();
+        let m = &result.merged;
+        let module = |q: &str| {
+            m.graphs.iter().find_map(|g| {
+                let id = g.symbols.module_by_qname.get(q)?;
+                g.nodes.iter().find(|n| n.id == *id)
+            })
+        };
+        let page = module("web::src::app::page").expect("importer");
+        let core = module("web::src::app::core::index").expect("alias target");
+        assert!(
+            m.all_edges().any(|e| e.category == edge_category::IMPORTS
+                && e.from == page.id
+                && e.to == core.id),
+            "the alias import binds"
+        );
+        let cell = page
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::IMPORTS)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            });
+        assert_eq!(cell.as_deref(), Some(r#"["@angular/core"]"#));
     }
 }

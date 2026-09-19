@@ -19,6 +19,7 @@ use repo_graph_code_extractors::{anchor, queue_topic, queues};
 use repo_graph_core::{CellPayload, NodeId, RepoId};
 use repo_graph_graph::rust_paths::RustCrate;
 
+use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
 use crate::external::{WrapperPass, WrapperPhase};
@@ -35,7 +36,8 @@ use crate::route::ModuleQnames;
 /// segment, then the A16.4 IMPORTS-cell
 /// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
 /// project roots (A8.4); `rust_crates` their Cargo packages, whose names the
-/// IMPORTS filter treats as intra-repo (LA.1b). `wrappers` is the repo's
+/// IMPORTS filter treats as intra-repo (LA.1b), as it does every specifier a
+/// `ts_aliases` key matches (A6.8). `wrappers` is the repo's
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
 /// (`external::WrapperPass`).
@@ -56,6 +58,7 @@ pub(super) fn apply_post_cache(
     const_table: &ConstTable,
     roots: &[ProjectRoot],
     rust_crates: &[RustCrate],
+    ts_aliases: &TsAliasSet,
     wrappers: Option<&LoadedConfig>,
     parse_errors: &mut Vec<String>,
     repo_label: &str,
@@ -167,7 +170,7 @@ pub(super) fn apply_post_cache(
     // repo's declarations, so like `apply_rpc_needles` it runs after the parse
     // cache (cached parses are filtered too) and after the RPC grafts (whose
     // markers carry the same cell).
-    filter_imports_cells(parses_by_lang, rust_crates, repo_label);
+    filter_imports_cells(parses_by_lang, rust_crates, ts_aliases, repo_label);
 }
 
 /// LA.6d: per-repo tallies of the Next.js page graft.
@@ -446,12 +449,18 @@ fn queue_nodes_read_from(fp: &FileParse, position: &str) -> bool {
 /// crate reaches the filter as `repo_graph_engine`, which is not a dependency.
 /// Only Rust crate names are seeded (`rust_crates` is the Cargo projects).
 ///
+/// A TS-family specifier a tsconfig `paths` key matches (`@core/auth.service`
+/// under `@core/*`) names an in-repo module too (A6.8): every key of
+/// `ts_aliases` is declared (`LocalModuleIndex::add_alias_prefix`), and the
+/// build's TS resolver turns the same specifier into an IMPORTS edge.
+///
 /// fired_on marker, once per repo that holds a language-parser parse:
 ///   `[imports] local-filter: kept {k}, dropped {d} intra-repo name(s) across {n} language group(s) repo=<label>`
 /// `kept` / `dropped` sum the per-file library names; `n` counts lang tags.
 fn filter_imports_cells(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     rust_crates: &[RustCrate],
+    ts_aliases: &TsAliasSet,
     repo_label: &str,
 ) {
     let carries_imports = |fp: &FileParse| {
@@ -465,6 +474,9 @@ fn filter_imports_cells(
     }
     for c in rust_crates {
         local.add_local_crate(&c.name);
+    }
+    for key in ts_aliases.keys() {
+        local.add_alias_prefix(key);
     }
     let (mut kept, mut dropped, mut groups) = (0usize, 0usize, 0usize);
     for (lang, parses) in parses_by_lang.iter_mut() {

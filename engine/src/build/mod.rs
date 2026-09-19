@@ -44,7 +44,8 @@ use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
 use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
-use assemble::build_graphs_for_repo;
+use assemble::{RepoBuildCtx, build_graphs_for_repo};
+use lang_build::TsAliasSet;
 use rpc_needles::RpcContext;
 
 /// One build's output. Outside this crate it comes from [`generate_one`] /
@@ -209,19 +210,22 @@ fn generate_one_inner(
     if let Some(c) = cache.as_deref_mut() {
         c.validate_context(&ident.key, &go.context_key());
     }
+    // A6.8: tsconfig `paths`, read per project dir. Consumed after the parse
+    // cache (graph build, IMPORTS-cell filter), so the cache needs no key.
+    let ts_aliases = TsAliasSet::read(&root, &roots, repo_path);
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
-    let (mut graphs, mut parse_errors) = build_graphs_for_repo(
-        &files,
+    let ctx = RepoBuildCtx {
         repo,
-        &go,
-        cache,
-        repo_path,
-        &rpc,
-        &roots,
-        inputs.first().and_then(|i| i.config.as_ref()),
+        repo_label: repo_path,
+        go: &go,
+        ts_aliases: &ts_aliases,
+        rpc: &rpc,
+        roots: &roots,
+        config: inputs.first().and_then(|i| i.config.as_ref()),
         opts,
-    );
+    };
+    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, cache, &ctx);
     // Slot order is regions, then projects, then docs. It fixes the shard index,
     // so generate_many_inner must use the same order.
     if !regions.is_empty() {
@@ -410,17 +414,18 @@ pub(crate) fn assemble_many_with(
         if let Some(c) = cache.as_mut() {
             c.validate_context(&ident.key, &go.context_key());
         }
-        let (graphs, parse_errors) = build_graphs_for_repo(
-            &files,
+        let ts_aliases = TsAliasSet::read(&root, &roots, path);
+        let ctx = RepoBuildCtx {
             repo,
-            &go,
-            cache.as_mut(),
-            path,
-            &rpc,
-            &roots,
-            input.config.as_ref(),
+            repo_label: path,
+            go: &go,
+            ts_aliases: &ts_aliases,
+            rpc: &rpc,
+            roots: &roots,
+            config: input.config.as_ref(),
             opts,
-        );
+        };
+        let (graphs, parse_errors) = build_graphs_for_repo(&files, cache.as_mut(), &ctx);
         inputs.push(input);
         if let Some(c) = cache.as_ref()
             && let Err(e) = c.save(path)

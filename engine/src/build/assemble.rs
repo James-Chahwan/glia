@@ -11,7 +11,7 @@ use repo_graph_core::RepoId;
 
 use super::BuildOptions;
 use super::grafts;
-use super::lang_build;
+use super::lang_build::{self, TsAliasSet};
 use super::rpc_needles::RpcContext;
 use crate::cache::ParseCache;
 use crate::extract::{GoModules, detect_language};
@@ -101,28 +101,43 @@ fn pin_overlay_constants(
     );
 }
 
-/// `repo_label` is the repo path as the caller was given it. It only prefixes
-/// the `[incremental]` marker, so a multi-repo build prints one attributable
-/// line per repo; it never reaches the graph. `go` is the repo's go.mod set
-/// (LA.13), handed to every Go parse. `rpc` is the build-wide proto
-/// service set (A5.2). `roots` are the walk's project roots (A8.4), the owner
-/// vocabulary of the LB.4a HTTP owner segment. `config` is the repo's loaded
-/// `.glia/overlay.toml` (`RepoInputs::config`) and `opts` the build's options:
-/// together they decide the overlay stages that run before the graph is built
-/// (LF.2d's constant pins; LF.2e's `[[wrapper]]` call sites, minted inside
-/// `grafts::apply_post_cache`).
-#[allow(clippy::too_many_arguments)]
+/// Everything `build_graphs_for_repo` knows about one repo besides its files
+/// and its parse cache (A6.8): the facts its caller gathered off the walk and
+/// the repo dir before the parse. A packet that adds a per-repo input extends
+/// this struct, never the parameter list.
+#[derive(Clone, Copy)]
+pub(super) struct RepoBuildCtx<'a> {
+    pub(super) repo: RepoId,
+    /// The repo path as the caller was given it. It only labels markers
+    /// (`[incremental]`, `[const]`, ...), so a multi-repo build prints one
+    /// attributable line per repo; it never reaches the graph.
+    pub(super) repo_label: &'a str,
+    /// The repo's go.mod set (LA.13), handed to every Go parse.
+    pub(super) go: &'a GoModules,
+    /// The repo's tsconfig `paths` aliases per project dir (A6.8): the TS
+    /// family's import resolver and the IMPORTS-cell filter read them.
+    pub(super) ts_aliases: &'a TsAliasSet,
+    /// The build-wide proto service set (A5.2).
+    pub(super) rpc: &'a RpcContext,
+    /// The walk's project roots (A8.4), the owner vocabulary of the LB.4a HTTP
+    /// owner segment.
+    pub(super) roots: &'a [ProjectRoot],
+    /// The repo's loaded `.glia/overlay.toml` (`RepoInputs::config`). With
+    /// `opts` it decides the overlay stages that run before the graph is built
+    /// (LF.2d's constant pins; LF.2e's `[[wrapper]]` call sites, minted inside
+    /// `grafts::apply_post_cache`).
+    pub(super) config: Option<&'a LoadedConfig>,
+    pub(super) opts: &'a BuildOptions,
+}
+
+/// Parse, graft and build one repo's graphs from its walked `files`, reusing
+/// `cache` when given, under the per-repo context `ctx` ([`RepoBuildCtx`]).
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
-    repo: RepoId,
-    go: &GoModules,
     cache: Option<&mut ParseCache>,
-    repo_label: &str,
-    rpc: &RpcContext,
-    roots: &[ProjectRoot],
-    config: Option<&LoadedConfig>,
-    opts: &BuildOptions,
+    ctx: &RepoBuildCtx<'_>,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
+    let RepoBuildCtx { repo, repo_label, go, ts_aliases, rpc, roots, config, opts } = *ctx;
     // Keep caught per-file panics off stderr: the default hook would print
     // (with a backtrace) for every bad file even though it becomes a
     // parse_errors line. LG.1a: the flag is per thread (`parallel`), so this
@@ -166,6 +181,7 @@ pub(super) fn build_graphs_for_repo(
         &const_table,
         roots,
         &rust_crates,
+        ts_aliases,
         config.filter(|_| opts.overlay),
         &mut parse_errors,
         repo_label,
@@ -176,6 +192,7 @@ pub(super) fn build_graphs_for_repo(
         repo,
         repo_label,
         &rust_crates,
+        ts_aliases,
         &mut parse_errors,
     );
 

@@ -1,0 +1,13 @@
+/* To learn more about Typescript configuration files see: https://angular.dev/reference/configs/workspace-config */
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    // Angular CLI / Nx shape: non-relative imports resolve from ./src
+    "baseUrl": "./src",
+    "paths": {
+      "@core/*": ["app/core/*"],
+      "@env": ["environments/environment.ts"],
+    },
+    "strict": true
+  }
+}
