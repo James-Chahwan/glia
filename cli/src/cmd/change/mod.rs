@@ -9,6 +9,7 @@
 use clap::Subcommand;
 
 mod delta;
+mod tests_for;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChangeCmd {
@@ -19,10 +20,21 @@ pub(crate) enum ChangeCmd {
     /// incremental build does, never a layout. Exits 0 on an answer, 2 on a
     /// git or build error.
     Delta(delta::Args),
+    /// Tests-for (LE.3b): the tests to run for a change — the test cases that
+    /// reach the changed nodes backward over calls, TESTS edges and the
+    /// cross-service links (an integration test's HTTP call to the changed
+    /// handler's route), each located and tiered fact (a TESTS edge straight
+    /// to the seed), derived (reached through other edges) or heuristic (a
+    /// test module paired by name with a seed's module). Seeds: qnames, a
+    /// diff (`--diff`), or the working tree's change against a git rev
+    /// (`--base`). `--files-only` prints the test files for a runner. Exits
+    /// 0 on an answer, 2 on a usage, git or build error.
+    TestsFor(tests_for::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
     match c {
         ChangeCmd::Delta(a) => delta::run(a),
+        ChangeCmd::TestsFor(a) => tests_for::run(a),
     }
 }

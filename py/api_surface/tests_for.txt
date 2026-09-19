@@ -1,0 +1,4 @@
+# pyo3 surface of py/src/tests_for.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.tests_for(qnames: Vec<String>, depth: usize = 6, scope: Option<&str> = None, module_level: bool = true) -> PyResult<Py<PyAny>>
+method PyGraph.tests_for_diff(diff_text: &str, depth: usize = 6, scope: Option<&str> = None, module_level: bool = true) -> PyResult<Py<PyAny>>
+fn tests_for_rev(repo_path: &str, base: &str = "HEAD", depth: usize = 6, scope: Option<&str> = None, module_level: bool = true) -> PyResult<Py<PyAny>>
