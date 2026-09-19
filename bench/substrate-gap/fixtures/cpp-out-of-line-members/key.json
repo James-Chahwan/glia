@@ -1,0 +1,55 @@
+{
+  "framework": "cpp-out-of-line-members",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.10c identity fixture (legacy-only, no matrix cell). An out-of-line member definition in a .cpp (void Widget::run() {}) meets the class its header declares: one METHOD under one CLASS, so this->helper() in the .cpp body resolves to the header's inline method, and a static helper of the .cpp still resolves from the moved method. A qualified definition whose qualifier is a namespace (void shop::init() {}) is a namespace function, not a method. HEAD: the .cpp half is a FUNCTION named Widget::run under the file MODULE, so neither this-> call resolves.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "src::Widget::run"
+    },
+    {
+      "kind": "METHOD",
+      "name": "shop::Cart::total"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::cart.cpp::shop::init",
+      "note": "the qualifier names a namespace: a file-scoped free function, as at HEAD"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::Widget::run",
+      "to": "src::Widget::helper",
+      "category": "CALLS",
+      "note": "this-> call from the .cpp half to the header half"
+    },
+    {
+      "from": "shop::Cart::total",
+      "to": "shop::Cart::tax",
+      "category": "CALLS",
+      "note": "the class is declared in another directory (include/shop)"
+    },
+    {
+      "from": "src::Widget::run",
+      "to": "src::Widget.cpp::file_helper",
+      "category": "CALLS",
+      "note": "the defining file's own static helper still resolves"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "METHOD",
+      "name": "src::shop::init",
+      "note": "the parser's provisional shape for a namespace-qualified definition must not survive the graph pass"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Widget::Widget::run",
+      "note": "HEAD shape"
+    }
+  ]
+}

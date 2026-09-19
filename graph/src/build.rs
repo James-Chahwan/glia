@@ -1,22 +1,22 @@
 //! Per-language graph builders plus the shared merge / nav / symbol-table
 //! passes they all run.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{
-    CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, ImportTarget, UnresolvedRef,
-    bare_module_qname, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget,
+    UnresolvedRef, bare_module_qname, edge_category, node_kind,
 };
-use repo_graph_core::{Cell, Confidence, Edge, NodeId, RepoId};
+use repo_graph_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
     EvidenceTally, emit_method_level_implements, enclosing_module, graph_evidence, push_edge,
     resolve_calls, resolve_refs,
 };
 use crate::imports::{
-    resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
-    same_stem_table,
+    SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
+    resolve_imports_ts, same_stem_table,
 };
 use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
@@ -216,6 +216,44 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
+    Ok(g)
+}
+
+/// Build a per-repo C/C++ graph. Every C/C++ file is its own MODULE, named by
+/// its file name (`src::Widget.h`, LB.10a); `resolve_source(from, spec)` maps
+/// a quoted `#include` to the included file's MODULE qname (the engine's
+/// include resolver). An include names a file, never a bare stem, so the
+/// LB.13 same-stem table is empty.
+///
+/// LB.10c: an out-of-line member defined in another file than its class
+/// (`void Widget::run() {}` in `Widget.cpp`) joins the class its header
+/// declares ([`bind_out_of_line`]): one METHOD under the header's CLASS /
+/// STRUCT, so `this->helper()` in the .cpp body resolves through the class.
+/// A qualified definition whose qualifier is a namespace (`void shop::init()
+/// {}`) becomes a FUNCTION of its file. `resolve_calls`' `extra_hook` is the
+/// definition's own file ([`CppCallScope`]): a Bare call of a bound member is
+/// looked up in the file that defines it, then every Bare call the generic
+/// pass missed in the headers its file directly `#include`s.
+pub fn build_c_cpp<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+) -> Result<RepoGraph, GraphError>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let (mut g, all_imports, mut all_calls, mut all_refs) = merge_parses(repo, parses);
+    let (defining, members) = bind_out_of_line(&mut g, &mut all_calls, &mut all_refs);
+    build_symbol_table(&mut g);
+    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut SameStem::default());
+    let scope = CppCallScope::new(&g, defining);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |g, site| scope.resolve(g, site), &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
+    emit_method_level_implements(&mut g);
+    members.report();
+    scope.report();
     tally.report();
     Ok(g)
 }
@@ -1176,6 +1214,744 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
     Some(stats)
 }
 
+// ============================================================================
+// C/C++ header / implementation join (LB.10c)
+// ============================================================================
+
+/// What [`bind_out_of_line`] did to one C/C++ graph.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OutOfLineStats {
+    /// Members joined to a header CLASS / STRUCT: one METHOD under it.
+    bound: usize,
+    /// Of `bound`: found only by the tail of a type's C++ name (a definition
+    /// after `using namespace shop;`).
+    by_name: usize,
+    /// Of `bound`: the parser's provisional qname was not the class's member
+    /// qname and moved (a global class in another directory, a class in an
+    /// outer namespace, `using namespace`).
+    renamed: usize,
+    /// Qualified definitions whose qualifier names a namespace: FUNCTIONs.
+    namespace_fns: usize,
+    /// Qualifiers naming two or more classes the definition's directory does
+    /// not tell apart: left FUNCTIONs.
+    ambiguous: usize,
+    /// Qualifiers naming no class and no namespace of the graph (a nested
+    /// class, a class outside the tree): left FUNCTIONs.
+    unbound: usize,
+}
+
+impl OutOfLineStats {
+    /// LB.10c fired_on, once per C/C++ graph with an out-of-line member
+    /// defined in another file than its class:
+    /// `[cpp-members] out-of-line members bound: B (by_name=K renamed=R
+    /// namespace_fns=N ambiguous=A unbound=U)`.
+    fn marker(&self) -> Option<String> {
+        (self.bound + self.namespace_fns + self.ambiguous + self.unbound > 0).then(|| {
+            format!(
+                "[cpp-members] out-of-line members bound: {} (by_name={} renamed={} \
+                 namespace_fns={} ambiguous={} unbound={})",
+                self.bound,
+                self.by_name,
+                self.renamed,
+                self.namespace_fns,
+                self.ambiguous,
+                self.unbound
+            )
+        })
+    }
+
+    fn report(&self) {
+        if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// A class / struct an out-of-line definition can join: a type a header
+/// declares, never a source file's own (translation-unit local) type.
+struct TypeRef {
+    id: NodeId,
+    qname: String,
+    /// Its MODULE's directory: the MODULE qname minus the file segment.
+    dir: String,
+}
+
+/// What C++ finds for a definition's qualifier ([`CppTypes::lookup`]).
+enum Qualifier<'t> {
+    /// A class / struct; `true` when found only by the tail of its C++ name.
+    Type(&'t TypeRef, bool),
+    Namespace,
+    Ambiguous,
+    Unbound,
+}
+
+/// The join's lookup tables, built once for a graph with a candidate.
+/// BTree-ordered, so a scan never depends on a hasher seed.
+struct CppTypes {
+    /// C++ name -> the header CLASS / STRUCT nodes of that name, in
+    /// `g.nodes` order.
+    types: BTreeMap<String, Vec<TypeRef>>,
+    /// C++ names of the namespace blocks (PACKAGE nodes).
+    namespaces: BTreeSet<String>,
+}
+
+impl CppTypes {
+    fn build(g: &RepoGraph) -> Self {
+        let nav = &g.nav;
+        let mut types: BTreeMap<String, Vec<TypeRef>> = BTreeMap::new();
+        let mut namespaces: BTreeSet<String> = BTreeSet::new();
+        for n in &g.nodes {
+            let Some(&kind) = nav.kind_by_id.get(&n.id) else {
+                continue;
+            };
+            if kind == node_kind::PACKAGE {
+                namespaces.insert(cpp_name(nav, n.id));
+                continue;
+            }
+            if kind != node_kind::CLASS && kind != node_kind::STRUCT {
+                continue;
+            }
+            let Some(qname) = nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some(module_qname) =
+                enclosing_module(nav, n.id).and_then(|m| nav.qname_by_id.get(&m))
+            else {
+                continue;
+            };
+            // LB.10b's source-file shape `<file module>::..`: its members are
+            // bound in its own file, and no other file can define them.
+            if qname
+                .strip_prefix(module_qname.as_str())
+                .is_some_and(|r| r.starts_with("::"))
+            {
+                continue;
+            }
+            types.entry(cpp_name(nav, n.id)).or_default().push(TypeRef {
+                id: n.id,
+                qname: qname.clone(),
+                // A MODULE qname is `<dir>::<file name>`, like a Go file's.
+                dir: go_package_dir(module_qname).to_string(),
+            });
+        }
+        CppTypes { types, namespaces }
+    }
+
+    /// C++'s lookup of qualifier `q` for a definition in namespace `ns` of a
+    /// file in directory `dir`: from the definition's namespace outward, the
+    /// first scope where `<scope>::q` names a type or a namespace decides.
+    /// Several types of one name (global classes of two directories) bind
+    /// the one in the definition's directory, else none. When no scope
+    /// answers, a unique type whose C++ name ends in `::q` binds (a
+    /// definition after `using namespace`).
+    fn lookup(&self, ns: &str, q: &str, dir: &str) -> Qualifier<'_> {
+        for scope in cpp_ns_prefixes(ns) {
+            let full = cpp_join(scope, q);
+            if let Some(found) = self.types.get(&full) {
+                let pick = match found.as_slice() {
+                    [one] => Some(one),
+                    many => {
+                        let mut here = many.iter().filter(|t| t.dir == dir);
+                        match (here.next(), here.next()) {
+                            (Some(one), None) => Some(one),
+                            _ => None,
+                        }
+                    }
+                };
+                return pick.map_or(Qualifier::Ambiguous, |t| Qualifier::Type(t, false));
+            }
+            if self.namespaces.contains(&full) {
+                return Qualifier::Namespace;
+            }
+        }
+        let tail = format!("::{q}");
+        let mut hits = self
+            .types
+            .iter()
+            .filter(|(name, _)| name.ends_with(&tail))
+            .flat_map(|(_, found)| found);
+        match (hits.next(), hits.next()) {
+            (Some(one), None) => Qualifier::Type(one, true),
+            _ => Qualifier::Unbound,
+        }
+    }
+}
+
+/// C++ name of a type or namespace: the nav names of its CLASS / STRUCT /
+/// PACKAGE ancestors up to the MODULE, then its own (a PACKAGE name may
+/// itself be `a::b`). `shop::Cart`, `Widget`, `Outer::Inner`. Bounded by the
+/// nav's size, so a malformed parent cycle ends.
+fn cpp_name(nav: &CodeNav, id: NodeId) -> String {
+    let mut segs: Vec<&str> = Vec::new();
+    let mut cur = Some(id);
+    for _ in 0..=nav.parent_of.len() {
+        let Some(at) = cur else { break };
+        let scoped = nav.kind_by_id.get(&at).is_some_and(|k| {
+            *k == node_kind::CLASS || *k == node_kind::STRUCT || *k == node_kind::PACKAGE
+        });
+        if !scoped {
+            break;
+        }
+        if let Some(name) = nav.name_by_id.get(&at) {
+            segs.push(name);
+        }
+        cur = nav.parent_of.get(&at).copied();
+    }
+    segs.reverse();
+    segs.join("::")
+}
+
+/// `a::b`, or `b` alone when `a` is empty.
+fn cpp_join(a: &str, b: &str) -> String {
+    if a.is_empty() {
+        b.to_string()
+    } else {
+        format!("{a}::{b}")
+    }
+}
+
+/// The scopes C++ searches for a qualified definition's qualifier, innermost
+/// first: `a::b` -> `a::b`, `a`, "" (the global namespace).
+fn cpp_ns_prefixes(ns: &str) -> Vec<&str> {
+    let mut out = vec![ns];
+    let mut cur = ns;
+    while let Some((outer, _)) = cur.rsplit_once("::") {
+        out.push(outer);
+        cur = outer;
+    }
+    if !ns.is_empty() {
+        out.push("");
+    }
+    out
+}
+
+/// Where one out-of-line member ends up ([`bind_out_of_line`]).
+struct Placement {
+    /// The member as merged.
+    x: NodeId,
+    /// Its defining file's lexical scope (the MODULE or namespace PACKAGE).
+    scope: NodeId,
+    /// Every MODULE / PACKAGE whose nav children list it (two files that
+    /// define one member merge into one node).
+    lexical: Vec<NodeId>,
+    kind: NodeKindId,
+    qname: String,
+    name: String,
+    /// Nav parent after the join.
+    parent: NodeId,
+    /// The class it joined, if any.
+    class: Option<NodeId>,
+}
+
+/// True for a node kind that owns C++ members.
+fn is_cpp_type(nav: &CodeNav, id: NodeId) -> bool {
+    nav.kind_by_id
+        .get(&id)
+        .is_some_and(|k| *k == node_kind::CLASS || *k == node_kind::STRUCT)
+}
+
+/// LB.10c: join each out-of-line C++ member to the class its header declares.
+///
+/// Candidates are the METHODs a MODULE / PACKAGE lists as a nav child: LB.10b
+/// emits an out-of-line member whose class its file does not define as a
+/// provisional METHOD named `Q::m` under its lexical scope, and when the
+/// member's qname equals an inline METHOD of the header class the two parses
+/// merged into one node, listed by both the CLASS and the file (`Folded`,
+/// whichever parse's nav record won). A graph without a METHOD (C) returns
+/// at once.
+///
+/// A folded member already sits at its class's qname and joins that class.
+/// Any other is looked up from its lexical namespace outward
+/// ([`CppTypes::lookup`]): a class binds (METHOD `<class qname>::m`, renamed
+/// when the parser's guess differs), a namespace makes it FUNCTION
+/// `<lexical scope>::Q::m` named `m`, and an ambiguous or unknown qualifier
+/// leaves FUNCTION `<lexical scope>::Q::m` named `Q::m` (never a METHOD
+/// without a class). A joined member moves under its class in the nav
+/// (leaving every file's children list, so no file's `module_symbols` lists
+/// it), gets a CLASS -> METHOD DEFINES edge and keeps its file's DEFINES (the
+/// file still defines it, LA.23d's rule). The returned map is member ->
+/// defining scope, for [`CppCallScope`].
+///
+/// Runs before [`build_symbol_table`]. Deterministic: candidates follow
+/// `g.nodes` order, the lookup tables are BTree-ordered, and every HashMap
+/// here is lookup-only.
+fn bind_out_of_line(
+    g: &mut RepoGraph,
+    calls: &mut [CallSite],
+    refs: &mut [UnresolvedRef],
+) -> (HashMap<NodeId, NodeId>, OutOfLineStats) {
+    let mut stats = OutOfLineStats::default();
+    let mut defining: HashMap<NodeId, NodeId> = HashMap::new();
+    if !g.nav.kind_by_id.values().any(|k| *k == node_kind::METHOD) {
+        return (defining, stats);
+    }
+    let placements = place_out_of_line(g, &mut stats);
+    if placements.is_empty() {
+        return (defining, stats);
+    }
+    let renames: Vec<(NodeId, NodeId)> = placements
+        .iter()
+        .map(|p| {
+            (
+                p.x,
+                NodeId::from_parts(GRAPH_TYPE, g.repo, p.kind, &p.qname),
+            )
+        })
+        .filter(|(old, new)| old != new)
+        .collect();
+    let absorbed = rename_nodes(g, calls, refs, &renames);
+    let remap: HashMap<NodeId, NodeId> = renames.iter().copied().collect();
+    let mut defines: HashSet<(NodeId, NodeId)> = g
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::DEFINES)
+        .map(|e| (e.from, e.to))
+        .collect();
+    for p in &placements {
+        let id = remap.get(&p.x).copied().unwrap_or(p.x);
+        // A record merged into an existing node keeps that node's nav.
+        if !absorbed.contains(&p.x) {
+            g.nav.name_by_id.insert(id, p.name.clone());
+            g.nav.qname_by_id.insert(id, p.qname.clone());
+            g.nav.kind_by_id.insert(id, p.kind);
+            g.nav.parent_of.insert(id, p.parent);
+        }
+        let Some(class) = p.class else { continue };
+        for scope in &p.lexical {
+            if let Some(kids) = g.nav.children_of.get_mut(scope) {
+                kids.retain(|k| *k != id);
+                if kids.is_empty() {
+                    g.nav.children_of.remove(scope);
+                }
+            }
+        }
+        let kids = g.nav.children_of.entry(class).or_default();
+        if !kids.contains(&id) {
+            kids.push(id);
+        }
+        if defines.insert((class, id)) {
+            let ev = graph_evidence("graph:cpp_members", "out_of_line");
+            push_edge(g, class, id, edge_category::DEFINES, ev);
+        }
+        defining.entry(id).or_insert(p.scope);
+    }
+    (defining, stats)
+}
+
+/// [`bind_out_of_line`]'s decisions, in `g.nodes` order, counted in `stats`.
+fn place_out_of_line(g: &RepoGraph, stats: &mut OutOfLineStats) -> Vec<Placement> {
+    let nav = &g.nav;
+    // METHOD -> the file scopes (MODULE / PACKAGE) and the types listing it
+    // as a nav child, each sorted by qname then id.
+    let mut lexical: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut typed: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for (parent, kids) in &nav.children_of {
+        let Some(&kind) = nav.kind_by_id.get(parent) else {
+            continue;
+        };
+        let slot = if kind == node_kind::MODULE || kind == node_kind::PACKAGE {
+            &mut lexical
+        } else if kind == node_kind::CLASS || kind == node_kind::STRUCT {
+            &mut typed
+        } else {
+            continue;
+        };
+        for kid in kids {
+            if nav.kind_by_id.get(kid) == Some(&node_kind::METHOD) {
+                let list = slot.entry(*kid).or_default();
+                if !list.contains(parent) {
+                    list.push(*parent);
+                }
+            }
+        }
+    }
+    let qname_of = |id: &NodeId| nav.qname_by_id.get(id).map_or("", String::as_str);
+    for list in lexical.values_mut().chain(typed.values_mut()) {
+        list.sort_by(|a, b| qname_of(a).cmp(qname_of(b)).then(a.0.cmp(&b.0)));
+    }
+
+    let mut index: Option<CppTypes> = None;
+    let mut out: Vec<Placement> = Vec::new();
+    for n in &g.nodes {
+        let x = n.id;
+        let (Some(lex), Some(name), Some(qname)) = (
+            lexical.get(&x),
+            nav.name_by_id.get(&x),
+            nav.qname_by_id.get(&x),
+        ) else {
+            continue;
+        };
+        let parent = nav.parent_of.get(&x).copied();
+        let Some(scope) = parent
+            .filter(|p| lex.contains(p))
+            .or_else(|| lex.first().copied())
+        else {
+            continue;
+        };
+        let (q, m) = name.rsplit_once("::").unwrap_or(("", name.as_str()));
+        let folded = parent
+            .filter(|p| is_cpp_type(nav, *p))
+            .or_else(|| typed.get(&x).and_then(|t| t.first().copied()));
+        let scope_qname = qname_of(&scope);
+        let function = |named: String| Placement {
+            x,
+            scope,
+            lexical: lex.clone(),
+            kind: node_kind::FUNCTION,
+            qname: format!("{scope_qname}::{q}::{m}"),
+            name: named,
+            parent: scope,
+            class: None,
+        };
+        let joined = |class: NodeId, qname: String| Placement {
+            x,
+            scope,
+            lexical: lex.clone(),
+            kind: node_kind::METHOD,
+            qname,
+            name: m.to_string(),
+            parent: class,
+            class: Some(class),
+        };
+        if let Some(class) = folded {
+            stats.bound += 1;
+            out.push(joined(class, qname.clone()));
+            continue;
+        }
+        if q.is_empty() {
+            // A plain-named METHOD under a file scope is not LB.10b's shape.
+            continue;
+        }
+        let types = index.get_or_insert_with(|| CppTypes::build(g));
+        let ns = if nav.kind_by_id.get(&scope) == Some(&node_kind::PACKAGE) {
+            cpp_name(nav, scope)
+        } else {
+            String::new()
+        };
+        let dir = enclosing_module(nav, scope)
+            .map(|module| go_package_dir(qname_of(&module)))
+            .unwrap_or("");
+        out.push(match types.lookup(&ns, q, dir) {
+            Qualifier::Type(t, by_name) => {
+                let member = format!("{}::{m}", t.qname);
+                stats.bound += 1;
+                stats.by_name += usize::from(by_name);
+                stats.renamed += usize::from(member != *qname);
+                joined(t.id, member)
+            }
+            Qualifier::Namespace => {
+                stats.namespace_fns += 1;
+                function(m.to_string())
+            }
+            Qualifier::Ambiguous => {
+                stats.ambiguous += 1;
+                function(name.clone())
+            }
+            Qualifier::Unbound => {
+                stats.unbound += 1;
+                function(name.clone())
+            }
+        });
+    }
+    out
+}
+
+/// Move nodes to new ids in one batched pass. `renames` holds `(old, new)`
+/// pairs in candidate order; a node's id is `NodeId::from_parts(kind,
+/// qname)`, so a kind or qname change moves every place the id lives: the
+/// node record, every edge's `from` / `to`, the pending `calls` and `refs`
+/// (`from`, `from_module`), the unresolved lists, `properties`, and the nav
+/// (name / qname / kind / parent records, `parent_of` values, `children_of`
+/// keys and entries, deduped keeping the first occurrence, and the
+/// field / local type tables).
+///
+/// A new id that already exists absorbs the renamed record: its cells are
+/// appended to the existing node's (merge_parses' duplicate rule) and the
+/// existing nav record stays. Returns the old ids so absorbed. A rewritten
+/// edge equal to another edge, cells included (the file's DEFINES of a
+/// member two parses both emitted), is dropped: two sites of one key stay
+/// two edges. Every other edge keeps its place and cells.
+fn rename_nodes(
+    g: &mut RepoGraph,
+    calls: &mut [CallSite],
+    refs: &mut [UnresolvedRef],
+    renames: &[(NodeId, NodeId)],
+) -> HashSet<NodeId> {
+    let remap: HashMap<NodeId, NodeId> = renames
+        .iter()
+        .copied()
+        .filter(|(old, new)| old != new)
+        .collect();
+    let mut absorbed: HashSet<NodeId> = HashSet::new();
+    if remap.is_empty() {
+        return absorbed;
+    }
+    let map = |id: NodeId| remap.get(&id).copied().unwrap_or(id);
+
+    // Node records.
+    let mut at: HashMap<NodeId, usize> = g
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !remap.contains_key(&n.id))
+        .map(|(i, n)| (n.id, i))
+        .collect();
+    let mut dropped = vec![false; g.nodes.len()];
+    for i in 0..g.nodes.len() {
+        let old = g.nodes[i].id;
+        let Some(&new) = remap.get(&old) else {
+            continue;
+        };
+        match at.get(&new) {
+            Some(&j) => {
+                let cells = std::mem::take(&mut g.nodes[i].cells);
+                append_cells(&mut g.nodes[j].cells, cells);
+                absorbed.insert(old);
+                dropped[i] = true;
+            }
+            None => {
+                g.nodes[i].id = new;
+                at.insert(new, i);
+            }
+        }
+    }
+    let mut flags = dropped.into_iter();
+    g.nodes.retain(|_| !flags.next().unwrap_or(false));
+
+    // Edges.
+    let mut rewritten = vec![false; g.edges.len()];
+    for (e, r) in g.edges.iter_mut().zip(rewritten.iter_mut()) {
+        let (from, to) = (map(e.from), map(e.to));
+        *r = from != e.from || to != e.to;
+        e.from = from;
+        e.to = to;
+    }
+    if rewritten.contains(&true) {
+        let keys: HashSet<(NodeId, NodeId, EdgeCategoryId)> = g
+            .edges
+            .iter()
+            .zip(&rewritten)
+            .filter(|(_, r)| **r)
+            .map(|(e, _)| e.key())
+            .collect();
+        let mut seen: HashSet<Edge> = g
+            .edges
+            .iter()
+            .zip(&rewritten)
+            .filter(|(e, r)| !**r && keys.contains(&e.key()))
+            .map(|(e, _)| e.clone())
+            .collect();
+        let keep: Vec<bool> = g
+            .edges
+            .iter()
+            .zip(&rewritten)
+            .map(|(e, &r)| !r || seen.insert(e.clone()))
+            .collect();
+        let mut flags = keep.into_iter();
+        g.edges.retain(|_| flags.next().unwrap_or(true));
+    }
+
+    // Pending and unresolved sites, properties.
+    for c in calls.iter_mut().chain(g.unresolved_calls.iter_mut()) {
+        c.from = map(c.from);
+    }
+    for r in refs.iter_mut().chain(g.unresolved_refs.iter_mut()) {
+        r.from = map(r.from);
+        r.from_module = map(r.from_module);
+    }
+    if g.properties.iter().any(|p| remap.contains_key(p)) {
+        g.properties = std::mem::take(&mut g.properties)
+            .into_iter()
+            .map(map)
+            .collect();
+    }
+
+    // Nav.
+    let nav = &mut g.nav;
+    for &(old, new) in renames {
+        if old == new {
+            continue;
+        }
+        let name = nav.name_by_id.remove(&old);
+        let qname = nav.qname_by_id.remove(&old);
+        let kind = nav.kind_by_id.remove(&old);
+        let parent = nav.parent_of.remove(&old);
+        if !absorbed.contains(&old) {
+            if let Some(v) = name {
+                nav.name_by_id.insert(new, v);
+            }
+            if let Some(v) = qname {
+                nav.qname_by_id.insert(new, v);
+            }
+            if let Some(v) = kind {
+                nav.kind_by_id.insert(new, v);
+            }
+            if let Some(v) = parent {
+                nav.parent_of.insert(new, v);
+            }
+        }
+        if let Some(kids) = nav.children_of.remove(&old) {
+            let list = nav.children_of.entry(new).or_default();
+            for kid in kids {
+                if !list.contains(&kid) {
+                    list.push(kid);
+                }
+            }
+        }
+        if let Some(fields) = nav.field_types.remove(&old) {
+            nav.field_types.entry(new).or_default().extend(fields);
+        }
+        if let Some(locals) = nav.local_types.remove(&old) {
+            nav.local_types.entry(new).or_default().extend(locals);
+        }
+    }
+    for parent in nav.parent_of.values_mut() {
+        *parent = map(*parent);
+    }
+    for kids in nav.children_of.values_mut() {
+        if kids.iter().any(|k| remap.contains_key(k)) {
+            let mut seen: HashSet<NodeId> = HashSet::new();
+            *kids = kids
+                .iter()
+                .map(|k| map(*k))
+                .filter(|k| seen.insert(*k))
+                .collect();
+        }
+    }
+    absorbed
+}
+
+/// LB.10c: a bound out-of-line member's enclosing MODULE is its class's
+/// header, but its body still sees its own file: a Bare name the generic
+/// chain missed is looked up in the defining file's lexical scope (its
+/// namespace PACKAGE, then that file's MODULE). File-scoped PACKAGEs have
+/// their own file's MODULE as parent, so the walk never leaves the defining
+/// file.
+fn defining_scope_call(
+    g: &RepoGraph,
+    defining: &HashMap<NodeId, NodeId>,
+    site: &CallSite,
+) -> Option<NodeId> {
+    let CallQualifier::Bare(name) = &site.qualifier else {
+        return None;
+    };
+    let mut scope = *defining.get(&site.from)?;
+    for _ in 0..=g.nav.parent_of.len() {
+        if let Some(hit) = g
+            .symbols
+            .module_symbols
+            .get(&scope)
+            .and_then(|s| s.get(name))
+        {
+            return Some(*hit);
+        }
+        if g.nav.kind_by_id.get(&scope) == Some(&node_kind::MODULE) {
+            return None;
+        }
+        scope = *g.nav.parent_of.get(&scope)?;
+    }
+    None
+}
+
+/// `resolve_calls`' `extra_hook` for C/C++, consulted only after every
+/// generic lookup missed, for a Bare call:
+///
+/// 1. from a member [`bind_out_of_line`] joined to its header class: the
+///    defining file's lexical scope ([`defining_scope_call`]), evidence
+///    `graph:cpp_members` rule `defining_scope`;
+/// 2. the one top-level symbol of that name among the MODULEs the calling
+///    file directly `#include`s: the IMPORTS edges its quoted includes bound
+///    (a bound member's calling file is its defining file, not the header).
+///    A quoted include is textual inclusion, so the header's top-level names
+///    are visible; a name two included files define stays unresolved rather
+///    than guess, and an include of an include is not followed. Evidence
+///    `graph:c_includes` rule `include` (LB.10a's engine-side stopgap, moved
+///    here).
+struct CppCallScope {
+    /// Joined member -> its defining file's lexical scope.
+    defining: HashMap<NodeId, NodeId>,
+    /// Including MODULE -> the MODULEs it includes, in edge order.
+    includes: HashMap<NodeId, Vec<NodeId>>,
+    /// Bare calls bound through an include.
+    included: std::cell::Cell<usize>,
+    /// Bare calls two or more included MODULEs could answer.
+    ambiguous: std::cell::Cell<usize>,
+}
+
+impl CppCallScope {
+    /// Index `g`'s include edges; after `resolve_imports_ts`.
+    fn new(g: &RepoGraph, defining: HashMap<NodeId, NodeId>) -> Self {
+        let mut includes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for e in g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS)
+        {
+            let to = includes.entry(e.from).or_default();
+            if !to.contains(&e.to) {
+                to.push(e.to);
+            }
+        }
+        CppCallScope {
+            defining,
+            includes,
+            included: std::cell::Cell::new(0),
+            ambiguous: std::cell::Cell::new(0),
+        }
+    }
+
+    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+        let CallQualifier::Bare(name) = &site.qualifier else {
+            return None;
+        };
+        if let Some(to) = defining_scope_call(g, &self.defining, site) {
+            return Some((to, graph_evidence("graph:cpp_members", "defining_scope")));
+        }
+        let file = match self.defining.get(&site.from) {
+            Some(&scope) => enclosing_module(&g.nav, scope),
+            None => enclosing_module(&g.nav, site.from),
+        }?;
+        let mut hits: Vec<NodeId> = self
+            .includes
+            .get(&file)
+            .into_iter()
+            .flatten()
+            .filter_map(|h| g.symbols.module_symbols.get(h)?.get(name).copied())
+            .collect();
+        hits.sort_unstable_by_key(|id| id.0);
+        hits.dedup();
+        match hits[..] {
+            [to] => {
+                self.included.set(self.included.get() + 1);
+                Some((to, graph_evidence("graph:c_includes", "include")))
+            }
+            [] => None,
+            _ => {
+                self.ambiguous.set(self.ambiguous.get() + 1);
+                None
+            }
+        }
+    }
+
+    /// LB.10a fired_on, once per C/C++ graph that bound or refused an
+    /// include call: `[c-includes] bare calls bound through a direct
+    /// #include: N (ambiguous=A)`.
+    fn marker(&self) -> Option<String> {
+        let (bound, ambiguous) = (self.included.get(), self.ambiguous.get());
+        (bound + ambiguous > 0).then(|| {
+            format!(
+                "[c-includes] bare calls bound through a direct #include: {bound} \
+                 (ambiguous={ambiguous})"
+            )
+        })
+    }
+
+    fn report(&self) {
+        if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2259,6 +3035,729 @@ mod tests {
         assert_eq!(
             pk.import_target("infra", gid(node_kind::MODULE, "cmd::run")),
             DirImport::Bound(gid(node_kind::MODULE, "infra::main.go"))
+        );
+    }
+
+    // ---- LB.10c: C/C++ out-of-line members ----------------------------------
+
+    /// One C/C++ file shaped the way LB.10b's parser emits it: MODULE
+    /// `module` (nav name its stem) plus `(kind, qname, nav name, parent)`
+    /// items, where a `None` parent is the MODULE and `Some(q)` an earlier
+    /// item of this file (a namespace PACKAGE, a CLASS). Each item gets its
+    /// parent -> item DEFINES edge and one CODE cell `<module>|<qname>`, so a
+    /// merged node shows whose cells it carries.
+    fn cpp_file(
+        module: &str,
+        items: &[(repo_graph_core::NodeKindId, &str, &str, Option<&str>)],
+    ) -> FileParse {
+        let r = repo();
+        let m = gid(node_kind::MODULE, module);
+        let file = module.rsplit("::").next().unwrap_or(module);
+        let stem = file.split('.').next().unwrap_or(file);
+        let mut nav = CodeNav::default();
+        nav.record(m, stem, module, node_kind::MODULE, None);
+        let mut ids: HashMap<&str, NodeId> = HashMap::new();
+        let mut nodes = vec![Node {
+            id: m,
+            repo: r,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        }];
+        let mut edges = vec![];
+        for &(kind, qname, name, parent) in items {
+            let id = gid(kind, qname);
+            let parent_id = parent.map_or(m, |p| ids[p]);
+            nav.record(id, name, qname, kind, Some(parent_id));
+            nodes.push(Node {
+                id,
+                repo: r,
+                confidence: Confidence::Strong,
+                cells: vec![code_cell(module, qname)],
+            });
+            edges.push(Edge::new(
+                parent_id,
+                id,
+                edge_category::DEFINES,
+                Confidence::Strong,
+            ));
+            ids.insert(qname, id);
+        }
+        FileParse {
+            nodes,
+            edges,
+            nav,
+            ..FileParse::default()
+        }
+    }
+
+    fn code_cell(module: &str, qname: &str) -> Cell {
+        Cell {
+            kind: repo_graph_code_domain::cell_type::CODE,
+            payload: repo_graph_core::CellPayload::Text(format!("{module}|{qname}")),
+        }
+    }
+
+    fn include(from: &str, spec: &str) -> ImportStmt {
+        ImportStmt {
+            from_module: from.to_string(),
+            target: ImportTarget::Module {
+                path: spec.to_string(),
+                alias: None,
+            },
+            line: 0,
+        }
+    }
+
+    /// The engine's include resolver, reduced: `spec` relative to the
+    /// including file's directory, file name kept.
+    fn include_source(from: &str, spec: &str) -> Option<String> {
+        let mut segs: Vec<&str> = from.split("::").collect();
+        segs.pop();
+        for part in spec.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segs.pop()?;
+                }
+                p => segs.push(p),
+            }
+        }
+        (!segs.is_empty()).then(|| segs.join("::"))
+    }
+
+    fn bare(from: NodeId, name: &str, line: u32) -> CallSite {
+        CallSite {
+            from,
+            qualifier: CallQualifier::Bare(name.to_string()),
+            line,
+        }
+    }
+
+    fn cpp_stats(parses: Vec<FileParse>) -> OutOfLineStats {
+        let (mut g, _, mut calls, mut refs) = merge_parses(repo(), parses);
+        bind_out_of_line(&mut g, &mut calls, &mut refs).1
+    }
+
+    fn only_edge<'g>(
+        g: &'g RepoGraph,
+        from: NodeId,
+        to: NodeId,
+        category: repo_graph_core::EdgeCategoryId,
+    ) -> &'g Edge {
+        let hits: Vec<&Edge> = g
+            .edges
+            .iter()
+            .filter(|e| (e.from, e.to, e.category) == (from, to, category))
+            .collect();
+        assert_eq!(hits.len(), 1, "one {category:?} edge {from:?} -> {to:?}");
+        hits[0]
+    }
+
+    fn rule_of(e: &Edge) -> (String, Option<String>) {
+        let ev = repo_graph_code_domain::evidence::Evidence::of(e).expect("EVIDENCE cell");
+        (ev.emitter, ev.rule)
+    }
+
+    /// No trace of `old` anywhere an id lives.
+    fn assert_gone(g: &RepoGraph, old: NodeId) {
+        assert!(g.nodes.iter().all(|n| n.id != old), "node record");
+        assert!(
+            g.edges.iter().all(|e| e.from != old && e.to != old),
+            "edges"
+        );
+        let nav = &g.nav;
+        assert!(!nav.name_by_id.contains_key(&old) && !nav.qname_by_id.contains_key(&old));
+        assert!(!nav.kind_by_id.contains_key(&old) && !nav.parent_of.contains_key(&old));
+        assert!(
+            nav.parent_of.values().all(|p| *p != old),
+            "parent_of values"
+        );
+        assert!(!nav.children_of.contains_key(&old), "children_of key");
+        assert!(
+            nav.children_of.values().flatten().all(|k| *k != old),
+            "children_of entries"
+        );
+        assert!(!nav.local_types.contains_key(&old) && !g.properties.contains(&old));
+        assert!(
+            g.unresolved_calls.iter().all(|c| c.from != old),
+            "unresolved calls"
+        );
+        assert!(
+            g.unresolved_refs
+                .iter()
+                .all(|r| r.from != old && r.from_module != old)
+        );
+    }
+
+    /// The fixtures/cpp-out-of-line-members Widget half: `Widget.h` declares
+    /// `class Widget { void run(); int helper() {..} }`; `Widget.cpp` defines
+    /// `static int file_helper()` and `void Widget::run() { this->helper();
+    /// file_helper(); }`, a provisional METHOD under its MODULE.
+    fn widget_shape() -> Vec<FileParse> {
+        let h = cpp_file(
+            "src::Widget.h",
+            &[
+                (node_kind::CLASS, "src::Widget", "Widget", None),
+                (
+                    node_kind::METHOD,
+                    "src::Widget::helper",
+                    "helper",
+                    Some("src::Widget"),
+                ),
+            ],
+        );
+        let mut cpp = cpp_file(
+            "src::Widget.cpp",
+            &[
+                (
+                    node_kind::FUNCTION,
+                    "src::Widget.cpp::file_helper",
+                    "file_helper",
+                    None,
+                ),
+                (node_kind::METHOD, "src::Widget::run", "Widget::run", None),
+            ],
+        );
+        let run = gid(node_kind::METHOD, "src::Widget::run");
+        cpp.imports = vec![include("src::Widget.cpp", "Widget.h")];
+        cpp.calls = vec![
+            CallSite {
+                from: run,
+                qualifier: CallQualifier::SelfMethod("helper".to_string()),
+                line: 5,
+            },
+            bare(run, "file_helper", 6),
+        ];
+        vec![h, cpp]
+    }
+
+    /// The out-of-line half joins the header's CLASS: one METHOD, nav parent
+    /// the class, a CLASS -> METHOD DEFINES next to the kept file DEFINES,
+    /// `class_methods` instead of the file's `module_symbols`; `this->helper()`
+    /// binds through the class and the file's static helper through the hook.
+    #[test]
+    fn out_of_line_member_joins_its_header_class() {
+        let (class, helper, run) = (
+            gid(node_kind::CLASS, "src::Widget"),
+            gid(node_kind::METHOD, "src::Widget::helper"),
+            gid(node_kind::METHOD, "src::Widget::run"),
+        );
+        let (cpp, file_helper) = (
+            gid(node_kind::MODULE, "src::Widget.cpp"),
+            gid(node_kind::FUNCTION, "src::Widget.cpp::file_helper"),
+        );
+        let stats = cpp_stats(widget_shape());
+        assert_eq!(
+            stats,
+            OutOfLineStats {
+                bound: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[cpp-members] out-of-line members bound: 1 (by_name=0 renamed=0 namespace_fns=0 ambiguous=0 unbound=0)"
+            )
+        );
+        assert_eq!(OutOfLineStats::default().marker(), None);
+
+        let g = build_c_cpp(repo(), widget_shape(), include_source).expect("build");
+        assert_eq!(g.nav.parent_of[&run], class);
+        assert_eq!(g.nav.name_by_id[&run], "run");
+        assert_eq!(g.nav.qname_by_id[&run], "src::Widget::run");
+        assert_eq!(g.nav.kind_by_id[&run], node_kind::METHOD);
+        assert_eq!(g.nav.children_of[&class], vec![helper, run]);
+        assert!(!g.nav.children_of[&cpp].contains(&run));
+        let joined = only_edge(&g, class, run, edge_category::DEFINES);
+        assert_eq!(
+            rule_of(joined),
+            (
+                "graph:cpp_members".to_string(),
+                Some("out_of_line".to_string())
+            )
+        );
+        only_edge(&g, cpp, run, edge_category::DEFINES);
+        assert_eq!(g.symbols.class_methods[&class].get("run"), Some(&run));
+        let file_symbols = &g.symbols.module_symbols[&cpp];
+        assert!(!file_symbols.contains_key("run") && !file_symbols.contains_key("Widget::run"));
+        let this_call = only_edge(&g, run, helper, edge_category::CALLS);
+        assert_eq!(
+            rule_of(this_call),
+            ("graph:calls".to_string(), Some("self_method".to_string()))
+        );
+        let own_file = only_edge(&g, run, file_helper, edge_category::CALLS);
+        assert_eq!(
+            rule_of(own_file),
+            (
+                "graph:cpp_members".to_string(),
+                Some("defining_scope".to_string())
+            )
+        );
+        assert!(g.unresolved_calls.is_empty(), "{:?}", g.unresolved_calls);
+    }
+
+    /// `void shop::init() {}` names a namespace: LB.10b's provisional METHOD
+    /// `src::shop::init` becomes FUNCTION `src::cart.cpp::shop::init` named
+    /// `init`, under its file, with its cells, DEFINES and call sites.
+    #[test]
+    fn namespace_qualified_definition_is_a_function() {
+        let shape = || {
+            let hpp = cpp_file(
+                "include::shop::cart.hpp",
+                &[(
+                    node_kind::PACKAGE,
+                    "include::shop::cart.hpp::shop",
+                    "shop",
+                    None,
+                )],
+            );
+            let mut cpp = cpp_file(
+                "src::cart.cpp",
+                &[
+                    (node_kind::FUNCTION, "src::cart.cpp::audit", "audit", None),
+                    (node_kind::METHOD, "src::shop::init", "shop::init", None),
+                ],
+            );
+            cpp.calls = vec![bare(gid(node_kind::METHOD, "src::shop::init"), "audit", 3)];
+            vec![hpp, cpp]
+        };
+        assert_eq!(
+            cpp_stats(shape()),
+            OutOfLineStats {
+                namespace_fns: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape(), include_source).expect("build");
+        let old = gid(node_kind::METHOD, "src::shop::init");
+        let init = gid(node_kind::FUNCTION, "src::cart.cpp::shop::init");
+        let (cpp, audit) = (
+            gid(node_kind::MODULE, "src::cart.cpp"),
+            gid(node_kind::FUNCTION, "src::cart.cpp::audit"),
+        );
+        assert_gone(&g, old);
+        let node = g
+            .nodes
+            .iter()
+            .find(|n| n.id == init)
+            .expect("FUNCTION node");
+        assert_eq!(
+            node.cells,
+            vec![code_cell("src::cart.cpp", "src::shop::init")]
+        );
+        assert_eq!(g.nav.kind_by_id[&init], node_kind::FUNCTION);
+        assert_eq!(g.nav.name_by_id[&init], "init");
+        assert_eq!(g.nav.qname_by_id[&init], "src::cart.cpp::shop::init");
+        assert_eq!(g.nav.parent_of[&init], cpp);
+        assert_eq!(g.nav.children_of[&cpp], vec![audit, init]);
+        only_edge(&g, cpp, init, edge_category::DEFINES);
+        only_edge(&g, init, audit, edge_category::CALLS);
+        assert!(g.nav.kind_by_id.values().all(|k| *k != node_kind::METHOD));
+    }
+
+    /// A global class of another directory (`include/Widget.h`) binds, and
+    /// the provisional `src::Widget::run` moves to `include::Widget::run`
+    /// everywhere its id lived: node, edges, pending calls and refs (`from`,
+    /// `from_module`), properties, local types.
+    #[test]
+    fn cross_directory_class_is_bound_and_renamed() {
+        let old = gid(node_kind::METHOD, "src::Widget::run");
+        let cpp = gid(node_kind::MODULE, "src::w.cpp");
+        let shape = || {
+            let h = cpp_file(
+                "include::Widget.h",
+                &[(node_kind::CLASS, "include::Widget", "Widget", None)],
+            );
+            let mut w = cpp_file(
+                "src::w.cpp",
+                &[(node_kind::METHOD, "src::Widget::run", "Widget::run", None)],
+            );
+            w.calls = vec![bare(old, "nowhere", 2)];
+            let uses = |from, from_module| UnresolvedRef {
+                from,
+                from_module,
+                qualifier: CallQualifier::Bare("Missing".to_string()),
+                category: edge_category::USES,
+                line: 1,
+            };
+            w.refs = vec![uses(old, cpp), uses(cpp, old)];
+            w.properties.insert(old);
+            w.nav.record_local_type(old, "w", "Widget");
+            vec![h, w]
+        };
+        assert_eq!(
+            cpp_stats(shape()),
+            OutOfLineStats {
+                bound: 1,
+                renamed: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape(), include_source).expect("build");
+        let (class, run) = (
+            gid(node_kind::CLASS, "include::Widget"),
+            gid(node_kind::METHOD, "include::Widget::run"),
+        );
+        assert_gone(&g, old);
+        assert_eq!(g.nodes.iter().filter(|n| n.id == run).count(), 1);
+        assert_eq!(g.nav.qname_by_id[&run], "include::Widget::run");
+        assert_eq!(
+            (g.nav.name_by_id[&run].as_str(), g.nav.parent_of[&run]),
+            ("run", class)
+        );
+        assert_eq!(g.nav.children_of[&class], vec![run]);
+        assert!(
+            !g.nav.children_of.contains_key(&cpp),
+            "the file's only child left"
+        );
+        only_edge(&g, class, run, edge_category::DEFINES);
+        only_edge(&g, cpp, run, edge_category::DEFINES);
+        assert_eq!(
+            g.unresolved_calls
+                .iter()
+                .map(|c| c.from)
+                .collect::<Vec<_>>(),
+            vec![run]
+        );
+        let refs: Vec<(NodeId, NodeId)> = g
+            .unresolved_refs
+            .iter()
+            .map(|r| (r.from, r.from_module))
+            .collect();
+        assert_eq!(refs, vec![(run, cpp), (cpp, run)]);
+        assert!(g.properties.contains(&run));
+        assert_eq!(g.nav.local_types[&run]["w"], "Widget");
+    }
+
+    /// Two global `Widget` classes (a/, b/) and a definition in c/: neither
+    /// directory decides, so HEAD's FUNCTION stays; a definition in a/ binds
+    /// a/'s class.
+    #[test]
+    fn ambiguous_global_class_stays_a_function() {
+        let shape = |dir: &str| {
+            let (file, member) = (format!("{dir}::w.cpp"), format!("{dir}::Widget::run"));
+            vec![
+                cpp_file(
+                    "a::Widget.h",
+                    &[(node_kind::CLASS, "a::Widget", "Widget", None)],
+                ),
+                cpp_file(
+                    "b::Widget.h",
+                    &[(node_kind::CLASS, "b::Widget", "Widget", None)],
+                ),
+                cpp_file(&file, &[(node_kind::METHOD, &member, "Widget::run", None)]),
+            ]
+        };
+        assert_eq!(
+            cpp_stats(shape("c")),
+            OutOfLineStats {
+                ambiguous: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape("c"), include_source).expect("build");
+        let f = gid(node_kind::FUNCTION, "c::w.cpp::Widget::run");
+        assert_gone(&g, gid(node_kind::METHOD, "c::Widget::run"));
+        assert_eq!(g.nav.name_by_id[&f], "Widget::run");
+        assert_eq!(g.nav.parent_of[&f], gid(node_kind::MODULE, "c::w.cpp"));
+        assert!(g.nav.kind_by_id.values().all(|k| *k != node_kind::METHOD));
+
+        assert_eq!(
+            cpp_stats(shape("a")),
+            OutOfLineStats {
+                bound: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape("a"), include_source).expect("build");
+        let run = gid(node_kind::METHOD, "a::Widget::run");
+        assert_eq!(g.nav.parent_of[&run], gid(node_kind::CLASS, "a::Widget"));
+    }
+
+    /// A class a source file declares (`src::a.cpp::Helper`, LB.10b's
+    /// translation-unit shape) is never a target of another file's
+    /// definition: `Helper::go` in b.cpp stays HEAD's FUNCTION.
+    #[test]
+    fn tu_local_class_of_another_file_is_never_a_target() {
+        let shape = || {
+            vec![
+                cpp_file(
+                    "src::a.cpp",
+                    &[(node_kind::CLASS, "src::a.cpp::Helper", "Helper", None)],
+                ),
+                cpp_file(
+                    "src::b.cpp",
+                    &[(node_kind::METHOD, "src::Helper::go", "Helper::go", None)],
+                ),
+            ]
+        };
+        assert_eq!(
+            cpp_stats(shape()),
+            OutOfLineStats {
+                unbound: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape(), include_source).expect("build");
+        let f = gid(node_kind::FUNCTION, "src::b.cpp::Helper::go");
+        assert_gone(&g, gid(node_kind::METHOD, "src::Helper::go"));
+        assert_eq!(g.nav.name_by_id[&f], "Helper::go");
+        assert_eq!(g.nav.parent_of[&f], gid(node_kind::MODULE, "src::b.cpp"));
+        assert!(
+            !g.nav
+                .children_of
+                .contains_key(&gid(node_kind::CLASS, "src::a.cpp::Helper"))
+        );
+    }
+
+    /// Renamed onto an id a header inline METHOD already holds: one node
+    /// carrying both cell lists (the existing first), the header's nav record,
+    /// no second CLASS -> METHOD DEFINES.
+    #[test]
+    fn rename_into_an_existing_id_merges_cells() {
+        let shape = || {
+            vec![
+                cpp_file(
+                    "include::Widget.h",
+                    &[
+                        (node_kind::CLASS, "include::Widget", "Widget", None),
+                        (
+                            node_kind::METHOD,
+                            "include::Widget::run",
+                            "run",
+                            Some("include::Widget"),
+                        ),
+                    ],
+                ),
+                cpp_file(
+                    "src::w.cpp",
+                    &[(node_kind::METHOD, "src::Widget::run", "Widget::run", None)],
+                ),
+            ]
+        };
+        assert_eq!(
+            cpp_stats(shape()),
+            OutOfLineStats {
+                bound: 1,
+                renamed: 1,
+                ..OutOfLineStats::default()
+            }
+        );
+        let g = build_c_cpp(repo(), shape(), include_source).expect("build");
+        let (class, run) = (
+            gid(node_kind::CLASS, "include::Widget"),
+            gid(node_kind::METHOD, "include::Widget::run"),
+        );
+        assert_gone(&g, gid(node_kind::METHOD, "src::Widget::run"));
+        let merged: Vec<&Node> = g.nodes.iter().filter(|n| n.id == run).collect();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].cells,
+            vec![
+                code_cell("include::Widget.h", "include::Widget::run"),
+                code_cell("src::w.cpp", "src::Widget::run")
+            ]
+        );
+        assert_eq!(
+            (g.nav.name_by_id[&run].as_str(), g.nav.parent_of[&run]),
+            ("run", class)
+        );
+        assert_eq!(g.nav.children_of[&class], vec![run]);
+        // The header parse's own DEFINES (no graph evidence) is the only one.
+        let header_defines = only_edge(&g, class, run, edge_category::DEFINES);
+        assert!(repo_graph_code_domain::evidence::Evidence::of(header_defines).is_none());
+        only_edge(
+            &g,
+            gid(node_kind::MODULE, "src::w.cpp"),
+            run,
+            edge_category::DEFINES,
+        );
+    }
+
+    /// LB.10b merges an out-of-line member into a same-qname inline METHOD of
+    /// the header class (the RunLoop `= delete` shape), and whichever parse
+    /// merges last wins its nav record. Either order joins the class the
+    /// same way, and the member still sees its file's static helper.
+    #[test]
+    fn folded_member_joins_its_class_in_either_parse_order() {
+        let (class, member) = (
+            gid(node_kind::CLASS, "src::RunLoop"),
+            gid(node_kind::METHOD, "src::RunLoop::RunLoop"),
+        );
+        let (cpp, tick) = (
+            gid(node_kind::MODULE, "src::loop.cpp"),
+            gid(node_kind::FUNCTION, "src::loop.cpp::tick"),
+        );
+        let header = || {
+            cpp_file(
+                "src::loop.h",
+                &[
+                    (node_kind::CLASS, "src::RunLoop", "RunLoop", None),
+                    (
+                        node_kind::METHOD,
+                        "src::RunLoop::RunLoop",
+                        "RunLoop",
+                        Some("src::RunLoop"),
+                    ),
+                ],
+            )
+        };
+        let source = || {
+            let mut f = cpp_file(
+                "src::loop.cpp",
+                &[
+                    (node_kind::FUNCTION, "src::loop.cpp::tick", "tick", None),
+                    (
+                        node_kind::METHOD,
+                        "src::RunLoop::RunLoop",
+                        "RunLoop::RunLoop",
+                        None,
+                    ),
+                ],
+            );
+            f.calls = vec![bare(member, "tick", 4)];
+            f
+        };
+        let mut navs = Vec::new();
+        for parses in [vec![header(), source()], vec![source(), header()]] {
+            let (mut g, _, mut calls, mut refs) = merge_parses(repo(), parses.clone());
+            let (defining, stats) = bind_out_of_line(&mut g, &mut calls, &mut refs);
+            assert_eq!(
+                stats,
+                OutOfLineStats {
+                    bound: 1,
+                    ..OutOfLineStats::default()
+                }
+            );
+            assert_eq!(defining.get(&member), Some(&cpp));
+            let g = build_c_cpp(repo(), parses, include_source).expect("build");
+            assert_eq!(g.nav.children_of[&class], vec![member]);
+            assert_eq!(g.nav.children_of[&cpp], vec![tick]);
+            only_edge(&g, class, member, edge_category::DEFINES);
+            only_edge(&g, cpp, member, edge_category::DEFINES);
+            only_edge(&g, member, tick, edge_category::CALLS);
+            assert!(!g.symbols.module_symbols[&cpp].contains_key("RunLoop"));
+            navs.push((g.nav.name_by_id[&member].clone(), g.nav.parent_of[&member]));
+        }
+        assert_eq!(navs, vec![("RunLoop".to_string(), class); 2]);
+    }
+
+    /// The include hook (LB.10a's stopgap, moved into `build_c_cpp`): a Bare
+    /// call binds the one directly included file's top-level symbol, two
+    /// includes answering is refused, a name no include answers stays
+    /// unresolved, and a joined member looks in ITS file's includes, not its
+    /// header's.
+    #[test]
+    fn bare_call_binds_through_a_direct_include() {
+        let (f, sq) = (
+            gid(node_kind::FUNCTION, "src::a.cpp::f"),
+            gid(node_kind::FUNCTION, "src::a.h::sq"),
+        );
+        let (go, twice) = (
+            gid(node_kind::METHOD, "src::W::go"),
+            gid(node_kind::FUNCTION, "src::util.h::twice"),
+        );
+        let a_h = cpp_file(
+            "src::a.h",
+            &[
+                (node_kind::FUNCTION, "src::a.h::sq", "sq", None),
+                (node_kind::FUNCTION, "src::a.h::dup", "dup", None),
+            ],
+        );
+        let b_h = cpp_file(
+            "src::b.h",
+            &[(node_kind::FUNCTION, "src::b.h::dup", "dup", None)],
+        );
+        let mut a_cpp = cpp_file(
+            "src::a.cpp",
+            &[(node_kind::FUNCTION, "src::a.cpp::f", "f", None)],
+        );
+        a_cpp.imports = vec![include("src::a.cpp", "a.h"), include("src::a.cpp", "b.h")];
+        a_cpp.calls = vec![bare(f, "sq", 2), bare(f, "dup", 2), bare(f, "nowhere", 2)];
+        let w_h = cpp_file("src::w.h", &[(node_kind::CLASS, "src::W", "W", None)]);
+        let util_h = cpp_file(
+            "src::util.h",
+            &[(node_kind::FUNCTION, "src::util.h::twice", "twice", None)],
+        );
+        let mut w_cpp = cpp_file(
+            "src::w.cpp",
+            &[(node_kind::METHOD, "src::W::go", "W::go", None)],
+        );
+        w_cpp.imports = vec![
+            include("src::w.cpp", "w.h"),
+            include("src::w.cpp", "util.h"),
+        ];
+        w_cpp.calls = vec![bare(go, "twice", 7)];
+        let parses = vec![a_h, b_h, a_cpp, w_h, util_h, w_cpp];
+
+        let (mut g, imports, mut calls, mut refs) = merge_parses(repo(), parses);
+        let (defining, _) = bind_out_of_line(&mut g, &mut calls, &mut refs);
+        build_symbol_table(&mut g);
+        resolve_imports_ts(&mut g, &imports, &include_source, &mut SameStem::default());
+        let scope = CppCallScope::new(&g, defining);
+        let mut tally = EvidenceTally::default();
+        resolve_calls(&mut g, &calls, |g, site| scope.resolve(g, site), &mut tally);
+        assert_eq!(
+            scope.marker().as_deref(),
+            Some("[c-includes] bare calls bound through a direct #include: 2 (ambiguous=1)")
+        );
+        assert_eq!(g.nav.parent_of[&go], gid(node_kind::CLASS, "src::W"));
+        for (from, to, line) in [(f, sq, 2), (go, twice, 7)] {
+            let e = only_edge(&g, from, to, edge_category::CALLS);
+            let ev = repo_graph_code_domain::evidence::Evidence::of(e).expect("evidence");
+            assert_eq!(
+                (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
+                ("graph:c_includes", Some("include"), Some(line))
+            );
+        }
+        let calls: Vec<&Edge> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS)
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            g.unresolved_calls.len(),
+            2,
+            "dup (two includes) and nowhere"
+        );
+    }
+
+    /// The join is a pure function of the parses: two builds give identical
+    /// node and edge vectors (cells and order included).
+    #[test]
+    fn c_cpp_build_is_deterministic() {
+        let shape = || {
+            let mut parses = widget_shape();
+            parses.push(cpp_file(
+                "include::Gadget.h",
+                &[(node_kind::STRUCT, "include::Gadget", "Gadget", None)],
+            ));
+            parses.push(cpp_file(
+                "src::gadget.cpp",
+                &[
+                    (node_kind::METHOD, "src::Gadget::spin", "Gadget::spin", None),
+                    (node_kind::METHOD, "src::Gone::x", "Gone::x", None),
+                ],
+            ));
+            parses
+        };
+        let (a, b) = (
+            build_c_cpp(repo(), shape(), include_source).expect("a"),
+            build_c_cpp(repo(), shape(), include_source).expect("b"),
+        );
+        assert_eq!(a.nodes, b.nodes);
+        assert_eq!(a.edges, b.edges);
+        assert!(
+            a.nodes
+                .iter()
+                .any(|n| n.id == gid(node_kind::METHOD, "include::Gadget::spin"))
+        );
+        assert!(
+            a.nodes
+                .iter()
+                .any(|n| n.id == gid(node_kind::FUNCTION, "src::gadget.cpp::Gone::x"))
         );
     }
 }

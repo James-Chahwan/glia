@@ -14,8 +14,14 @@
 //! (`shop::Cart`), or the header's directory in the global namespace
 //! (`src::Widget`) - a source file's type keeps the file scope
 //! (`src::Widget.cpp::Local`), and an out-of-line member definition is a
-//! METHOD, bound to its class when the same file defines it. LB.10c adds its
-//! tests here.
+//! METHOD, bound to its class when the same file defines it.
+//!
+//! LB.10c (`out_of_line_members_meet_their_class`, on
+//! `cpp-out-of-line-members`): an out-of-line member defined in another file
+//! than its class joins the class its header declares at graph build (one
+//! METHOD under one CLASS, `this->x()` resolves, the defining file's static
+//! helper stays callable), and a namespace-qualified definition is a
+//! FUNCTION of its file.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -294,7 +300,75 @@ fn types_take_their_cpp_name() {
         defines.contains(&pair("src::Widget.cpp::Local", "src::Widget.cpp::Local::a")),
         "{defines:?}"
     );
-    // The provisional ones keep the lexical parent until LB.10c binds them.
+    // The defining file keeps its DEFINES after LB.10c joins them to the
+    // header class, which DEFINES them too.
     assert!(defines.contains(&pair("src::Widget.cpp", "src::Widget::run")), "{defines:?}");
     assert!(defines.contains(&pair("src::cart.cpp::shop", "shop::Cart::total")), "{defines:?}");
+    assert!(defines.contains(&pair("src::Widget", "src::Widget::run")), "{defines:?}");
+    assert!(defines.contains(&pair("shop::Cart", "shop::Cart::total")), "{defines:?}");
+}
+
+const OUT_OF_LINE_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-out-of-line-members";
+
+/// The nav parent's (qname, kind) of the node with `qname` and `kind`.
+fn nav_parent(merged: &MergedGraph, qname: &str, kind: NodeKindId) -> Option<(String, NodeKindId)> {
+    let nav = nav(merged);
+    let (id, _) = nav.iter().find(|(_, (q, _, k))| q == qname && *k == kind)?;
+    let parent = merged.graphs.iter().find_map(|g| g.nav.parent_of.get(id))?;
+    nav.get(parent).map(|(q, _, k)| (q.clone(), *k))
+}
+
+/// LB.10c on `cpp-out-of-line-members`: `void Widget::run() {}` in
+/// `Widget.cpp` and `int Cart::total() {}` inside `namespace shop {}` of
+/// `src/cart.cpp` (the class in `include/shop/cart.hpp`) join the header
+/// classes: nav parent the CLASS, `this->helper()` / `this->tax()` bind
+/// through it, and `file_helper()` (a static of `Widget.cpp`) still binds
+/// from the moved method. `void shop::init() {}` names a namespace: FUNCTION
+/// `src::cart.cpp::shop::init`, never the provisional METHOD.
+#[test]
+fn out_of_line_members_meet_their_class() {
+    let tmp = copy_of(OUT_OF_LINE_FIXTURE);
+    let merged = build(&tmp);
+
+    assert_eq!(
+        nav_parent(&merged, "src::Widget::run", node_kind::METHOD),
+        Some(("src::Widget".to_string(), node_kind::CLASS))
+    );
+    assert_eq!(
+        nav_parent(&merged, "shop::Cart::total", node_kind::METHOD),
+        Some(("shop::Cart".to_string(), node_kind::CLASS))
+    );
+    let calls = edges(&merged, edge_category::CALLS);
+    for (from, to) in [
+        ("src::Widget::run", "src::Widget::helper"),
+        ("src::Widget::run", "src::Widget.cpp::file_helper"),
+        ("shop::Cart::total", "shop::Cart::tax"),
+    ] {
+        assert!(calls.contains(&pair(from, to)), "CALLS {from} -> {to} missing: {calls:?}");
+    }
+
+    let functions = qnames_of(&merged, node_kind::FUNCTION);
+    assert!(functions.contains(&"src::cart.cpp::shop::init".to_string()), "{functions:?}");
+    let methods = qnames_of(&merged, node_kind::METHOD);
+    assert!(!methods.contains(&"src::shop::init".to_string()), "{methods:?}");
+    // No out-of-line member is left named `Q::m`.
+    let nav = nav(&merged);
+    for (q, name, kind) in nav.values() {
+        if *kind == node_kind::METHOD || *kind == node_kind::FUNCTION {
+            assert!(!name.contains("::"), "{q} is named {name}");
+        }
+    }
+
+    // Every edge carries its EVIDENCE cell (LC.3a), the new CLASS -> METHOD
+    // DEFINES included.
+    for e in merged.all_edges() {
+        assert!(Evidence::of(e).is_some(), "edge without EVIDENCE: {e:?}");
+    }
+    let joined = merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::DEFINES)
+        .filter_map(Evidence::of)
+        .filter(|ev| ev.emitter == "graph:cpp_members")
+        .count();
+    assert_eq!(joined, 2, "Widget -> run, Cart -> total");
 }
