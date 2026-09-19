@@ -8,7 +8,7 @@ use repo_graph_code_domain::CodeNav;
 use repo_graph_core::{Edge, NodeId, NodeKindId, RepoId};
 use repo_graph_graph::{RepoGraph, SymbolTable};
 
-use crate::container::{Container, FORMAT_VERSION, Header, MAGIC, write_atomic};
+use crate::container::{Container, FORMAT_VERSION, Header, MAGIC, encode_file, write_atomic};
 use crate::error::StoreError;
 
 // ============================================================================
@@ -248,13 +248,14 @@ impl Header {
 // Write — atomic via .tmp + rename
 // ============================================================================
 
-/// Serialise a `RepoGraph` to a `.gmap` file. Writes to `<path>.tmp` first,
-/// then atomically renames over `<path>` so a crash mid-write never leaves a
-/// half-written file in place. Existing readers' mmaps stay valid against the
-/// old inode until they re-open.
+/// Serialise a `RepoGraph` to a `.gmap` file (preamble + rkyv core, see
+/// `FORMAT_VERSION`). Writes to `<path>.tmp` first, then atomically renames
+/// over `<path>` so a crash mid-write never leaves a half-written file in
+/// place. Existing readers' mmaps stay valid against the old inode until they
+/// re-open.
 pub fn write_repo_graph(g: &RepoGraph, path: &Path) -> Result<(), StoreError> {
     let container = Container::from_repo_graph(g);
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
+    let bytes = encode_file(&container)?;
     write_atomic(path, &bytes)
 }
 

@@ -12,7 +12,7 @@ use repo_graph_code_domain::node_kind;
 use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::build_go;
 use repo_graph_parser_go::parse_file;
-use repo_graph_store::{MmapContainer, write_repo_graph};
+use repo_graph_store::{FORMAT_VERSION, MmapContainer, StoreError, write_repo_graph};
 
 const MODULE_PREFIX: &str = "example.com/backend";
 
@@ -58,13 +58,15 @@ fn repo_graph_roundtrips_through_gmap_file() {
     let path = dir.path().join("backend.gmap");
     write_repo_graph(&g, &path).unwrap();
     assert!(path.exists(), "written .gmap file should exist at {path:?}");
+    let raw = std::fs::read(&path).unwrap();
+    assert!(raw.starts_with(b"GLIAGMAP"), "written .gmap has no GLIAGMAP preamble");
 
     let container = MmapContainer::open(&path).unwrap();
     let archived = container.archived().unwrap();
 
     // Header + repo round-trip.
     assert_eq!(archived.header.magic, *b"GMAP");
-    assert_eq!(archived.header.version.to_native(), 1);
+    assert_eq!(archived.header.version.to_native(), FORMAT_VERSION);
     assert_eq!(archived.header.graph_type.as_str(), "code");
     assert_eq!(archived.repo.0.to_native(), repo().0);
 
@@ -124,9 +126,17 @@ fn repo_graph_roundtrips_through_gmap_file() {
 }
 
 #[test]
-fn opening_a_non_gmap_file_fails_with_bad_magic_or_rkyv_error() {
+fn opening_a_non_gmap_file_fails_with_old_format() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(tmp.path(), b"NOTA gmap file, just some junk bytes").unwrap();
-    let err = MmapContainer::open(tmp.path());
-    assert!(err.is_err(), "garbage file should not open as a gmap");
+    // No GLIAGMAP preamble: rejected before rkyv reads a byte, and reported as
+    // a file to rebuild rather than an rkyv validation error.
+    match MmapContainer::open(tmp.path()) {
+        Err(ref e @ StoreError::OldFormat { found: None }) => {
+            assert!(e.needs_rebuild());
+            assert!(!e.to_string().contains("rkyv"), "{e}");
+        }
+        Err(e) => panic!("garbage file: expected OldFormat{{None}}, got {e:?}"),
+        Ok(_) => panic!("garbage file should not open as a gmap"),
+    }
 }

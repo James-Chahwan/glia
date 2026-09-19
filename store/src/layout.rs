@@ -9,7 +9,9 @@ use repo_graph_code_domain::walk_gating;
 use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId};
 use repo_graph_graph::RepoGraph;
 
-use crate::container::{Container, MmapContainer, hex_xxhash64, read_to_owned, write_atomic};
+use crate::container::{
+    Container, MmapContainer, encode_file, hex_xxhash64, read_to_owned, write_atomic,
+};
 use crate::error::StoreError;
 
 /// Convention: `<repo>/.ai/repo-graph/` holds the sharded layout (manifest.json
@@ -28,8 +30,13 @@ pub fn default_gmap_dir(repo_path: &Path) -> PathBuf {
 // Sharded layout — manifest.json + per-shard .gmap + cross_stack.gmap
 // ============================================================================
 
-/// Manifest schema version. Bump on any manifest JSON shape change.
-pub const MANIFEST_VERSION: u32 = 1;
+/// Manifest schema version. Bump on any manifest JSON shape change that an
+/// older reader would misread; purely additive `#[serde(default)]` fields do
+/// not bump it (serde ignores unknown fields). 2 = 0.5.0, the layout whose
+/// shards carry the `GLIAGMAP` preamble (`FORMAT_VERSION` 2): a schema-1
+/// layout is reported stale by `is_gmap_stale` and rejected by
+/// `ShardedMmap::open` before any shard is opened.
+pub const MANIFEST_VERSION: u32 = 2;
 /// Filename of the manifest inside a sharded directory.
 pub const MANIFEST_NAME: &str = "manifest.json";
 /// Filename of the cross-stack edge shard inside a sharded directory.
@@ -70,6 +77,27 @@ pub struct Manifest {
     pub cross: Option<ShardEntry>,
 }
 
+/// Just the schema number, parsed before the full `Manifest` so a manifest of
+/// another schema reports `ManifestSchemaVersion` even when its shape no
+/// longer deserialises as this build's `Manifest`.
+#[derive(serde::Deserialize)]
+struct SchemaProbe {
+    schema_version: u32,
+}
+
+/// Read `<dir>/manifest.json`, checking the schema number first.
+fn read_manifest(dir: &Path) -> Result<Manifest, StoreError> {
+    let bytes = std::fs::read(dir.join(MANIFEST_NAME))?;
+    let probe: SchemaProbe = serde_json::from_slice(&bytes)?;
+    if probe.schema_version != MANIFEST_VERSION {
+        return Err(StoreError::ManifestSchemaVersion {
+            got: probe.schema_version,
+            supported: MANIFEST_VERSION,
+        });
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ShardEntry {
     /// Caller-provided name for this shard ("backend", "frontend", ...).
@@ -104,9 +132,9 @@ pub fn write_sharded(
     // Best case: parse output identical → only manifest gets a rewrite
     // (and it might also skip via the same check). Typical: 1-3 of N
     // shards change per cycle when a single language tree is edited.
-    let prior_manifest: Option<Manifest> = std::fs::read(dir.join(MANIFEST_NAME))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok());
+    // A prior manifest of another schema describes shards of another format:
+    // none of its hashes can be reused.
+    let prior_manifest: Option<Manifest> = read_manifest(dir).ok();
 
     let mut entries = Vec::with_capacity(shards.len());
     let mut shards_skipped = 0usize;
@@ -114,7 +142,7 @@ pub fn write_sharded(
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
         let container = Container::from_repo_graph(g);
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
+        let bytes = encode_file(&container)?;
         let content_hash = hex_xxhash64(&bytes);
 
         // Skip-when-unchanged: write only if the prior manifest didn't
@@ -142,7 +170,7 @@ pub fn write_sharded(
     } else {
         let shard_path = dir.join(CROSS_STACK_NAME);
         let container = Container::for_cross_edges(cross_edges.to_vec());
-        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
+        let bytes = encode_file(&container)?;
         let content_hash = hex_xxhash64(&bytes);
         let unchanged = prior_manifest.as_ref()
             .and_then(|m| m.cross.as_ref())
@@ -201,18 +229,12 @@ pub struct ShardedMmap {
 }
 
 impl ShardedMmap {
-    /// Open a sharded directory. Validates the manifest schema version, then
-    /// opens each shard's `.gmap` and verifies its content hash against the
-    /// manifest. Returns on the first hash mismatch or missing file.
+    /// Open a sharded directory. Validates the manifest schema version (from
+    /// a probe, before the full manifest is parsed), then opens each shard's
+    /// `.gmap` and verifies its content hash against the manifest. Returns on
+    /// the first hash mismatch or missing file.
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
-        let manifest_bytes = std::fs::read(dir.join(MANIFEST_NAME))?;
-        let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
-        if manifest.schema_version != MANIFEST_VERSION {
-            return Err(StoreError::ManifestSchemaVersion {
-                got: manifest.schema_version,
-                supported: MANIFEST_VERSION,
-            });
-        }
+        let manifest = read_manifest(dir)?;
 
         let mut shards = Vec::with_capacity(manifest.shards.len());
         for entry in &manifest.shards {
@@ -306,8 +328,24 @@ pub fn write_merged_sharded(
 /// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
 /// every per-language `RepoGraph` from its archived shard, then attaches the
 /// cross-stack edges. Loaded `RepoGraph.properties` is empty (parse-time-only
-/// field, not persisted at FORMAT_VERSION=1).
+/// field, not persisted at FORMAT_VERSION=2).
+///
+/// When the layout cannot be served (`StoreError::needs_rebuild`) it prints one
+/// `[gmap] needs rebuild: <dir>: <reason>` line before returning the error, so
+/// the first 0.5.0 load of a 0.4.x layout says why it is regenerating.
 pub fn read_merged_sharded(
+    dir: &Path,
+) -> Result<repo_graph_graph::MergedGraph, StoreError> {
+    let result = read_merged_sharded_inner(dir);
+    if let Err(e) = &result
+        && let Some(reason) = e.rebuild_reason()
+    {
+        eprintln!("[gmap] needs rebuild: {}: {reason}", dir.display());
+    }
+    result
+}
+
+fn read_merged_sharded_inner(
     dir: &Path,
 ) -> Result<repo_graph_graph::MergedGraph, StoreError> {
     let sharded = ShardedMmap::open(dir)?;
@@ -341,7 +379,8 @@ pub fn read_merged_sharded(
 /// matches — directories and files alike — and copied web bundles.
 ///
 /// Returns:
-/// - `true` if the gmap is missing/unreadable, if it was written by another
+/// - `true` if the gmap is missing/unreadable, if its manifest schema is not
+///   `MANIFEST_VERSION`, if it was written by another
 ///   build, if any un-gated file's mtime is newer than the manifest's, or if a
 ///   GATED directory's own mtime is newer (the builder emits one REGION node
 ///   per collapsed directory, so a region appearing or disappearing does change
@@ -360,13 +399,25 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
     };
     // A layout written by a different build is stale regardless of source
     // mtimes — otherwise an old engine's output is served until a source file
-    // happens to change. `engine_version` catches an upgrade between releases;
-    // `build_stamp` catches a graph-shaping change within one.
+    // happens to change. The schema number catches a layout of another format
+    // (every 0.4.x layout after LC.1); `engine_version` catches an upgrade
+    // between releases; `build_stamp` catches a graph-shaping change within one.
     // Unreadable/unparseable manifest → stale.
-    let parsed: Option<Manifest> = std::fs::read(&manifest_path)
-        .ok()
-        .and_then(|b| serde_json::from_slice::<Manifest>(&b).ok());
-    let Some(m) = parsed else {
+    let Ok(manifest_bytes) = std::fs::read(&manifest_path) else {
+        return true;
+    };
+    let Ok(probe) = serde_json::from_slice::<SchemaProbe>(&manifest_bytes) else {
+        return true;
+    };
+    if probe.schema_version != MANIFEST_VERSION {
+        // Un-gated, like the build-stamp line below: it explains a regenerate.
+        eprintln!(
+            "[gmap] stale: manifest schema {} != {MANIFEST_VERSION} - regenerating",
+            probe.schema_version
+        );
+        return true;
+    }
+    let Ok(m) = serde_json::from_slice::<Manifest>(&manifest_bytes) else {
         return true;
     };
     if m.engine_version != env!("CARGO_PKG_VERSION")
@@ -504,8 +555,7 @@ pub fn upsert_cell_sharded(
     payload: CellPayload,
 ) -> Result<(), StoreError> {
     let manifest_path = dir.join(MANIFEST_NAME);
-    let manifest_bytes = std::fs::read(&manifest_path)?;
-    let mut manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
+    let mut manifest = read_manifest(dir)?;
 
     for entry in &mut manifest.shards {
         let shard_path = dir.join(&entry.path);
@@ -524,7 +574,7 @@ pub fn upsert_cell_sharded(
                 .nodes
                 .iter_mut()
                 .find(|n| n.id == node_id)
-                .unwrap();
+                .ok_or(StoreError::NodeNotFound(node_id))?;
 
             if let Some(cell) = node.cells.iter_mut().find(|c| c.kind == cell_type) {
                 cell.payload = payload;
@@ -535,7 +585,7 @@ pub fn upsert_cell_sharded(
                 });
             }
 
-            let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&container)?;
+            let bytes = encode_file(&container)?;
             entry.content_hash = hex_xxhash64(&bytes);
             write_atomic(&shard_path, &bytes)?;
 
