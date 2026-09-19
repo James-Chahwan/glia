@@ -131,6 +131,7 @@ impl EntitySink {
             to: id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 

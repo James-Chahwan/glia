@@ -351,6 +351,7 @@ pub fn extract_grpc_service_nodes(
                 to: m_id,
                 category: repo_graph_code_domain::edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             rpc_count += 1;
         }
@@ -1773,6 +1774,7 @@ pub fn extract_proto_rpc_nodes(
         to,
         category,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     };
     for (name, group) in servers {
         let (Some(Some(svc)), Some(first)) = (services.get(name), group.first()) else {

@@ -342,6 +342,7 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
                     to: id,
                     category: edge_category::CONTAINS,
                     confidence: Confidence::Strong,
+                    cells: Vec::new(),
                 });
             }
         }

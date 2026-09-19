@@ -538,6 +538,7 @@ pub(crate) fn resolve_nav_links(g: &mut RepoGraph, refs: &[&UnresolvedRef]) -> N
                             to,
                             category: edge_category::NAVIGATES_TO,
                             confidence,
+                            cells: Vec::new(),
                         });
                     }
                 }

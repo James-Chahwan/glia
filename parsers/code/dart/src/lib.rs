@@ -266,6 +266,7 @@ fn visit_class(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
     // LA.37b: a later container of the same name adds no second Node.
@@ -472,6 +473,7 @@ fn visit_container(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
     }
@@ -740,6 +742,7 @@ fn visit_class_member(
                         to: id,
                         category: edge_category::DEFINES,
                         confidence: Confidence::Strong,
+                        cells: Vec::new(),
                     });
                     acc.nav
                         .record(id, &name, &qname, node_kind::METHOD, Some(owner.id));
@@ -813,6 +816,7 @@ fn visit_enum(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
@@ -889,6 +893,7 @@ fn visit_function(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav
             .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -971,6 +976,7 @@ fn visit_top_level_consts(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav
             .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));

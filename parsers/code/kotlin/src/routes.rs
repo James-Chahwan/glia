@@ -339,6 +339,7 @@ fn emit_ktor_route(
             to: handler,
             category: edge_category::HANDLED_BY,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
         acc.ktor.handled_by += 1;
     }

@@ -527,6 +527,7 @@ fn emit_route(method: &str, path: &str, handler: NodeId, file: &File, acc: &mut 
         to: handler,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.spring.routes += 1;
 }
@@ -551,6 +552,7 @@ fn emit_data_entity(flavor: &str, name: &str, class_id: NodeId, file: &File, acc
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
@@ -592,6 +594,7 @@ fn emit_repository_access(node: TsNode, from: NodeId, file: &File, acc: &mut Acc
             to,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
         acc.spring.repos += 1;
     }

@@ -70,6 +70,7 @@ impl CrossGraphResolver for GraphQLStackResolver {
                         to: t.id,
                         category: edge_category::GRAPHQL_CALLS,
                         confidence: weakest(n.confidence, t.confidence),
+                        cells: Vec::new(),
                     });
                     pairs += 1;
                 }

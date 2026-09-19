@@ -487,6 +487,7 @@ mod tests {
             to: id,
             category: edge_category::CALLS,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
         if !fp.nav.kind_by_id.contains_key(&id) {
             fp.nav.record(

@@ -51,6 +51,7 @@ impl CrossGraphResolver for CronResolver {
                             to: refs[j].0,
                             category: edge_category::SHARES_CRON_SCHEDULE,
                             confidence: weakest(refs[i].2, refs[j].2),
+                            cells: Vec::new(),
                         });
                     }
                 }

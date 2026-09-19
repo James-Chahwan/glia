@@ -370,6 +370,7 @@ fn visit_namespace(
         to: ns_id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(ns_id, simple, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -427,6 +428,7 @@ fn visit_type_decl(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -807,6 +809,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
@@ -1251,6 +1254,7 @@ fn emit_efcore_entities<'a>(
             to: entity_id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
     }
     acc.efcore_table_attrs = Some(attrs);
@@ -1314,6 +1318,7 @@ fn visit_field_decl(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
@@ -2058,6 +2063,7 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         to: handler_id,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 

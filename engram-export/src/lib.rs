@@ -788,6 +788,7 @@ mod tests {
                 to: query,
                 category: ec::CALLS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }],
             nav,
             symbols: Default::default(),

@@ -460,6 +460,7 @@ fn declare(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav.record(id, name, qname, kind, Some(parent));
     }

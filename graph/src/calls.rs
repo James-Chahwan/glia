@@ -821,6 +821,7 @@ pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: E
         to,
         category,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 

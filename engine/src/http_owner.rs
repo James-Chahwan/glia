@@ -586,7 +586,7 @@ mod tests {
         let h = push(&mut fp, node_kind::FUNCTION, handler, &format!("{module}::{handler}"), vec![position(file)]);
         let verb = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text("GET".into()) };
         let r = push(&mut fp, node_kind::ROUTE, "GET /health", "GET /health", vec![verb]);
-        fp.edges.push(Edge { from: r, to: h, category: edge_category::HANDLED_BY, confidence: Confidence::Strong });
+        fp.edges.push(Edge { from: r, to: h, category: edge_category::HANDLED_BY, confidence: Confidence::Strong, cells: Vec::new() });
         (fp, r, h)
     }
 
@@ -676,7 +676,7 @@ mod tests {
         push(&mut fp, node_kind::ROUTE, "/users", "page:/users", vec![]);
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: ep, category: edge_category::CALLS, confidence: Confidence::Strong });
+        other.edges.push(Edge { from: caller, to: ep, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() });
         let mut bare = FileParse::default();
         let lost = push(&mut bare, node_kind::ROUTE, "ANY /legacy", "ANY /legacy", vec![]);
 
@@ -733,7 +733,7 @@ mod tests {
         ];
         for (kind, q) in sides {
             let n = push(&mut fp, kind, q, q, vec![position(file)]);
-            fp.edges.push(Edge { from: f, to: n, category: edge_category::USES, confidence: Confidence::Strong });
+            fp.edges.push(Edge { from: f, to: n, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
         }
         let svc = push(&mut fp, node_kind::GRPC_SERVICE, "UserService", "grpc:user.UserService", vec![position(file)]);
         let msg = push(&mut fp, node_kind::MESSAGE_TYPE, "User", "message:proto:user.User", vec![position(file)]);
@@ -766,7 +766,7 @@ mod tests {
         let client = push(&mut fp, node_kind::WS_CLIENT, "/ws", "ws_client:/ws", vec![position("web/chat.ts")]);
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: client, category: edge_category::USES, confidence: Confidence::Strong });
+        other.edges.push(Edge { from: caller, to: client, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
         let mut bare = FileParse::default();
         let lost = push(&mut bare, node_kind::QUEUE_PRODUCER, "t", "queue_producer:t", vec![]);
 
@@ -835,7 +835,7 @@ mod tests {
         let call = push(&mut fp, node_kind::RPC_CALL, "user.list", "rpc_call:user.list", vec![position("web/users.tsx")]);
         let mut other = FileParse::default();
         let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
-        other.edges.push(Edge { from: caller, to: call, category: edge_category::USES, confidence: Confidence::Strong });
+        other.edges.push(Edge { from: caller, to: call, category: edge_category::USES, confidence: Confidence::Strong, cells: Vec::new() });
         let mut bare = FileParse::default();
         let lost = push(&mut bare, node_kind::EVENT_HANDLER, "x", "event_handle:x", vec![]);
 

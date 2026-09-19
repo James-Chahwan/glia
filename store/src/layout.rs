@@ -1136,6 +1136,7 @@ mod tests {
             to: NodeId(9),
             category: repo_graph_code_domain::edge_category::HTTP_CALLS,
             confidence: repo_graph_core::Confidence::Strong,
+            cells: Vec::new(),
         }];
         write_sharded(&[("a", &g)], &cross, &dir).unwrap();
 
@@ -1358,6 +1359,7 @@ mod tests {
             to: NodeId(2),
             category: EdgeCategoryId(1),
             confidence: repo_graph_core::Confidence::Strong,
+            cells: Vec::new(),
         }];
         write_sharded(&[("a", &g)], &cross, tmp.path()).unwrap();
         let good_a = std::fs::read(tmp.path().join("a.gmap")).unwrap();

@@ -73,6 +73,7 @@ impl CrossGraphResolver for GrpcStackResolver {
                         to: t.id,
                         category: edge_category::GRPC_CALLS,
                         confidence: weakest(n.confidence, t.confidence),
+                        cells: Vec::new(),
                     });
                 }
             }
@@ -139,6 +140,7 @@ fn pair_servers(merged: &MergedGraph, index: &GrpcIndex) -> Vec<Edge> {
                     to: n.id,
                     category: edge_category::HANDLED_BY,
                     confidence: weakest(n.confidence, t.confidence),
+                    cells: Vec::new(),
                 });
             }
         }

@@ -42,6 +42,7 @@ fn edge(from: NodeId, to: NodeId, category: EdgeCategoryId) -> Edge {
         to,
         category,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     }
 }
 

@@ -194,6 +194,7 @@ pub fn extract_service_nodes(
                                 to: child_id,
                                 category: edge_category::CONTAINS,
                                 confidence: Confidence::Medium,
+                                cells: Vec::new(),
                             });
                         }
                     }

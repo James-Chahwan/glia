@@ -209,6 +209,7 @@ fn visit_defn(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -245,6 +246,7 @@ fn visit_defprotocol(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::INTERFACE, Some(parent_id));
@@ -267,6 +269,7 @@ fn visit_defprotocol(
                 to: mid,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(mid, method_name, &mq, node_kind::METHOD, Some(id));
@@ -300,6 +303,7 @@ fn visit_defrecord(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::STRUCT, Some(parent_id));

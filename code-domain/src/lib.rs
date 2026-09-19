@@ -1988,6 +1988,7 @@ pub mod endpoint {
             to: id,
             category: edge_category::CALLS,
             confidence: ep.confidence,
+            cells: Vec::new(),
         });
         id
     }

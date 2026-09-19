@@ -140,6 +140,7 @@ fn visit_block(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, &name, &qname, node_kind::INFRA_RESOURCE, Some(parent_id));
@@ -160,6 +161,7 @@ fn visit_block(
                 to: id,
                 category: edge_category::CONTAINS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, name, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -189,6 +191,7 @@ fn visit_block(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -208,6 +211,7 @@ fn visit_block(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -227,6 +231,7 @@ fn visit_block(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, &name, &qname, node_kind::STRUCT, Some(parent_id));
@@ -342,6 +347,7 @@ fn emit_resource_edges(node: TsNode, src: &[u8], from: NodeId, self_address: &st
                             to,
                             category,
                             confidence: Confidence::Strong,
+                            cells: Vec::new(),
                         });
                     }
                 }

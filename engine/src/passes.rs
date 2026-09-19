@@ -19,10 +19,23 @@ pub(crate) fn post_passes(merged: &mut MergedGraph) {
     // iterating HashMap indexes (per-process seed), so the edge SET was stable
     // but its Vec order — and therefore cross_stack.gmap's bytes — flapped
     // across processes and even clean-vs-incremental in one process (audit
-    // 2026-06-10 #6). One sort here covers all resolvers and post-passes.
-    merged
-        .cross_edges
-        .sort_unstable_by_key(|e| (e.from.0, e.to.0, e.category.0, e.confidence as u8));
+    // 2026-06-10 #6). One sort here covers all resolvers and post-passes. The
+    // order is total (LC.2): same-key edges that differ only in their cells
+    // still land in one order, so the bytes cannot flap once edges carry cells.
+    merged.sort_cross_edges();
+    edge_cells_marker(merged);
+}
+
+/// LC.2 fired_on marker, one line per build, un-gated:
+///   `[edge-cells] intra=<intra edges> cross=<cross edges> with_cells=<k>`
+/// `k` counts edges of either kind carrying at least one cell.
+fn edge_cells_marker(merged: &MergedGraph) {
+    let intra: usize = merged.graphs.iter().map(|g| g.edges.len()).sum();
+    let with_cells = merged.all_edges().filter(|e| !e.cells.is_empty()).count();
+    eprintln!(
+        "[edge-cells] intra={intra} cross={} with_cells={with_cells}",
+        merged.cross_edges.len()
+    );
 }
 
 /// WP-H / #7: link `.md` DOC_SECTION nodes to the code symbols they document so
@@ -94,6 +107,7 @@ fn link_doc_sections(merged: &mut MergedGraph) {
                     to: sym,
                     category: edge_category::DOCUMENTS,
                     confidence,
+                    cells: Vec::new(),
                 });
                 if seen.len() >= MAX_LINKS_PER_DOC {
                     break;
@@ -277,6 +291,7 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
                 to: h.route,
                 category: edge_category::DOCUMENTS,
                 confidence,
+                cells: Vec::new(),
             });
         }
     }
@@ -385,6 +400,7 @@ fn channel_edges(
                 to,
                 category: edge_category::DOCUMENTS,
                 confidence: weaker(tier, node_conf),
+                cells: Vec::new(),
             });
             stats.channel_edges += 1;
         }
@@ -759,6 +775,7 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
                 to: to_id,
                 category: edge_category::TESTS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
     }
@@ -1594,6 +1611,7 @@ mod passes_tests {
             to: r_matched,
             category: edge_category::HTTP_CALLS,
             confidence: Strong,
+            cells: Vec::new(),
         });
         let conf = |m: &MergedGraph, id: NodeId| -> Vec<Confidence> {
             m.graphs

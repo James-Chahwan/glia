@@ -249,6 +249,7 @@ fn visit_namespace(
         to: ns_id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(ns_id, simple, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -289,6 +290,7 @@ fn visit_class(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
@@ -358,6 +360,7 @@ fn visit_interface(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::INTERFACE, Some(parent_id));
@@ -393,6 +396,7 @@ fn visit_enum(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
@@ -426,6 +430,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -467,6 +472,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
@@ -1211,6 +1217,7 @@ fn emit_route_strong(method: &str, path: &str, handler_id: NodeId, repo: RepoId,
         to: handler_id,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
@@ -1906,6 +1913,7 @@ fn emit_eloquent_model(
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 
@@ -1956,6 +1964,7 @@ fn eloquent_query_site(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, acc
             to: entity_id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 }

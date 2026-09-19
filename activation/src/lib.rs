@@ -293,6 +293,7 @@ mod tests {
             to: NodeId(to),
             category: cat,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         }
     }
 

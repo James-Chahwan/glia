@@ -188,6 +188,7 @@ fn visit_defmodule(
         to: id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, &short, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -301,6 +302,7 @@ fn visit_def(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -352,6 +354,7 @@ fn visit_defprotocol(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, &name, &qname, node_kind::INTERFACE, Some(parent_id));
@@ -380,6 +383,7 @@ fn visit_defstruct(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, "__struct__", &qname, node_kind::STRUCT, Some(parent_id));

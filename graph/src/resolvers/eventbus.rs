@@ -224,6 +224,7 @@ impl CrossGraphResolver for EventBusResolver {
                         to: h.target.id,
                         category: edge_category::EVENT_FLOWS,
                         confidence: weakest(n.confidence, h.target.confidence),
+                        cells: Vec::new(),
                     });
                 }
             }

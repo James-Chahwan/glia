@@ -1066,7 +1066,7 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
     stats.types = pairs.iter().map(|&(ty, _)| ty).collect::<HashSet<_>>().len();
     stats.edges = pairs.len();
     for (from, to) in pairs {
-        g.edges.push(Edge { from, to, category: edge_category::IMPLEMENTS, confidence: Confidence::Medium });
+        g.edges.push(Edge { from, to, category: edge_category::IMPLEMENTS, confidence: Confidence::Medium, cells: Vec::new() });
     }
     Some(stats)
 }
@@ -1302,6 +1302,7 @@ mod tests {
                 to: iface,
                 category: edge_category::IMPLEMENTS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             for name in ["a", "b", "c", "d"] {
                 let q = format!("{cq}::{name}");
@@ -1392,6 +1393,7 @@ mod tests {
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             ids.insert(qname, id);
         }

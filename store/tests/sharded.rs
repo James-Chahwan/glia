@@ -121,6 +121,7 @@ fn sharded_layout_roundtrips_with_cross_edges() {
         to: route_id,
         category: edge_category::HTTP_CALLS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     }];
 
     let dir = tempfile::tempdir().unwrap();

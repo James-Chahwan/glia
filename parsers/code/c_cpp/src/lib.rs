@@ -128,6 +128,7 @@ fn visit_namespace(
         to: ns_id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(ns_id, name, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -169,6 +170,7 @@ fn visit_type(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -209,6 +211,7 @@ fn visit_enum(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
@@ -244,6 +247,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, &name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -283,6 +287,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, &name, &qname, node_kind::METHOD, Some(parent_id));

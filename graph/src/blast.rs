@@ -199,8 +199,8 @@ mod tests {
             repo: r,
             nodes: vec![mk(x), mk(y), mk(z)],
             edges: vec![
-                Edge { from: x, to: y, category: edge_category::CALLS, confidence: Confidence::Strong },
-                Edge { from: x, to: z, category: edge_category::IMPORTS, confidence: Confidence::Strong },
+                Edge { from: x, to: y, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
+                Edge { from: x, to: z, category: edge_category::IMPORTS, confidence: Confidence::Strong, cells: Vec::new() },
             ],
             symbols: SymbolTable::default(),
             nav,

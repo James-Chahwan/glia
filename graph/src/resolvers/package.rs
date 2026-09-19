@@ -50,6 +50,7 @@ impl CrossGraphResolver for PackageResolver {
                             to: refs[j].0,
                             category: edge_category::SHARES_DEPENDENCY,
                             confidence: weakest(refs[i].2, refs[j].2),
+                            cells: Vec::new(),
                         });
                     }
                 }

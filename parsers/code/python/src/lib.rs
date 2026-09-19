@@ -362,6 +362,7 @@ fn visit_class(
         to: class_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.module_classes.insert(name.to_string(), class_id);
     acc.nav
@@ -557,6 +558,7 @@ fn emit_class_attribute(
         to: attr_id,
         category: edge_category::HAS_ATTRIBUTE,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(
         attr_id,
@@ -648,6 +650,7 @@ fn visit_method(
         to: method_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.class_methods
         .insert((class_id, name.to_string()), method_id);
@@ -735,6 +738,7 @@ fn visit_function(
         to: func_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     // Only top-level functions go in the module symbol table — nested ones
     // aren't reachable by bare name from module scope.
@@ -862,6 +866,7 @@ fn collect_state_vars(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
     }
 }
@@ -1199,6 +1204,7 @@ fn try_detect_data_access(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc)
         to: entity_id,
         category: edge_category::ACCESSES_DATA,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     });
 }
 
@@ -1418,6 +1424,7 @@ fn emit_django_model(
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 
@@ -1475,6 +1482,7 @@ fn try_detect_django_access(call: TsNode, src: &[u8], from: NodeId, repo: RepoId
             to: entity_id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 }
@@ -2500,6 +2508,7 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
                 to,
                 category: edge_category::CALLS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }),
             None => out.calls.push(CallSite {
                 from: uc.from,
@@ -2850,6 +2859,7 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         to: handler_id,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);

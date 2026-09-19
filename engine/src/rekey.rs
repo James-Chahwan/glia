@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn edge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
-        Edge { from, to, category, confidence: Confidence::Strong }
+        Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
     }
 
     /// A module holding a handler, a ROUTE between two siblings, the ROUTE's

@@ -74,6 +74,7 @@ impl CrossGraphResolver for QueueStackResolver {
                         to: t.id,
                         category: edge_category::QUEUE_FLOWS,
                         confidence: weakest(n.confidence, t.confidence),
+                        cells: Vec::new(),
                     });
                     paired += 1;
                 }
@@ -93,6 +94,7 @@ impl CrossGraphResolver for QueueStackResolver {
                         to: w.id,
                         category: edge_category::QUEUE_FLOWS,
                         confidence: Confidence::Weak,
+                        cells: Vec::new(),
                     });
                     paired += 1;
                     wildcard += 1;

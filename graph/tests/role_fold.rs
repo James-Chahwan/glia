@@ -46,6 +46,7 @@ fn edge(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> 
         to,
         category,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     }
 }
 

@@ -133,6 +133,7 @@ fn emit_cross_repo_pairs(
                 to: refs[j].0,
                 category,
                 confidence: confidence.unwrap_or_else(|| weakest(refs[i].2, refs[j].2)),
+                cells: Vec::new(),
             });
             emitted += 1;
         }

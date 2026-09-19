@@ -215,6 +215,7 @@ fn visit_type_def(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -329,6 +330,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
@@ -372,6 +374,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));

@@ -265,6 +265,7 @@ fn v2_round_trips() {
             to: NodeId(20),
             category: repo_graph_code_domain::edge_category::HTTP_CALLS,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         }],
         pass_undo: vec![],
     };

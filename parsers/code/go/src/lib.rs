@@ -354,6 +354,7 @@ fn collect_types(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         if kind == node_kind::INTERFACE {
             collect_interface_elems(type_node, src, file_rel, &qname, id, module_id, repo, acc);
@@ -415,6 +416,7 @@ fn collect_interface_elems(
                     to: id,
                     category: edge_category::DEFINES,
                     confidence: Confidence::Strong,
+                    cells: Vec::new(),
                 });
             }
             "type_elem" => {
@@ -692,6 +694,7 @@ fn emit_state_var_spec(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         // A7.6: `var ProviderSet = wire.NewSet(NewA, NewB)` registers its
         // providers from the var, which a `wire.Build(ProviderSet)` then names.
@@ -772,6 +775,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 
     if let Some(body) = decl.child_by_field_name("body") {
@@ -828,6 +832,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 
     if name == "TableName" {
@@ -1542,6 +1547,7 @@ fn emit_data_access(table: &str, from: NodeId, repo: RepoId, acc: &mut Acc) {
         to: entity_id,
         category: edge_category::ACCESSES_DATA,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     });
 }
 

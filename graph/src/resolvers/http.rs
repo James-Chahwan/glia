@@ -87,6 +87,7 @@ impl CrossGraphResolver for HttpStackResolver {
                     // tiers floor it so a consumer can tell a principled
                     // pairing from a guessed one.
                     confidence: weakest(weakest(ep.confidence, target.confidence), tier.ceiling()),
+                    cells: Vec::new(),
                 });
             }
         }
@@ -2174,6 +2175,7 @@ mod tests {
             to,
             category: edge_category::DEFINES,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         };
         g.edges = vec![
             defines(ids[2], ids[6]),

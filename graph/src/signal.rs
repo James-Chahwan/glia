@@ -544,6 +544,7 @@ mod tests {
             to,
             category,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         };
         let mut edges: Vec<repo_graph_core::Edge> = callers
             .iter()

@@ -729,6 +729,7 @@ mod tests {
                 to: fn_id,
                 category: edge_category::CALLS,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             }],
             nav: Default::default(),
             symbols: Default::default(),
@@ -810,6 +811,7 @@ mod tests {
                 to: fn_id,
                 category: edge_category::HANDLED_BY,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }],
             nav: Default::default(),
             symbols: Default::default(),
@@ -849,6 +851,7 @@ mod tests {
                 to: ghost,
                 category: edge_category::CALLS,
                 confidence: Confidence::Weak,
+                cells: Vec::new(),
             }],
             nav: Default::default(),
             symbols: Default::default(),
@@ -925,6 +928,7 @@ mod tests {
             to: route_id,
             category: edge_category::HTTP_CALLS,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
 
         let s = render_merged(&merged);
@@ -982,6 +986,7 @@ mod tests {
                     to: *id,
                     category: edge_category::CALLS,
                     confidence: Confidence::Strong,
+                    cells: Vec::new(),
                 })
                 .collect(),
             nav: Default::default(),

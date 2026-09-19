@@ -300,6 +300,7 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
                     Side::Define => edge_category::DEFINES_CONFIG,
                 },
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             });
         }
     }

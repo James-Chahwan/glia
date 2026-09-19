@@ -56,6 +56,7 @@ impl CrossGraphResolver for CliInvocationResolver {
                             to: t.id,
                             category: edge_category::CLI_INVOKES,
                             confidence: weakest(n.confidence, t.confidence),
+                            cells: Vec::new(),
                         });
                         bin += 1;
                     }
@@ -74,6 +75,7 @@ impl CrossGraphResolver for CliInvocationResolver {
                                 to: t.id,
                                 category: edge_category::CLI_INVOKES,
                                 confidence: Confidence::Weak,
+                                cells: Vec::new(),
                             });
                             sub += 1;
                         }

@@ -181,6 +181,7 @@ pub fn owner_edge(marker_kind: NodeKindId, marker: NodeId, owner: NodeId) -> Opt
         to,
         category,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     })
 }
 
@@ -293,6 +294,7 @@ pub fn attach(
                     to: marker,
                     category: edge_category::CONTAINS,
                     confidence: Confidence::Medium,
+                    cells: Vec::new(),
                 },
             );
             stats.to_module += 1;
@@ -577,6 +579,7 @@ mod tests {
                 to: client,
                 category: edge_category::USES,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             }]
         );
         assert_eq!(census(&fp), stats);
@@ -609,6 +612,7 @@ mod tests {
                 to: handler,
                 category: edge_category::CONTAINS,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             }]
         );
         assert!(position_of(&fp, handler).is_some_and(|p| p.contains("\"start_line\":8")));

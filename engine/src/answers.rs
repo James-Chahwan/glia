@@ -1629,6 +1629,7 @@ mod locate_tests {
             to,
             category: edge_category::HANDLED_BY,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         };
         let g = RepoGraph {
             repo,
@@ -1839,6 +1840,7 @@ mod contracts_tests {
                 to: ids[*c],
                 category: edge_category::QUEUE_FLOWS,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             });
         }
         (merged, ids)
@@ -2006,6 +2008,7 @@ mod role_live_tests {
                 to: api,
                 category: edge_category::INJECTS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }],
             nav,
             symbols: SymbolTable::default(),
@@ -2089,6 +2092,7 @@ mod live_tests {
                 to,
                 category,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
 
@@ -2156,6 +2160,7 @@ mod live_tests {
                 to: svc_class,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }],
             vec![],
             nav,
@@ -2189,6 +2194,7 @@ mod live_tests {
                 to: comp_class,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }],
             vec![UnresolvedRef {
                 from: comp_class,

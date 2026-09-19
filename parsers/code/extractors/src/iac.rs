@@ -79,6 +79,7 @@ pub fn extract_dockerfile(
                     to: to_id,
                     category: edge_category::INFRA_REFERENCES,
                     confidence: Confidence::Medium,
+                    cells: Vec::new(),
                 });
             }
         }
@@ -134,6 +135,7 @@ fn emit_resource(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Medium,
+        cells: Vec::new(),
     });
 }
 
@@ -243,6 +245,7 @@ fn extract_k8s_documents(
                 to: to_id,
                 category: edge_category::INFRA_REFERENCES,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             });
         }
     }
@@ -396,6 +399,7 @@ fn extract_compose_services(
                             to: to_id,
                             category: edge_category::INFRA_REFERENCES,
                             confidence: Confidence::Medium,
+                            cells: Vec::new(),
                         });
                     }
                 }

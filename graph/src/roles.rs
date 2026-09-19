@@ -395,6 +395,7 @@ mod tests {
             to,
             category,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         }
     }
 

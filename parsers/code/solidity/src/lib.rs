@@ -152,6 +152,7 @@ fn visit_contract(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -212,6 +213,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
@@ -251,6 +253,7 @@ fn collect_emits_in(
                     to,
                     category: edge_category::EVENT_FLOWS,
                     confidence: Confidence::Strong,
+                    cells: Vec::new(),
                 });
             }
         }
@@ -290,6 +293,7 @@ fn visit_event(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::EVENT_EMITTER, Some(parent_id));
@@ -322,6 +326,7 @@ fn visit_enum(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
@@ -354,6 +359,7 @@ fn visit_struct_decl(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::STRUCT, Some(parent_id));
@@ -406,6 +412,7 @@ fn visit_state_variable(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));

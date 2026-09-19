@@ -1355,7 +1355,7 @@ fn http_edges(merged: &MergedGraph) -> Vec<repo_graph_core::Edge> {
         .cross_edges
         .iter()
         .filter(|e| e.category == edge_category::HTTP_CALLS)
-        .copied()
+        .cloned()
         .collect()
 }
 

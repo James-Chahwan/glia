@@ -194,6 +194,7 @@ fn visit_type(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name_str, &qname, kind, Some(scope.id));
 
@@ -227,6 +228,7 @@ fn visit_type(
             to: vid,
             category: edge_category::HAS_ATTRIBUTE,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav
             .record(vid, vname, &vq, node_kind::ATTRIBUTE, Some(id));
@@ -269,6 +271,7 @@ fn visit_mod(node: TsNode, scope: &Scope, src: &[u8], file_rel: &str, repo: Repo
         to: id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::PACKAGE, Some(scope.id));
@@ -310,6 +313,7 @@ fn visit_function(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
@@ -355,6 +359,7 @@ fn visit_impl(
                 to: trait_id,
                 category: edge_category::IMPLEMENTS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
     }
@@ -383,6 +388,7 @@ fn visit_impl(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
@@ -439,6 +445,7 @@ fn visit_const_static(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::STATE_VAR, Some(scope.id));
@@ -600,6 +607,7 @@ fn visit_route_attr(
                 to: scope_id,
                 category: edge_category::HANDLED_BY,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav.record(
                 route_id,

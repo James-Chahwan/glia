@@ -724,6 +724,7 @@ fn visit_type_decl(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -1035,6 +1036,7 @@ fn visit_enum_constant(
         to: id,
         category: edge_category::HAS_ATTRIBUTE,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::ATTRIBUTE, Some(owner.id));
@@ -1097,6 +1099,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
@@ -1253,6 +1256,7 @@ fn emit_data_entity(
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(entity_id, name, &qname, node_kind::DATA_ENTITY, Some(class_id));
@@ -1296,6 +1300,7 @@ fn scan_repository_generics(
                 to: data_entity_id(flavor, &entity, repo),
                 category: edge_category::ACCESSES_DATA,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             });
         }
         let mut cc = n.walk();
@@ -1390,6 +1395,7 @@ fn visit_field_decl(
             to: id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav
             .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
@@ -1956,6 +1962,7 @@ fn emit_route(method: &str, path: &str, handler_id: NodeId, repo: RepoId, acc: &
         to: handler_id,
         category: edge_category::HANDLED_BY,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
@@ -2413,6 +2420,7 @@ fn resolve_member_refs(module_id: NodeId, acc: &mut Acc) -> (usize, usize) {
                 to,
                 category: edge_category::USES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             uses += 1;
         }

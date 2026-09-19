@@ -87,6 +87,7 @@ impl CrossGraphResolver for IacResolver {
                             to: refs[j].0,
                             category: edge_category::SHARES_INFRA_REF,
                             confidence: weakest(refs[i].2, refs[j].2),
+                            cells: Vec::new(),
                         });
                         paired += 1;
                     }

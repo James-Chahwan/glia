@@ -114,6 +114,7 @@ pub fn extract_prisma_models(
             to: id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
     }
     PrismaSchema {

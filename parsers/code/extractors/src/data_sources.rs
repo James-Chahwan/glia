@@ -74,6 +74,7 @@ pub fn extract_data_source_nodes(
             to: id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 

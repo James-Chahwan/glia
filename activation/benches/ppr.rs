@@ -26,6 +26,7 @@ fn build_grid(n: usize, density: usize) -> (Vec<NodeId>, Vec<Edge>) {
             to: NodeId(((i + 1) % n) as u64),
             category: cat,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         for k in 1..=density {
             let target = (i + k * 7) % n;
@@ -35,6 +36,7 @@ fn build_grid(n: usize, density: usize) -> (Vec<NodeId>, Vec<Edge>) {
                     to: NodeId(target as u64),
                     category: cat,
                     confidence: Confidence::Strong,
+                    cells: Vec::new(),
                 });
             }
         }

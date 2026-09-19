@@ -88,6 +88,7 @@ impl CrossGraphResolver for SharedSchemaResolver {
                             to: refs[j].0,
                             category: edge_category::SHARES_SCHEMA,
                             confidence: weakest(refs[i].2, refs[j].2),
+                            cells: Vec::new(),
                         });
                     }
                 }

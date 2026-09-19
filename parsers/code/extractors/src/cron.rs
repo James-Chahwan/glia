@@ -236,6 +236,7 @@ pub fn extract_cron_nodes(
                 to: id,
                 category: edge_category::SCHEDULES,
                 confidence: Confidence::Medium,
+                cells: Vec::new(),
             });
             counts.bump(job.source);
         }

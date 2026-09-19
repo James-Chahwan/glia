@@ -1059,6 +1059,7 @@ fn finish(
             to: p.id,
             category: edge_category::CONTAINS,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 
@@ -2932,6 +2933,7 @@ public class AuditFunction
             to,
             category: edge_category::CONTAINS,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         };
         let mut fp = FileParse {
             nodes: vec![bare(module), bare(func)],

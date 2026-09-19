@@ -29,9 +29,9 @@ pub(crate) fn flow_graph() -> RepoGraph {
         Node { id: d, repo: r, confidence: Confidence::Strong, cells: vec![] },
     ];
     let edges = vec![
-        Edge { from: a, to: b, category: edge_category::CALLS, confidence: Confidence::Strong },
-        Edge { from: b, to: c, category: edge_category::CALLS, confidence: Confidence::Strong },
-        Edge { from: d, to: c, category: edge_category::CALLS, confidence: Confidence::Strong },
+        Edge { from: a, to: b, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
+        Edge { from: b, to: c, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
+        Edge { from: d, to: c, category: edge_category::CALLS, confidence: Confidence::Strong, cells: Vec::new() },
     ];
     let mut nav = CodeNav::default();
     nav.record(a, "a", "m::a", node_kind::FUNCTION, None);

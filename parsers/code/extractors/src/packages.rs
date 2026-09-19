@@ -126,6 +126,7 @@ fn build_nodes(
             to: id,
             category: edge_category::DEPENDS_ON,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
     PackageNodes { nodes, edges, nav }

@@ -289,6 +289,7 @@ fn visit_class(
         to: class_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
@@ -723,6 +724,7 @@ fn visit_interface(
         to: iface_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(
         iface_id,
@@ -816,6 +818,7 @@ fn visit_enum(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             acc.nav
                 .record(id, name, &enum_qname, node_kind::ENUM, Some(module_id));
@@ -862,6 +865,7 @@ fn visit_enum(
             to: member_id,
             category: edge_category::HAS_ATTRIBUTE,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav.record(
             member_id,
@@ -900,6 +904,7 @@ fn visit_method(
         to: method_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.class_methods
         .insert((class_id, name.to_string()), method_id);
@@ -1063,6 +1068,7 @@ fn visit_exported_const(
             to: const_id,
             category: edge_category::DEFINES,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
         acc.nav.record(
             const_id,
@@ -1112,6 +1118,7 @@ fn emit_function(
         to: func_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.module_functions.insert(name.to_string(), func_id);
     acc.nav.record(
@@ -1151,6 +1158,7 @@ fn emit_function_value(
         to: func_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.module_functions.insert(name.to_string(), func_id);
     acc.nav.record(
@@ -1822,6 +1830,7 @@ fn emit_typeorm_entity(
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 
@@ -2025,6 +2034,7 @@ fn emit_typeorm_access(model: &str, from: NodeId, acc: &mut Acc) {
             to: entity_id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
     }
 }
@@ -2057,6 +2067,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 to,
                 category: edge_category::CALLS,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             }),
             None => out.calls.push(CallSite {
                 from: uc.from,
@@ -2088,6 +2099,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 to: member,
                 category: edge_category::USES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
             member_uses += 1;
             continue;
@@ -2171,6 +2183,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             to: endpoint_id,
             category: edge_category::CALLS,
             confidence: cand.confidence,
+            cells: Vec::new(),
         });
     }
 

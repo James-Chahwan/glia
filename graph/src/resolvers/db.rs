@@ -368,6 +368,7 @@ fn entity_pass(graphs: &[RepoGraph]) -> EntityPass {
                             to: b.0,
                             category: edge_category::SHARES_DATA_ENTITY,
                             confidence: Confidence::Weak,
+                            cells: Vec::new(),
                         });
                         stats.folded_paired += 1;
                     }

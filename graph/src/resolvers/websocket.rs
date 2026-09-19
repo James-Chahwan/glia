@@ -160,6 +160,7 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
                     to: h.id,
                     category: edge_category::WS_CONNECTS,
                     confidence: weakest(n.confidence, h.confidence),
+                    cells: Vec::new(),
                 });
             }
         }
@@ -499,6 +500,7 @@ mod tests {
                 to,
                 category,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
 

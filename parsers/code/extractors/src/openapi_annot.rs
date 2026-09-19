@@ -1315,6 +1315,7 @@ mod tests {
             to: handler,
             category: edge_category::HANDLED_BY,
             confidence: Confidence::Strong,
+            cells: Vec::new(),
         });
     }
 

@@ -64,6 +64,7 @@ impl CrossGraphResolver for RpcStackResolver {
                             to: t.id,
                             category: edge_category::RPC_CALLS,
                             confidence: weakest(n.confidence, t.confidence),
+                            cells: Vec::new(),
                         });
                     }
                 }

@@ -566,6 +566,7 @@ pub fn extract_proto_messages(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
         out.nav.record(
@@ -973,6 +974,7 @@ pub fn extract_avro_records(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
         out.nav.record(
@@ -1210,6 +1212,7 @@ pub fn extract_json_schema_types(
                 to: id,
                 category: edge_category::DEFINES,
                 confidence: Confidence::Strong,
+                cells: Vec::new(),
             });
         }
         out.nav.record(id, name, &qname, node_kind::MESSAGE_TYPE, Some(root_id.unwrap_or(module_id)));

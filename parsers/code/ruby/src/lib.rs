@@ -154,6 +154,7 @@ fn visit_class(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
 
@@ -191,6 +192,7 @@ fn visit_module(
         to: id,
         category: edge_category::CONTAINS,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav
         .record(id, name, &qname, node_kind::PACKAGE, Some(parent_id));
@@ -235,6 +237,7 @@ fn visit_method(
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
     acc.nav.record(id, name, &qname, kind, Some(parent_id));
 
@@ -609,6 +612,7 @@ fn try_emit_accesses_data(call: TsNode, src: &[u8], from: NodeId, repo: RepoId, 
             to: entity_id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
+            cells: Vec::new(),
         });
     }
 }
@@ -705,6 +709,7 @@ fn emit_ar_model_entity(
         to: entity_id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
+        cells: Vec::new(),
     });
 }
 
