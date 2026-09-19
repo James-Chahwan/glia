@@ -1,0 +1,3 @@
+# pyo3 surface of py/src/gaps.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.gaps(top_k: Option<usize> = None, category: Option<&str> = None) -> PyResult<Py<PyAny>>
+fn overlay_delta(repo_paths: Vec<String>, incremental: bool = false) -> PyResult<Py<PyAny>>
