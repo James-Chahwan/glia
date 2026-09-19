@@ -813,6 +813,25 @@ fn downgrade_test_paths(merged: &mut MergedGraph) {
     }
 }
 
+/// Lower every ROUTE / ENDPOINT that found no HTTP_CALLS partner in this build
+/// to Medium (Weak ones stay Weak). The one post-pass whose result depends on
+/// WHICH repos were built together: `web/` alone leaves its client endpoint
+/// unmatched, `web/` + `api/` match it. So it records what it changed in
+/// `merged.pass_undo` (LC.10a), for a merge of pre-built layouts to undo
+/// before it re-runs the passes over the union.
+///
+/// An id is recorded, as `(id, Strong)`, only when EVERY unmatched instance
+/// of it was Strong on entry: the undo restores every instance of an id, so
+/// recording one that also has a Weak or Medium instance would promote a node
+/// the parser (or `downgrade_test_paths`) marked weaker. Such an id is left
+/// unrecorded and stays Medium through a merge (understated, never
+/// overstated), counted in the `not undoable` marker. Medium -> Medium is no
+/// change and is not recorded. Existing entries are kept (the earliest value
+/// wins), so running the pass twice never loses the original.
+///
+/// Markers: `[passes] http demotions: <n> (undo recorded)` when it recorded
+/// any, `[passes] http demotions: <m> not undoable (instances disagree)` when
+/// an id had mixed instances.
 fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
     use std::collections::HashSet;
     let mut matched: HashSet<NodeId> = HashSet::new();
@@ -822,21 +841,45 @@ fn demote_unmatched_http_nodes(merged: &mut MergedGraph) {
             matched.insert(e.to);
         }
     }
+    // id -> (an instance was demoted from Strong, an instance was left as it was)
+    let mut seen: HashMap<NodeId, (bool, bool)> = HashMap::new();
     for g in &mut merged.graphs {
         for n in &mut g.nodes {
             let kind = g.nav.kind_by_id.get(&n.id).copied();
             let is_http_node = matches!(kind, Some(k) if k == node_kind::ROUTE || k == node_kind::ENDPOINT);
-            if !is_http_node {
+            if !is_http_node || matched.contains(&n.id) {
                 continue;
             }
-            if matches!(n.confidence, Confidence::Weak) {
-                continue;
-            }
-            if !matched.contains(&n.id) {
-                n.confidence = Confidence::Medium;
+            let entry = seen.entry(n.id).or_default();
+            match n.confidence {
+                Confidence::Strong => {
+                    n.confidence = Confidence::Medium;
+                    entry.0 = true;
+                }
+                Confidence::Medium | Confidence::Weak => entry.1 = true,
             }
         }
     }
+    let mut recorded: Vec<(NodeId, Confidence)> = Vec::new();
+    let mut mixed = 0usize;
+    for (id, (demoted, left)) in seen {
+        match (demoted, left) {
+            (true, false) => recorded.push((id, Confidence::Strong)),
+            (true, true) => mixed += 1,
+            _ => {}
+        }
+    }
+    if !recorded.is_empty() {
+        eprintln!("[passes] http demotions: {} (undo recorded)", recorded.len());
+    }
+    if mixed > 0 {
+        eprintln!("[passes] http demotions: {mixed} not undoable (instances disagree)");
+    }
+    merged.pass_undo.extend(recorded);
+    // Stable sort, then keep the FIRST entry per id: an entry already present
+    // holds the value from before any pass ran.
+    merged.pass_undo.sort_by_key(|(id, _)| id.0);
+    merged.pass_undo.dedup_by_key(|(id, _)| id.0);
 }
 
 fn qname_is_noncritical_path(qname: &str) -> bool {
@@ -1489,5 +1532,96 @@ mod passes_tests {
         }];
         assert_eq!(position_file(&cells).as_deref(), Some("src/app/a.ts"));
         assert_eq!(position_file(&[]), None);
+    }
+
+    /// LC.10a: the HTTP demotion records exactly the Strong -> Medium changes
+    /// it made. Not a Medium or Weak node it left alone, not a matched one, not
+    /// a non-HTTP node, and not an id one of whose instances it left alone
+    /// (the undo covers every instance of an id). Undoing restores the
+    /// recorded ids on every instance and nothing else; a second run keeps the
+    /// original record.
+    #[test]
+    fn http_demotion_records_only_its_own_changes() {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_core::{Node, NodeKindId, RepoId};
+        use repo_graph_graph::{RepoGraph, SymbolTable};
+        use Confidence::{Medium, Strong, Weak};
+
+        let repo = RepoId::from_canonical("test://lc10a");
+        let id = |kind: NodeKindId, q: &str| NodeId::from_parts(GRAPH_TYPE, repo, kind, q);
+        let e_strong = id(node_kind::ENDPOINT, "endpoint:GET:/a");
+        let e_medium = id(node_kind::ENDPOINT, "endpoint:GET:/b");
+        let r_weak = id(node_kind::ROUTE, "route:GET:/c");
+        let r_matched = id(node_kind::ROUTE, "route:GET:/d");
+        let e_matched = id(node_kind::ENDPOINT, "endpoint:GET:/d");
+        let e_mixed = id(node_kind::ENDPOINT, "endpoint:GET:/e");
+        let f = id(node_kind::FUNCTION, "m::f");
+        let graph = |nodes: &[(NodeId, NodeKindId, &str, Confidence)]| {
+            let mut nav = CodeNav::default();
+            for (n, k, q, _) in nodes {
+                nav.record(*n, q, q, *k, None);
+            }
+            RepoGraph {
+                repo,
+                nodes: nodes
+                    .iter()
+                    .map(|(n, _, _, c)| Node { id: *n, repo, confidence: *c, cells: vec![] })
+                    .collect(),
+                edges: vec![],
+                nav,
+                symbols: SymbolTable::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            }
+        };
+        let g1 = graph(&[
+            (e_strong, node_kind::ENDPOINT, "endpoint:GET:/a", Strong),
+            (e_medium, node_kind::ENDPOINT, "endpoint:GET:/b", Medium),
+            (r_weak, node_kind::ROUTE, "route:GET:/c", Weak),
+            (r_matched, node_kind::ROUTE, "route:GET:/d", Strong),
+            (e_matched, node_kind::ENDPOINT, "endpoint:GET:/d", Strong),
+            (e_mixed, node_kind::ENDPOINT, "endpoint:GET:/e", Strong),
+            (f, node_kind::FUNCTION, "m::f", Strong),
+        ]);
+        let g2 = graph(&[
+            (e_strong, node_kind::ENDPOINT, "endpoint:GET:/a", Strong),
+            (e_mixed, node_kind::ENDPOINT, "endpoint:GET:/e", Weak),
+        ]);
+        let mut m = MergedGraph::new(vec![g1, g2]);
+        m.cross_edges.push(Edge {
+            from: e_matched,
+            to: r_matched,
+            category: edge_category::HTTP_CALLS,
+            confidence: Strong,
+        });
+        let conf = |m: &MergedGraph, id: NodeId| -> Vec<Confidence> {
+            m.graphs
+                .iter()
+                .flat_map(|g| &g.nodes)
+                .filter(|n| n.id == id)
+                .map(|n| n.confidence)
+                .collect()
+        };
+
+        demote_unmatched_http_nodes(&mut m);
+        assert_eq!(m.pass_undo, vec![(e_strong, Strong)]);
+        assert_eq!(conf(&m, e_strong), vec![Medium, Medium]);
+        assert_eq!(conf(&m, e_medium), vec![Medium]);
+        assert_eq!(conf(&m, r_weak), vec![Weak]);
+        assert_eq!(conf(&m, r_matched), vec![Strong]);
+        assert_eq!(conf(&m, e_matched), vec![Strong]);
+        assert_eq!(conf(&m, e_mixed), vec![Medium, Weak], "demoted, but not undoable");
+        assert_eq!(conf(&m, f), vec![Strong]);
+
+        demote_unmatched_http_nodes(&mut m);
+        assert_eq!(m.pass_undo, vec![(e_strong, Strong)], "a re-run keeps the original");
+
+        m.undo_pass_mutations();
+        assert!(m.pass_undo.is_empty());
+        assert_eq!(conf(&m, e_strong), vec![Strong, Strong]);
+        assert_eq!(conf(&m, e_medium), vec![Medium]);
+        assert_eq!(conf(&m, r_weak), vec![Weak]);
+        assert_eq!(conf(&m, e_mixed), vec![Medium, Weak]);
     }
 }

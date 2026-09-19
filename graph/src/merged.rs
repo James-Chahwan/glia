@@ -25,6 +25,17 @@ use crate::types::{RepoGraph, SymbolTable};
 pub struct MergedGraph {
     pub graphs: Vec<RepoGraph>,
     pub cross_edges: Vec<Edge>,
+    /// Node confidences a set-dependent post-pass overwrote (LC.10a):
+    /// `(node, its confidence before the pass)`, sorted by id, at most one
+    /// entry per id. A pass whose result depends on WHICH repos were built
+    /// together (an HTTP route no client in this build calls) records here
+    /// what it changed, so a merge of pre-built layouts can put the values
+    /// back with [`Self::undo_pass_mutations`] and re-run the passes over the
+    /// union, answering like one build of every repo. An entry covers every
+    /// instance of its id (one id can sit in several per-language graphs).
+    /// Persisted in the layout's `manifest.json`; empty for a graph no such
+    /// pass touched, and for a [`Self::subset`] (a view is never re-merged).
+    pub pass_undo: Vec<(NodeId, Confidence)>,
 }
 
 impl MergedGraph {
@@ -32,7 +43,31 @@ impl MergedGraph {
         Self {
             graphs,
             cross_edges: Vec::new(),
+            pass_undo: Vec::new(),
         }
+    }
+
+    /// Put back every confidence [`Self::pass_undo`] records, on EVERY
+    /// instance of each id in every graph, then clear the record (LC.10a).
+    /// Domain-agnostic: it restores what a pass said it changed and knows
+    /// nothing about which pass or why. Idempotent: a second call finds the
+    /// record empty. Prints `[passes] pass undo: entries=<e> restored=<r>`
+    /// (`r` node instances) when the record was not empty.
+    pub fn undo_pass_mutations(&mut self) {
+        if self.pass_undo.is_empty() {
+            return;
+        }
+        let undo: HashMap<NodeId, Confidence> = self.pass_undo.drain(..).collect();
+        let mut restored = 0usize;
+        for g in &mut self.graphs {
+            for n in &mut g.nodes {
+                if let Some(&c) = undo.get(&n.id) {
+                    n.confidence = c;
+                    restored += 1;
+                }
+            }
+        }
+        eprintln!("[passes] pass undo: entries={} restored={restored}", undo.len());
     }
 
     pub fn run<R: CrossGraphResolver>(&mut self, resolver: &R) {
@@ -281,7 +316,7 @@ impl MergedGraph {
             .filter(|e| keep.contains(&e.from) && keep.contains(&e.to))
             .cloned()
             .collect();
-        MergedGraph { graphs, cross_edges }
+        MergedGraph { graphs, cross_edges, pass_undo: Vec::new() }
     }
 
     /// G19 — resolve an OTLP-style dotted span name (`myservice.handlers.users.list_users`)
@@ -1025,5 +1060,40 @@ mod tests {
         assert_eq!(cluster_key_for(solo, 1, &merged), "");
         // Unknown node id → empty.
         assert_eq!(cluster_key_for(NodeId(0xdeadbeef), 1, &merged), "");
+    }
+
+    /// LC.10a: the undo restores every instance of a recorded id (one id can
+    /// sit in two per-language graphs), leaves unrecorded nodes alone, clears
+    /// the record, and a subset starts with none.
+    #[test]
+    fn undo_pass_mutations_restores_every_instance_and_clears() {
+        let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
+        let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::b");
+        let demote = |mut g: RepoGraph| {
+            for n in &mut g.nodes {
+                n.confidence = Confidence::Medium;
+            }
+            g
+        };
+        let mut m = MergedGraph::new(vec![demote(flow_graph()), demote(flow_graph())]);
+        m.pass_undo = vec![(a, Confidence::Strong)];
+        assert!(m.subset(&[a, b]).pass_undo.is_empty(), "a view carries no undo");
+
+        m.undo_pass_mutations();
+        assert!(m.pass_undo.is_empty());
+        let conf = |m: &MergedGraph, id: NodeId| -> Vec<Confidence> {
+            m.graphs
+                .iter()
+                .flat_map(|g| &g.nodes)
+                .filter(|n| n.id == id)
+                .map(|n| n.confidence)
+                .collect()
+        };
+        use Confidence::{Medium, Strong};
+        assert_eq!(conf(&m, a), vec![Strong, Strong], "both instances");
+        assert_eq!(conf(&m, b), vec![Medium, Medium], "unrecorded: untouched");
+
+        m.undo_pass_mutations();
+        assert_eq!(conf(&m, a), vec![Strong, Strong], "idempotent");
     }
 }

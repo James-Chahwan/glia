@@ -33,7 +33,11 @@
 //!   (a multi-repo build has several repos and one error list), so they go in
 //!   `manifest.json` ([`repo_graph_store::LayoutMeta`]);
 //! - `RepoGraph.properties` is per-graph code state, so it goes in each
-//!   shard's code section beside nav and symbols.
+//!   shard's code section beside nav and symbols;
+//! - `MergedGraph::pass_undo` (LC.10a), the confidences a set-dependent
+//!   post-pass overwrote, rides the manifest's `pass_undo` and comes back on
+//!   the loaded graph, so a merge of loaded layouts can undo the demotions
+//!   (`undo_pass_mutations`) before it re-runs the passes over the union.
 //!
 //! A root is recorded RELATIVE to the layout dir (`../..` for the in-repo
 //! `<repo>/.glia/graph`), so a committed layout carries no absolute path
@@ -41,13 +45,13 @@
 //! against the dir it loads from.
 //!
 //! Markers, one line per call:
-//! `[gmap] meta: repos=<r> labeled=<l> rooted=<o> parse_errors=<p> properties=<q> writer=<w>`
+//! `[gmap] meta: repos=<r> labeled=<l> rooted=<o> parse_errors=<p> properties=<q> pass_undo=<u> writer=<w>`
 //! from [`persist_layout`] (the store's own `[gmap] layout` line follows it),
 //! `[gmap] wrote <dir> writer=<w> shards=<n> cross=<c> bytes=<b>` from
 //! [`persist_result`] (`n` per-graph shards, `c` cross edges, `b` the bytes of
 //! every `.gmap` the manifest names), with `[gmap] legacy layout ignored: <dir> ...`
 //! and `[gmap] removed <k> orphan shard(s) from <dir>` when they apply, and
-//! `[gmap] loaded <dir>: repos=<r> labeled=<l> parse_errors=<p> properties=<q>`
+//! `[gmap] loaded <dir>: repos=<r> labeled=<l> parse_errors=<p> properties=<q> pass_undo=<u>`
 //! from [`load_layout`], and `[gmap] rebuilt <dir> (<reason>)` from
 //! [`load_or_rebuild`] each time it rebuilds (written or not).
 //!
@@ -169,10 +173,11 @@ fn write_layout(
     let labeled = meta.repos.iter().filter(|r| !r.label.is_empty()).count();
     let rooted = meta.repos.iter().filter(|r| r.root.is_some()).count();
     eprintln!(
-        "[gmap] meta: repos={} labeled={labeled} rooted={rooted} parse_errors={} properties={} writer={writer}",
+        "[gmap] meta: repos={} labeled={labeled} rooted={rooted} parse_errors={} properties={} pass_undo={} writer={writer}",
         meta.repos.len(),
         meta.parse_errors.len(),
         property_count(merged),
+        merged.pass_undo.len(),
     );
     write_merged_sharded_meta(merged, meta, dir)
         .map_err(|e| format!("{writer}: persist to {}: {e}", dir.display()))
@@ -374,12 +379,13 @@ fn read_layout(dir: &Path) -> Result<GenerateResult, StoreError> {
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
     eprintln!(
-        "[gmap] loaded {}: repos={} labeled={} parse_errors={} properties={}",
+        "[gmap] loaded {}: repos={} labeled={} parse_errors={} properties={} pass_undo={}",
         dir.display(),
         meta.repos.len(),
         repo_labels.len(),
         meta.parse_errors.len(),
         property_count(&merged),
+        merged.pass_undo.len(),
     );
     Ok(GenerateResult {
         merged,

@@ -266,6 +266,7 @@ fn v2_round_trips() {
             category: repo_graph_code_domain::edge_category::HTTP_CALLS,
             confidence: Confidence::Strong,
         }],
+        pass_undo: vec![],
     };
     let manifest = write_merged_sharded(&merged, &dir).unwrap();
     assert_eq!(manifest.schema_version, 2);
@@ -305,7 +306,11 @@ fn stale_on_old_manifest_schema() {
     let repo_dir = tmp.path().join("repo");
     std::fs::create_dir_all(&repo_dir).unwrap();
     write_merged_sharded(
-        &MergedGraph { graphs: vec![graph("test://lc1-stale", &[1])], cross_edges: vec![] },
+        &MergedGraph {
+            graphs: vec![graph("test://lc1-stale", &[1])],
+            cross_edges: vec![],
+            pass_undo: vec![],
+        },
         &gmap_dir,
     )
     .unwrap();

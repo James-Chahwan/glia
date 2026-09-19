@@ -83,10 +83,7 @@ impl AppState {
             mode,
             paused: false,
             frame: 0,
-            graph: MergedGraph {
-                graphs: Vec::new(),
-                cross_edges: Vec::new(),
-            },
+            graph: MergedGraph::default(),
             all_nodes: Vec::new(),
             all_edges: Vec::new(),
             meta: HashMap::new(),

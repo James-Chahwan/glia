@@ -13,7 +13,7 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use repo_graph_code_domain::walk_gating;
-use repo_graph_core::{CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId};
+use repo_graph_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
 use repo_graph_graph::RepoGraph;
 
 use crate::code_section::{decode_repo_graph, encode_repo_graph_counted};
@@ -137,6 +137,72 @@ pub struct Manifest {
     /// repo that has inputs.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub external_inputs: BTreeMap<String, String>,
+    /// The node confidences a set-dependent post-pass overwrote in the build
+    /// that wrote this layout (LC.10a, `MergedGraph::pass_undo`), sorted by
+    /// node id, so a merge of pre-built layouts can undo them before it
+    /// re-runs the passes over the union. Omitted when empty, so a layout no
+    /// such pass touched writes the same bytes as before; `MANIFEST_VERSION`
+    /// is not bumped (additive, the `build_stamp` precedent above).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pass_undo: Vec<PassUndo>,
+}
+
+/// One entry of [`Manifest::pass_undo`] (LC.10a): a node whose confidence a
+/// post-pass overwrote, and the value it had before the pass. Written from
+/// and read back into `MergedGraph::pass_undo`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PassUndo {
+    /// The node's `NodeId.0`.
+    pub node: u64,
+    /// Its confidence before the pass: `strong`, `medium` or `weak`.
+    pub confidence: String,
+}
+
+/// The manifest spelling of a confidence in [`PassUndo::confidence`].
+fn confidence_name(c: Confidence) -> &'static str {
+    match c {
+        Confidence::Strong => "strong",
+        Confidence::Medium => "medium",
+        Confidence::Weak => "weak",
+    }
+}
+
+/// Inverse of [`confidence_name`]; `None` for any other spelling.
+fn confidence_from_name(s: &str) -> Option<Confidence> {
+    match s {
+        "strong" => Some(Confidence::Strong),
+        "medium" => Some(Confidence::Medium),
+        "weak" => Some(Confidence::Weak),
+        _ => None,
+    }
+}
+
+/// `MergedGraph::pass_undo` as manifest entries, sorted by node id.
+fn pass_undo_entries(undo: &[(NodeId, Confidence)]) -> Vec<PassUndo> {
+    let mut out: Vec<PassUndo> = undo
+        .iter()
+        .map(|(id, c)| PassUndo { node: id.0, confidence: confidence_name(*c).to_string() })
+        .collect();
+    out.sort_by_key(|e| e.node);
+    out
+}
+
+/// Manifest entries back as `MergedGraph::pass_undo`: sorted by id, the first
+/// entry per id kept. An unknown confidence spelling is a corrupt manifest
+/// (the layout needs a rebuild), never a silently dropped undo.
+fn pass_undo_from_entries(entries: &[PassUndo]) -> Result<Vec<(NodeId, Confidence)>, StoreError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        let Some(c) = confidence_from_name(&e.confidence) else {
+            return Err(StoreError::ManifestJson(<serde_json::Error as serde::de::Error>::custom(
+                format!("pass_undo: node {} has unknown confidence {:?}", e.node, e.confidence),
+            )));
+        };
+        out.push((NodeId(e.node), c));
+    }
+    out.sort_by_key(|(id, _)| id.0);
+    out.dedup_by_key(|(id, _)| id.0);
+    Ok(out)
 }
 
 /// One repo of a layout (LC.7): its `RepoId.0`, its human label (the one
@@ -249,18 +315,21 @@ pub fn write_sharded_meta(
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
-    write_sharded_with(shards, cross_edges, meta, dir, BTreeMap::new())
+    write_sharded_with(shards, cross_edges, meta, dir, BTreeMap::new(), Vec::new())
 }
 
 /// The sharded writer behind [`write_sharded_meta`] and the merged-graph
 /// writers: `external_inputs` is the `.glia` fingerprint the manifest records
-/// (LF.1d), empty for a layout no repo root is known for.
+/// (LF.1d), empty for a layout no repo root is known for; `pass_undo` is the
+/// merged graph's post-pass undo record (LC.10a), sorted by node id, empty
+/// for a writer of bare shards.
 fn write_sharded_with(
     shards: &[(&str, &RepoGraph)],
     cross_edges: &[Edge],
     meta: &LayoutMeta,
     dir: &Path,
     external_inputs: BTreeMap<String, String>,
+    pass_undo: Vec<PassUndo>,
 ) -> Result<Manifest, StoreError> {
     std::fs::create_dir_all(dir)?;
 
@@ -346,6 +415,7 @@ fn write_sharded_with(
         repos,
         parse_errors: meta.parse_errors.clone(),
         external_inputs,
+        pass_undo,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     // Skip the manifest write only if it's byte-identical to the prior one
@@ -546,13 +616,21 @@ fn write_merged_with(
         .zip(merged.graphs.iter())
         .map(|(n, g)| (n.as_str(), g))
         .collect();
-    write_sharded_with(&shards, &merged.cross_edges, meta, dir, external_inputs)
+    write_sharded_with(
+        &shards,
+        &merged.cross_edges,
+        meta,
+        dir,
+        external_inputs,
+        pass_undo_entries(&merged.pass_undo),
+    )
 }
 
 /// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
 /// every per-language `RepoGraph` from its archived shard (core + code
 /// section, `properties` included since LC.7), then attaches the cross-stack
-/// edges. Drops the layout metadata: see [`read_merged_sharded_meta`].
+/// edges and the post-pass undo record (LC.10a). Drops the layout metadata:
+/// see [`read_merged_sharded_meta`].
 ///
 /// When the layout cannot be served (`StoreError::needs_rebuild`) it prints one
 /// `[gmap] needs rebuild: <dir>: <reason>` line before returning the error, so
@@ -567,6 +645,10 @@ pub fn read_merged_sharded(
 /// labels and roots as written (roots still relative to `dir`) and the parse
 /// errors. A layout written without metadata reads back an empty
 /// [`LayoutMeta`]. Prints the same `[gmap] needs rebuild` line on failure.
+///
+/// The manifest's post-pass undo record (LC.10a) comes back on the graph, as
+/// `MergedGraph::pass_undo`, not in the [`LayoutMeta`]: it is the graph's
+/// state, and one carrier keeps the write and the read from disagreeing.
 pub fn read_merged_sharded_meta(
     dir: &Path,
 ) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
@@ -599,10 +681,12 @@ fn read_merged_sharded_inner(
         repos: sharded.manifest.repos.clone(),
         parse_errors: sharded.manifest.parse_errors.clone(),
     };
+    let pass_undo = pass_undo_from_entries(&sharded.manifest.pass_undo)?;
     Ok((
         repo_graph_graph::MergedGraph {
             graphs,
             cross_edges,
+            pass_undo,
         },
         meta,
     ))
@@ -1087,7 +1171,7 @@ mod tests {
     fn layout_meta_round_trips_through_the_manifest() {
         let tmp = tempfile::tempdir().unwrap();
         let g = empty_graph("test://lc7-meta");
-        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], cross_edges: vec![] };
+        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
             repos: vec![
                 RepoMeta { id: 9, label: "web".into(), root: Some("../web".into()) },
@@ -1114,6 +1198,50 @@ mod tests {
         assert_eq!(empty, LayoutMeta::default());
     }
 
+    /// LC.10a: the post-pass undo record rides the manifest, written sorted
+    /// by node id whatever order the graph holds, read back onto the graph;
+    /// an empty record writes no key; an unknown confidence spelling is a
+    /// corrupt manifest that needs a rebuild, never a silently dropped undo.
+    #[test]
+    fn pass_undo_round_trips_through_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut merged = repo_graph_graph::MergedGraph {
+            graphs: vec![empty_graph("test://lc10a-undo")],
+            ..Default::default()
+        };
+        merged.pass_undo =
+            vec![(NodeId(9), Confidence::Strong), (NodeId(2), Confidence::Medium)];
+        let dir = tmp.path().join("undo");
+        let written = write_merged_sharded(&merged, &dir).unwrap();
+        assert_eq!(
+            written.pass_undo,
+            vec![
+                PassUndo { node: 2, confidence: "medium".into() },
+                PassUndo { node: 9, confidence: "strong".into() },
+            ]
+        );
+        let back = read_merged_sharded(&dir).unwrap();
+        assert_eq!(
+            back.pass_undo,
+            vec![(NodeId(2), Confidence::Medium), (NodeId(9), Confidence::Strong)]
+        );
+
+        let bare = tmp.path().join("bare");
+        merged.pass_undo.clear();
+        write_merged_sharded(&merged, &bare).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(bare.join(MANIFEST_NAME)).unwrap()).unwrap();
+        assert!(json.get("pass_undo").is_none(), "{json}");
+        assert!(read_merged_sharded(&bare).unwrap().pass_undo.is_empty());
+
+        let path = dir.join(MANIFEST_NAME);
+        let text = std::fs::read_to_string(&path).unwrap().replace("\"strong\"", "\"certain\"");
+        std::fs::write(&path, text).unwrap();
+        let err = read_merged_sharded(&dir).unwrap_err();
+        assert!(err.needs_rebuild(), "{err}");
+        assert!(err.to_string().contains("certain"), "{err}");
+    }
+
     /// LC.8: the lenient read yields schema, stamp and roots from any schema,
     /// and nothing from a missing or unparseable manifest.
     #[test]
@@ -1135,7 +1263,7 @@ mod tests {
         assert!(m.repos.is_empty());
 
         let g = empty_graph("test://lc8-lenient");
-        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], cross_edges: vec![] };
+        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
             repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()) }],
             parse_errors: vec![],
@@ -1581,7 +1709,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn one_graph(canonical: &str) -> repo_graph_graph::MergedGraph {
-        repo_graph_graph::MergedGraph { graphs: vec![empty_graph(canonical)], cross_edges: vec![] }
+        repo_graph_graph::MergedGraph { graphs: vec![empty_graph(canonical)], ..Default::default() }
     }
 
     fn manifest_json(dir: &Path) -> serde_json::Value {
