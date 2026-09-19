@@ -1,2 +1,2 @@
 # pyo3 surface of py/src/docs.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.governing_docs(qname: &str, scope: Option<&str> = None) -> PyResult<String>
+method PyGraph.governing_docs(qname: &str, scope: Option<&str> = None) -> PyResult<Py<PyAny>>

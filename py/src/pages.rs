@@ -1,11 +1,11 @@
 //! **pages** (LA.6e): the `page_flow` answer — client-router pages, the links
 //! between them, dead deep links and unlinked pages.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use repo_graph_graph::MergedGraph;
 
+use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::page_flow`], minus pyo3 — kept pyo3-free so
@@ -20,7 +20,7 @@ fn page_flow_json(merged: &MergedGraph) -> Result<String, serde_json::Error> {
 
 #[pymethods]
 impl PyGraph {
-    /// **page_flow** (LA.6e): the frontend's page flow as one JSON object
+    /// **page_flow** (LA.6e): the frontend's page flow as one dict
     /// `{pages, links, dead, unlinked}`. `pages`: `{path, route_qname,
     /// handler, handler_file, handler_line, redirect_to, catchall,
     /// inbound_links}` per client-router route. `links`: `{from_qname,
@@ -30,8 +30,8 @@ impl PyGraph {
     /// redirect, e.g. `"/** -> /login"`). `unlinked`: paths no in-repo link or
     /// redirect reaches (a fact, not a dead page). Lines are 1-based.
     /// Report-only: nothing is added to the graph.
-    fn page_flow(&self) -> PyResult<String> {
-        page_flow_json(&self.merged).map_err(|e| PyValueError::new_err(e.to_string()))
+    fn page_flow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, page_flow_json(&self.merged))
     }
 }
 

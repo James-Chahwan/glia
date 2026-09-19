@@ -1,11 +1,11 @@
 //! The whole-stack view: extraction `coverage` (P2), the manifest-rooted
 //! `project_roots`, and the `service_map` behind `glia arch`.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use repo_graph_graph::MergedGraph;
 
+use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::service_map`], minus pyo3 — kept pyo3-free so
@@ -24,10 +24,11 @@ impl PyGraph {
     /// — so a consumer falls back to grep DELIBERATELY where glia is
     /// known-partial (dynamic dispatch, string-built URLs, non-standard HTTP
     /// clients) instead of trusting a silent blind spot. Each note
-    /// `{language, edge_category, note, verify, edges_found}`. Returns a JSON array.
-    fn coverage(&self) -> PyResult<String> {
+    /// `{language, edge_category, note, verify, edges_found}`. Returns a list
+    /// of dicts.
+    fn coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let report = repo_graph_engine::coverage_report(&self.merged);
-        serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+        to_py(py, serde_json::to_string(&report))
     }
 
     /// **project_roots** (A8.6): the manifest-rooted sub-projects in this graph
@@ -36,10 +37,10 @@ impl PyGraph {
     /// root). Pass a `label` (e.g. `@shop/web`) or a `path` as `scope`; both
     /// give the same answer. Read back out of the graph's PROJECT anchors, so
     /// a graph from `load_from_gmap` answers exactly like a fresh one.
-    /// Returns a JSON array.
-    fn project_roots(&self) -> PyResult<String> {
+    /// Returns a list of dicts.
+    fn project_roots(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let roots = repo_graph_engine::project_roots(&self.merged);
-        serde_json::to_string(&roots).map_err(|e| PyValueError::new_err(e.to_string()))
+        to_py(py, serde_json::to_string(&roots))
     }
 
     /// **service_map** (v6 follow-on): the architecture summary — one record
@@ -50,7 +51,7 @@ impl PyGraph {
     /// labelled with its mechanism (HTTP_CALLS / QUEUE_FLOWS / GRPC_CALLS …)
     /// and the channel it travels over (route, topic, service name). Returns
     /// `{keying, services:[…], links:[…], self_links, unlocated_nodes}` as a
-    /// JSON object; `keying` says which rule produced the service ids.
+    /// dict; `keying` says which rule produced the service ids.
     ///
     /// Transport only — the keying and the link aggregation live in
     /// `repo_graph_engine::arch`, shared with `glia analyze`, so the CLI and
@@ -60,9 +61,8 @@ impl PyGraph {
     /// `manifest.json` recorded (LC.7), so it names services like the fresh
     /// build did; only a layout written without that metadata falls back to
     /// `repo<id>` ids.
-    fn service_map(&self) -> PyResult<String> {
-        service_map_json(&self.merged, &self.repo_labels)
-            .map_err(|e| PyValueError::new_err(e.to_string()))
+    fn service_map(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, service_map_json(&self.merged, &self.repo_labels))
     }
 }
 

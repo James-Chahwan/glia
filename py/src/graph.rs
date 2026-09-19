@@ -3,10 +3,11 @@
 //! `multiple-pymethods`). This block holds the graph's own accessors: parse
 //! state, counts, raw cells, and persistence. Every `PyGraph` is made by
 //! [`PyGraph::from_result`] and saved over `repo_graph_engine::persist` (LC.7):
-//! `save_to` through `persist_layout`, `save_to_default` (like `generate`'s
-//! auto-persist) through the single layout writer `persist_graph` (LC.9), so a
-//! saved-then-loaded graph carries the same labels, roots, parse errors and
-//! properties as the fresh one.
+//! `save_to` through `persist_layout`, `save_to_default` through the single
+//! layout writer `persist_graph` (LC.9), so a saved-then-loaded graph carries
+//! the same labels, roots, parse errors and properties as the fresh one. These
+//! two methods are the only way Python writes a layout: `generate` /
+//! `generate_many` only build (LD.2).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -33,7 +34,7 @@ pub(crate) struct PyGraph {
     pub(crate) repo_labels: BTreeMap<u64, String>,
     /// `RepoId.0` → repo root: the path as given on a fresh build, resolved
     /// against the layout dir on a load (LC.7). Recorded relative to the
-    /// layout dir by `save_to` / `save_to_default` / `generate`'s auto-persist.
+    /// layout dir by `save_to` / `save_to_default`.
     pub(crate) repo_roots: BTreeMap<u64, String>,
 }
 
@@ -120,11 +121,12 @@ impl PyGraph {
             .map_err(|e| PyValueError::new_err(format!("save_to({dir}): {e}")))
     }
 
-    /// Convenience: save to the repo's layout dir `<repo>/.glia/graph/` (see
-    /// `default_gmap_dir`) with the same single writer as `generate`'s
-    /// auto-persist and `glia build`: the dir's self-ignoring `.gitignore`,
-    /// orphan-shard cleanup and the legacy `.ai/repo-graph` notice included.
-    /// The wrapper's cache-load path will find it there.
+    /// Save to the repo's layout dir `<repo>/.glia/graph/` (see
+    /// `default_gmap_dir`) with the same single writer as `glia build` and the
+    /// hooks: the dir's self-ignoring `.gitignore`, orphan-shard cleanup and
+    /// the legacy `.ai/repo-graph` notice included. `load_from_gmap` finds it
+    /// there. `generate` writes no layout (LD.2), so a caller that wants the
+    /// next session to load instead of rebuild calls this after it.
     fn save_to_default(&self, repo_path: &str) -> PyResult<()> {
         let dir = default_layout_dir(Path::new(repo_path));
         persist_graph(

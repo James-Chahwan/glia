@@ -3,6 +3,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 #[pymethods]
@@ -12,11 +13,12 @@ impl PyGraph {
     /// answer that `find`→`impact`→`activate`→`read×N` composed to, in ONE call.
     /// Structural `imports`/`contains` edges are excluded so the radius doesn't
     /// fan out through shared containers (handoff P1 bullet 4). Each record:
-    /// `{id, qname, name, kind, reason, depth, score, file, line}` where `reason`
-    /// is the edge category that first put the node in scope. `direction` ∈
-    /// {`forward` (what it affects), `backward` (what affects it), `both`}.
-    /// Returns a JSON array, ranked by PPR score (desc). Errors if `qname`
-    /// resolves to no node.
+    /// `{id, qname, name, kind, reason, depth, score, live, file, line}` where
+    /// `reason` is the edge category that first put the node in scope, `live`
+    /// says whether an entry point reaches the node, and `line` is 1-based.
+    /// `direction` ∈ {`forward` (what it affects), `backward` (what affects
+    /// it), `both`}. Returns a list of dicts, ranked by PPR score (desc).
+    /// Raises ValueError if `qname` resolves to no node.
     ///
     /// `scope` (optional, default `None` = no-op) restricts the answer to nodes
     /// whose file lives under that repo-relative path — or under the project
@@ -28,13 +30,14 @@ impl PyGraph {
     #[pyo3(signature = (qname, direction="both", depth=4, top_k=None, live_only=false, scope=None))]
     fn blast_radius(
         &self,
+        py: Python<'_>,
         qname: &str,
         direction: &str,
         depth: usize,
         top_k: Option<usize>,
         live_only: bool,
         scope: Option<&str>,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         let answer = repo_graph_engine::blast_radius_by_qname(
             &self.merged,
             qname,
@@ -45,6 +48,6 @@ impl PyGraph {
             scope,
         )
         .map_err(PyValueError::new_err)?;
-        serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
+        to_py(py, serde_json::to_string(&answer))
     }
 }

@@ -148,6 +148,13 @@ def main():
     say(f"== wheel: build rc={rc}, stale={len(stale.split())}, stamp {stamp.strip()}")
     if rc or stale.strip():
         gates.append("wheel rebuild/stale")
+    # LD.2: the pyo3 surface behaves as its convention says, over the wheel just installed.
+    # One file per py/src module; each ends on `[surface] <module>: N checks, M failed`.
+    for t in sorted((ROOT / "py/tests/surface").glob("test_*.py")):
+        out, rc = sh(f"python3 {t.relative_to(ROOT)} 2>&1")
+        say(f"== pyo3 surface {t.stem}: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+        if rc:
+            gates.append(f"pyo3 surface ({t.stem})")
 
     rp, _ = sh("python3 run.py --no-log 2>/dev/null", cwd=SG)
     fixtures = len([p for p in (SG / "fixtures").iterdir() if (p / "key.json").exists()])

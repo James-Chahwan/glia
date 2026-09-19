@@ -1,2 +1,2 @@
 # pyo3 surface of py/src/pages.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.page_flow() -> PyResult<String>
+method PyGraph.page_flow() -> PyResult<Py<PyAny>>

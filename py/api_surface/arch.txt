@@ -1,4 +1,4 @@
 # pyo3 surface of py/src/arch.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.coverage() -> PyResult<String>
-method PyGraph.project_roots() -> PyResult<String>
-method PyGraph.service_map() -> PyResult<String>
+method PyGraph.coverage() -> PyResult<Py<PyAny>>
+method PyGraph.project_roots() -> PyResult<Py<PyAny>>
+method PyGraph.service_map() -> PyResult<Py<PyAny>>

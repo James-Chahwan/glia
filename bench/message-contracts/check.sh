@@ -89,7 +89,10 @@ def proj(rows):
         for r in rows)
 
 cli = proj(json.load(open(sys.argv[1])))
-got = proj(json.loads(g.contracts()))
+rows = g.contracts()
+if not isinstance(rows, list):
+    print(f"FAIL: PyGraph.contracts() returned {type(rows).__name__}, want a list of dicts (LD.2); rebuild the wheel"); sys.exit(1)
+got = proj(rows)
 if got != cli:
     print(f"FAIL: pyo3 contracts() disagrees with the CLI:\n  pyo3 {got}\n  cli  {cli}"); sys.exit(1)
 print("PASS: pyo3 contracts() agrees with the CLI")

@@ -16,10 +16,10 @@ use crate::registry::ModuleFns;
 /// cannot be served as it is (LC.8, `repo_graph_engine::persist::load_or_rebuild`).
 ///
 /// `dir` is a layout written by `PyGraph.save_to` / `save_to_default` /
-/// `generate`'s auto-persist / `glia build`. When it is current it loads as
-/// is: a `PyGraph` whose methods (node_count, dense_text, activate,
-/// service_map, …) behave like the fresh `generate()` result that was saved,
-/// with repo labels, roots, parse errors and `RepoGraph.properties` (LC.7).
+/// `glia build`. When it is current it loads as is: a `PyGraph` whose methods
+/// (node_count, dense_text, activate, service_map, …) behave like the fresh
+/// `generate()` result that was saved, with repo labels, roots, parse errors
+/// and `RepoGraph.properties` (LC.7).
 ///
 /// When it is not (an older format, another glia build, sources changed since
 /// the write, a damaged or missing shard, or no layout at all) and `rebuild`
@@ -45,11 +45,11 @@ fn load_from_gmap(dir: &str, repo_path: Option<&str>, rebuild: bool) -> PyResult
 
 /// Conventional gmap directory path for a repo: `<repo>/.glia/graph` (0.4.x:
 /// `<repo>/.ai/repo-graph`, no longer read or written). The one layout
-/// `generate`'s auto-persist, `save_to_default`, `glia build` and the
-/// `glia install-hooks` hooks all write, and the directory holding only
-/// engine output (a watcher should skip exactly this prefix, not all of
-/// `.glia/`, whose `overlay.toml` is an input). The Python wrapper uses this
-/// to know where to look for a cached graph.
+/// `save_to_default`, `glia build` and the `glia install-hooks` hooks all
+/// write, and the directory holding only engine output (a watcher should skip
+/// exactly this prefix, not all of `.glia/`, whose `overlay.toml` is an
+/// input). The Python wrapper uses this to know where to look for a cached
+/// graph.
 #[pyfunction]
 fn default_gmap_dir(repo_path: &str) -> String {
     default_layout_dir(Path::new(repo_path))

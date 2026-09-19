@@ -1,23 +1,118 @@
-//! Text → nodes: `resolve` (P3, located records), the id-level
-//! `resolve_signal`, and the name / qname lookups.
+//! Text → nodes: `find` (LD.3b's ranked fuzzy find, the one name / qname
+//! lookup) and `resolve` (P3: a failure / change signal → located records).
+//! Both return the LD.8a envelope `{results, absence}` as a native `dict`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use repo_graph_code_domain::node_kind;
+use repo_graph_core::NodeKindId;
+use repo_graph_engine::absence::Answer;
+use repo_graph_engine::find::{FindOptions, FoundNode, find_nodes};
+use repo_graph_graph::MergedGraph;
+
+use crate::convert::to_py;
 use crate::graph::PyGraph;
+
+// `find`'s `top_k=20` below is a literal so `__text_signature__` shows it;
+// this keeps it the engine's default.
+const _: () = assert!(repo_graph_engine::find::DEFAULT_TOP_K == 20);
+
+/// Node-kind names → ids, case-insensitively, as `glia find --kind` reads
+/// them. An unknown name is an error naming every valid one.
+fn kinds_by_name(names: &[String]) -> Result<Vec<NodeKindId>, String> {
+    names
+        .iter()
+        .map(|n| {
+            node_kind::ALL
+                .iter()
+                .find(|(_, name)| name.eq_ignore_ascii_case(n))
+                .map(|(id, _)| *id)
+                .ok_or_else(|| {
+                    let valid: Vec<&str> = node_kind::ALL.iter().map(|(_, name)| *name).collect();
+                    format!("unknown kind '{n}'; valid kinds: {}", valid.join(", "))
+                })
+        })
+        .collect()
+}
+
+/// The whole body of [`PyGraph::find`], minus pyo3 — kept pyo3-free so
+/// `cargo test -p repo-graph-py` covers it (see the crate doc). An empty
+/// `kinds` list filters nothing, as `glia find` with no `--kind`.
+fn find_answer(
+    merged: &MergedGraph,
+    query: &str,
+    top_k: usize,
+    kinds: &[String],
+    scope: Option<String>,
+    unparsed_files: usize,
+) -> Result<Answer<FoundNode>, String> {
+    let kinds = kinds_by_name(kinds)?;
+    let mut opts = FindOptions::default();
+    opts.top_k = top_k;
+    opts.kinds = (!kinds.is_empty()).then_some(kinds);
+    opts.scope = scope;
+    let mut answer = find_nodes(merged, query, &opts);
+    if let Some(a) = answer.absence.as_mut() {
+        a.unparsed_files = unparsed_files;
+    }
+    Ok(answer)
+}
 
 #[pymethods]
 impl PyGraph {
+    /// **find** (LD.3b): the ranked, located nodes whose name or qname
+    /// `query` names, in one call — the one lookup (it replaced `find_node`
+    /// and `find_nodes_by_qname`). Returns a dict `{results, absence}`:
+    /// `results` is the records `{id, qname, name, kind, file, line, match}`
+    /// (`line` is 1-based; `match` names the tier that matched: `exact_qname`,
+    /// `exact_name`, `exact_ci`, `qname_suffix`, `name_prefix`, `name_word`,
+    /// `name_substring`, `qname_substring`, `subsequence`); `absence` is
+    /// `None` when there are results, else a `no_match` dict with
+    /// `unparsed_files` set to `len(parse_errors)`.
+    ///
+    /// Rows rank by tier, then — inside `exact_qname` / `exact_name` — by the
+    /// same key the seeded answers resolve a name with (a declaration before
+    /// a container, then degree): when `query` is a node's exact qname or
+    /// name, `find(query, top_k=1)['results'][0]` is the node
+    /// `blast_radius(query)` starts from.
+    ///
+    /// `top_k` keeps the first rows (0 keeps every match). `kinds` keeps only
+    /// nodes of those kind names (`["FUNCTION", "CLASS"]`, any case; `None` or
+    /// `[]` keeps every kind); an unknown name raises ValueError listing the
+    /// valid ones. `scope` (a repo-relative path or a project label, see
+    /// `project_roots`) is a FILTER applied before `top_k`: a node whose file
+    /// is outside it is dropped, one with no file is kept.
+    #[pyo3(signature = (query, top_k=20, kinds=None, scope=None))]
+    fn find(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        top_k: usize,
+        kinds: Option<Vec<String>>,
+        scope: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let answer = find_answer(
+            &self.merged,
+            query,
+            top_k,
+            kinds.as_deref().unwrap_or_default(),
+            scope,
+            self.parse_errors.len(),
+        )
+        .map_err(PyValueError::new_err)?;
+        to_py(py, serde_json::to_string(&answer))
+    }
+
     /// **resolve** (P3, handoff v6): a failure/change signal (stacktrace, diff,
     /// test id, or `auto`-sniffed) → the ranked, LOCATED nodes it points at, in
-    /// one call — the answer that `resolve_signal`→`activate`→`read×N` collapses
-    /// to. Resolution order preserved. Returns a JSON object `{results,
+    /// one call. Resolution order preserved. Returns a dict `{results,
     /// absence}` (LD.8a): `results` is the records
-    /// `{id, qname, name, kind, score, file, line}`; `absence` is `null` when
-    /// there are results, else the FACT-tier reason — `no_signal_match` (the
-    /// signal resolved to no node; the note counts what it held) or `no_match`
-    /// (`scope` or `top_k=0` removed every node) — with `unparsed_files` set to
-    /// `len(parse_errors)`.
+    /// `{id, qname, name, kind, score, file, line}` (`line` is 1-based);
+    /// `absence` is `None` when there are results, else the FACT-tier reason —
+    /// `no_signal_match` (the signal resolved to no node; the note counts what
+    /// it held) or `no_match` (`scope` or `top_k=0` removed every node) — with
+    /// `unparsed_files` set to `len(parse_errors)`.
     ///
     /// `scope` (optional, default `None` = no-op; a path or a project label —
     /// see `project_roots`) filters the SEEDS before the
@@ -28,62 +123,71 @@ impl PyGraph {
     #[pyo3(signature = (text, kind="auto", top_k=None, scope=None))]
     fn resolve(
         &self,
+        py: Python<'_>,
         text: &str,
         kind: &str,
         top_k: Option<usize>,
         scope: Option<&str>,
-    ) -> PyResult<String> {
+    ) -> PyResult<Py<PyAny>> {
         let mut answer =
             repo_graph_engine::resolve_signal_located(&self.merged, text, kind, top_k, scope);
         if let Some(a) = answer.absence.as_mut() {
             a.unparsed_files = self.parse_errors.len();
         }
-        serde_json::to_string(&answer).map_err(|e| PyValueError::new_err(e.to_string()))
+        to_py(py, serde_json::to_string(&answer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn built(tag: &str) -> MergedGraph {
+        let root = std::env::temp_dir().join(format!("glia-ld2-find-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("svc")).expect("temp dir");
+        std::fs::write(
+            root.join("app.py"),
+            "class Helper:\n    pass\n\n\ndef helper(x):\n    return x + 1\n\n\ndef main():\n    return helper(2)\n",
+        )
+        .expect("write fixture");
+        std::fs::write(root.join("svc/other.py"), "def helper_two():\n    return 2\n")
+            .expect("write fixture");
+        let built = repo_graph_engine::generate_one(root.to_str().expect("utf-8 temp path"));
+        let _ = std::fs::remove_dir_all(&root);
+        built.expect("build").merged
     }
 
-    /// Resolve a simple name to a node id. Deterministic across processes: when
-    /// several nodes share the name (e.g. a class and a same-named module, or
-    /// one symbol in two repos of a merge), a declaration beats a
-    /// container, then the highest-degree node wins, rather than whichever the
-    /// per-process `HashMap` seed happened to order first — the root cause of
-    /// `impact`/`trace` intermittently returning empty. A framework role
-    /// (component, service, ...) is no longer a same-name twin: LB.3a folds it
-    /// into its declaration as a ROLE cell, listed in `nodes_json`'s `roles`.
-    ///
-    /// LA.14: a `name` that is a full qname resolves to that node first, then
-    /// falls back to the simple name. `scope` (optional, a path or a project
-    /// label) is a PREFERENCE among several candidates — the one located under
-    /// it wins — never a filter: with no candidate in scope the answer is the
-    /// unscoped one, and `scope=None` changes nothing for a bare name.
-    #[pyo3(signature = (name, scope=None))]
-    fn find_node(&self, name: &str, scope: Option<&str>) -> Option<u64> {
-        repo_graph_engine::resolve_seed(&self.merged, name, scope).map(|id| id.0)
-    }
+    /// LD.2: pyo3 `find` is the engine's `find_nodes` — the same rows, in the
+    /// same order, as `glia find` — with kind NAMES validated (any case), the
+    /// scope a filter, and the parse-error count on an empty answer.
+    #[test]
+    fn find_is_the_engine_find_with_kind_names() {
+        let merged = built("kinds");
+        let all = find_answer(&merged, "helper", 20, &[], None, 0).expect("answer");
+        let engine = find_nodes(&merged, "helper", &FindOptions::default());
+        assert_eq!(all.results, engine.results);
+        assert_eq!(all.results.first().map(|r| r.qname.as_str()), Some("app::helper"));
 
-    /// Substring search over qnames, returned sorted by node id so repeated
-    /// calls (and any caller that takes `[0]`) are reproducible across processes.
-    /// Resolve a failure/change signal to seed node ids (WP-B / GR-2 `locate`).
-    /// `kind` ∈ {"stacktrace", "test", "diff", "auto"}; "auto" sniffs the shape.
-    /// Frame/symbol/path → node-id resolution (and the sniffer) run in Rust;
-    /// unresolvable tokens are simply absent. Feed the result to `activate`.
-    #[pyo3(signature = (text, kind="auto"))]
-    fn resolve_signal(&self, text: &str, kind: &str) -> Vec<u64> {
-        self.merged.resolve_signal(text, kind).into_iter().map(|id| id.0).collect()
-    }
+        let funcs = find_answer(&merged, "helper", 0, &["function".into()], None, 0).expect("answer");
+        assert!(!funcs.results.is_empty());
+        assert!(funcs.results.iter().all(|r| r.kind == "FUNCTION"), "{:?}", funcs.results);
 
-    /// `scope` (optional) narrows the hits to one part of a monorepo using the
-    /// same `/`-boundary rule as `blast_radius`/`resolve`/`governing_docs`, so
-    /// a consumer never has to re-derive a path guess in Python. Nodes with no
-    /// locatable file are KEPT. A project label (see `project_roots`) works
-    /// here too — it is resolved once, before the per-node filter.
-    #[pyo3(signature = (pattern, scope=None))]
-    fn find_nodes_by_qname(&self, pattern: &str, scope: Option<&str>) -> Vec<u64> {
-        let scope = scope.map(|s| repo_graph_engine::resolve_scope(&self.merged, s));
-        self.merged
-            .qnames_containing(pattern)
-            .into_iter()
-            .filter(|id| repo_graph_engine::node_in_scope(&self.merged, *id, scope.as_deref()))
-            .map(|id| id.0)
-            .collect()
+        let bad = find_answer(&merged, "helper", 20, &["FUNCTOIN".into()], None, 0);
+        let err = bad.expect_err("an unknown kind name is an error");
+        assert!(err.contains("unknown kind 'FUNCTOIN'") && err.contains("FUNCTION"), "{err}");
+
+        let scoped = find_answer(&merged, "helper", 0, &[], Some("svc".into()), 0).expect("answer");
+        assert!(!scoped.results.is_empty());
+        assert!(
+            scoped.results.iter().all(|r| r.file.as_deref().is_none_or(|f| f.starts_with("svc/"))),
+            "scope is a filter: {:?}",
+            scoped.results
+        );
+
+        let none = find_answer(&merged, "zzqqxx", 20, &[], None, 7).expect("answer");
+        assert!(none.results.is_empty());
+        let absence = none.absence.expect("an empty answer carries its absence");
+        assert_eq!((absence.reason, absence.unparsed_files), ("no_match", 7));
     }
 }

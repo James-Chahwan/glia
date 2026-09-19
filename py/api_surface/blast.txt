@@ -1,2 +1,2 @@
 # pyo3 surface of py/src/blast.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.blast_radius(qname: &str, direction: &str = "both", depth: usize = 4, top_k: Option<usize> = None, live_only: bool = false, scope: Option<&str> = None) -> PyResult<String>
+method PyGraph.blast_radius(qname: &str, direction: &str = "both", depth: usize = 4, top_k: Option<usize> = None, live_only: bool = false, scope: Option<&str> = None) -> PyResult<Py<PyAny>>

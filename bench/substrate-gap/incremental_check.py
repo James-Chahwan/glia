@@ -20,9 +20,10 @@ nothing -- NOT-WARM.
 Grading logic is not duplicated: `grade_fixture` runs as-is with its module
 global `build_graph` swapped for one call (the seam matrix.py's
 `grade_with_kinds` already uses), so grade.py grows no mode switch.
-Copies, never the fixture dirs: GLIA_NO_PERSIST=1 gates only the .gmap write,
-not `<repo>/.glia/graph/parse_cache.bin`, and a sidecar left under the
-bench tree would silently de-hermeticise every later cold grade.
+Copies, never the fixture dirs: every warm pass writes
+`<repo>/.glia/graph/parse_cache.bin` (GLIA_NO_PERSIST=1 never gated it), and
+the bench tree must stay free of engine output. Since LD.2 a cold grade
+(`incremental=False`) neither reads nor purges that sidecar.
 
 Usage:
   python3 incremental_check.py                   # all fixtures; exit 1 on any failure
@@ -220,7 +221,7 @@ def selftest(name):
         f.write_text(edited)
         os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))
         say(f"selftest {rel(src)}: edited {path} {old}->{new} (same length, mtime kept)")
-        cold_b, _ = grade_pass(work, COLD)  # generate(.., False) purges the sidecar
+        cold_b, _ = grade_pass(work, COLD)  # generate(.., False) neither reads nor purges the sidecar (LD.2)
         if cold_b["graph"] == cold_a["graph"]:
             raise SystemExit("selftest: the edit is not graph-visible; pick another fixture")
         side.write_bytes(stale)

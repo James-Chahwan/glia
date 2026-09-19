@@ -1,11 +1,11 @@
 //! **contracts** (A12): producer / consumer message-type agreement per
 //! queue topic.
 
-use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use repo_graph_graph::MergedGraph;
 
+use crate::convert::to_py;
 use crate::graph::PyGraph;
 
 /// The whole body of [`PyGraph::contracts`], minus pyo3 — kept pyo3-free so
@@ -24,12 +24,13 @@ impl PyGraph {
     /// `{topic, topic_is_tag, pattern, producer, consumer, status, confidence,
     /// note}` where each side is `null` or `{node_id, repo_id, qname, topic,
     /// module, file, line, message_type, message_type_raw, form, window,
-    /// types_seen, conflicting}`. `status` ∈ {match, mismatch, unknown}.
-    /// `repo_id` is the raw `RepoId` (an xxhash of the repo identity key: git
-    /// remote / git dir / dir name, LB.1); Python has no label map for it yet. Report-only: no edge is emitted. Returns a
-    /// JSON array.
-    fn contracts(&self) -> PyResult<String> {
-        contracts_json(&self.merged).map_err(|e| PyValueError::new_err(e.to_string()))
+    /// types_seen, conflicting}` (`line` is 1-based). `status` ∈ {match,
+    /// mismatch, unknown}. `repo_id` is the raw `RepoId` (an xxhash of the
+    /// repo identity key: git remote / git dir / dir name, LB.1), a Python
+    /// `int`; Python has no label map for it yet. Report-only: no edge is
+    /// emitted. Returns a list of dicts.
+    fn contracts(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, contracts_json(&self.merged))
     }
 }
 

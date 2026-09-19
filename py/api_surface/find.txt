@@ -1,5 +1,3 @@
 # pyo3 surface of py/src/find.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.find_node(name: &str, scope: Option<&str> = None) -> Option<u64>
-method PyGraph.find_nodes_by_qname(pattern: &str, scope: Option<&str> = None) -> Vec<u64>
-method PyGraph.resolve(text: &str, kind: &str = "auto", top_k: Option<usize> = None, scope: Option<&str> = None) -> PyResult<String>
-method PyGraph.resolve_signal(text: &str, kind: &str = "auto") -> Vec<u64>
+method PyGraph.find(query: &str, top_k: usize = 20, kinds: Option<Vec<String>> = None, scope: Option<String> = None) -> PyResult<Py<PyAny>>
+method PyGraph.resolve(text: &str, kind: &str = "auto", top_k: Option<usize> = None, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
