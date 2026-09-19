@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 251,
+  "fixtures": 255,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -294,6 +294,11 @@
         "CALLS": 1.0,
         "HTTP_CALLS": 1.0
       }
+    },
+    "cypher-label-precision": {
+      "framework": "cypher-label-precision",
+      "language": "python",
+      "per_category": {}
     },
     "dart-bare-calls": {
       "framework": "dart-bare-calls",
@@ -935,6 +940,13 @@
         "INJECTS": 1.0
       }
     },
+    "prisma-schema": {
+      "framework": "prisma-schema",
+      "language": "prisma+typescript",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "proto-field-drift": {
       "framework": "proto-field-drift",
       "language": "proto",
@@ -1168,6 +1180,14 @@
       "language": "rust",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "rust-use-reexport-calls": {
+      "framework": "rust-use-reexport-calls",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "scala-calls": {
@@ -1444,6 +1464,11 @@
       "per_category": {
         "CALLS": 1.0
       }
+    },
+    "walk-glia-control-dir": {
+      "framework": "walk-glia-control-dir",
+      "language": "python",
+      "per_category": {}
     },
     "walk-nested-submodule": {
       "framework": "walk-nested-submodule",

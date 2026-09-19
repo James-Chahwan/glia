@@ -3272,28 +3272,29 @@
     },
     "rust/calls": {
       "extract": [
-        12,
-        12
+        15,
+        15
       ],
       "fixtures": [
         "fixtures/rust-axum-calls",
         "fixtures/rust-crate-path-calls",
         "fixtures/rust-inline-mod-enum",
-        "fixtures/rust-macro-arg-calls"
+        "fixtures/rust-macro-arg-calls",
+        "fixtures/rust-use-reexport-calls"
       ],
       "forbid": [
-        5,
-        5
+        6,
+        6
       ],
       "level": "full",
       "literal": [
-        12,
-        12
+        15,
+        15
       ],
       "reasons": [],
       "route": [
-        16,
-        16
+        20,
+        20
       ],
       "via": "call"
     },
@@ -4435,6 +4436,7 @@
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
     "fixtures/csharp-namespace-qnames",
+    "fixtures/cypher-label-precision",
     "fixtures/dart-bare-calls",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
@@ -4484,6 +4486,7 @@
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
+    "fixtures/prisma-schema",
     "fixtures/proto-field-drift",
     "fixtures/py-router-prefix",
     "fixtures/py-typer-argparse-cli",
@@ -4504,6 +4507,7 @@
     "fixtures/ts-typeorm",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
+    "fixtures/walk-glia-control-dir",
     "fixtures/walk-nested-submodule",
     "fixtures/walk-project-roots",
     "fixtures/xcli-invokes",

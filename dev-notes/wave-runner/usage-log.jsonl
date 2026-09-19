@@ -22,3 +22,5 @@
 {"wave": "W10", "event": "end", "pct": 39, "resets_at": 1789801800, "ts": 1789790803}
 {"wave": "W11", "event": "start", "pct": 39, "resets_at": 1789801800, "ts": 1789790814}
 {"wave": "W11", "event": "end", "pct": 44, "resets_at": 1789801800, "ts": 1789793682}
+{"wave": "W12", "event": "start", "pct": 44, "resets_at": 1789801800, "ts": 1789793694}
+{"wave": "W12", "event": "end", "pct": 50, "resets_at": 1789801800, "ts": 1789796044}
