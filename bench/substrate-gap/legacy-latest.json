@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 255,
+  "fixtures": 259,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -349,6 +349,13 @@
       "language": "dart",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "data-entity-literal-shape": {
+      "framework": "data-entity-literal-shape",
+      "language": "typescript",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
       }
     },
     "docs-md-section-lines": {
@@ -816,6 +823,13 @@
         "INJECTS": 1.0
       }
     },
+    "module-synthetic-filename": {
+      "framework": "module-synthetic-filename",
+      "language": "go+proto+yaml+json+dockerfile",
+      "per_category": {
+        "DEFINES_CONFIG": 1.0
+      }
+    },
     "nav-angular-links": {
       "framework": "nav-angular-links",
       "language": "typescript",
@@ -1182,6 +1196,13 @@
         "CALLS": 1.0
       }
     },
+    "rust-typed-receivers": {
+      "framework": "rust-typed-receivers",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 0.875
+      }
+    },
     "rust-use-reexport-calls": {
       "framework": "rust-use-reexport-calls",
       "language": "rust",
@@ -1480,6 +1501,11 @@
     "walk-project-roots": {
       "framework": "walk-project-roots",
       "language": "typescript+go+rust",
+      "per_category": {}
+    },
+    "walk-user-config": {
+      "framework": "walk-user-config",
+      "language": "python",
       "per_category": {}
     },
     "xcli-invokes": {
@@ -1842,7 +1868,9 @@
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [],
-    "partial_cells": []
+    "partial_cells": [
+      "rust-typed-receivers: CALLS 0.88"
+    ]
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
 }
