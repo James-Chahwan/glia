@@ -21,11 +21,19 @@
 //! takes `&CODE_TABLES`), signal resolution, `PyGraph.activate`, and the
 //! store / projection research harnesses. The engine's
 //! `profile::tests::code_profile_matches_head_tables` pins each list to the
-//! original's values as literals. `effect_sinks` had no hardcoding: it is
-//! seeded with the four effects LE.4 names, and LE.4 owns its final content.
+//! original's values as literals. `effect_sinks` had no hardcoding: LD.14a
+//! seeded it with four categories.
+//!
+//! LE.4d: `effect_sinks` is the table `effects` classifies with, one
+//! [`EffectSink`] per (target kind, reaching category) class: the data kinds
+//! over ACCESSES_DATA, every OUTBOUND marker the anchor pass
+//! (`extractors::anchor`) ties to the function that owns it (QUEUE_PRODUCER,
+//! EVENT_EMITTER, GRPC_CLIENT, RPC_CALL, WS_CLIENT, GRAPHQL_OPERATION, reached
+//! over USES; RPC_CALL also over CALLS) and the outbound HTTP ENDPOINT
+//! (reached over the CALLS the HTTP client extractor anchors, or USES).
 
 use repo_graph_activation::profile::{
-    ActivationPreset, DomainTables, EntryRule, NamedEntry, Registries,
+    ActivationPreset, DomainTables, EffectSink, EntryRule, NamedEntry, Registries,
 };
 
 use crate::{GRAPH_TYPE, cell_type, edge_category as ec, node_kind as nk};
@@ -102,8 +110,29 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         ec::READS_CONFIG,
         ec::DEFINES_CONFIG,
     ],
-    // LE.4's four effects: data access, a queue, an outbound call, an event.
-    effect_sinks: &[ec::ACCESSES_DATA, ec::QUEUE_FLOWS, ec::HTTP_CALLS, ec::EVENT_FLOWS],
+    // LE.4d: what a function does to the outside world, as (target kind,
+    // reaching category). A category alone misfires: USES also links a
+    // function to symbols that are no effect, and a producer with no consumer
+    // in the build has no QUEUE_FLOWS edge. The flow edges past a sink
+    // (QUEUE_FLOWS, HTTP_CALLS, ...) name its receivers; they are not sinks.
+    effect_sinks: &[
+        EffectSink {
+            class: "db",
+            kinds: &[nk::DATA_ENTITY, nk::DATABASE, nk::CACHE, nk::BLOB_STORE, nk::SEARCH_INDEX],
+            via: &[ec::ACCESSES_DATA],
+        },
+        EffectSink { class: "email", kinds: &[nk::EMAIL_SERVICE], via: &[ec::ACCESSES_DATA] },
+        EffectSink { class: "queue_produce", kinds: &[nk::QUEUE_PRODUCER], via: &[ec::USES] },
+        EffectSink { class: "http_call", kinds: &[nk::ENDPOINT], via: &[ec::CALLS, ec::USES] },
+        EffectSink { class: "event_emit", kinds: &[nk::EVENT_EMITTER], via: &[ec::USES] },
+        EffectSink {
+            class: "rpc_call",
+            kinds: &[nk::GRPC_CLIENT, nk::RPC_CALL],
+            via: &[ec::USES, ec::CALLS],
+        },
+        EffectSink { class: "ws_send", kinds: &[nk::WS_CLIENT], via: &[ec::USES] },
+        EffectSink { class: "graphql_op", kinds: &[nk::GRAPHQL_OPERATION], via: &[ec::USES] },
+    ],
     // `calls` and cross-stack calls highest, flows and handlers next, imports
     // medium, structural edges (`contains`, `defines`) lowest; any category
     // not listed weighs 1.0. CO_CHANGES (LF.5b) weighs 0: a git-history
@@ -185,6 +214,23 @@ mod tests {
         assert_eq!(CODE_TABLES.registries.cell_name(cell_type::ORIGIN), Some("ORIGIN"));
     }
 
+    /// LE.4d: a sink is the (kind, category) pair. The USES a function has on
+    /// a queue producer is an effect; the same USES on a plain function, or a
+    /// CONTAINS / QUEUE_FLOWS into the producer, is not.
+    #[test]
+    fn effect_sinks_are_kind_and_category() {
+        let class = |k, c| CODE_TABLES.effect_sink(k, c).map(|(_, s)| s.class);
+        assert_eq!(class(nk::DATA_ENTITY, ec::ACCESSES_DATA), Some("db"));
+        assert_eq!(class(nk::QUEUE_PRODUCER, ec::USES), Some("queue_produce"));
+        assert_eq!(class(nk::ENDPOINT, ec::CALLS), Some("http_call"));
+        assert_eq!(class(nk::EVENT_EMITTER, ec::USES), Some("event_emit"));
+        assert_eq!(class(nk::RPC_CALL, ec::CALLS), Some("rpc_call"));
+        assert_eq!(class(nk::FUNCTION, ec::USES), None);
+        assert_eq!(class(nk::QUEUE_PRODUCER, ec::CONTAINS), None);
+        assert_eq!(class(nk::QUEUE_CONSUMER, ec::QUEUE_FLOWS), None);
+        assert_eq!(class(nk::DATA_ENTITY, ec::USES), None);
+    }
+
     #[test]
     fn shares_data_source_is_not_carried() {
         // REGRESSION GUARD. A shared Postgres is an operational fact, not a
@@ -203,7 +249,7 @@ mod tests {
         // and must weigh 0 in every activation preset (an unlisted category
         // would weigh 1.0 and reshape every ranking in a repo with history).
         assert!(!CODE_TABLES.carries(ec::CO_CHANGES), "CO_CHANGES must stay OUT of carry_edges");
-        assert!(!CODE_TABLES.effect_sinks.contains(&ec::CO_CHANGES));
+        assert!(!CODE_TABLES.effect_sinks.iter().any(|s| s.via.contains(&ec::CO_CHANGES)));
         for preset in [None, Some("repair"), Some("review"), Some("onboard")] {
             let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");

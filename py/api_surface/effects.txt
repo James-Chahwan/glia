@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/effects.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.effects(qnames: Vec<String>, depth: usize = 8, classes: Option<Vec<String>> = None, writes_only: bool = false, cross_service: bool = false, scope: Option<String> = None) -> PyResult<Py<PyAny>>

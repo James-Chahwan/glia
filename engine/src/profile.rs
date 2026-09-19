@@ -524,7 +524,24 @@ mod tests {
                 ("tag_synthetic_provenance", &[cell_type::ORIGIN][..]),
             ]
         );
-        assert_eq!(t.effect_sinks, [ec::ACCESSES_DATA, ec::QUEUE_FLOWS, ec::HTTP_CALLS, ec::EVENT_FLOWS]);
+        // LE.4d's sink table: (class, target kinds, reaching categories).
+        let sinks: Vec<(&str, &[NodeKindId], &[EdgeCategoryId])> =
+            t.effect_sinks.iter().map(|s| (s.class, s.kinds, s.via)).collect();
+        let expect: [(&str, &[NodeKindId], &[EdgeCategoryId]); 8] = [
+            (
+                "db",
+                &[nk::DATA_ENTITY, nk::DATABASE, nk::CACHE, nk::BLOB_STORE, nk::SEARCH_INDEX],
+                &[ec::ACCESSES_DATA],
+            ),
+            ("email", &[nk::EMAIL_SERVICE], &[ec::ACCESSES_DATA]),
+            ("queue_produce", &[nk::QUEUE_PRODUCER], &[ec::USES]),
+            ("http_call", &[nk::ENDPOINT], &[ec::CALLS, ec::USES]),
+            ("event_emit", &[nk::EVENT_EMITTER], &[ec::USES]),
+            ("rpc_call", &[nk::GRPC_CLIENT, nk::RPC_CALL], &[ec::USES, ec::CALLS]),
+            ("ws_send", &[nk::WS_CLIENT], &[ec::USES]),
+            ("graphql_op", &[nk::GRAPHQL_OPERATION], &[ec::USES]),
+        ];
+        assert_eq!(sinks, expect);
         assert_eq!(t.graph_type, repo_graph_code_domain::GRAPH_TYPE);
     }
 

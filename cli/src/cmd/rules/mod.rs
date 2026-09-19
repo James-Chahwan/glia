@@ -10,6 +10,7 @@ use clap::Subcommand;
 
 mod check;
 mod cycles;
+mod effects;
 mod spec_status;
 
 #[derive(Subcommand, Debug)]
@@ -33,6 +34,14 @@ pub(crate) enum RulesCmd {
     /// but no handler-to-producer path is in the graph), then module import
     /// cycles. A report: exits 0 whatever it finds.
     Cycles(cycles::Args),
+    /// Effects (LE.4d): what the named nodes do to the outside world - the
+    /// effect sinks downstream of them (DB read / write with the SQL verb,
+    /// queue produce, outbound HTTP / RPC / WS / GraphQL call, event emit),
+    /// each with its witness path from the seed and the receivers one flow
+    /// hop past it. A config key seeds from the functions reading it. With
+    /// --cross-service the walk continues past each send into the receiving
+    /// handler. A report: exits 0 whatever it finds.
+    Effects(effects::Args),
     /// Spec status (LE.9b): per feature, the declared API ops (OpenAPI,
     /// quokka feature.yaml) that a route implements and the ones still
     /// missing, then the routes of governed services no op declares. Pact and
@@ -45,6 +54,7 @@ pub(crate) fn run(c: RulesCmd) -> i32 {
     match c {
         RulesCmd::Check(a) => check::run(a),
         RulesCmd::Cycles(a) => cycles::run(a),
+        RulesCmd::Effects(a) => effects::run(a),
         RulesCmd::SpecStatus(a) => spec_status::run(a),
     }
 }

@@ -1,0 +1,13 @@
+# CLI surface of `glia effects`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia effects
+  arg class pos=- long=class short=- required=false num_args=1 action=Append default=- value_names=CLASS global=false hidden=false
+  arg cross_service pos=- long=cross-service short=- required=false num_args=0 action=SetTrue default=false value_names=CROSS_SERVICE global=false hidden=false
+  arg depth pos=- long=depth short=- required=false num_args=1 action=Set default=8 value_names=DEPTH global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg qnames pos=2 long=- short=- required=true num_args=1.. action=Append default=- value_names=QNAMES global=false hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg scope pos=- long=scope short=- required=false num_args=1 action=Set default=- value_names=SCOPE global=false hidden=false
+  arg with pos=- long=with short=- required=false num_args=1 action=Append default=- value_names=WITH global=false hidden=false
+  arg writes_only pos=- long=writes-only short=- required=false num_args=0 action=SetTrue default=false value_names=WRITES_ONLY global=false hidden=false

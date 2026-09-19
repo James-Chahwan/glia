@@ -4,8 +4,8 @@
 //! Split in two so the query side never depends on the build side:
 //! - [`DomainTables`] is the data half — no generics, const-constructible:
 //!   the id registries, which nodes are entrypoints ([`EntryRule`]), which
-//!   edges carry reachability / blast radius, the effect sinks, and the
-//!   activation weights with their named presets. Query consumers (blast
+//!   edges carry reachability / blast radius, the effect sinks
+//!   ([`EffectSink`]), and the activation weights with their named presets. Query consumers (blast
 //!   radius, liveness, PPR seeding) need only this, so a crate that cannot
 //!   name the domain's graph type still reads it.
 //! - [`DomainProfile<G, C>`] is the tables plus the domain's build passes
@@ -148,6 +148,34 @@ impl EntryRule {
 }
 
 // ============================================================================
+// Effect sinks
+// ============================================================================
+
+/// One class of external effect (LE.4d): a walk that reaches a node of one of
+/// `kinds` over an edge of one of `via` has that effect (`db`, `queue_produce`,
+/// `http_call`, ...), and stops there.
+///
+/// A sink is the PAIR, never a category alone: a category is also emitted for
+/// uses that are not effects (the code domain's USES links a function to any
+/// symbol it names, not only the queue producer it sends through), and a
+/// producer with no consumer in the build has no flow edge at all, so only the
+/// target kind together with the reaching category names the effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectSink {
+    /// The effect's name, unique within the table.
+    pub class: &'static str,
+    pub kinds: &'static [NodeKindId],
+    pub via: &'static [EdgeCategoryId],
+}
+
+impl EffectSink {
+    /// Is reaching a `kind` node over a `via` edge this effect?
+    pub fn matches(&self, kind: NodeKindId, via: EdgeCategoryId) -> bool {
+        self.kinds.contains(&kind) && self.via.contains(&via)
+    }
+}
+
+// ============================================================================
 // Activation presets
 // ============================================================================
 
@@ -174,9 +202,11 @@ pub struct DomainTables {
     /// The semantic edges reachability and blast radius follow, in declared
     /// order (structural containment / import fan-out stays out).
     pub carry_edges: &'static [EdgeCategoryId],
-    /// The edges whose target is an external effect (data access, a queue, an
-    /// outbound call, an event). Empty is legal: a domain with no effects.
-    pub effect_sinks: &'static [EdgeCategoryId],
+    /// The external effects a node can have (data access, a queue, an
+    /// outbound call, an event, ...), each a (target kind, reaching category)
+    /// class; the first match in table order classifies. Empty is legal: a
+    /// domain with no effects.
+    pub effect_sinks: &'static [EffectSink],
     /// Base PPR weight per edge category; a category not listed weighs 1.0
     /// (the [`ActivationConfig`] default).
     pub activation_weights: &'static [(EdgeCategoryId, f64)],
@@ -205,11 +235,25 @@ impl DomainTables {
         self.carry_edges.contains(&c)
     }
 
+    /// The effect sink (with its table index) that reaching a `kind` node over
+    /// a `via` edge is, first match in table order; `None` when it is no
+    /// effect.
+    pub fn effect_sink(
+        &self,
+        kind: NodeKindId,
+        via: EdgeCategoryId,
+    ) -> Option<(usize, &'static EffectSink)> {
+        self.effect_sinks.iter().enumerate().find(|(_, s)| s.matches(kind, via))
+    }
+
     /// Every problem with the tables, or `Ok`: the registries hold unique ids
     /// and names; every id the entry rule, carry edges, effect sinks, weights
     /// and presets name is registered, and none is listed twice in one list;
     /// every weight is finite and `>= 0`; preset names are non-empty and
-    /// unique; a named entry can match something.
+    /// unique; a named entry can match something; effect sink classes are
+    /// non-empty and unique, each sink names a kind and a category, and no
+    /// (kind, category) pair belongs to two sinks (the first would hide the
+    /// second).
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if self.graph_type.is_empty() {
@@ -261,7 +305,31 @@ impl DomainTables {
             }
         };
         categories("carry_edges", &mut self.carry_edges.iter().copied(), &mut errors);
-        categories("effect_sinks", &mut self.effect_sinks.iter().copied(), &mut errors);
+        for (i, sink) in self.effect_sinks.iter().enumerate() {
+            let field = format!("effect_sinks[{i}]");
+            if sink.class.is_empty() {
+                errors.push(format!("{field} has an empty class"));
+            }
+            if self.effect_sinks[..i].iter().any(|s| s.class == sink.class) {
+                errors.push(format!("effect sink class {:?} is declared more than once", sink.class));
+            }
+            if sink.kinds.is_empty() || sink.via.is_empty() {
+                errors.push(format!("{field} matches no node: it needs a kind and a category"));
+            }
+            kinds(&format!("{field}.kinds"), sink.kinds, &mut errors);
+            categories(&format!("{field}.via"), &mut sink.via.iter().copied(), &mut errors);
+            for (j, prior) in self.effect_sinks[..i].iter().enumerate() {
+                let shared = sink.kinds.iter().find_map(|k| {
+                    sink.via.iter().find(|c| prior.matches(*k, **c)).map(|c| (k, c))
+                });
+                if let Some((k, c)) = shared {
+                    errors.push(format!(
+                        "{field} ({:?}) overlaps effect_sinks[{j}] ({:?}) on node kind {} over edge category {}: the first would hide the second",
+                        sink.class, prior.class, k.0, c.0
+                    ));
+                }
+            }
+        }
 
         let weights = |field: &str, rows: &[(EdgeCategoryId, f64)], errors: &mut Vec<String>| {
             categories(field, &mut rows.iter().map(|(c, _)| *c), errors);
@@ -483,7 +551,7 @@ mod tests {
                 roles: &[NodeKindId(78)],
                 named: &[NamedEntry { kinds: &[FUNCTION], exact: &[], prefixes: &[""] }],
             },
-            effect_sinks: &[EdgeCategoryId(55)],
+            effect_sinks: &[EffectSink { class: "db", kinds: &[ROUTE], via: &[EdgeCategoryId(55)] }],
             activation_weights: &[(CALLS, -1.0), (IMPORTS, f64::NAN), (CALLS, 2.0)],
             activation_presets: &[
                 ActivationPreset { name: "p", overrides: &[(EdgeCategoryId(66), 1.0)] },
@@ -498,7 +566,7 @@ mod tests {
             "entry.kinds lists node kind 1 more than once",
             "entry.roles holds node kind 78, which is not registered",
             "entry.named[0] has an empty prefix, which matches every name: list its kinds in entry.kinds",
-            "effect_sinks holds edge category 55, which is not registered",
+            "effect_sinks[0].via holds edge category 55, which is not registered",
             "activation_weights lists edge category 1 more than once",
             "activation_weights weighs edge category 1 -1: a weight is finite and >= 0",
             "activation_weights weighs edge category 2 NaN: a weight is finite and >= 0",
@@ -520,6 +588,52 @@ mod tests {
             [
                 "node kind 1 is registered more than once",
                 "node kind name \"ROUTE\" is registered more than once"
+            ]
+        );
+    }
+
+    #[test]
+    fn effect_sinks_classify_and_validate() {
+        const SINKS: &[EffectSink] = &[
+            EffectSink { class: "call", kinds: &[ROUTE], via: &[CALLS] },
+            EffectSink { class: "import", kinds: &[ROUTE, CLASS], via: &[IMPORTS] },
+        ];
+        let tables = DomainTables { effect_sinks: SINKS, ..TABLES };
+        assert_eq!(tables.validate(), Ok(()));
+        // The pair classifies: the kind alone or the category alone does not.
+        assert_eq!(tables.effect_sink(ROUTE, CALLS).map(|(i, s)| (i, s.class)), Some((0, "call")));
+        assert_eq!(tables.effect_sink(CLASS, IMPORTS).map(|(i, s)| (i, s.class)), Some((1, "import")));
+        assert!(tables.effect_sink(CLASS, CALLS).is_none());
+        assert!(tables.effect_sink(FUNCTION, IMPORTS).is_none());
+        assert!(TABLES.effect_sink(ROUTE, CALLS).is_none(), "an empty table has no effects");
+
+        // An unregistered kind is rejected, as an unregistered category is.
+        let bad = DomainTables {
+            effect_sinks: &[EffectSink { class: "db", kinds: &[NodeKindId(77), ROUTE], via: &[CALLS] }],
+            ..TABLES
+        };
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            ["effect_sinks[0].kinds holds node kind 77, which is not registered"]
+        );
+
+        let bad = DomainTables {
+            effect_sinks: &[
+                EffectSink { class: "", kinds: &[], via: &[CALLS] },
+                EffectSink { class: "db", kinds: &[ROUTE, ROUTE], via: &[CALLS, CALLS] },
+                EffectSink { class: "db", kinds: &[ROUTE], via: &[CALLS] },
+            ],
+            ..TABLES
+        };
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            [
+                "effect_sinks[0] has an empty class",
+                "effect_sinks[0] matches no node: it needs a kind and a category",
+                "effect_sinks[1].kinds lists node kind 1 more than once",
+                "effect_sinks[1].via lists edge category 1 more than once",
+                "effect sink class \"db\" is declared more than once",
+                "effect_sinks[2] (\"db\") overlaps effect_sinks[1] (\"db\") on node kind 1 over edge category 1: the first would hide the second",
             ]
         );
     }
