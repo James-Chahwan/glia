@@ -20,9 +20,17 @@
 //! const-derived namespace (`people: userRouter` elsewhere): the procedure reads
 //! `rpc:user.*` while the client calls `people.*`. The fix for that is mount
 //! resolution in the extractor, not fuzz here.
+//!
+//! OWNERS (LB.8b). Under a nested project root both sides carry LB.4a's
+//! ` @<project path>` owner (`rpc:user.list @services/users`,
+//! `rpc_call:user.list @apps/web`). They are network RPC sides like
+//! GRPC_SERVER / GRPC_CLIENT, so the owner is stripped on both ends (the
+//! procedure index is `build_kind_index`, owner-free since LB.8) and every
+//! call pairs every same-path procedure, whichever project holds it.
 
 use std::collections::HashSet;
 
+use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{Edge, NodeId};
 
@@ -45,7 +53,7 @@ impl CrossGraphResolver for RpcStackResolver {
                     continue;
                 }
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
-                let Some(path) = qname.strip_prefix("rpc_call:") else { continue };
+                let Some(path) = split_owner(qname).0.strip_prefix("rpc_call:") else { continue };
                 calls += 1;
                 let Some(targets) = index.get(path) else { continue };
                 paired += 1;
@@ -170,6 +178,33 @@ mod tests {
         let proc_id = id(server, PROC, "rpc:user.list");
         let hit = hits.iter().find(|h| h.id == proc_id).map(|h| (h.depth, h.reason));
         assert_eq!(hit, Some((1, edge_category::RPC_CALLS)), "RPC_CALLS must carry blast radius");
+    }
+
+    /// LB.8b: an owned call reaches every owned procedure of its path, and the
+    /// owner never takes part in the key.
+    #[test]
+    fn rpc_call_owner_is_stripped() {
+        let r = RepoId::from_canonical("test://mono");
+        let g = graph(
+            r,
+            &[
+                (PROC, "rpc:user.list @services/users", Strong),
+                (PROC, "rpc:user.list @services/legacy", Strong),
+                (PROC, "rpc:user.byId @services/users", Strong),
+                (CALL, "rpc_call:user.list @apps/web", Medium),
+            ],
+        );
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.run(&RpcStackResolver);
+        let call = id(r, CALL, "rpc_call:user.list @apps/web");
+        assert_eq!(
+            rpc_edges(&merged),
+            vec![
+                (call, id(r, PROC, "rpc:user.list @services/users"), Medium),
+                (call, id(r, PROC, "rpc:user.list @services/legacy"), Medium),
+            ],
+            "one edge per same-path procedure, across owners; user.byId untouched"
+        );
     }
 
     #[test]

@@ -1041,6 +1041,153 @@ fn event_resolver_keeps_string_topics_exact() {
     );
 }
 
+// LB.8b — the owner rule. An event side inside a nested project carries
+// ` @<project path>`; an in-process event pairs only inside one owner or with
+// an unowned side, a transport-scoped side pairs across owners.
+
+/// The ORIGIN the extractor writes on a transport-scoped event side.
+fn transport_origin() -> repo_graph_core::Cell {
+    repo_graph_core::Cell {
+        kind: repo_graph_code_domain::cell_type::ORIGIN,
+        payload: repo_graph_core::CellPayload::Json(
+            r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#.into(),
+        ),
+    }
+}
+
+/// One event side: `(kind, qname, transport)`, the nav name the owner-free
+/// event name (the extractor's display name).
+fn event_side(
+    nodes: &mut Vec<Node>,
+    nav: &mut CodeNav,
+    repo: RepoId,
+    kind: repo_graph_core::NodeKindId,
+    qname: &str,
+    transport: bool,
+) -> NodeId {
+    let (mut node, id) = make_node(repo, kind, qname, Confidence::Weak);
+    if transport {
+        node.cells.push(transport_origin());
+    }
+    let bare = qname.split(" @").next().unwrap_or(qname);
+    let name = bare.split_once(':').map_or(bare, |(_, n)| n);
+    record(nav, id, name, qname, kind);
+    nodes.push(node);
+    id
+}
+
+/// `(from qname, to qname)` of every EVENT_FLOWS edge, sorted.
+fn event_flows(merged: &MergedGraph) -> Vec<(String, String)> {
+    let q = |id: NodeId| {
+        merged
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+            .unwrap_or_default()
+    };
+    let mut out: Vec<(String, String)> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .map(|e| (q(e.from), q(e.to)))
+        .collect();
+    out.sort();
+    out
+}
+
+fn pair(a: &str, b: &str) -> (String, String) {
+    (a.to_string(), b.to_string())
+}
+
+#[test]
+fn event_resolver_pairs_within_an_owner_or_with_an_unowned_side() {
+    let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
+    for q in ["event_emit:x @a", "event_emit:x @b"] {
+        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, q, false);
+    }
+    for q in ["event_handle:x @a", "event_handle:x @b", "event_handle:x"] {
+        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, q, false);
+    }
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
+    EventBusResolver.resolve(&mut merged);
+    assert_eq!(
+        event_flows(&merged),
+        [
+            pair("event_emit:x @a", "event_handle:x"),
+            pair("event_emit:x @a", "event_handle:x @a"),
+            pair("event_emit:x @b", "event_handle:x"),
+            pair("event_emit:x @b", "event_handle:x @b"),
+        ],
+        "a @ b never exchange an in-process event"
+    );
+}
+
+#[test]
+fn event_resolver_transport_side_pairs_across_owners() {
+    for (transport, want) in [(true, 1usize), (false, 0)] {
+        let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
+        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, "event_emit:y @a", false);
+        event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:y @b", transport);
+        let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
+        EventBusResolver.resolve(&mut merged);
+        assert_eq!(event_flows(&merged).len(), want, "transport={transport}");
+    }
+    // Either side may carry the mark: a ClientProxy.emit reaches a plain handler.
+    let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
+    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_EMITTER, "event_emit:y @a", true);
+    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:y @b", false);
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
+    EventBusResolver.resolve(&mut merged);
+    assert_eq!(event_flows(&merged), [pair("event_emit:y @a", "event_handle:y @b")]);
+}
+
+#[test]
+fn event_resolver_owner_is_repo_scoped() {
+    // The same rel path in two repos is two projects.
+    let (mut na, mut va) = (Vec::new(), CodeNav::default());
+    event_side(&mut na, &mut va, repo_a(), node_kind::EVENT_EMITTER, "event_emit:x @svc", false);
+    let (mut nb, mut vb) = (Vec::new(), CodeNav::default());
+    event_side(&mut nb, &mut vb, repo_b(), node_kind::EVENT_HANDLER, "event_handle:x @svc", false);
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), na, va), make_graph(repo_b(), nb, vb)]);
+    EventBusResolver.resolve(&mut merged);
+    assert!(event_flows(&merged).is_empty(), "{:?}", event_flows(&merged));
+
+    // An unowned emitter in A still reaches B's owned handler.
+    let (mut na, mut va) = (Vec::new(), CodeNav::default());
+    let e = event_side(&mut na, &mut va, repo_a(), node_kind::EVENT_EMITTER, "event_emit:x", false);
+    let (mut nb, mut vb) = (Vec::new(), CodeNav::default());
+    let h = event_side(&mut nb, &mut vb, repo_b(), node_kind::EVENT_HANDLER, "event_handle:x @svc", false);
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), na, va), make_graph(repo_b(), nb, vb)]);
+    EventBusResolver.resolve(&mut merged);
+    let edges: Vec<(NodeId, NodeId)> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .map(|e| (e.from, e.to))
+        .collect();
+    assert_eq!(edges, [(e, h)]);
+}
+
+#[test]
+fn event_resolver_code_qname_event_is_unowned() {
+    // A Solidity-declared event keeps its code qname (never owned); it keys on
+    // its NAME and pairs an owned handler of any project.
+    let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
+    let (emitter, e) = make_node(repo_a(), node_kind::EVENT_EMITTER, "m::C::C::BidPlaced", Confidence::Medium);
+    record(&mut nav, e, "BidPlaced", "m::C::C::BidPlaced", node_kind::EVENT_EMITTER);
+    nodes.push(emitter);
+    let h = event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced @web", false);
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
+    EventBusResolver.resolve(&mut merged);
+    let edges: Vec<(NodeId, NodeId)> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::EVENT_FLOWS)
+        .map(|e| (e.from, e.to))
+        .collect();
+    assert_eq!(edges, [(e, h)]);
+}
+
 // ============================================================================
 // CliInvocationResolver
 // ============================================================================

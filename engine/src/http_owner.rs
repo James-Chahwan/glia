@@ -2,7 +2,9 @@
 //! a nested project root are qualified with ` @<project path>`. LB.8 extends
 //! the same rule to the SIDES of every named channel: QUEUE_PRODUCER /
 //! QUEUE_CONSUMER, WS_HANDLER / WS_CLIENT, GRAPHQL_RESOLVER /
-//! GRAPHQL_OPERATION, GRPC_CLIENT and the A5.3 GRPC_SERVER marker.
+//! GRAPHQL_OPERATION, GRPC_CLIENT and the A5.3 GRPC_SERVER marker. LB.8b
+//! adds the last two channel families: RPC_PROCEDURE / RPC_CALL (tRPC,
+//! Connect, Twirp) and EVENT_EMITTER / EVENT_HANDLER.
 //!
 //! WHY. NodeId hashes (repo, kind, qname), and an HTTP qname is only a method
 //! and a path. Two services in ONE repo serving `/health` were therefore ONE
@@ -28,6 +30,17 @@
 //! agrees. Within one project the A2.8 rule stands: one producer node per
 //! topic however many files publish.
 //!
+//! RPC AND EVENT SIDES (LB.8b). `rpc:<path>` / `rpc_call:<path>` are network
+//! RPC sides like the gRPC ones and pair across owners on the exact path.
+//! `event_emit:<name>` / `event_handle:<name>` take the owner too, but the
+//! EventBusResolver pairs an IN-PROCESS event only inside one owner (or with
+//! an unowned side): two nested projects are two processes. A side the
+//! extractor marked transport-scoped (NestJS microservices, EventBridge)
+//! pairs across owners like a queue. Only the extractor's prefixed qnames are
+//! owned: a Solidity `event BidPlaced(..)` is an EVENT_EMITTER with an
+//! ordinary code qname, already path-scoped, and an on-chain event is read
+//! off-chain by other processes; it is left alone and counted `declared`.
+//!
 //! WHO OWNS A NODE. The longest nested project root (A8.4) enclosing the
 //! node's file (the `service_of` rule in [`crate::arch`]). The repo root is
 //! never an owner, so a single-project repo, and every file under only the
@@ -42,14 +55,18 @@
 //! WHERE IT RUNS. Post-cache, LAST among the grafts that mint or re-key an
 //! owned kind (the A11.2 endpoint fold, which keys client endpoints by their
 //! owner-free path; LA.6d's Next.js pages; LA.4's queue-topic const fold;
-//! the A5.2 / A5.3 RPC needles), from `build::grafts::apply_post_cache`. The
+//! the A5.2 / A5.3 RPC needles and LA.17's Connect / Twirp RPC_PROCEDURE /
+//! RPC_CALL graft), from `build::grafts::apply_post_cache`. The
 //! cache keeps the owner-free parse, so adding or removing a manifest never
 //! needs a cache flush.
 //!
 //! PAIRING IGNORES OWNERS. Every resolver strips the segment
 //! (`code_domain::endpoint::split_owner`) before it reads a method, path,
 //! topic, field or service name, so two owners on one channel pair
-//! all-to-all; narrowing an HTTP pairing by project is LB.4b.
+//! all-to-all; narrowing an HTTP pairing by project is LB.4b. The one
+//! exception is the in-process event (LB.8b, above): the EventBusResolver
+//! reads the owner back and keeps an EVENT_FLOWS only inside one owner, with
+//! an unowned side, or across a transport.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file.
 //! Crate-private: cross-module items are `pub(crate)`.
@@ -131,8 +148,10 @@ fn owner_segment(rel: &str) -> Cow<'_, str> {
 }
 
 /// The channel family of an owned kind. The Http rows keep LB.4a's routes /
-/// endpoints / pages accounting and its `[http-owner]` line; the others are
-/// counted on the LB.8 `[channel-owner]` line.
+/// endpoints / pages accounting and its `[http-owner]` line; Queue / Ws /
+/// Graphql / Grpc are counted on the LB.8 `[channel-owner]` line, and Rpc /
+/// Event (LB.8b) on a second `[channel-owner]` line, so LB.8's reads exactly
+/// as before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mechanism {
     Http,
@@ -140,25 +159,36 @@ enum Mechanism {
     Ws,
     Graphql,
     Grpc,
+    Rpc,
+    Event,
 }
 
-/// Every kind the owner pass qualifies, with its mechanism. A kind absent
-/// here is never owned: GRPC_SERVICE and MESSAGE_TYPE are shared contracts.
-const OWNED: &[(NodeKindId, Mechanism)] = &[
-    (node_kind::ROUTE, Mechanism::Http),
-    (node_kind::ENDPOINT, Mechanism::Http),
-    (node_kind::QUEUE_PRODUCER, Mechanism::Queue),
-    (node_kind::QUEUE_CONSUMER, Mechanism::Queue),
-    (node_kind::WS_HANDLER, Mechanism::Ws),
-    (node_kind::WS_CLIENT, Mechanism::Ws),
-    (node_kind::GRAPHQL_RESOLVER, Mechanism::Graphql),
-    (node_kind::GRAPHQL_OPERATION, Mechanism::Graphql),
-    (node_kind::GRPC_CLIENT, Mechanism::Grpc),
-    (node_kind::GRPC_SERVER, Mechanism::Grpc),
+/// Every kind the owner pass qualifies, with its mechanism and the qname
+/// prefix a node of that kind must carry to be owned (`""` = any). A kind
+/// absent here is never owned: GRPC_SERVICE and MESSAGE_TYPE are shared
+/// contracts. A node of a listed kind whose qname lacks the prefix (a
+/// Solidity-declared event, a code qname) is left alone and counted
+/// `declared`.
+const OWNED: &[(NodeKindId, Mechanism, &str)] = &[
+    (node_kind::ROUTE, Mechanism::Http, ""),
+    (node_kind::ENDPOINT, Mechanism::Http, ""),
+    (node_kind::QUEUE_PRODUCER, Mechanism::Queue, ""),
+    (node_kind::QUEUE_CONSUMER, Mechanism::Queue, ""),
+    (node_kind::WS_HANDLER, Mechanism::Ws, ""),
+    (node_kind::WS_CLIENT, Mechanism::Ws, ""),
+    (node_kind::GRAPHQL_RESOLVER, Mechanism::Graphql, ""),
+    (node_kind::GRAPHQL_OPERATION, Mechanism::Graphql, ""),
+    (node_kind::GRPC_CLIENT, Mechanism::Grpc, ""),
+    (node_kind::GRPC_SERVER, Mechanism::Grpc, ""),
+    (node_kind::RPC_PROCEDURE, Mechanism::Rpc, "rpc:"),
+    (node_kind::RPC_CALL, Mechanism::Rpc, "rpc_call:"),
+    (node_kind::EVENT_EMITTER, Mechanism::Event, "event_emit:"),
+    (node_kind::EVENT_HANDLER, Mechanism::Event, "event_handle:"),
 ];
 
-fn mechanism_of(kind: NodeKindId) -> Option<Mechanism> {
-    OWNED.iter().find(|(k, _)| *k == kind).map(|(_, m)| *m)
+/// The mechanism and required qname prefix of an owned kind.
+fn owned_row(kind: NodeKindId) -> Option<(Mechanism, &'static str)> {
+    OWNED.iter().find(|(k, _, _)| *k == kind).map(|(_, m, p)| (*m, *p))
 }
 
 /// Which marker bucket a qualified node counts in.
@@ -171,6 +201,41 @@ enum Class {
     Ws,
     Graphql,
     Grpc,
+    Rpc,
+    Event,
+}
+
+impl Class {
+    /// Which marker line (and which owner / unplaced / foreign tallies) a
+    /// qualified node counts on.
+    fn family(self) -> Family {
+        match self {
+            Class::Route | Class::Page | Class::Endpoint => Family::Http,
+            Class::Queue | Class::Ws | Class::Graphql | Class::Grpc => Family::Channel,
+            Class::Rpc | Class::Event => Family::RpcEvent,
+        }
+    }
+}
+
+/// The three marker lines' families: LB.4a HTTP, LB.8 channel sides, LB.8b
+/// RPC and event sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Http,
+    Channel,
+    RpcEvent,
+}
+
+impl Family {
+    fn of(mechanism: Mechanism) -> Self {
+        match mechanism {
+            Mechanism::Http => Family::Http,
+            Mechanism::Queue | Mechanism::Ws | Mechanism::Graphql | Mechanism::Grpc => {
+                Family::Channel
+            }
+            Mechanism::Rpc | Mechanism::Event => Family::RpcEvent,
+        }
+    }
 }
 
 /// One planned rekey inside one parse.
@@ -180,12 +245,6 @@ struct Move<'o> {
     qname: String,
     class: Class,
     owner: &'o str,
-}
-
-impl Move<'_> {
-    fn is_http(&self) -> bool {
-        matches!(self.class, Class::Route | Class::Page | Class::Endpoint)
-    }
 }
 
 /// What the pass did to one repo, for the `[http-owner]` and
@@ -229,6 +288,19 @@ pub(crate) struct OwnerStats {
     pub chan_unplaced: usize,
     /// LB.8: `foreign` for re-keyed channel-side ids.
     pub chan_foreign: usize,
+    /// LB.8b: qualified RPC_PROCEDURE / RPC_CALL nodes (tRPC, Connect, Twirp).
+    pub rpc: usize,
+    /// LB.8b: qualified EVENT_EMITTER / EVENT_HANDLER nodes.
+    pub event: usize,
+    /// LB.8b: RPC / event nodes whose qname lacks the row's prefix (a
+    /// Solidity `event X(..)` with a code qname): never owned.
+    pub declared: usize,
+    /// LB.8b: owners that qualified at least one RPC / event side.
+    pub rpc_event_owners: usize,
+    /// LB.8b: `chan_unplaced` for RPC / event sides.
+    pub rpc_event_unplaced: usize,
+    /// LB.8b: `chan_foreign` for re-keyed RPC / event ids.
+    pub rpc_event_foreign: usize,
 }
 
 impl OwnerStats {
@@ -240,6 +312,11 @@ impl OwnerStats {
     /// Once per repo that has a nested project root and qualified (or failed
     /// to place, or saw a dangling reference to) a channel side:
     ///   `[channel-owner] qualified queue=Q ws=W graphql=G grpc=R over O owners (unplaced=U foreign=F) repo=<label>`
+    ///
+    /// LB.8b, a SECOND line (LB.8's stays byte-identical), once per repo that
+    /// has a nested project root and qualified, declined (`declared`), failed
+    /// to place or saw a dangling reference to an RPC or event side:
+    ///   `[channel-owner] qualified rpc=P event=E over O owners (declared=D unplaced=U foreign=F) repo=<label>`
     pub(crate) fn report(&self, repo_label: &str) {
         if self.seen > 0 {
             eprintln!(
@@ -258,6 +335,22 @@ impl OwnerStats {
                 self.chan_owners,
                 self.chan_unplaced,
                 self.chan_foreign
+            );
+        }
+        let rpc_event = self.rpc
+            + self.event
+            + self.declared
+            + self.rpc_event_unplaced
+            + self.rpc_event_foreign;
+        if rpc_event > 0 {
+            eprintln!(
+                "[channel-owner] qualified rpc={} event={} over {} owners (declared={} unplaced={} foreign={}) repo={repo_label}",
+                self.rpc,
+                self.event,
+                self.rpc_event_owners,
+                self.declared,
+                self.rpc_event_unplaced,
+                self.rpc_event_foreign
             );
         }
     }
@@ -295,8 +388,10 @@ pub(crate) fn qualify_repo<'a>(
         .collect();
 
     // The foreign census, before anything moves. The value says whether the
-    // moved id is an HTTP node (`foreign`) or a channel side (`chan_foreign`).
-    let moved: HashMap<NodeId, bool> = plans.iter().flatten().map(|m| (m.old, m.is_http())).collect();
+    // moved id is an HTTP node (`foreign`), a channel side (`chan_foreign`)
+    // or an RPC / event side (`rpc_event_foreign`).
+    let moved: HashMap<NodeId, Family> =
+        plans.iter().flatten().map(|m| (m.old, m.class.family())).collect();
     if !moved.is_empty() {
         for fp in &parses {
             let own: HashSet<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
@@ -305,8 +400,9 @@ pub(crate) fn qualify_repo<'a>(
                     return;
                 }
                 match moved.get(&id) {
-                    Some(true) => stats.foreign += 1,
-                    Some(false) => stats.chan_foreign += 1,
+                    Some(Family::Http) => stats.foreign += 1,
+                    Some(Family::Channel) => stats.chan_foreign += 1,
+                    Some(Family::RpcEvent) => stats.rpc_event_foreign += 1,
                     None => {}
                 }
             };
@@ -323,17 +419,21 @@ pub(crate) fn qualify_repo<'a>(
         }
     }
 
-    let mut qualified: [HashSet<NodeId>; 7] = Default::default();
-    let (mut http_owners, mut chan_owners): (BTreeSet<&str>, BTreeSet<&str>) = Default::default();
+    let mut qualified: [HashSet<NodeId>; 9] = Default::default();
+    let (mut http_owners, mut chan_owners, mut rpc_event_owners): (
+        BTreeSet<&str>,
+        BTreeSet<&str>,
+        BTreeSet<&str>,
+    ) = Default::default();
     for (fp, moves) in parses.iter_mut().zip(plans) {
         for m in moves {
             rekey_node(fp, m.old, m.new, &m.qname);
             qualified[m.class as usize].insert(m.new);
-            if m.is_http() {
-                http_owners.insert(m.owner);
-            } else {
-                chan_owners.insert(m.owner);
-            }
+            match m.class.family() {
+                Family::Http => http_owners.insert(m.owner),
+                Family::Channel => chan_owners.insert(m.owner),
+                Family::RpcEvent => rpc_event_owners.insert(m.owner),
+            };
         }
     }
     let count = |c: Class| qualified[c as usize].len();
@@ -344,10 +444,15 @@ pub(crate) fn qualify_repo<'a>(
     stats.ws = count(Class::Ws);
     stats.graphql = count(Class::Graphql);
     stats.grpc = count(Class::Grpc);
+    stats.rpc = count(Class::Rpc);
+    stats.event = count(Class::Event);
     stats.owners = http_owners.len();
     stats.chan_owners = chan_owners.len();
+    stats.rpc_event_owners = rpc_event_owners.len();
     stats.unplaced = census.unplaced.len();
     stats.chan_unplaced = census.chan_unplaced.len();
+    stats.rpc_event_unplaced = census.rpc_event_unplaced.len();
+    stats.declared = census.declared.len();
     stats.seen = census.seen.len();
     stats
 }
@@ -359,6 +464,9 @@ struct Census {
     seen: HashSet<NodeId>,
     unplaced: HashSet<NodeId>,
     chan_unplaced: HashSet<NodeId>,
+    rpc_event_unplaced: HashSet<NodeId>,
+    /// LB.8b: RPC / event nodes whose qname lacks their row's prefix.
+    declared: HashSet<NodeId>,
 }
 
 /// The rekeys one parse needs, in `fp.nodes` order, one per distinct id.
@@ -375,30 +483,34 @@ fn plan_parse<'o>(
         let Some(&kind) = fp.nav.kind_by_id.get(&node.id) else {
             continue;
         };
-        let Some(mechanism) = mechanism_of(kind) else {
+        let Some((mechanism, prefix)) = owned_row(kind) else {
             continue;
         };
         if !planned.insert(node.id) {
             continue;
         }
-        let http = mechanism == Mechanism::Http;
-        if http {
+        let family = Family::of(mechanism);
+        if family == Family::Http {
             census.seen.insert(node.id);
         }
         let Some(qname) = fp.nav.qname_by_id.get(&node.id) else {
             continue;
         };
+        if !qname.starts_with(prefix) {
+            census.declared.insert(node.id);
+            continue;
+        }
         if split_owner(qname).1.is_some() {
             continue;
         }
         let file = node_file(node)
             .or_else(|| parse_file.get_or_insert_with(|| module_file(fp)).clone());
         let Some(file) = file else {
-            if http {
-                census.unplaced.insert(node.id);
-            } else {
-                census.chan_unplaced.insert(node.id);
-            }
+            match family {
+                Family::Http => census.unplaced.insert(node.id),
+                Family::Channel => census.chan_unplaced.insert(node.id),
+                Family::RpcEvent => census.rpc_event_unplaced.insert(node.id),
+            };
             continue;
         };
         let Some(owner) = owners.owner_of(&file) else {
@@ -413,6 +525,8 @@ fn plan_parse<'o>(
             Mechanism::Ws => Class::Ws,
             Mechanism::Graphql => Class::Graphql,
             Mechanism::Grpc => Class::Grpc,
+            Mechanism::Rpc => Class::Rpc,
+            Mechanism::Event => Class::Event,
         };
         moves.push(Move {
             old: node.id,
@@ -663,5 +777,80 @@ mod tests {
         );
         assert_eq!(bare.nodes[0].id, lost);
         assert_eq!(fp.nodes[0].id, id(node_kind::WS_CLIENT, "ws_client:/ws @web"));
+    }
+
+    /// LB.8b: RPC and event sides are owned and counted apart from LB.8's
+    /// channel sides (whose counters, and so whose line, do not move); a
+    /// Solidity-shaped code qname is left alone and counted `declared`; every
+    /// cell rides the rekey, so an extractor's transport ORIGIN survives.
+    #[test]
+    fn rpc_and_event_sides_are_owned_and_code_qname_events_are_declared() {
+        let idx = OwnerIndex::from_roots(&[root("services/users", "npm"), root("contracts", "npm")]);
+        let mut fp = FileParse::default();
+        let file = "services/users/router.ts";
+        push(&mut fp, node_kind::MODULE, "router", "services::users::router", vec![position(file)]);
+        let transport = Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(
+                r#"{"provenance":"synthetic","delivery":"transport","via":"nestjs-microservices"}"#.into(),
+            ),
+        };
+        let sides = [
+            (node_kind::RPC_PROCEDURE, "rpc:user.list"),
+            (node_kind::RPC_CALL, "rpc_call:user.list"),
+            (node_kind::EVENT_EMITTER, "event_emit:orderPlaced"),
+            (node_kind::EVENT_HANDLER, "event_handle:orderShipped"),
+        ];
+        for (kind, q) in sides {
+            // No POSITION on the side itself: the MODULE file places it.
+            push(&mut fp, kind, q, q, vec![transport.clone()]);
+        }
+        let mut sol = FileParse::default();
+        let bid_q = "contracts::Auction::Auction::BidPlaced";
+        let bid = push(&mut sol, node_kind::EVENT_EMITTER, "BidPlaced", bid_q, vec![position("contracts/Auction.sol")]);
+
+        let stats = qualify_repo([&mut fp, &mut sol], &idx, REPO);
+        assert_eq!(
+            stats,
+            OwnerStats { rpc: 2, event: 2, rpc_event_owners: 1, declared: 1, ..OwnerStats::default() }
+        );
+        for (kind, q) in sides {
+            let new = id(kind, &format!("{q} @services/users"));
+            let node = fp.nodes.iter().find(|n| n.id == new);
+            assert!(node.is_some(), "{q} qualified");
+            assert_eq!(node.map(|n| n.cells.clone()), Some(vec![transport.clone()]), "{q}: cells ride the rekey");
+            assert_eq!(fp.nav.name_by_id.get(&new).map(String::as_str), Some(q), "display name kept");
+        }
+        assert_eq!(sol.nodes[0].id, bid, "a code-qname event is never owned");
+        assert_eq!(sol.nav.qname_by_id.get(&bid).map(String::as_str), Some(bid_q));
+    }
+
+    /// An RPC / event side with no file is counted on the LB.8b tallies, and a
+    /// reference to a re-keyed one from another parse is an LB.8b foreign,
+    /// never an LB.8 one.
+    #[test]
+    fn rpc_event_unplaced_and_foreign_are_counted_apart_from_channels() {
+        let idx = OwnerIndex::from_roots(&[root("web", "npm")]);
+        let mut fp = FileParse::default();
+        let call = push(&mut fp, node_kind::RPC_CALL, "user.list", "rpc_call:user.list", vec![position("web/users.tsx")]);
+        let mut other = FileParse::default();
+        let caller = push(&mut other, node_kind::FUNCTION, "f", "lib::f", vec![]);
+        other.edges.push(Edge { from: caller, to: call, category: edge_category::USES, confidence: Confidence::Strong });
+        let mut bare = FileParse::default();
+        let lost = push(&mut bare, node_kind::EVENT_HANDLER, "x", "event_handle:x", vec![]);
+
+        let stats = qualify_repo([&mut fp, &mut other, &mut bare], &idx, REPO);
+        assert_eq!(
+            stats,
+            OwnerStats {
+                rpc: 1,
+                rpc_event_owners: 1,
+                rpc_event_unplaced: 1,
+                rpc_event_foreign: 1,
+                ..OwnerStats::default()
+            }
+        );
+        assert_eq!(bare.nodes[0].id, lost);
+        assert_eq!(fp.nodes[0].id, id(node_kind::RPC_CALL, "rpc_call:user.list @web"));
     }
 }

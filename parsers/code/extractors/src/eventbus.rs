@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use repo_graph_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 
@@ -193,6 +193,23 @@ const PYEE_BASES: &[&str] = &["EventEmitter", "AsyncIOEventEmitter"];
 /// microservices' `@EventPattern` handler.
 const NEST_MICROSERVICES: &str = "@nestjs/microservices";
 
+/// LB.8b: the string-keyed needles whose event travels over a TRANSPORT (a
+/// broker, a network bus) rather than an in-process bus, with the `via` their
+/// ORIGIN mark records. `@EventPattern(` is the NestJS microservices handler,
+/// fed by a `ClientProxy.emit` in another service over Kafka / RMQ / Redis /
+/// NATS / TCP; `putEvents` is AWS EventBridge. The `.emit(` needle is
+/// transport too in a file naming [`NEST_MICROSERVICES`] (the ClientProxy
+/// conjugate, LA.39's R4 test) — [`transport_via`]. Everything else is an
+/// in-process bus, which the EventBusResolver pairs only inside one project.
+const TRANSPORT_NEEDLES: &[(&str, &str)] = &[
+    ("@EventPattern(", "nestjs-microservices"),
+    ("EventBridge.putEvents", "aws-eventbridge"),
+    ("eventBridge.putEvents", "aws-eventbridge"),
+];
+
+/// The `via` of a `.emit(` in a file naming [`NEST_MICROSERVICES`].
+const MICROSERVICES_EMIT_VIA: &str = "nestjs-microservices";
+
 /// The plural collection nouns among [`BUS_RECEIVER_SUFFIXES`]. They name a bus
 /// only as a named receiver (`this.events`, `ActiveSupport::Notifications`);
 /// a CALL that returns events or notifications is a data fetch —
@@ -348,6 +365,9 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
         if minted {
             anchors.push(Anchor { node: id, line: line_of(source, idx) });
         }
+        if let Some(via) = transport_via(pattern, source, &mut ctx) {
+            mark_transport(&mut nodes, id, via);
+        }
     }
 
     EventNodes { nodes, nav, anchors }
@@ -399,9 +419,46 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
         if minted {
             anchors.push(Anchor { node: id, line: line_of(source, idx) });
         }
+        if let Some(via) = transport_via(pattern, source, &mut ctx) {
+            mark_transport(&mut nodes, id, via);
+        }
     }
 
     EventNodes { nodes, nav, anchors }
+}
+
+/// LB.8b: the delivery scope of a string-keyed needle's site, when it is a
+/// transport ([`TRANSPORT_NEEDLES`], or `.emit(` in a file naming
+/// [`NEST_MICROSERVICES`]); `None` for an in-process bus.
+fn transport_via(pattern: &str, source: &str, ctx: &mut VerbCtx) -> Option<&'static str> {
+    if let Some(&(_, via)) = TRANSPORT_NEEDLES.iter().find(|(needle, _)| *needle == pattern) {
+        return Some(via);
+    }
+    (pattern == ".emit(" && ctx.ms_client(source)).then_some(MICROSERVICES_EMIT_VIA)
+}
+
+/// LB.8b: record that node `id`'s event is delivered over a transport, as an
+/// ORIGIN cell `{"provenance":"synthetic","delivery":"transport","via":..}`.
+/// `provenance` stays first and `synthetic`: the engine's
+/// `tag_synthetic_provenance` skips a node that already carries ORIGIN (it
+/// would otherwise write exactly `{"provenance":"synthetic"}` on every EVENT_*
+/// node), and engram-export reads only `provenance`. A node that already has
+/// an ORIGIN cell (a second transport needle naming the same event) is left
+/// alone, so a node carries at most one. The EventBusResolver reads
+/// `"delivery":"transport"` to pair this side across project owners.
+fn mark_transport(nodes: &mut [Node], id: NodeId, via: &str) {
+    let Some(node) = nodes.iter_mut().find(|n| n.id == id) else {
+        return;
+    };
+    if node.cells.iter().any(|c| c.kind == cell_type::ORIGIN) {
+        return;
+    }
+    node.cells.push(Cell {
+        kind: cell_type::ORIGIN,
+        payload: CellPayload::Json(format!(
+            r#"{{"provenance":"synthetic","delivery":"transport","via":"{via}"}}"#
+        )),
+    });
 }
 
 /// The event the occurrence of a string-keyed needle at `idx` names (LA.41):
@@ -2039,5 +2096,86 @@ mod tests {
         ] {
             assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
         }
+    }
+
+    /// The ORIGIN payloads on each node of an extract, by qname, sorted.
+    fn origins(out: &EventNodes) -> Vec<(String, Vec<String>)> {
+        let mut v: Vec<(String, Vec<String>)> = out
+            .nodes
+            .iter()
+            .map(|n| {
+                let q = out.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                let cells = n
+                    .cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::ORIGIN)
+                    .map(|c| match &c.payload {
+                        CellPayload::Json(j) => j.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                (q, cells)
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn transport(via: &str) -> Vec<String> {
+        vec![format!(r#"{{"provenance":"synthetic","delivery":"transport","via":"{via}"}}"#)]
+    }
+
+    /// LB.8b: a transport needle marks the node it mints (or re-sees) with the
+    /// transport ORIGIN; an in-process bus gets no ORIGIN from the extractor
+    /// (the engine's synthetic tag adds the plain one later).
+    #[test]
+    fn transport_needles_mark_their_nodes() {
+        let out = extract_event_handler_nodes(
+            "@EventPattern('order_shipped')\nasync onShipped(data) {}",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_handle:order_shipped"), transport("nestjs-microservices"))]
+        );
+
+        let client = "import { ClientProxy } from '@nestjs/microservices';\nthis.client.emit('order_shipped', o);";
+        let out = extract_event_emitter_nodes(client, module_id(), repo());
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
+        );
+
+        let bridge = "await eventBridge.putEvents({ Entries: [] }).promise();";
+        let out = extract_event_emitter_nodes(bridge, module_id(), repo());
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_emit:eventBridge.putEvents"), transport("aws-eventbridge"))]
+        );
+
+        let local = "import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nbus.emit('x', 1);";
+        let out = extract_event_emitter_nodes(local, module_id(), repo());
+        assert_eq!(origins(&out), vec![(s("event_emit:x"), vec![])], "in-process: no ORIGIN");
+        let out = extract_event_handler_nodes("bus.on('x', h);\n@OnEvent('y')\nh2() {}", module_id(), repo());
+        assert_eq!(
+            origins(&out),
+            vec![(s("event_handle:x"), vec![]), (s("event_handle:y"), vec![])],
+            "@OnEvent is the in-process EventEmitter2 handler"
+        );
+    }
+
+    /// The string pass re-sees a name an earlier needle minted: the ONE node
+    /// is marked, once.
+    #[test]
+    fn a_transport_needle_marks_a_node_an_in_process_needle_minted() {
+        let src = "bus.on('x', h);\n@EventPattern('x')\nonX(data) {}";
+        let out = extract_event_handler_nodes(src, module_id(), repo());
+        assert_eq!(origins(&out), vec![(s("event_handle:x"), transport("nestjs-microservices"))]);
+        assert_eq!(out.nodes.len(), 1);
+    }
+
+    fn s(v: &str) -> String {
+        v.to_string()
     }
 }

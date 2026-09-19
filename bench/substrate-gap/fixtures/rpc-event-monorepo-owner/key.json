@@ -1,0 +1,113 @@
+{
+  "framework": "rpc-event-monorepo-owner",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.8b (legacy-only). One repo, seven manifest-rooted projects plus root-level shared code. tRPC sides (RPC_PROCEDURE in services/users and services/legacy, RPC_CALL in apps/web and apps/admin) and event sides carry LB.4a's ` @<project path>` owner suffix. tRPC is a network channel, so every call pairs every same-path procedure (2 x 2 RPC_CALLS). An IN-PROCESS event (services/orders and services/billing each on its own EventEmitter) pairs only inside one project or with an unowned side: lib/bus.ts sits under the root manifest only, so its handler pairs with both services' emitters (pinned exactly by engine/tests/channel_owner_rpc_event.rs, since a recall substring cannot tell it from the owned handlers), while orders never flows into billing's handler. A TRANSPORT event (a NestJS microservices @EventPattern handler in services/notify, fed by a ClientProxy.emit in services/orders) pairs across projects like a queue. HEAD (ee4a84a, installed wheel): one RPC_PROCEDURE rpc:user.list, one RPC_CALL rpc_call:user.list, one RPC_CALLS; one EVENT_EMITTER event_emit:orderPlaced (both services' files), one EVENT_HANDLER event_handle:orderPlaced (three files), one EVENT_FLOWS per event name; `glia arch` 2 links, 2 unlocated.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "rpc:user.list @services/users"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "rpc:user.list @services/legacy"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:user.list @apps/web"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:user.list @apps/admin"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orderPlaced @services/orders"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orderPlaced @services/billing"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orderPlaced @services/orders"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orderPlaced @services/billing"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orderShipped @services/orders",
+      "note": "ClientProxy.emit in a @nestjs/microservices file"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orderShipped @services/notify",
+      "note": "@EventPattern: a transport handler"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "rpc_call:user.list @apps/web",
+      "to": "rpc:user.list @services/users",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "rpc_call:user.list @apps/admin",
+      "to": "rpc:user.list @services/legacy",
+      "category": "RPC_CALLS",
+      "note": "a network RPC pairs across owners: all 2 x 2"
+    },
+    {
+      "from": "event_emit:orderPlaced @services/orders",
+      "to": "event_handle:orderPlaced @services/orders",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "event_emit:orderPlaced @services/billing",
+      "to": "event_handle:orderPlaced @services/billing",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "event_emit:orderShipped @services/orders",
+      "to": "event_handle:orderShipped @services/notify",
+      "category": "EVENT_FLOWS",
+      "note": "a transport event pairs across projects"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "event_emit:orderPlaced @services/orders",
+      "to": "event_handle:orderPlaced @services/billing",
+      "category": "EVENT_FLOWS",
+      "note": "PRECISION: two projects' in-process buses never exchange events"
+    },
+    {
+      "from": "event_emit:orderPlaced @services/billing",
+      "to": "event_handle:orderPlaced @services/orders",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "rpc:user.list",
+      "note": "the owner-free procedure both routers collapsed into"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:user.list"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:orderPlaced",
+      "note": "the owner-free emitter both services collapsed into (there is no root-level emitter)"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:orderShipped",
+      "note": "the transport handler is owned by services/notify"
+    }
+  ]
+}
