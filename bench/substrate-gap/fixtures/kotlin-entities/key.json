@@ -2,7 +2,7 @@
   "framework": "kotlin",
   "language": "kotlin",
   "dirs": ["."],
-  "note": "A14.1 baseline: no Kotlin parser; .kt went through the Java grammar — 4 nodes / 2 edges, only INTERFACE Auditable found, every edge cell 0.00. A14.2 (kotlin parser): 19 nodes / 19 edges, all six nodes found, DEFINES and IMPORTS 1.00; CALLS / INHERITS_FROM / IMPLEMENTS stay 0.00 for A14.3. A14.4: api.kt's @GetMapping mints ROUTE GET /users/{id}.",
+  "note": "A14.1 baseline: no Kotlin parser; .kt went through the Java grammar — 4 nodes / 2 edges, only INTERFACE Auditable found, every edge cell 0.00. A14.2 (kotlin parser): 19 nodes / 19 edges, all six nodes found, DEFINES and IMPORTS 1.00; CALLS / INHERITS_FROM / IMPLEMENTS stay 0.00 for A14.3. A14.4: api.kt's @GetMapping mints ROUTE GET /users/{id}. A14.3 (parsers/code/kotlin/src/calls.rs): CALLS 2/2, INHERITS_FROM 1/1, IMPLEMENTS 1/1 — function bodies emit CallSites, supertypes emit Bare heritage refs, and the primary-constructor `val userService: UserService` is a recorded field type; marker `[kotlin] refs: calls=4 self=1 inherits=1 implements=1 field_types=1`.",
   "expect_nodes": [
     {"kind": "CLASS",     "name": "UserController", "note": "primary constructor killed the class node under the java grammar; found since A14.2"},
     {"kind": "CLASS",     "name": "UserService",    "note": "`: BaseService()` heritage killed the class node under the java grammar; found since A14.2"},
@@ -14,10 +14,10 @@
   ],
   "expect_edges": [
     {"from": "UserController", "to": "getUser",     "category": "DEFINES",       "note": "class -> method"},
-    {"from": "getUser",        "to": "findById",    "category": "CALLS",         "note": "userService.findById(id) — Attribute qualifier"},
-    {"from": "createUser",     "to": "logIt",       "category": "CALLS",         "note": "bare call to a sibling method — needs the extra_hook"},
+    {"from": "getUser",        "to": "findById",    "category": "CALLS",         "note": "userService.findById(id) — Attribute qualifier, bound through the primary-constructor property's declared type (A14.3 records it, A6.2a's receiver-type pass binds it)"},
+    {"from": "createUser",     "to": "logIt",       "category": "CALLS",         "note": "receiver-less call to a method declared in the class body: the parser emits SelfMethod (Kotlin resolves local > member > top-level), bound through class_methods (A14.3)"},
     {"from": "api",            "to": "UserService", "category": "IMPORTS",       "note": "import com.acme.service.UserService"},
-    {"from": "UserService",    "to": "BaseService", "category": "INHERITS_FROM", "note": "delegation_specifier with constructor_invocation"},
-    {"from": "UserController", "to": "Auditable",   "category": "IMPLEMENTS",    "note": "delegation_specifier with bare user_type"}
+    {"from": "UserService",    "to": "BaseService", "category": "INHERITS_FROM", "note": "delegation_specifier with constructor_invocation — the superclass (A14.3)"},
+    {"from": "UserController", "to": "Auditable",   "category": "IMPLEMENTS",    "note": "delegation_specifier with bare user_type — an interface of a class (A14.3)"}
   ]
 }

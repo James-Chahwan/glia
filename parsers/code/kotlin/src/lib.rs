@@ -8,11 +8,14 @@
 //! ported from the Java parser) and the
 //! Spring / Micronaut / JAX-RS / JPA annotation needles ([`spring`]: routes
 //! with HANDLED_BY, stereotype and `@Inject` constructor / property INJECTS,
-//! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA). Parsers
-//! extract, the graph crate resolves: imports leave as [`ImportStmt`]s for
-//! `build_dotted`'s dotted resolver, which the engine runs over the Java and
-//! Kotlin parses of a repo as ONE graph (the JVM family), so a Kotlin import
-//! binds a Java class and back.
+//! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA), and the
+//! call sites, supertypes and field types of [`calls`] (A14.3: every call in
+//! a declared function's body, `: Base()` INHERITS_FROM / `: Iface`
+//! IMPLEMENTS refs, primary-constructor and typed properties as field types).
+//! Parsers extract, the graph crate resolves: imports leave as
+//! [`ImportStmt`]s for `build_dotted`'s dotted resolver, which the engine runs
+//! over the Java and Kotlin parses of a repo as ONE graph (the JVM family), so
+//! a Kotlin import binds a Java class and back.
 //!
 //! # Qnames (`::` separator)
 //!
@@ -54,12 +57,13 @@
 //!   keeps the surrounding tree, and an `ERROR` node is walked through as a
 //!   transparent container so the declarations inside it still count.
 
+mod calls;
 mod routes;
 mod spring;
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::UnresolvedRef;
+use repo_graph_code_domain::{CallSite, UnresolvedRef};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -122,12 +126,14 @@ fn parse_counting(
         module_qname,
         module_id,
     };
+    let no_members = HashSet::new();
     let top = Owner {
         id: module_id,
         qname: module_qname,
         in_type: false,
         route_prefix: "",
         is_bean: false,
+        members: &no_members,
     };
     walk_members(root, &file, top, &mut acc);
     // After the walk: `fn_ids` names every declared function a Ktor route can
@@ -140,7 +146,7 @@ fn parse_counting(
         nodes: acc.nodes,
         edges: acc.edges,
         imports: acc.imports,
-        calls: Vec::new(),
+        calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
         properties: acc.properties,
@@ -158,6 +164,13 @@ fn parse_counting(
 /// since the last repo's line (a cache-served file ran none — see [`spring`]):
 ///   `[kotlin/spring] stereotypes=S routes=R composed=C injects=J entities=E repos=P repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/spring\]'`.
+///
+/// A14.3 adds the refs line, counted off the parses like the entities line
+/// (so cache-served files count too):
+///   `[kotlin] refs: calls=C self=S inherits=A implements=B field_types=F repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '\[kotlin\] refs:'` — `C` CallSites, `S` of
+/// them receiver-less member calls (`SelfMethod`), `A` / `B` INHERITS_FROM /
+/// IMPLEMENTS refs, `F` recorded property types (see [`calls`]).
 ///
 /// A14.5 adds the Ktor line, from the same kind of process-global bank:
 ///   `[kotlin/ktor] ast routes=R handled_by=H (text_scan_would_find=N) repo=<label>`
@@ -183,6 +196,7 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
         "[kotlin] entities: {} file(s) types={types} fns={fns} props={props} imports={imports} routes={routes} repo={repo_label}",
         parses.len()
     );
+    eprintln!("{}", calls::marker(parses, repo_label));
     eprintln!("{}", spring::marker(spring::take(), repo_label));
     eprintln!("{}", routes::marker(routes::take(), repo_label));
 }
@@ -203,8 +217,11 @@ struct Acc {
     /// Every declared FUNCTION / METHOD, keyed on its `function_declaration`'s
     /// tree-sitter node id: the handler a Ktor route inside it binds ([`routes`]).
     fn_ids: HashMap<usize, NodeId>,
-    /// INJECTS refs ([`spring`]); `resolve_refs` binds each `Bare(TypeName)`.
+    /// INJECTS refs ([`spring`]) and INHERITS_FROM / IMPLEMENTS refs
+    /// ([`calls`]); `resolve_refs` binds each `Bare(TypeName)`.
     refs: Vec<UnresolvedRef>,
+    /// The call sites of every declared function's body ([`calls`]).
+    calls: Vec<CallSite>,
     /// What the [`spring`] detectors did in this file.
     spring: spring::SpringCounts,
     /// What the Ktor pass ([`routes`]) did in this file.
@@ -232,6 +249,10 @@ struct Owner<'a> {
     route_prefix: &'a str,
     /// The type is a Spring stereotype: its constructors inject (A14.4).
     is_bean: bool,
+    /// The methods the type's body declares (companion members included):
+    /// a receiver-less call to one is a self call (A14.3). Empty at the top
+    /// level.
+    members: &'a HashSet<String>,
 }
 
 /// Visit every declaration directly inside `container` (the `source_file`, a
@@ -282,13 +303,17 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     };
     let id = declare(node, name, &qname, kind, owner.id, file, acc);
     let spring = spring::on_type(node, name, id, file, acc);
+    calls::heritage(node, id, kind == node_kind::INTERFACE, file, acc);
+    calls::record_ctor_field_types(node, id, file, acc);
     if let Some(body) = body {
+        let members = calls::member_fn_names(body, file.src);
         let inner = Owner {
             id,
             qname: &qname,
             in_type: true,
             route_prefix: &spring.prefix,
             is_bean: spring.is_bean,
+            members: &members,
         };
         walk_members(body, file, inner, acc);
     }
@@ -310,6 +335,13 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     if owner.in_type {
         spring::on_method(node, id, owner.route_prefix, file, acc);
     }
+    let scope = calls::CallScope {
+        members: owner.members,
+        type_name: owner
+            .in_type
+            .then(|| owner.qname.rsplit("::").next().unwrap_or(owner.qname)),
+    };
+    calls::collect(node, id, scope, file, acc);
 }
 
 /// A property gets a node when it carries meaning beyond a literal: `const`,
@@ -321,6 +353,7 @@ fn visit_property(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     // node below (`@Resource var m: Mailer? = null` does not).
     if owner.in_type {
         spring::on_property(node, owner.id, file, acc);
+        calls::record_property_type(node, owner.id, file, acc);
     }
     // `val (a, b) = pair` destructures into locals-to-be; no single name.
     let Some(var) = named_child_of_kind(node, &["variable_declaration"]) else {
