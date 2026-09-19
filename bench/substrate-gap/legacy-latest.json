@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 264,
+  "fixtures": 268,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -176,6 +176,13 @@
       "language": "c_cpp",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "cpp-namespace-qnames": {
+      "framework": "cpp-namespace-qnames",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "csharp-aspnet": {
@@ -513,6 +520,13 @@
         "IMPORTS": 1.0
       }
     },
+    "go-nats-consumer-callbacks": {
+      "framework": "go-nats-consumer-callbacks",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-package-multifile-calls": {
       "framework": "go-package-multifile-calls",
       "language": "go",
@@ -837,6 +851,14 @@
         "CALLS": 1.0,
         "IMPORTS": 1.0,
         "TESTS": 1.0
+      }
+    },
+    "module-same-group": {
+      "framework": "module-same-group",
+      "language": "typescript+clojure+java",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "module-synthetic-filename": {
@@ -1672,6 +1694,13 @@
       "language": "java",
       "per_category": {
         "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-consumer-callbacks": {
+      "framework": "xcut-queue-consumer-callbacks",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "xcut-queue-csharp-kafka": {
