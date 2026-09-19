@@ -1,0 +1,12 @@
+{
+  "framework": "test-reports-fail",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.6b: a committed .glia/test-snapshot/ (one pytest JUnit case, tests.test_app::test_list_orders at tests/test_app.py:4, message 'ValueError: boom', its long traceback through api/app.py:2 and :5) puts a FAIL cell (9) on the failing test, mapped via file_line, and FAIL entries with role implicated on the two non-test frames its traceback resolves to (list_orders frame 1, helper frame 2). Baseline 2026-09-19 (HEAD c0edf47, installed wheel = W25 code): FAIL 0/2 - resolve maps these signals, but nothing reads test reports and FAIL has no emitter.",
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "tests::test_app::test_list_orders", "cell": "FAIL", "contains": "ValueError: boom"},
+    {"kind": "FUNCTION", "node": "tests::test_app::test_list_orders", "cell": "FAIL", "contains": "\"via\":\"file_line\""},
+    {"kind": "FUNCTION", "node": "api::app::helper", "cell": "FAIL", "contains": "implicated"},
+    {"kind": "FUNCTION", "node": "api::app::list_orders", "cell": "FAIL", "contains": "\"frame\":1"}
+  ]
+}

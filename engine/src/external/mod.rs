@@ -36,12 +36,15 @@
 //! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
 //!   once per repo whose overlay declares a `[[constraint]]` / `[[decision]]`
 //!   / `[[note]]`, and `[declared] rules=<r> (forbid_edge=<f> no_cycle=<c> invariant=<i>)`
-//!   once per build whose graph then holds a CONSTRAINT rule (see [`declared`]).
+//!   once per build whose graph then holds a CONSTRAINT rule (see [`declared`]);
+//! - `[tests] fail-cells repo=<label> cases=<n> mapped=<m> (file_line=<a> qname=<b> name=<c>) unmapped=<u> implicated=<i> fail_cells=<f> dropped=<d>`
+//!   once per repo with a complete `.glia/test-snapshot/` (see [`test_reports`]).
 
 mod cells;
 mod declared;
 mod history;
 mod overlay;
+mod test_reports;
 mod wrappers;
 
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
@@ -131,14 +134,16 @@ pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInput
 /// then the git-history ATTN cells (LF.5b, [`history::history_cells`]), then
 /// the overlay's declared knowledge (LF.4a,
 /// [`declared::apply_declared_cells`]: never gated by `--no-overlay`), then
-/// the stages LF.3b and LF.6b append, in the order their packets document.
+/// the test-report FAIL cells (LF.6b, [`test_reports::ingest_test_reports`]:
+/// a fact input, never gated either), then the stage LF.3b appends.
 ///
 /// Runs after the code passes. When any stage changed the graph, the evidence
 /// fill and the cross-edge sort run again (LC.3a: fill-then-sort is the last
 /// step of every build), so a stage that adds an edge still leaves it located
 /// and in canonical order. The sidecar and declared stages write only
-/// CONSTRAINT / DECISION / CONV / VECTOR node cells and the history stage
-/// only ATTN node cells, which neither the fill (it reads POSITION) nor the
+/// CONSTRAINT / DECISION / CONV / VECTOR node cells, the history stage
+/// only ATTN node cells and the test-report stage only FAIL node cells,
+/// which neither the fill (it reads POSITION) nor the
 /// sort (edges only) reads. A repo with no external inputs takes no branch
 /// that writes anything. After a stage wrote, the build reports the CONSTRAINT
 /// rules `glia check` will read ([`declared::report_rules`]).
@@ -150,6 +155,7 @@ pub(crate) fn apply_external_cells(merged: &mut MergedGraph, inputs: &[RepoInput
         if let Some(cfg) = &input.config {
             changed |= declared::apply_declared_cells(merged, input, cfg);
         }
+        changed |= test_reports::ingest_test_reports(merged, input);
     }
     if changed {
         declared::report_rules(merged);

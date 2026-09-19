@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "run": null,
+  "reports": [
+    "reports/junit.xml"
+  ],
+  "cases_total": 1,
+  "failed": 1,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 0,
+  "lcov_files": 0,
+  "data_hash": "4e308f383a284da9"
+}
