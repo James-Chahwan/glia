@@ -27,7 +27,10 @@
 //! source is present, since we export straight off a freshly generated graph):
 //!
 //!   1. Distinct file paths are interned to **stable, 1-based** `u32` ids
-//!      (sorted order; `0` is reserved for "no/unknown position").
+//!      (sorted order; `0` is reserved for "no/unknown position"). Along a
+//!      `--since` chain the prior's table seeds them
+//!      ([`ExportOptions::prior_files`], LG.8a): a path that survives keeps its
+//!      id, so a node nobody touched keeps its bytes and stays out of the diff.
 //!   2. Each source file is read once and its line-start byte offsets indexed:
 //!      `byte_range` turns the rows into the bytes of those whole lines, and
 //!      `line_span` — the one place rows become lines — turns them into
@@ -81,7 +84,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use engram_core::{Content, EdgeKind, Gmap, GmapEdge, GmapNode, SpanRef, content_digest};
+use engram_core::{Content, EdgeKind, FileId, Gmap, GmapEdge, GmapNode, SpanRef, content_digest};
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{Cell, CellPayload, EdgeCategoryId, Node, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -142,7 +145,8 @@ pub struct ExportStats {
     pub natspec_inheritdoc_unresolved: usize,
     /// [`engram_core::content_digest`] of the gmap bytes [`export_engram_gmap`]
     /// wrote — the content address a `GmapDiff` names as its base or target.
-    /// `0` from [`build_gmap`], which serializes nothing. (glia-v6)
+    /// `0` from [`build_gmap`], which serializes nothing; a caller writing
+    /// through [`write_engram_gmap`] sets it from that call's return. (glia-v6)
     pub digest: u64,
 }
 
@@ -159,6 +163,13 @@ pub struct ExportOptions {
     /// [`prior_tokens`]). A path it does not name is its own token, so the
     /// empty map (no `--since`) starts a chain. (LG.9)
     pub file_identity: BTreeMap<String, String>,
+    /// The `--since` prior's `id -> path` table (its `Gmap.files`): a path it
+    /// names keeps that id, new paths (sorted) take the ids above the largest
+    /// one kept, and a path no longer positioned drops out. `None` numbers
+    /// every path from 1 in sorted order. Without it one new file that sorts
+    /// first renumbers every file, and every positioned node would diff as
+    /// modified. (LG.8a)
+    pub prior_files: Option<BTreeMap<FileId, String>>,
 }
 
 /// `ORIGIN`-cell provenances dropped from the export by default. Region anchors
@@ -721,6 +732,36 @@ fn inheritdoc_base(
     })
 }
 
+/// Pass 1 of [`build_gmap`]: the `id -> path` table for `paths`, seeded from
+/// `prior` ([`ExportOptions::prior_files`]). A prior id whose path is still in
+/// `paths` is kept (the lowest id, should a hand-built table name one path
+/// twice; id `0`, "no position", never); the other paths, in sorted order,
+/// take the ids after the largest one kept. With no prior that is `1..` in
+/// sorted order. Ids a prior would push past `u32::MAX` fall back to that
+/// plain numbering: every id moves, and the diff says so, but none is lost.
+fn intern_files(
+    paths: &BTreeSet<String>,
+    prior: Option<&BTreeMap<FileId, String>>,
+) -> BTreeMap<FileId, String> {
+    let mut id_to_path: BTreeMap<FileId, String> = BTreeMap::new();
+    let mut kept: BTreeSet<&str> = BTreeSet::new();
+    for (&id, path) in prior.into_iter().flatten() {
+        if id != 0 && paths.contains(path) && kept.insert(path.as_str()) {
+            id_to_path.insert(id, path.clone());
+        }
+    }
+    let fresh: Vec<&String> = paths.iter().filter(|p| !kept.contains(p.as_str())).collect();
+    let mut next = id_to_path.keys().next_back().copied().unwrap_or(0);
+    if u32::try_from(fresh.len()).ok().and_then(|n| next.checked_add(n)).is_none() {
+        return intern_files(paths, None);
+    }
+    for p in fresh {
+        next += 1; // cannot overflow: checked above
+        id_to_path.insert(next, p.clone());
+    }
+    id_to_path
+}
+
 /// Build an [`engram_core::Gmap`] plus the file-id → path sidecar table from a
 /// resolved [`MergedGraph`]. `repo_root` is joined with each POSITION path to
 /// read source for byte-range spans; point it at the repo the graph was built
@@ -735,13 +776,9 @@ pub fn build_gmap(
 
     // Pass 1 — intern distinct POSITION file paths to stable, 1-based ids.
     let paths = position_paths(merged);
-    let mut file_id: HashMap<String, u32> = HashMap::new();
-    let mut id_to_path: BTreeMap<u32, String> = BTreeMap::new();
-    for (i, p) in paths.iter().enumerate() {
-        let id = (i + 1) as u32; // 0 reserved for "no position"
-        file_id.insert(p.clone(), id);
-        id_to_path.insert(id, p.clone());
-    }
+    let id_to_path = intern_files(&paths, opts.prior_files.as_ref());
+    let file_id: HashMap<&str, FileId> =
+        id_to_path.iter().map(|(id, p)| (p.as_str(), *id)).collect();
     stats.files = id_to_path.len();
 
     // Read each source file once for row → byte conversion and the line-count
@@ -837,7 +874,7 @@ pub fn build_gmap(
             let pos = position_of(&n.cells);
             let span = match &pos {
                 Some((file, sr, er)) => {
-                    let fid = file_id.get(file).copied().unwrap_or(0);
+                    let fid = file_id.get(file.as_str()).copied().unwrap_or(0);
                     let src = line_cache.get(file);
                     let (start, end) = src.map_or((0, 0), |s| byte_range(&s.starts, s.len, *sr, *er));
                     let (start_line, end_line) = line_span(*sr, *er, src.map(|s| s.lines));
@@ -1039,19 +1076,27 @@ pub fn export_engram_gmap(
     out_path: &Path,
     opts: &ExportOptions,
 ) -> io::Result<ExportStats> {
-    let (gmap, id_to_path, mut stats) = build_gmap(merged, repo_root, opts);
+    let (gmap, _, mut stats) = build_gmap(merged, repo_root, opts);
+    stats.digest = write_engram_gmap(&gmap, out_path)?;
+    Ok(stats)
+}
 
-    let bytes = bincode::serialize(&gmap)
+/// The write half of [`export_engram_gmap`], for a caller that keeps the
+/// [`Gmap`] it built (the bin diffs it against the `--since` prior, LG.8a):
+/// the bincode bytes to `out_path`, then `gmap.files` as the
+/// `<out_path>.files.json` sidecar, each tmp-then-rename. Returns the
+/// [`content_digest`] of the bytes written (a `GmapDiff`'s target digest).
+pub fn write_engram_gmap(gmap: &Gmap, out_path: &Path) -> io::Result<u64> {
+    let bytes = bincode::serialize(gmap)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    stats.digest = content_digest(&bytes);
     write_atomic(out_path, &bytes)?;
 
     let sidecar: BTreeMap<String, &String> =
-        id_to_path.iter().map(|(k, v)| (k.to_string(), v)).collect();
+        gmap.files.iter().map(|(k, v)| (k.to_string(), v)).collect();
     let sidecar_json = serde_json::to_vec_pretty(&sidecar)?;
     write_atomic(&sidecar_path(out_path), &sidecar_json)?;
 
-    Ok(stats)
+    Ok(content_digest(&bytes))
 }
 
 /// `<out_path>.files.json` — the span sidecar lives beside the bincode.
@@ -1614,5 +1659,107 @@ mod tests {
         let t2 = prior_tokens(&g2);
         assert_eq!(t2.get("sub/a.py").map(String::as_str), Some("a.py"));
         assert_eq!(t2.get("a.py").map(String::as_str), Some("a.py#2"));
+    }
+
+    // ---- LG.8a: file ids seeded from the --since prior ----
+
+    fn path_set(paths: &[&str]) -> BTreeSet<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    fn table(pairs: &[(FileId, &str)]) -> BTreeMap<FileId, String> {
+        pairs.iter().map(|(id, p)| (*id, p.to_string())).collect()
+    }
+
+    #[test]
+    fn intern_files_without_prior_is_sorted_from_one() {
+        let paths = path_set(&["svc/orders.py", "a/first.py", "docs/README.md"]);
+        assert_eq!(
+            intern_files(&paths, None),
+            table(&[
+                (1, "a/first.py"),
+                (2, "docs/README.md"),
+                (3, "svc/orders.py")
+            ])
+        );
+    }
+
+    #[test]
+    fn intern_files_keeps_surviving_ids_and_appends_new_paths() {
+        // contracts/Vault.sol (1) is gone and svc/orders.py (3) survives:
+        // new paths, sorted, take 4 and 5; the freed 1 stays unused.
+        let prior = table(&[
+            (1, "contracts/Vault.sol"),
+            (2, "docs/README.md"),
+            (3, "svc/orders.py"),
+        ]);
+        let paths = path_set(&[
+            "a/first.py",
+            "contracts/core/Vault.sol",
+            "docs/README.md",
+            "svc/orders.py",
+        ]);
+        assert_eq!(
+            intern_files(&paths, Some(&prior)),
+            table(&[
+                (2, "docs/README.md"),
+                (3, "svc/orders.py"),
+                (4, "a/first.py"),
+                (5, "contracts/core/Vault.sol"),
+            ])
+        );
+        // Nothing survives: numbering starts over from 1.
+        assert_eq!(
+            intern_files(&path_set(&["x.py"]), Some(&prior)),
+            table(&[(1, "x.py")])
+        );
+    }
+
+    #[test]
+    fn intern_files_ignores_id_zero_and_repeated_paths() {
+        let prior = table(&[(0, "a.py"), (5, "b.py"), (7, "b.py")]);
+        assert_eq!(
+            intern_files(&path_set(&["a.py", "b.py"]), Some(&prior)),
+            table(&[(5, "b.py"), (6, "a.py")])
+        );
+    }
+
+    #[test]
+    fn intern_files_falls_back_when_ids_would_overflow() {
+        let prior = table(&[(u32::MAX, "b.py")]);
+        // Nothing new: the kept id stands.
+        assert_eq!(
+            intern_files(&path_set(&["b.py"]), Some(&prior)),
+            table(&[(u32::MAX, "b.py")])
+        );
+        // One new path cannot go above u32::MAX: plain numbering.
+        assert_eq!(
+            intern_files(&path_set(&["a.py", "b.py"]), Some(&prior)),
+            table(&[(1, "a.py"), (2, "b.py")])
+        );
+    }
+
+    #[test]
+    fn prior_files_keep_untouched_spans_byte_equal() {
+        // The pre-LG.8a failure: a new file sorting first renumbered b.py, so
+        // its untouched node changed span.file and would diff as modified.
+        let before = located_graph(&[(1, "b", node_kind::MODULE, "b.py", 0)]);
+        let (g1, _, _) = build_gmap(&before, &std::env::temp_dir(), &ExportOptions::default());
+        let after = located_graph(&[
+            (2, "a", node_kind::MODULE, "a.py", 0),
+            (1, "b", node_kind::MODULE, "b.py", 0),
+        ]);
+        let span_file =
+            |g: &Gmap, key: &str| match &g.nodes.iter().find(|n| n.key == key).unwrap().content {
+                Content::Symbol { span, .. } => span.file,
+                other => panic!("{key}: {other:?}"),
+            };
+        let (plain, _, _) = build_gmap(&after, &std::env::temp_dir(), &ExportOptions::default());
+        assert_eq!((span_file(&g1, "b"), span_file(&plain, "b")), (1, 2));
+        let opts = ExportOptions { prior_files: Some(g1.files.clone()), ..Default::default() };
+        let (g2, _, stats) = build_gmap(&after, &std::env::temp_dir(), &opts);
+        assert_eq!(g2.files, table(&[(1, "b.py"), (2, "a.py")]));
+        assert_eq!(stats.files, 2);
+        assert_eq!((span_file(&g2, "b"), span_file(&g2, "a")), (1, 2));
     }
 }

@@ -1,15 +1,22 @@
 //! Inspect an emitted `.engram-gmap`: version, field coverage, edge-kind +
-//! provenance histograms. Verification tool for the v3 contract.
+//! provenance histograms. Verification tool for the v3 contract. A path
+//! ending in `.diff` is a `--since` run's `GmapDiff` (LG.8a): its version,
+//! both digests, the list lengths and the first keys of each node list.
 //!
 //!   cargo run -p glia-engram-export --example inspect -- <path.engram-gmap>
+//!   cargo run -p glia-engram-export --example inspect -- <path.engram-gmap.diff>
 
 use std::collections::BTreeMap;
 
-use engram_core::{Content, Gmap};
+use engram_core::{Content, Gmap, GmapDiff};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: inspect <path.engram-gmap>");
+    let path = std::env::args().nth(1).expect("usage: inspect <path.engram-gmap[.diff]>");
     let bytes = std::fs::read(&path).expect("read gmap");
+    if path.ends_with(".diff") {
+        inspect_diff(&bincode::deserialize(&bytes).expect("decode diff"));
+        return;
+    }
     let g: Gmap = bincode::deserialize(&bytes).expect("decode gmap");
 
     let n = g.nodes.len();
@@ -96,6 +103,54 @@ fn main() {
                 break;
             }
         }
+    }
+}
+
+/// The diff mode: counts, digests and the first 5 keys of each node list.
+fn inspect_diff(d: &GmapDiff) {
+    println!("format_version : {}", d.format_version);
+    println!("base_digest    : {:016x}", d.base_digest);
+    println!("target_digest  : {:016x}", d.target_digest);
+    let added: Vec<&str> = d.added.iter().map(|n| n.key.as_str()).collect();
+    let removed: Vec<&str> = d.removed.iter().map(String::as_str).collect();
+    let modified: Vec<String> = d
+        .modified
+        .iter()
+        .map(|c| {
+            let moved = if c.prior_key == c.node.key {
+                String::new()
+            } else {
+                format!(" (was {})", c.prior_key)
+            };
+            let loc = if c.location_only { " [location only]" } else { "" };
+            format!("{}{moved}{loc}", c.node.key)
+        })
+        .collect();
+    print_keys("added", &added);
+    print_keys("removed", &removed);
+    print_keys("modified", &modified);
+    // Where the changes sit: modified nodes per file of their new span.
+    let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in &d.modified {
+        let file = match &c.node.content {
+            Content::Symbol { span, .. } | Content::Proposition { span: Some(span), .. } => {
+                d.files.get(&span.file).map_or("<no file>", String::as_str)
+            }
+            _ => "<no span>",
+        };
+        *by_file.entry(file).or_default() += 1;
+    }
+    for (file, n) in &by_file {
+        println!("  in {file}: {n}");
+    }
+    println!("edges          : +{} / -{}", d.edges_added.len(), d.edges_removed.len());
+    println!("files map      : {} entries", d.files.len());
+}
+
+fn print_keys<S: AsRef<str>>(label: &str, keys: &[S]) {
+    println!("{label:<15}: {}", keys.len());
+    for k in keys.iter().take(5) {
+        println!("  {}", k.as_ref());
     }
 }
 

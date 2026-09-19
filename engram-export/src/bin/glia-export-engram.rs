@@ -15,8 +15,16 @@
 //! ```text
 //! bash scripts/check-engram-export.sh
 //! engram-export/target/debug/glia-export-engram <repo> --out <file> \
-//!     [--since <prior>] [--include-noise] [--exclude <glob>]...
+//!     [--since <prior>] [--no-persist] [--include-noise] [--exclude <glob>]...
 //! ```
+//!
+//! The build is the persisted incremental one by default: the repo's parse
+//! cache (`<repo>/.glia/graph/parse_cache.bin`, beside the layout; the file
+//! pyo3 `generate(incremental=True)`, `glia build` and the MCP read and write)
+//! is loaded, the unchanged files skip their parse, and the cache is saved
+//! back. `--no-persist`, or `GLIA_NO_PERSIST=1`, builds clean in memory and
+//! writes nothing into the repo. The gmap bytes are the same either way
+//! (`engine/tests/byte_identical.rs`).
 //!
 //! `--since <prior>` names the gmap the Engram store last applied (a full v6
 //! export; it may be `--out` itself — everything prior is read before anything
@@ -26,17 +34,29 @@
 //! prior this build cannot read is refused (exit 6); a missing or outdated
 //! `<prior>.glia/` only means moves go undetected this run. Keep `--out`
 //! outside the exported repo, and move `<out>.glia/` with the gmap.
+//!
+//! With `--since` the run also writes the G16 diff (LG.8a): file ids are
+//! seeded from the prior's `files` table, so a surviving path keeps its id and
+//! an untouched node keeps its bytes, and `<out>.diff` gets the bincode
+//! `GmapDiff` from the prior (base) to this export (target), named by both
+//! gmaps' content digests; with no change it is still written, with every list
+//! empty. Write order: `<out>.diff` beside `--out` is deleted first on every
+//! run, then the full gmap (+ sidecar) is written (the next run's base), then
+//! the diff, then `<out>.glia/`. A run that stops between the gmap and the
+//! diff leaves a full gmap and no diff (Engram re-seeds from it); a diff that
+//! cannot be written is exit 7.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use engram_core::GMAP_FORMAT_VERSION;
-use glia_engine::generate_one;
+use engram_core::{GMAP_FORMAT_VERSION, Gmap};
 use glia_engine::persist::{load_layout, persist_result};
-use glia_engram_export::diff::read_gmap;
+use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
+use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
 use glia_engram_export::{
-    ExportOptions, export_engram_gmap, history_dir, position_paths, prior_tokens, sidecar_path,
+    ExportOptions, build_gmap, history_dir, position_paths, prior_tokens, sidecar_path,
+    write_engram_gmap,
 };
 use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves};
 
@@ -53,9 +73,14 @@ struct Args {
     #[arg(long)]
     out: Option<String>,
     /// The gmap the Engram store last applied: carry file identities across
-    /// the moves since then (reads `<since>.glia/`; may equal --out).
+    /// the moves since then (reads `<since>.glia/`; may equal --out), keep its
+    /// file ids, and write the diff from it to `<out>.diff`.
     #[arg(long)]
     since: Option<String>,
+    /// Build clean in memory: no parse cache is read or written in the repo
+    /// (`GLIA_NO_PERSIST=1` does the same).
+    #[arg(long)]
+    no_persist: bool,
     /// Keep substrate-only synthetic nodes (npm deps, event names, generated
     /// stubs) that are filtered from the export by default.
     #[arg(long)]
@@ -72,6 +97,10 @@ fn main() {
 
 /// What `--since` read before anything was written.
 struct Prior {
+    /// The prior gmap: the diff's base, and the file ids this run keeps.
+    gmap: Gmap,
+    /// `content_digest` of the prior's bytes: the diff's `base_digest`.
+    digest: u64,
     /// `path -> file token` read out of the prior gmap's hints.
     tokens: BTreeMap<String, String>,
     /// The graph recorded beside the prior gmap, when it loads.
@@ -81,7 +110,7 @@ struct Prior {
 /// Read the `--since` prior: its gmap (refused -> `Err(exit code)`) and its
 /// recorded graph (a failure is a warning: no moves this run).
 fn read_prior(since: &Path) -> Result<Prior, i32> {
-    let (prior, _base_digest) = match read_gmap(since) {
+    let (prior, digest) = match read_gmap(since) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[engram-export] v6 since: refused - {}: {e}", since.display());
@@ -103,7 +132,36 @@ fn read_prior(since: &Path) -> Result<Prior, i32> {
             None
         }
     };
-    Ok(Prior { tokens: prior_tokens(&prior), graph })
+    Ok(Prior { tokens: prior_tokens(&prior), gmap: prior, digest, graph })
+}
+
+/// The parse cache's file counts for one build (LA.12 `ParseCache::last_diff`).
+struct CacheCounts {
+    reused: usize,
+    reparsed: usize,
+    evicted: usize,
+}
+
+/// Build `repo`: the persisted incremental build (the repo's parse cache
+/// loaded, used and saved, the sequence of the engine's
+/// `generate_one_incremental`, keeping the cache to read its `last_diff`), or
+/// with `persist` false the clean in-memory `generate_one`. The counts are
+/// `None` when the cache is off, or when the build recorded no diff.
+fn build(repo: &str, persist: bool) -> Result<(GenerateResult, Option<CacheCounts>), String> {
+    if !persist {
+        return generate_one(repo).map(|r| (r, None));
+    }
+    let mut cache = ParseCache::load(repo);
+    let result = generate_one_with_cache(repo, &mut cache)?;
+    if let Err(e) = cache.save(repo) {
+        eprintln!("[engram-export] warning: parse cache not saved: {e}");
+    }
+    let counts = cache.last_diff().map(|d| CacheCounts {
+        reused: d.reused.len(),
+        reparsed: d.reparsed.len(),
+        evicted: d.evicted.len(),
+    });
+    Ok((result, counts))
 }
 
 fn run(args: &Args) -> i32 {
@@ -112,7 +170,8 @@ fn run(args: &Args) -> i32 {
         Some(Err(code)) => return code,
         None => None,
     };
-    let result = match generate_one(&args.repo) {
+    let persist = !args.no_persist && std::env::var("GLIA_NO_PERSIST").as_deref() != Ok("1");
+    let (result, cache) = match build(&args.repo, persist) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -160,13 +219,41 @@ fn run(args: &Args) -> i32 {
         include_noise: args.include_noise,
         exclude: args.exclude.clone(),
         file_identity,
+        prior_files: prior.as_ref().map(|p| p.gmap.files.clone()),
     };
-    let stats = match export_engram_gmap(&result.merged, repo_root, &out_path, &opts) {
-        Ok(s) => s,
+    let (gmap, _, mut stats) = build_gmap(&result.merged, repo_root, &opts);
+    // A diff beside --out reaches the gmap that was there, which this run
+    // replaces: drop it before the write, so no crash leaves it beside a gmap
+    // it does not reach.
+    let diff_out = diff_path(&out_path);
+    if let Err(e) = std::fs::remove_file(&diff_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("error removing the stale diff {}: {e}", diff_out.display());
+        return 5;
+    }
+    stats.digest = match write_engram_gmap(&gmap, &out_path) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!("error writing {}: {e}", out_path.display());
             return 5;
         }
+    };
+    // The G16 diff from the prior, after the full gmap it reaches.
+    let mut code = 0;
+    let since = match &prior {
+        Some(p) => {
+            let (diff, ds) = diff_gmaps(&p.gmap, p.digest, &gmap, stats.digest);
+            match write_diff(&diff_out, &diff) {
+                Ok(_) => Some((p.digest, ds)),
+                Err(e) => {
+                    eprintln!("error writing the diff {}: {e}", diff_out.display());
+                    code = 7;
+                    None
+                }
+            }
+        }
+        None => None,
     };
     // The graph this gmap was exported from, for the next `--since` run. The
     // gmap is complete without it, so a failure is a warning.
@@ -190,6 +277,31 @@ fn run(args: &Args) -> i32 {
         sidecar_path(&out_path).display(),
         history.display(),
     );
+    // The v6 since marker (LG.8a): the diff just written, by digest and
+    // counts, and what the parse cache reused for this build (since the cache
+    // was last saved, by any writer: not the export diff).
+    if let Some((base, ds)) = since {
+        let cache = match (&cache, persist) {
+            (Some(c), _) => {
+                format!("reused={} reparsed={} evicted={}", c.reused, c.reparsed, c.evicted)
+            }
+            (None, true) => "unrecorded".to_string(),
+            (None, false) => "off".to_string(),
+        };
+        eprintln!(
+            "[engram-export] v6 since: base={base:016x} target={:016x}{} added={} removed={} modified={} (moved={} location_only={}) edges +{}/-{}; parse cache {cache}\n  diff: {}",
+            stats.digest,
+            if base == stats.digest { " unchanged" } else { "" },
+            ds.added,
+            ds.removed,
+            ds.modified,
+            ds.moved,
+            ds.location_only,
+            ds.edges_added,
+            ds.edges_removed,
+            diff_out.display(),
+        );
+    }
     // The v6 span marker (LG.10): how many positioned nodes got 1-based lines
     // and how many doc Propositions got a source anchor. A healthy export has
     // both pairs equal; an unreadable file still keeps its lines (bytes 0..0).
@@ -242,5 +354,5 @@ fn run(args: &Args) -> i32 {
     if !result.parse_errors.is_empty() {
         eprintln!("(plus {} parse errors)", result.parse_errors.len());
     }
-    0
+    code
 }
