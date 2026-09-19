@@ -8,9 +8,20 @@
 
 use clap::Subcommand;
 
+mod spec_status;
+
 #[derive(Subcommand, Debug)]
-pub(crate) enum RulesCmd {}
+pub(crate) enum RulesCmd {
+    /// Spec status (LE.9b): per feature, the declared API ops (OpenAPI,
+    /// quokka feature.yaml) that a route implements and the ones still
+    /// missing, then the routes of governed services no op declares. Pact and
+    /// handler-annotation ops are not declarations. A report: exits 0
+    /// whatever it finds.
+    SpecStatus(spec_status::Args),
+}
 
 pub(crate) fn run(c: RulesCmd) -> i32 {
-    match c {}
+    match c {
+        RulesCmd::SpecStatus(a) => spec_status::run(a),
+    }
 }
