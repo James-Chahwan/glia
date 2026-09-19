@@ -100,6 +100,9 @@ pub struct CodeNavStore {
     pub children_of: Vec<(NodeId, Vec<NodeId>)>,
 }
 
+/// Serialised mirror of `SymbolTable`: every map flattened into a `Vec`
+/// sorted by key at both levels (outer by `NodeId`, inner by name), so the
+/// shard bytes are identical across processes. Field order is archive order.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
@@ -107,6 +110,10 @@ pub struct SymbolTableStore {
     pub module_by_qname: Vec<(String, NodeId)>,
     pub module_symbols: Vec<(NodeId, Vec<(String, NodeId)>)>,
     pub class_methods: Vec<(NodeId, Vec<(String, NodeId)>)>,
+    /// `SymbolTable.interface_methods` (A6.6): INTERFACE id -> (method name ->
+    /// METHOD id). Persisted since LC.6 (FORMAT_VERSION 2), so a graph loaded
+    /// from a `.gmap` carries the same interface table as a fresh build.
+    pub interface_methods: Vec<(NodeId, Vec<(String, NodeId)>)>,
     pub module_import_bindings: Vec<(NodeId, Vec<(String, NodeId)>)>,
 }
 
@@ -199,6 +206,7 @@ impl SymbolTableStore {
             module_by_qname,
             module_symbols: to_pair_vec(&sym.module_symbols),
             class_methods: to_pair_vec(&sym.class_methods),
+            interface_methods: to_pair_vec(&sym.interface_methods),
             module_import_bindings: to_pair_vec(&sym.module_import_bindings),
         }
     }
@@ -224,15 +232,14 @@ impl SymbolTableStore {
                 })
                 .collect()
         };
-        // Starts from Default for the build-time-only tables this store does
-        // not persist (`interface_methods`, A6.6): a loaded graph has already
-        // been resolved, so they stay empty and the archived layout is unchanged.
+        // Exhaustive on purpose: a new `SymbolTable` field fails to compile
+        // here until the store persists it (or says why it does not).
         SymbolTable {
             module_by_qname,
             module_symbols: to_map(&self.module_symbols),
             class_methods: to_map(&self.class_methods),
+            interface_methods: to_map(&self.interface_methods),
             module_import_bindings: to_map(&self.module_import_bindings),
-            ..Default::default()
         }
     }
 }
@@ -287,6 +294,17 @@ impl Header {
 pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<(Vec<u8>, bool), StoreError> {
     let mut core = code_core(g);
     let code = CodeSection::from_repo_graph(g);
+    // LC.6 marker, un-gated: one line per encoded shard that carries an
+    // interface method table (owners = INTERFACE entries, methods = their sum).
+    let iface = &code.symbols.interface_methods;
+    if !iface.is_empty() {
+        let methods: usize = iface.iter().map(|(_, m)| m.len()).sum();
+        eprintln!(
+            "[gmap] code symbols: repo={} iface_owners={} iface_methods={methods}",
+            g.repo.0,
+            iface.len(),
+        );
+    }
     let sections: Vec<EncodedSection> = if code.is_empty() {
         Vec::new()
     } else {
@@ -370,6 +388,25 @@ mod tests {
         let store = CodeNavStore::from_owned(&nav);
         let ids: Vec<u64> = store.name_by_id.iter().map(|(k, _)| k.0).collect();
         assert_eq!(ids, vec![10, 30, 50]);
+    }
+
+    /// LC.6: `interface_methods` is flattened sorted at both levels (outer by
+    /// id, inner by name) and decodes back into the same table.
+    #[test]
+    fn symbol_store_persists_interface_methods_sorted() {
+        let mut sym = SymbolTable::default();
+        for (iface, names) in [(90u64, ["Save", "GetById"]), (20, ["Put", "Delete"])] {
+            let inner = names.iter().enumerate().map(|(i, n)| (n.to_string(), NodeId(iface + 1 + i as u64)));
+            sym.interface_methods.insert(NodeId(iface), inner.collect());
+        }
+        let store = SymbolTableStore::from_owned(&sym);
+        let flat: Vec<(u64, Vec<&str>)> = store
+            .interface_methods
+            .iter()
+            .map(|(k, m)| (k.0, m.iter().map(|(n, _)| n.as_str()).collect()))
+            .collect();
+        assert_eq!(flat, vec![(20, vec!["Delete", "Put"]), (90, vec!["GetById", "Save"])]);
+        assert_eq!(store.to_owned_table().interface_methods, sym.interface_methods);
     }
 
     /// LC.7: `properties` rides the code section, sorted, and decodes back into
