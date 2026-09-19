@@ -1,0 +1,25 @@
+{
+  "framework": "xcut-queue-anchor",
+  "language": "typescript",
+  "note": "LE.4c: QUEUE_PRODUCER / QUEUE_CONSUMER join the A5.8 marker anchoring: the function holding the producer call USES the producer node, the consumer node is HANDLED_BY the function holding the subscribe call. The A2.8 module CONTAINS edge stays. Baseline 2026-09-18 (HEAD code): USES 0/1, HANDLED_BY 0/1, CONTAINS 1/1.",
+  "expect_edges": [
+    {
+      "from": "publishOrder",
+      "to": "queue_producer:orders",
+      "category": "USES",
+      "note": "the function holding producer.send USES the producer node"
+    },
+    {
+      "from": "queue_consumer:payments",
+      "to": "listen",
+      "category": "HANDLED_BY",
+      "note": "the consumer node is HANDLED_BY the function holding consumer.subscribe"
+    },
+    {
+      "from": "svc::bus",
+      "to": "queue_producer:orders",
+      "category": "CONTAINS",
+      "note": "A2.8's module CONTAINS stays"
+    }
+  ]
+}

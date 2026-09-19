@@ -11,8 +11,8 @@
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 use repo_graph_engine::{
-    ParseCache, cross_stack_trace, generate_many, generate_one, generate_one_with_cache,
-    locate_node, node_file, service_map,
+    ParseCache, blast_radius_by_qname, cross_stack_trace, generate_many, generate_one,
+    generate_one_with_cache, locate_node, node_file, service_map,
 };
 use repo_graph_graph::MergedGraph;
 use std::path::Path;
@@ -292,6 +292,72 @@ fn owner_edges_are_emitted_in_a_stable_order() {
             && *c == edge_category::USES),
         "{la:?}"
     );
+}
+
+// LE.4c: the queue markers (A2.8) join the anchoring. `svc/bus.ts` is a
+// kafkajs file: `producer.send({ topic: 'orders' })` inside `publishOrder`,
+// `consumer.subscribe({ topic: 'payments' })` inside `listen`, both clients
+// built at module level.
+
+#[test]
+fn queue_producer_is_used_by_its_function() {
+    let m = build(&["xcut-queue-anchor"]);
+    let producer = node_id(&m, node_kind::QUEUE_PRODUCER, "queue_producer:orders");
+    let publish = node_id(&m, node_kind::FUNCTION, "svc::bus::publishOrder");
+    let module = node_id(&m, node_kind::MODULE, "svc::bus");
+    assert!(has_edge(&m, publish, producer, edge_category::USES));
+    // A2.8's module CONTAINS and POSITION stay exactly as they were.
+    assert!(has_edge(&m, module, producer, edge_category::CONTAINS));
+    assert_eq!(
+        positions(&m, producer),
+        vec![r#"{"file":"svc/bus.ts","start_line":7,"end_line":7}"#.to_string()]
+    );
+    // The point of the packet: code reaches the queue sink. At HEAD the only
+    // edge on the producer was the structural CONTAINS, so a forward blast
+    // from the publishing function was empty.
+    let hits = blast_radius_by_qname(
+        &m,
+        "svc::bus::publishOrder",
+        "forward",
+        4,
+        None,
+        false,
+        None,
+    )
+    .expect("seed resolves");
+    assert!(
+        hits.iter()
+            .any(|h| h.qname == "queue_producer:orders" && h.reason == "USES"),
+        "{:?}",
+        hits.iter()
+            .map(|h| (&h.qname, h.reason))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn queue_consumer_is_handled_by_subscriber() {
+    let m = build(&["xcut-queue-anchor"]);
+    let consumer = node_id(&m, node_kind::QUEUE_CONSUMER, "queue_consumer:payments");
+    let listen = node_id(&m, node_kind::FUNCTION, "svc::bus::listen");
+    let publish = node_id(&m, node_kind::FUNCTION, "svc::bus::publishOrder");
+    let module = node_id(&m, node_kind::MODULE, "svc::bus");
+    assert!(has_edge(&m, consumer, listen, edge_category::HANDLED_BY));
+    assert!(
+        !has_edge(&m, consumer, publish, edge_category::HANDLED_BY),
+        "only the function holding the subscribe owns the consumer"
+    );
+    assert!(has_edge(&m, module, consumer, edge_category::CONTAINS));
+    // Exactly one owner edge per queue node: the module-level
+    // `kafka.producer()` / `kafka.consumer(..)` lines are not queue sites.
+    let owner_edges = m
+        .all_edges()
+        .filter(|e| {
+            (e.category == edge_category::USES && e.to == consumer)
+                || (e.category == edge_category::HANDLED_BY && e.from == consumer)
+        })
+        .count();
+    assert_eq!(owner_edges, 1);
 }
 
 fn copy_tree(from: &Path, to: &Path) {

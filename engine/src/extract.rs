@@ -207,14 +207,29 @@ pub(crate) fn apply_cross_cutting_extractors(
         }};
     }
 
-    // A2.8: `run_with_edges!`, not `run!` — queue nodes now carry a CONTAINS
-    // edge from the module that publishes/consumes the topic. Dropping
-    // `out.edges` here would silently discard them.
-    run_with_edges!(
+    // LE.4c: `run_with_edges!` plus the extractor's marker anchors — the
+    // queue extractor's nodes carry both its own edges and anchors.
+    macro_rules! run_marked_with_edges {
+        ($name:literal, $call:expr) => {{
+            let mut out = $call;
+            evidence::stamp_missing(&mut out.edges, concat!("extractor:", $name));
+            anchors.extend(out.anchors);
+            fp.nodes.extend(out.nodes);
+            fp.edges.extend(out.edges);
+            merge_nav(&mut fp.nav, out.nav);
+        }};
+    }
+
+    // A2.8: not `run!` — queue nodes carry a CONTAINS edge from the module
+    // that publishes/consumes the topic. Dropping `out.edges` here would
+    // silently discard them. LE.4c: and one anchor per call site, so the
+    // A5.8 pass below adds `function -USES-> queue_producer:<t>` and
+    // `queue_consumer:<t> -HANDLED_BY-> function` on top of that CONTAINS.
+    run_marked_with_edges!(
         "queues",
         queues::extract_queue_consumer_nodes(source, path, module_id, repo)
     );
-    run_with_edges!(
+    run_marked_with_edges!(
         "queues",
         queues::extract_queue_producer_nodes(source, path, module_id, repo)
     );
@@ -395,8 +410,9 @@ pub(crate) fn apply_cross_cutting_extractors(
         source, path, lang, fp, module_id, repo
     ));
 
-    // A5.8: locate every RPC-family marker and tie it to the METHOD/FUNCTION
-    // whose span holds its needle (module CONTAINS when none does). Runs after
+    // A5.8: locate every RPC-family marker (LE.4c: and every queue marker)
+    // and tie it to the METHOD/FUNCTION whose span holds its needle (module
+    // CONTAINS when none does; a queue node already has one). Runs after
     // every extractor above so the owner index sees all of the file's spans.
     // The result is a function of this file alone, so it is cached with the
     // parse; the build-level `[marker-anchor]` marker counts it post-cache.

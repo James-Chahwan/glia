@@ -32,9 +32,21 @@
 //! Parsers extract, the graph crate resolves: this pass reads only the file's
 //! own parse (spans the language parser already attached), so its output is a
 //! function of the file's content and is safe to cache with the `FileParse`.
-//! Queue markers (A2.8) should reuse this module rather than grow a parallel
-//! helper, as GRPC_SERVER (A5.3) does: it finds its implementing type through
-//! [`build_span_index`] and anchors through [`attach`].
+//! Other marker families reuse this module rather than grow a parallel helper:
+//! GRPC_SERVER (A5.3) finds its implementing type through [`build_span_index`]
+//! and anchors through [`attach`].
+//!
+//! LE.4c: the queue markers (A2.8's QUEUE_PRODUCER / QUEUE_CONSUMER) are
+//! marker kinds too. The queue extractor already ties every topic node to its
+//! MODULE with CONTAINS (structural, so the publishing file does not fan the
+//! blast radius out) and already gives it a POSITION, so [`attach`] keeps both
+//! and only ADDS the owner edge: the function holding `producer.send(..)`
+//! USES the producer node, and the consumer node is HANDLED_BY the function
+//! holding `consumer.subscribe(..)`. Every queue call site anchors, so a topic
+//! published from two functions of one file gives both a USES edge. A
+//! consumer registered inside a setup function is HANDLED_BY that function,
+//! not the callback it passes (`consumer.run({ eachMessage })`): binding the
+//! callback needs reference extraction.
 
 use std::collections::{HashMap, HashSet};
 
@@ -53,31 +65,43 @@ pub struct Anchor {
 
 /// Marker kinds a method reaches OUT through: the method USES the marker.
 /// RPC_CALL (LA.31) is the tRPC hook / vanilla call, the gRPC-client shape.
+/// QUEUE_PRODUCER (LE.4c) is the function that publishes to a topic.
 const OUTBOUND: &[NodeKindId] = &[
     node_kind::GRPC_CLIENT,
     node_kind::WS_CLIENT,
     node_kind::EVENT_EMITTER,
     node_kind::GRAPHQL_OPERATION,
     node_kind::RPC_CALL,
+    node_kind::QUEUE_PRODUCER,
 ];
 
 /// Marker kinds that are an INBOUND contract: the marker is HANDLED_BY the
 /// method, mirroring the HTTP side (`ROUTE --HANDLED_BY--> handler`).
 /// RPC_PROCEDURE (LA.31) is a tRPC procedure key; one declared in a
 /// module-level router has no enclosing function and takes the module
-/// CONTAINS fallback.
+/// CONTAINS fallback. QUEUE_CONSUMER (LE.4c) is HANDLED_BY the function that
+/// subscribes (or, for an annotation listener, the annotated method).
 const INBOUND: &[NodeKindId] = &[
     node_kind::WS_HANDLER,
     node_kind::EVENT_HANDLER,
     node_kind::GRAPHQL_RESOLVER,
     node_kind::GRPC_SERVER,
     node_kind::RPC_PROCEDURE,
+    node_kind::QUEUE_CONSUMER,
 ];
+
+/// LE.4c: the queue markers, counted apart in [`AnchorStats`] so the
+/// `[marker-anchor]` line shows the queue half fired.
+fn is_queue_kind(kind: NodeKindId) -> bool {
+    kind == node_kind::QUEUE_PRODUCER || kind == node_kind::QUEUE_CONSUMER
+}
 
 /// True for every kind [`attach`] anchors. RPC_CALL / RPC_PROCEDURE are shared
 /// with LA.17's Connect / Twirp nodes, which are grafted post-cache with their
 /// own HANDLED_BY / USES / CONTAINS edges in the directions [`owner_edge`]
-/// uses, so [`census`] classifies them as anchored too.
+/// uses, so [`census`] classifies them as anchored too. The queue kinds
+/// (LE.4c) always carry A2.8's module CONTAINS, so a queue node no function
+/// encloses counts as anchored to the module.
 pub fn is_marker_kind(kind: NodeKindId) -> bool {
     OUTBOUND.contains(&kind) || INBOUND.contains(&kind)
 }
@@ -199,6 +223,10 @@ pub struct AnchorStats {
     pub to_module: usize,
     /// Markers left floating: no owner edge, no module edge.
     pub unanchored: usize,
+    /// LE.4c: the QUEUE_PRODUCER / QUEUE_CONSUMER share of `to_method`.
+    pub queue_to_method: usize,
+    /// LE.4c: the QUEUE_PRODUCER / QUEUE_CONSUMER share of `to_module`.
+    pub queue_to_module: usize,
 }
 
 impl AnchorStats {
@@ -206,6 +234,24 @@ impl AnchorStats {
         self.to_method += other.to_method;
         self.to_module += other.to_module;
         self.unanchored += other.unanchored;
+        self.queue_to_method += other.queue_to_method;
+        self.queue_to_module += other.queue_to_module;
+    }
+
+    /// One marker of `kind` anchored to a METHOD / FUNCTION.
+    fn count_method(&mut self, kind: NodeKindId) {
+        self.to_method += 1;
+        if is_queue_kind(kind) {
+            self.queue_to_method += 1;
+        }
+    }
+
+    /// One marker of `kind` anchored to its MODULE.
+    fn count_module(&mut self, kind: NodeKindId) {
+        self.to_module += 1;
+        if is_queue_kind(kind) {
+            self.queue_to_module += 1;
+        }
     }
 
     pub fn total(&self) -> usize {
@@ -251,7 +297,7 @@ pub fn attach(
 
     // Markers in first-anchor order (the anchors are line-sorted, so this is
     // also each marker's lowest line).
-    let mut order: Vec<(NodeId, u32)> = Vec::new();
+    let mut order: Vec<(NodeId, u32, NodeKindId)> = Vec::new();
     let mut owned: HashMap<NodeId, bool> = HashMap::new();
     let mut bogus: HashSet<NodeId> = HashSet::new();
     for a in anchors.iter() {
@@ -264,7 +310,7 @@ pub fn attach(
             continue;
         }
         let has_owner = owned.entry(a.node).or_insert_with(|| {
-            order.push((a.node, a.line));
+            order.push((a.node, a.line, kind));
             false
         });
         if let Some(owner) = owner_of_line(&idx, a.line)
@@ -276,7 +322,7 @@ pub fn attach(
         }
     }
 
-    for (marker, line) in order {
+    for (marker, line, kind) in order {
         if let Some(node) = fp.nodes.iter_mut().find(|n| n.id == marker)
             && !node.cells.iter().any(|c| c.kind == cell_type::POSITION)
         {
@@ -285,7 +331,7 @@ pub fn attach(
         let has_owner = owned.get(&marker).copied().unwrap_or(false)
             || fp.edges.iter().any(|e| is_owner_edge(e, marker));
         if has_owner {
-            stats.to_method += 1;
+            stats.count_method(kind);
         } else {
             push_edge(
                 fp,
@@ -297,7 +343,7 @@ pub fn attach(
                     cells: Vec::new(),
                 },
             );
-            stats.to_module += 1;
+            stats.count_module(kind);
         }
     }
     stats.unanchored += bogus.len();
@@ -330,18 +376,16 @@ pub fn census(fp: &FileParse) -> AnchorStats {
     }
     let mut seen: HashSet<NodeId> = HashSet::new();
     for n in &fp.nodes {
-        let is_marker = fp
-            .nav
-            .kind_by_id
-            .get(&n.id)
-            .is_some_and(|k| is_marker_kind(*k));
-        if !is_marker || !seen.insert(n.id) {
+        let Some(kind) = fp.nav.kind_by_id.get(&n.id).copied() else {
+            continue;
+        };
+        if !is_marker_kind(kind) || !seen.insert(n.id) {
             continue;
         }
         if owner_linked.contains(&n.id) {
-            stats.to_method += 1;
+            stats.count_method(kind);
         } else if module_linked.contains(&n.id) {
-            stats.to_module += 1;
+            stats.count_module(kind);
         } else {
             stats.unanchored += 1;
         }
@@ -349,14 +393,34 @@ pub fn census(fp: &FileParse) -> AnchorStats {
     stats
 }
 
-/// The fired_on marker, once per repo that holds a marker node:
+/// The fired_on marker line for `stats`, or `None` when the repo holds no
+/// marker node:
 ///   `[marker-anchor] {a} anchored to methods, {m} to module, {u} unanchored repo=<label>`
+/// LE.4c: when a queue marker was anchored, ` (queue: {q} to methods, {qm} to
+/// module)` goes before ` repo=` (grep token `(queue: `); a repo without queue
+/// nodes prints the line unchanged.
+pub fn report_line(stats: AnchorStats, repo_label: &str) -> Option<String> {
+    if stats.total() == 0 {
+        return None;
+    }
+    let queue = if stats.queue_to_method + stats.queue_to_module > 0 {
+        format!(
+            " (queue: {} to methods, {} to module)",
+            stats.queue_to_method, stats.queue_to_module
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "[marker-anchor] {} anchored to methods, {} to module, {} unanchored{queue} repo={repo_label}",
+        stats.to_method, stats.to_module, stats.unanchored
+    ))
+}
+
+/// Print [`report_line`], once per repo that holds a marker node.
 pub fn report(stats: AnchorStats, repo_label: &str) {
-    if stats.total() > 0 {
-        eprintln!(
-            "[marker-anchor] {} anchored to methods, {} to module, {} unanchored repo={repo_label}",
-            stats.to_method, stats.to_module, stats.unanchored
-        );
+    if let Some(line) = report_line(stats, repo_label) {
+        eprintln!("{line}");
     }
 }
 
@@ -494,6 +558,7 @@ mod tests {
             node_kind::WS_CLIENT,
             node_kind::EVENT_EMITTER,
             node_kind::GRAPHQL_OPERATION,
+            node_kind::QUEUE_PRODUCER,
         ] {
             let marker = id(kind, "x");
             let e = owner_edge(kind, marker, owner).expect("outbound kinds anchor");
@@ -508,6 +573,7 @@ mod tests {
             node_kind::EVENT_HANDLER,
             node_kind::GRAPHQL_RESOLVER,
             node_kind::GRPC_SERVER,
+            node_kind::QUEUE_CONSUMER,
         ] {
             let marker = id(kind, "x");
             let e = owner_edge(kind, marker, owner).expect("inbound kinds anchor");
@@ -517,7 +583,7 @@ mod tests {
             );
         }
         for kind in [
-            node_kind::QUEUE_PRODUCER,
+            node_kind::CRON_JOB,
             node_kind::ROUTE,
             node_kind::METHOD,
             node_kind::GRPC_SERVICE,
@@ -565,7 +631,8 @@ mod tests {
             AnchorStats {
                 to_method: 1,
                 to_module: 0,
-                unanchored: 0
+                unanchored: 0,
+                ..AnchorStats::default()
             }
         );
         assert_eq!(
@@ -602,7 +669,8 @@ mod tests {
             AnchorStats {
                 to_method: 0,
                 to_module: 1,
-                unanchored: 0
+                unanchored: 0,
+                ..AnchorStats::default()
             }
         );
         assert_eq!(
@@ -711,7 +779,8 @@ mod tests {
             AnchorStats {
                 to_method: 0,
                 to_module: 0,
-                unanchored: 2
+                unanchored: 2,
+                ..AnchorStats::default()
             }
         );
         assert!(fp.edges.is_empty());
@@ -731,7 +800,8 @@ mod tests {
             AnchorStats {
                 to_method: 0,
                 to_module: 0,
-                unanchored: 1
+                unanchored: 1,
+                ..AnchorStats::default()
             }
         );
     }
@@ -782,5 +852,171 @@ mod tests {
         assert_eq!(a.nodes, b.nodes);
         assert_eq!(a.nodes, c.nodes);
         assert_eq!(a.edges.len(), 5, "4 owner edges + 1 module fallback");
+    }
+
+    /// LE.4c: a queue parse as the queue extractor leaves it — each topic
+    /// node already carries its A2.8 POSITION and module CONTAINS.
+    fn queue_parse() -> (FileParse, NodeId, NodeId, NodeId) {
+        let (mut fp, module) = parse_with(&[
+            (node_kind::FUNCTION, "publishOrder", Some((6, 11))),
+            (node_kind::FUNCTION, "listen", Some((13, 20))),
+            (
+                node_kind::QUEUE_PRODUCER,
+                "queue_producer:orders",
+                Some((7, 7)),
+            ),
+            (
+                node_kind::QUEUE_CONSUMER,
+                "queue_consumer:payments",
+                Some((14, 14)),
+            ),
+        ]);
+        let producer = id(node_kind::QUEUE_PRODUCER, "queue_producer:orders");
+        let consumer = id(node_kind::QUEUE_CONSUMER, "queue_consumer:payments");
+        for to in [consumer, producer] {
+            fp.edges.push(Edge {
+                from: module,
+                to,
+                category: edge_category::CONTAINS,
+                confidence: Confidence::Medium,
+                cells: Vec::new(),
+            });
+        }
+        (fp, module, producer, consumer)
+    }
+
+    #[test]
+    fn queue_markers_gain_owner_edges_and_keep_contains_and_position() {
+        assert!(is_marker_kind(node_kind::QUEUE_PRODUCER));
+        assert!(is_marker_kind(node_kind::QUEUE_CONSUMER));
+        let (mut fp, module, producer, consumer) = queue_parse();
+        let before = fp.edges.clone();
+        let mut anchors = vec![
+            Anchor {
+                node: consumer,
+                line: 14,
+            },
+            Anchor {
+                node: producer,
+                line: 7,
+            },
+        ];
+        let stats = attach(&mut fp, "svc/bus.ts", module, &mut anchors);
+        assert_eq!(
+            stats,
+            AnchorStats {
+                to_method: 2,
+                to_module: 0,
+                unanchored: 0,
+                queue_to_method: 2,
+                queue_to_module: 0,
+            }
+        );
+        // A2.8's CONTAINS pair stays first and untouched; the owner edges are
+        // ADDED after it, in line order.
+        assert_eq!(fp.edges[..2], before[..]);
+        let added: Vec<_> = fp.edges[2..]
+            .iter()
+            .map(|e| (e.from, e.to, e.category))
+            .collect();
+        assert_eq!(
+            added,
+            vec![
+                (
+                    id(node_kind::FUNCTION, "publishOrder"),
+                    producer,
+                    edge_category::USES
+                ),
+                (
+                    consumer,
+                    id(node_kind::FUNCTION, "listen"),
+                    edge_category::HANDLED_BY
+                ),
+            ]
+        );
+        // The extractor's POSITION is kept, not replaced by the anchor's.
+        assert!(position_of(&fp, producer).is_some_and(|p| p.contains("\"file\":\"a.ts\"")));
+        assert_eq!(census(&fp), stats);
+    }
+
+    #[test]
+    fn queue_marker_at_module_level_keeps_its_one_contains() {
+        let (mut fp, module, producer, _) = queue_parse();
+        let mut anchors = vec![Anchor {
+            node: producer,
+            line: 2,
+        }];
+        let stats = attach(&mut fp, "svc/bus.ts", module, &mut anchors);
+        assert_eq!(
+            stats,
+            AnchorStats {
+                to_method: 0,
+                to_module: 1,
+                unanchored: 0,
+                queue_to_method: 0,
+                queue_to_module: 1,
+            }
+        );
+        assert_eq!(
+            fp.edges.len(),
+            2,
+            "no second module CONTAINS, no owner edge"
+        );
+    }
+
+    #[test]
+    fn queue_topic_sent_from_two_functions_is_used_by_both() {
+        let (mut fp, module, producer, _) = queue_parse();
+        let mut anchors = vec![
+            Anchor {
+                node: producer,
+                line: 15,
+            },
+            Anchor {
+                node: producer,
+                line: 8,
+            },
+        ];
+        attach(&mut fp, "svc/bus.ts", module, &mut anchors);
+        let users: Vec<NodeId> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES && e.to == producer)
+            .map(|e| e.from)
+            .collect();
+        assert_eq!(
+            users,
+            vec![
+                id(node_kind::FUNCTION, "publishOrder"),
+                id(node_kind::FUNCTION, "listen")
+            ]
+        );
+    }
+
+    #[test]
+    fn report_line_appends_the_queue_share_only_when_queues_anchored() {
+        let rpc = AnchorStats {
+            to_method: 3,
+            to_module: 1,
+            ..AnchorStats::default()
+        };
+        assert_eq!(
+            report_line(rpc, "r").as_deref(),
+            Some("[marker-anchor] 3 anchored to methods, 1 to module, 0 unanchored repo=r"),
+            "a repo without queue markers prints the pre-LE.4c line"
+        );
+        let mut both = rpc;
+        both.add(AnchorStats {
+            to_method: 2,
+            queue_to_method: 2,
+            ..AnchorStats::default()
+        });
+        assert_eq!(
+            report_line(both, "r").as_deref(),
+            Some(
+                "[marker-anchor] 5 anchored to methods, 1 to module, 0 unanchored (queue: 2 to methods, 0 to module) repo=r"
+            )
+        );
+        assert_eq!(report_line(AnchorStats::default(), "r"), None);
     }
 }

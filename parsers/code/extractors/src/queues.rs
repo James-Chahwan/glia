@@ -2,10 +2,12 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use repo_graph_code_domain::{
-    CodeNav, FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, node_kind,
+    CodeNav, FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, evidence,
+    node_kind,
 };
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
+use crate::anchor::{self, Anchor};
 use crate::queue_topic::{self, TopicForm, TopicRule};
 
 pub struct QueueConsumer {
@@ -532,6 +534,13 @@ pub struct QueueNodes {
     /// `QUEUE_FLOWS` stays the semantic path.
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+    /// LE.4c: one (node, 0-indexed line) per call site that minted or re-used
+    /// a topic node, uncapped (unlike the [`MAX_SITES`] provenance list), so a
+    /// topic published from two functions of one file anchors in both.
+    /// [`anchor::attach`] turns them into the owner edges: the enclosing
+    /// function USES a QUEUE_PRODUCER, a QUEUE_CONSUMER is HANDLED_BY it. The
+    /// node's POSITION and module CONTAINS above are kept as they are.
+    pub anchors: Vec<Anchor>,
 }
 
 /// Call sites recorded per (topic, framework) per file. A generated file can
@@ -556,6 +565,9 @@ struct Pending {
     /// A12.1: the needle's byte offset for each entry of `lines`, same order.
     /// The MESSAGE_TYPE scan looks for the payload type around these.
     offsets: Vec<usize>,
+    /// LE.4c: the 0-indexed line of EVERY site recorded for this node, in
+    /// scan order, not capped or deduped (`anchor::attach` sorts and dedups).
+    anchor_lines: Vec<u32>,
 }
 
 /// Queue-consumer nodes for one file — one node per DISTINCT (topic, framework).
@@ -622,6 +634,9 @@ pub struct ConstFold {
     pub consumers: QueueNodes,
     pub producers: QueueNodes,
     pub counts: ConstFoldCounts,
+    /// LE.4c: the file the nodes were read from, which [`replace_queue_nodes`]
+    /// hands [`anchor::attach`] when it re-anchors the folded nodes.
+    pub path: String,
 }
 
 /// LA.4 (A11.7): the file's queue nodes, both sides, emitted exactly as
@@ -667,6 +682,7 @@ pub fn extract_queue_nodes_with_consts(
         consumers,
         producers,
         counts,
+        path: path.to_string(),
     }
 }
 
@@ -684,6 +700,13 @@ pub fn extract_queue_nodes_with_consts(
 /// ones get it too, last, via `attach_imports_cell` on a scratch parse (the
 /// `graft_rpc_markers` precedent), so the A16.4 filter then rewrites them like
 /// every other node. `lang` is the engine's language tag for that cell.
+///
+/// LE.4c: the removed nodes' owner edges (`function -USES-> producer`,
+/// `consumer -HANDLED_BY-> function`, emitted by the per-file anchor pass)
+/// go too, and [`anchor::attach`] re-anchors the fold's nodes from the fold's
+/// own sites. The new owner edges take the removed ones' place (the end, when
+/// there were none) and are stamped `extractor:anchor` rule `const_fold`, the
+/// post-cache counterpart of the per-file `extractor:anchor` stamp.
 pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fold: ConstFold) {
     let is_queue =
         |k: &NodeKindId| *k == node_kind::QUEUE_CONSUMER || *k == node_kind::QUEUE_PRODUCER;
@@ -735,8 +758,11 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
     let ConstFold {
         consumers,
         producers,
+        path,
         ..
     } = fold;
+    let mut anchors = consumers.anchors;
+    anchors.extend(producers.anchors);
     let mut fresh = FileParse {
         nodes: consumers.nodes,
         imports: if had_imports {
@@ -773,6 +799,26 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
             }
         }
     }
+
+    // LE.4c: re-anchor. The old owner edges name ids that may be gone (the
+    // sentinel a fold replaces), and a folded site is a new owner.
+    let old_owner = |e: &Edge| {
+        (e.category == edge_category::USES && old.contains(&e.to))
+            || (e.category == edge_category::HANDLED_BY && old.contains(&e.from))
+    };
+    let owner_at = fp
+        .edges
+        .iter()
+        .position(&old_owner)
+        .unwrap_or(fp.edges.len());
+    fp.edges.retain(|e| !old_owner(e));
+    let tail = fp.edges.len();
+    anchor::attach(fp, &path, module_id, &mut anchors);
+    let mut added = fp.edges.split_off(tail);
+    let ev = evidence::Evidence::emitter("extractor:anchor").rule("const_fold");
+    evidence::stamp_missing_with(&mut added, &ev);
+    let at = owner_at.min(fp.edges.len());
+    fp.edges.splice(at..at, added);
 }
 
 /// Shared emit loop for both sides.
@@ -959,8 +1005,12 @@ fn record_site(
     (line, offset): (usize, usize),
 ) -> bool {
     let key = format!("{topic}:{framework:?}");
+    // LE.4c: every site anchors, capped or not. `line` is the site's
+    // POSITION / CODE line, the count of `\n` before `offset`.
+    let anchor_line = u32::try_from(line).unwrap_or(u32::MAX);
     if let Some(&idx) = seen.get(&key) {
         let p = &mut pending[idx];
+        p.anchor_lines.push(anchor_line);
         if p.lines.len() < MAX_SITES && !p.lines.contains(&line) {
             p.lines.push(line);
             p.offsets.push(offset);
@@ -978,6 +1028,7 @@ fn record_site(
         confidence,
         lines: vec![line],
         offsets: vec![offset],
+        anchor_lines: vec![anchor_line],
     });
     true
 }
@@ -999,6 +1050,7 @@ fn finish(
 ) -> QueueNodes {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
+    let mut anchors = Vec::new();
     let mut nav = CodeNav::default();
     let file = queue_topic::escape_json(path);
 
@@ -1061,9 +1113,19 @@ fn finish(
             confidence: Confidence::Medium,
             cells: Vec::new(),
         });
+        anchors.extend(
+            p.anchor_lines
+                .iter()
+                .map(|&line| Anchor { node: p.id, line }),
+        );
     }
 
-    QueueNodes { nodes, edges, nav }
+    QueueNodes {
+        nodes,
+        edges,
+        nav,
+        anchors,
+    }
 }
 
 /// True for the A2.5 rules that read a task SYMBOL rather than a broker topic.
@@ -2916,9 +2978,16 @@ public class AuditFunction
 
     /// One file's parse as the engine assembles it: a language-parser MODULE
     /// and FUNCTION with an edge, then the queue extractors (consumers, then
-    /// producers), then a later extractor's node and edge; with `imports`, the
+    /// producers), then a later extractor's node and edge, then the A5.8
+    /// anchor pass over the queue anchors (LE.4c); with `imports`, the
     /// router's raw IMPORTS cell on every node.
     fn file_parse(src: &str, imports: bool) -> FileParse {
+        file_parse_spanned(src, imports, None)
+    }
+
+    /// [`file_parse`] with the FUNCTION located at `span` (0-indexed lines),
+    /// so the anchor pass finds an owner for the queue sites inside it.
+    fn file_parse_spanned(src: &str, imports: bool, span: Option<(u32, u32)>) -> FileParse {
         let module = module_id();
         let func = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test::publish");
         let later = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CRON_JOB, "cron:nightly");
@@ -2928,6 +2997,15 @@ public class AuditFunction
             confidence: Confidence::Strong,
             cells: Vec::new(),
         };
+        let mut located = bare(func);
+        if let Some((start, end)) = span {
+            located.cells.push(Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":"{PATH}","start_line":{start},"end_line":{end}}}"#
+                )),
+            });
+        }
         let contains = |to| Edge {
             from: module,
             to,
@@ -2936,7 +3014,7 @@ public class AuditFunction
             cells: Vec::new(),
         };
         let mut fp = FileParse {
-            nodes: vec![bare(module), bare(func)],
+            nodes: vec![bare(module), located],
             edges: vec![contains(func)],
             ..Default::default()
         };
@@ -2949,12 +3027,14 @@ public class AuditFunction
             node_kind::FUNCTION,
             Some(module),
         );
+        let mut anchors = Vec::new();
         for out in [
             extract_queue_consumer_nodes(src, PATH, module, repo()),
             extract_queue_producer_nodes(src, PATH, module, repo()),
         ] {
             fp.nodes.extend(out.nodes);
             fp.edges.extend(out.edges);
+            anchors.extend(out.anchors);
             merge(&mut fp.nav, out.nav);
         }
         fp.nodes.push(bare(later));
@@ -2966,6 +3046,7 @@ public class AuditFunction
             node_kind::CRON_JOB,
             Some(module),
         );
+        anchor::attach(&mut fp, PATH, module, &mut anchors);
         if imports {
             fp.imports.push(repo_graph_code_domain::ImportStmt {
                 from_module: "test".into(),
@@ -3063,5 +3144,142 @@ public class AuditFunction
                 .iter()
                 .all(|n| n.cells.iter().all(|c| c.kind != cell_type::IMPORTS))
         );
+    }
+
+    // ---- LE.4c: queue markers anchored to their functions ----------------
+
+    fn anchors_of(r: &QueueNodes) -> Vec<(String, u32)> {
+        r.anchors
+            .iter()
+            .map(|a| {
+                let q = r.nav.qname_by_id.get(&a.node).cloned().unwrap_or_default();
+                (q, a.line)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_queue_site_is_an_anchor() {
+        // `orders` sent from two functions, `payments` once, one subscribe.
+        let src = "import { Kafka } from 'kafkajs';\nasync function a() { await producer.send({ topic: 'orders', messages }); }\nasync function b() {\n  await producer.send({ topic: 'payments', messages });\n  await producer.send({ topic: 'orders', messages });\n}\nasync function c() { await consumer.subscribe({ topic: 'payments' }); }\n";
+        let p = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            anchors_of(&p),
+            vec![
+                ("queue_producer:orders".to_string(), 1),
+                ("queue_producer:orders".to_string(), 4),
+                ("queue_producer:payments".to_string(), 3),
+            ],
+            "node order, then site order: both `orders` sites anchor"
+        );
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            anchors_of(&c),
+            vec![("queue_consumer:payments".to_string(), 6)]
+        );
+        // The A2.8 provenance is unchanged: one module CONTAINS per node.
+        assert_eq!(p.edges.len(), 2);
+        assert!(
+            p.edges
+                .iter()
+                .all(|e| e.from == module_id() && e.category == edge_category::CONTAINS)
+        );
+    }
+
+    #[test]
+    fn anchors_are_not_capped_like_the_provenance_sites() {
+        let mut src = String::from("import { Kafka } from 'kafkajs';\n");
+        for _ in 0..(MAX_SITES + 4) {
+            src.push_str("await producer.send({ topic: 'orders', messages });\n");
+        }
+        let p = extract_queue_producer_nodes(&src, PATH, module_id(), repo());
+        assert_eq!(p.anchors.len(), MAX_SITES + 4);
+        let code = payload(cell_of(&p.nodes[0], cell_type::CODE)).to_string();
+        assert_eq!(code.matches("\"line\":").count(), MAX_SITES);
+    }
+
+    #[test]
+    fn the_framework_tag_anchors_at_the_site_that_minted_it() {
+        let src = "import { Kafka } from 'kafkajs';\n\nawait producer.send({ topic: topic, messages });\n";
+        let p = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            anchors_of(&p),
+            vec![("queue_producer:unresolved:kafka".to_string(), 2)]
+        );
+    }
+
+    #[test]
+    fn replace_queue_nodes_re_anchors_the_folded_nodes() {
+        // The FUNCTION spans both sites (lines 1 and 2), so the per-file parse
+        // has `payments -HANDLED_BY-> publish` and `publish -USES->` the
+        // sentinel; the fold must drop the sentinel's owner edge and anchor
+        // `orders` in its place.
+        let func = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test::publish");
+        let sentinel = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::QUEUE_PRODUCER,
+            "queue_producer:unresolved:kafka",
+        );
+        let orders = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::QUEUE_PRODUCER,
+            "queue_producer:orders",
+        );
+        let payments = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::QUEUE_CONSUMER,
+            "queue_consumer:payments",
+        );
+        let mut fp = file_parse_spanned(CONST_SRC, false, Some((1, 2)));
+        assert!(
+            fp.edges
+                .iter()
+                .any(|e| (e.from, e.to, e.category) == (func, sentinel, edge_category::USES))
+        );
+        let fold = folded(CONST_SRC, &[("ORDERS_TOPIC", "orders")]);
+        assert_eq!(fold.path, PATH);
+        replace_queue_nodes(&mut fp, module_id(), "typescript", fold);
+        let literal = file_parse_spanned(LITERAL_SRC, false, Some((1, 2)));
+
+        type Triple = (NodeId, NodeId, repo_graph_core::EdgeCategoryId);
+        let triples = |fp: &FileParse| -> Vec<Triple> {
+            fp.edges
+                .iter()
+                .map(|e| (e.from, e.to, e.category))
+                .collect()
+        };
+        assert_eq!(
+            triples(&fp),
+            triples(&literal),
+            "laid out as the literal file"
+        );
+        assert!(triples(&fp).contains(&(func, orders, edge_category::USES)));
+        assert!(triples(&fp).contains(&(payments, func, edge_category::HANDLED_BY)));
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| e.from == sentinel || e.to == sentinel)
+        );
+        assert_eq!(fp.nodes, literal.nodes);
+
+        // The re-anchored owner edges carry the post-cache anchor stamp; the
+        // literal parse's are unstamped in this hand-built harness.
+        let owner: Vec<evidence::Evidence> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category != edge_category::CONTAINS)
+            .filter_map(evidence::Evidence::of)
+            .collect();
+        assert_eq!(owner.len(), 2);
+        assert!(
+            owner
+                .iter()
+                .all(|ev| ev.emitter == "extractor:anchor"
+                    && ev.rule.as_deref() == Some("const_fold"))
+        );
+        assert_eq!(anchor::census(&fp), anchor::census(&literal));
     }
 }
