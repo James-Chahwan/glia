@@ -80,3 +80,5 @@
 {"wave": "W39", "event": "end", "pct": 3, "resets_at": 1789855800, "ts": 1789840201}
 {"wave": "W40", "event": "start", "pct": 3, "resets_at": 1789855800, "ts": 1789840207}
 {"wave": "W40", "event": "end", "pct": 4, "resets_at": 1789855800, "ts": 1789840749}
+{"wave": "W41", "event": "start", "pct": 4, "resets_at": 1789855800, "ts": 1789840755}
+{"wave": "W41", "event": "end", "pct": 6, "resets_at": 1789855800, "ts": 1789842959}
