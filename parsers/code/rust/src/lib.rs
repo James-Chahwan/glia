@@ -146,9 +146,9 @@ fn visit_items(
                 visit_const_static(child, src, file_rel, scope, repo, acc);
             }
             // A `use` inside an inline mod is recorded against the PACKAGE
-            // qname. `resolve_imports_python` keys `from_module` on MODULEs
-            // only, so it binds nothing yet (LA.1b) - never the file module,
-            // which would leak a test-only import into file-level resolution.
+            // qname, never the file module, which would leak a test-only
+            // import into file-level resolution; `resolve_imports_rust` binds
+            // it into that PACKAGE's scope (LA.1b).
             "use_declaration" => collect_use(child, src, &scope.qname, acc),
             "attribute_item" => visit_route_attr(child, src, file_rel, scope.id, repo, acc),
             "mod_item" => visit_mod(child, scope, src, file_rel, repo, acc),
@@ -312,7 +312,7 @@ fn visit_function(
         .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
 
     if let Some(body) = node.child_by_field_name("body") {
-        collect_calls_in(body, src, id, acc);
+        collect_calls_in(body, src, id, &qname, acc);
         let n = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
         acc.client_endpoints += n;
     }
@@ -382,7 +382,7 @@ fn visit_impl(
                 .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
             if let Some(fn_body) = child.child_by_field_name("body") {
-                collect_calls_in(fn_body, src, id, acc);
+                collect_calls_in(fn_body, src, id, &qname, acc);
                 let n = collect_client_endpoints_in(fn_body, src, id, repo, file_rel, acc);
                 acc.client_endpoints += n;
             }
@@ -437,86 +437,125 @@ fn visit_const_static(
         .record(id, name, &qname, node_kind::STATE_VAR, Some(scope.id));
 }
 
+/// One `use` declaration, flattened to one [`ImportStmt`] per leaf of its tree
+/// (LA.1b). Every path is RAW Rust: its first segment is kept verbatim
+/// (`crate`, `self`, `super`, a crate or a module name), external crates
+/// included, and the graph crate resolves it (`rust_paths::resolve_imports_rust`).
+///
+/// - `use a::b::c;` -> `Symbol { module: "a::b", name: "c" }`; `c as d` sets `alias`
+/// - `use a::b::{self, c};` -> `Module { path: "a::b" }` + `Symbol { module: "a::b", name: "c" }`;
+///   nested groups flatten with their prefix joined
+/// - `use a::b::*;` -> `Symbol { module: "a::b", name: "*" }` (the glob marker)
+/// - `use a;` / `use a as b;` -> `Module { path: "a", alias }`
+///
+/// `level` is always 0. `from_module` is the qname of the innermost scope
+/// holding the `use`: the file module, an inline-mod PACKAGE, or the fn /
+/// method whose body it sits in.
 fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
-    // `use crate::foo::bar;` or `use crate::foo::{bar, baz};` or `use super::foo;`
-    let text = text_of(node, src);
-    let trimmed = text.trim_start_matches("use ").trim_end_matches(';').trim();
+    if let Some(arg) = node.child_by_field_name("argument") {
+        walk_use_tree(arg, src, "", from_module, acc);
+    }
+}
 
-    if trimmed.starts_with("crate::") {
-        let path = trimmed.trim_start_matches("crate::");
-        if let Some(brace_pos) = path.find('{') {
-            // `crate::foo::{bar, baz}` — multiple symbol imports
-            let base = path[..brace_pos].trim_end_matches("::");
-            let names_part = &path[brace_pos + 1..].trim_end_matches('}');
-            for name in names_part.split(',') {
-                let name = name.trim();
-                if name == "self" || name.is_empty() {
-                    continue;
-                }
-                let (actual_name, alias) = if let Some((n, a)) = name.split_once(" as ") {
-                    (n.trim(), Some(a.trim().to_string()))
-                } else {
-                    (name, None)
-                };
-                acc.imports.push(ImportStmt {
-                    from_module: from_module.to_string(),
-                    target: ImportTarget::Symbol {
-                        module: base.to_string(),
-                        name: actual_name.to_string(),
-                        alias,
-                        level: 0,
-                    },
-                });
-            }
-        } else if let Some((module, name)) = path.rsplit_once("::") {
-            // `crate::foo::bar` — single symbol import
-            let (actual_name, alias) = if let Some((n, a)) = name.split_once(" as ") {
-                (n.trim(), Some(a.trim().to_string()))
-            } else {
-                (name, None)
+/// One node of a use tree under `prefix` (the `::`-joined path of the
+/// enclosing `scoped_use_list`s, `""` at the top).
+fn walk_use_tree(node: TsNode, src: &[u8], prefix: &str, from_module: &str, acc: &mut Acc) {
+    match node.kind() {
+        "use_as_clause" => {
+            let (Some(path), Some(alias)) = (
+                node.child_by_field_name("path"),
+                node.child_by_field_name("alias"),
+            ) else {
+                return;
             };
+            let full = join_use_path(prefix, &use_path_text(path, src));
+            let alias = Some(text_of(alias, src).to_string());
+            push_use(&full, alias, from_module, acc);
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                walk_use_tree(child, src, prefix, from_module, acc);
+            }
+        }
+        "scoped_use_list" => {
+            let head = node
+                .child_by_field_name("path")
+                .map(|p| use_path_text(p, src))
+                .unwrap_or_default();
+            if let Some(list) = node.child_by_field_name("list") {
+                walk_use_tree(list, src, &join_use_path(prefix, &head), from_module, acc);
+            }
+        }
+        "use_wildcard" => {
+            let text = use_path_text(node, src);
+            let module = join_use_path(prefix, text.trim_end_matches('*').trim_end_matches("::"));
+            if module.is_empty() {
+                return;
+            }
             acc.imports.push(ImportStmt {
                 from_module: from_module.to_string(),
                 target: ImportTarget::Symbol {
-                    module: module.to_string(),
-                    name: actual_name.to_string(),
-                    alias,
+                    module,
+                    name: "*".to_string(),
+                    alias: None,
                     level: 0,
                 },
             });
-        } else {
-            // `crate::foo` — module import
-            acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
-                target: ImportTarget::Module {
-                    path: path.to_string(),
-                    alias: None,
-                },
-            });
         }
-    } else if trimmed.starts_with("super::") {
-        let path = trimmed.trim_start_matches("super::");
-        if let Some((module, name)) = path.rsplit_once("::") {
-            acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
-                target: ImportTarget::Symbol {
-                    module: format!("super::{module}"),
-                    name: name.to_string(),
-                    alias: None,
-                    level: 1,
-                },
-            });
-        } else {
-            acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
-                target: ImportTarget::Module {
-                    path: format!("super::{path}"),
-                    alias: None,
-                },
-            });
+        "identifier" | "scoped_identifier" | "crate" | "self" | "super" => {
+            let full = join_use_path(prefix, &use_path_text(node, src));
+            push_use(&full, None, from_module, acc);
         }
+        // `$crate::x` (a macro metavariable) and comments name nothing.
+        _ => {}
     }
-    // External crate imports (std::, etc.) — skip, won't resolve internally.
+}
+
+/// One leaf path of a use tree: `a::b::self` names the module `a::b`; a
+/// multi-segment path is a symbol in its parent path; one segment is a module.
+fn push_use(full: &str, alias: Option<String>, from_module: &str, acc: &mut Acc) {
+    if full.is_empty() {
+        return;
+    }
+    let target = match full.rsplit_once("::") {
+        Some((module, "self")) => ImportTarget::Module {
+            path: module.to_string(),
+            alias,
+        },
+        Some((module, name)) => ImportTarget::Symbol {
+            module: module.to_string(),
+            name: name.to_string(),
+            alias,
+            level: 0,
+        },
+        None => ImportTarget::Module {
+            path: full.to_string(),
+            alias,
+        },
+    };
+    acc.imports.push(ImportStmt {
+        from_module: from_module.to_string(),
+        target,
+    });
+}
+
+/// A use-tree path's text with whitespace and a leading `::` dropped
+/// (`::std :: io` -> `std::io`).
+fn use_path_text(node: TsNode, src: &[u8]) -> String {
+    let plain: String = text_of(node, src)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    plain.trim_start_matches("::").to_string()
+}
+
+fn join_use_path(prefix: &str, rest: &str) -> String {
+    match (prefix.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_string(),
+        (false, true) => prefix.to_string(),
+        (false, false) => format!("{prefix}::{rest}"),
+    }
 }
 
 /// `scope_id`: the file MODULE, or the inline-mod PACKAGE the attribute sits in.
@@ -846,7 +885,10 @@ fn emit_axum_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
 }
 
-fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+/// Every call site, variant reference and `use` in one fn body. `from` is the
+/// fn / method node and `from_qname` its qname: a `use` in the body is scoped
+/// to that fn (LA.1b), so it never binds for a sibling fn.
+fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, from_qname: &str, acc: &mut Acc) {
     // (base, variant) pairs this fn already references (LA.3): a 40-arm
     // match over one enum is one USES ref per variant, not per arm.
     let mut variants: HashSet<(String, String)> = HashSet::new();
@@ -888,9 +930,14 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                     push_variant_ref(name, src, from, &mut variants, acc);
                 }
             }
-            // A type path names no variant, and a `use` inside a body is an
-            // import, not a reference.
-            "scoped_type_identifier" | "use_declaration" => continue,
+            // A type path names no variant.
+            "scoped_type_identifier" => continue,
+            // A `use` inside a body is an import scoped to this fn, not a
+            // reference (LA.1b).
+            "use_declaration" => {
+                collect_use(n, src, from_qname, acc);
+                continue;
+            }
             _ => {}
         }
         // Don't recurse into nested function items (closures are ok).
@@ -1643,9 +1690,11 @@ mod tests {
         let ep_node = fp.nodes.iter().find(|n| n.id == ep).unwrap();
         let kinds: Vec<_> = ep_node.cells.iter().map(|c| c.kind).collect();
         assert_eq!(kinds, vec![cell_type::POSITION]);
-        // `use super::*` inside `mod tests` is recorded against the PACKAGE.
+        // `use super::*` inside `mod tests` is recorded against the PACKAGE,
+        // as a glob on `super` (LA.1b).
         assert!(fp.imports.iter().any(|i| i.from_module == "m::tests"
-            && matches!(&i.target, ImportTarget::Module { path, .. } if path == "super::*")));
+            && matches!(&i.target, ImportTarget::Symbol { module, name, .. }
+                if module == "super" && name == "*")));
         // The bare call inside the mod is the mod fn's CallSite.
         let url = nid(node_kind::FUNCTION, "m::endpoint::url_to_path");
         assert!(
@@ -1882,8 +1931,108 @@ use crate::auth::{login, logout};
 use std::io::Read;
 "#;
         let fp = parse_file(source, "src/main.rs", "myapp", repo()).unwrap();
-        // std import is skipped (external)
-        assert_eq!(fp.imports.len(), 4); // User, db, login, logout
+        // Every use is emitted as a raw path, `std::io::Read` included (LA.1b):
+        // the IMPORTS cell drops it later through `library_name`.
+        assert_eq!(fp.imports.len(), 5); // User, db, login, logout, Read
+        assert!(fp.imports.iter().any(|i| matches!(&i.target,
+            ImportTarget::Symbol { module, name, level: 0, .. }
+                if module == "std::io" && name == "Read")));
+    }
+
+    /// `(from_module, rendered target)` of every import, in emission order:
+    /// `M path [as a]` for a Module, `S module|name [as a]` for a Symbol.
+    fn rendered_imports(fp: &FileParse) -> Vec<(String, String)> {
+        fp.imports
+            .iter()
+            .map(|i| {
+                let t = match &i.target {
+                    ImportTarget::Module { path, alias } => match alias {
+                        Some(a) => format!("M {path} as {a}"),
+                        None => format!("M {path}"),
+                    },
+                    ImportTarget::Symbol {
+                        module,
+                        name,
+                        alias,
+                        level,
+                    } => {
+                        assert_eq!(*level, 0, "Rust paths are never relative-by-level");
+                        match alias {
+                            Some(a) => format!("S {module}|{name} as {a}"),
+                            None => format!("S {module}|{name}"),
+                        }
+                    }
+                };
+                (i.from_module.clone(), t)
+            })
+            .collect()
+    }
+
+    /// LA.1b: every use-tree form flattens to raw Rust paths, with the scope
+    /// that holds the `use` (file, inline mod, fn body, method body).
+    #[test]
+    fn use_tree_forms() {
+        let source = r#"
+pub use engine::{generate_many, generate_one, Engine as Core};
+use crate::a::{self, b::{c, d as e}, f::*};
+use ::serde::Serialize;
+pub(crate) use super::super::x;
+use reexp_lib;
+use tokio as rt;
+use self::m::{self as mm};
+use {left, right::r};
+use super::*;
+use std::fmt::Write as _;
+
+mod inner {
+    use super::Core;
+}
+
+fn helpers() -> u32 {
+    use reexp_lib::generate_many as gm;
+    gm()
+}
+
+struct S;
+impl S {
+    fn run(&self) {
+        {
+            use std::io::Write;
+        }
+    }
+}
+"#;
+        let fp = parse_file(source, "src/main.rs", "app", repo()).unwrap();
+        let s = |from: &str, t: &str| (from.to_string(), t.to_string());
+        assert_eq!(
+            rendered_imports(&fp),
+            vec![
+                s("app", "S engine|generate_many"),
+                s("app", "S engine|generate_one"),
+                s("app", "S engine|Engine as Core"),
+                s("app", "M crate::a"),
+                s("app", "S crate::a::b|c"),
+                s("app", "S crate::a::b|d as e"),
+                s("app", "S crate::a::f|*"),
+                s("app", "S serde|Serialize"),
+                s("app", "S super::super|x"),
+                s("app", "M reexp_lib"),
+                s("app", "M tokio as rt"),
+                s("app", "M self::m as mm"),
+                s("app", "M left"),
+                s("app", "S right|r"),
+                s("app", "S super|*"),
+                s("app", "S std::fmt|Write as _"),
+                s("app::inner", "S super|Core"),
+                s("app::helpers", "S reexp_lib|generate_many as gm"),
+                s("app::S::run", "S std::io|Write"),
+            ]
+        );
+        // A fn-body `use` is an import, never a call site or a variant ref.
+        let helpers = nid(node_kind::FUNCTION, "app::helpers");
+        let from_helpers: Vec<_> = fp.calls.iter().filter(|c| c.from == helpers).collect();
+        assert_eq!(from_helpers.len(), 1, "only gm(): {from_helpers:?}");
+        assert!(fp.refs.iter().all(|r| r.from != helpers));
     }
 
     #[test]
@@ -2473,7 +2622,7 @@ impl Svc {
             if n.kind() == "function_item"
                 && let Some(body) = n.child_by_field_name("body")
             {
-                collect_calls_in(body, src, from, &mut acc);
+                collect_calls_in(body, src, from, "m::f", &mut acc);
             }
             let mut cursor = n.walk();
             stack.extend(n.named_children(&mut cursor));

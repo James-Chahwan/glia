@@ -1,0 +1,8 @@
+[package]
+name = "reexp-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reexp-lib = { path = "../lib" }
+serde = "1"

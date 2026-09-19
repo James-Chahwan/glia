@@ -15,7 +15,7 @@ use crate::calls::{
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
-use crate::rust_paths::{RustCrate, RustIndex};
+use crate::rust_paths::{RustCrate, RustIndex, resolve_imports_rust};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
 // ============================================================================
@@ -133,6 +133,12 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// enclosing mods' own fns, innermost first (the generic order would bind a
 /// same-named file-level fn), and the enum-variant USES refs `resolve_refs`
 /// leaves are bound through the same path rules.
+///
+/// LA.1b: `use` trees resolve as Rust paths ([`resolve_imports_rust`], in
+/// place of `resolve_imports_python`): workspace-crate uses, `pub use`
+/// re-exports, aliases, globs and fn-body uses bind. A fn's own `use`s and
+/// every glob stay in the returned bindings, which the pre-pass (a fn's
+/// `use`s shadow the file's) and the hook (the file's globs, last) read.
 pub fn build_rust(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -140,24 +146,26 @@ pub fn build_rust(
 ) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
-    resolve_imports_python(&mut g, &all_imports);
     let idx = RustIndex::build(&g, crates);
-    // Inline-mod pre-pass: a hit is a CALLS edge now; a miss (and every other
+    let bindings = resolve_imports_rust(&mut g, &all_imports, &idx);
+    // Scoped pre-pass: a hit is a CALLS edge now; a miss (and every other
     // site) keeps its original position for the generic pass.
     let mut rest: Vec<CallSite> = Vec::with_capacity(all_calls.len());
     let mut mod_scoped = 0usize;
     for site in all_calls {
-        match idx.resolve_scoped_bare(&g, &site) {
-            Some(to) => {
+        match idx.resolve_scoped_bare(&g, &site, &bindings) {
+            Some((to, mod_item)) => {
                 push_edge(&mut g, site.from, to, edge_category::CALLS);
-                mod_scoped += 1;
+                mod_scoped += usize::from(mod_item);
             }
             None => rest.push(site),
         }
     }
-    resolve_calls(&mut g, &rest, |g, site| idx.resolve_call(g, site));
+    resolve_calls(&mut g, &rest, |g, site| {
+        idx.resolve_call(g, site, &bindings)
+    });
     resolve_refs(&mut g, &all_refs);
-    idx.resolve_leftover_refs(&mut g);
+    idx.resolve_leftover_refs(&mut g, &bindings);
     emit_method_level_implements(&mut g);
     idx.report();
     idx.report_items(&g, mod_scoped);

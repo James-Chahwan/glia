@@ -1,0 +1,26 @@
+{
+  "framework": "rust-use-reexport-calls",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["rust/calls"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "lib/src/engine/generate_one"},
+    {"kind": "FUNCTION", "name": "lib/src/engine/generate_many"},
+    {"kind": "METHOD", "name": "lib/src/engine/Engine/new"}
+  ],
+  "expect_edges": [
+    {"from": "app/src/main/main", "to": "lib/src/engine/generate_one", "category": "CALLS", "note": "`use reexp_lib::generate_one` -> the crate root's `pub use engine::{generate_one}`"},
+    {"from": "app/src/main/main", "to": "lib/src/engine/Engine/new", "category": "CALLS", "note": "`use reexp_lib::Core` where the root re-exports `Engine as Core`"},
+    {"from": "app/src/main/helpers", "to": "lib/src/engine/generate_many", "category": "CALLS", "note": "a fn-body `use ... as gm` binds only inside that fn"},
+    {"from": "app/src/extra/again", "to": "app/src/main/helpers", "category": "CALLS", "note": "`use super::*` glob"},
+    {"from": "app/src/main", "to": "lib/src/lib", "category": "IMPORTS", "note": "module-granularity IMPORTS to the crate root the path names"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "app/src/main", "cell": "IMPORTS", "contains": "serde", "note": "external crates reach the IMPORTS cell; on HEAD `use serde::...` is dropped by the parser"}
+  ],
+  "forbid": [
+    {"from": "app/src/main/main", "to": "lib/src/engine/generate_many", "category": "CALLS", "note": "gm is bound in helpers() only; main never calls generate_many"}
+  ],
+  "note": "LA.1b. Baseline HEAD 7a4883b (installed 0.4.18+p3d23e8828e7ba01a wheel): only in-crate `crate::`/`super::` uses are parsed; every call through a workspace-crate use, a re-export, an alias, a fn-body use or a glob is unresolved, and the IMPORTS cell never lists an external crate."
+}

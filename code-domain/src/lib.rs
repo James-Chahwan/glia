@@ -790,6 +790,11 @@ pub fn library_name(path: &str, lang: &str) -> Option<String> {
             if matches!(top, "crate" | "self" | "super" | "std" | "core" | "alloc") {
                 return None;
             }
+            // LA.1b: a raw `use` path may start with a type (`use Kind::*`,
+            // `use Ordering::Less`); a crate name is never capitalised.
+            if top.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return None;
+            }
             Some(top.to_string())
         }
         "dart" => p
@@ -938,8 +943,26 @@ impl LocalModuleIndex {
         }
     }
 
+    /// Declare a workspace crate's path identifier (`repo_graph_engine`)
+    /// local (LA.1b): a Rust `use` of a sibling crate is intra-repo, not a
+    /// dependency. The engine seeds every Cargo package the walk found.
+    pub fn add_local_crate(&mut self, name: &str) {
+        let segs = import_segments(name);
+        if !segs.is_empty() {
+            self.paths.insert(segs.join("::"));
+        }
+    }
+
     fn add_path(&mut self, qname: &str, is_package: bool) {
         let segs = import_segments(qname);
+        // A Rust `x/mod.rs` declares the module `x` (LA.1b: `pub use x::..`
+        // is intra-repo), so its suffixes end at `x` too.
+        if segs.len() > 1 && segs.last() == Some(&"mod") {
+            let dir = &segs[..segs.len() - 1];
+            for i in 1..=dir.len() {
+                self.paths.insert(dir[dir.len() - i..].join("::"));
+            }
+        }
         for i in 1..=segs.len() {
             self.paths.insert(segs[..i].join("::"));
             self.paths.insert(segs[segs.len() - i..].join("::"));
@@ -2665,9 +2688,40 @@ mod tests {
         assert!(!java.is_local_symbol("Other"));
     }
 
+    /// LA.1b: the Rust parser emits raw `use` paths, so a sibling workspace
+    /// crate (`use reexp_lib::..`) and a type path (`use Kind::*`) reach the
+    /// filter; neither is a dependency, while an external crate is.
+    #[test]
+    fn rust_raw_paths_keep_external_crates_only() {
+        let mut local = index_of(&[
+            (node_kind::MODULE, "app::src::main"),
+            (node_kind::MODULE, "app::src::resolvers::mod"),
+        ]);
+        local.add_local_crate("reexp_lib");
+        local.add_local_crate("");
+        assert!(local.is_local_path("reexp_lib"));
+        assert!(!local.is_local_path("serde"));
+        let imports = vec![
+            symbol_import("reexp_lib", "generate_one"),
+            symbol_import("serde", "Serialize"),
+            symbol_import("std::io", "Read"),
+            symbol_import("crate::util", "helper"),
+            symbol_import("super", "*"),
+            symbol_import("Kind", "*"),
+            module_import("self::m"),
+            module_import("tokio"),
+            symbol_import("resolvers", "HttpResolver"),
+        ];
+        assert_eq!(
+            library_names_filtered(&imports, "rust", &local),
+            vec!["serde".to_string(), "tokio".to_string()]
+        );
+        assert_eq!(library_name("Ordering::Less", "rust"), None, "a type, never a crate");
+    }
+
     #[test]
     fn filtered_drops_rust_sibling_module() {
-        // `use crate::snapshot::Page;` — the parser strips `crate::`.
+        // `use snapshot::Page;` — a path through a sibling module.
         let local = index_of(&[(node_kind::MODULE, "src::snapshot"), (node_kind::MODULE, "src::confluence_rest")]);
         let imports = vec![symbol_import("snapshot", "Page")];
         assert_eq!(library_names(&imports, "rust"), vec!["snapshot".to_string()], "the leak this fixes");

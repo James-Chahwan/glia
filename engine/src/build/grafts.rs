@@ -15,6 +15,7 @@ use repo_graph_code_extractors::constants::ConstTable;
 use repo_graph_code_extractors::next_pages::{self, NextRoots, PageRouter};
 use repo_graph_code_extractors::{anchor, queue_topic, queues};
 use repo_graph_core::{CellPayload, NodeId, RepoId};
+use repo_graph_graph::rust_paths::RustCrate;
 
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
@@ -27,7 +28,8 @@ use crate::http_owner;
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census, the LB.4a / LB.8 owner segment, then the A16.4 IMPORTS-cell
 /// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
-/// project roots (A8.4).
+/// project roots (A8.4); `rust_crates` their Cargo packages, whose names the
+/// IMPORTS filter treats as intra-repo (LA.1b).
 ///
 /// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
 /// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
@@ -44,6 +46,7 @@ pub(super) fn apply_post_cache(
     rpc: &RpcContext,
     const_table: &ConstTable,
     roots: &[ProjectRoot],
+    rust_crates: &[RustCrate],
     parse_errors: &mut Vec<String>,
     repo_label: &str,
 ) {
@@ -123,7 +126,7 @@ pub(super) fn apply_post_cache(
     // repo's declarations, so like `apply_rpc_needles` it runs after the parse
     // cache (cached parses are filtered too) and after the RPC grafts (whose
     // markers carry the same cell).
-    filter_imports_cells(parses_by_lang, repo_label);
+    filter_imports_cells(parses_by_lang, rust_crates, repo_label);
 }
 
 /// LA.6d: per-repo tallies of the Next.js page graft.
@@ -390,11 +393,17 @@ fn queue_nodes_read_from(fp: &FileParse, position: &str) -> bool {
 /// not gain a cell they never had. Rewriting in place keeps the cell's slot, so
 /// every node's cell order is unchanged.
 ///
+/// The repo's own Cargo packages count as declared too (LA.1b): the Rust
+/// parser emits raw `use` paths, so `use repo_graph_engine::..` in a sibling
+/// crate reaches the filter as `repo_graph_engine`, which is not a dependency.
+/// Only Rust crate names are seeded (`rust_crates` is the Cargo projects).
+///
 /// fired_on marker, once per repo that holds a language-parser parse:
 ///   `[imports] local-filter: kept {k}, dropped {d} intra-repo name(s) across {n} language group(s) repo=<label>`
 /// `kept` / `dropped` sum the per-file library names; `n` counts lang tags.
 fn filter_imports_cells(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    rust_crates: &[RustCrate],
     repo_label: &str,
 ) {
     let carries_imports = |fp: &FileParse| {
@@ -405,6 +414,9 @@ fn filter_imports_cells(
     let mut local = LocalModuleIndex::default();
     for fp in parses_by_lang.values().flatten().filter(|fp| carries_imports(fp)) {
         local.add_parse(fp);
+    }
+    for c in rust_crates {
+        local.add_local_crate(&c.name);
     }
     let (mut kept, mut dropped, mut groups) = (0usize, 0usize, 0usize);
     for (lang, parses) in parses_by_lang.iter_mut() {

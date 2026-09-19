@@ -77,6 +77,9 @@ pub(super) fn build_graphs_for_repo(
             const_table.conflicts()
         );
     }
+    // LA.1a / LA.1b: the Cargo packages, read by the A16.4 IMPORTS filter
+    // (a sibling crate is not a dependency) and by `build_rust`.
+    let rust_crates = lang_build::rust_crates(files, roots);
     // A11.2, LA.6d, LA.4, A5.2 / A5.3, A5.8, LB.4a / LB.8, A16.4: the
     // post-cache grafts, in that order.
     grafts::apply_post_cache(
@@ -86,11 +89,11 @@ pub(super) fn build_graphs_for_repo(
         rpc,
         &const_table,
         roots,
+        &rust_crates,
         &mut parse_errors,
         repo_label,
     );
 
-    let rust_crates = lang_build::rust_crates(files, roots);
     let (graphs, di_refs) = lang_build::build_language_graphs(
         parses_by_lang,
         repo,

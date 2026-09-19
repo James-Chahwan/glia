@@ -123,6 +123,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "navigations built from variables (navigate([path]), navigateByUrl(url), router.push(url)), guard redirects (router.createUrlTree / parseUrl), Vue named-route pushes and Angular relative navigations are not resolved, so a page reached only through one is listed unlinked; lazily loaded child tables in another file match only by path suffix (Weak); plain <a href> links bind but are never reported dead",
         verify: "grep -rnE 'navigate\\(|navigateByUrl|createUrlTree|parseUrl|router\\.push|routerLink' src",
     },
+    // LA.1b: with crate paths (LA.1a), macro-argument calls (LA.2), inline
+    // mods (LA.3) and `use` trees (LA.1b) resolved, the Rust CALLS gap left
+    // is a method call on a typed local or field.
+    CoverageCaveat {
+        language: "rust",
+        edge_category: "CALLS",
+        note: "method calls on a local variable or field (`x.m()`) resolve only when the receiver is `self`/`Self` or a module/type path; typed-receiver inference is not implemented",
+        verify: "grep the method name",
+    },
     CoverageCaveat {
         language: "dart",
         edge_category: "HTTP_CALLS",
@@ -442,6 +451,23 @@ mod tests {
         );
         let go = coverage_report(&graph_with_file("main.go"));
         assert!(go.iter().all(|n| n.edge_category != "NAVIGATES_TO"));
+    }
+
+    #[test]
+    fn rust_calls_caveat_names_the_receiver_gap() {
+        // LA.1b: a Rust repo states the one CALLS gap LA.1-LA.3 leave; a
+        // repo without Rust gets no such row.
+        let report = coverage_report(&graph_with_file("src/lib.rs"));
+        let rust: Vec<_> = report.iter().filter(|n| n.language == "rust").collect();
+        assert_eq!(rust.len(), 1);
+        assert_eq!((rust[0].edge_category, rust[0].edges_found), ("CALLS", 0));
+        let note = rust[0].note;
+        assert!(note.contains("typed-receiver inference is not implemented"));
+        assert!(note.contains("`self`/`Self`"));
+        assert_eq!(rust[0].verify, "grep the method name");
+        let go = coverage_report(&graph_with_file("main.go"));
+        assert!(go.iter().all(|n| n.language != "rust"));
+        assert_eq!(go.len(), report.len() - 1);
     }
 
     #[test]

@@ -3,18 +3,31 @@
 //! walk found. Before LA.1a Rust built with `build_dotted` and a no-op hook,
 //! so every `crate::` / `self::` / `super::` / `Self::` / `other_crate::` call
 //! was dropped. Run with `-- --nocapture` to see the `[rust-paths]` marker.
+//!
+//! LA.1b: `use` trees resolve as Rust paths (`resolve_imports_rust`), so a
+//! workspace-crate use, a `pub use` re-export, an alias, a glob and a fn-body
+//! use bind, and the IMPORTS cell lists external crates only. Run with
+//! `-- --nocapture` to see the `[rust-uses]` marker.
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use repo_graph_code_domain::edge_category;
-use repo_graph_core::NodeId;
+use repo_graph_code_domain::{cell_type, edge_category};
+use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId};
 use repo_graph_engine::{GenerateResult, entrypoint_reachable, generate_one};
 
 fn fixture() -> String {
     concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../bench/substrate-gap/fixtures/rust-crate-path-calls"
+    )
+    .to_string()
+}
+
+fn reexport_fixture() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bench/substrate-gap/fixtures/rust-use-reexport-calls"
     )
     .to_string()
 }
@@ -39,6 +52,20 @@ fn calls(r: &GenerateResult) -> Vec<(String, String)> {
             let name = |id: &NodeId| qname.get(id).cloned().unwrap_or_else(|| format!("{id:?}"));
             (name(&e.from), name(&e.to))
         })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every edge of `category` as `(from qname, to qname)`, sorted.
+fn edges_of(r: &GenerateResult, category: EdgeCategoryId) -> Vec<(String, String)> {
+    let qname = qnames(r);
+    let name = |id: &NodeId| qname.get(id).cloned().unwrap_or_else(|| format!("{id:?}"));
+    let mut out: Vec<(String, String)> = r
+        .merged
+        .all_edges()
+        .filter(|e| e.category == category)
+        .map(|e| (name(&e.from), name(&e.to)))
         .collect();
     out.sort();
     out
@@ -263,6 +290,241 @@ fn impl_elsewhere_nested_super_and_value_receivers() {
     assert_eq!(
         count(&calls, "src::lib::value", "src::model::pow"),
         0,
+        "{calls:?}"
+    );
+}
+
+/// LA.1b, the rust-use-reexport-calls fixture: `use reexp_lib::{generate_one,
+/// Core}` through the crate root's `pub use engine::{.., Engine as Core}`, a
+/// fn-body `use .. as gm`, a `use super::*` glob, and the precision guard that
+/// `gm` never binds outside the fn that imports it.
+#[test]
+fn use_reexport_alias_glob_and_fn_scope() {
+    let r = generate_one(&reexport_fixture()).expect("fixture builds");
+    let calls = calls(&r);
+    for (from, to, form) in [
+        (
+            "app::src::main::main",
+            "lib::src::engine::generate_one",
+            "use reexp_lib::generate_one -> pub use engine::generate_one",
+        ),
+        (
+            "app::src::main::main",
+            "lib::src::engine::Engine::new",
+            "use reexp_lib::Core -> pub use engine::Engine as Core",
+        ),
+        (
+            "app::src::main::helpers",
+            "lib::src::engine::generate_many",
+            "fn-body use reexp_lib::generate_many as gm",
+        ),
+        (
+            "app::src::extra::again",
+            "app::src::main::helpers",
+            "use super::*",
+        ),
+    ] {
+        assert_eq!(
+            count(&calls, from, to),
+            1,
+            "{form}: {from} -> {to}; CALLS = {calls:?}"
+        );
+    }
+    assert_eq!(
+        count(
+            &calls,
+            "app::src::main::main",
+            "lib::src::engine::generate_many"
+        ),
+        0,
+        "gm is bound in helpers() only; CALLS = {calls:?}"
+    );
+    let imports = edges_of(&r, edge_category::IMPORTS);
+    for (from, to) in [
+        ("app::src::main", "lib::src::lib"),
+        ("app::src::extra", "app::src::main"),
+        ("lib::src::lib", "lib::src::engine"),
+    ] {
+        assert!(
+            imports.iter().any(|(f, t)| f == from && t == to),
+            "{from} -> {to}; IMPORTS = {imports:?}"
+        );
+    }
+    assert_eq!(
+        imports.len(),
+        3,
+        "one IMPORTS per (file, module): {imports:?}"
+    );
+}
+
+/// The IMPORTS cell of every node of `module`: exactly one per node, all
+/// equal, returned once.
+fn imports_cell(r: &GenerateResult, module: &str) -> String {
+    let mut payloads = Vec::new();
+    for g in &r.merged.graphs {
+        for n in &g.nodes {
+            let Some(q) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            if q != module && !q.starts_with(&format!("{module}::")) {
+                continue;
+            }
+            let cells: Vec<String> = n
+                .cells
+                .iter()
+                .filter(|c| c.kind == cell_type::IMPORTS)
+                .map(|c| match &c.payload {
+                    CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                    CellPayload::Bytes(_) => String::from("<bytes>"),
+                })
+                .collect();
+            assert_eq!(cells.len(), 1, "{q}: {cells:?}");
+            payloads.push(cells[0].clone());
+        }
+    }
+    payloads.sort();
+    payloads.dedup();
+    assert_eq!(payloads.len(), 1, "{module}: {payloads:?}");
+    payloads.remove(0)
+}
+
+/// LA.1b: `use serde::Serialize` reaches the IMPORTS cell; the sibling
+/// workspace crate (`use reexp_lib::..`) and the child module of a `pub use
+/// engine::..` do not.
+#[test]
+fn imports_cell_lists_external_crates_only() {
+    let r = generate_one(&reexport_fixture()).expect("fixture builds");
+    assert_eq!(imports_cell(&r, "app::src::main"), r#"["serde"]"#);
+    assert_eq!(
+        imports_cell(&r, "app::src::extra"),
+        "[]",
+        "use super::* is local"
+    );
+    assert_eq!(
+        imports_cell(&r, "lib::src::lib"),
+        "[]",
+        "pub use engine::.. is local"
+    );
+}
+
+/// A fn-body `use` shadows a file-level item of the same name inside that
+/// fn, and only there.
+#[test]
+fn fn_scoped_use_shadows_file_item() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"lib\", \"app\"]\n",
+    );
+    write(root, "lib/Cargo.toml", "[package]\nname = \"lib\"\n");
+    write(
+        root,
+        "lib/src/lib.rs",
+        "pub fn generate_many() -> u32 {\n    2\n}\n",
+    );
+    write(root, "app/Cargo.toml", "[package]\nname = \"app\"\n");
+    write(
+        root,
+        "app/src/main.rs",
+        "fn gm() -> u32 {\n    0\n}\n\nfn scoped() -> u32 {\n    use lib::generate_many as gm;\n    gm()\n}\n\n\
+         fn plain() -> u32 {\n    gm()\n}\n\nfn main() {\n    scoped();\n    plain();\n}\n",
+    );
+    let r = generate_one(root.to_str().expect("utf-8 path")).expect("builds");
+    let calls = calls(&r);
+    assert_eq!(
+        count(
+            &calls,
+            "app::src::main::scoped",
+            "lib::src::lib::generate_many"
+        ),
+        1,
+        "{calls:?}"
+    );
+    assert_eq!(
+        count(&calls, "app::src::main::scoped", "app::src::main::gm"),
+        0,
+        "the fn-body use shadows the file-level gm; CALLS = {calls:?}"
+    );
+    assert_eq!(
+        count(&calls, "app::src::main::plain", "app::src::main::gm"),
+        1,
+        "a sibling fn still binds the file-level gm; CALLS = {calls:?}"
+    );
+    assert_eq!(
+        count(
+            &calls,
+            "app::src::main::plain",
+            "lib::src::lib::generate_many"
+        ),
+        0,
+        "{calls:?}"
+    );
+}
+
+/// Re-export chains resolve whatever order their files declare them in; a
+/// re-export cycle and a name two globs both bring in stay unresolved, never
+/// a guess.
+#[test]
+fn reexport_chains_cycles_and_glob_ambiguity() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write(root, "Cargo.toml", "[package]\nname = \"shop\"\n");
+    write(
+        root,
+        "src/lib.rs",
+        "pub mod a_user;\npub mod b_hub;\npub mod c_mid;\npub mod d_leaf;\n\
+         pub mod ping;\npub mod pong;\npub mod one;\npub mod two;\npub mod both;\npub mod solo;\n",
+    );
+    // a_user -> b_hub -> c_mid -> d_leaf: the use sorts before every re-export.
+    write(
+        root,
+        "src/a_user.rs",
+        "use crate::b_hub::deep;\n\npub fn run() -> u32 {\n    deep()\n}\n",
+    );
+    write(root, "src/b_hub.rs", "pub use crate::c_mid::deep;\n");
+    write(root, "src/c_mid.rs", "pub use crate::d_leaf::deep;\n");
+    write(root, "src/d_leaf.rs", "pub fn deep() -> u32 {\n    1\n}\n");
+    // ping::loopy <-> pong::loopy re-export each other; nothing defines it.
+    write(
+        root,
+        "src/ping.rs",
+        "pub use crate::pong::loopy;\n\npub fn f() {\n    loopy();\n}\n",
+    );
+    write(root, "src/pong.rs", "pub use crate::ping::loopy;\n");
+    // `dup` comes in through two globs: ambiguous.
+    write(root, "src/one.rs", "pub fn dup() {}\n");
+    write(root, "src/two.rs", "pub fn dup() {}\n");
+    write(
+        root,
+        "src/both.rs",
+        "use crate::one::*;\nuse crate::two::*;\n\npub fn g() {\n    dup();\n}\n",
+    );
+    // Control: one glob binds it.
+    write(
+        root,
+        "src/solo.rs",
+        "use crate::one::*;\n\npub fn h() {\n    dup();\n}\n",
+    );
+    let r = generate_one(root.to_str().expect("utf-8 path")).expect("builds");
+    let calls = calls(&r);
+    assert_eq!(
+        count(&calls, "src::a_user::run", "src::d_leaf::deep"),
+        1,
+        "a three-hop re-export chain; CALLS = {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(f, _)| f == "src::ping::f"),
+        "a re-export cycle binds nothing; CALLS = {calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|(f, _)| f == "src::both::g"),
+        "two globs bringing in `dup` is ambiguous; CALLS = {calls:?}"
+    );
+    assert_eq!(
+        count(&calls, "src::solo::h", "src::one::dup"),
+        1,
         "{calls:?}"
     );
 }

@@ -21,18 +21,25 @@
 //! enum-variant USES refs (`resolve_leftover_refs`) and the `[rust-items]`
 //! marker.
 //!
+//! LA.1b resolves the `use` trees the parser emits as raw Rust paths
+//! ([`resolve_imports_rust`]): workspace-crate uses, `pub use` re-exports
+//! (chains followed), aliases, globs and `use`s inside fn bodies bind, in the
+//! scope that holds them. A file MODULE's or inline PACKAGE's bindings go in
+//! the persisted `module_import_bindings`; a fn's and every glob stay in the
+//! build-time [`RustBindings`] the call passes read.
+//!
 //! Every lookup is by key, and every candidate list is sorted by qname before
 //! a tie-break, so no winner is ever picked by iterating a `HashMap`.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{
-    CallQualifier, CallSite, CodeNav, cell_type, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category, node_kind,
 };
 use repo_graph_core::{CellPayload, NodeId, NodeKindId};
 
-use crate::calls::{position_file, push_edge};
+use crate::calls::{position_file, push_edge, unique_global_function, unique_global_module};
 use crate::types::RepoGraph;
 
 /// One Cargo package's crate roots, as the engine found them in the walk.
@@ -266,12 +273,24 @@ impl RustIndex {
     }
 
     /// The `extra_hook` body: resolve one Attribute call site as a Rust path,
-    /// or (LA.3) one `self.m()` the generic owner walk missed. `None` for
-    /// every other qualifier shape.
-    pub(crate) fn resolve_call(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+    /// (LA.3) one `self.m()` the generic owner walk missed, or (LA.1b) one
+    /// Bare call through the file module's `use ..::*` globs, the last scope
+    /// Rust consults. `None` for every other qualifier shape.
+    pub(crate) fn resolve_call(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        rb: &RustBindings,
+    ) -> Option<NodeId> {
         let (base, name) = match &site.qualifier {
             CallQualifier::Attribute { base, name } => (base, name),
-            CallQualifier::SelfMethod(name) => return self.resolve_self_method(g, site.from, name),
+            CallQualifier::SelfMethod(name) => {
+                return self.resolve_self_method(g, rb, site.from, name);
+            }
+            CallQualifier::Bare(name) => {
+                let file_module = enclosing(&g.nav, site.from, false)?;
+                return self.glob_member(g, rb, file_module, name, is_callable);
+            }
             _ => return None,
         };
         if name.is_empty() {
@@ -280,7 +299,7 @@ impl RustIndex {
         let segs = split_path(base)?;
         let scope = enclosing(&g.nav, site.from, true)?;
         let file_module = enclosing(&g.nav, site.from, false)?;
-        let (start, rule) = self.start(g, site.from, scope, file_module, &segs[0])?;
+        let (start, rule) = self.start(g, rb, site.from, scope, file_module, &segs[0])?;
         // `x.m()` and `x::m()` reach here in one shape. A lone base found by
         // an import / child-module / type / crate-name rule may be a local
         // variable that shares the name; the caller's own source decides.
@@ -295,14 +314,14 @@ impl RustIndex {
         }
         Stats::bump(&self.stats.by_rule[rule as usize]);
         let mut used_fallback = false;
-        let pos = self.walk(g, start, &segs[1..], &mut used_fallback)?;
+        let pos = self.walk(g, rb, start, &segs[1..], &mut used_fallback)?;
         let pos = self.settle_type_name(g, pos, file_module);
         let caller_pkg = g
             .nav
             .qname_by_id
             .get(&file_module)
             .and_then(|q| self.covering(q));
-        let hit = self.final_name(g, &pos, name, caller_pkg, &mut used_fallback)?;
+        let hit = self.final_name(g, rb, &pos, name, caller_pkg, &mut used_fallback)?;
         Stats::bump(&self.stats.resolved);
         if used_fallback {
             Stats::bump(&self.stats.unique_in_crate);
@@ -351,7 +370,13 @@ impl RustIndex {
     /// names a type defined in another file, e.g. `impl MergedGraph` in
     /// `blast.rs`) the type is the one crate-local STRUCT / ENUM / CLASS of
     /// that name, else the other-file impls of that name.
-    fn resolve_self_method(&self, g: &RepoGraph, from: NodeId, name: &str) -> Option<NodeId> {
+    fn resolve_self_method(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        from: NodeId,
+        name: &str,
+    ) -> Option<NodeId> {
         if name.is_empty() {
             return None;
         }
@@ -363,7 +388,7 @@ impl RustIndex {
             .get(&file_module)
             .and_then(|q| self.covering(q));
         let mut unused = false;
-        self.final_name(g, &pos, name, caller_pkg, &mut unused)
+        self.final_name(g, rb, &pos, name, caller_pkg, &mut unused)
     }
 
     /// `Pos::TypeName(ty)` -> `Pos::Type` when the caller's crate defines
@@ -395,32 +420,60 @@ impl RustIndex {
         }
     }
 
-    /// The inline-mod pre-pass for one `Bare(name)` call site: the first
-    /// callable `name` defined directly in a PACKAGE ancestor of the caller,
-    /// innermost first, stopping at the file MODULE. Rust scoping is
+    /// The scoped pre-pass for one `Bare(name)` call site, innermost scope
+    /// first: (LA.1b) the caller fn's own `use`s, then its `use ..::*` globs;
+    /// then each PACKAGE ancestor out to the file MODULE (LA.3): its own
+    /// callable `name`, its `use` binding, (LA.1b) its globs. Rust scoping is
     /// innermost-first, while the generic Bare order checks the FILE module
     /// before any PACKAGE, so without this `fn helper` inside `mod endpoint`
-    /// would lose to a file-level `fn helper`. `None` when the caller is in no
-    /// inline mod or no enclosing mod defines `name`: the site then goes to
-    /// the generic pass (the `use super::*` case).
-    pub(crate) fn resolve_scoped_bare(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+    /// would lose to a file-level `fn helper`, and a fn-body
+    /// `use lib::generate_many as gm` to a file-level `fn gm`. A site whose
+    /// caller has no fn-scoped `use` and sits in no inline mod finds nothing
+    /// here and keeps the generic order exactly. The bool is true for a hit
+    /// on an inline mod's own fn, the LA.3 rule the `[rust-items]` marker's
+    /// `mod_scoped_calls` counts.
+    pub(crate) fn resolve_scoped_bare(
+        &self,
+        g: &RepoGraph,
+        site: &CallSite,
+        rb: &RustBindings,
+    ) -> Option<(NodeId, bool)> {
         let CallQualifier::Bare(name) = &site.qualifier else {
             return None;
         };
+        let callable = |id: &NodeId| g.nav.kind_by_id.get(id).is_some_and(|k| is_callable(*k));
+        let fn_hit = rb
+            .fn_scoped
+            .get(&site.from)
+            .and_then(|m| m.get(name))
+            .copied()
+            .filter(callable)
+            .or_else(|| self.glob_member(g, rb, site.from, name, is_callable));
+        if let Some(id) = fn_hit {
+            return Some((id, false));
+        }
         let mut cur = site.from;
         loop {
             let parent = *g.nav.parent_of.get(&cur)?;
             match g.nav.kind_by_id.get(&parent) {
                 Some(k) if *k == node_kind::MODULE => return None,
                 Some(k) if *k == node_kind::PACKAGE => {
-                    let hit = g
+                    let own = g
                         .symbols
                         .module_symbols
                         .get(&parent)
                         .and_then(|s| s.get(name))
-                        .filter(|id| g.nav.kind_by_id.get(*id).is_some_and(|k| is_callable(*k)));
-                    if let Some(id) = hit {
-                        return Some(*id);
+                        .copied()
+                        .filter(callable);
+                    if let Some(id) = own {
+                        return Some((id, true));
+                    }
+                    let used = rb
+                        .bound(g, parent, name)
+                        .filter(callable)
+                        .or_else(|| self.glob_member(g, rb, parent, name, is_callable));
+                    if let Some(id) = used {
+                        return Some((id, false));
                     }
                 }
                 _ => {}
@@ -434,12 +487,12 @@ impl RustIndex {
     /// variant already bound there through the module's import bindings).
     /// Drains `g.unresolved_refs`; misses go back in their original order,
     /// every other ref untouched.
-    pub(crate) fn resolve_leftover_refs(&self, g: &mut RepoGraph) {
+    pub(crate) fn resolve_leftover_refs(&self, g: &mut RepoGraph, rb: &RustBindings) {
         let pending = std::mem::take(&mut g.unresolved_refs);
         for r in pending {
             let hit = match &r.qualifier {
                 CallQualifier::Attribute { base, name } if r.category == edge_category::USES => {
-                    self.resolve_variant(g, r.from, base, name)
+                    self.resolve_variant(g, rb, r.from, base, name)
                 }
                 _ => None,
             };
@@ -456,6 +509,7 @@ impl RustIndex {
     fn resolve_variant(
         &self,
         g: &RepoGraph,
+        rb: &RustBindings,
         from: NodeId,
         base: &str,
         name: &str,
@@ -463,9 +517,9 @@ impl RustIndex {
         let segs = split_path(base)?;
         let scope = enclosing(&g.nav, from, true)?;
         let file_module = enclosing(&g.nav, from, false)?;
-        let (start, _) = self.start(g, from, scope, file_module, &segs[0])?;
+        let (start, _) = self.start(g, rb, from, scope, file_module, &segs[0])?;
         let mut unused = false;
-        let pos = self.walk(g, start, &segs[1..], &mut unused)?;
+        let pos = self.walk(g, rb, start, &segs[1..], &mut unused)?;
         match self.settle_type_name(g, pos, file_module) {
             Pos::Type(ty) if g.nav.kind_by_id.get(&ty) == Some(&node_kind::ENUM) => {
                 enum_variant(&g.nav, ty, name)
@@ -556,9 +610,13 @@ impl RustIndex {
 
     // ---- first segment ------------------------------------------------------
 
+    /// The first segment of a path written in `from` (a fn or method, or for
+    /// a `use` the scope that holds it), whose enclosing MODULE / PACKAGE is
+    /// `scope` and file module `file_module`.
     fn start(
         &self,
         g: &RepoGraph,
+        sc: &dyn UseScopes,
         from: NodeId,
         scope: NodeId,
         file_module: NodeId,
@@ -573,30 +631,36 @@ impl RustIndex {
             "super" => Some((self.parent_pos(g, scope)?, Rule::Super)),
             "Self" => Some((self_type(&g.nav, from)?, Rule::SelfType)),
             _ => {
-                if let Some(p) = self.binding_pos(g, scope, seg).or_else(|| {
-                    (scope != file_module)
-                        .then(|| self.binding_pos(g, file_module, seg))
-                        .flatten()
-                }) {
-                    return Some((p, Rule::Import));
+                let chain = scope_chain(&g.nav, scope, file_module);
+                // A `use` binding, innermost scope first: (LA.1b) the fn's
+                // own body, then each scope out to the file module.
+                let fn_scope = (from != scope).then_some(from);
+                for s in fn_scope.iter().chain(&chain) {
+                    if let Some(p) = self.binding_pos(g, sc, *s, seg) {
+                        return Some((p, Rule::Import));
+                    }
                 }
                 // Innermost scope first, then (LA.3) each enclosing scope out
                 // to the file module: an inline `mod tests` reaches its parent's
                 // modules and types, the `use super::*` every test mod opens
                 // with. Top-level code has no enclosing scope, so this is
                 // LA.1a's lookup unchanged there.
-                let mut cur = Some(scope);
-                while let Some(s) = cur {
-                    if let Some(p) = self.child_pos(g, &Pos::Scope(s), seg) {
+                for s in &chain {
+                    if let Some(p) = self.child_pos(g, &Pos::Scope(*s), seg) {
                         return Some((p, Rule::Child));
                     }
-                    if let Some(p) = type_pos(g, s, seg) {
+                    if let Some(p) = type_pos(g, *s, seg) {
                         return Some((p, Rule::Type));
                     }
-                    cur = (s != file_module)
-                        .then(|| g.nav.parent_of.get(&s))
-                        .flatten()
-                        .and_then(|up| enclosing(&g.nav, *up, true));
+                }
+                // A glob import (LA.1b), innermost first: shadowed by every
+                // item and explicit `use` above, above the extern prelude.
+                for s in fn_scope.iter().chain(&chain) {
+                    let hit =
+                        self.glob_member(g, sc, *s, seg, |k| is_scope_kind(k) || is_type_kind(k));
+                    if let Some(p) = hit.and_then(|id| scope_or_type(g, id)) {
+                        return Some((p, Rule::Import));
+                    }
                 }
                 let q = g.nav.qname_by_id.get(&file_module)?;
                 Some((self.crate_name_pos(g, q, seg)?, Rule::CrateName))
@@ -634,6 +698,7 @@ impl RustIndex {
     fn walk(
         &self,
         g: &RepoGraph,
+        sc: &dyn UseScopes,
         mut pos: Pos,
         rest: &[String],
         fallback: &mut bool,
@@ -644,7 +709,11 @@ impl RustIndex {
                 Pos::Scope(id) => self
                     .child_pos(g, &pos, seg)
                     .or_else(|| type_pos(g, id, seg))
-                    .or_else(|| self.binding_pos(g, id, seg))
+                    .or_else(|| self.binding_pos(g, sc, id, seg))
+                    .or_else(|| {
+                        self.glob_member(g, sc, id, seg, |k| is_scope_kind(k) || is_type_kind(k))
+                            .and_then(|hit| scope_or_type(g, hit))
+                    })
                     .or_else(|| {
                         let hit = self.unique_in_crate(g, id, seg, true).map(Pos::Type);
                         *fallback |= hit.is_some();
@@ -660,6 +729,7 @@ impl RustIndex {
     fn final_name(
         &self,
         g: &RepoGraph,
+        sc: &dyn UseScopes,
         pos: &Pos,
         name: &str,
         caller_pkg: Option<usize>,
@@ -675,16 +745,13 @@ impl RustIndex {
                     .get(id)
                     .and_then(|s| s.get(name))
                     .copied();
-                let bound = || {
-                    g.symbols
-                        .module_import_bindings
-                        .get(id)
-                        .and_then(|b| b.get(name))
-                        .copied()
-                };
                 direct
                     .filter(callable)
-                    .or_else(|| bound().filter(callable))
+                    .or_else(|| {
+                        let hit = sc.bound(g, *id, name).filter(callable);
+                        hit.inspect(|_| sc.note_hop())
+                    })
+                    .or_else(|| self.glob_member(g, sc, *id, name, is_callable))
                     .or_else(|| {
                         let hit = self.unique_in_crate(g, *id, name, false);
                         *fallback |= hit.is_some();
@@ -904,16 +971,88 @@ impl RustIndex {
         }
     }
 
-    fn binding_pos(&self, g: &RepoGraph, scope: NodeId, seg: &str) -> Option<Pos> {
-        let id = *g.symbols.module_import_bindings.get(&scope)?.get(seg)?;
-        let kind = *g.nav.kind_by_id.get(&id)?;
-        if kind == node_kind::MODULE || kind == node_kind::PACKAGE {
-            Some(Pos::Scope(id))
-        } else if is_type_kind(kind) {
-            Some(Pos::Type(id))
-        } else {
-            None
+    /// A module / type that a `use` in `scope` binds as `seg`.
+    fn binding_pos(
+        &self,
+        g: &RepoGraph,
+        sc: &dyn UseScopes,
+        scope: NodeId,
+        seg: &str,
+    ) -> Option<Pos> {
+        let pos = scope_or_type(g, sc.bound(g, scope, seg)?)?;
+        sc.note_hop();
+        Some(pos)
+    }
+
+    /// `name` through the `use ..::*` globs of `scope` (LA.1b): every scope
+    /// reachable over glob edges, breadth-first, each once, at most
+    /// [`MAX_USE_HOPS`] globs deep. A reached scope contributes its own item,
+    /// its explicit `use` binding or its child module named `name`, and only
+    /// when it has none do its own globs count (Rust: a glob is shadowed by
+    /// every explicit name). Hits `want` rejects are skipped. Exactly one
+    /// distinct hit binds; two is ambiguous -> `None`, never first-wins.
+    fn glob_member(
+        &self,
+        g: &RepoGraph,
+        sc: &dyn UseScopes,
+        scope: NodeId,
+        name: &str,
+        want: fn(NodeKindId) -> bool,
+    ) -> Option<NodeId> {
+        let mut frontier: Vec<NodeId> = sc.globs(scope).to_vec();
+        if frontier.is_empty() {
+            return None;
         }
+        let mut seen: HashSet<NodeId> = HashSet::from([scope]);
+        let mut hit: Option<NodeId> = None;
+        for _ in 0..MAX_USE_HOPS {
+            let mut next = Vec::new();
+            for t in frontier {
+                if !seen.insert(t) {
+                    continue;
+                }
+                match (self.own_member(g, sc, t, name, want), hit) {
+                    (Some(id), Some(h)) if id != h => return None,
+                    (Some(id), _) => hit = Some(id),
+                    (None, _) => next.extend_from_slice(sc.globs(t)),
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        hit.inspect(|_| sc.note_hop())
+    }
+
+    /// What scope `t` itself names `name`, of a kind `want` admits: an item
+    /// it defines, an explicit `use` binding in it, or a child module /
+    /// inline mod, in that order.
+    fn own_member(
+        &self,
+        g: &RepoGraph,
+        sc: &dyn UseScopes,
+        t: NodeId,
+        name: &str,
+        want: fn(NodeKindId) -> bool,
+    ) -> Option<NodeId> {
+        let fits = |id: &NodeId| {
+            g.nav
+                .kind_by_id
+                .get(id)
+                .is_some_and(|k| is_bindable(*k) && want(*k))
+        };
+        g.symbols
+            .module_symbols
+            .get(&t)
+            .and_then(|s| s.get(name))
+            .copied()
+            .filter(fits)
+            .or_else(|| sc.bound(g, t, name).filter(fits))
+            .or_else(|| match self.child_pos(g, &Pos::Scope(t), name)? {
+                Pos::Scope(id) => Some(id).filter(fits),
+                _ => None,
+            })
     }
 
     /// True when the caller's own source writes `base.name` and never
@@ -936,6 +1075,499 @@ impl RustIndex {
         code.is_some_and(|code| {
             joined_by(code, base, ".", name) && !joined_by(code, base, "::", name)
         })
+    }
+}
+
+// ---- LA.1b: `use` trees ------------------------------------------------------
+
+/// The longest chain a `use` lookup follows: a re-export that needs more
+/// than this many other `use`s to resolve, or a name more than this many
+/// globs away, stays unresolved.
+const MAX_USE_HOPS: usize = 8;
+
+/// What [`resolve_imports_rust`] binds outside the persisted symbol table:
+/// the `use`s inside fn bodies, and every glob. `module_import_bindings` is
+/// written to the `.gmap` per module and two fns of one file may bind one name
+/// to two targets, so a fn's bindings live here, owned by the call passes of
+/// one `build_rust` and never stored.
+#[derive(Default)]
+pub(crate) struct RustBindings {
+    /// fn / METHOD node -> (bound name -> target) for the `use`s in its body.
+    fn_scoped: HashMap<NodeId, HashMap<String, NodeId>>,
+    /// Scope (file MODULE, inline PACKAGE, fn) -> the scopes its `use ..::*`
+    /// globs name, sorted by qname.
+    globs: HashMap<NodeId, Vec<NodeId>>,
+}
+
+/// Where a lookup reads `use` bindings: the finished tables at call time
+/// ([`RustBindings`] beside the graph's module bindings), or the previous
+/// round's while [`resolve_imports_rust`] iterates ([`Round`]).
+trait UseScopes {
+    /// What an explicit `use` in `scope` binds `name` to.
+    fn bound(&self, g: &RepoGraph, scope: NodeId, name: &str) -> Option<NodeId>;
+    /// The scopes `scope`'s globs name.
+    fn globs(&self, scope: NodeId) -> &[NodeId];
+    /// A lookup went through a binding another `use` made (`reexport_hops`).
+    fn note_hop(&self) {}
+}
+
+impl UseScopes for RustBindings {
+    fn bound(&self, g: &RepoGraph, scope: NodeId, name: &str) -> Option<NodeId> {
+        self.fn_scoped
+            .get(&scope)
+            .or_else(|| g.symbols.module_import_bindings.get(&scope))
+            .and_then(|m| m.get(name))
+            .copied()
+    }
+
+    fn globs(&self, scope: NodeId) -> &[NodeId] {
+        self.globs.get(&scope).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// One round's binding tables, over every scope kind.
+#[derive(Default, PartialEq)]
+struct UseTables {
+    bound: HashMap<NodeId, HashMap<String, NodeId>>,
+    globs: HashMap<NodeId, Vec<NodeId>>,
+}
+
+impl UseTables {
+    /// The tables one round's results make. Two `use`s of one scope binding
+    /// one name to different targets (cfg-gated twins) bind it to neither.
+    fn collect(g: &RepoGraph, leaves: &[UseLeaf<'_>], results: &[Option<UseHit>]) -> Self {
+        let mut t = UseTables::default();
+        let mut ambiguous: Vec<(NodeId, &str)> = Vec::new();
+        for (leaf, hit) in leaves.iter().zip(results) {
+            let Some(target) = hit.and_then(|h| h.target) else {
+                continue;
+            };
+            if leaf.glob {
+                t.globs.entry(leaf.scope).or_default().push(target);
+                continue;
+            }
+            let Some(name) = leaf.bound else { continue };
+            let slot = t.bound.entry(leaf.scope).or_default();
+            match slot.get(name) {
+                Some(prev) if *prev != target => ambiguous.push((leaf.scope, name)),
+                _ => {
+                    slot.insert(name.to_string(), target);
+                }
+            }
+        }
+        for (scope, name) in ambiguous {
+            if let Some(m) = t.bound.get_mut(&scope) {
+                m.remove(name);
+            }
+        }
+        let qname = |id: &NodeId| g.nav.qname_by_id.get(id).map_or("", String::as_str);
+        for list in t.globs.values_mut() {
+            list.sort_by(|a, b| qname(a).cmp(qname(b)));
+            list.dedup();
+        }
+        t
+    }
+}
+
+/// [`UseScopes`] over the previous round's tables while one leaf resolves:
+/// the name that leaf binds never resolves through itself (`use log::log;`
+/// names the `log` crate), and every binding it goes through is counted.
+struct Round<'a> {
+    tables: &'a UseTables,
+    skip: Option<(NodeId, &'a str)>,
+    hops: Cell<usize>,
+}
+
+impl UseScopes for Round<'_> {
+    fn bound(&self, _g: &RepoGraph, scope: NodeId, name: &str) -> Option<NodeId> {
+        if self.skip == Some((scope, name)) {
+            return None;
+        }
+        self.tables.bound.get(&scope)?.get(name).copied()
+    }
+
+    fn globs(&self, scope: NodeId) -> &[NodeId] {
+        self.tables.globs.get(&scope).map_or(&[], Vec::as_slice)
+    }
+
+    fn note_hop(&self) {
+        Stats::bump(&self.hops);
+    }
+}
+
+/// One leaf of a `use` tree, placed in its scope.
+struct UseLeaf<'a> {
+    /// What holds the `use`: a file MODULE, an inline PACKAGE, or a fn / METHOD.
+    scope: NodeId,
+    /// The path resolved to a module or type (a Symbol's `module`, a
+    /// Module's `path`); `None` when it is not made of identifiers.
+    path: Option<Vec<String>>,
+    /// `use path::member` names `member` in `path`; `None` binds `path` itself.
+    member: Option<&'a str>,
+    /// The name bound: the alias, else the last segment. `None` for a glob
+    /// and for `as _`.
+    bound: Option<&'a str>,
+    glob: bool,
+    alias: bool,
+    /// A `crate::` / `super::` Symbol: HEAD resolved these, so a miss in a
+    /// loose file keeps HEAD's tail fallback. Never an external crate's path.
+    tail_fallback: bool,
+}
+
+/// A leaf whose path resolved: what it binds (`None` when the member it
+/// names is not found there), and the MODULE / PACKAGE its file's IMPORTS
+/// edge points at.
+#[derive(Clone, Copy)]
+struct UseHit {
+    target: Option<NodeId>,
+    imports: Option<NodeId>,
+}
+
+/// Every `use` of one Rust graph whose `from_module` names a node, as leaves
+/// in statement order.
+fn use_leaves<'a>(g: &RepoGraph, imports: &'a [ImportStmt]) -> Vec<UseLeaf<'a>> {
+    let inner = inner_scopes(g);
+    imports
+        .iter()
+        .filter_map(|stmt| {
+            let q = stmt.from_module.as_str();
+            let scope = g
+                .symbols
+                .module_by_qname
+                .get(q)
+                .copied()
+                .or_else(|| inner.get(q).copied().flatten())?;
+            let unnamed = |b: &&str| *b != "_";
+            Some(match &stmt.target {
+                ImportTarget::Symbol {
+                    module,
+                    name,
+                    alias,
+                    ..
+                } => {
+                    let path = split_path(module);
+                    let glob = name == "*";
+                    let first = path.as_ref().and_then(|p| p.first()).map(String::as_str);
+                    UseLeaf {
+                        scope,
+                        tail_fallback: !glob && matches!(first, Some("crate" | "super")),
+                        path,
+                        member: (!glob).then_some(name.as_str()),
+                        bound: (!glob)
+                            .then(|| alias.as_deref().unwrap_or(name.as_str()))
+                            .filter(unnamed),
+                        glob,
+                        alias: alias.is_some(),
+                    }
+                }
+                ImportTarget::Module { path, alias } => UseLeaf {
+                    scope,
+                    tail_fallback: false,
+                    path: split_path(path),
+                    member: None,
+                    bound: alias
+                        .as_deref()
+                        .or_else(|| path.rsplit("::").next())
+                        .filter(unnamed),
+                    glob: false,
+                    alias: alias.is_some(),
+                },
+            })
+        })
+        .collect()
+}
+
+/// qname -> the inline PACKAGE, else the one fn / METHOD, of that qname: the
+/// non-file scopes a `use` can sit in. A qname two fn-like nodes share maps
+/// to `None` (never first-wins).
+fn inner_scopes(g: &RepoGraph) -> HashMap<&str, Option<NodeId>> {
+    let mut by_q: HashMap<&str, (Option<NodeId>, Vec<NodeId>)> = HashMap::new();
+    for (id, kind) in &g.nav.kind_by_id {
+        let is_pkg = *kind == node_kind::PACKAGE;
+        if !is_pkg && *kind != node_kind::FUNCTION && *kind != node_kind::METHOD {
+            continue;
+        }
+        let Some(q) = g.nav.qname_by_id.get(id) else {
+            continue;
+        };
+        let slot = by_q.entry(q.as_str()).or_default();
+        if is_pkg {
+            slot.0 = Some(*id);
+        } else {
+            slot.1.push(*id);
+        }
+    }
+    by_q.into_iter()
+        .map(|(q, (pkg, fns))| {
+            let fn_scope = match fns.as_slice() {
+                [only] => Some(*only),
+                _ => None,
+            };
+            (q, pkg.or(fn_scope))
+        })
+        .collect()
+}
+
+/// Per-build tallies of the `[rust-uses]` marker.
+#[derive(Default)]
+struct UseStats {
+    scopes: usize,
+    bindings: usize,
+    hops: usize,
+    alias: usize,
+    fn_scoped: usize,
+    glob: usize,
+    unresolved: usize,
+    imports_edges: usize,
+}
+
+/// Resolve one Rust graph's `use` trees (LA.1b), replacing
+/// `resolve_imports_python` for Rust. Each leaf resolves as a Rust path from
+/// the scope that holds it: the first segment through LA.1a's rules (an
+/// earlier `use`, a child module, a type, a glob, a workspace crate), then
+/// the member in that module: an item, else the module's own `use` binding
+/// (a `pub use` re-export, followed), else a child module, else its globs.
+///
+/// Re-export chains are order-independent by construction: every leaf
+/// resolves against the previous round's bindings, rounds repeat until the
+/// tables stop changing, and a leaf needing more than [`MAX_USE_HOPS`] rounds
+/// (a longer chain, or a cycle, which never settles on a target) stays
+/// unresolved. A leaf never resolves through the name it binds.
+///
+/// Storage: a file MODULE's or inline PACKAGE's bindings go in
+/// `module_import_bindings` (the generic resolver reads them, and the store
+/// persists them); a fn's, and every glob, in the returned [`RustBindings`].
+/// IMPORTS edges run from the leaf's file MODULE to the MODULE / PACKAGE the
+/// path names (the member when it is a module, else its parent path), one per
+/// (from, to), in statement order. A `crate::` / `super::` symbol in a file
+/// whose crate is unknown (loose `.rs` files) that resolves to nothing keeps
+/// HEAD's tail fallback (a repo-unique fn / module of that name); an external
+/// crate's path binds nothing and draws no edge.
+///
+/// fired_on marker, once per graph with a `use`:
+/// `[rust-uses] scopes=S bindings=B (reexport_hops=H alias=A fn_scoped=F
+/// glob=G) unresolved=U imports_edges=E`. S = scopes holding a `use`, B =
+/// distinct (scope, name) bound, H = bindings the final round's lookups went
+/// through, A / F = bound leaves with an alias / in a fn body, G = globs
+/// resolved to a module, U = leaves that bound nothing, E = IMPORTS edges.
+pub(crate) fn resolve_imports_rust(
+    g: &mut RepoGraph,
+    imports: &[ImportStmt],
+    idx: &RustIndex,
+) -> RustBindings {
+    let leaves = use_leaves(g, imports);
+    if leaves.is_empty() {
+        return RustBindings::default();
+    }
+    let mut tables = UseTables::default();
+    let mut results: Vec<Option<UseHit>> = Vec::with_capacity(leaves.len());
+    let mut hops: Vec<usize> = Vec::with_capacity(leaves.len());
+    for _ in 0..=MAX_USE_HOPS {
+        results.clear();
+        hops.clear();
+        for leaf in &leaves {
+            let round = Round {
+                tables: &tables,
+                skip: leaf.bound.map(|b| (leaf.scope, b)),
+                hops: Cell::new(0),
+            };
+            results.push(idx.resolve_leaf(g, &round, leaf));
+            hops.push(round.hops.get());
+        }
+        let next = UseTables::collect(g, &leaves, &results);
+        let settled = next == tables;
+        tables = next;
+        if settled {
+            break;
+        }
+    }
+    // HEAD's tail fallback, last resort, for the paths HEAD resolved, in a
+    // file whose crate is unknown: no Cargo package covers it, or its package
+    // has no crate root above it (loose `.rs` files, whose module tree is a
+    // guess). In a known crate a `crate::` path that misses names something
+    // the walk never saw (a gated dir, a macro-made item): a repo-wide guess
+    // there would bind another crate's same-named fn.
+    for (leaf, hit) in leaves.iter().zip(results.iter_mut()) {
+        let bound = hit.is_some_and(|h| h.target.is_some());
+        let (false, true, Some(name)) = (bound, leaf.tail_fallback, leaf.member) else {
+            continue;
+        };
+        let known_crate = enclosing(&g.nav, leaf.scope, false)
+            .and_then(|m| g.nav.qname_by_id.get(&m))
+            .is_some_and(|q| {
+                idx.covering(q).is_some() && matches!(idx.crate_root(g, q), Some(Root::Module(_)))
+            });
+        if known_crate {
+            continue;
+        }
+        let Some(t) = unique_global_function(g, name).or_else(|| unique_global_module(g, name))
+        else {
+            continue;
+        };
+        *hit = Some(UseHit {
+            target: Some(t),
+            imports: Some(t),
+        });
+        if let Some(b) = leaf.bound {
+            tables
+                .bound
+                .entry(leaf.scope)
+                .or_default()
+                .entry(b.to_string())
+                .or_insert(t);
+        }
+    }
+
+    let mut stats = UseStats::default();
+    let mut scopes: HashSet<NodeId> = HashSet::new();
+    for ((leaf, hit), h) in leaves.iter().zip(&results).zip(&hops) {
+        scopes.insert(leaf.scope);
+        if !hit.is_some_and(|h| h.target.is_some()) {
+            stats.unresolved += 1;
+            continue;
+        }
+        stats.hops += h;
+        if leaf.glob {
+            stats.glob += 1;
+        } else if leaf.bound.is_some() {
+            stats.alias += usize::from(leaf.alias);
+            stats.fn_scoped += usize::from(is_fn_kind(&g.nav, leaf.scope));
+        }
+    }
+    stats.scopes = scopes.len();
+
+    let mut rb = RustBindings {
+        fn_scoped: HashMap::new(),
+        globs: tables.globs,
+    };
+    for (scope, names) in tables.bound {
+        if names.is_empty() {
+            continue;
+        }
+        stats.bindings += names.len();
+        if is_fn_kind(&g.nav, scope) {
+            rb.fn_scoped.insert(scope, names);
+        } else {
+            g.symbols
+                .module_import_bindings
+                .entry(scope)
+                .or_default()
+                .extend(names);
+        }
+    }
+    let mut drawn: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for (leaf, hit) in leaves.iter().zip(&results) {
+        let Some(UseHit {
+            imports: Some(to), ..
+        }) = hit
+        else {
+            continue;
+        };
+        let Some(from) = enclosing(&g.nav, leaf.scope, false) else {
+            continue;
+        };
+        if from != *to && drawn.insert((from, *to)) {
+            push_edge(g, from, *to, edge_category::IMPORTS);
+        }
+    }
+    stats.imports_edges = drawn.len();
+    eprintln!(
+        "[rust-uses] scopes={} bindings={} (reexport_hops={} alias={} fn_scoped={} glob={}) \
+         unresolved={} imports_edges={}",
+        stats.scopes,
+        stats.bindings,
+        stats.hops,
+        stats.alias,
+        stats.fn_scoped,
+        stats.glob,
+        stats.unresolved,
+        stats.imports_edges,
+    );
+    rb
+}
+
+impl RustIndex {
+    /// One leaf against one round's bindings: its path to a module or type,
+    /// then (a Symbol) the member it names there. `None` when the path itself
+    /// does not resolve (an external crate); a path that resolves draws its
+    /// IMPORTS edge even when the member it names is not found.
+    fn resolve_leaf(
+        &self,
+        g: &RepoGraph,
+        sc: &dyn UseScopes,
+        leaf: &UseLeaf<'_>,
+    ) -> Option<UseHit> {
+        let path = leaf.path.as_ref()?;
+        let scope = enclosing(&g.nav, leaf.scope, true)?;
+        let file_module = enclosing(&g.nav, leaf.scope, false)?;
+        let (start, _) = self.start(g, sc, leaf.scope, scope, file_module, &path[0])?;
+        let mut unused = false;
+        let pos = self.walk(g, sc, start, &path[1..], &mut unused)?;
+        let module = match pos {
+            Pos::Scope(id) => Some(id),
+            _ => None,
+        };
+        if leaf.glob {
+            return Some(UseHit {
+                target: module,
+                imports: module,
+            });
+        }
+        let Some(name) = leaf.member else {
+            let target = match pos {
+                Pos::Scope(id) | Pos::Type(id) => Some(id),
+                Pos::Virtual | Pos::TypeName(_) => None,
+            };
+            return Some(UseHit {
+                target,
+                imports: module,
+            });
+        };
+        let target = self.use_member(g, sc, &pos, name);
+        let imports = match target {
+            Some(t) if g.nav.kind_by_id.get(&t).is_some_and(|k| is_scope_kind(*k)) => Some(t),
+            _ => module,
+        };
+        Some(UseHit { target, imports })
+    }
+
+    /// The item `use <pos>::name` binds: an item the module defines, else its
+    /// own `use` binding (a re-export), else a child module, else a name its
+    /// globs bring in, else (at a crate root) the one top-level def of that
+    /// name in the crate. A type's members (`use Kind::A`) bind nothing.
+    fn use_member(
+        &self,
+        g: &RepoGraph,
+        sc: &dyn UseScopes,
+        pos: &Pos,
+        name: &str,
+    ) -> Option<NodeId> {
+        let bindable = |id: &NodeId| g.nav.kind_by_id.get(id).is_some_and(|k| is_bindable(*k));
+        match pos {
+            Pos::Scope(id) => g
+                .symbols
+                .module_symbols
+                .get(id)
+                .and_then(|s| s.get(name))
+                .copied()
+                .filter(bindable)
+                .or_else(|| {
+                    let hit = sc.bound(g, *id, name).filter(bindable);
+                    hit.inspect(|_| sc.note_hop())
+                })
+                .or_else(|| match self.child_pos(g, pos, name)? {
+                    Pos::Scope(child) => Some(child),
+                    _ => None,
+                })
+                .or_else(|| self.glob_member(g, sc, *id, name, is_bindable))
+                .or_else(|| self.unique_in_crate(g, *id, name, false))
+                .or_else(|| self.unique_in_crate(g, *id, name, true)),
+            Pos::Virtual => match self.child_pos(g, pos, name)? {
+                Pos::Scope(child) => Some(child),
+                _ => None,
+            },
+            Pos::Type(_) | Pos::TypeName(_) => None,
+        }
     }
 }
 
@@ -1033,6 +1665,44 @@ fn self_type(nav: &CodeNav, from: NodeId) -> Option<Pos> {
     }
 }
 
+/// `scope`, then each enclosing MODULE / PACKAGE out to `file_module`
+/// inclusive: the scopes a name written in `scope` is looked up in.
+fn scope_chain(nav: &CodeNav, scope: NodeId, file_module: NodeId) -> Vec<NodeId> {
+    let mut out = vec![scope];
+    let mut cur = scope;
+    while cur != file_module {
+        let Some(up) = nav
+            .parent_of
+            .get(&cur)
+            .and_then(|p| enclosing(nav, *p, true))
+        else {
+            break;
+        };
+        out.push(up);
+        cur = up;
+    }
+    out
+}
+
+/// A module / inline mod as a scope, a type as a type; anything else `None`.
+fn scope_or_type(g: &RepoGraph, id: NodeId) -> Option<Pos> {
+    let kind = *g.nav.kind_by_id.get(&id)?;
+    if is_scope_kind(kind) {
+        Some(Pos::Scope(id))
+    } else if is_type_kind(kind) {
+        Some(Pos::Type(id))
+    } else {
+        None
+    }
+}
+
+/// A fn or method: the scope of a `use` inside its body.
+fn is_fn_kind(nav: &CodeNav, id: NodeId) -> bool {
+    nav.kind_by_id
+        .get(&id)
+        .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD)
+}
+
 /// A type defined directly in `scope`.
 fn type_pos(g: &RepoGraph, scope: NodeId, seg: &str) -> Option<Pos> {
     let id = *g.symbols.module_symbols.get(&scope)?.get(seg)?;
@@ -1069,6 +1739,14 @@ fn is_type_kind(k: NodeKindId) -> bool {
         || k == node_kind::ENUM
         || k == node_kind::CLASS
         || k == node_kind::INTERFACE
+}
+
+/// What a `use` binds a name to: an item, a module or an inline mod. Never a
+/// METHOD (an `impl` elsewhere shares its file's symbol table) or an enum
+/// variant (`use Kind::A` would turn a tuple-variant constructor into a CALLS
+/// edge; LA.3 reads variants as USES).
+fn is_bindable(k: NodeKindId) -> bool {
+    k == node_kind::FUNCTION || k == node_kind::STATE_VAR || is_type_kind(k) || is_scope_kind(k)
 }
 
 /// What a module-level path call may land on: a fn, or a tuple-struct constructor.
