@@ -75,6 +75,10 @@ def main():
         sys.exit(3)
     now = int(time.time())
     age = now - int(lim.get("updated", now))
+    if resets and int(resets) <= now:
+        # The window this reading belongs to has already reset: a fresh window.
+        print(f"(last reading {pct:.0f}% was for a window that reset {fmt_mins((now - int(resets)) // 60)} ago; treating usage as 0%)")
+        pct, resets = 0, None
     mins_left = max(0, (int(resets) - now) // 60) if resets else None
     week = (lim.get("seven_day") or {}).get("used_percentage")
 
