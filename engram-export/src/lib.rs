@@ -55,6 +55,8 @@ use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
+pub mod diff;
+
 /// Counts surfaced after an export so callers can flag lossy runs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExportStats {
@@ -719,8 +721,8 @@ pub fn sidecar_path(out_path: &Path) -> std::path::PathBuf {
 }
 
 /// Write to `<path>.tmp` then rename over `path` so readers never see a
-/// half-written file.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// half-written file. `pub(crate)` for [`diff::write_diff`].
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
     let tmp = std::path::PathBuf::from(tmp);
