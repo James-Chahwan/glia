@@ -731,6 +731,50 @@ fn visit_interface(
         node_kind::INTERFACE,
         Some(module_id),
     );
+    collect_interface_heritage(n, src, iface_id, module_id, acc);
+}
+
+/// LD.7a: `interface A extends B, ns.C<T>` → one INHERITS_FROM ref per
+/// super-interface (interface → super-interface, the direction of class →
+/// superclass). The `extends_type_clause` child (no field name) lists each
+/// supertype under field `type`; each becomes the A6.3 heritage shape, an
+/// `UnresolvedRef` with a `Bare(<simple name>)` qualifier that `resolve_refs`
+/// binds through imports, same-file symbols, then a unique repo-wide type. A
+/// merged interface declaration repeating the same `extends` adds no second
+/// ref, so declaration merging never doubles the edge.
+fn collect_interface_heritage(
+    iface: TsNode,
+    src: &[u8],
+    iface_id: NodeId,
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    let mut cursor = iface.walk();
+    for clause in iface.named_children(&mut cursor) {
+        if clause.kind() != "extends_type_clause" {
+            continue;
+        }
+        let mut tc = clause.walk();
+        for ty in clause.children_by_field_name("type", &mut tc) {
+            let Some(base) = heritage_type_name(ty, src) else {
+                continue;
+            };
+            let seen = acc.refs.iter().any(|r| {
+                r.from == iface_id
+                    && r.category == edge_category::INHERITS_FROM
+                    && matches!(&r.qualifier, CallQualifier::Bare(b) if b == base)
+            });
+            if seen {
+                continue;
+            }
+            acc.refs.push(UnresolvedRef {
+                from: iface_id,
+                from_module: module_id,
+                qualifier: CallQualifier::Bare(base.to_string()),
+                category: edge_category::INHERITS_FROM,
+            });
+        }
+    }
 }
 
 /// LA.30c: `enum E { … }` / `const enum E { … }` → an ENUM node (DEFINES from
@@ -3160,6 +3204,43 @@ class X extends Base implements IFoo {}
             !parse.edges.iter().any(|e| e.from == class_id
                 && (e.category == edge_category::IMPLEMENTS
                     || e.category == edge_category::INHERITS_FROM)),
+            "the parser must not mint heritage edges, edges: {:?}",
+            parse.edges
+        );
+    }
+
+    #[test]
+    fn interface_extends_emits_inherits_from_ref() {
+        // LD.7a: `interface Catalog extends Readable, ns.Paged<T>` → one
+        // INHERITS_FROM ref per super-interface, from the interface, in the A6.3
+        // shape (Bare(<simple name>), the file module). A merged declaration
+        // repeating the same `extends` adds no second ref; the parser mints no
+        // heritage edge.
+        let src = "\
+export interface Readable { read(id: string): string; }
+export interface Catalog extends Readable, ns.Paged<string> { search(q: string): string[]; }
+export interface Catalog extends Readable { count(): number; }
+";
+        let parse = parse_file(src, "catalog.ts", "catalog", repo()).unwrap();
+        let mod_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "catalog");
+        let iface_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "catalog::Catalog");
+        let inherits: Vec<&UnresolvedRef> = parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INHERITS_FROM)
+            .collect();
+        assert_eq!(inherits.len(), 2, "Readable once, Paged once: {inherits:?}");
+        for name in ["Readable", "Paged"] {
+            assert!(
+                inherits.iter().any(|r| r.from == iface_id
+                    && r.from_module == mod_id
+                    && r.qualifier == CallQualifier::Bare(name.to_string())),
+                "expected Catalog --INHERITS_FROM--> Bare({name}) ref: {inherits:?}"
+            );
+        }
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::INHERITS_FROM),
             "the parser must not mint heritage edges, edges: {:?}",
             parse.edges
         );

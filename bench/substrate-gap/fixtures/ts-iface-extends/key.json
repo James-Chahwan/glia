@@ -1,0 +1,18 @@
+{
+  "framework": "ts-iface-extends",
+  "language": "typescript",
+  "dirs": ["."],
+  "cells": ["typescript/impl"],
+  "note": "LD.7a: interface-to-interface heritage in TypeScript (same-file; cross-file binds through A6.3's UnresolvedRef path). Baseline HEAD (installed wheel at ca1ede8): IMPLEMENTS catalog::PgCatalog->catalog::Catalog present; INHERITS_FROM catalog::Catalog->catalog::Readable absent (visit_interface ignored extends_type_clause). Interface method signatures are not METHOD nodes - a recorded gap, not graded here.",
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "catalog::Readable"},
+    {"kind": "INTERFACE", "name": "catalog::Catalog"}
+  ],
+  "expect_edges": [
+    {"from": "catalog::Catalog", "to": "catalog::Readable", "category": "INHERITS_FROM", "note": "`interface Catalog extends Readable` - an UnresolvedRef(Bare) bound through the module's own symbols"},
+    {"from": "catalog::PgCatalog", "to": "catalog::Catalog", "category": "IMPLEMENTS", "note": "already 1.00 - the positive control"}
+  ],
+  "forbid": [
+    {"from": "catalog::PgCatalog", "to": "catalog::Readable", "category": "IMPLEMENTS", "note": "transitivity is the query's job, not the extractor's"}
+  ]
+}

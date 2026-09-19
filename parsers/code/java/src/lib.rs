@@ -719,6 +719,28 @@ fn visit_type_decl(
             }
         }
     }
+    // LD.7a: interface heritage. `interface A extends B, C` carries an
+    // `extends_interfaces` child (no field name) wrapping a `type_list`; each
+    // super-interface → INHERITS_FROM, interface → super-interface, the same
+    // direction as class → superclass.
+    if kind == node_kind::INTERFACE {
+        let mut ei_cursor = node.walk();
+        for extends in node.named_children(&mut ei_cursor) {
+            if extends.kind() != "extends_interfaces" {
+                continue;
+            }
+            let mut ex_cursor = extends.walk();
+            for type_list in extends.named_children(&mut ex_cursor) {
+                let mut tl_cursor = type_list.walk();
+                for sup in type_list.named_children(&mut tl_cursor) {
+                    if sup.kind() == "comment" {
+                        continue;
+                    }
+                    emit_heritage_ref(text_of(sup, src), edge_category::INHERITS_FROM, id, module_id, acc);
+                }
+            }
+        }
+    }
 
     // Persistence substrate: a JPA `@Entity` / Mongo `@Document` class is also a
     // DATA_ENTITY; a Spring Data repository (`extends JpaRepository<Entity, Id>`)
@@ -2912,6 +2934,51 @@ public class X extends Base implements IFoo, IBar {
         let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "com::example::X");
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "com::example::X");
         assert!(inherits[0].from == x_id && inherits[0].from_module == module_id);
+    }
+
+    #[test]
+    fn interface_extends_emits_inherits_from_ref() {
+        // LD.7a: `interface Catalog extends Readable, shop.Paged<T>` → one
+        // INHERITS_FROM ref per super-interface, from the interface, carrying
+        // the bare (generic- and qualifier-stripped) name. No IMPLEMENTS: an
+        // interface extends, it never implements.
+        let source = r#"
+package shop;
+
+public interface Catalog extends Readable, shop.Paged<String> {
+    String search(String q);
+}
+"#;
+        let fp = parse_file(source, "src/main/java/shop/Catalog.java", "shop::Catalog", repo()).unwrap();
+        let iface_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "shop::Catalog");
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::Catalog");
+        let inherits: Vec<&UnresolvedRef> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INHERITS_FROM)
+            .collect();
+        assert_eq!(inherits.len(), 2, "one ref per super-interface: {inherits:?}");
+        for name in ["Readable", "Paged"] {
+            assert!(
+                inherits.iter().any(|r| r.from == iface_id
+                    && r.from_module == module_id
+                    && r.qualifier == CallQualifier::Bare(name.to_string())),
+                "expected Catalog --INHERITS_FROM--> Bare({name}) ref: {inherits:?}"
+            );
+        }
+        assert!(
+            !fp.refs.iter().any(|r| r.category == edge_category::IMPLEMENTS),
+            "an interface's extends is not IMPLEMENTS: {:?}",
+            fp.refs
+        );
+        // A class's `extends` stays on the superclass path: exactly one
+        // INHERITS_FROM, never a second one through extends_interfaces.
+        let class_src = "package shop;\npublic class PgCatalog extends Base implements Catalog {}\n";
+        let cp = parse_file(class_src, "PgCatalog.java", "shop::PgCatalog", repo()).unwrap();
+        assert_eq!(
+            cp.refs.iter().filter(|r| r.category == edge_category::INHERITS_FROM).count(),
+            1
+        );
     }
 
     #[test]

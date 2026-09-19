@@ -1,0 +1,18 @@
+{
+  "framework": "java-iface-extends",
+  "language": "java",
+  "dirs": ["."],
+  "cells": ["java/impl"],
+  "note": "LD.7a: interface-to-interface heritage, the edge a transitive implementors query walks. Baseline HEAD (installed wheel at ca1ede8): IMPLEMENTS PgCatalog->Catalog present, INHERITS_FROM Catalog->Readable absent - interface_declaration's extends_interfaces was read only by the repository-generics scan, never as heritage.",
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "Readable", "note": "super-interface, in Readable.java"},
+    {"kind": "INTERFACE", "name": "Catalog", "note": "sub-interface, in Catalog.java"}
+  ],
+  "expect_edges": [
+    {"from": "Catalog", "to": "Readable", "category": "INHERITS_FROM", "note": "`interface Catalog extends Readable` across files - an UnresolvedRef(Bare) bound by resolve_refs, interface -> super-interface like class -> superclass"},
+    {"from": "PgCatalog", "to": "Catalog", "category": "IMPLEMENTS", "note": "already 1.00 - the positive control"}
+  ],
+  "forbid": [
+    {"from": "PgCatalog", "to": "Readable", "category": "INHERITS_FROM", "note": "transitivity is the query's job, not the extractor's"}
+  ]
+}

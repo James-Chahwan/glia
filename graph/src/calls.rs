@@ -165,22 +165,62 @@ impl EnumHits {
     /// File extension of the POSITION cell of the lowest-qname ENUM hit, or `?`
     /// when that ENUM carries no POSITION (or its file has no extension).
     fn ext(&self, g: &RepoGraph) -> String {
-        // NodeId is Hash, not Ord: order by qname alone. Two hits with the same
-        // ENUM qname are the same node (the id derives from kind + qname).
-        let lowest = self
-            .enums
-            .iter()
-            .filter_map(|id| g.nav.qname_by_id.get(id).map(|q| (q.as_str(), *id)))
-            .min_by(|a, b| a.0.cmp(b.0));
-        lowest
-            .and_then(|(_, id)| g.nodes.iter().find(|n| n.id == id))
-            .and_then(position_file)
-            .and_then(|file| {
-                let base = file.rsplit('/').next().unwrap_or(&file);
-                base.rsplit_once('.').map(|(_, ext)| ext.to_string())
-            })
-            .unwrap_or_else(|| "?".to_string())
+        lowest_qname_ext(g, &self.enums)
     }
+}
+
+/// Per-build tally of interface → super-interface heritage refs (LD.7a):
+/// INHERITS_FROM refs whose `from` is an INTERFACE, split by whether
+/// `resolve_refs` bound them. `ifaces` feeds the marker's `ext` discriminator —
+/// the generic pass does not know which language it is building.
+#[derive(Default)]
+struct IfaceExtends {
+    bound: usize,
+    unresolved: usize,
+    ifaces: Vec<NodeId>,
+}
+
+impl IfaceExtends {
+    /// `[heritage] interface-extends bound=N unresolved=M ext=<ext>`, or None
+    /// when the build saw no interface heritage ref.
+    fn marker(&self, g: &RepoGraph) -> Option<String> {
+        if self.bound + self.unresolved == 0 {
+            return None;
+        }
+        Some(format!(
+            "[heritage] interface-extends bound={} unresolved={} ext={}",
+            self.bound,
+            self.unresolved,
+            lowest_qname_ext(g, &self.ifaces)
+        ))
+    }
+}
+
+/// An interface -> super-interface heritage ref (LD.7a): INHERITS_FROM out of
+/// an INTERFACE. A class's `extends` and any IMPLEMENTS ref are not.
+fn extends_interface(g: &RepoGraph, r: &UnresolvedRef) -> bool {
+    r.category == edge_category::INHERITS_FROM
+        && g.nav.kind_by_id.get(&r.from) == Some(&node_kind::INTERFACE)
+}
+
+/// File extension of the POSITION cell of the lowest-qname node in `ids`, or
+/// `?` when that node carries no POSITION (or its file has no extension) — a
+/// marker's language discriminator.
+fn lowest_qname_ext(g: &RepoGraph, ids: &[NodeId]) -> String {
+    // NodeId is Hash, not Ord: order by qname alone. Two ids with the same
+    // qname are the same node (the id derives from kind + qname).
+    let lowest = ids
+        .iter()
+        .filter_map(|id| g.nav.qname_by_id.get(id).map(|q| (q.as_str(), *id)))
+        .min_by(|a, b| a.0.cmp(b.0));
+    lowest
+        .and_then(|(_, id)| g.nodes.iter().find(|n| n.id == id))
+        .and_then(position_file)
+        .and_then(|file| {
+            let base = file.rsplit('/').next().unwrap_or(&file);
+            base.rsplit_once('.').map(|(_, ext)| ext.to_string())
+        })
+        .unwrap_or_else(|| "?".to_string())
 }
 
 /// The `file` field of a node's POSITION cell (JSON `{"file":"…",…}`). Also
@@ -220,7 +260,9 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
         refs.iter().partition(|r| r.category == edge_category::NAVIGATES_TO);
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
+    let mut iface_extends = IfaceExtends::default();
     for r in refs {
+        let extends_iface = extends_interface(g, r);
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
         let resolved: Option<NodeId> = match &r.qualifier {
             CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
@@ -306,6 +348,13 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
             | CallQualifier::ComplexReceiver { .. } => None,
         };
 
+        if extends_iface {
+            match resolved {
+                Some(_) => iface_extends.bound += 1,
+                None => iface_extends.unresolved += 1,
+            }
+            iface_extends.ifaces.push(r.from);
+        }
         match resolved {
             Some(to) => push_edge(g, r.from, to, r.category),
             None => g.unresolved_refs.push(r.clone()),
@@ -316,6 +365,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     }
     if enum_hits.uses > 0 {
         eprintln!("[resolve] enum member uses bound: {} ext={}", enum_hits.uses, enum_hits.ext(g));
+    }
+    // LD.7a fired_on marker, once per language graph build:
+    //   `[heritage] interface-extends bound=N unresolved=M ext=<ext>`
+    if let Some(line) = iface_extends.marker(g) {
+        eprintln!("{line}");
     }
     let mut nav = crate::nav::resolve_nav_links(g, &nav_refs);
     nav.lifted = crate::nav::lift_nav_endpoints(g);
@@ -1423,5 +1477,78 @@ mod tests {
             .unwrap();
         assert_eq!(g.nav.field_types[&a].len(), 2);
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+    }
+
+    // ---- LD.7a: interface -> super-interface heritage ------------------------
+
+    /// `package shop` over three Java files: `Readable.java` declares the
+    /// super-interface, `Catalog.java` extends it — the parser's INHERITS_FROM
+    /// ref, bound across files by the global unique-type fallback.
+    fn iface_extends_files(readable_path: &str) -> (Vec<FileParse>, NodeId, NodeId) {
+        let mut r = Shape::new();
+        let rm = r.add(node_kind::MODULE, "shop::Readable", None);
+        let readable = r.add(node_kind::INTERFACE, "shop::Readable", Some(rm));
+        let mut readable_file = r.file(vec![], vec![], vec![]);
+        place(&mut readable_file, readable, readable_path);
+        let mut c = Shape::new();
+        let cm = c.add(node_kind::MODULE, "shop::Catalog", None);
+        let catalog = c.add(node_kind::INTERFACE, "shop::Catalog", Some(cm));
+        let mut catalog_file = c.file(
+            vec![],
+            vec![],
+            vec![heritage_ref(catalog, cm, "Readable", edge_category::INHERITS_FROM)],
+        );
+        place(&mut catalog_file, catalog, "src/shop/Catalog.java");
+        (vec![readable_file, catalog_file], catalog, readable)
+    }
+
+    #[test]
+    fn interface_extends_binds_across_files() {
+        let (files, catalog, readable) = iface_extends_files("src/shop/Readable.java");
+        let g = build_dotted(repo(), files).unwrap();
+        assert_eq!(
+            heritage_edges(&g),
+            vec![(catalog, readable, edge_category::INHERITS_FROM, Confidence::Strong)]
+        );
+        assert!(g.unresolved_refs.is_empty());
+        let tally = IfaceExtends { bound: 1, unresolved: 0, ifaces: vec![catalog] };
+        assert_eq!(
+            tally.marker(&g).as_deref(),
+            Some("[heritage] interface-extends bound=1 unresolved=0 ext=java")
+        );
+    }
+
+    /// Two packages each declaring a `Readable`: the bare name is ambiguous for
+    /// the global fallback, so the ref stays unresolved (counted), never
+    /// first-wins.
+    #[test]
+    fn ambiguous_super_interface_stays_unresolved() {
+        let (mut files, _, _) = iface_extends_files("src/shop/Readable.java");
+        let mut o = Shape::new();
+        let om = o.add(node_kind::MODULE, "other::Readable", None);
+        o.add(node_kind::INTERFACE, "other::Readable", Some(om));
+        files.push(o.file(vec![], vec![], vec![]));
+        let g = build_dotted(repo(), files).unwrap();
+        assert!(heritage_edges(&g).is_empty());
+        assert_eq!(g.unresolved_refs.len(), 1);
+    }
+
+    /// Only INHERITS_FROM out of an INTERFACE counts toward the marker: a
+    /// CLASS's `extends` and an IMPLEMENTS ref do not, and the marker is silent
+    /// when nothing counted.
+    #[test]
+    fn interface_extends_counts_only_interface_inherits_from() {
+        let (files, catalog, _) = iface_extends_files("src/shop/Readable.java");
+        let mut k = Shape::new();
+        let km = k.add(node_kind::MODULE, "shop::PgCatalog", None);
+        let class = k.add(node_kind::CLASS, "shop::PgCatalog", Some(km));
+        let mut all = files;
+        all.push(k.file(vec![], vec![], vec![]));
+        let g = build_dotted(repo(), all).unwrap();
+        let m = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop::Catalog");
+        assert!(extends_interface(&g, &heritage_ref(catalog, m, "Readable", edge_category::INHERITS_FROM)));
+        assert!(!extends_interface(&g, &heritage_ref(catalog, m, "Readable", edge_category::IMPLEMENTS)));
+        assert!(!extends_interface(&g, &heritage_ref(class, km, "Base", edge_category::INHERITS_FROM)));
+        assert_eq!(IfaceExtends::default().marker(&g), None);
     }
 }
