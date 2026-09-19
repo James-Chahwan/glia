@@ -14,6 +14,7 @@
 use std::path::Path;
 
 use clap::Parser;
+use engram_core::GMAP_FORMAT_VERSION;
 use glia_engine::generate_one;
 use glia_engram_export::{ExportOptions, export_engram_gmap, sidecar_path};
 
@@ -79,12 +80,16 @@ fn run(args: &Args) -> i32 {
             return 5;
         }
     };
+    // The grep-able success marker: the contract version the bytes follow and
+    // their content address (what a `GmapDiff` names as base / target).
     eprintln!(
-        "wrote {} nodes + {} edges ({} files) to {}\n  span sidecar: {}",
+        "[engram-export] wrote {} nodes + {} edges ({} files) to {} format_version={} digest={:016x}\n  span sidecar: {}",
         stats.nodes,
         stats.edges,
         stats.files,
         out_path.display(),
+        GMAP_FORMAT_VERSION,
+        stats.digest,
         sidecar_path(&out_path).display(),
     );
     if stats.skipped_nodes > 0 || stats.duplicate_keys > 0 || stats.skipped_edges > 0 {

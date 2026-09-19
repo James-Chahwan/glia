@@ -16,8 +16,9 @@
 //!
 //! ## The span story
 //!
-//! engram's `SpanRef { file: u32, start: u32, end: u32 }` is a **byte range**
-//! into an interned file. glia stores POSITION cells as
+//! engram's `SpanRef { file, start, end, .. }` is a **byte range** into an
+//! interned file (the v6 `start_line` / `end_line` fields are left `0`,
+//! unknown, by [`SpanRef::bytes`]). glia stores POSITION cells as
 //! `{"file": "<repo-relative path>", "start_line": r, "end_line": r}` — row
 //! numbers, no columns, no byte offsets, path as a string. We close the gap at
 //! export time (the repo source is present, since we export straight off a
@@ -34,14 +35,14 @@
 //!      on the span; it just hands it back.
 //!
 //! If a POSITION file can't be read (e.g. exporting against a moved repo) the
-//! node keeps its interned file id but gets a `{file, 0, 0}` span; nodes with
-//! no POSITION cell get `{0, 0, 0}`.
+//! node keeps its interned file id but gets a `SpanRef::bytes(file, 0, 0)`
+//! span; nodes with no POSITION cell get `SpanRef::NONE`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::Path;
 
-use engram_core::{Content, EdgeKind, Gmap, GmapEdge, GmapNode, SpanRef};
+use engram_core::{Content, EdgeKind, Gmap, GmapEdge, GmapNode, SpanRef, content_digest};
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
 use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
@@ -69,6 +70,10 @@ pub struct ExportStats {
     pub dropped_noise: usize,
     /// Nodes dropped by a caller `--exclude <glob>` pattern. (glia-v2 G15)
     pub dropped_excluded: usize,
+    /// [`engram_core::content_digest`] of the gmap bytes [`export_engram_gmap`]
+    /// wrote — the content address a `GmapDiff` names as its base or target.
+    /// `0` from [`build_gmap`], which serializes nothing. (glia-v6)
+    pub digest: u64,
 }
 
 /// Knobs for [`build_gmap`] / [`export_engram_gmap`].
@@ -505,12 +510,12 @@ pub fn build_gmap(
                     match line_cache.get(file) {
                         Some((starts, len)) => {
                             let (start, end) = byte_range(starts, *len, *sl, *el);
-                            SpanRef { file: fid, start, end }
+                            SpanRef::bytes(fid, start, end)
                         }
-                        None => SpanRef { file: fid, start: 0, end: 0 },
+                        None => SpanRef::bytes(fid, 0, 0),
                     }
                 }
-                None => SpanRef { file: 0, start: 0, end: 0 },
+                None => SpanRef::NONE,
             };
             // Leading documentation (D1). Every parser emits a DOC cell via the
             // shared AST `leading_doc` walk (Python via its docstring extractor),
@@ -537,7 +542,7 @@ pub fn build_gmap(
                 let prose = code_cell(&n.cells).unwrap_or_else(|| name.clone());
                 // concept_hint = `docs::<stem>` (key minus the section slug).
                 let ch = qname.rsplit_once("::").map(|(h, _)| h.to_string());
-                (Content::Proposition(prose), ch)
+                (Content::Proposition { text: prose, span: None }, ch)
             } else {
                 (
                     Content::Symbol {
@@ -588,7 +593,9 @@ pub fn build_gmap(
         edges,
         // G16: inline the file-id → path map (same source as the .files.json
         // sidecar) so engram renders `file.go:42` without a second-file load.
-        files: id_to_path.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        // A BTreeMap since v6, so the map is written in id order and the
+        // export bytes are deterministic.
+        files: id_to_path.clone(),
     };
     (gmap, id_to_path, stats)
 }
@@ -602,10 +609,11 @@ pub fn export_engram_gmap(
     out_path: &Path,
     opts: &ExportOptions,
 ) -> io::Result<ExportStats> {
-    let (gmap, id_to_path, stats) = build_gmap(merged, repo_root, opts);
+    let (gmap, id_to_path, mut stats) = build_gmap(merged, repo_root, opts);
 
     let bytes = bincode::serialize(&gmap)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    stats.digest = content_digest(&bytes);
     write_atomic(out_path, &bytes)?;
 
     let sidecar: BTreeMap<String, &String> =
@@ -652,7 +660,7 @@ mod tests {
                 key: "app::User::login".into(),
                 content: Content::Symbol {
                     name: "login".into(),
-                    span: SpanRef { file: 1, start: 12, end: 20 },
+                    span: SpanRef::bytes(1, 12, 20),
                     qname: Some("app::User::login".into()),
                     doc: None,
                     imports: Some(vec!["bcrypt".into()]),
@@ -667,7 +675,7 @@ mod tests {
                 to: "app::db::query".into(),
                 weight: Some(0.8),
             }],
-            files: HashMap::from([(1u32, "src/user.rs".to_string())]),
+            files: BTreeMap::from([(1u32, "src/user.rs".to_string())]),
         };
         let bytes = bincode::serialize(&gmap).unwrap();
         let back: Gmap = bincode::deserialize(&bytes).unwrap();
@@ -824,7 +832,7 @@ mod tests {
         let query_node = gmap.nodes.iter().find(|n| n.key == "app::db::query").unwrap();
         match &query_node.content {
             Content::Symbol { span, .. } => {
-                assert_eq!(*span, SpanRef { file: 0, start: 0, end: 0 })
+                assert_eq!(*span, SpanRef::NONE)
             }
             _ => unreachable!(),
         }

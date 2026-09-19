@@ -33,7 +33,7 @@ fn main() {
     let propositions = g
         .nodes
         .iter()
-        .filter(|x| matches!(&x.content, Content::Proposition(_)))
+        .filter(|x| matches!(&x.content, Content::Proposition { .. }))
         .count();
 
     println!("format_version : {}", g.format_version);
