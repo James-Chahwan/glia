@@ -67,7 +67,8 @@ impl Collapse {
 pub enum Gate {
     /// Ordinary source directory: walk into it.
     Descend,
-    /// VCS internals / editor metadata: skip outright, not even a region.
+    /// VCS internals / editor metadata / glia's control dir: skip outright,
+    /// not even a region.
     HardSkip,
     /// Name is always a dependency tree or build output.
     Always(Collapse),
@@ -96,11 +97,24 @@ impl Gate {
     }
 }
 
-/// VCS internals and editor metadata: no graph-meaningful content, skipped
-/// outright (not even recorded as a region). Also guards FILES — a `.git` file
-/// must never be read as source.
+/// glia's control directory (LF.1d): the engine's output (`.glia/graph`) and
+/// every input glia reads from outside the parse — `overlay.toml`, the cell
+/// sidecar, vectors, the docs / history / test snapshots. [`is_hard_skip`]
+/// covers it, so the walk never parses under it and never turns it into a
+/// REGION, and the store's mtime scan never descends into it. Its readers
+/// open their files directly, never through the walk; the store tracks the
+/// inputs by content instead (`repo_graph_store::external_inputs_fingerprint`),
+/// which is gitignore-blind by design.
+///
+/// Name-based like the rest of [`is_hard_skip`], so a nested `pkg/.glia` is
+/// skipped too, though only the repo root's is ever read.
+pub const CONTROL_DIR: &str = ".glia";
+
+/// VCS internals, editor metadata and glia's own [`CONTROL_DIR`]: no source to
+/// parse, skipped outright (not even recorded as a region). Also guards FILES —
+/// a `.git` file must never be read as source.
 pub fn is_hard_skip(name: &str) -> bool {
-    matches!(name, ".git" | ".hg" | ".svn" | ".idea" | ".vscode" | ".vs")
+    matches!(name, ".git" | ".hg" | ".svn" | ".idea" | ".vscode" | ".vs") || name == CONTROL_DIR
 }
 
 /// Directories always collapsed regardless of `.gitignore` — dependency trees
@@ -730,6 +744,10 @@ mod tests {
     fn hard_skip_and_always_region_names() {
         assert!(is_hard_skip(".git") && is_hard_skip(".vs"));
         assert!(!is_hard_skip("src"));
+        // LF.1d: glia's control dir, by name at any depth; only the exact name.
+        assert!(is_hard_skip(CONTROL_DIR) && is_hard_skip(".glia"));
+        assert!(!is_hard_skip(".glia2") && !is_hard_skip("glia"));
+        assert_eq!(gate_dir(Path::new("r/.glia"), ".glia", true), Gate::HardSkip);
         assert_eq!(always_region("node_modules"), Some(Collapse::Vendored));
         assert_eq!(always_region("TestResults"), Some(Collapse::BuildOutput));
         assert_eq!(always_region("src"), None);

@@ -8,7 +8,9 @@
 //! the LAYOUT (a multi-repo build has several repos and one error list), not
 //! any single shard, so they live in the human-readable `manifest.json`.
 
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
 use repo_graph_code_domain::walk_gating;
 use repo_graph_core::{CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId};
@@ -44,6 +46,22 @@ pub const LEGACY_GMAP_SUBDIR: &str = ".ai/repo-graph";
 /// directory — callers decide whether to write.
 pub fn default_gmap_dir(repo_path: &Path) -> PathBuf {
     repo_path.join(DEFAULT_GMAP_SUBDIR)
+}
+
+/// The inverse of [`default_gmap_dir`] (LF.1d): the repo whose conventional
+/// layout `dir` is, found by stripping the [`DEFAULT_GMAP_SUBDIR`] components
+/// from its end. `None` for any other directory. Purely lexical, like
+/// `default_gmap_dir`: `r/.glia/graph` and `r/.glia/graph/` give `r`, a bare
+/// `.glia/graph` gives `.`, and `r/.glia/graph/..` is not a layout dir.
+pub fn repo_root_of_gmap_dir(dir: &Path) -> Option<PathBuf> {
+    let sub: Vec<Component> = Path::new(DEFAULT_GMAP_SUBDIR).components().collect();
+    let comps: Vec<Component> = dir.components().collect();
+    let split = comps.len().checked_sub(sub.len())?;
+    if comps[split..] != sub[..] {
+        return None;
+    }
+    let root: PathBuf = comps[..split].iter().collect();
+    Some(if root.as_os_str().is_empty() { PathBuf::from(".") } else { root })
 }
 
 // ============================================================================
@@ -107,6 +125,18 @@ pub struct Manifest {
     /// so "no gRPC here" and "the file that had it failed" stay apart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parse_errors: Vec<String>,
+    /// Content fingerprint of the repo's `.glia` control-dir inputs (LF.1d):
+    /// repo-relative `/`-joined path -> xxhash64 of the file's bytes, from
+    /// [`external_inputs_fingerprint`]. The walk and the mtime scan never enter
+    /// `.glia` (`walk_gating::CONTROL_DIR`), so [`is_gmap_stale`] compares this
+    /// map instead: gitignore-blind, and an in-place rewrite that moves no
+    /// directory mtime still marks stale. Omitted when empty, so a repo without
+    /// `.glia` inputs writes the same bytes as before. `MANIFEST_VERSION` is not
+    /// bumped (the `build_stamp` precedent above): an older glia ignores the
+    /// key, a newer one reading a manifest without it regenerates once for a
+    /// repo that has inputs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_inputs: BTreeMap<String, String>,
 }
 
 /// One repo of a layout (LC.7): its `RepoId.0`, its human label (the one
@@ -219,6 +249,19 @@ pub fn write_sharded_meta(
     meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
+    write_sharded_with(shards, cross_edges, meta, dir, BTreeMap::new())
+}
+
+/// The sharded writer behind [`write_sharded_meta`] and the merged-graph
+/// writers: `external_inputs` is the `.glia` fingerprint the manifest records
+/// (LF.1d), empty for a layout no repo root is known for.
+fn write_sharded_with(
+    shards: &[(&str, &RepoGraph)],
+    cross_edges: &[Edge],
+    meta: &LayoutMeta,
+    dir: &Path,
+    external_inputs: BTreeMap<String, String>,
+) -> Result<Manifest, StoreError> {
     std::fs::create_dir_all(dir)?;
 
     // Phase 1 incremental rebuild: load prior manifest (if present) and
@@ -302,6 +345,7 @@ pub fn write_sharded_meta(
         cross,
         repos,
         parse_errors: meta.parse_errors.clone(),
+        external_inputs,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     // Skip the manifest write only if it's byte-identical to the prior one
@@ -423,6 +467,19 @@ fn verify_hash(entry: &ShardEntry, path: &Path) -> Result<(), StoreError> {
 /// `repo-<u64>-<idx>` so the same repo's multiple language sub-graphs don't
 /// collide. Returns the manifest that was written. Records no layout
 /// metadata: see [`write_merged_sharded_meta`].
+///
+/// The `.glia` inputs fingerprint (LF.1d) is recorded when `dir` is a repo's
+/// default layout dir ([`repo_root_of_gmap_dir`]), so every default-dir writer
+/// (pyo3 `generate`'s auto-persist, `save_to_default`, `glia build`) records
+/// it with no call-site change. A custom dir records it only through
+/// [`write_merged_sharded_meta`] with exactly one repo root, or
+/// [`write_merged_sharded_for_repo`]. A custom-dir manifest written with no
+/// root records nothing, so [`is_gmap_stale`] on it, for a repo that HAS
+/// `.glia` inputs, reports stale on every call: the safe direction (regenerate,
+/// never serve stale). The fingerprint is taken when the manifest is written,
+/// not when the build read its inputs, so an input rewritten DURING a long
+/// build is recorded as fresh: the same window the mtime scan accepts for a
+/// source edited during a build.
 pub fn write_merged_sharded(
     merged: &repo_graph_graph::MergedGraph,
     dir: &Path,
@@ -433,10 +490,44 @@ pub fn write_merged_sharded(
 /// [`write_merged_sharded`] plus the layout's metadata (repo labels and roots,
 /// parse errors) in the manifest (LC.7). [`read_merged_sharded_meta`] is its
 /// inverse.
+///
+/// The `.glia` inputs fingerprint (LF.1d) is of the repo whose default layout
+/// `dir` is, else of the one repo root `meta` records (resolved against
+/// `dir`, as [`RepoMeta::root`] is written), else none: see
+/// [`write_merged_sharded`].
 pub fn write_merged_sharded_meta(
     merged: &repo_graph_graph::MergedGraph,
     meta: &LayoutMeta,
     dir: &Path,
+) -> Result<Manifest, StoreError> {
+    // First, so a recorded root relative to `dir` (`../repo`) resolves: the
+    // OS walks `dir/..` only when `dir` exists.
+    std::fs::create_dir_all(dir)?;
+    let root = repo_root_of_gmap_dir(dir).or_else(|| match meta.repos.as_slice() {
+        [only] => only.root.as_deref().map(|r| dir.join(r)),
+        _ => None,
+    });
+    let inputs = root.map(|r| external_inputs_fingerprint(&r)).unwrap_or_default();
+    write_merged_with(merged, meta, dir, inputs)
+}
+
+/// [`write_merged_sharded_meta`] recording the `.glia` inputs fingerprint of
+/// an explicit `repo_root` (LF.1d), for a layout at a custom dir whose
+/// metadata does not name exactly one root.
+pub fn write_merged_sharded_for_repo(
+    merged: &repo_graph_graph::MergedGraph,
+    meta: &LayoutMeta,
+    dir: &Path,
+    repo_root: &Path,
+) -> Result<Manifest, StoreError> {
+    write_merged_with(merged, meta, dir, external_inputs_fingerprint(repo_root))
+}
+
+fn write_merged_with(
+    merged: &repo_graph_graph::MergedGraph,
+    meta: &LayoutMeta,
+    dir: &Path,
+    external_inputs: BTreeMap<String, String>,
 ) -> Result<Manifest, StoreError> {
     let names: Vec<String> = merged
         .graphs
@@ -455,7 +546,7 @@ pub fn write_merged_sharded_meta(
         .zip(merged.graphs.iter())
         .map(|(n, g)| (n.as_str(), g))
         .collect();
-    write_sharded_meta(&shards, &merged.cross_edges, meta, dir)
+    write_sharded_with(&shards, &merged.cross_edges, meta, dir, external_inputs)
 }
 
 /// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
@@ -525,10 +616,15 @@ fn read_merged_sharded_inner(
 /// and build-output directories, anything a `.gitignore` (root or nested)
 /// matches — directories and files alike — and copied web bundles.
 ///
+/// `.glia` (`walk_gating::CONTROL_DIR`) is hard-skipped by both, so its
+/// inputs are compared by CONTENT instead: the manifest's `external_inputs`
+/// against a fresh [`external_inputs_fingerprint`] (LF.1d).
+///
 /// Returns:
 /// - `true` if the gmap is missing/unreadable, if its manifest schema is not
 ///   `MANIFEST_VERSION`, if it was written by another
-///   build, if any un-gated file's mtime is newer than the manifest's, or if a
+///   build, if a `.glia` input was added, edited or deleted since it was
+///   written, if any un-gated file's mtime is newer than the manifest's, or if a
 ///   GATED directory's own mtime is newer (the builder emits one REGION node
 ///   per collapsed directory, so a region appearing or disappearing does change
 ///   the graph).
@@ -581,8 +677,106 @@ pub fn is_gmap_stale(gmap_dir: &Path, repo_path: &Path) -> bool {
         );
         return true;
     }
+    // LF.1d: the control dir's inputs, by content. Un-gated like the lines
+    // above; `grep '^\[gmap\] stale: external input changed'` is the marker.
+    let now = external_inputs_fingerprint(repo_path);
+    if let Some(key) = first_changed_input(&m.external_inputs, &now) {
+        eprintln!("[gmap] stale: external input changed ({key}) - regenerating");
+        return true;
+    }
 
     scan_for_newer(repo_path, gmap_dir, manifest_mtime)
+}
+
+/// Files under `.glia` the store or the parse cache writes itself: never an
+/// input, or every layout written into `.glia` would change its own
+/// fingerprint and go stale at once (a silent infinite regenerate).
+fn is_store_output_name(name: &str) -> bool {
+    name == MANIFEST_NAME
+        || name == "parse_cache.bin"
+        || name == ".gitignore"
+        || name.ends_with(".gmap")
+        || name.ends_with(".lock")
+        || name.ends_with(".tmp")
+}
+
+/// Content fingerprint of the inputs under `<repo_root>/.glia`, glia's control
+/// directory (LF.1d): repo-relative `/`-joined path -> xxhash64 hex of the
+/// bytes, for every regular file (a symlink to one included) except the
+/// store's own output: the default layout dir `.glia/graph` and, anywhere,
+/// `*.gmap`, `manifest.json`, `parse_cache.bin`, `*.lock`, `*.tmp` and
+/// `.gitignore` (so the flat 0.4.x `glia build` output and a custom layout dir
+/// inside `.glia` are excluded too). Gitignore-blind by design: a gitignored
+/// docs snapshot is an input all the same. Files are hashed in 1 MiB chunks,
+/// so a large `vectors.jsonl` is one streaming pass. An unreadable file is
+/// left out (glia cannot read it either). Empty when there is no `.glia`.
+pub fn external_inputs_fingerprint(repo_root: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let control = repo_root.join(walk_gating::CONTROL_DIR);
+    let own_layout = repo_root.join(DEFAULT_GMAP_SUBDIR);
+    let mut stack = vec![control];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ftype) = entry.file_type() else { continue };
+            if ftype.is_dir() {
+                if path != own_layout {
+                    stack.push(path);
+                }
+                continue;
+            }
+            // A symlinked file counts; a symlinked directory is not followed
+            // (no cycles).
+            let is_file = ftype.is_file()
+                || (ftype.is_symlink() && std::fs::metadata(&path).is_ok_and(|m| m.is_file()));
+            if !is_file || is_store_output_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(repo_root) else { continue };
+            let key = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if let Some(hash) = hash_file_streaming(&path) {
+                out.insert(key, hash);
+            }
+        }
+    }
+    out
+}
+
+/// xxhash64 of a file's bytes, read in 1 MiB chunks; the same hex form as
+/// `hex_xxhash64`. `None` when the file cannot be read.
+fn hash_file_streaming(path: &Path) -> Option<String> {
+    use core::hash::Hasher;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = twox_hash::XxHash64::with_seed(0);
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.write(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(format!("{:016x}", hasher.finish()))
+}
+
+/// The first path, in sorted order, that was added, edited or deleted between
+/// the recorded and the current fingerprint; `None` when they are equal.
+fn first_changed_input<'a>(
+    recorded: &'a BTreeMap<String, String>,
+    now: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    recorded
+        .keys()
+        .chain(now.keys())
+        .filter(|k| recorded.get(*k) != now.get(*k))
+        .min()
+        .map(String::as_str)
 }
 
 /// Walk `repo_path` for anything newer than the manifest, gating directories
@@ -615,11 +809,12 @@ fn scan_for_newer(
     // `is_self_output`: the layout being checked, the repo's default layout
     // `<repo>/.glia/graph` (a layout checked at another dir must not go stale
     // because a hook refreshed the default one), and the legacy
-    // `<repo>/.ai/repo-graph` a 0.4.x wrapper may still write into. Their
-    // parents are NOT our output: `.glia/overlay.toml` is an input and the
-    // engine ingests `.ai/**/*.md` as DOC_SECTIONs, so an edit there MUST mark
-    // the gmap stale. Canonicalised so the prefix test survives a relative
-    // `repo_path` against an absolute `gmap_dir`.
+    // `<repo>/.ai/repo-graph` a 0.4.x wrapper may still write into. `.ai` is
+    // NOT our output: the engine ingests `.ai/**/*.md` as DOC_SECTIONs, so an
+    // edit there MUST mark the gmap stale. `.glia` as a whole is hard-skipped
+    // below (`walk_gating::CONTROL_DIR`); its inputs are compared by content in
+    // `is_gmap_stale` (LF.1d). Canonicalised so the prefix test survives a
+    // relative `repo_path` against an absolute `gmap_dir`.
     let root = std::fs::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
     let gmap = std::fs::canonicalize(gmap_dir).unwrap_or_else(|_| gmap_dir.to_path_buf());
     let own_output = [gmap, root.join(DEFAULT_GMAP_SUBDIR), root.join(LEGACY_GMAP_SUBDIR)];
@@ -1282,8 +1477,9 @@ mod tests {
         );
     }
 
-    /// `.glia` is not blanket-skipped either: only `.glia/graph` is output,
-    /// while `.glia/overlay.toml` is an input the build reads.
+    /// `.glia` is hard-skipped by the mtime scan (LF.1d), but its inputs are
+    /// not invisible: `.glia/overlay.toml` is an input the build reads, so a
+    /// new one changes the manifest's `external_inputs` fingerprint.
     #[test]
     fn stale_scan_sees_glia_inputs_beside_the_gmap_dir() {
         let (_tmp, gmap_dir, repo_dir) = glia_layout_repo();
@@ -1327,6 +1523,168 @@ mod tests {
             is_gmap_stale(&gmap_dir, &repo_dir),
             "a nested rule must not leak to a sibling tree"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // LF.1d: `.glia` inputs by content, not by mtime
+    // ------------------------------------------------------------------
+
+    fn one_graph(canonical: &str) -> repo_graph_graph::MergedGraph {
+        repo_graph_graph::MergedGraph { graphs: vec![empty_graph(canonical)], cross_edges: vec![] }
+    }
+
+    fn manifest_json(dir: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap()
+    }
+
+    /// The probe-s2 repo: `.gitignore` holds `.glia/docs-snapshot/` (the
+    /// documented default), and the default layout is written with the
+    /// snapshot already synced.
+    fn docs_snapshot_repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        let gmap_dir = default_gmap_dir(&repo_dir);
+        write_file(&repo_dir.join("m.py"), "def f():\n    return 1\n");
+        write_file(&repo_dir.join(".gitignore"), ".glia/docs-snapshot/\n");
+        write_file(&repo_dir.join(".glia/docs-snapshot/manifest.jsonl"), "{\"v\":1}\n");
+        write_merged_sharded(&one_graph("test://docs-snapshot"), &gmap_dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        (dir, gmap_dir, repo_dir)
+    }
+
+    /// Pre-fix (probe s2, HEAD code): `is_stale` was False right after the
+    /// persist AND after exactly this rewrite. The dir is gitignored, so it was
+    /// GATED and only its own mtime was watched, and an in-place rewrite does
+    /// not move it: the MCP warm path kept serving the pre-sync docs.
+    #[test]
+    fn in_place_docs_snapshot_rewrite_marks_stale() {
+        let (_tmp, gmap_dir, repo_dir) = docs_snapshot_repo();
+        let snap = repo_dir.join(".glia/docs-snapshot/manifest.jsonl");
+        let recorded = manifest_json(&gmap_dir)["external_inputs"].clone();
+        assert_eq!(recorded.as_object().map(|o| o.len()), Some(1), "{recorded}");
+        assert!(recorded[".glia/docs-snapshot/manifest.jsonl"].is_string(), "{recorded}");
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "fresh right after the persist");
+
+        let dir_mtime = || std::fs::metadata(snap.parent().unwrap()).unwrap().modified().unwrap();
+        let before = dir_mtime();
+        // What doc-sources `write_snapshot` does: `std::fs::write` in place,
+        // same length, different bytes.
+        std::fs::write(&snap, "{\"v\":2}\n").unwrap();
+        assert_eq!(before, dir_mtime(), "an in-place rewrite moves no directory mtime");
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "an in-place snapshot rewrite must mark stale");
+    }
+
+    #[test]
+    fn deleting_an_input_marks_stale() {
+        let (_tmp, gmap_dir, repo_dir) = docs_snapshot_repo();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        std::fs::remove_file(repo_dir.join(".glia/docs-snapshot/manifest.jsonl")).unwrap();
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "a deleted .glia input must mark stale");
+    }
+
+    #[test]
+    fn adding_a_nested_input_marks_stale_and_a_rewrite_restores_fresh() {
+        let (_tmp, gmap_dir, repo_dir) = docs_snapshot_repo();
+        write_file(&repo_dir.join(".glia/history/2026/log.jsonl"), "{}\n");
+        assert!(is_gmap_stale(&gmap_dir, &repo_dir), "a new nested .glia input must mark stale");
+        // Regenerating records it; the same bytes are fresh again.
+        write_merged_sharded(&one_graph("test://docs-snapshot"), &gmap_dir).unwrap();
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+        let fp = external_inputs_fingerprint(&repo_dir);
+        let keys: Vec<&str> = fp.keys().map(String::as_str).collect();
+        assert_eq!(keys, [".glia/docs-snapshot/manifest.jsonl", ".glia/history/2026/log.jsonl"]);
+    }
+
+    /// The store's own writes under `.glia` never enter the fingerprint, or a
+    /// layout would go stale the moment it is written (a silent infinite
+    /// regenerate).
+    #[test]
+    fn fingerprint_excludes_gmap_and_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay\n");
+        let before = external_inputs_fingerprint(&repo_dir);
+        assert_eq!(before.keys().collect::<Vec<_>>(), [".glia/overlay.toml"]);
+
+        let gmap_dir = default_gmap_dir(&repo_dir);
+        write_merged_sharded(&one_graph("test://own-output"), &gmap_dir).unwrap();
+        write_file(&gmap_dir.join("parse_cache.bin"), "cache\n");
+        write_file(&gmap_dir.join("parse_cache.bin.123.tmp"), "half\n");
+        write_file(&gmap_dir.join(".gitignore"), "*\n");
+        write_file(&gmap_dir.join("notes.txt"), "anything under the layout dir\n");
+        // The flat 0.4.x `glia build` output and a custom layout inside .glia.
+        write_file(&repo_dir.join(".glia/repo-1.gmap"), "old\n");
+        write_file(&repo_dir.join(".glia/custom/manifest.json"), "{}\n");
+        write_file(&repo_dir.join(".glia/custom/repo-1.gmap"), "x\n");
+        write_file(&repo_dir.join(".glia/custom/.gitignore"), "*\n");
+        write_file(&repo_dir.join(".glia/build.lock"), "\n");
+        assert_eq!(external_inputs_fingerprint(&repo_dir), before);
+
+        write_merged_sharded(&one_graph("test://own-output"), &gmap_dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_file(&gmap_dir.join("parse_cache.bin"), "cache v2\n");
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir), "our own output must never mark stale");
+    }
+
+    #[test]
+    fn manifest_without_inputs_has_no_external_inputs_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        write_file(&repo_dir.join("m.py"), "x = 1\n");
+        let gmap_dir = default_gmap_dir(&repo_dir);
+        write_merged_sharded(&one_graph("test://no-inputs"), &gmap_dir).unwrap();
+        let bytes = std::fs::read(gmap_dir.join(MANIFEST_NAME)).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("external_inputs"), "{text}");
+        // A manifest without the key reads back as an empty map.
+        let m: Manifest = serde_json::from_str(&text).unwrap();
+        assert!(m.external_inputs.is_empty());
+        assert!(!is_gmap_stale(&gmap_dir, &repo_dir));
+    }
+
+    #[test]
+    fn custom_dir_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path().join("repo");
+        write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay\n");
+        let custom = dir.path().join("out");
+        write_merged_sharded(&one_graph("test://custom"), &custom).unwrap();
+        assert!(manifest_json(&custom).get("external_inputs").is_none());
+        // No root was known, so a repo WITH inputs is stale on every call:
+        // regenerate, never serve stale.
+        assert!(is_gmap_stale(&custom, &repo_dir));
+        assert!(is_gmap_stale(&custom, &repo_dir));
+
+        // An explicit root records its fingerprint.
+        write_merged_sharded_for_repo(&one_graph("test://custom"), &LayoutMeta::default(), &custom, &repo_dir)
+            .unwrap();
+        assert!(manifest_json(&custom)["external_inputs"][".glia/overlay.toml"].is_string());
+        assert!(!is_gmap_stale(&custom, &repo_dir));
+
+        // So does metadata naming exactly one root (LC.7 records it relative
+        // to the layout dir), which is what the engine's writer passes.
+        let meta = LayoutMeta {
+            repos: vec![RepoMeta { id: 1, label: "repo".into(), root: Some("../repo".into()) }],
+            parse_errors: vec![],
+        };
+        let other = dir.path().join("out2");
+        write_merged_sharded_meta(&one_graph("test://custom"), &meta, &other).unwrap();
+        assert!(!is_gmap_stale(&other, &repo_dir));
+        write_file(&repo_dir.join(".glia/overlay.toml"), "# overlay v2\n");
+        assert!(is_gmap_stale(&other, &repo_dir));
+    }
+
+    #[test]
+    fn repo_root_of_gmap_dir_inverts_default() {
+        for r in ["r", "/abs/repo", "a/b/c", "."] {
+            assert_eq!(repo_root_of_gmap_dir(&default_gmap_dir(Path::new(r))), Some(PathBuf::from(r)), "{r}");
+        }
+        assert_eq!(repo_root_of_gmap_dir(Path::new("r/.glia/graph/")), Some(PathBuf::from("r")));
+        assert_eq!(repo_root_of_gmap_dir(Path::new(".glia/graph")), Some(PathBuf::from(".")));
+        assert_eq!(repo_root_of_gmap_dir(Path::new("/.glia/graph")), Some(PathBuf::from("/")));
+        for other in ["r/.glia", "r/graph", "r/.glia/graph/..", "r/.glia/graph/x", "r/glia/graph", "out"] {
+            assert_eq!(repo_root_of_gmap_dir(Path::new(other)), None, "{other}");
+        }
     }
 
     #[test]

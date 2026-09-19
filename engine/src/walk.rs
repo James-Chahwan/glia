@@ -40,9 +40,11 @@ pub(crate) type WalkResult = (
 /// outright, like `store::scan_for_newer` skips them by prefix: otherwise a repo
 /// that gitignores one grows a `region:.glia/graph` only after its FIRST
 /// persisted build, so the graph depends on build history. (A8.2 → A8.4
-/// hand-off, LC.9) Only the root's copies are ours; `.glia` (inputs such as
-/// `overlay.toml`) and `.ai` (authored docs) are still walked, and a nested
-/// `pkg/.glia/graph` stays under the usual gates.
+/// hand-off, LC.9) Only the root's copies are ours; `.ai` (authored docs) is
+/// still walked, and a nested `pkg/.ai/repo-graph` stays under the usual
+/// gates. Since LF.1d `walk_gating::is_hard_skip` skips every `.glia`
+/// (`CONTROL_DIR`) before this is asked, so its `.glia/graph` arm is a
+/// backstop, never the deciding rule.
 fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
     let at_root =
         |dir: &str| parent.file_name().is_some_and(|n| n == dir) && parent.parent() == Some(root);
@@ -988,7 +990,8 @@ mod walk_tests {
 
     /// The A8.2 hand-off, LC.9: the engine's own `<root>/.glia/graph` and the
     /// legacy `<root>/.ai/repo-graph` are neither walked nor a region,
-    /// gitignored or not, while the rest of `.glia` and `.ai` is.
+    /// gitignored or not, while the rest of `.ai` is. LF.1d: `.glia` is
+    /// glia's control dir, never walked at any depth.
     #[test]
     fn engine_output_dir_is_skipped() {
         let root = walk_tmp("selfout");
@@ -1011,15 +1014,17 @@ mod walk_tests {
         let own = |p: &str| p.starts_with(".glia/graph/") || p.starts_with(".ai/repo-graph/");
         assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
         assert!(md.iter().any(|(p, _)| p == ".ai/notes.md"), "authored .ai is still walked");
-        assert!(md.iter().any(|(p, _)| p == ".glia/notes.md"), "the rest of .glia is still walked");
-        // Only the ROOT copies are ours; nested ones stay under the usual gates.
-        assert_eq!(region_paths, ["pkg/.ai/repo-graph", "pkg/.glia/graph"]);
+        assert!(md.iter().all(|(p, _)| !p.contains(".glia")), "LF.1d: .glia is never walked: {md:?}");
+        // Only the ROOT legacy copy is ours; a nested one stays under the
+        // usual gates. A nested `.glia` is the control dir too: no region.
+        assert_eq!(region_paths, ["pkg/.ai/repo-graph"]);
 
         // Without a gitignore they are still never parsed.
         std::fs::remove_file(root.join(".gitignore")).unwrap();
         let (files, regions, _md, _roots) = walk_source_files(&root);
         assert!(files.iter().all(|(p, _)| !own(p)), "{files:?}");
-        assert!(files.iter().any(|(p, _)| p == "pkg/.glia/graph/other.py"), "{files:?}");
+        assert!(files.iter().any(|(p, _)| p == "pkg/.ai/repo-graph/other.py"), "{files:?}");
+        assert!(files.iter().all(|(p, _)| !p.contains(".glia")), "{files:?}");
         assert!(regions.is_empty(), "{}", regions.len());
         let _ = std::fs::remove_dir_all(&root);
     }
