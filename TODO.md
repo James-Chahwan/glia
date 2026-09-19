@@ -16,7 +16,6 @@ These stay here so each packet can find its line. The packet ticks or removes th
 - [ ] **`glia merge` of pre-built `.gmap`s.** `glia merge` takes repo paths and rebuilds each one. Merging pre-built layouts under a workspace manifest is LC.10b (engine) plus LC.10c (CLI and pyo3).
 - [ ] **`glia impact` from a file or diff.** `impact` takes a qname. Seeding it with changed files or a pasted diff is LE.2 (diff_impact).
 - [ ] **Effect classification.** Reshaped as effects(A): data, config and queue sites anchored to their functions (LE.4a–c), then the effect sinks downstream of a node (LE.4d).
-- [ ] **Cron: framework schedulers.** whenever, sidekiq-cron, Laravel `$schedule` and Oban are LA.19b.
 - [ ] **Config: secrets and feature flags as `CONFIG_KEY` flavours.** Vault paths, AWS Secrets Manager ARNs and k8s `Secret` refs are A13.8 (Batch C).
 - [ ] **DB: ORM breadth and migrations.** JPA/Hibernate, EF Core, GORM, ActiveRecord, Eloquent, TypeORM, Prisma and Django implicit tables are A13.10–A13.17. Migration files and DDL are A13.9 (Batch C).
 

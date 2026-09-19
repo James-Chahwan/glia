@@ -1,0 +1,38 @@
+{
+  "framework": "elixir-oban-cron",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "elixir/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "cron:0 * * * *:MyApp.Workers.HourlyWorker",
+      "note": "{\"0 * * * *\", MyApp.Workers.HourlyWorker}; the full module name is the target (the k8s control in client/ shares only the schedule)"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 * * *",
+      "note": "{\"@daily\", ...} normalised"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "config",
+      "to": "0 0 * * *",
+      "category": "SCHEDULES"
+    },
+    {
+      "from": "cron:0 * * * *:MyApp.Workers.HourlyWorker",
+      "to": "HourlyWorker",
+      "category": "HANDLED_BY",
+      "note": "worker module short name, bound by resolve_refs' global fallback. Measured on the LA.19b tree: it lands on the same-named QUEUE_CONSUMER that `use Oban.Worker` mints, which shadows the defmodule PACKAGE in module_symbols"
+    }
+  ],
+  "note": "LA.19b. Oban crontab tuples. Baseline HEAD: 0 Oban CRON_JOB."
+}

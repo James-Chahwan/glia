@@ -1,0 +1,51 @@
+{
+  "framework": "ruby-whenever-sidekiq-cron",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "ruby/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "30 4 * * *",
+      "note": "whenever: every 1.day, at: '4:30 am'"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 27-31 * *",
+      "note": "whenever: every '0 0 27-31 * *' verbatim"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "30 2 * * *",
+      "note": "sidekiq-cron YAML (client/config/sidekiq_schedule.yml, NOT schedule.yml: path_to_qname strips only the last extension, so config/schedule.rb and config/schedule.yml in ONE repo would share a MODULE NodeId)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "schedule",
+      "to": "30 4 * * *",
+      "category": "SCHEDULES"
+    },
+    {
+      "from": "30 4 * * *",
+      "to": "generate",
+      "category": "HANDLED_BY",
+      "note": "runner \"Report.generate\""
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CRON_JOB",
+      "name": "cron:30 2 * * *:queue",
+      "max_nodes": 0,
+      "note": "PRECISION: the sibling `queue:` key is not the target"
+    }
+  ],
+  "note": "LA.19b. whenever (server) + sidekiq-cron YAML (client). Baseline HEAD: 0 CRON_JOB."
+}

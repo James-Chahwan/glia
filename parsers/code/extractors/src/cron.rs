@@ -13,17 +13,25 @@
 //!   7. Hangfire — `RecurringJob.AddOrUpdate(.., () => X.M(), "..." | Cron.X)`
 //!   8. Go — robfig `c.AddFunc("..", fn)` / `c.AddJob`, gocron `.Cron("..").Do(fn)`
 //!   9. APScheduler — `@s.scheduled_job("cron", **kw)`, `s.add_job(f, ..)`
+//!  10. whenever — `every 1.day, at: '4:30 am' do runner "X.y" end` (LA.19b)
+//!  11. sidekiq-cron / sidekiq-scheduler — a schedule YAML's `cron:` + `class:`
+//!      entries, and `Sidekiq::Cron::Job.create(..)` in Ruby (LA.19b)
+//!  12. Laravel — `$schedule->job(new X)->everyFiveMinutes()` (LA.19b)
+//!  13. Oban — `{Oban.Plugins.Cron, crontab: [{"@daily", MyApp.Worker}]}` (LA.19b)
 //!
-//! Sources 5–9 are CODE sources: their jobs also carry a
-//! `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the graph
-//! builder's `resolve_refs`), so trace / blast-radius walk from a job into the
-//! code it runs. YAML jobs carry none: they live in the synthetic yaml graph,
-//! where a handler in another language's graph can never resolve.
+//! Sources 5–13 are CODE sources: a job whose handler is nameable also
+//! carries a `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the
+//! graph builder's `resolve_refs`), so trace / blast-radius walk from a job
+//! into the code it runs. YAML jobs (sidekiq's included) carry none: they live
+//! in the synthetic yaml graph, where a handler in another language's graph
+//! can never resolve. Nor does a job named only by a command string (Laravel
+//! `->command('emails:send')`, whenever `rake` / `command`): no resolver
+//! indexes CLI_COMMANDs by that string.
 //!
 //! Out of scope:
 //!   - Server-side `crontab -e` entries that aren't committed
 //!   - UI-configured cloud schedulers (GCP Scheduler / EventBridge)
-//!   - systemd `*.timer`, Sidekiq-cron, Rails whenever, Laravel, Oban (LA.19b)
+//!   - systemd `*.timer`
 //!   - Dockerfile CMD bridging to external scheduler — IaC resolver (#9) closes
 //!     this gap by linking image → k8s CronJob via Resource nodes.
 //!
@@ -53,13 +61,15 @@ struct CronJob {
     schedule: String,
     target: String,
     /// workflow / k8s / node-cron / celery / scheduled-annot / quartz /
-    /// hangfire / robfig / gocron / apscheduler
+    /// hangfire / robfig / gocron / apscheduler / whenever / sidekiq_cron /
+    /// laravel / oban
     source: &'static str,
     /// The code the job runs: `Bare(fn)` or `Attribute { base, name }`.
     handler: Option<CallQualifier>,
 }
 
-/// Per-file tally of code-sourced jobs, for the LA.19a fired_on marker.
+/// Per-file tally of code-sourced jobs, for the LA.19a `[cron] code` and the
+/// LA.19b `[cron] script` fired_on markers.
 #[derive(Debug, Default, PartialEq)]
 struct CodeCounts {
     quartz: usize,
@@ -67,6 +77,10 @@ struct CodeCounts {
     go: usize,
     apscheduler: usize,
     spring: usize,
+    whenever: usize,
+    sidekiq: usize,
+    laravel: usize,
+    oban: usize,
 }
 
 impl CodeCounts {
@@ -77,6 +91,10 @@ impl CodeCounts {
             "robfig" | "gocron" => self.go += 1,
             "apscheduler" => self.apscheduler += 1,
             "scheduled_annot" => self.spring += 1,
+            "whenever" => self.whenever += 1,
+            "sidekiq_cron" => self.sidekiq += 1,
+            "laravel" => self.laravel += 1,
+            "oban" => self.oban += 1,
             _ => {}
         }
     }
@@ -84,6 +102,15 @@ impl CodeCounts {
     fn total(&self) -> usize {
         self.quartz + self.hangfire + self.go + self.apscheduler + self.spring
     }
+
+    fn script_total(&self) -> usize {
+        self.whenever + self.sidekiq + self.laravel + self.oban
+    }
+}
+
+/// The LA.19b sources, which the `[cron] script` marker counts.
+fn is_script_source(source: &str) -> bool {
+    matches!(source, "whenever" | "sidekiq_cron" | "laravel" | "oban")
 }
 
 /// LA.19a fired_on: `[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0
@@ -99,6 +126,23 @@ fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String
             c.go,
             c.apscheduler,
             c.spring,
+        )
+    })
+}
+
+/// LA.19b fired_on: `[cron] script jobs=3 whenever=0 sidekiq=0 laravel=3 oban=0
+/// handler_refs=1 path=app/Console/Kernel.php`, or `None` when the file
+/// declared no whenever / sidekiq-cron / Laravel / Oban job. `handler_refs`
+/// counts only the refs of those jobs. The prefix and field order are stable.
+fn script_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String> {
+    (c.script_total() > 0).then(|| {
+        format!(
+            "[cron] script jobs={} whenever={} sidekiq={} laravel={} oban={} handler_refs={handler_refs} path={path}",
+            c.script_total(),
+            c.whenever,
+            c.sidekiq,
+            c.laravel,
+            c.oban,
         )
     })
 }
@@ -153,8 +197,12 @@ pub fn extract_cron_nodes(
     if matches!(ext, "py" | "pyw") && source.contains("apscheduler") {
         jobs.extend(extract_apscheduler(source));
     }
+    // LA.19b script-language schedulers, gated the same way: extension first,
+    // then the library's own spelling.
+    jobs.extend(extract_script_schedulers(source, path, ext));
 
     let mut counts = CodeCounts::default();
+    let (mut code_refs, mut script_refs) = (0usize, 0usize);
     for job in jobs {
         let qname = format!("cron:{}:{}", job.schedule, job.target);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CRON_JOB, &qname);
@@ -202,9 +250,17 @@ pub fn extract_cron_nodes(
                 qualifier: handler,
                 category: edge_category::HANDLED_BY,
             });
+            if is_script_source(job.source) {
+                script_refs += 1;
+            } else {
+                code_refs += 1;
+            }
         }
     }
-    if let Some(marker) = code_marker(&counts, refs.len(), path) {
+    if let Some(marker) = code_marker(&counts, code_refs, path) {
+        eprintln!("{marker}");
+    }
+    if let Some(marker) = script_marker(&counts, script_refs, path) {
         eprintln!("{marker}");
     }
 
@@ -733,6 +789,14 @@ fn skip_string(bytes: &[u8], at: usize, limit: usize) -> Option<usize> {
 /// literals are skipped whole; `None` when the call does not close within
 /// 4 KiB (a truncated or non-call needle).
 fn call_args(source: &str, open: usize) -> Option<(Vec<&str>, usize)> {
+    bracket_items(source, open, b')')
+}
+
+/// [`call_args`] for any bracket: the top-level items of the list whose
+/// opener ends just before `open` and which closes with `close` (`)` / `]` /
+/// `}`), plus the index just past the closer. A mismatched closer, or no
+/// close within 4 KiB, is `None`.
+fn bracket_items(source: &str, open: usize, close: u8) -> Option<(Vec<&str>, usize)> {
     const MAX_CALL_BYTES: usize = 4096;
     let bytes = source.as_bytes();
     let limit = open.saturating_add(MAX_CALL_BYTES).min(bytes.len());
@@ -746,14 +810,14 @@ fn call_args(source: &str, open: usize) -> Option<(Vec<&str>, usize)> {
             }
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' if depth > 0 => depth -= 1,
-            b')' => {
+            b if b == close => {
                 let last = source.get(start..i)?.trim();
                 if !last.is_empty() {
                     args.push(last);
                 }
                 return Some((args, i + 1));
             }
-            b']' | b'}' => return None,
+            b')' | b']' | b'}' => return None,
             b',' if depth == 0 => {
                 args.push(source.get(start..i)?.trim());
                 start = i + 1;
@@ -1480,6 +1544,1125 @@ fn aps_interval(kw: &[(&str, &str)]) -> Option<String> {
         }
     }
     (!dur.is_empty()).then(|| format!("@every {dur}"))
+}
+
+// ----------------------------------------------------------------------------
+// LA.19b script-language schedulers: whenever, sidekiq-cron, Laravel, Oban.
+// Ruby / PHP / Elixir sources are scanned through [`blank_comments`] first, so
+// a commented-out job never fires and an apostrophe in a comment cannot
+// derail the bracket reader. Offsets are preserved, so every helper above
+// applies unchanged.
+// ----------------------------------------------------------------------------
+
+/// Dispatch by extension, then by the library's own spelling: whenever (path
+/// `config/schedule.rb`, or `every ` with a `runner ` / `rake ` / `command `
+/// job), sidekiq-cron (`Sidekiq::Cron::Job` in Ruby; `class:` beside `cron:`
+/// / `every:` in YAML), Laravel (`$schedule->` / `Schedule::`), Oban
+/// (`Oban.Plugins.Cron`).
+fn extract_script_schedulers(source: &str, path: &str, ext: &str) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    match ext {
+        "rb" => {
+            let whenever = path.replace('\\', "/").ends_with("config/schedule.rb")
+                || (source.contains("every ")
+                    && ["runner ", "rake ", "command "]
+                        .iter()
+                        .any(|k| source.contains(k)));
+            let sidekiq = source.contains("Sidekiq::Cron::Job");
+            if whenever || sidekiq {
+                let clean = blank_comments(source, CommentStyle::Hash);
+                if whenever {
+                    out.extend(extract_whenever(&clean));
+                }
+                if sidekiq {
+                    out.extend(extract_sidekiq_cron(&clean, false));
+                }
+            }
+        }
+        "yml" | "yaml"
+            if source.contains("class:")
+                && (source.contains("cron:") || source.contains("every:")) =>
+        {
+            out.extend(extract_sidekiq_cron(source, true));
+        }
+        "php" if source.contains("$schedule->") || source.contains("Schedule::") => {
+            out.extend(extract_laravel_schedule(&blank_comments(
+                source,
+                CommentStyle::Php,
+            )));
+        }
+        "ex" | "exs" if source.contains("Oban.Plugins.Cron") => {
+            out.extend(extract_oban_crontab(&blank_comments(
+                source,
+                CommentStyle::Hash,
+            )));
+        }
+        _ => {}
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CommentStyle {
+    /// Ruby / Elixir: `#` to end of line.
+    Hash,
+    /// PHP: `#` (not a `#[..]` attribute), `//` and `/* .. */`.
+    Php,
+}
+
+/// `source` with every comment byte replaced by a space (newlines kept), so
+/// byte offsets and line numbers are unchanged. String literals — Elixir's
+/// `"""` heredocs included — are skipped whole; an unterminated one ends the
+/// pass with the rest of the file untouched.
+fn blank_comments(source: &str, style: CommentStyle) -> String {
+    let bytes = source.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut blank = |from: usize, to: usize| {
+        for b in out.iter_mut().take(to).skip(from) {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    };
+    let eol = |from: usize| {
+        bytes
+            .get(from..)
+            .and_then(|r| r.iter().position(|b| *b == b'\n'))
+            .map_or(bytes.len(), |n| from + n)
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            q @ (b'"' | b'\'') => {
+                let triple = [q, q, q];
+                let next = if bytes.get(i..i + 3) == Some(&triple[..]) {
+                    bytes
+                        .get(i + 3..)
+                        .and_then(|r| r.windows(3).position(|w| w == triple))
+                        .map(|n| i + 3 + n + 3)
+                } else {
+                    skip_string(bytes, i, bytes.len())
+                };
+                match next {
+                    Some(n) => i = n,
+                    None => break,
+                }
+                continue;
+            }
+            b'#' if !(style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'[')) => {
+                let end = eol(i);
+                blank(i, end);
+                i = end;
+                continue;
+            }
+            b'/' if style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'/') => {
+                let end = eol(i);
+                blank(i, end);
+                i = end;
+                continue;
+            }
+            b'/' if style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'*') => {
+                let end = bytes
+                    .get(i + 2..)
+                    .and_then(|r| r.windows(2).position(|w| w == b"*/"))
+                    .map_or(bytes.len(), |n| i + 2 + n + 2);
+                blank(i, end);
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+}
+
+/// Split `s` on its top-level commas (brackets and string literals skipped
+/// whole), trimmed; `None` when a bracket or string does not balance.
+fn split_top_level(s: &str) -> Option<Vec<&str>> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut start, mut i) = (0usize, 0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' | b'`' => {
+                i = skip_string(bytes, i, bytes.len())?;
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
+            b',' if depth == 0 => {
+                out.push(s.get(start..i)?.trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth != 0 {
+        return None;
+    }
+    let last = s.get(start..)?.trim();
+    if !last.is_empty() {
+        out.push(last);
+    }
+    Some(out)
+}
+
+/// A time of day: `4:30 am`, `4pm`, `12am`, `noon`, `midnight` (with
+/// `meridiem`), and 24-hour `16:00` / `9` always. `(hour, minute)`, or `None`
+/// for anything else — a computed or natural-language time is never guessed.
+fn clock_time(s: &str, meridiem: bool) -> Option<(u32, u32)> {
+    let t = s.trim().to_ascii_lowercase();
+    if meridiem {
+        match t.as_str() {
+            "noon" => return Some((12, 0)),
+            "midnight" => return Some((0, 0)),
+            _ => {}
+        }
+    }
+    let (body, pm) = match (t.strip_suffix("am"), t.strip_suffix("pm")) {
+        (Some(b), _) if meridiem => (b.trim_end(), Some(false)),
+        (_, Some(b)) if meridiem => (b.trim_end(), Some(true)),
+        _ => (t.as_str(), None),
+    };
+    let (h, m) = body.split_once(':').unwrap_or((body, "0"));
+    let num = |v: &str| {
+        (!v.is_empty() && v.len() <= 2 && v.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| v.parse::<u32>().ok())
+            .flatten()
+    };
+    let (h, m) = (num(h)?, num(m)?);
+    if m >= 60 {
+        return None;
+    }
+    let h = match pm {
+        None if h < 24 => h,
+        None => return None,
+        Some(pm) if (1..=12).contains(&h) => h % 12 + if pm { 12 } else { 0 },
+        Some(_) => return None,
+    };
+    Some((h, m))
+}
+
+/// A Ruby hash pair or keyword argument: `key: v`, `:key => v`, `'key' => v`,
+/// `"key": v` — `(key, v)`.
+fn ruby_pair(item: &str) -> Option<(&str, &str)> {
+    let item = item.trim();
+    let bytes = item.as_bytes();
+    if matches!(bytes.first(), Some(b'"' | b'\'')) {
+        let end = skip_string(bytes, 0, bytes.len())?;
+        let key = item.get(1..end - 1)?;
+        let rest = item.get(end..)?.trim_start();
+        let value = rest.strip_prefix("=>").or_else(|| rest.strip_prefix(':'))?;
+        return Some((key, value.trim()));
+    }
+    if let Some(sym) = item.strip_prefix(':') {
+        let key = leading_ident(sym)?;
+        let value = sym.get(key.len()..)?.trim_start().strip_prefix("=>")?;
+        return Some((key, value.trim()));
+    }
+    let key = leading_ident(item)?;
+    let rest = item.get(key.len()..)?;
+    let value = rest.strip_prefix(':').filter(|v| !v.starts_with(':'))?;
+    Some((key, value.trim()))
+}
+
+/// A Ruby constant path (`Report`, `Reports::Digest`) — its segments.
+fn ruby_const_path(s: &str) -> Option<Vec<&str>> {
+    let segs: Vec<&str> = s.trim().trim_start_matches("::").split("::").collect();
+    segs.iter()
+        .all(|seg| {
+            leading_ident(seg).is_some_and(|id| id.len() == seg.len())
+                && seg.starts_with(|c: char| c.is_ascii_uppercase())
+        })
+        .then_some(segs)
+}
+
+// --- whenever ------------------------------------------------------------------
+
+/// whenever's `config/schedule.rb`: each `every <freq>[, at: '<time>'] do .. end`
+/// block, run through [`whenever_every`]. The job is the block's first
+/// `runner` / `rake` / `command` / `script` line: `runner "Report.generate"`
+/// names `Report.generate` and binds `Attribute { Report, generate }`; a rake
+/// task, shell command or script is named by its first word and binds
+/// nothing.
+fn extract_whenever(src: &str) -> Vec<CronJob> {
+    let lines: Vec<&str> = src.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(rest) = lines[i]
+            .trim_start()
+            .strip_prefix("every")
+            .filter(|r| r.starts_with([' ', '(']))
+        else {
+            i += 1;
+            continue;
+        };
+        // A header continued over lines that end in `,`.
+        let mut header = rest.trim().to_string();
+        let mut j = i;
+        while header.ends_with(',') && j + 1 < lines.len() && j - i < 4 {
+            j += 1;
+            header.push(' ');
+            header.push_str(lines[j].trim());
+        }
+        i = j + 1;
+        let Some(parts) = block_header_args(&header).and_then(split_top_level) else {
+            continue;
+        };
+        let Some((freq, kw)) = parts.split_first() else {
+            continue;
+        };
+        let at = kw
+            .iter()
+            .filter_map(|p| ruby_pair(p))
+            .find_map(|(k, v)| (k == "at").then_some(v));
+        let Some(schedule) = whenever_every(freq, at) else {
+            continue;
+        };
+        let job = lines
+            .get(i..)
+            .unwrap_or(&[])
+            .iter()
+            .map(|l| l.trim())
+            .take_while(|l| *l != "end" && !l.starts_with("every "))
+            .find_map(whenever_job_line);
+        let (target, handler) = job
+            .and_then(|(kind, arg)| whenever_job(kind, arg))
+            .unwrap_or_else(|| ("anon".to_string(), None));
+        out.push(CronJob {
+            schedule,
+            target,
+            source: "whenever",
+            handler,
+        });
+    }
+    out
+}
+
+/// The argument text of `<args> do` / `(<args>) do |..|` — `None` when the
+/// header does not open a `do` block.
+fn block_header_args(header: &str) -> Option<&str> {
+    let mut h = header.trim_end();
+    if let Some(body) = h.strip_suffix('|') {
+        h = body.rfind('|').and_then(|p| body.get(..p))?.trim_end();
+    }
+    let args = h.strip_suffix("do")?;
+    if !args.ends_with([' ', ')']) {
+        return None;
+    }
+    let args = args.trim();
+    Some(
+        args.strip_prefix('(')
+            .and_then(|a| a.strip_suffix(')'))
+            .unwrap_or(args),
+    )
+}
+
+/// A whenever job line: its job type and argument text.
+fn whenever_job_line(line: &str) -> Option<(&'static str, &str)> {
+    ["runner", "rake", "command", "script"]
+        .into_iter()
+        .find_map(|kind| {
+            let rest = line.strip_prefix(kind)?;
+            rest.starts_with([' ', '(']).then(|| (kind, rest.trim()))
+        })
+}
+
+fn whenever_job(kind: &str, arg: &str) -> Option<(String, Option<CallQualifier>)> {
+    let arg = arg
+        .strip_prefix('(')
+        .and_then(|a| a.strip_suffix(')'))
+        .unwrap_or(arg);
+    let text = string_literal(split_top_level(arg)?.first()?)?;
+    let text = text.trim();
+    if kind == "runner"
+        && let Some(bound) = ruby_runner_handler(text)
+    {
+        return Some(bound);
+    }
+    Some((text.split_whitespace().next()?.to_string(), None))
+}
+
+/// `Report.generate` / `Reports::Digest.build!(1)` — a `runner` string that
+/// calls a class method: `(path, Attribute { class, method })`.
+fn ruby_runner_handler(text: &str) -> Option<(String, Option<CallQualifier>)> {
+    let end = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '!' | '?')))
+        .unwrap_or(text.len());
+    let path = text.get(..end)?;
+    let (recv, method) = path.rsplit_once('.')?;
+    let class = *ruby_const_path(recv)?.last()?;
+    let bare = method.strip_suffix(['!', '?']).unwrap_or(method);
+    if leading_ident(bare).is_none_or(|id| id.len() != bare.len()) {
+        return None;
+    }
+    let q = CallQualifier::Attribute {
+        base: class.to_string(),
+        name: method.to_string(),
+    };
+    Some((path.to_string(), Some(q)))
+}
+
+/// whenever's `every` argument → a cron expression. A quoted cron string is
+/// verbatim; `N.minutes` → `*/N * * * *`; `N.hours` → `M */N * * *` (`M` an
+/// integer `at:`, else 0); `1.day` / `:day` → `M H * * *` from `at:`, else
+/// midnight; `N.days` → `M H */N * *`; `:monday`..`:sunday` / `:weekday` /
+/// `:weekend` → day of week `1`..`0` / `1-5` / `0,6`; `1.week` → `M H * * 0`;
+/// `1.month` → `M H 1 * *`; `1.year` → `M H 1 1 *`; `:reboot` and the
+/// `:daily`-style keywords → their `@` descriptor. Anything else, and any
+/// `at:` that is not a literal time, is skipped.
+fn whenever_every(freq: &str, at: Option<&str>) -> Option<String> {
+    let freq = freq.trim();
+    if let Some(raw) = string_literal(freq) {
+        return normalise_schedule(&raw);
+    }
+    let clock = || match at {
+        None => Some((0, 0)),
+        Some(a) => clock_time(&string_literal(a)?, true),
+    };
+    let (n, unit): (u32, &str) = match freq.strip_prefix(':') {
+        Some(sym) => match sym {
+            "reboot" | "yearly" | "annually" | "monthly" | "weekly" | "daily" | "midnight"
+            | "hourly" => {
+                return at
+                    .is_none()
+                    .then(|| normalise_schedule(&format!("@{sym}")))?;
+            }
+            "minute" | "hour" | "day" | "week" | "month" | "year" => (1, sym),
+            _ => {
+                let dow = match sym {
+                    "sunday" => "0",
+                    "monday" => "1",
+                    "tuesday" => "2",
+                    "wednesday" => "3",
+                    "thursday" => "4",
+                    "friday" => "5",
+                    "saturday" => "6",
+                    "weekday" => "1-5",
+                    "weekend" => "0,6",
+                    _ => return None,
+                };
+                let (h, m) = clock()?;
+                return Some(format!("{m} {h} * * {dow}"));
+            }
+        },
+        None => {
+            let (n, unit) = freq.split_once('.')?;
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            (n.parse().ok().filter(|n| *n > 0)?, unit)
+        }
+    };
+    let unit = unit.strip_suffix('s').unwrap_or(unit);
+    Some(match (unit, n) {
+        ("minute", 1) if at.is_none() => "* * * * *".to_string(),
+        ("minute", 2..=59) if at.is_none() => format!("*/{n} * * * *"),
+        ("hour", 1..=23) => {
+            let m: u32 = match at {
+                None => 0,
+                Some(a) => a.parse().ok().filter(|m| *m < 60)?,
+            };
+            if n == 1 {
+                format!("{m} * * * *")
+            } else {
+                format!("{m} */{n} * * *")
+            }
+        }
+        ("day", 1) => {
+            let (h, m) = clock()?;
+            format!("{m} {h} * * *")
+        }
+        ("day", 2..=31) => {
+            let (h, m) = clock()?;
+            format!("{m} {h} */{n} * *")
+        }
+        ("week", 1) => {
+            let (h, m) = clock()?;
+            format!("{m} {h} * * 0")
+        }
+        ("month", 1) => {
+            let (h, m) = clock()?;
+            format!("{m} {h} 1 * *")
+        }
+        ("year", 1) => {
+            let (h, m) = clock()?;
+            format!("{m} {h} 1 1 *")
+        }
+        _ => return None,
+    })
+}
+
+// --- sidekiq-cron / sidekiq-scheduler ---------------------------------------------
+
+/// sidekiq-cron and sidekiq-scheduler. A job needs BOTH a schedule (`cron:`,
+/// or sidekiq-scheduler's `every:`) and a `class:` — the precision gate that
+/// keeps arbitrary `cron:` keys out. The target is the class; in Ruby source
+/// the handler is `Bare(<class>)`, a YAML job binds nothing (other graph).
+///
+/// YAML (`is_yaml`): the entries of the top-level mapping (sidekiq-cron's
+/// `schedule.yml`), the items of a top-level list (its array form), and the
+/// entries under a `schedule:` / `:schedule:` key (sidekiq-scheduler).
+/// Ruby: `Sidekiq::Cron::Job.create(..)` / `.new(..)` with keyword or hash
+/// arguments, `load_from_hash({name => {..}})` and `load_from_array([{..}])`
+/// with literal arguments.
+fn extract_sidekiq_cron(source: &str, is_yaml: bool) -> Vec<CronJob> {
+    if is_yaml {
+        return extract_sidekiq_yaml(source);
+    }
+    let mut out = Vec::new();
+    for (pos, needle) in source.match_indices("Sidekiq::Cron::Job.") {
+        let at = pos + needle.len();
+        let Some(method) = source.get(at..).and_then(leading_ident) else {
+            continue;
+        };
+        let mut open = at + method.len();
+        if source.get(open..).is_some_and(|r| r.starts_with('!')) {
+            open += 1;
+        }
+        if !source.get(open..).is_some_and(|r| r.starts_with('(')) {
+            continue;
+        }
+        let Some((args, _)) = call_args(source, open + 1) else {
+            continue;
+        };
+        let hashes: Vec<Vec<&str>> = match method {
+            "create" | "new" => match args.as_slice() {
+                [one] if one.starts_with('{') => ruby_hash_items(one).into_iter().collect(),
+                _ => vec![args],
+            },
+            "load_from_hash" => args
+                .first()
+                .and_then(|a| ruby_hash_items(a))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|item| ruby_hash_items(ruby_pair(item)?.1))
+                .collect(),
+            "load_from_array" => args
+                .first()
+                .and_then(|a| ruby_or_php_list(a))
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|item| ruby_hash_items(item))
+                .collect(),
+            _ => continue,
+        };
+        for items in hashes {
+            let pairs: Vec<(&str, &str)> = items.iter().filter_map(|i| ruby_pair(i)).collect();
+            let get = |k: &str| pairs.iter().find_map(|(key, v)| (*key == k).then_some(*v));
+            let Some(cron) = get("cron").and_then(string_literal) else {
+                continue;
+            };
+            let Some(class) = get("class").and_then(ruby_class_value) else {
+                continue;
+            };
+            if let Some(job) = sidekiq_job(Some(&cron), None, &class, true) {
+                out.push(job);
+            }
+        }
+    }
+    out
+}
+
+/// The items of a Ruby hash literal / Elixir tuple `{ .. }`.
+fn ruby_hash_items(s: &str) -> Option<Vec<&str>> {
+    let s = s.trim();
+    let inner = s.strip_prefix('{')?;
+    let (items, end) = bracket_items(s, s.len() - inner.len(), b'}')?;
+    s.get(end..)?.trim().is_empty().then_some(items)
+}
+
+/// The items of a `[..]` list literal (Ruby / PHP / Elixir).
+fn ruby_or_php_list(s: &str) -> Option<Vec<&str>> {
+    let s = s.trim();
+    let inner = s.strip_prefix('[')?;
+    let (items, end) = bracket_items(s, s.len() - inner.len(), b']')?;
+    s.get(end..)?.trim().is_empty().then_some(items)
+}
+
+/// A sidekiq `class:` value in Ruby: `'Worker'`, `Worker`, `A::Worker`, or
+/// `Worker.name` / `Worker.to_s`.
+fn ruby_class_value(v: &str) -> Option<String> {
+    if let Some(s) = string_literal(v) {
+        return Some(s);
+    }
+    let v = v
+        .strip_suffix(".name")
+        .or_else(|| v.strip_suffix(".to_s"))
+        .unwrap_or(v);
+    ruby_const_path(v).map(|_| v.trim().to_string())
+}
+
+/// One sidekiq job from its unquoted `cron` / `every` and `class` values.
+fn sidekiq_job(
+    cron: Option<&str>,
+    every: Option<&str>,
+    class: &str,
+    code: bool,
+) -> Option<CronJob> {
+    let schedule = match (cron, every) {
+        (Some(c), _) => normalise_schedule(c)?,
+        (None, Some(e)) => normalise_schedule(&format!("@every {}", e.trim()))?,
+        (None, None) => return None,
+    };
+    let class = class.trim();
+    if class.is_empty() {
+        return None;
+    }
+    let handler = if code {
+        ruby_const_path(class)
+            .and_then(|segs| segs.last().map(|s| CallQualifier::Bare(s.to_string())))
+    } else {
+        None
+    };
+    Some(CronJob {
+        schedule,
+        target: class.to_string(),
+        source: "sidekiq_cron",
+        handler,
+    })
+}
+
+/// One logical line of a YAML block mapping: a `- ` list item opener, or a
+/// `key: value` line (a list item's inline first key is its own line, one
+/// level deeper than its dash).
+struct YamlLine<'a> {
+    indent: usize,
+    dash: bool,
+    key: Option<&'a str>,
+    value: &'a str,
+}
+
+fn yaml_lines(source: &str) -> Vec<YamlLine<'_>> {
+    let mut lines = Vec::new();
+    for raw in source.lines() {
+        let t = raw.trim_start();
+        let mut indent = raw.len() - t.len();
+        let t = t.trim_end();
+        if t.is_empty() || t.starts_with('#') || t.starts_with("---") || t == "..." {
+            continue;
+        }
+        let mut body = t;
+        if let Some(rest) = t
+            .strip_prefix('-')
+            .filter(|r| r.is_empty() || r.starts_with(' '))
+        {
+            lines.push(YamlLine {
+                indent,
+                dash: true,
+                key: None,
+                value: "",
+            });
+            let r = rest.trim_start();
+            if r.is_empty() {
+                continue;
+            }
+            indent += t.len() - r.len();
+            body = r;
+        }
+        let (key, value) = yaml_key_value(body);
+        lines.push(YamlLine {
+            indent,
+            dash: false,
+            key,
+            value,
+        });
+    }
+    lines
+}
+
+/// `key: value` → `(Some(key), value)`, the key unquoted and a Ruby symbol's
+/// leading `:` dropped (`:schedule:` is sidekiq-scheduler's spelling).
+fn yaml_key_value(body: &str) -> (Option<&str>, &str) {
+    let bytes = body.as_bytes();
+    let from = match bytes.first() {
+        Some(b'"' | b'\'') => skip_string(bytes, 0, bytes.len()).unwrap_or(0),
+        Some(b':') => 1,
+        _ => 0,
+    };
+    let colon = (from..bytes.len())
+        .find(|&i| bytes[i] == b':' && bytes.get(i + 1).is_none_or(|b| *b == b' '));
+    match colon {
+        Some(c) => {
+            let key = body.get(..c).unwrap_or("").trim();
+            let key = key.strip_prefix(':').unwrap_or(key);
+            let key = key.trim_matches(|c| c == '"' || c == '\'');
+            (Some(key), body.get(c + 1..).unwrap_or("").trim())
+        }
+        None => (None, body),
+    }
+}
+
+fn extract_sidekiq_yaml(source: &str) -> Vec<CronJob> {
+    let lines = yaml_lines(source);
+    let mut out = Vec::new();
+    for (h, head) in lines.iter().enumerate() {
+        let opens_block = head.dash || (head.key.is_some() && head.value.is_empty());
+        if !opens_block {
+            continue;
+        }
+        // Where the block sits: top level, or under a `schedule` key.
+        let parent = lines
+            .get(..h)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .find(|l| l.indent < head.indent);
+        let placed = match parent {
+            None => true,
+            Some(p) => !p.dash && p.key == Some("schedule"),
+        };
+        if !placed {
+            continue;
+        }
+        let body: Vec<&YamlLine> = lines
+            .get(h + 1..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|l| l.indent > head.indent)
+            .collect();
+        let Some(child_indent) = body.first().map(|l| l.indent) else {
+            continue;
+        };
+        let get = |k: &str| {
+            body.iter()
+                .find(|l| l.indent == child_indent && !l.dash && l.key == Some(k))
+                .map(|l| l.value)
+        };
+        let Some(class) = get("class").and_then(first_yaml_string) else {
+            continue;
+        };
+        let cron = get("cron").and_then(first_yaml_string);
+        let every = get("every").and_then(|v| {
+            if v.starts_with('[') {
+                first_list_element(v)
+            } else {
+                first_yaml_string(v)
+            }
+        });
+        if let Some(job) = sidekiq_job(cron.as_deref(), every.as_deref(), &class, false) {
+            out.push(job);
+        }
+    }
+    out
+}
+
+// --- Laravel -------------------------------------------------------------------
+
+/// Laravel's scheduler (gate `$schedule->` / `Schedule::`): per statement, the
+/// head `->command('name')` (target: the command name; no handler, since no
+/// resolver indexes CLI_COMMANDs by command string — `command(X::class)` binds
+/// `Bare(X)`), `->job(new X)` / `->job(X::class)` (`Bare(X)`), `->call(..)`
+/// (an invokable `new X` / `X::class` or `[X::class, 'm']` binds, a closure
+/// is `anon`) or `->exec('..')` (its first word), then the frequency chain
+/// through [`frequency_to_cron`]. A chain with no frequency method, or with a
+/// method the table does not know, is skipped — never guessed.
+fn extract_laravel_schedule(src: &str) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    for needle in ["$schedule->", "Schedule::"] {
+        for (pos, _) in src.match_indices(needle) {
+            if needle == "Schedule::" && ident_before(src, pos).is_some() {
+                continue;
+            }
+            let head_at = pos + needle.len();
+            let Some(head) = src.get(head_at..).and_then(leading_ident) else {
+                continue;
+            };
+            if !matches!(head, "command" | "job" | "call" | "exec") {
+                continue;
+            }
+            let open = head_at + head.len();
+            if !src.get(open..).is_some_and(|r| r.starts_with('(')) {
+                continue;
+            }
+            let Some((args, end)) = call_args(src, open + 1) else {
+                continue;
+            };
+            let Some(schedule) = laravel_chain_schedule(src, end) else {
+                continue;
+            };
+            let (target, handler) = laravel_head(head, &args);
+            out.push(CronJob {
+                schedule,
+                target,
+                source: "laravel",
+                handler,
+            });
+        }
+    }
+    out
+}
+
+/// Walk the `->method(..)` chain from byte `i` (just past the head call) and
+/// fold every link into the expression, starting from Laravel's default
+/// `* * * * *`.
+fn laravel_chain_schedule(src: &str, mut i: usize) -> Option<String> {
+    let mut fields: Vec<String> = vec!["*".to_string(); 5];
+    let mut framed = false;
+    for _ in 0..32 {
+        let rest = src.get(i..)?.trim_start();
+        let Some(link) = rest.strip_prefix("->").or_else(|| rest.strip_prefix("?->")) else {
+            break;
+        };
+        let link = link.trim_start();
+        let name = leading_ident(link)?;
+        let paren = link.get(name.len()..)?.trim_start().strip_prefix('(')?;
+        let (args, end) = call_args(src, src.len() - paren.len())?;
+        framed |= frequency_to_cron(&mut fields, name, &args)?;
+        i = end;
+    }
+    if !framed {
+        return None;
+    }
+    normalise_schedule(&fields.join(" "))
+}
+
+/// The job a Laravel head call schedules: `(target, handler)`.
+fn laravel_head(head: &str, args: &[&str]) -> (String, Option<CallQualifier>) {
+    let first = args.first().copied().unwrap_or("");
+    let anon = || ("anon".to_string(), None);
+    let class = |a: &str| php_class_ref(a).map(|c| (c.clone(), Some(CallQualifier::Bare(c))));
+    match head {
+        "command" | "exec" => match string_literal(first) {
+            Some(text) => text
+                .split_whitespace()
+                .next()
+                .map_or_else(anon, |w| (w.to_string(), None)),
+            None if head == "command" => class(first).unwrap_or_else(anon),
+            None => anon(),
+        },
+        "call" => class(first)
+            .or_else(|| {
+                let items = ruby_or_php_list(first)?;
+                let [cls, method] = items.as_slice() else {
+                    return None;
+                };
+                let base = php_class_ref(cls)?;
+                let name = string_literal(method)?;
+                leading_ident(&name).filter(|id| id.len() == name.len())?;
+                let q = CallQualifier::Attribute {
+                    base,
+                    name: name.clone(),
+                };
+                Some((name, Some(q)))
+            })
+            .unwrap_or_else(anon),
+        _ => class(first).unwrap_or_else(anon),
+    }
+}
+
+/// `new X` / `new \App\Jobs\X(..)` / `X::class` → `X`.
+fn php_class_ref(arg: &str) -> Option<String> {
+    let a = arg.trim();
+    let path = match a.strip_prefix("new ") {
+        Some(n) => n.split('(').next()?.trim(),
+        None => a.strip_suffix("::class")?.trim(),
+    };
+    let path = path.trim_start_matches('\\');
+    let segs: Vec<&str> = path.split('\\').collect();
+    let all_idents = segs
+        .iter()
+        .all(|s| leading_ident(s).is_some_and(|id| id.len() == s.len()));
+    all_idents.then(|| segs.last().map(|s| s.to_string()))?
+}
+
+/// One link of a Laravel schedule chain, folded into the running 5-field
+/// expression exactly as Laravel's `ManagesFrequencies` splices it (so
+/// `->weekly()->mondays()->at('9:30')` is `30 9 * * 1`). `Some(true)` for a
+/// frequency method, `Some(false)` for a known non-frequency modifier
+/// (`->withoutOverlapping()`, `->timezone(..)`, ..), `None` for an unknown
+/// method or an argument that is not a literal.
+fn frequency_to_cron(fields: &mut Vec<String>, method: &str, args: &[&str]) -> Option<bool> {
+    const MODIFIERS: &[&str] = &[
+        "after",
+        "appendOutputTo",
+        "before",
+        "between",
+        "description",
+        "emailOutputOnFailure",
+        "emailOutputTo",
+        "emailWrittenOutputTo",
+        "environments",
+        "evenInMaintenanceMode",
+        "name",
+        "onFailure",
+        "onFailureWithOutput",
+        "onOneServer",
+        "onSuccess",
+        "onSuccessWithOutput",
+        "pingBefore",
+        "pingBeforeIf",
+        "pingOnFailure",
+        "pingOnFailureIf",
+        "pingOnSuccess",
+        "pingOnSuccessIf",
+        "runInBackground",
+        "sendOutputTo",
+        "skip",
+        "storeOutput",
+        "then",
+        "thenPing",
+        "thenPingIf",
+        "timezone",
+        "unlessBetween",
+        "user",
+        "when",
+        "withoutOverlapping",
+    ];
+    if MODIFIERS.contains(&method) {
+        return Some(false);
+    }
+    let int = |i: usize, default: u32| -> Option<u32> {
+        match args.get(i) {
+            None => Some(default),
+            Some(a) if !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()) => a.parse().ok(),
+            Some(_) => None,
+        }
+    };
+    let at = |f: &mut Vec<String>, i: usize| -> Option<()> {
+        let (h, m) = match args.get(i) {
+            None => (0, 0),
+            Some(a) => clock_time(&string_literal(a)?, false)?,
+        };
+        splice(f, 1, m.to_string())?;
+        splice(f, 2, h.to_string())
+    };
+    let fixed = |f: &mut Vec<String>, set: &[(usize, &str)]| -> Option<()> {
+        if !args.is_empty() {
+            return None;
+        }
+        set.iter()
+            .try_for_each(|(p, v)| splice(f, *p, v.to_string()))
+    };
+    match method {
+        "cron" => {
+            let [expr] = args else {
+                return None;
+            };
+            let expr = normalise_schedule(&string_literal(expr)?)?;
+            *fields = expr.split_whitespace().map(str::to_string).collect();
+        }
+        "everyMinute" => fixed(fields, &[(1, "*")])?,
+        "everyTwoMinutes" => fixed(fields, &[(1, "*/2")])?,
+        "everyThreeMinutes" => fixed(fields, &[(1, "*/3")])?,
+        "everyFourMinutes" => fixed(fields, &[(1, "*/4")])?,
+        "everyFiveMinutes" => fixed(fields, &[(1, "*/5")])?,
+        "everyTenMinutes" => fixed(fields, &[(1, "*/10")])?,
+        "everyFifteenMinutes" => fixed(fields, &[(1, "*/15")])?,
+        "everyThirtyMinutes" => fixed(fields, &[(1, "0,30")])?,
+        "hourly" => fixed(fields, &[(1, "0")])?,
+        "hourlyAt" => {
+            let offset = match args {
+                [one] if one.starts_with('[') => ruby_or_php_list(one)?
+                    .iter()
+                    .map(|m| m.parse::<u32>().ok().filter(|m| *m < 60))
+                    .collect::<Option<Vec<u32>>>()?
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                [_] => int(0, 0).filter(|m| *m < 60)?.to_string(),
+                _ => return None,
+            };
+            splice(fields, 1, offset)?;
+        }
+        "everyOddHour" | "everyTwoHours" | "everyThreeHours" | "everyFourHours"
+        | "everySixHours" => {
+            if args.len() > 1 {
+                return None;
+            }
+            let hours = match method {
+                "everyOddHour" => "1-23/2",
+                "everyTwoHours" => "*/2",
+                "everyThreeHours" => "*/3",
+                "everyFourHours" => "*/4",
+                _ => "*/6",
+            };
+            splice(fields, 1, int(0, 0).filter(|m| *m < 60)?.to_string())?;
+            splice(fields, 2, hours.to_string())?;
+        }
+        "daily" => fixed(fields, &[(1, "0"), (2, "0")])?,
+        "dailyAt" | "at" => {
+            if args.len() != 1 {
+                return None;
+            }
+            at(fields, 0)?;
+        }
+        "twiceDaily" | "twiceDailyAt" => {
+            let max = if method == "twiceDaily" { 2 } else { 3 };
+            if args.len() > max {
+                return None;
+            }
+            let (first, second) = (int(0, 1)?, int(1, 13)?);
+            let offset = if max == 3 { int(2, 0)? } else { 0 };
+            if first > 23 || second > 23 || offset > 59 {
+                return None;
+            }
+            splice(fields, 1, offset.to_string())?;
+            splice(fields, 2, format!("{first},{second}"))?;
+        }
+        "weekly" => fixed(fields, &[(1, "0"), (2, "0"), (5, "0")])?,
+        "weeklyOn" => {
+            if args.is_empty() || args.len() > 2 {
+                return None;
+            }
+            let day = laravel_days(args.get(..1)?)?;
+            at(fields, 1)?;
+            splice(fields, 5, day)?;
+        }
+        "monthly" => fixed(fields, &[(1, "0"), (2, "0"), (3, "1")])?,
+        "monthlyOn" => {
+            if args.len() > 2 {
+                return None;
+            }
+            let day = int(0, 1).filter(|d| (1..=31).contains(d))?;
+            at(fields, 1)?;
+            splice(fields, 3, day.to_string())?;
+        }
+        "twiceMonthly" => {
+            if args.len() > 3 {
+                return None;
+            }
+            let (first, second) = (int(0, 1)?, int(1, 16)?);
+            at(fields, 2)?;
+            splice(fields, 3, format!("{first},{second}"))?;
+        }
+        "quarterly" => fixed(fields, &[(1, "0"), (2, "0"), (3, "1"), (4, "1-12/3")])?,
+        "quarterlyOn" => {
+            if args.len() > 2 {
+                return None;
+            }
+            let day = int(0, 1)?;
+            at(fields, 1)?;
+            splice(fields, 3, day.to_string())?;
+            splice(fields, 4, "1-12/3".to_string())?;
+        }
+        "yearly" => fixed(fields, &[(1, "0"), (2, "0"), (3, "1"), (4, "1")])?,
+        "yearlyOn" => {
+            if args.len() > 3 {
+                return None;
+            }
+            let (month, day) = (int(0, 1)?, int(1, 1)?);
+            at(fields, 2)?;
+            splice(fields, 3, day.to_string())?;
+            splice(fields, 4, month.to_string())?;
+        }
+        "weekdays" => fixed(fields, &[(5, "1-5")])?,
+        "weekends" => fixed(fields, &[(5, "6,0")])?,
+        "sundays" => fixed(fields, &[(5, "0")])?,
+        "mondays" => fixed(fields, &[(5, "1")])?,
+        "tuesdays" => fixed(fields, &[(5, "2")])?,
+        "wednesdays" => fixed(fields, &[(5, "3")])?,
+        "thursdays" => fixed(fields, &[(5, "4")])?,
+        "fridays" => fixed(fields, &[(5, "5")])?,
+        "saturdays" => fixed(fields, &[(5, "6")])?,
+        "days" => {
+            let days = laravel_days(args)?;
+            splice(fields, 5, days)?;
+        }
+        _ => return None,
+    }
+    Some(true)
+}
+
+/// Set 1-based cron field `pos`.
+fn splice(fields: &mut [String], pos: usize, value: String) -> Option<()> {
+    *fields.get_mut(pos.checked_sub(1)?)? = value;
+    Some(())
+}
+
+/// Laravel day-of-week arguments (`->days(..)`, `->weeklyOn(d, ..)`): ints
+/// 0–6, `Schedule::MONDAY`-style constants (any class), a literal like
+/// `'1-5'`, or an array of those; joined with `,` as Laravel implodes them.
+fn laravel_days(args: &[&str]) -> Option<String> {
+    const DAYS: [&str; 7] = [
+        "SUNDAY",
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+        "SATURDAY",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    for arg in args {
+        if arg.starts_with('[') {
+            out.push(laravel_days(&ruby_or_php_list(arg)?)?);
+            continue;
+        }
+        let v = if let Some(s) = string_literal(arg) {
+            let ok = !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b',' | b'-' | b'*' | b'/'));
+            ok.then_some(s)?
+        } else if let Some((_, name)) = arg.rsplit_once("::") {
+            DAYS.iter().position(|d| *d == name)?.to_string()
+        } else {
+            let n: u32 = arg.parse().ok().filter(|n| *n < 7)?;
+            n.to_string()
+        };
+        out.push(v);
+    }
+    (!out.is_empty()).then(|| out.join(","))
+}
+
+// --- Oban ----------------------------------------------------------------------
+
+/// Oban's cron plugin (gate `Oban.Plugins.Cron`): every `crontab: [..]` list,
+/// each `{"expr", Mod}` / `{"expr", Mod, opts}` tuple. The expression runs
+/// through [`normalise_schedule`] (Oban accepts `@daily` and friends); the
+/// target is the full module name and the handler `Bare(<last segment>)` —
+/// Elixir `defmodule` PACKAGE nodes are recorded by that short name.
+fn extract_oban_crontab(src: &str) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    for (pos, needle) in src.match_indices("crontab:") {
+        if ident_before(src, pos).is_some() {
+            continue;
+        }
+        let Some(list) = src
+            .get(pos + needle.len()..)
+            .and_then(|r| r.trim_start().strip_prefix('['))
+        else {
+            continue;
+        };
+        let Some((items, _)) = bracket_items(src, src.len() - list.len(), b']') else {
+            continue;
+        };
+        for item in items {
+            let Some(elems) = ruby_hash_items(item) else {
+                continue;
+            };
+            let Some(schedule) = elems
+                .first()
+                .and_then(|e| string_literal(e))
+                .and_then(|raw| normalise_schedule(&raw))
+            else {
+                continue;
+            };
+            let Some(module) = elems.get(1).copied() else {
+                continue;
+            };
+            let Some(segs) = ident_path(module) else {
+                continue;
+            };
+            let aliased = segs
+                .iter()
+                .all(|s| s.starts_with(|c: char| c.is_ascii_uppercase()));
+            let Some(short) = segs.last().filter(|_| aliased) else {
+                continue;
+            };
+            out.push(CronJob {
+                schedule,
+                target: module.to_string(),
+                source: "oban",
+                handler: Some(CallQualifier::Bare(short.to_string())),
+            });
+        }
+    }
+    out
 }
 
 // ----------------------------------------------------------------------------
@@ -2458,6 +3641,611 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
                     "import apscheduler\n@s.scheduled_job(\"cron\", hour='{wide}')\ndef {wide}(): pass\ns.add_job({wide}, CronTrigger.from_crontab(\"{wide}\"))\ns.add_job(f, \"cron\", hour=3"
                 ),
                 "s.py",
+            ),
+        ] {
+            let _ = run(&src, path);
+        }
+    }
+
+    // ---- LA.19b: whenever / sidekiq-cron / Laravel / Oban -------------------
+
+    #[test]
+    fn whenever_every_macro_table() {
+        for (freq, at, want) in [
+            ("'0 0 27-31 * *'", None, Some("0 0 27-31 * *")),
+            ("\"@reboot\"", None, Some("@reboot")),
+            ("1.minute", None, Some("* * * * *")),
+            ("5.minutes", None, Some("*/5 * * * *")),
+            ("1.hour", None, Some("0 * * * *")),
+            ("3.hours", None, Some("0 */3 * * *")),
+            ("2.hours", Some("15"), Some("15 */2 * * *")),
+            ("1.day", None, Some("0 0 * * *")),
+            ("1.day", Some("'4:30 am'"), Some("30 4 * * *")),
+            (":day", Some("'16:00'"), Some("0 16 * * *")),
+            ("2.days", Some("\"4pm\""), Some("0 16 */2 * *")),
+            (":monday", Some("'12pm'"), Some("0 12 * * 1")),
+            (":sunday", None, Some("0 0 * * 0")),
+            (":weekday", Some("'9:15 am'"), Some("15 9 * * 1-5")),
+            (":weekend", None, Some("0 0 * * 0,6")),
+            ("1.week", None, Some("0 0 * * 0")),
+            ("1.month", None, Some("0 0 1 * *")),
+            ("1.year", None, Some("0 0 1 1 *")),
+            (":hour", None, Some("0 * * * *")),
+            (":reboot", None, Some("@reboot")),
+            (":daily", None, Some("0 0 * * *")),
+            (":hourly", Some("'4:30 am'"), None),
+            ("1.day", Some("['4:30 am', '6:00 pm']"), None),
+            ("1.day", Some("Time.now"), None),
+            ("5.minutes", Some("'1:00'"), None),
+            ("60.minutes", None, None),
+            ("2.weeks", None, None),
+            ("3.months", None, None),
+            ("0.days", None, None),
+            (":fortnight", None, None),
+            ("interval", None, None),
+            ("'every day'", None, None),
+        ] {
+            assert_eq!(
+                whenever_every(freq, at).as_deref(),
+                want,
+                "{freq} at {at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn clock_time_parses_meridiem_and_24h() {
+        for (s, meridiem, want) in [
+            ("4:30 am", true, Some((4, 30))),
+            ("4:30 AM", true, Some((4, 30))),
+            ("4:30pm", true, Some((16, 30))),
+            ("4pm", true, Some((16, 0))),
+            ("12am", true, Some((0, 0))),
+            ("12:15 pm", true, Some((12, 15))),
+            ("noon", true, Some((12, 0))),
+            ("midnight", true, Some((0, 0))),
+            ("16:00", true, Some((16, 0))),
+            ("16:00", false, Some((16, 0))),
+            ("9", false, Some((9, 0))),
+            ("4pm", false, None),
+            ("13pm", true, None),
+            ("24:00", false, None),
+            ("4:60", false, None),
+            ("4:30 a.m.", true, None),
+            ("", false, None),
+        ] {
+            assert_eq!(clock_time(s, meridiem), want, "{s:?} meridiem={meridiem}");
+        }
+    }
+
+    #[test]
+    fn whenever_schedule_rb_jobs_and_handlers() {
+        let src = r#"
+set :output, "log/cron.log"
+
+every 1.day, at: '4:30 am' do
+  runner "Report.generate"
+end
+
+every '0 0 27-31 * *' do
+  command "echo month-end"
+end
+
+every :sunday, at: '12pm' do # it's the weekly one
+  rake "db:backup"
+  runner "Other.ignored"
+end
+
+every 3.hours,
+      roles: [:app] do
+  runner "Billing::Invoice.sweep!"
+end
+
+# every 1.day do
+#   runner "Commented.out"
+# end
+
+every 2.weeks do
+  runner "Skipped.biweekly"
+end
+
+every :reboot do
+  script "boot_warmup"
+end
+"#;
+        let out = run(src, "config/schedule.rb");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 */3 * * *:Billing::Invoice.sweep!",
+                "cron:0 0 27-31 * *:echo",
+                "cron:0 12 * * 0:db:backup",
+                "cron:30 4 * * *:Report.generate",
+                "cron:@reboot:boot_warmup",
+            ],
+            "a commented-out block and an unsupported frequency never fire"
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:0 */3 * * *:Billing::Invoice.sweep!".to_string(),
+                    attr("Invoice", "sweep!")
+                ),
+                (
+                    "cron:30 4 * * *:Report.generate".to_string(),
+                    attr("Report", "generate")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn whenever_needs_its_path_or_its_dsl() {
+        let src = "every 1.day do\n  runner \"Report.generate\"\nend\n";
+        assert_eq!(run(src, "lib/tasks/cron.rb").nodes.len(), 1, "DSL gate");
+        let no_job = "every 1.day do\n  Report.generate\nend\n";
+        assert!(
+            run(no_job, "lib/jobs.rb").nodes.is_empty(),
+            "no job verb, no gate"
+        );
+        assert_eq!(
+            sorted_qnames(&run(no_job, "config/schedule.rb")),
+            vec!["cron:0 0 * * *:anon"],
+            "the path gate admits a block with no recognised job line"
+        );
+        assert!(
+            run(src, "config/schedule.py").nodes.is_empty(),
+            "not a Ruby file"
+        );
+    }
+
+    #[test]
+    fn sidekiq_cron_yaml_needs_cron_and_class() {
+        let src = r#"
+nightly_digest:
+  cron: "30 2 * * *"
+  class: "DigestWorker"
+  queue: default
+
+no_class:
+  cron: "0 5 * * *"
+  queue: default
+
+hourly_sync:
+  cron: '0 * * * *'
+  class: Sync::PullWorker
+  args:
+    cron: "0 1 * * *"
+    class: "Nested"
+
+natural_language:
+  cron: "every 5 minutes"
+  class: "FugitWorker"
+"#;
+        let out = run(src, "config/sidekiq_schedule.yml");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 * * * *:Sync::PullWorker",
+                "cron:30 2 * * *:DigestWorker",
+            ],
+            "no class, a nested pair and a fugit phrase are all skipped"
+        );
+        assert!(out.refs.is_empty(), "YAML jobs bind nothing");
+    }
+
+    #[test]
+    fn sidekiq_cron_yaml_array_and_scheduler_forms() {
+        let array = r#"
+- name: digest
+  cron: "30 2 * * *"
+  class: DigestWorker
+- name: queue_only
+  cron: "0 3 * * *"
+"#;
+        assert_eq!(
+            sorted_qnames(&run(array, "config/schedule.yml")),
+            vec!["cron:30 2 * * *:DigestWorker"]
+        );
+        let scheduler = r#"
+:concurrency: 5
+:scheduler:
+  :schedule:
+    hello_world:
+      every: '45m'
+      class: HelloWorld
+    cleanup:
+      cron: '0 0 * * * *'
+      class: "CleanupWorker"
+    backoff:
+      every: ['1h', first_in: '10s']
+      class: BackoffWorker
+"#;
+        assert_eq!(
+            sorted_qnames(&run(scheduler, "config/sidekiq.yml")),
+            vec![
+                "cron:0 0 * * * *:CleanupWorker",
+                "cron:@every 1h:BackoffWorker",
+                "cron:@every 45m:HelloWorld",
+            ]
+        );
+        let workflow = "on:\n  schedule:\n    - cron: '0 4 * * *'\njobs:\n  build:\n    runs-on: ubuntu-latest\n";
+        let out = run(workflow, "ci/nightly.yml");
+        assert!(
+            out.nodes.is_empty(),
+            "a bare `cron:` with no class is not sidekiq"
+        );
+    }
+
+    #[test]
+    fn sidekiq_cron_ruby_create_and_load() {
+        let src = r#"
+require "sidekiq/cron/job"
+
+Sidekiq::Cron::Job.create(name: 'Digest - nightly', cron: '30 2 * * *', class: 'DigestWorker')
+Sidekiq::Cron::Job.new(name: 'sync', cron: '0 * * * *', class: Sync::PullWorker).save
+Sidekiq::Cron::Job.create({ 'name' => 'purge', 'cron' => '0 4 * * *', 'class' => 'PurgeWorker' })
+Sidekiq::Cron::Job.load_from_hash({
+  'report' => { 'cron' => '0 6 * * 1', 'class' => 'ReportWorker' },
+  'broken' => { 'class' => 'NoCron' }
+})
+Sidekiq::Cron::Job.load_from_array([
+  { 'name' => 'a', 'cron' => '15 1 * * *', 'class' => 'AWorker' }
+])
+Sidekiq::Cron::Job.load_from_hash(YAML.load_file(path))
+"#;
+        let out = run(src, "config/initializers/sidekiq.rb");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 * * * *:Sync::PullWorker",
+                "cron:0 4 * * *:PurgeWorker",
+                "cron:0 6 * * 1:ReportWorker",
+                "cron:15 1 * * *:AWorker",
+                "cron:30 2 * * *:DigestWorker",
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:0 * * * *:Sync::PullWorker".to_string(),
+                    bare("PullWorker")
+                ),
+                (
+                    "cron:0 4 * * *:PurgeWorker".to_string(),
+                    bare("PurgeWorker")
+                ),
+                (
+                    "cron:0 6 * * 1:ReportWorker".to_string(),
+                    bare("ReportWorker")
+                ),
+                ("cron:15 1 * * *:AWorker".to_string(), bare("AWorker")),
+                (
+                    "cron:30 2 * * *:DigestWorker".to_string(),
+                    bare("DigestWorker")
+                ),
+            ]
+        );
+    }
+
+    /// One Laravel frequency method on the default `* * * * *`.
+    fn laravel(method: &str, args: &[&str]) -> Option<String> {
+        let mut fields = vec!["*".to_string(); 5];
+        frequency_to_cron(&mut fields, method, args)?;
+        Some(fields.join(" "))
+    }
+
+    #[test]
+    fn laravel_frequency_table() {
+        for (method, args, want) in [
+            ("cron", &["'15 1 * * 1'"][..], Some("15 1 * * 1")),
+            ("everyMinute", &[][..], Some("* * * * *")),
+            ("everyTwoMinutes", &[][..], Some("*/2 * * * *")),
+            ("everyFiveMinutes", &[][..], Some("*/5 * * * *")),
+            ("everyTenMinutes", &[][..], Some("*/10 * * * *")),
+            ("everyFifteenMinutes", &[][..], Some("*/15 * * * *")),
+            ("everyThirtyMinutes", &[][..], Some("0,30 * * * *")),
+            ("hourly", &[][..], Some("0 * * * *")),
+            ("hourlyAt", &["17"][..], Some("17 * * * *")),
+            ("hourlyAt", &["[0, 30]"][..], Some("0,30 * * * *")),
+            ("everyOddHour", &[][..], Some("0 1-23/2 * * *")),
+            ("everyTwoHours", &["15"][..], Some("15 */2 * * *")),
+            ("everySixHours", &[][..], Some("0 */6 * * *")),
+            ("daily", &[][..], Some("0 0 * * *")),
+            ("dailyAt", &["'13:00'"][..], Some("0 13 * * *")),
+            ("dailyAt", &["'9:05'"][..], Some("5 9 * * *")),
+            ("at", &["'7'"][..], Some("0 7 * * *")),
+            ("twiceDaily", &[][..], Some("0 1,13 * * *")),
+            ("twiceDaily", &["1", "13"][..], Some("0 1,13 * * *")),
+            (
+                "twiceDailyAt",
+                &["1", "13", "15"][..],
+                Some("15 1,13 * * *"),
+            ),
+            ("weekly", &[][..], Some("0 0 * * 0")),
+            ("weeklyOn", &["1", "'8:00'"][..], Some("0 8 * * 1")),
+            ("weeklyOn", &["Schedule::FRIDAY"][..], Some("0 0 * * 5")),
+            ("monthly", &[][..], Some("0 0 1 * *")),
+            ("monthlyOn", &["4", "'15:00'"][..], Some("0 15 4 * *")),
+            (
+                "twiceMonthly",
+                &["1", "16", "'13:00'"][..],
+                Some("0 13 1,16 * *"),
+            ),
+            ("quarterly", &[][..], Some("0 0 1 1-12/3 *")),
+            (
+                "quarterlyOn",
+                &["4", "'14:00'"][..],
+                Some("0 14 4 1-12/3 *"),
+            ),
+            ("yearly", &[][..], Some("0 0 1 1 *")),
+            ("yearlyOn", &["6", "1", "'17:00'"][..], Some("0 17 1 6 *")),
+            ("weekdays", &[][..], Some("* * * * 1-5")),
+            ("weekends", &[][..], Some("* * * * 6,0")),
+            ("mondays", &[][..], Some("* * * * 1")),
+            (
+                "days",
+                &["[Schedule::SUNDAY, Schedule::WEDNESDAY]"][..],
+                Some("* * * * 0,3"),
+            ),
+            ("days", &["1", "3"][..], Some("* * * * 1,3")),
+            ("daily", &["1"][..], None),
+            ("dailyAt", &["$time"][..], None),
+            ("dailyAt", &["'4pm'"][..], None),
+            ("hourlyAt", &["60"][..], None),
+            ("days", &["9"][..], None),
+            ("lastDayOfMonth", &[][..], None),
+            ("everySecond", &[][..], None),
+            ("sometimes", &[][..], None),
+        ] {
+            assert_eq!(laravel(method, args).as_deref(), want, "{method}{args:?}");
+        }
+        let mut fields = vec!["*".to_string(); 5];
+        assert_eq!(
+            frequency_to_cron(&mut fields, "withoutOverlapping", &[]),
+            Some(false),
+            "a modifier leaves the expression alone"
+        );
+        assert_eq!(fields.join(" "), "* * * * *");
+    }
+
+    #[test]
+    fn laravel_kernel_chains_and_heads() {
+        let src = r#"<?php
+
+namespace App\Console;
+
+use App\Jobs\Heartbeat;
+use Illuminate\Console\Scheduling\Schedule;
+use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
+
+class Kernel extends ConsoleKernel
+{
+    protected function schedule(Schedule $schedule)
+    {
+        $schedule->command('emails:send')->daily();
+        $schedule->job(new Heartbeat)->everyFiveMinutes();
+        $schedule->command('reports:build')->cron('15 1 * * 1');
+        // $schedule->command('commented:out')->hourly();
+        $schedule->command('backup:run --only-db')
+            ->weekly()->mondays()->at('9:30') // don't run twice
+            ->withoutOverlapping()
+            ->onOneServer();
+        $schedule->call(function () {
+            DB::table('recent_users')->delete();
+        })->weekdays()->hourly()->timezone('America/Chicago');
+        $schedule->call([Cleaner::class, 'purge'])->twiceDaily(1, 13);
+        $schedule->exec('node /home/forge/script.js')->dailyAt('3:15');
+        $schedule->job(\App\Jobs\Prune::class)->monthlyOn(4, '15:00');
+        $schedule->command(SendReminders::class, ['--force'])->everyTenMinutes();
+        $schedule->command('unknown:freq')->daily()->sometimesMaybe();
+        $schedule->command('no:frequency')->withoutOverlapping();
+        $event = $schedule->command('assigned:later');
+    }
+}
+"#;
+        let out = run(src, "app/Console/Kernel.php");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:*/10 * * * *:SendReminders",
+                "cron:*/5 * * * *:Heartbeat",
+                "cron:0 * * * 1-5:anon",
+                "cron:0 0 * * *:emails:send",
+                "cron:0 1,13 * * *:purge",
+                "cron:0 15 4 * *:Prune",
+                "cron:15 1 * * 1:reports:build",
+                "cron:15 3 * * *:node",
+                "cron:30 9 * * 1:backup:run",
+            ],
+            "an unknown frequency, a chain with none and a commented line are skipped"
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:*/10 * * * *:SendReminders".to_string(),
+                    bare("SendReminders")
+                ),
+                ("cron:*/5 * * * *:Heartbeat".to_string(), bare("Heartbeat")),
+                (
+                    "cron:0 1,13 * * *:purge".to_string(),
+                    attr("Cleaner", "purge")
+                ),
+                ("cron:0 15 4 * *:Prune".to_string(), bare("Prune")),
+            ],
+            "a `command('name')` job carries no handler ref"
+        );
+    }
+
+    #[test]
+    fn laravel_schedule_facade_and_gate() {
+        let src = "<?php\nuse Illuminate\\Support\\Facades\\Schedule;\n\nSchedule::command('inspire')->hourly();\nSchedule::job(new Heartbeat)->everyMinute();\n\\Illuminate\\Support\\Facades\\Schedule::exec('php artisan queue:work')->everyTwoMinutes();\nweeklyOn(Schedule::MONDAY);\n";
+        let out = run(src, "routes/console.php");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:* * * * *:Heartbeat",
+                "cron:*/2 * * * *:php",
+                "cron:0 * * * *:inspire",
+            ]
+        );
+        let not_php = "Schedule::command('inspire')->hourly();";
+        assert!(run(not_php, "routes/console.ts").nodes.is_empty());
+    }
+
+    #[test]
+    fn oban_crontab_tuples() {
+        let src = r#"
+import Config
+
+config :my_app, Oban,
+  plugins: [
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"0 * * * *", MyApp.Workers.HourlyWorker},
+       # it's daily
+       {"@daily", MyApp.Workers.DailyWorker, args: %{kind: "full"}},
+       {"*/15 9-17 * * MON-FRI", Reports},
+       {"@every 5m", MyApp.Workers.Nope},
+       {bad_expr, MyApp.Workers.Var},
+       {"0 3 * * *", :"Elixir.Atom"}
+     ]}
+  ]
+"#;
+        let out = run(src, "config/config.exs");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:*/15 9-17 * * MON-FRI:Reports",
+                "cron:0 * * * *:MyApp.Workers.HourlyWorker",
+                "cron:0 0 * * *:MyApp.Workers.DailyWorker",
+                "cron:@every 5m:MyApp.Workers.Nope",
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:*/15 9-17 * * MON-FRI:Reports".to_string(),
+                    bare("Reports")
+                ),
+                (
+                    "cron:0 * * * *:MyApp.Workers.HourlyWorker".to_string(),
+                    bare("HourlyWorker")
+                ),
+                (
+                    "cron:0 0 * * *:MyApp.Workers.DailyWorker".to_string(),
+                    bare("DailyWorker")
+                ),
+                (
+                    "cron:@every 5m:MyApp.Workers.Nope".to_string(),
+                    bare("Nope")
+                ),
+            ]
+        );
+        let ungated = "config :my_app, Scheduler, crontab: [{\"0 * * * *\", MyApp.Job}]";
+        assert!(
+            run(ungated, "config/config.exs").nodes.is_empty(),
+            "no Oban.Plugins.Cron"
+        );
+    }
+
+    #[test]
+    fn script_marker_counts_script_sources_only() {
+        let mut c = CodeCounts::default();
+        c.bump("quartz");
+        assert_eq!(
+            script_marker(&c, 0, "Jobs.java"),
+            None,
+            "a code job is not a script job"
+        );
+        for s in ["laravel", "laravel", "laravel"] {
+            c.bump(s);
+        }
+        assert_eq!(
+            script_marker(&c, 1, "app/Console/Kernel.php").as_deref(),
+            Some(
+                "[cron] script jobs=3 whenever=0 sidekiq=0 laravel=3 oban=0 handler_refs=1 path=app/Console/Kernel.php"
+            )
+        );
+        c.bump("whenever");
+        c.bump("sidekiq_cron");
+        c.bump("oban");
+        assert_eq!(
+            script_marker(&c, 2, "x").as_deref(),
+            Some(
+                "[cron] script jobs=6 whenever=1 sidekiq=1 laravel=3 oban=1 handler_refs=2 path=x"
+            )
+        );
+        assert_eq!(
+            code_marker(&c, 0, "x").as_deref(),
+            Some(
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 handler_refs=0 path=x"
+            ),
+            "the LA.19a marker is unchanged by script jobs"
+        );
+    }
+
+    #[test]
+    fn blank_comments_keeps_offsets_and_strings() {
+        let src = "a = \"# not a comment\" # gone \u{1F600}\nb = 'x' # it's gone\n\"\"\"\n# heredoc text\n\"\"\"\n";
+        let out = blank_comments(src, CommentStyle::Hash);
+        assert_eq!(out.len(), src.len());
+        assert_eq!(out.lines().count(), src.lines().count());
+        assert!(out.contains("\"# not a comment\""));
+        assert!(!out.contains("gone"));
+        assert!(
+            out.contains("# heredoc text"),
+            "a heredoc is a string, not a comment"
+        );
+        let php = "<?php\n#[Attr]\n$a = 'http://x'; // c1\n/* c2\n c3 */ $b = 1; # c4\n";
+        let out = blank_comments(php, CommentStyle::Php);
+        assert_eq!(out.len(), php.len());
+        assert!(out.contains("#[Attr]") && out.contains("'http://x'") && out.contains("$b = 1;"));
+        assert!(
+            !out.contains("c1")
+                && !out.contains("c2")
+                && !out.contains("c3")
+                && !out.contains("c4")
+        );
+    }
+
+    #[test]
+    fn script_scans_survive_multibyte_text() {
+        let wide = "\u{1F600}";
+        for (src, path) in [
+            (
+                format!(
+                    "every 1.day, at: '{wide}' do\n  runner \"{wide}.x\"\nend\nevery {wide} do # {wide}\nend\nevery 1.day do\n  runner \"R.{wide}"
+                ),
+                "config/schedule.rb",
+            ),
+            (
+                format!(
+                    "{wide}:\n  cron: \"{wide}\"\n  class: {wide}\n- cron: '0 * * * *'\n  class: \"{wide}"
+                ),
+                "config/sidekiq_schedule.yml",
+            ),
+            (
+                format!(
+                    "Sidekiq::Cron::Job.create(cron: '{wide}', class: {wide})\nSidekiq::Cron::Job.load_from_hash({{'{wide}' => {{'cron' => '0 * * * *'"
+                ),
+                "s.rb",
+            ),
+            (
+                format!(
+                    "<?php $schedule->job(new {wide})->dailyAt('{wide}'); $schedule->call([{wide}::class, '{wide}'])->days({wide}); /* {wide}"
+                ),
+                "k.php",
+            ),
+            (
+                format!(
+                    "Oban.Plugins.Cron crontab: [{{\"{wide}\", {wide}}}, {{\"0 * * * *\", M.{wide}}}, {{\"0 * * * *\""
+                ),
+                "c.exs",
             ),
         ] {
             let _ = run(&src, path);

@@ -1,0 +1,4 @@
+nightly_digest:
+  cron: "30 2 * * *"
+  class: "DigestWorker"
+  queue: default

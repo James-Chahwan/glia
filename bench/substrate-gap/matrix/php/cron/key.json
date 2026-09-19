@@ -1,0 +1,43 @@
+{
+  "framework": "php-laravel-schedule-cron",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "php/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "15 1 * * 1",
+      "note": "->cron('15 1 * * 1')"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 * * *",
+      "note": "->daily() normalised"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "*/5 * * * *",
+      "note": "->everyFiveMinutes() normalised"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Kernel",
+      "to": "15 1 * * 1",
+      "category": "SCHEDULES"
+    },
+    {
+      "from": "*/5 * * * *",
+      "to": "Heartbeat",
+      "category": "HANDLED_BY",
+      "note": "$schedule->job(new Heartbeat) binds through `use App\\Jobs\\Heartbeat`"
+    }
+  ],
+  "note": "LA.19b. Laravel $schedule-> chains. Baseline HEAD: 0 CRON_JOB."
+}
