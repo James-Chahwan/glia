@@ -36,15 +36,20 @@
 //! - `error` — `StoreError`.
 //! - `inspect` — `inspect_path` / `Inspection` (LC.4): a file or layout
 //!   decoded from its core and header registries alone, no domain crate.
+//! - `cells` — the cell write API (LF.1b): `write_cell` / `remove_cell_entry`
+//!   upsert the `.glia` cell sidecars under a lock and write through into a
+//!   layout only while it is fresh.
 
 mod error;
 mod container;
 mod code_section;
 mod layout;
 mod inspect;
+mod cells;
 
 pub use error::*;
 pub use container::*;
 pub use code_section::*;
 pub use layout::*;
 pub use inspect::*;
+pub use cells::*;

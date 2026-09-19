@@ -21,6 +21,7 @@ use repo_graph_core::{CellPayload, NodeId};
 use repo_graph_engine::GenerateResult;
 use repo_graph_engine::persist::{default_layout_dir, layout_meta, persist_graph, persist_layout};
 use repo_graph_graph::MergedGraph;
+use repo_graph_store::write_merged_sharded_for_repo;
 
 #[pyclass]
 pub(crate) struct PyGraph {
@@ -81,6 +82,17 @@ impl PyGraph {
     fn persist_to(&self, dir: &Path) -> Result<(), String> {
         let meta = layout_meta(&self.repo_labels, &self.repo_roots, &self.parse_errors, dir);
         persist_layout(&self.merged, &meta, dir, "py")
+    }
+
+    /// [`Self::persist_to`] recording the `.glia` inputs fingerprint of
+    /// `repo_root` (LF.1d, `write_merged_sharded_for_repo`), for `save_to(dir,
+    /// repo_path=...)`: the manifest of a custom dir then covers that repo's
+    /// sidecars, so `is_stale(dir, repo_path)` sees a sidecar edit.
+    fn persist_to_for_repo(&self, dir: &Path, repo_root: &Path) -> Result<(), String> {
+        let meta = layout_meta(&self.repo_labels, &self.repo_roots, &self.parse_errors, dir);
+        write_merged_sharded_for_repo(&self.merged, &meta, dir, repo_root)
+            .map(|_| ())
+            .map_err(|e| format!("py: persist to {}: {e}", dir.display()))
     }
 }
 
@@ -148,10 +160,18 @@ impl PyGraph {
     /// labels, repo roots (relative to `dir`) and parse errors in
     /// `manifest.json`. Creates `dir` if missing. Idempotent: re-writing the
     /// same graph is content-hash skipped (see `write_sharded`'s
-    /// skip-when-unchanged logic).
-    fn save_to(&self, dir: &str) -> PyResult<()> {
-        self.persist_to(Path::new(dir))
-            .map_err(|e| PyValueError::new_err(format!("save_to({dir}): {e}")))
+    /// skip-when-unchanged logic). With `repo_path` (LF.1b), the manifest also
+    /// records that repo's `.glia` inputs (cell sidecars, overlay, snapshots),
+    /// so `is_stale(dir, repo_path)` sees them change; without it, a custom
+    /// `dir` records them only for a graph of one repo root.
+    #[pyo3(signature = (dir, repo_path=None))]
+    fn save_to(&self, dir: &str, repo_path: Option<&str>) -> PyResult<()> {
+        let d = Path::new(dir);
+        match repo_path {
+            None => self.persist_to(d),
+            Some(root) => self.persist_to_for_repo(d, Path::new(root)),
+        }
+        .map_err(|e| PyValueError::new_err(format!("save_to({dir}): {e}")))
     }
 
     /// Save to the repo's layout dir `<repo>/.glia/graph/` (see

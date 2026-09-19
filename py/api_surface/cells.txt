@@ -1,0 +1,6 @@
+# pyo3 surface of py/src/cells.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.node_cell_bytes(node_id: u64, cell_type: &str) -> PyResult<Option<Py<PyBytes>>>
+method PyGraph.remove_cell(qname: &str, cell_type: &str, entry_id: &str, source: &str = "api") -> PyResult<bool>
+method PyGraph.set_cell(qname: &str, cell_type: &str, payload: &Bound<'_, PyAny>, kind: Option<String> = None, model: Option<String> = None, dims: Option<u32> = None) -> PyResult<Py<PyAny>>
+fn remove_cell(repo_path: &str, qname: &str, cell_type: &str, entry_id: &str, source: &str = "api") -> PyResult<bool>
+fn write_cell(repo_path: &str, qname: &str, cell_type: &str, payload: &Bound<'_, PyAny>, kind: Option<String> = None, model: Option<String> = None, dims: Option<u32> = None) -> PyResult<Py<PyAny>>

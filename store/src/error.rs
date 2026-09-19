@@ -52,6 +52,11 @@ pub enum StoreError {
     ShardMissing(String),
     #[error("node {0:?} not found in container")]
     NodeNotFound(NodeId),
+    /// A write the caller got wrong (LF.1b `write_cell`): a cell type outside
+    /// `WRITABLE`, a payload that does not fit its cell, an entry that breaks
+    /// its rules, a sidecar with unreadable lines. Nothing was written.
+    #[error("invalid cell write: {0}")]
+    Invalid(String),
 }
 
 fn old_format_reason(found: Option<u32>) -> String {
@@ -70,12 +75,12 @@ impl StoreError {
     /// is to regenerate it: an old, future, foreign or damaged `.gmap`, a
     /// manifest of another schema, a shard that is missing or does not match
     /// its manifest hash, or no layout at all (`Io` NotFound). False for a
-    /// caller error (`NodeNotFound`) and for an I/O failure a rebuild would
-    /// not fix (permissions, a full disk).
+    /// caller error (`NodeNotFound`, `Invalid`) and for an I/O failure a
+    /// rebuild would not fix (permissions, a full disk).
     pub fn needs_rebuild(&self) -> bool {
         match self {
             StoreError::Io(e) => e.kind() == std::io::ErrorKind::NotFound,
-            StoreError::NodeNotFound(_) => false,
+            StoreError::NodeNotFound(_) | StoreError::Invalid(_) => false,
             StoreError::Rkyv(_)
             | StoreError::BadMagic { .. }
             | StoreError::UnsupportedVersion(..)
@@ -114,7 +119,7 @@ impl StoreError {
             StoreError::ShardMissing(shard) => format!("shard {shard} is missing"),
             StoreError::Rkyv(_) => "archive does not deserialize".to_string(),
             StoreError::Io(e) => format!("not found: {e}"),
-            StoreError::NodeNotFound(_) => return None,
+            StoreError::NodeNotFound(_) | StoreError::Invalid(_) => return None,
         })
     }
 }
