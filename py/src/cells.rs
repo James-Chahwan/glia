@@ -54,7 +54,7 @@ use crate::registry::ModuleFns;
 /// The `surface=` of the marker.
 const SURFACE: &str = "pyo3";
 const NO_ROOT: &str =
-    "no repo root known for this graph; call repo_graph_py.write_cell(repo_path, ...)";
+    "no repo root known for this graph; call glia_py.write_cell(repo_path, ...)";
 
 /// A write's payload as Python passed it.
 pub(crate) enum Payload {
@@ -155,11 +155,11 @@ fn owning_repo(
     match hits.as_slice() {
         [(repo, id)] => Ok((*repo, Some(*id))),
         [] => Err(format!(
-            "no node {qname:?} in this graph's {} repos; call repo_graph_py.write_cell(repo_path, ...) to write it anyway",
+            "no node {qname:?} in this graph's {} repos; call glia_py.write_cell(repo_path, ...) to write it anyway",
             repos.len()
         )),
         _ => Err(format!(
-            "{qname:?} names a node in {} of this graph's repos; pass kind=, or call repo_graph_py.write_cell(repo_path, ...) for the one meant",
+            "{qname:?} names a node in {} of this graph's repos; pass kind=, or call glia_py.write_cell(repo_path, ...) for the one meant",
             hits.len()
         )),
     }
