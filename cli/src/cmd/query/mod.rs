@@ -9,6 +9,7 @@
 use clap::Subcommand;
 
 mod find;
+mod pages;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueryCmd {
@@ -17,10 +18,16 @@ pub(crate) enum QueryCmd {
     /// exact_ci, qname_suffix, name_prefix, name_word, name_substring,
     /// qname_substring, subsequence — ranked by tier, then by degree.
     Find(find::Args),
+    /// Pages (LA.6e): the frontend's client-router pages with their handlers,
+    /// the navigation links between them, dead deep links (a router link no
+    /// route serves, with the catch-all that absorbs it) and pages no in-repo
+    /// link reaches. A report: exits 0 whatever it finds.
+    Pages(pages::Args),
 }
 
 pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Find(a) => find::run(a),
+        QueryCmd::Pages(a) => pages::run(a),
     }
 }

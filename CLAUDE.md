@@ -266,12 +266,17 @@ CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
 - `glia docs-for <repo> <qname>` — the DOC_SECTIONs that DOCUMENTS a symbol
   (governing_docs). Tier-4 doc ingestion: `glia docs sync --space <KEY>` /
   `glia docs push` (network; feeds the deterministic build via a local snapshot).
+- `glia pages <repo> [--dead-only]` — frontend page flow (LA.6e `pages::page_flow`):
+  client-router pages with their handlers, the links between them, dead deep links
+  (a router link no route serves, with the catch-all that absorbs it) and unlinked
+  pages (no in-repo link reaches them: a fact, never "dead"). Exits 0 either way.
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `resolve`, `coverage`,
-`governing_docs` (+ `activate`, `find_node`, `node_cells`, `dense_text*`). Engine
-entry points: `blast_radius_by_qname`, `cross_stack_trace`, `resolve_signal_located`,
-`coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
-`service_map` / `service_map_with` (A9.2, behind `glia arch`).
+`governing_docs`, `page_flow` (+ `activate`, `find_node`, `node_cells`,
+`dense_text*`). Engine entry points: `blast_radius_by_qname`, `cross_stack_trace`,
+`resolve_signal_located`, `coverage_report`, `governing_docs`,
+`entrypoint_reachable`, `locate_node`, `service_map` / `service_map_with` (A9.2,
+behind `glia arch`), `pages::page_flow` (behind `glia pages`).
 
 ## Roadmap
 

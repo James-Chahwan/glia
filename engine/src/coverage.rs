@@ -114,6 +114,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "fetch/axios at component or hook scope are extracted; calls hidden behind custom wrappers may be missed",
         verify: "grep fetch / axios / the wrapper name",
     },
+    // LA.6e: page flow (`glia pages`) judges only the links the LA.6c
+    // extractor can read, so the navigations it counts but cannot judge
+    // (`dynamic_skipped` in the `[nav-links]` marker) are declared here.
+    CoverageCaveat {
+        language: "typescript",
+        edge_category: "NAVIGATES_TO",
+        note: "navigations built from variables (navigate([path]), navigateByUrl(url), router.push(url)), guard redirects (router.createUrlTree / parseUrl), Vue named-route pushes and Angular relative navigations are not resolved, so a page reached only through one is listed unlinked; lazily loaded child tables in another file match only by path suffix (Weak); plain <a href> links bind but are never reported dead",
+        verify: "grep -rnE 'navigate\\(|navigateByUrl|createUrlTree|parseUrl|router\\.push|routerLink' src",
+    },
     CoverageCaveat {
         language: "dart",
         edge_category: "HTTP_CALLS",
@@ -408,6 +417,30 @@ mod tests {
             properties: Default::default(),
         };
         MergedGraph::new(vec![g])
+    }
+
+    #[test]
+    fn navigates_to_caveat_lists_for_typescript_repos_only() {
+        // LA.6e: a TS repo's page flow declares the navigations it cannot
+        // judge; a repo without TS gets no such row.
+        let report = coverage_report(&graph_with_file("src/app/app.component.ts"));
+        let nav: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "NAVIGATES_TO")
+            .collect();
+        assert_eq!(nav.len(), 1);
+        assert_eq!((nav[0].language, nav[0].edges_found), ("typescript", 0));
+        assert!(nav[0].note.contains("navigate([path])"));
+        assert!(nav[0].note.contains("never reported dead"));
+        assert!(nav[0].note.contains("createUrlTree"), "guard redirects are declared");
+        assert!(nav[0].verify.contains("routerLink") && nav[0].verify.contains("createUrlTree"));
+        assert_eq!(
+            edge_category::name(edge_category::NAVIGATES_TO),
+            "NAVIGATES_TO",
+            "edges_found is keyed by this spelling"
+        );
+        let go = coverage_report(&graph_with_file("main.go"));
+        assert!(go.iter().all(|n| n.edge_category != "NAVIGATES_TO"));
     }
 
     #[test]
