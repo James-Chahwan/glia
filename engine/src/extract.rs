@@ -170,8 +170,8 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
-        nav_links, nav_routes, openapi_annot, queues, react, services, trpc, ts_routes, vue,
-        websocket,
+        nav_links, nav_routes, openapi_annot, queues, react, secrets_flags, services, trpc,
+        ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -261,6 +261,19 @@ pub(crate) fn apply_cross_cutting_extractors(
         merge_nav(&mut fp.nav, out.nav);
     }
     run_with_edges!(config::extract_config_reads(source, module_id, repo));
+    // A13.8: secrets-manager refs (`config:secret:<provider>/<ref>`) and
+    // feature-flag checks (`config:flag:<key>`), language-blind, so every
+    // code file of every language is scanned. Per-file marker, printed only
+    // when the file captured one.
+    {
+        let secrets = secrets_flags::extract_secret_refs(source, module_id, repo);
+        let flags = secrets_flags::extract_feature_flags(source, module_id, repo);
+        if let Some(marker) = secrets_flags::marker(&[&secrets, &flags], lang) {
+            eprintln!("{marker} path={path}");
+        }
+        run_with_edges!(secrets);
+        run_with_edges!(flags);
+    }
 
     if matches!(lang, "typescript" | "react" | "angular" | "vue") {
         // A3.5: not `run!` — the routes also carry HANDLED_BY refs for named

@@ -20,6 +20,7 @@ pub mod queue_topic;
 pub mod queues;
 pub mod react;
 pub mod schemas;
+pub mod secrets_flags;
 pub mod services;
 pub mod trpc;
 pub mod ts_routes;

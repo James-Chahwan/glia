@@ -178,12 +178,17 @@ MECHANISMS = [
      "kinds": [["CONFIG_KEY"]], "via_labels": ["config"],
      "literal": "the secret's key name in the CONFIG_KEY qname",
      "categories": ["READS_CONFIG", "DEFINES_CONFIG", "SHARES_CONFIG"], "cross_repo": True,
-     "note": "no secrets-specific flavor; secrets are indistinguishable from env config today"},
+     "note": "A13.8: a secrets-manager ref is `config:secret:<provider>/<ref>` (vault / aws_sm / "
+             "gcp_sm / azure_kv from code, k8s from secretKeyRef / secretRef reads and kind: Secret "
+             "defines); an env-delivered secret stays `config:env:` with the redacted ENV cell. "
+             "Out of scope: .NET IConfiguration[\"Section:Key\"] + appsettings.json (csharp/secrets)"},
     {"id": "flags", "label": "flags", "family": "config",
      "kinds": [["CONFIG_KEY"]], "via_labels": ["config"],
      "literal": "the feature-flag key in the CONFIG_KEY qname",
      "categories": ["READS_CONFIG", "DEFINES_CONFIG", "SHARES_CONFIG"], "cross_repo": True,
-     "note": "no flag-provider needles; only flags that arrive as env vars are visible"},
+     "note": "A13.8: an SDK check (LaunchDarkly, OpenFeature, Unleash, Flagsmith, Split) reads "
+             "`config:flag:<key>`, gated on the file naming its provider; a Flipt `flags:` list "
+             "defines it; the qname carries no provider so both sides pair (SHARES_CONFIG)"},
 
     {"id": "cron", "label": "cron", "family": "schedule",
      "kinds": [["CRON_JOB"]], "via_labels": ["cron"],

@@ -1,0 +1,32 @@
+{
+  "framework": "secrets-vault-aws",
+  "language": "python",
+  "dirs": ["."],
+  "mechanism": "secrets",
+  "cells": ["python/secrets"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "prod/db-creds",
+     "note": "AWS Secrets Manager SecretId kwarg -> config:secret:aws_sm/prod/db-creds"},
+    {"kind": "CONFIG_KEY", "name": "secret/data/api",
+     "note": "Vault kv path through an hvac client -> config:secret:vault/secret/data/api"}
+  ],
+  "expect_edges": [
+    {"from": "config", "to": "prod/db-creds", "category": "READS_CONFIG",
+     "note": "the module reads the AWS secret"},
+    {"from": "config", "to": "secret/data/api", "category": "READS_CONFIG",
+     "note": "the module reads the Vault path"}
+  ],
+  "expect_cells": [
+    {"kind": "CONFIG_KEY", "node": "prod/db-creds", "cell": "ENV", "contains": "\"source\":\"aws_sm\"",
+     "note": "the provider rides the A13.7 ENV cell; a read site never carries a value"},
+    {"kind": "CONFIG_KEY", "node": "secret/data/api", "cell": "ENV", "contains": "\"redacted\":true",
+     "note": "a secret-manager ref records only that a value exists"}
+  ],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "SecretString", "max_nodes": 0,
+     "note": "precision: the response field subscripted off the call is not a secret ref"},
+    {"kind": "CONFIG_KEY", "name": "secretsmanager", "max_nodes": 0,
+     "note": "precision: the boto3 service name is the provider, not a ref"}
+  ],
+  "note": "A13.8. Two providers in one file proves the needle table, not one hardcoded path. The first secrets-manager probe: before A13.8 a secret fetched from a manager (not delivered as an env var) was invisible."
+}
