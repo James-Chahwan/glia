@@ -1200,7 +1200,7 @@
       "framework": "rust-typed-receivers",
       "language": "rust",
       "per_category": {
-        "CALLS": 0.875
+        "CALLS": 1.0
       }
     },
     "rust-use-reexport-calls": {
@@ -1868,9 +1868,7 @@
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [],
-    "partial_cells": [
-      "rust-typed-receivers: CALLS 0.88"
-    ]
+    "partial_cells": []
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
 }
