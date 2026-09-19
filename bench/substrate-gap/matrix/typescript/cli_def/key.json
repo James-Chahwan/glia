@@ -1,0 +1,40 @@
+{
+  "framework": "ts-npm-bin-commander-cli",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "typescript/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "shipit",
+      "note": "package.json bin"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "deploy",
+      "note": "commander .command('deploy')"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:shipit",
+      "to": "cli:shipit",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "@acme/shipit",
+      "max_nodes": 0,
+      "note": "the scoped package name is not the binary"
+    }
+  ],
+  "note": "LA.20c. The binary comes from package.json `bin`, the subcommand from commander. Baseline HEAD: deploy found, shipit missing."
+}

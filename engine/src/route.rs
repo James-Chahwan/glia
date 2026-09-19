@@ -182,15 +182,26 @@ pub(crate) fn parse_repo_files(
             let pkg_out = repo_graph_code_extractors::packages::extract_for_path(
                 source, path, module_id, repo,
             );
-            if !pkg_out.nodes.is_empty() {
+            // LA.20c: the binaries the manifest declares (pyproject scripts,
+            // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
+            // invocation's argv0 pairs with them. A manifest that declares a
+            // binary but no dependency is still stashed.
+            let bin_out = repo_graph_code_extractors::cli::extract_manifest_binaries(
+                source, path, module_id, repo,
+            );
+            if let Some(marker) = repo_graph_code_extractors::cli::manifest_marker(path, &bin_out)
+            {
+                eprintln!("{marker}");
+            }
+            if !pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty() {
                 stash_synthetic_parse(
                     "manifest",
                     path,
                     module_id,
                     repo,
-                    vec![pkg_out.nodes],
+                    vec![pkg_out.nodes, bin_out.nodes],
                     vec![pkg_out.edges],
-                    vec![pkg_out.nav],
+                    vec![pkg_out.nav, bin_out.nav],
                     vec![],
                     &mut parses_by_lang,
                 );
@@ -893,5 +904,46 @@ mod tests {
     fn graphql_operation_documents_mint_nothing() {
         let doc = "query getUser($id: ID!) {\n  getUser(id: $id) { id }\n}\n";
         assert!(route("client/getUser.graphql", doc).is_empty());
+    }
+
+    /// The `cli:<bin>` CLI_COMMANDs a manifest's MODULE parents, by qname.
+    fn manifest_cli(fp: &FileParse, module_qname: &str) -> Vec<String> {
+        let module_id = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, module_qname);
+        assert_eq!(fp.nodes[0].id, module_id, "the manifest is a MODULE");
+        let mut out: Vec<String> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::CLI_COMMAND))
+            .inspect(|n| assert_eq!(fp.nav.parent_of.get(&n.id), Some(&module_id)))
+            .filter_map(|n| fp.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// LA.20c: a manifest's declared binaries ride the synthetic `manifest`
+    /// parse beside its PACKAGE_DEPs, and a manifest that declares a binary
+    /// but no dependency is stashed all the same.
+    #[test]
+    fn manifest_binaries_join_the_manifest_parse() {
+        let pkg = r#"{"name": "@acme/shipit", "bin": {"shipit": "bin/cli.js"}, "dependencies": {"commander": "12.0.0"}}"#;
+        let parses = route("server/package.json", pkg);
+        let fp = &parses["manifest"][0];
+        assert_eq!(manifest_cli(fp, "server::package"), ["cli:shipit"]);
+        assert!(
+            fp.nav.qname_by_id.values().any(|q| q == "package:npm:commander"),
+            "the dependency is still read"
+        );
+
+        let scripts_only = "[project.scripts]\nmytool = \"mytool.cli:cli\"\n";
+        let parses = route("server/pyproject.toml", scripts_only);
+        assert_eq!(manifest_cli(&parses["manifest"][0], "server::pyproject"), ["cli:mytool"]);
+
+        let bin_only = "[package]\nname = \"tools\"\n\n[[bin]]\nname = \"migrate\"\n";
+        let parses = route("Cargo.toml", bin_only);
+        assert_eq!(manifest_cli(&parses["manifest"][0], "Cargo"), ["cli:migrate"]);
+
+        // Neither a dependency nor a binary: nothing is stashed.
+        assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
     }
 }

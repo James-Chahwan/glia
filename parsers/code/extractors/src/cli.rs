@@ -20,6 +20,10 @@ pub enum CliFramework {
     Thor,
     Symfony,
     Laravel,
+    /// LA.20c: a binary a packaging manifest declares (pyproject.toml
+    /// `[project.scripts]`, setup.py `console_scripts`, package.json `bin`,
+    /// Cargo.toml `[[bin]]`), not a subcommand a CLI library registers.
+    Manifest,
 }
 
 impl CliFramework {
@@ -38,6 +42,7 @@ impl CliFramework {
             CliFramework::Thor => "thor",
             CliFramework::Symfony => "symfony",
             CliFramework::Laravel => "laravel",
+            CliFramework::Manifest => "manifest",
         }
     }
 }
@@ -83,11 +88,13 @@ type LineExtractor = fn(&str) -> Option<String>;
 /// for the TS family only (it minted phantoms from Ruby / Java `.command("x")`
 /// calls before); clap for `rust` (the single-line `#[command(name` form, plus
 /// the derive and builder scans in a file that mentions `clap`); picocli for
-/// `java` (which also carries `.kt`); System.CommandLine / Spectre.Console.Cli
-/// for `csharp`. LA.20b: Typer / click decorators and argparse subparsers for
-/// `python` (commander's needle no longer reads Python, so a non-decorator
+/// `java` and `kotlin`; System.CommandLine / Spectre.Console.Cli for `csharp`.
+/// LA.20b: Typer / click decorators and argparse subparsers for `python`
+/// (commander's needle no longer reads Python, so a non-decorator
 /// `db.command("ping")` mints nothing); Thor for `ruby`; Symfony Console and
-/// Laravel artisan for `php`.
+/// Laravel artisan for `php`. LA.20c: a `python` file's setuptools
+/// `console_scripts` entry points (setup.py is Python source, so it is read
+/// here, not by [`extract_manifest_binaries`]) declare binaries.
 pub fn extract_cli_command_nodes(
     source: &str,
     lang: &str,
@@ -125,7 +132,7 @@ pub fn extract_cli_command_nodes(
             decls.extend(scan_clap_derive(source, &code));
             decls.extend(scan_clap_builder(source, &code));
         }
-        "java" if source.contains("picocli") => {
+        "java" | "kotlin" if source.contains("picocli") => {
             decls.extend(scan_picocli(source, &CodeMap::new(source)));
         }
         "csharp" if source.contains("System.CommandLine") || source.contains("Spectre.Console.Cli") => {
@@ -145,6 +152,14 @@ pub fn extract_cli_command_nodes(
             decls.extend(scan_symfony_laravel(source, &CodeMap::script(source, Script::Php)));
         }
         _ => {}
+    }
+
+    if lang == "python" && source.contains("console_scripts") {
+        decls.extend(
+            scan_setup_py_console_scripts(source)
+                .into_iter()
+                .map(|name| CliDecl::new(CliFramework::Manifest, name, None)),
+        );
     }
 
     let mut out = CliNodes::default();
@@ -193,10 +208,19 @@ pub fn extract_cli_command_nodes(
 
 /// LA.20a fired_on: `[cli-decl] rust=clap:3 handler_refs=0 path=src/main.rs`,
 /// or `None` when the file declared no command. Only frameworks that fired are
-/// listed; the prefix and `path=` are stable.
+/// listed; the prefix and `path=` are stable. LA.20c: a python file that
+/// declares only setuptools `console_scripts` binaries (a setup.py) prints the
+/// manifest line instead, `[cli-decl] manifest bins=1 (pyproject=0 setup=1
+/// npm=0 cargo=0) path=setup.py`, the one every manifest-declared binary
+/// shares.
 pub fn decl_marker(lang: &str, out: &CliNodes, path: &str) -> Option<String> {
     if out.per_framework.is_empty() {
         return None;
+    }
+    if lang == "python"
+        && let [(CliFramework::Manifest, n)] = out.per_framework.as_slice()
+    {
+        return Some(manifest_line(ManifestForm::SetupPy, *n, path));
     }
     let counts: Vec<String> =
         out.per_framework.iter().map(|(f, n)| format!("{}:{n}", f.label())).collect();
@@ -2103,6 +2127,335 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
     found.into_iter().map(|(_, decl)| decl).collect()
 }
 
+// ----------------------------------------------------------------------------
+// LA.20c: binaries declared by packaging manifests. A CLI library declares the
+// SUBCOMMAND (`@click.command("sync")`); the BINARY a caller's argv[0] names
+// (`mytool`) is declared only by the package's manifest, so without these
+// scans `cli_invoke:mytool` has no `cli:mytool` to pair with. Line scanners
+// (the crate has no TOML dependency), deliberately narrow: the three Python
+// script tables, Cargo's `[[bin]]` name, npm's `bin`, and setuptools'
+// `console_scripts`. No HANDLED_BY: a manifest is a synthetic parse in the
+// `manifest` language group, and refs never resolve across language graphs.
+// ----------------------------------------------------------------------------
+
+/// The manifest form that declared a binary: the `[cli-decl] manifest`
+/// marker's counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestForm {
+    Pyproject,
+    SetupPy,
+    Npm,
+    Cargo,
+}
+
+impl ManifestForm {
+    /// The form a manifest path's basename names. Never [`ManifestForm::SetupPy`]:
+    /// setup.py is Python source, routed to the python arm of
+    /// [`extract_cli_command_nodes`], not to the manifest branch.
+    fn of_path(path: &str) -> Option<Self> {
+        match path.rsplit('/').next().unwrap_or(path) {
+            "pyproject.toml" => Some(ManifestForm::Pyproject),
+            "package.json" => Some(ManifestForm::Npm),
+            "Cargo.toml" => Some(ManifestForm::Cargo),
+            _ => None,
+        }
+    }
+}
+
+/// Longest `console_scripts` list (or `entry_points` string) the setup.py scan reads.
+const MAX_SCRIPTS_SPAN: usize = 16 * 1024;
+
+/// LA.20c: every binary a packaging manifest declares, as a flat `cli:<bin>`
+/// CLI_COMMAND parented to the manifest's MODULE, so it is located at the
+/// manifest and `CliInvocationResolver` pairs `cli_invoke:<bin>` with it.
+/// Dispatch is by basename: pyproject.toml `[project.scripts]` /
+/// `[project.gui-scripts]` / `[tool.poetry.scripts]` keys, package.json `bin`
+/// (its keys, or the unscoped package `name` when `bin` is one path), and each
+/// Cargo.toml `[[bin]]` table's `name`. A Cargo package with no `[[bin]]` is
+/// not assumed to be a binary: a per-file extractor cannot see whether
+/// `src/main.rs` exists. Any other path yields nothing.
+pub fn extract_manifest_binaries(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> CliNodes {
+    let names = match ManifestForm::of_path(path) {
+        Some(ManifestForm::Pyproject) => scan_pyproject_scripts(source),
+        Some(ManifestForm::Npm) => scan_package_json_bin(source),
+        Some(ManifestForm::Cargo) => scan_cargo_bins(source),
+        Some(ManifestForm::SetupPy) | None => Vec::new(),
+    };
+    let mut out = CliNodes::default();
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        if is_bin_name(&name) && seen.insert(name.clone()) {
+            add_cli_command(&mut out.nodes, &mut out.nav, &name, module_id, repo);
+        }
+    }
+    if !out.nodes.is_empty() {
+        out.per_framework.push((CliFramework::Manifest, out.nodes.len()));
+    }
+    out
+}
+
+/// LA.20c fired_on, one per manifest that declared a binary:
+/// `[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0) path=pyproject.toml`.
+/// `None` when `out` holds no manifest binary or `path` is not a manifest.
+pub fn manifest_marker(path: &str, out: &CliNodes) -> Option<String> {
+    let form = ManifestForm::of_path(path)?;
+    let n = out
+        .per_framework
+        .iter()
+        .find(|(f, _)| *f == CliFramework::Manifest)
+        .map_or(0, |(_, n)| *n);
+    (n > 0).then(|| manifest_line(form, n, path))
+}
+
+fn manifest_line(form: ManifestForm, n: usize, path: &str) -> String {
+    let count = |f: ManifestForm| if f == form { n } else { 0 };
+    format!(
+        "[cli-decl] manifest bins={n} (pyproject={} setup={} npm={} cargo={}) path={path}",
+        count(ManifestForm::Pyproject),
+        count(ManifestForm::SetupPy),
+        count(ManifestForm::Npm),
+        count(ManifestForm::Cargo),
+    )
+}
+
+/// A binary name a manifest declares: `[A-Za-z0-9._-]+`, at most 64 bytes, not
+/// starting with `.` or `-`. A scoped npm package name (`@acme/x`) is not one.
+fn is_bin_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with(['.', '-'])
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+/// The dotted name of a TOML `[table]` header line, key segments trimmed and
+/// unquoted (`[ project . "scripts" ]` -> `project.scripts`). `None` for an
+/// `[[array-of-tables]]` header or a line that is not a header.
+fn toml_table_header(line: &str) -> Option<String> {
+    let inner = line.strip_prefix('[').filter(|r| !r.starts_with('['))?;
+    let (inner, _) = inner.split_once(']')?;
+    let segs: Vec<&str> =
+        inner.split('.').map(|seg| seg.trim().trim_matches(|c| c == '"' || c == '\'')).collect();
+    Some(segs.join("."))
+}
+
+/// `key = value` on one trimmed TOML line: the key (bare `[A-Za-z0-9._-]+`, or
+/// quoted and returned raw) and the value text after `=`. `None` for a blank
+/// line, a comment, a header, or a key with no value.
+fn toml_key_value(line: &str) -> Option<(&str, &str)> {
+    let (key, rest) = if line.starts_with(['"', '\'']) {
+        let key = quoted_literal(line)?;
+        (key, line.get(key.len() + 2..)?)
+    } else {
+        let end = line
+            .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+            .unwrap_or(line.len());
+        line.split_at(end)
+    };
+    let value = rest.trim_start().strip_prefix('=')?.trim_start();
+    (!key.is_empty() && !value.is_empty() && !value.starts_with('=')).then_some((key, value))
+}
+
+/// The `{` nesting depth after `text`, starting from `depth`: braces inside a
+/// string or after a `#` comment do not count. How the pyproject scan steps
+/// over the continuation lines of a multi-line inline table.
+fn inline_table_depth(text: &str, mut depth: usize) -> usize {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in text.chars() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' && q == '"' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                '#' => break,
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            },
+        }
+    }
+    depth
+}
+
+/// pyproject.toml: the key of every entry of `[project.scripts]`,
+/// `[project.gui-scripts]` and `[tool.poetry.scripts]`, up to the next header.
+/// A poetry table value (`x = { reference = "m:f", type = "console" }`) still
+/// names the binary by its key; the continuation lines of a multi-line inline
+/// table are stepped over, never read as keys.
+fn scan_pyproject_scripts(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_scripts = false;
+    let mut depth = 0usize;
+    for line in source.lines() {
+        let t = line.trim();
+        if depth > 0 {
+            depth = inline_table_depth(t, depth);
+            continue;
+        }
+        if t.starts_with('[') {
+            in_scripts = matches!(
+                toml_table_header(t).as_deref(),
+                Some("project.scripts" | "project.gui-scripts" | "tool.poetry.scripts")
+            );
+            continue;
+        }
+        if !in_scripts {
+            continue;
+        }
+        if let Some((key, value)) = toml_key_value(t) {
+            depth = inline_table_depth(value, 0);
+            out.push(key.to_string());
+        }
+    }
+    out
+}
+
+/// Cargo.toml: the `name` of each `[[bin]]` table.
+fn scan_cargo_bins(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_bin = false;
+    for line in source.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("[[") {
+            in_bin = rest.split_once("]]").is_some_and(|(name, _)| name.trim() == "bin");
+            continue;
+        }
+        if t.starts_with('[') {
+            in_bin = false;
+            continue;
+        }
+        if in_bin
+            && let Some(("name", value)) = toml_key_value(t)
+            && let Some(name) = extract_quoted(value)
+        {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// package.json: `bin` as an object names each binary by its key; `bin` as one
+/// path names it after the package, `@scope/` removed.
+fn scan_package_json_bin(source: &str) -> Vec<String> {
+    use serde_json::Value;
+    let Ok(Value::Object(pkg)) = serde_json::from_str::<Value>(source) else {
+        return Vec::new();
+    };
+    match pkg.get("bin") {
+        Some(Value::Object(bins)) => bins.keys().cloned().collect(),
+        Some(Value::String(_)) => pkg
+            .get("name")
+            .and_then(Value::as_str)
+            .map(|name| {
+                name.strip_prefix('@')
+                    .and_then(|scoped| scoped.split_once('/'))
+                    .map_or(name, |(_, bare)| bare)
+                    .to_string()
+            })
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The binary an entry-point spec declares: `name = pkg.mod:func` (spaces
+/// optional) -> `name`. `None` when it is not `<bin-name> = <target>`.
+fn entry_point_name(spec: &str) -> Option<String> {
+    let (name, target) = spec.split_once('=')?;
+    let (name, target) = (name.trim(), target.trim());
+    (is_bin_name(name) && !target.is_empty() && !target.starts_with('=')).then(|| name.to_string())
+}
+
+/// LA.20c setup.py: every binary a setuptools `console_scripts` group
+/// declares. Three spellings of the group: a `'console_scripts': [...]` dict
+/// entry, a `console_scripts=[...]` keyword (`entry_points=dict(...)`), and an
+/// `[console_scripts]` section inside an INI-style `entry_points` string. Each
+/// `'name = pkg.mod:func'` / `'name=pkg.mod:func'` literal (or INI line)
+/// declares `name`. A `'console_scripts'` literal that is not followed by `:`
+/// (`entry_points(group='console_scripts')`, `eps['console_scripts']`) is a
+/// lookup, not a declaration.
+fn scan_setup_py_console_scripts(source: &str) -> Vec<String> {
+    const GROUP: &str = "console_scripts";
+    let b = source.as_bytes();
+    let code = CodeMap::script(source, Script::Python);
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices(GROUP) {
+        let end = at + GROUP.len();
+        let before = at.checked_sub(1).map(|p| b[p]);
+        let after = b.get(end).copied();
+        let sep = match (before, after) {
+            // `'console_scripts': [...]` — the whole literal is the group name.
+            (Some(q @ (b'"' | b'\'')), Some(c)) if c == q && code.next_code(at - 1) == end + 1 => {
+                let i = skip_ws(b, end + 1);
+                (b.get(i) == Some(&b':')).then_some(i)
+            }
+            // `[console_scripts]` in an INI-style `entry_points` string.
+            (Some(b'['), Some(b']')) if !code.is_code(at) => {
+                let stop = code.next_code(at).min(end.saturating_add(MAX_SCRIPTS_SPAN));
+                let body = source.get(end + 1..stop).unwrap_or("");
+                out.extend(
+                    body.lines()
+                        .map(str::trim)
+                        .take_while(|l| !l.starts_with('['))
+                        .filter_map(entry_point_name),
+                );
+                continue;
+            }
+            // `console_scripts=[...]` — a keyword argument.
+            _ if code.is_code(at)
+                && !before.is_some_and(is_ident_byte)
+                && !after.is_some_and(is_ident_byte) =>
+            {
+                let i = skip_ws(b, end);
+                (b.get(i) == Some(&b'=') && b.get(i + 1) != Some(&b'=')).then_some(i)
+            }
+            _ => None,
+        };
+        let Some(sep) = sep else { continue };
+        let open = skip_ws(b, sep + 1);
+        if matches!(b.get(open), Some(b'"' | b'\'')) {
+            // One string for the whole group, one entry per line.
+            if let Some(lit) = source.get(open..).and_then(quoted_literal) {
+                out.extend(lit.lines().map(str::trim).filter_map(entry_point_name));
+            }
+            continue;
+        }
+        if !matches!(b.get(open), Some(b'[' | b'(')) {
+            continue;
+        }
+        let Some((start, stop)) = balanced_code(source, &code, open, MAX_SCRIPTS_SPAN) else {
+            continue;
+        };
+        let mut i = start;
+        while i < stop {
+            let next = code.next_code(i);
+            if next == i {
+                i += 1;
+                continue;
+            }
+            if let Some(name) =
+                source.get(i..stop).and_then(quoted_literal).and_then(entry_point_name)
+            {
+                out.push(name);
+            }
+            i = next;
+        }
+    }
+    out
+}
+
 const INVOCATION_PATTERNS: &[&str] = &[
     "exec.Command(",
     "exec.CommandContext(",
@@ -2473,8 +2826,10 @@ final class Export implements Runnable {
             decl_marker("java", &out, "Tool.java").as_deref(),
             Some("[cli-decl] java=picocli:4 handler_refs=4 path=Tool.java")
         );
-        // Kotlin rides the java arm.
+        // Kotlin is read under its own tag (A14.2 moved `.kt` off java), and
+        // still under the java tag extract.rs's A14.2 stopgap passes.
         let kt = "import picocli.CommandLine.Command\n@Command(name = \"kt\")\nclass KtTool : Runnable { override fun run() {} }\n";
+        assert_eq!(handlers(&decls(kt, "kotlin")), vec![("cli:kt".to_string(), bare("KtTool"))]);
         assert_eq!(handlers(&decls(kt, "java")), vec![("cli:kt".to_string(), bare("KtTool"))]);
         // No picocli in the file: no scan.
         assert!(commands(&decls("@Command(name = \"x\") class X {}", "java")).is_empty());
@@ -3097,5 +3452,181 @@ def build():
         assert_eq!(parse_argv_cell(&argv_cell("mytool", &argv)), argv);
         let text = Cell { kind: cell_type::CODE, payload: CellPayload::Text("x".into()) };
         assert!(parse_argv_cell(&text).is_empty());
+    }
+
+    // ---- LA.20c: binaries declared by packaging manifests -----------------
+
+    fn manifest_bins(source: &str, path: &str) -> CliNodes {
+        extract_manifest_binaries(source, path, module_id(), repo())
+    }
+
+    /// Every node is a CLI_COMMAND parented to the manifest MODULE; returns
+    /// the qnames in emission order.
+    fn manifest_commands(out: &CliNodes) -> Vec<String> {
+        for n in &out.nodes {
+            assert_eq!(out.nav.kind_by_id.get(&n.id), Some(&node_kind::CLI_COMMAND));
+            assert_eq!(out.nav.parent_of.get(&n.id), Some(&module_id()));
+        }
+        assert!(out.refs.is_empty(), "a manifest emits no HANDLED_BY");
+        commands(out)
+    }
+
+    /// The matrix/python/cli_def probe's pyproject.toml, read from the fixture.
+    const PY_CLI_DEF_PYPROJECT: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/python/cli_def/server/pyproject.toml"
+    ));
+
+    #[test]
+    fn pyproject_project_scripts_declare_binaries() {
+        let out = manifest_bins(PY_CLI_DEF_PYPROJECT, "server/pyproject.toml");
+        // `[project] name = "mytool"` is the distribution, not a script: one node.
+        assert_eq!(manifest_commands(&out), ["cli:mytool"]);
+        assert_eq!(
+            manifest_marker("pyproject.toml", &out).as_deref(),
+            Some("[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0) path=pyproject.toml")
+        );
+
+        let pyproject = "[project]\nname = \"acme\"\ndependencies = [\"click\"]\n\n\
+[project.scripts]\n# the main tool\nacme = \"acme.cli:main\"\n\"acme-admin\" = 'acme.admin:main'\n\n\
+[ project . \"gui-scripts\" ]\nacme-gui = \"acme.gui:run\"\n\n\
+[tool.black]\nline-length = 100\n";
+        let out = manifest_bins(pyproject, "pyproject.toml");
+        assert_eq!(manifest_commands(&out), ["cli:acme", "cli:acme-admin", "cli:acme-gui"]);
+    }
+
+    #[test]
+    fn poetry_scripts_and_multi_line_inline_tables() {
+        let pyproject = "[tool.poetry]\nname = \"svc\"\n\n\
+[tool.poetry.scripts]\nsvc = \"svc.main:run\"\nsvc-file = { reference = \"bin/svc.sh\", type = \"file\" }\n\
+svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-after = \"svc.after:run\"\n\n\
+[tool.poetry.dependencies]\npython = \"^3.11\"\n";
+        let out = manifest_bins(pyproject, "pyproject.toml");
+        // The continuation lines `reference = ...` / `type = ...` are not keys.
+        assert_eq!(
+            manifest_commands(&out),
+            ["cli:svc", "cli:svc-file", "cli:svc-long", "cli:svc-after"]
+        );
+        // A pyproject with no script table declares no binary.
+        assert!(manifest_bins("[project]\nname = \"lib\"\n", "pyproject.toml").nodes.is_empty());
+    }
+
+    #[test]
+    fn package_json_bin_object_and_scoped_string() {
+        let obj = r#"{"name": "@acme/shipit", "bin": {"shipit": "bin/cli.js", "ship-admin": "bin/admin.js"}}"#;
+        let out = manifest_bins(obj, "server/package.json");
+        // serde_json's map is sorted by key; `@acme/shipit` is never minted.
+        assert_eq!(manifest_commands(&out), ["cli:ship-admin", "cli:shipit"]);
+        assert_eq!(
+            manifest_marker("server/package.json", &out).as_deref(),
+            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=2 cargo=0) path=server/package.json")
+        );
+
+        let scoped = r#"{"name": "@acme/deployer", "bin": "./cli.js"}"#;
+        assert_eq!(manifest_commands(&manifest_bins(scoped, "package.json")), ["cli:deployer"]);
+        let plain = r#"{"name": "deployer", "bin": "./cli.js"}"#;
+        assert_eq!(manifest_commands(&manifest_bins(plain, "package.json")), ["cli:deployer"]);
+
+        // No `bin`, or not JSON: nothing, and no marker.
+        let lib = manifest_bins(r#"{"name": "lib", "main": "index.js"}"#, "package.json");
+        assert!(lib.nodes.is_empty());
+        assert_eq!(manifest_marker("package.json", &lib), None);
+        assert!(manifest_bins("{ not json", "package.json").nodes.is_empty());
+    }
+
+    #[test]
+    fn cargo_bin_tables_only() {
+        let cargo = "[package]\nname = \"tools\"\nversion = \"0.1.0\"\n\n\
+[[bin]]\nname = \"migrate\" # the db tool\npath = \"src/bin/migrate.rs\"\n\n\
+[[bin]]\npath = \"src/bin/seed.rs\"\nname = 'seed'\n\n\
+[[example]]\nname = \"demo\"\n\n[dependencies]\nname = \"not-a-bin\"\n";
+        let out = manifest_bins(cargo, "Cargo.toml");
+        assert_eq!(manifest_commands(&out), ["cli:migrate", "cli:seed"]);
+        assert_eq!(
+            manifest_marker("Cargo.toml", &out).as_deref(),
+            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=0 cargo=2) path=Cargo.toml")
+        );
+        // A package with no [[bin]] is not assumed to be a binary: whether
+        // src/main.rs exists is not visible to a per-file extractor.
+        let lib = "[package]\nname = \"tools\"\n\n[dependencies]\nserde = \"1\"\n";
+        assert!(manifest_bins(lib, "Cargo.toml").nodes.is_empty());
+    }
+
+    #[test]
+    fn non_manifest_paths_yield_nothing() {
+        let scripts = "[project.scripts]\nx = \"x:main\"\n";
+        assert!(manifest_bins(scripts, "setup.cfg").nodes.is_empty());
+        assert!(manifest_bins(scripts, "docs/pyproject.toml.txt").nodes.is_empty());
+        assert_eq!(manifest_marker("setup.py", &manifest_bins(scripts, "pyproject.toml")), None);
+    }
+
+    #[test]
+    fn setup_py_console_scripts_forms() {
+        let setup = r#"from setuptools import setup
+
+setup(
+    name="acme",
+    entry_points={
+        "console_scripts": [
+            "acme = acme.cli:main",  # the tool
+            'acme-admin=acme.admin:main',
+        ],
+        "gui_scripts": ["acme-gui = acme.gui:run"],
+    },
+)
+"#;
+        let out = decls(setup, "python");
+        assert_eq!(manifest_commands(&out), ["cli:acme", "cli:acme-admin"]);
+        assert_eq!(
+            decl_marker("python", &out, "setup.py").as_deref(),
+            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=2 npm=0 cargo=0) path=setup.py")
+        );
+
+        let kwarg = "from setuptools import setup\nsetup(entry_points=dict(console_scripts=['tool = pkg.mod:func']))\n";
+        assert_eq!(commands(&decls(kwarg, "python")), ["cli:tool"]);
+
+        let ini = "from setuptools import setup\nsetup(\n    entry_points='''\n    [console_scripts]\n    inimytool = pkg.cli:main\n    [paste.app_factory]\n    main = pkg:app\n    ''',\n)\n";
+        assert_eq!(commands(&decls(ini, "python")), ["cli:inimytool"]);
+
+        let one_string = "setup(entry_points={'console_scripts': 'solo = pkg:main'})\n";
+        assert_eq!(commands(&decls(one_string, "python")), ["cli:solo"]);
+    }
+
+    #[test]
+    fn console_scripts_lookups_and_comments_declare_nothing() {
+        let lookups = r#"from importlib.metadata import entry_points
+
+# console_scripts = ["commented = x:y"]
+eps = entry_points(group="console_scripts")
+scripts = eps["console_scripts"]
+note = "console_scripts: ['in = a:string']"
+"#;
+        let out = decls(lookups, "python");
+        assert!(out.nodes.is_empty(), "{:?}", commands(&out));
+        assert_eq!(decl_marker("python", &out, "tools.py"), None);
+        // Other languages never run the setuptools scan.
+        assert!(decls("x = {'console_scripts': ['a = b:c']}", "ruby").nodes.is_empty());
+        // A malformed entry is not a binary.
+        let bad = "setup(entry_points={'console_scripts': ['no-target =', '= x:y', 'two words = a:b']})";
+        assert!(decls(bad, "python").nodes.is_empty());
+    }
+
+    #[test]
+    fn click_and_console_scripts_in_one_file_keep_the_framework_line() {
+        let both = r#"import click
+from setuptools import setup
+
+@click.command("sync")
+def sync():
+    pass
+
+setup(entry_points={"console_scripts": ["mytool = mytool.cli:cli"]})
+"#;
+        let out = decls(both, "python");
+        assert_eq!(commands(&out), ["cli:sync", "cli:mytool"]);
+        assert_eq!(
+            decl_marker("python", &out, "setup.py").as_deref(),
+            Some("[cli-decl] python=click:1,manifest:1 handler_refs=0 path=setup.py")
+        );
     }
 }
