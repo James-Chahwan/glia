@@ -660,6 +660,8 @@ fn cell_label(c: CellTypeId) -> &'static str {
         // A12.1 — cell_type::MESSAGE_TYPE, the payload type on a queue node.
         // ORIGIN / IMPORTS (15 / 16) deliberately stay on the `cell` arm.
         17 => "msgtype",
+        // LF.6c — cell_type::COVERAGE, lcov line counts {"hit","lines"}.
+        23 => "coverage",
         _ => "cell",
     }
 }
@@ -1252,6 +1254,12 @@ mod tests {
             alias.starts_with("SC"),
             "should extend from initials: {alias}"
         );
+    }
+
+    #[test]
+    fn coverage_cell_renders_as_coverage() {
+        // LF.6c: the lcov counts read `:coverage`, not the generic `:cell`.
+        assert_eq!(cell_label(cell_type::COVERAGE), "coverage");
     }
 
     #[test]

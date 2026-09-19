@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "run": null,
+  "reports": [
+    "coverage/lcov.info"
+  ],
+  "cases_total": 0,
+  "failed": 0,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 0,
+  "lcov_files": 1,
+  "data_hash": "23fc0a11599f658d"
+}

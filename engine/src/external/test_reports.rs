@@ -54,17 +54,39 @@
 //! [`MAX_ENTRIES_PER_NODE`] entries, the lowest `(source, id)` first; the
 //! rest are counted `dropped`.
 //!
-//! Marker, once per repo with a complete snapshot (the fired_on line):
+//! LINE COVERAGE (LF.6c, [`plan_coverage`]): the snapshot's `lcov.jsonl`
+//! (FACT) becomes COVERAGE cells (23). A record maps to ONE repo file, a
+//! POSITION file of the repo's MODULE / CLASS / FUNCTION / METHOD nodes: its
+//! `rel` exactly, else a boundary-aligned path tail ([`tail_file`]), accepted
+//! only when one file holds the longest such tail; an ambiguous or absent
+//! file is counted `unmatched`, never guessed. Records mapping to one file
+//! are summed per line. Then, per node, over each of its POSITION cells
+//! (a C# partial class has one per file): a MODULE takes every DA record of
+//! that file, a CLASS / FUNCTION / METHOD the records inside its span
+//! (POSITION rows are 0-based, lcov lines 1-based: `[s0+1, e0+1]`). `lines`
+//! counts the distinct DA records taken, `hit` those with hits > 0; integers
+//! only, the consumer divides. A node that takes no record gets no cell
+//! (unknown is not zero). The payload, compact with sorted keys:
+//! `{"hit":H,"lines":N,"redacted"?:true,"run"?:"<run>","source":"lcov"}`,
+//! one cell per node (an existing COVERAGE cell is replaced).
+//!
+//! Markers, once per repo with a complete snapshot (the fired_on lines):
 //!   `[tests] fail-cells repo=<label> cases=<n> mapped=<m> (file_line=<a> qname=<b> name=<c>) unmapped=<u> implicated=<i> fail_cells=<f> dropped=<d>`
 //! where `cases` counts distinct failures (`mapped + unmapped`), `implicated`
 //! the implicated entries and `fail_cells` the nodes whose FAIL cell this
 //! stage wrote. When a repeated case was folded, one more line follows:
 //!   `[tests] fail-cells deduplicated <n> repeated case(s) repo=<label>`.
+//! Then the coverage line:
+//!   `[tests] lcov repo=<label> files=<n> matched=<m> unmatched=<u> coverage_nodes=<c>`
+//! where `files` counts `lcov.jsonl` rows and `coverage_nodes` the nodes
+//! whose COVERAGE cell this stage wrote.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use repo_graph_code_domain::external_inputs::merge_entry;
-use repo_graph_code_domain::snapshots::{SOURCE_JUNIT, TestCaseRecord, read_tests, redact_untrusted};
+use repo_graph_code_domain::snapshots::{
+    LcovFileRecord, SOURCE_JUNIT, TestCaseRecord, read_tests, redact_untrusted,
+};
 use repo_graph_code_domain::{cell_type, node_kind};
 use repo_graph_core::{Cell, CellPayload, Node, NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
@@ -80,6 +102,10 @@ pub(crate) const MAX_IMPLICATED: usize = 5;
 
 /// The kinds a failing test maps to on the `file_line` and `name` rungs.
 const TEST_KINDS: [NodeKindId; 2] = [node_kind::FUNCTION, node_kind::METHOD];
+
+/// The kinds that take a COVERAGE cell: a MODULE its whole file, the others
+/// their POSITION span.
+const COVERAGE_KINDS: [NodeKindId; 4] = [node_kind::MODULE, node_kind::CLASS, node_kind::FUNCTION, node_kind::METHOD];
 
 /// A classname's trailing segment that names a source file's extension
 /// (`tests/test_app.py` -> `tests`, `test_app`).
@@ -115,6 +141,9 @@ struct Facts<'a> {
     file: Option<String>,
     /// ORIGIN provenance `test_fixture`.
     fixture: bool,
+    /// Every POSITION cell's `(file, 0-based [start, end] rows)`, for a
+    /// [`COVERAGE_KINDS`] node only (empty otherwise).
+    positions: Vec<(String, Option<(u32, u32)>)>,
 }
 
 /// The repo's nodes, indexed for the ladder. Built once per snapshot.
@@ -146,7 +175,9 @@ impl<'a> RepoIndex<'a> {
                 {
                     tests_by_name.entry(name.as_str()).or_default().push(n.id);
                 }
-                facts.insert(n.id, Facts { kind, qname, file: position_file(n), fixture: is_fixture(n) });
+                let covers = kind.is_some_and(|k| COVERAGE_KINDS.contains(&k));
+                let positions = if covers { positions(n) } else { Vec::new() };
+                facts.insert(n.id, Facts { kind, qname, file: position_file(n), fixture: is_fixture(n), positions });
             }
         }
         for ids in by_tail.values_mut().chain(tests_by_name.values_mut()) {
@@ -190,15 +221,20 @@ impl Tally {
 }
 
 /// Apply `input`'s test-report snapshot: FAIL cells on the repo's failing
-/// tests and on the nodes their traces implicate, then the stage marker.
-/// True when a cell was written.
+/// tests and on the nodes their traces implicate, COVERAGE cells from its
+/// lcov rows ([`ingest_lcov`]), then the stage markers. True when a cell was
+/// written.
 pub(super) fn ingest_test_reports(merged: &mut MergedGraph, input: &RepoInputs) -> bool {
     let Some(snapshot) = read_tests(&input.root) else {
         return false;
     };
     let run = snapshot.meta.run.as_deref().map(redact_untrusted);
     let run = run.as_ref().map(|(r, spans)| (r.as_str(), *spans));
-    let (plan, mut tally) = plan_fail_cells(merged, input, &snapshot.cases, run);
+    // One index serves both plans; neither write touches what it reads.
+    let index = RepoIndex::new(merged, input);
+    let (plan, mut tally) = plan_fail_cells(merged, &index, &snapshot.cases, run);
+    let coverage = plan_coverage(&index, &snapshot.lcov, run);
+    drop(index);
     write_fail_cells(merged, input, plan, &mut tally);
     eprintln!(
         "[tests] fail-cells repo={} cases={} mapped={} (file_line={} qname={} name={}) unmapped={} implicated={} fail_cells={} dropped={}",
@@ -219,19 +255,19 @@ pub(super) fn ingest_test_reports(merged: &mut MergedGraph, input: &RepoInputs) 
             tally.deduplicated, input.label
         );
     }
-    tally.fail_cells > 0
+    let coverage_nodes = ingest_lcov(merged, input, coverage);
+    tally.fail_cells > 0 || coverage_nodes > 0
 }
 
 /// Node id -> the FAIL entries it takes, plus the mapping counts.
 fn plan_fail_cells(
     merged: &MergedGraph,
-    input: &RepoInputs,
+    index: &RepoIndex<'_>,
     cases: &[TestCaseRecord],
     run: Option<(&str, usize)>,
 ) -> (BTreeMap<u64, Vec<Value>>, Tally) {
     let mut tally = Tally::default();
     let cases = dedup_by_classname(cases, &mut tally);
-    let index = RepoIndex::new(merged, input);
 
     // One batch for every case's items.
     let mut items: Vec<(String, &'static str)> = Vec::new();
@@ -261,7 +297,7 @@ fn plan_fail_cells(
     // JUnit case with no classname folds here, once both mapped.
     let mut seen_tests: BTreeMap<(u64, &str), &str> = BTreeMap::new();
     for (case, ci) in cases.iter().zip(&per_case) {
-        let mapped = map_test(merged, &index, case, ci, &first_hit);
+        let mapped = map_test(merged, index, case, ci, &first_hit);
         if let Some((node, _)) = mapped {
             match seen_tests.get(&(node.0, case.name.as_str())) {
                 Some(&source) if source != case.source => {
@@ -525,6 +561,182 @@ fn cap_entries(payload: CellPayload) -> (CellPayload, usize) {
     // in the order it parsed them.
     let text = serde_json::to_string(&Value::Array(entries)).unwrap_or_else(|_| String::from("[]"));
     (CellPayload::Json(text), dropped)
+}
+
+/// The COVERAGE cells one snapshot's lcov rows plan, and the counts of its
+/// marker.
+#[derive(Default)]
+struct CoveragePlan {
+    /// Node id -> its COVERAGE payload.
+    cells: BTreeMap<u64, CellPayload>,
+    /// `lcov.jsonl` rows.
+    files: usize,
+    /// Rows mapped to a repo file.
+    matched: usize,
+    /// Rows no repo file (or more than one) matched.
+    unmatched: usize,
+}
+
+/// Map every lcov row onto one repo file, then every [`COVERAGE_KINDS`] node
+/// with a POSITION in a covered file onto its `(lines, hit)` counts (see the
+/// module doc).
+fn plan_coverage(index: &RepoIndex<'_>, lcov: &[LcovFileRecord], run: Option<(&str, usize)>) -> CoveragePlan {
+    let mut plan = CoveragePlan { files: lcov.len(), ..CoveragePlan::default() };
+    if lcov.is_empty() {
+        return plan;
+    }
+    // Node ids in id order, so the plan is built one way on every run.
+    let mut nodes: Vec<(NodeId, &Facts<'_>)> =
+        index.facts.iter().filter(|(_, f)| !f.positions.is_empty()).map(|(id, f)| (*id, f)).collect();
+    nodes.sort_by_key(|(id, _)| id.0);
+    let files: BTreeSet<&str> =
+        nodes.iter().flat_map(|(_, f)| f.positions.iter().map(|(file, _)| file.as_str())).collect();
+
+    // Repo file -> 1-based line -> hits, summed over the rows that map to it.
+    let mut da: BTreeMap<&str, BTreeMap<u32, u32>> = BTreeMap::new();
+    for record in lcov {
+        let Some(file) = lcov_file(record, &files) else {
+            plan.unmatched += 1;
+            continue;
+        };
+        plan.matched += 1;
+        let lines = da.entry(file).or_default();
+        for &[line, hits] in &record.lines {
+            let slot = lines.entry(line).or_insert(0);
+            *slot = slot.saturating_add(hits);
+        }
+    }
+
+    for (id, facts) in nodes {
+        let module = facts.kind == Some(node_kind::MODULE);
+        // (file, line) -> hits: a record two POSITION cells share counts once.
+        let mut taken: BTreeMap<(&str, u32), u32> = BTreeMap::new();
+        for (file, span) in &facts.positions {
+            let Some(lines) = da.get(file.as_str()) else { continue };
+            let range = match (module, span) {
+                (true, _) => 0..=u32::MAX,
+                (false, Some((s0, e0))) if s0 <= e0 => s0.saturating_add(1)..=e0.saturating_add(1),
+                _ => continue,
+            };
+            for (&line, &hits) in lines.range(range) {
+                taken.insert((file.as_str(), line), hits);
+            }
+        }
+        if taken.is_empty() {
+            continue;
+        }
+        let hit = taken.values().filter(|&&h| h > 0).count();
+        let mut payload: BTreeMap<&str, Value> = BTreeMap::new();
+        payload.insert("source", Value::from("lcov"));
+        payload.insert("lines", Value::from(taken.len()));
+        payload.insert("hit", Value::from(hit));
+        if let Some((r, spans)) = run {
+            payload.insert("run", Value::from(r));
+            if spans > 0 {
+                payload.insert("redacted", Value::Bool(true));
+            }
+        }
+        let Ok(text) = serde_json::to_string(&payload) else { continue };
+        plan.cells.insert(id.0, CellPayload::Json(text));
+    }
+    plan
+}
+
+/// The repo file an lcov row covers: its `rel` when a repo node sits in that
+/// file, else the one file sharing the longest boundary-aligned path tail
+/// with it ([`tail_file`]); `None` when no file or several do.
+fn lcov_file<'f>(record: &LcovFileRecord, files: &BTreeSet<&'f str>) -> Option<&'f str> {
+    let rel = record.rel.as_deref().map(|r| r.trim_start_matches("./"));
+    if let Some(r) = rel
+        && let Some(&file) = files.get(r)
+    {
+        return Some(file);
+    }
+    tail_file(rel, &record.sf.replace('\\', "/"), files)
+}
+
+/// The path-tail rung. A row with a `rel` names a file under the repo whose
+/// `SF:` was relative to a subdirectory (a JS package's own root): a repo file
+/// ending in `/<rel>`. A row without one names a file outside the root (a CI
+/// checkout's absolute path): a repo file `f` whose `SF:` ends in `/<f>`, the
+/// longest such `f`. Either way one file must hold the winning tail; a tie is
+/// ambiguous and maps nothing. (graph's `path_tail_matches` is crate-private,
+/// and matches either way round.)
+fn tail_file<'f>(rel: Option<&str>, sf: &str, files: &BTreeSet<&'f str>) -> Option<&'f str> {
+    fn ends_under(long: &str, short: &str) -> bool {
+        !short.is_empty()
+            && long.len() > short.len()
+            && long.ends_with(short)
+            && long.as_bytes()[long.len() - short.len() - 1] == b'/'
+    }
+    let mut best: Option<(usize, &'f str)> = None;
+    let mut tied = false;
+    for &file in files {
+        let len = match rel {
+            Some(r) if ends_under(file, r) => r.len(),
+            None if ends_under(sf, file) => file.len(),
+            _ => continue,
+        };
+        match best {
+            Some((l, _)) if l > len => {}
+            Some((l, _)) if l == len => tied = true,
+            _ => {
+                best = Some((len, file));
+                tied = false;
+            }
+        }
+    }
+    best.filter(|_| !tied).map(|(_, file)| file)
+}
+
+/// Write the planned COVERAGE cells (first copy of each node in graph order,
+/// replacing an existing one), print the `[tests] lcov` marker and return how
+/// many nodes took a cell.
+fn ingest_lcov(merged: &mut MergedGraph, input: &RepoInputs, plan: CoveragePlan) -> usize {
+    let mut done: BTreeSet<u64> = BTreeSet::new();
+    if !plan.cells.is_empty() {
+        for g in merged.graphs.iter_mut().filter(|g| g.repo == input.repo) {
+            for n in g.nodes.iter_mut() {
+                let Some(payload) = plan.cells.get(&n.id.0) else { continue };
+                if !done.insert(n.id.0) {
+                    continue;
+                }
+                let cell = Cell { kind: cell_type::COVERAGE, payload: payload.clone() };
+                match n.cells.iter().position(|c| c.kind == cell_type::COVERAGE) {
+                    Some(i) => n.cells[i] = cell,
+                    None => n.cells.push(cell),
+                }
+            }
+        }
+    }
+    eprintln!(
+        "[tests] lcov repo={} files={} matched={} unmatched={} coverage_nodes={}",
+        input.label,
+        plan.files,
+        plan.matched,
+        plan.unmatched,
+        done.len()
+    );
+    done.len()
+}
+
+/// Every POSITION cell of a node as `(file, 0-based [start_line, end_line])`;
+/// the span is `None` when either bound is missing.
+fn positions(n: &Node) -> Vec<(String, Option<(u32, u32)>)> {
+    let row = |v: &Value, key: &str| v.get(key).and_then(Value::as_u64).map(|r| u32::try_from(r).unwrap_or(u32::MAX));
+    n.cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .filter_map(|c| {
+            let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+                return None;
+            };
+            let v: Value = serde_json::from_str(s).ok()?;
+            let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?.to_string();
+            let span = row(&v, "start_line").zip(row(&v, "end_line"));
+            Some((file, span))
+        })
+        .collect()
 }
 
 /// The file of a node's first POSITION cell.

@@ -1,0 +1,10 @@
+{
+  "framework": "test-reports-coverage",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.6c: a committed .glia/test-snapshot/ whose lcov.jsonl covers api/app.py (DA 1,2,4 hit; DA 5 not) puts a COVERAGE cell (23) {\"hit\":H,\"lines\":N,\"source\":\"lcov\"} on the module and on each symbol whose POSITION span holds a DA record: list_orders lines 2 hit 2, helper lines 2 hit 1 (module lines 4 hit 3). Baseline 2026-09-19 (HEAD fdd4a32, installed wheel = W26 code): COVERAGE 0/2 - the cell type is registered (L0.1) but nothing reads lcov.",
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "api::app::list_orders", "cell": "COVERAGE", "contains": "\"hit\":2"},
+    {"kind": "FUNCTION", "node": "api::app::helper", "cell": "COVERAGE", "contains": "\"hit\":1"}
+  ]
+}
