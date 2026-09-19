@@ -1,0 +1,5 @@
+FROM alpine:3.20
+ENV PORT=9090
+ENV LOG_LEVEL=warn
+EXPOSE 9090
+CMD ["./server"]

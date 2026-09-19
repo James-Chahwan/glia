@@ -761,9 +761,9 @@ mod walk_tests {
         assert_eq!(
             accessed,
             [
-                ("db::migrate::002_orders".to_string(), "data_entity:sql:orders".to_string()),
+                ("db::migrate::002_orders.sql".to_string(), "data_entity:sql:orders".to_string()),
                 (
-                    "db::migrations::V1__create_users".to_string(),
+                    "db::migrations::V1__create_users.sql".to_string(),
                     "data_entity:sql:users".to_string()
                 ),
             ]

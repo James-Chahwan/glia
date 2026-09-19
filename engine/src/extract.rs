@@ -419,3 +419,19 @@ pub(crate) fn path_to_qname(path: &str) -> String {
         .to_string_lossy()
         .replace(['/', '\\'], "::")
 }
+
+/// A non-code file's MODULE qname (LB.9a): the directories `::`-joined plus
+/// the FULL file name (`svc/Dockerfile.prod` -> `svc::Dockerfile.prod`,
+/// `.env.local` -> `.env.local`, root `openapi.json` -> `openapi.json`).
+/// [`path_to_qname`] drops the last extension, which is right for code
+/// (imports name the stem) but lets `api/user.proto` share `api::user` with
+/// `api/user.go`, and folds `Dockerfile.prod` into `Dockerfile`. Nothing
+/// imports a non-code module by qname and its children are never
+/// path-qualified, so the full name costs no code qname.
+pub(crate) fn synthetic_module_qname(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    match p.rsplit_once('/') {
+        Some((dir, file)) => format!("{}::{file}", dir.replace('/', "::")),
+        None => p,
+    }
+}

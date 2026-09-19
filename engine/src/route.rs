@@ -6,7 +6,7 @@
 //! Split out of `build_graphs_for_repo`.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, node_kind};
@@ -15,7 +15,7 @@ use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 use crate::cache::{self, ParseCache};
 use crate::extract::{
     ExtractStats, apply_cross_cutting_extractors, detect_language, merge_nav, parse_one_with,
-    path_to_qname,
+    path_to_qname, synthetic_module_qname,
 };
 use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 
@@ -111,12 +111,7 @@ pub(crate) fn parse_repo_files(
             Some("yml" | "yaml")
         );
         if yaml_ext {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let cron_out = repo_graph_code_extractors::cron::extract_cron_nodes(
                 source, path, module_id, repo,
             );
@@ -154,12 +149,7 @@ pub(crate) fn parse_repo_files(
         }
 
         if is_dockerfile_path(path) {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let cfg_out = repo_graph_code_extractors::config::extract_dockerfile_defs(
                 source, module_id, repo,
             );
@@ -183,12 +173,7 @@ pub(crate) fn parse_repo_files(
         }
 
         if repo_graph_code_extractors::packages::is_manifest_path(path) {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let pkg_out = repo_graph_code_extractors::packages::extract_for_path(
                 source, path, module_id, repo,
             );
@@ -220,12 +205,7 @@ pub(crate) fn parse_repo_files(
         }
 
         if is_dotenv_path(path) {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let cfg_out = repo_graph_code_extractors::config::extract_dotenv_defs(
                 source, module_id, repo,
             );
@@ -251,12 +231,7 @@ pub(crate) fn parse_repo_files(
         // detect_language, which has no sql arm on purpose: the const-table
         // scan would bind `UPDATE t SET name = 'x'` as a constant.
         if repo_graph_code_extractors::migrations::is_migration_path(path) {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let out = repo_graph_code_extractors::migrations::extract_sql_migration(
                 source, path, module_id, repo,
             );
@@ -283,12 +258,7 @@ pub(crate) fn parse_repo_files(
         // cell. Before detect_language, which has no prisma arm on purpose:
         // the const-table scan would bind `provider = "postgresql"`.
         if repo_graph_code_extractors::prisma::is_prisma_schema(path) {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let out = repo_graph_code_extractors::prisma::extract_prisma_models(
                 source,
                 module_id,
@@ -320,7 +290,10 @@ pub(crate) fn parse_repo_files(
         // component's page live. A bare `FileParse`, never
         // `stash_synthetic_parse`: that mints a MODULE node, and this id is
         // the `.component.ts` parse's. Before detect_language, which has no
-        // html arm.
+        // html arm. The one non-code branch that keeps the CODE form
+        // (`path_to_qname`, not `synthetic_module_id`, LB.9a): it borrows the
+        // `.component.ts` MODULE id, and the file-name form would orphan
+        // every link it reads.
         if is_angular_template_path(path) {
             let module_id =
                 NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
@@ -360,12 +333,7 @@ pub(crate) fn parse_repo_files(
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case("json"));
         if json_ext {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             // LA.16 (A10.12): a JSON Schema that is not an API contract
             // declares MESSAGE_TYPEs, the shape a `.proto` message or an
             // `.avsc` record gets, so MessageSchemaResolver can pair them
@@ -417,12 +385,7 @@ pub(crate) fn parse_repo_files(
         let Some(lang) = detect_language(path) else { continue };
 
         if lang == "proto" {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
                 source, path, module_id, repo,
             );
@@ -470,12 +433,7 @@ pub(crate) fn parse_repo_files(
         // schema declares server fields, and the operation needles would mint
         // client ops from its keywords.
         if lang == "graphql" {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let repo_graph_code_extractors::graphql::GraphqlNodes {
                 nodes,
                 nav,
@@ -510,12 +468,7 @@ pub(crate) fn parse_repo_files(
         // Its named types (record / enum / fixed) become MESSAGE_TYPE nodes
         // under the file's MODULE, the shape A10.5 gives a `.proto` message.
         if lang == "avro" {
-            let module_id = NodeId::from_parts(
-                GRAPH_TYPE,
-                repo,
-                node_kind::MODULE,
-                &path_to_qname(path),
-            );
+            let module_id = synthetic_module_id(repo, path);
             let recs = repo_graph_code_extractors::schemas::extract_avro_records(
                 source, path, module_id, repo,
             );
@@ -735,6 +688,23 @@ pub(crate) fn parse_repo_files(
         );
     }
 
+    // LB.9a fired_on marker: the non-code MODULEs this build minted, each
+    // named by its full file name (`api::user.proto`). Counted per lang key
+    // through a BTreeMap, so no HashMap order reaches the line.
+    let synthetic: BTreeMap<&str, usize> = SYNTHETIC_MODULE_KEYS
+        .iter()
+        .filter_map(|k| parses_by_lang.get(k).map(|v| (*k, v.len())))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    let synthetic_total: usize = synthetic.values().sum();
+    if synthetic_total > 0 {
+        let per_key: Vec<String> = synthetic.iter().map(|(k, n)| format!("{k}={n}")).collect();
+        eprintln!(
+            "[modules] non-code MODULEs named by file: {synthetic_total} ({}) repo={repo_label}",
+            per_key.join(" ")
+        );
+    }
+
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
     let contract_ops = contracts.openapi + contracts.asyncapi + contracts.pact;
@@ -774,6 +744,36 @@ fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
     }
 }
 
+/// The lang keys [`stash_synthetic_parse`] files a non-code MODULE under (the
+/// `[modules]` marker counts these). A new non-code branch adds its key here;
+/// `synthetic_modules_are_named_by_file_name` fails on a routed key it lacks.
+const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
+    "avro",
+    "dockerfile",
+    "dotenv",
+    "graphql",
+    "json",
+    "manifest",
+    "migration",
+    "prisma",
+    "proto",
+    "yaml",
+];
+
+/// A non-code file's MODULE id (LB.9a): keyed on [`synthetic_module_qname`],
+/// the full file name, so `api/user.proto` never shares a NodeId with
+/// `api/user.go`, nor `svc/Dockerfile.prod` with `svc/Dockerfile`. Every
+/// branch that stashes through [`stash_synthetic_parse`] mints its id here,
+/// the id that function records under the same qname.
+fn synthetic_module_id(repo: RepoId, path: &str) -> NodeId {
+    NodeId::from_parts(
+        GRAPH_TYPE,
+        repo,
+        node_kind::MODULE,
+        &synthetic_module_qname(path),
+    )
+}
+
 fn stash_synthetic_parse(
     lang_key: &'static str,
     path: &str,
@@ -799,7 +799,7 @@ fn stash_synthetic_parse(
     merged_nav.record(
         module_id,
         path.rsplit('/').next().unwrap_or(path),
-        &path_to_qname(path),
+        &synthetic_module_qname(path),
         node_kind::MODULE,
         None,
     );
@@ -849,7 +849,7 @@ mod tests {
             GRAPH_TYPE,
             RepoId(1),
             node_kind::MODULE,
-            "db::migrations::V1__create_users",
+            "db::migrations::V1__create_users.sql",
         );
         let users = NodeId::from_parts(
             GRAPH_TYPE,
@@ -868,8 +868,8 @@ mod tests {
         assert!(!parses.contains_key("migration"));
     }
 
-    /// A13.16: a `.prisma` file becomes a MODULE (`prisma::schema`, named
-    /// `schema.prisma`) whose models are model-keyed DATA_ENTITYs; a
+    /// A13.16: a `.prisma` file becomes a MODULE (`prisma::schema.prisma`,
+    /// named `schema.prisma`) whose models are model-keyed DATA_ENTITYs; a
     /// prismaSchemaFolder model file takes the flavor of the datasource
     /// another file declares.
     #[test]
@@ -880,7 +880,7 @@ mod tests {
         let parses = route("prisma/schema.prisma", schema);
         let fp = &parses["prisma"][0];
         let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "prisma::schema");
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "prisma::schema.prisma");
         let user = NodeId::from_parts(
             GRAPH_TYPE,
             RepoId(1),
@@ -932,7 +932,7 @@ mod tests {
         let fp = &fps[0];
 
         let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "api::schema");
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "api::schema.graphql");
         assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
 
         let mut resolvers: Vec<&str> = fp
@@ -982,7 +982,7 @@ mod tests {
         let fp = &parses["avro"][0];
 
         let module_id =
-            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "schemas::user");
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "schemas::user.avsc");
         assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
         let module_pos = fp.nodes[0].cells.iter().find(|c| c.kind == cell_type::POSITION);
         assert!(
@@ -1092,7 +1092,7 @@ mod tests {
         let pkg = r#"{"name": "@acme/shipit", "bin": {"shipit": "bin/cli.js"}, "dependencies": {"commander": "12.0.0"}}"#;
         let parses = route("server/package.json", pkg);
         let fp = &parses["manifest"][0];
-        assert_eq!(manifest_cli(fp, "server::package"), ["cli:shipit"]);
+        assert_eq!(manifest_cli(fp, "server::package.json"), ["cli:shipit"]);
         assert!(
             fp.nav.qname_by_id.values().any(|q| q == "package:npm:commander"),
             "the dependency is still read"
@@ -1100,13 +1100,177 @@ mod tests {
 
         let scripts_only = "[project.scripts]\nmytool = \"mytool.cli:cli\"\n";
         let parses = route("server/pyproject.toml", scripts_only);
-        assert_eq!(manifest_cli(&parses["manifest"][0], "server::pyproject"), ["cli:mytool"]);
+        assert_eq!(manifest_cli(&parses["manifest"][0], "server::pyproject.toml"), ["cli:mytool"]);
 
         let bin_only = "[package]\nname = \"tools\"\n\n[[bin]]\nname = \"migrate\"\n";
         let parses = route("Cargo.toml", bin_only);
-        assert_eq!(manifest_cli(&parses["manifest"][0], "Cargo"), ["cli:migrate"]);
+        assert_eq!(manifest_cli(&parses["manifest"][0], "Cargo.toml"), ["cli:migrate"]);
 
         // Neither a dependency nor a binary: nothing is stashed.
         assert!(route("package.json", r#"{"name": "empty"}"#).is_empty());
+    }
+
+    /// LB.9a: every non-code branch names its MODULE by the full file name,
+    /// the display name the MODULE already carried, so a `.proto` beside a
+    /// same-stem `.go`, a `.json` beside a same-stem `.yaml`, and a
+    /// `Dockerfile.prod` beside a `Dockerfile` are separate MODULEs. One case
+    /// per branch that stashes through `stash_synthetic_parse`.
+    #[test]
+    fn synthetic_modules_are_named_by_file_name() {
+        assert_eq!(
+            synthetic_module_qname("svc/Dockerfile.prod"),
+            "svc::Dockerfile.prod"
+        );
+        assert_eq!(synthetic_module_qname(".env.local"), ".env.local");
+        assert_eq!(synthetic_module_qname("openapi.json"), "openapi.json");
+        assert_eq!(
+            synthetic_module_qname(r"api\v1\user.proto"),
+            "api::v1::user.proto"
+        );
+        assert_eq!(
+            path_to_qname("api/user.proto"),
+            "api::user",
+            "the code form keeps the stem"
+        );
+
+        let cases: [(&str, &str, &str, &str); 13] = [
+            (
+                "api/user.proto",
+                "syntax = \"proto3\";\npackage user;\nservice UserService {\n  rpc GetUser (GetUserRequest) returns (User);\n}\nmessage GetUserRequest { string id = 1; }\nmessage User { string id = 1; }\n",
+                "proto",
+                "api::user.proto",
+            ),
+            (
+                "docs/swagger.json",
+                r#"{"openapi":"3.0.0","paths":{"/orders":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+                "json",
+                "docs::swagger.json",
+            ),
+            (
+                "docs/swagger.yaml",
+                "openapi: 3.0.0\npaths:\n  /users:\n    get:\n      responses:\n        '200':\n          description: ok\n",
+                "yaml",
+                "docs::swagger.yaml",
+            ),
+            (
+                "svc/Dockerfile.prod",
+                "FROM alpine\nENV PORT=9090\n",
+                "dockerfile",
+                "svc::Dockerfile.prod",
+            ),
+            (
+                "svc/api.dockerfile",
+                "FROM alpine\nENV PORT=9090\n",
+                "dockerfile",
+                "svc::api.dockerfile",
+            ),
+            (".env.local", "KEY=1\n", "dotenv", ".env.local"),
+            (
+                "k8s/cron.yml",
+                "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: nightly\nspec:\n  schedule: \"0 2 * * *\"\n",
+                "yaml",
+                "k8s::cron.yml",
+            ),
+            (
+                "web/package.json",
+                r#"{"name": "web", "dependencies": {"react": "18.0.0"}}"#,
+                "manifest",
+                "web::package.json",
+            ),
+            (
+                "db/migrations/V1__init.sql",
+                "CREATE TABLE users (id INT);\n",
+                "migration",
+                "db::migrations::V1__init.sql",
+            ),
+            (
+                "prisma/schema.prisma",
+                "datasource db {\n  provider = \"postgresql\"\n}\nmodel User {\n  id Int @id\n}\n",
+                "prisma",
+                "prisma::schema.prisma",
+            ),
+            (
+                "api/schema.graphql",
+                "type Query {\n  getUser(id: ID!): String\n}\n",
+                "graphql",
+                "api::schema.graphql",
+            ),
+            (
+                "schemas/user.avsc",
+                "{\"type\": \"record\", \"name\": \"User\", \"fields\": []}\n",
+                "avro",
+                "schemas::user.avsc",
+            ),
+            (
+                "schemas/refund.schema.json",
+                "{\n  \"title\": \"Refund\",\n  \"type\": \"object\",\n  \"properties\": {}\n}\n",
+                "json",
+                "schemas::refund.schema.json",
+            ),
+        ];
+        for (path, source, key, qname) in cases {
+            let parses = route(path, source);
+            assert_eq!(parses.keys().copied().collect::<Vec<_>>(), [key], "{path}");
+            assert!(
+                SYNTHETIC_MODULE_KEYS.contains(&key),
+                "{key} feeds the [modules] marker"
+            );
+            let fp = &parses[key][0];
+            let module_id = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname);
+            assert_eq!(
+                fp.nodes[0].id, module_id,
+                "{path}: the MODULE is keyed on the file name"
+            );
+            assert_eq!(
+                fp.nav.qname_by_id.get(&module_id).map(String::as_str),
+                Some(qname)
+            );
+            assert_eq!(
+                fp.nav.name_by_id.get(&module_id).map(String::as_str),
+                qname.rsplit("::").next(),
+                "{path}: the name is the qname's last segment"
+            );
+        }
+
+        // The one exception: an Angular template mints no MODULE and its refs
+        // go out from the `.component.ts` MODULE, which keeps the code form.
+        let files = vec![
+            (
+                "src/app/home/home.component.ts".to_string(),
+                "import { Component } from '@angular/core';\n\
+                 @Component({ selector: 'app-home', templateUrl: './home.component.html' })\n\
+                 export class HomeComponent {}\n"
+                    .to_string(),
+            ),
+            (
+                "src/app/home/home.component.html".to_string(),
+                "<a routerLink=\"/home\">h</a>\n".to_string(),
+            ),
+        ];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let ts_module = parses
+            .values()
+            .flatten()
+            .find_map(|fp| {
+                let first = fp.nodes.first()?.id;
+                (fp.nav.kind_by_id.get(&first) == Some(&node_kind::MODULE)).then_some(first)
+            })
+            .expect("the .component.ts MODULE");
+        assert_eq!(
+            ts_module,
+            NodeId::from_parts(
+                GRAPH_TYPE,
+                RepoId(1),
+                node_kind::MODULE,
+                "src::app::home::home.component"
+            )
+        );
+        let template = parses["angular"]
+            .iter()
+            .find(|fp| fp.nodes.is_empty())
+            .expect("the template's bare parse");
+        assert_eq!(template.refs.len(), 1);
+        assert_eq!(template.refs[0].from_module, ts_module);
     }
 }

@@ -1,0 +1,50 @@
+{
+  "framework": "module-synthetic-filename",
+  "language": "go+proto+yaml+json+dockerfile",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.9a identity fixture (legacy-only, no matrix cell). A non-code file's MODULE is named by its file name (api::user.proto), as its display name already is, so it can no longer share a NodeId with a same-stem code file or a same-stem file of another format. HEAD: api/user.proto and api/user.go are both MODULE api::user (one NodeId, two records); docs/swagger.yaml and docs/swagger.json are both docs::swagger; svc/Dockerfile and svc/Dockerfile.prod fold into one svc::Dockerfile with every edge doubled.",
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "api::user.proto"
+    },
+    {
+      "kind": "MODULE",
+      "name": "docs::swagger.json"
+    },
+    {
+      "kind": "MODULE",
+      "name": "docs::swagger.yaml"
+    },
+    {
+      "kind": "MODULE",
+      "name": "svc::Dockerfile.prod"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "api::user::Validate",
+      "note": "control: code MODULE qnames are unchanged"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "svc::Dockerfile.prod",
+      "to": "LOG_LEVEL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "svc::Dockerfile",
+      "to": "PORT",
+      "category": "DEFINES_CONFIG",
+      "note": "control"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "MODULE",
+      "name": "docs::swagger"
+    }
+  ]
+}

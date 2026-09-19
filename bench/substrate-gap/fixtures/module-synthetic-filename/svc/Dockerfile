@@ -1,0 +1,4 @@
+FROM alpine:3.20
+ENV PORT=8080
+EXPOSE 8080
+CMD ["./server"]
