@@ -1,14 +1,13 @@
 //! WebSocket stack resolver — WS client → handler by path.
 //!
-//! LA.18b (programme A5.9, resolver half). Three rules on top of the
+//! LA.18b (programme A5.9, resolver half) and LA.18c. Four rules on top of the
 //! segment-aware Exact / Suffix pairing:
 //!
 //! - **Generic is a raw-key property.** The WS extractor names a site it could
-//!   not read a path off `ws` (`default` for the path-less NestJS / Phoenix /
-//!   ActionCable rows). A real path always starts with `/`, so the generic
-//!   test runs on the raw key BEFORE segmenting: `/ws` is a client path, `ws`
-//!   is a fallback name. They used to reduce to the same segment list and pair
-//!   Exact by coincidence.
+//!   not read a path off `ws` (`default` for the path-less NestJS row). A real
+//!   path always starts with `/`, so the generic test runs on the raw key
+//!   BEFORE segmenting: `/ws` is a client path, `ws` is a fallback name. They
+//!   used to reduce to the same segment list and pair Exact by coincidence.
 //! - **A generic handler pairs only through the routes that reach it.** Which
 //!   route serves an upgrade site is a cross-file join (the gorilla chat
 //!   layout registers `/ws` in main.go and upgrades in client.go), so it lives
@@ -21,9 +20,16 @@
 //!   on the client side) match exactly one non-empty segment, and a path
 //!   holding any parameter pairs only at equal length — never through the
 //!   suffix tier — so `/chat/lobby/feed` never reaches `/chat/{room}`.
+//! - **Topic wildcards (LA.18c).** Channel-keyed frameworks name the socket by
+//!   a channel or topic, not a path (`ws:ChatChannel`, `ws:room:*`), and pair
+//!   through the same segment logic. A handler whose last segment ends in `*`
+//!   (Phoenix's `channel "room:*"`) matches a client with the same number of
+//!   segments, equal leading segments and a last segment starting with the
+//!   pattern minus its `*` — `room:*` reaches `room:lobby`, never
+//!   `lobby:room`. A bare `*` catch-all asserts nothing and never pairs.
 //!
 //! fired_on marker, once per build that pairs or drops anything:
-//!   `[ws-resolve] 2 pairs (exact=0 suffix=0 param=0 inherited=2) dropped-generic=1`
+//!   `[ws-resolve] 2 pairs (exact=1 suffix=0 param=0 inherited=0 wildcard=1) dropped-generic=0`
 //! A pair with a generic handler counts `inherited` whatever tier its
 //! inherited path matched at. `dropped-generic` counts (client, handler)
 //! combinations that a generic side was part of and that did not pair.
@@ -51,9 +57,14 @@ impl CrossGraphResolver for WebSocketStackResolver {
         let pairs = stats.pairs();
         if pairs > 0 || stats.dropped_generic > 0 {
             eprintln!(
-                "[ws-resolve] {pairs} pairs (exact={} suffix={} param={} inherited={}) \
-                 dropped-generic={}",
-                stats.exact, stats.suffix, stats.param, stats.inherited, stats.dropped_generic
+                "[ws-resolve] {pairs} pairs (exact={} suffix={} param={} inherited={} \
+                 wildcard={}) dropped-generic={}",
+                stats.exact,
+                stats.suffix,
+                stats.param,
+                stats.inherited,
+                stats.wildcard,
+                stats.dropped_generic
             );
         }
     }
@@ -66,12 +77,13 @@ struct WsStats {
     suffix: usize,
     param: usize,
     inherited: usize,
+    wildcard: usize,
     dropped_generic: usize,
 }
 
 impl WsStats {
     fn pairs(&self) -> usize {
-        self.exact + self.suffix + self.param + self.inherited
+        self.exact + self.suffix + self.param + self.inherited + self.wildcard
     }
 }
 
@@ -80,7 +92,8 @@ struct Handler {
     id: NodeId,
     confidence: Confidence,
     /// The key was a fallback name: `paths` are the inherited route paths
-    /// (possibly none), never the name itself.
+    /// (possibly none), never the name itself. A bare `*` catch-all topic is
+    /// generic with no paths at all: it has no mount to inherit.
     generic: bool,
     /// Segmented paths, in [`BTreeSet`] order of their raw text for a generic
     /// handler; exactly one for a handler that names its own path.
@@ -136,6 +149,7 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
                     (false, WsPair::Exact) => stats.exact += 1,
                     (false, WsPair::Suffix) => stats.suffix += 1,
                     (false, WsPair::Param) => stats.param += 1,
+                    (false, WsPair::Wildcard) => stats.wildcard += 1,
                     (false, WsPair::No) => continue,
                 }
                 edges.push(Edge {
@@ -171,14 +185,21 @@ fn collect_handlers(graphs: &[RepoGraph]) -> Vec<Handler> {
             }
         }
     }
+    let inherits = |key: &str| is_generic_ws_key(key) && !is_catch_all_key(key);
     let reach = found
         .iter()
-        .any(|(_, _, key)| is_generic_ws_key(key))
+        .any(|(_, _, key)| inherits(key))
         .then(|| RouteReach::new(graphs));
     found
         .into_iter()
         .map(|(id, confidence, key)| match &reach {
-            Some(reach) if is_generic_ws_key(key) => Handler {
+            _ if is_catch_all_key(key) => Handler {
+                id,
+                confidence,
+                generic: true,
+                paths: Vec::new(),
+            },
+            Some(reach) if inherits(key) => Handler {
                 id,
                 confidence,
                 generic: true,
@@ -276,6 +297,8 @@ enum WsPair {
     Suffix,
     /// Equal length, every segment equal or a parameter on either side.
     Param,
+    /// A trailing-`*` topic pattern and a concrete topic it covers (LA.18c).
+    Wildcard,
     No,
 }
 
@@ -294,11 +317,26 @@ fn ws_segments(s: &str) -> Vec<String> {
 
 /// True for a raw WS key that is only an extractor fallback name — `ws` when
 /// the WS extractor could not read a URL off the source, `default` for
-/// `@WebSocketGateway` / `Phoenix.Channel` / `ActionCable`, which carry no path
-/// at all. Such a name asserts nothing about where the socket is mounted. A
-/// key with a leading `/` (`/ws`, `/default`) is a path that was read.
+/// `@WebSocketGateway`, which carries no path at all — or a bare `*` topic
+/// catch-all ([`is_catch_all_key`]). Such a name asserts nothing about where
+/// the socket is mounted. A key with a leading `/` (`/ws`, `/default`) is a
+/// path that was read.
 fn is_generic_ws_key(key: &str) -> bool {
-    key == "ws" || key == "default"
+    key == "ws" || key == "default" || is_catch_all_key(key)
+}
+
+/// Phoenix's `channel "*", CatchAllChannel`: every topic, so no join key.
+/// Generic, but unlike a fallback name it inherits no route paths either — a
+/// topic pattern is not an upgrade site a route reaches.
+fn is_catch_all_key(key: &str) -> bool {
+    key == "*"
+}
+
+/// The stem of a trailing-`*` topic pattern (`room:*` -> `room:`): the last
+/// segment of `h` minus its `*`, when that segment ends in `*` and is more
+/// than a bare `*`.
+fn topic_stem(h: &[String]) -> Option<&str> {
+    h.last()?.strip_suffix('*').filter(|stem| !stem.is_empty())
 }
 
 /// A handler-side parameter segment: `{room}` (JSR-356, Spring, ASP.NET, Go
@@ -316,17 +354,28 @@ fn is_client_param(seg: &str) -> bool {
     seg.len() >= 2 && seg.starts_with('{') && seg.ends_with('}')
 }
 
-/// Segment-aware pairing. Equal paths pair exactly; a path holding a parameter
-/// pairs only at equal length with each parameter standing for one segment;
-/// otherwise one literal path may be a segment-boundary suffix of the other,
-/// so a client mounted at `/api/v1/chat` still reaches a handler registered
-/// as `/chat` — but `/news` never "ends with" a handler named `ws`.
+/// Segment-aware pairing. Equal paths pair exactly; a trailing-`*` topic
+/// pattern pairs a concrete topic under it at equal length ([`topic_stem`]); a
+/// path holding a parameter pairs only at equal length with each parameter
+/// standing for one segment; otherwise one literal path may be a
+/// segment-boundary suffix of the other, so a client mounted at `/api/v1/chat`
+/// still reaches a handler registered as `/chat` — but `/news` never "ends
+/// with" a handler named `ws`. A bare `*` on either side never pairs.
 fn ws_pair(c: &[String], h: &[String]) -> WsPair {
-    if c.is_empty() || h.is_empty() {
+    let bare_star = |p: &[String]| matches!(p, [only] if only == "*");
+    if c.is_empty() || h.is_empty() || bare_star(c) || bare_star(h) {
         return WsPair::No;
     }
     if c == h {
         return WsPair::Exact;
+    }
+    if let Some(stem) = topic_stem(h) {
+        // Equal leading segments imply equal length.
+        let fits = match (c.split_last(), h.split_last()) {
+            (Some((last, lead)), Some((_, h_lead))) => lead == h_lead && last.starts_with(stem),
+            _ => false,
+        };
+        return if fits { WsPair::Wildcard } else { WsPair::No };
     }
     let templated = h.iter().any(|s| is_handler_param(s)) || c.iter().any(|s| is_client_param(s));
     if templated {
@@ -629,5 +678,82 @@ mod tests {
         assert_eq!(edges.len(), 1, "{edges:?}");
         assert!(connects(&edges, ids[0], ws));
         assert_eq!(stats.inherited, 1);
+    }
+
+    // ---- LA.18c: channel-keyed frameworks --------------------------------
+
+    #[test]
+    fn phoenix_topic_wildcard_pairs_suffix() {
+        assert_eq!(pair("room:lobby", "room:*"), WsPair::Wildcard);
+        assert_eq!(pair("room:42:admin", "room:*"), WsPair::Wildcard);
+        // Phoenix matches `"room:" <> _`, so the empty suffix pairs too.
+        assert_eq!(pair("room:", "room:*"), WsPair::Wildcard);
+        assert_eq!(pair("lobby:room", "room:*"), WsPair::No);
+        assert_eq!(pair("roomy", "room:*"), WsPair::No);
+        // The pattern is the handler's: a client `*` covers nothing.
+        assert_eq!(pair("room:*", "room:lobby"), WsPair::No);
+        // Class-named channels (ActionCable) pair exactly, and apart.
+        assert_eq!(pair("ChatChannel", "ChatChannel"), WsPair::Exact);
+        assert_eq!(pair("ChatChannel", "PresenceChannel"), WsPair::No);
+        // A topic never reaches a mount path, nor a mount a topic pattern.
+        assert_eq!(pair("room:lobby", "/socket"), WsPair::No);
+        assert_eq!(pair("/socket", "room:*"), WsPair::No);
+    }
+
+    #[test]
+    fn bare_star_never_pairs() {
+        assert_eq!(pair("room:lobby", "*"), WsPair::No);
+        assert_eq!(pair("*", "*"), WsPair::No);
+        assert_eq!(pair("*", "room:*"), WsPair::No);
+        assert!(is_generic_ws_key("*"));
+        // Through pair_all: a `*` catch-all counts dropped-generic, pairs
+        // nothing and inherits no route path even when a route reaches the
+        // function its site sits in.
+        let mut s = G::new("server");
+        let serve = s.node(node_kind::FUNCTION, "sock::serve");
+        let r = s.node(node_kind::ROUTE, "route:/room:lobby");
+        let star = s.node(node_kind::WS_HANDLER, "ws:*");
+        s.edge(r, serve, edge_category::HANDLED_BY);
+        s.edge(star, serve, edge_category::HANDLED_BY);
+        let (client, _) = clients(&["room:lobby", "/room:lobby"]);
+        let (edges, stats) = pair_all(&[s.build(), client]);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!(stats.pairs(), 0);
+        assert_eq!(stats.dropped_generic, 2);
+    }
+
+    #[test]
+    fn wildcard_needs_equal_segment_count() {
+        assert_eq!(pair("/chat/room:lobby", "room:*"), WsPair::No);
+        assert_eq!(pair("room:lobby", "/chat/room:*"), WsPair::No);
+        assert_eq!(pair("/chat/room:lobby", "/chat/room:*"), WsPair::Wildcard);
+        // Leading segments must be equal, not merely the same count.
+        assert_eq!(pair("/news/room:lobby", "/chat/room:*"), WsPair::No);
+        // A path whose last segment is a bare `*` is not a topic pattern and
+        // keeps the path tiers (the literal suffix one, here).
+        assert_eq!(pair("/api/files/*", "/files/*"), WsPair::Suffix);
+    }
+
+    #[test]
+    fn wildcard_pairs_counted_wildcard() {
+        // The Phoenix fixture shape: an endpoint mount and a topic pattern on
+        // the server, the phoenix.js socket and its joined topic on the client.
+        let mut s = G::new("server");
+        let mount = s.node(node_kind::WS_HANDLER, "ws:/socket");
+        let room = s.node(node_kind::WS_HANDLER, "ws:room:*");
+        let (client, ids) = clients(&["/socket", "room:lobby"]);
+        let (edges, stats) = pair_all(&[s.build(), client]);
+        assert_eq!(edges.len(), 2, "{edges:?}");
+        assert!(connects(&edges, ids[0], mount));
+        assert!(connects(&edges, ids[1], room));
+        assert!(!connects(&edges, ids[1], mount));
+        assert_eq!(
+            stats,
+            WsStats {
+                exact: 1,
+                wildcard: 1,
+                ..WsStats::default()
+            }
+        );
     }
 }

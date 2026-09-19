@@ -16,9 +16,24 @@
 //! client argument goes through [`client_path`], which reads the static tail
 //! of a concatenation or template literal and strips `ws(s)://` /
 //! `http(s)://` + authority. Anything unreadable falls back to `ws`
-//! (`default` for the path-less NestJS / Phoenix / ActionCable rows), exactly
-//! as before the rewrite. A name is never multi-line: whitespace and control
-//! characters reject it.
+//! (`default` for the path-less NestJS row), exactly as before the rewrite,
+//! unless the row's [`Accept`] says an unreadable site mints nothing. A name
+//! is never multi-line: whitespace and control characters reject it.
+//!
+//! Channel-keyed frameworks (LA.18c) join on a channel name or topic, not a
+//! URL path, so the name IS that key and never falls back:
+//! - ActionCable: the server's channel is the class inheriting
+//!   `ApplicationCable::Channel` (`ws:ChatChannel`, [`PathRead::ClassBeforeLt`]);
+//!   the JS consumer names it in `subscriptions.create({ channel: "..." })`,
+//!   accepted only in the `...Channel` class-name shape
+//!   ([`Accept::ChannelClass`]), so Stripe's `subscriptions.create(` never
+//!   mints.
+//! - Phoenix: the endpoint's `socket "/socket", ...` mount and the socket's
+//!   `channel "room:*", ...` topic pattern ([`PathRead::LineLiteral`], gated on
+//!   `Phoenix.Endpoint` / `Phoenix.Socket`); phoenix.js's `new Socket("/socket")`
+//!   and `socket.channel("room:lobby")` on the client. `use Phoenix.Channel` is
+//!   a module attribute, not a handler, and mints nothing. The resolver pairs
+//!   a trailing-`*` topic with its concrete topics.
 //!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
@@ -30,6 +45,8 @@
 //! = distinct nodes that framework's sites read, path repo-relative:
 //!   `[ws] handlers framework=fastapi n=2 in app.py`
 //!   `[ws] clients framework=browser n=2 in live.ts`
+//!   `[ws] handlers framework=phoenix n=1 in lib/app_web/channels/user_socket.ex`
+//!   `[ws] clients framework=actioncable n=1 in chat.js`
 //!
 //! The call-argument reader here ([`call_region`], [`split_top`]) is a local
 //! copy of the shape `queue_topic.rs` keeps private (that file belongs to
@@ -66,6 +83,25 @@ enum PathRead {
     AfterAngle,
     /// [`client_path`] on positional argument `n`.
     Client(usize),
+    /// The class declared on the needle's own line, before the needle:
+    /// `class ChatChannel < ApplicationCable::Channel` -> `ChatChannel`.
+    ClassBeforeLt,
+    /// The first double-quoted literal on the needle's line, from the needle
+    /// on (Elixir's paren-less `socket "/socket", ...` / `channel "room:*", ...`).
+    LineLiteral,
+}
+
+/// Which names a row mints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Accept {
+    /// Any name the site reads; an unreadable site mints the fallback name
+    /// (`ws`, or `default` for [`PathRead::Default`]).
+    ReadOrFallback,
+    /// Only a name the site reads: an unreadable site mints nothing.
+    ReadOnly,
+    /// Only a read name in ActionCable's channel-class shape
+    /// ([`is_channel_class`]); anything else mints nothing.
+    ChannelClass,
 }
 
 /// Which line a site anchors at.
@@ -87,6 +123,7 @@ struct WsRow {
     gate: &'static [&'static str],
     read: PathRead,
     anchor: AnchorAt,
+    accept: Accept,
     /// Discriminator of the fired_on marker.
     framework: &'static str,
 }
@@ -97,11 +134,24 @@ const fn row(
     read: PathRead,
     framework: &'static str,
 ) -> WsRow {
+    keyed_row(needle, gate, read, Accept::ReadOrFallback, framework)
+}
+
+/// A row whose [`Accept`] is not the fallback one: a channel-keyed framework,
+/// where a generic name would join nothing.
+const fn keyed_row(
+    needle: &'static str,
+    gate: &'static [&'static str],
+    read: PathRead,
+    accept: Accept,
+    framework: &'static str,
+) -> WsRow {
     WsRow {
         needle,
         gate,
         read,
         anchor: AnchorAt::Needle,
+        accept,
         framework,
     }
 }
@@ -110,6 +160,8 @@ const NONE: &[&str] = &[];
 const GORILLA: &[&str] = &["gorilla/websocket"];
 const NHOOYR: &[&str] = &["nhooyr.io/websocket", "github.com/coder/websocket"];
 const FASTAPI_STARLETTE: &[&str] = &["fastapi", "starlette"];
+/// phoenix.js, by its import string (not `phoenix_html` / `phoenix_live_view`).
+const PHOENIX_JS: &[&str] = &["\"phoenix\"", "'phoenix'"];
 
 const HANDLER_ROWS: &[WsRow] = &[
     // node `ws` / socket servers. A bare `WebSocketServer` (an import line)
@@ -140,6 +192,7 @@ const HANDLER_ROWS: &[WsRow] = &[
         gate: FASTAPI_STARLETTE,
         read: PathRead::Arg(0),
         anchor: AnchorAt::NextDef,
+        accept: Accept::ReadOrFallback,
         framework: "fastapi",
     },
     row(
@@ -181,12 +234,39 @@ const HANDLER_ROWS: &[WsRow] = &[
         PathRead::Generic,
         "aspnetcore",
     ),
-    // Phoenix / ActionCable: unchanged reads, replaced by LA.18c.
-    row("channel \"", NONE, PathRead::Generic, "phoenix"),
-    row("channel '", NONE, PathRead::Generic, "phoenix"),
-    row("socket \"", NONE, PathRead::Generic, "phoenix"),
-    row("Phoenix.Channel", NONE, PathRead::Default, "phoenix"),
-    row("ActionCable", NONE, PathRead::Default, "actioncable"),
+    // ActionCable (LA.18c): a channel is a class inheriting the app's
+    // channel base (or ActionCable's own); its class name is the join key.
+    keyed_row(
+        "< ApplicationCable::Channel",
+        NONE,
+        PathRead::ClassBeforeLt,
+        Accept::ReadOnly,
+        "actioncable",
+    ),
+    keyed_row(
+        "< ActionCable::Channel::Base",
+        NONE,
+        PathRead::ClassBeforeLt,
+        Accept::ReadOnly,
+        "actioncable",
+    ),
+    // Phoenix (LA.18c), paren-less Elixir calls: the endpoint's socket mount
+    // and the socket's channel topic pattern. A single-quoted `channel '...'`
+    // is an Elixir charlist, not a topic.
+    keyed_row(
+        "socket \"",
+        &["Phoenix.Endpoint"],
+        PathRead::LineLiteral,
+        Accept::ReadOnly,
+        "phoenix",
+    ),
+    keyed_row(
+        "channel \"",
+        &["Phoenix.Socket"],
+        PathRead::LineLiteral,
+        Accept::ReadOnly,
+        "phoenix",
+    ),
 ];
 
 const CLIENT_ROWS: &[WsRow] = &[
@@ -238,6 +318,23 @@ const CLIENT_ROWS: &[WsRow] = &[
         NONE,
         PathRead::Client(0),
         "python-websockets",
+    ),
+    // ActionCable consumer (LA.18c): the channel class it subscribes to.
+    keyed_row(
+        "subscriptions.create(",
+        NONE,
+        PathRead::KeyedOrArg(&["channel"]),
+        Accept::ChannelClass,
+        "actioncable",
+    ),
+    // phoenix.js (LA.18c): the socket mount, then the topic it joins.
+    row("new Socket(", PHOENIX_JS, PathRead::Client(0), "phoenix"),
+    keyed_row(
+        ".channel(",
+        PHOENIX_JS,
+        PathRead::Arg(0),
+        Accept::ReadOnly,
+        "phoenix",
     ),
 ];
 
@@ -314,7 +411,11 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
             continue;
         }
         for offset in sites(source, r.needle) {
-            let name = read_name(source, offset, r).unwrap_or_else(|| fallback(r.read).to_string());
+            let Some(name) =
+                read_name(source, offset, r).or_else(|| fallback(r).map(str::to_string))
+            else {
+                continue;
+            };
             let id = match by_name.get(&name) {
                 Some(id) => *id,
                 None => {
@@ -391,11 +492,15 @@ fn sites(source: &str, needle: &str) -> Vec<usize> {
         .collect()
 }
 
-fn fallback(read: PathRead) -> &'static str {
-    match read {
+/// The name an unreadable site of `r` mints, or `None` when it mints nothing.
+fn fallback(r: &WsRow) -> Option<&'static str> {
+    if r.accept != Accept::ReadOrFallback {
+        return None;
+    }
+    Some(match r.read {
         PathRead::Default => "default",
         _ => "ws",
-    }
+    })
 }
 
 /// The name one site reads, or `None` when the row reads none there.
@@ -417,8 +522,59 @@ fn read_name(source: &str, offset: usize, r: &WsRow) -> Option<String> {
             server_literal(split_top(call_region(source, open)?, b',').first()?)?
         }
         PathRead::Client(n) => client_path(split_top(call_region(source, after)?, b',').get(n)?)?,
+        PathRead::ClassBeforeLt => class_before(source, offset, after)?,
+        PathRead::LineLiteral => line_literal(source, offset)?,
     };
-    valid_name(&name).then_some(name)
+    let shaped = r.accept != Accept::ChannelClass || is_channel_class(&name);
+    (valid_name(&name) && shaped).then_some(name)
+}
+
+/// For `class Name < Base` with the needle `< Base` at `offset` (`after` just
+/// past it): `Name`, when the text before the needle on its line is exactly
+/// `class Name` and the needle ends at a name boundary (`< ApplicationCable::
+/// ChannelHelper` is not the channel base). A class whose own name is
+/// `Channel` is the app's abstract base (`class Channel <
+/// ActionCable::Channel::Base` inside `module ApplicationCable`), not a
+/// channel, and reads nothing.
+fn class_before(source: &str, offset: usize, after: usize) -> Option<String> {
+    if source
+        .as_bytes()
+        .get(after)
+        .is_some_and(|b| is_ident_byte(*b) || *b == b':')
+    {
+        return None;
+    }
+    let line_start = source.get(..offset)?.rfind('\n').map_or(0, |nl| nl + 1);
+    let head = source.get(line_start..offset)?.trim();
+    let rest = head.strip_prefix("class")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let name = rest.trim();
+    let shaped = name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && name.bytes().all(|b| is_ident_byte(b) || b == b':');
+    let base = name.rsplit("::").next() == Some("Channel");
+    (shaped && !base).then(|| name.to_string())
+}
+
+/// The first `"..."` literal on the line of `offset`, from `offset` on. An
+/// interpolated Elixir string (`#{...}`) is not a literal name.
+fn line_literal(source: &str, offset: usize) -> Option<String> {
+    let line = source.get(offset..)?.split('\n').next()?;
+    let quote = line.find('"')?;
+    let (lit, _) = leading_literal(line.get(quote..)?)?;
+    (!lit.contains("#{")).then(|| lit.to_string())
+}
+
+/// ActionCable's channel-class shape, `^[A-Z][A-Za-z0-9_:]*Channel$`: the
+/// consumer side's only precision guard, so a non-channel `subscriptions.create(`
+/// (Stripe, a billing SDK) never mints. A channel class not ending in
+/// `Channel` is a declared miss, never a false node.
+fn is_channel_class(name: &str) -> bool {
+    name.len() > "Channel".len()
+        && name.ends_with("Channel")
+        && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
 }
 
 /// Non-empty, bounded, and a single token: no whitespace, no control chars.
@@ -1119,9 +1275,181 @@ mod tests {
                     assert!(r.needle.ends_with('('), "{}", r.needle)
                 }
                 PathRead::AfterAngle => assert!(r.needle.ends_with('<'), "{}", r.needle),
+                PathRead::ClassBeforeLt => assert!(r.needle.starts_with("< "), "{}", r.needle),
+                PathRead::LineLiteral => assert!(r.needle.ends_with('"'), "{}", r.needle),
                 PathRead::Generic | PathRead::Default => {}
             }
+            // A row that never falls back must read something.
+            if r.accept != Accept::ReadOrFallback {
+                assert!(
+                    !matches!(r.read, PathRead::Generic | PathRead::Default),
+                    "{}",
+                    r.needle
+                );
+            }
         }
+    }
+
+    // ---- LA.18c: channel-keyed frameworks --------------------------------
+
+    const CHAT_CHANNEL_RB: &str = "class ChatChannel < ApplicationCable::Channel\n\
+        \x20 def subscribed\n\
+        \x20   stream_from \"chat_#{params[:room]}\"\n\
+        \x20 end\n\
+        \n\
+        \x20 def speak(data)\n\
+        \x20   ActionCable.server.broadcast(\"chat\", data)\n\
+        \x20 end\n\
+        end\n";
+
+    #[test]
+    fn actioncable_class_is_the_channel() {
+        let out = handlers(CHAT_CHANNEL_RB);
+        assert_eq!(anchored(&out), vec![("ws:ChatChannel".to_string(), 0)]);
+        // The broadcast inside a method is not a handler (it minted
+        // `ws:default` HANDLED_BY `speak` before LA.18c).
+        assert!(!qnames(&out).contains(&"ws:default".to_string()));
+        // ActionCable's own base, and a namespaced compact class.
+        let src = "class Admin::AuditChannel < ActionCable::Channel::Base\nend\n";
+        assert_eq!(qnames(&handlers(src)), vec!["ws:Admin::AuditChannel"]);
+        // A class named after something that merely starts with the base.
+        let src = "class Helper < ApplicationCable::ChannelHelper\nend\n";
+        assert!(handlers(src).nodes.is_empty());
+    }
+
+    #[test]
+    fn application_cable_base_is_not_a_channel() {
+        // Rails' generated app/channels/application_cable/channel.rb.
+        let src = "module ApplicationCable\n  class Channel < ActionCable::Channel::Base\n  end\nend\n";
+        let out = handlers(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        let src = "class ApplicationCable::Channel < ActionCable::Channel::Base\nend\n";
+        assert!(handlers(src).nodes.is_empty());
+        // The needle without a `class Name` in front of it reads nothing.
+        let src = "# subclasses say `< ApplicationCable::Channel`\n";
+        assert!(handlers(src).nodes.is_empty());
+    }
+
+    #[test]
+    fn actioncable_client_channel_key() {
+        let src = "import { createConsumer } from \"@rails/actioncable\"\n\
+                   const consumer = createConsumer()\n\
+                   export function joinChat(room) {\n\
+                   \x20 return consumer.subscriptions.create({ channel: \"ChatChannel\", room: room }, {\n\
+                   \x20   received(data) { console.log(data) }\n\
+                   \x20 })\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(anchored(&out), vec![("ws_client:ChatChannel".to_string(), 3)]);
+        // The positional string form.
+        let src = "consumer.subscriptions.create(\"NotificationsChannel\", { received() {} })\n";
+        assert_eq!(
+            qnames(&clients(src)),
+            vec!["ws_client:NotificationsChannel"]
+        );
+        // A channel class outside the `...Channel` shape is a declared miss.
+        let src = "consumer.subscriptions.create({ channel: \"Notifications\" })\n";
+        assert!(clients(src).nodes.is_empty());
+    }
+
+    #[test]
+    fn stripe_subscriptions_create_is_not_a_client() {
+        for src in [
+            "const sub = await stripe.subscriptions.create({ customer: \"cus_1\", items: [{ price: p }] });\n",
+            "await stripe.subscriptions.create(params);\n",
+            "await stripe.subscriptions.create(\"sub_1\");\n",
+        ] {
+            let out = clients(src);
+            assert!(out.nodes.is_empty(), "{src}: {:?}", qnames(&out));
+            assert!(out.anchors.is_empty());
+        }
+    }
+
+    const ENDPOINT_EX: &str = "defmodule AppWeb.Endpoint do\n\
+        \x20 use Phoenix.Endpoint, otp_app: :app\n\
+        \n\
+        \x20 socket \"/socket\", AppWeb.UserSocket, websocket: true, longpoll: false\n\
+        \x20 socket \"/live\", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @s]]\n\
+        end\n";
+
+    const USER_SOCKET_EX: &str = "defmodule AppWeb.UserSocket do\n\
+        \x20 use Phoenix.Socket\n\
+        \n\
+        \x20 channel \"room:*\", AppWeb.RoomChannel\n\
+        \x20 channel \"user:*\", AppWeb.UserChannel\n\
+        \n\
+        \x20 def connect(_params, socket, _connect_info), do: {:ok, socket}\n\
+        end\n";
+
+    #[test]
+    fn phoenix_endpoint_socket_mount() {
+        let out = handlers(ENDPOINT_EX);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws:/socket".to_string(), 3), ("ws:/live".to_string(), 4)]
+        );
+        // `socket "` outside a Phoenix endpoint is not a mount.
+        let src = "defmodule Net do\n  def send(socket \"x\"), do: :ok\nend\n";
+        assert!(handlers(src).nodes.is_empty());
+    }
+
+    #[test]
+    fn phoenix_socket_channel_topic() {
+        let out = handlers(USER_SOCKET_EX);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws:room:*".to_string(), 3), ("ws:user:*".to_string(), 4)]
+        );
+        // An interpolated topic is not a literal, and never falls back.
+        let src = "use Phoenix.Socket\nchannel \"room:#{@prefix}\", R\n";
+        assert!(handlers(src).nodes.is_empty());
+        // A single-quoted charlist is not a topic.
+        let src = "use Phoenix.Socket\nchannel 'room:*', R\n";
+        assert!(handlers(src).nodes.is_empty());
+        // `channel "` without the Phoenix.Socket import.
+        assert!(handlers("channel \"room:*\", R\n").nodes.is_empty());
+    }
+
+    #[test]
+    fn phoenix_use_line_mints_nothing() {
+        let src = "defmodule AppWeb.RoomChannel do\n\
+                   \x20 use Phoenix.Channel\n\
+                   \x20 def join(\"room:lobby\", _message, socket) do\n\
+                   \x20   {:ok, socket}\n\
+                   \x20 end\n\
+                   end\n";
+        let out = handlers(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        assert!(clients(src).nodes.is_empty());
+    }
+
+    #[test]
+    fn phoenix_js_socket_and_channel() {
+        let src = "import { Socket } from \"phoenix\"\n\
+                   \n\
+                   let socket = new Socket(\"/socket\", { params: {} })\n\
+                   socket.connect()\n\
+                   \n\
+                   let channel = socket.channel(\"room:lobby\", {})\n\
+                   channel.join()\n";
+        let out = clients(src);
+        assert_eq!(
+            anchored(&out),
+            vec![
+                ("ws_client:/socket".to_string(), 2),
+                ("ws_client:room:lobby".to_string(), 5)
+            ]
+        );
+        // A topic held in a variable is unreadable and mints nothing.
+        let src = "import { Socket } from 'phoenix'\nconst c = socket.channel(topic, {})\n";
+        assert!(clients(src).nodes.is_empty());
+        // Without the phoenix import, `.channel(` is someone else's API
+        // (amqp's `connection.channel()`).
+        let src = "import amqp from \"amqplib\"\nconst ch = conn.channel(\"orders\")\n";
+        assert!(clients(src).nodes.is_empty());
+        // `phoenix_html` is not phoenix.js.
+        let src = "import \"phoenix_html\"\nlet s = new Socket(\"/socket\")\n";
+        assert!(clients(src).nodes.is_empty());
     }
 
     #[test]

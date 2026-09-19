@@ -1,0 +1,57 @@
+{
+  "framework": "elixir-phoenix-channels",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "elixir/ws"
+  ],
+  "note": "LA.18c (programme A5.9). Phoenix: the endpoint mounts `socket \"/socket\", AppWeb.UserSocket`; the socket routes topics with `channel \"room:*\", AppWeb.RoomChannel`; the JS client does `new Socket(\"/socket\")` then `socket.channel(\"room:lobby\")`. A trailing `*` in a Phoenix topic pattern matches any suffix of that topic. Baseline 2026-09-18 (HEAD 7a4883b): `channel \"` and `use Phoenix.Channel` mint only the generic ws:ws / ws:default, and no JS Phoenix client needle exists; cell reads none. Re-measured 2026-09-19 at HEAD 140024f before the fix: 3 nodes XX, 2 edges XX, FORBID VIOLATIONS 1 (ws:default matched=1). LA.18c reads the literal after `socket \"` (gate Phoenix.Endpoint) and `channel \"` (gate Phoenix.Socket), phoenix.js `new Socket(` / `.channel(`, and the resolver pairs a trailing-`*` topic by prefix (counted wildcard).",
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:/socket",
+      "note": "endpoint socket mount"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:room:*",
+      "note": "topic pattern from the socket's channel route"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:room:lobby",
+      "note": "socket.channel(\"room:lobby\")"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/socket",
+      "to": "ws:/socket",
+      "category": "WS_CONNECTS",
+      "note": "socket mount path, exact"
+    },
+    {
+      "from": "ws_client:room:lobby",
+      "to": "ws:room:*",
+      "category": "WS_CONNECTS",
+      "note": "Phoenix topic wildcard"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:room:lobby",
+      "to": "ws:/socket",
+      "category": "WS_CONNECTS",
+      "note": "a topic never pairs a mount path"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:default",
+      "note": "use Phoenix.Channel is not itself a handler name"
+    }
+  ]
+}

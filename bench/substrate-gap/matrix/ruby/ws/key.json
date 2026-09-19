@@ -1,0 +1,51 @@
+{
+  "framework": "ruby-actioncable",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "ruby/ws"
+  ],
+  "note": "LA.18c (programme A5.9). ActionCable identifies a stream by channel CLASS name: the server declares `class ChatChannel < ApplicationCable::Channel`, the JS client subscribes with `consumer.subscriptions.create({ channel: \"ChatChannel\" })`. PresenceChannel has no subscriber. Baseline 2026-09-18 (HEAD 7a4883b): the needle is the literal `ActionCable`, which a channel file does not contain (it says ApplicationCable), so nothing is extracted on either side; cell reads none. Re-measured 2026-09-19 at HEAD 140024f before the fix: 3 nodes XX, WS_CONNECTS XX, both forbids OK. LA.18c reads the class declared before `< ApplicationCable::Channel` and the consumer's `channel:` key (accepted only in the `...Channel` class-name shape).",
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:ChatChannel",
+      "note": "channel class"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:PresenceChannel",
+      "note": "second channel class, second file"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:ChatChannel",
+      "note": "subscriptions.create({ channel: ... })"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:ChatChannel",
+      "to": "ws:ChatChannel",
+      "category": "WS_CONNECTS",
+      "note": "channel name is the join key"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:ChatChannel",
+      "to": "ws:PresenceChannel",
+      "category": "WS_CONNECTS",
+      "note": "channels stay apart"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:default",
+      "note": "the channel class is readable; no generic fallback"
+    }
+  ]
+}
