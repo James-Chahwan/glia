@@ -1,13 +1,21 @@
 //! Traversal primitives over `RepoGraph` and `MergedGraph`: neighbours, BFS,
-//! reverse BFS, parent chains, and spreading activation.
+//! reverse BFS, reachability, shortest paths, parent chains, and spreading
+//! activation.
 //!
 //! Both graphs are [`GraphSource`]s, so the domain-agnostic algorithms in
 //! `repo_graph_activation::algo` run over them; the BFS walks here are thin
-//! calls into `algo::reach` over a per-call CSR `Adjacency` (LD.15a).
+//! calls into `algo::reach` over a per-call CSR `Adjacency` (LD.15a). The
+//! `MergedGraph` walks (LD.3a) see every repo's edges AND `cross_edges`, so a
+//! walk from a client function crosses HTTP_CALLS / QUEUE_FLOWS into the repo
+//! that serves it; the `RepoGraph` walks see one repo x language graph only.
 
+use std::collections::HashMap;
+
+use repo_graph_activation::algo::reach::Reached;
 use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use repo_graph_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 
+use crate::blast::Reach;
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -16,13 +24,13 @@ use crate::types::RepoGraph;
 // ============================================================================
 
 impl RepoGraph {
-    /// Outgoing neighbours of `id`: `(target, category)` pairs.
-    pub fn neighbours(&self, id: NodeId) -> Vec<(NodeId, EdgeCategoryId)> {
-        self.edges
-            .iter()
-            .filter(|e| e.from == id)
-            .map(|e| (e.to, e.category))
-            .collect()
+    /// One-hop neighbours of `id` over this graph's edges, in edge order:
+    /// `(other end, category, the way the edge was walked)`. `Forward` lists
+    /// outgoing edges, `Backward` incoming ones, `Both` both (a self-loop
+    /// once, as `Forward`). Cross-repo edges live on [`MergedGraph`]; use
+    /// [`MergedGraph::neighbours`] to see them.
+    pub fn neighbours(&self, id: NodeId, reach: Reach) -> Vec<(NodeId, EdgeCategoryId, Reach)> {
+        neighbours_in(self.edges.iter(), id, reach, &CategorySet::all())
     }
 
     /// Node ids reachable from `start` following edges in `follow` up to
@@ -118,6 +126,52 @@ fn reach_ids(walk: reach::Bfs) -> Vec<NodeId> {
     walk.reached.into_iter().map(|r| r.id).collect()
 }
 
+/// The walk direction a [`Reach`] names.
+fn walk_of(reach: Reach) -> Walk {
+    match reach {
+        Reach::Forward => Walk::Forward,
+        Reach::Backward => Walk::Backward,
+        Reach::Both => Walk::Both,
+    }
+}
+
+/// `None` follows every category, `Some(c)` exactly the listed ones.
+fn follow_set(follow: Option<&[EdgeCategoryId]>) -> CategorySet {
+    follow.map_or_else(CategorySet::all, CategorySet::of)
+}
+
+/// One linear scan of `edges` for those incident to `id` whose category
+/// `keep` holds, in edge order. An edge leaving `id` is taken forward when
+/// `reach` walks forward; otherwise an edge entering it is taken backward
+/// when `reach` walks backward — so under `Both` a self-loop counts once, as
+/// forward (the rule `Walk::Both` follows).
+fn neighbours_in<'a>(
+    edges: impl Iterator<Item = &'a Edge>,
+    id: NodeId,
+    reach: Reach,
+    keep: &CategorySet,
+) -> Vec<(NodeId, EdgeCategoryId, Reach)> {
+    let fwd = reach != Reach::Backward;
+    let bwd = reach != Reach::Forward;
+    edges
+        .filter(|e| keep.contains(e.category))
+        .filter_map(|e| {
+            if fwd && e.from == id {
+                Some((e.to, e.category, Reach::Forward))
+            } else if bwd && e.to == id {
+                Some((e.from, e.category, Reach::Backward))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The `[traverse]` fired_on line: one per merged-graph walk (LD.3a).
+fn traverse_marker(op: &str, walk: Walk, seeds: usize, reached: usize, index_nodes: usize) {
+    eprintln!("[traverse] op={op} walk={walk:?} seeds={seeds} reached={reached} index_nodes={index_nodes}");
+}
+
 /// Nodes in `nodes` order, edges in `edges` order.
 impl GraphSource for RepoGraph {
     fn node_ids(&self) -> Vec<NodeId> {
@@ -144,7 +198,126 @@ impl GraphSource for MergedGraph {
     }
 }
 
+/// Walks over every repo's edges and `cross_edges` (LD.3a). `follow = None`
+/// follows every category, `Some(c)` exactly the listed ones. An edge to an id
+/// that is no node is still followed, and that id reached (LD.15a parity rule
+/// 1). Order is global edge order: the graphs in `Vec` order, then
+/// `cross_edges` ([`MergedGraph::all_edges`]).
+///
+/// `bfs`, `predecessors`, `reachable_by` and `shortest_path` build one
+/// `Adjacency` per call, O(V + E), and print one
+/// `[traverse] op=<op> walk=<Forward|Backward|Both> seeds=<n> reached=<n> index_nodes=<n>`
+/// line to stderr (`reached` is the walk's reached count; for `reachable_by`
+/// the sources hit). A caller issuing many walks over one filter builds the
+/// `Adjacency` once and calls `repo_graph_activation::algo::reach` directly.
+/// `neighbours` is one edge scan with no index and no line: it is called per
+/// node.
 impl MergedGraph {
+    /// One-hop neighbours of `id` over intra-repo and cross edges, in global
+    /// edge order: `(other end, category, the way the edge was walked)`.
+    /// `Forward` lists outgoing edges, `Backward` incoming ones, `Both` both
+    /// (a self-loop once, as `Forward`).
+    pub fn neighbours(
+        &self,
+        id: NodeId,
+        reach: Reach,
+        follow: Option<&[EdgeCategoryId]>,
+    ) -> Vec<(NodeId, EdgeCategoryId, Reach)> {
+        neighbours_in(self.all_edges(), id, reach, &follow_set(follow))
+    }
+
+    /// Breadth-first walk from `seeds` along `reach`, up to `max_depth` hops:
+    /// every reached node in discovery order with its depth, the category of
+    /// the edge that first reached it and the node it was reached from. The
+    /// seeds are not in it; `max_depth = 0` reaches nothing.
+    pub fn bfs(
+        &self,
+        seeds: &[NodeId],
+        reach: Reach,
+        follow: Option<&[EdgeCategoryId]>,
+        max_depth: usize,
+    ) -> Vec<Reached> {
+        let walk = walk_of(reach);
+        let adj = Adjacency::build(self, &follow_set(follow));
+        let reached = reach::bfs(&adj, seeds, walk, max_depth).reached;
+        traverse_marker("bfs", walk, seeds.len(), reached.len(), adj.len());
+        reached
+    }
+
+    /// Node ids that reach `sink` within `max_depth` hops, in backward
+    /// discovery order. Sink excluded.
+    pub fn predecessors(
+        &self,
+        sink: NodeId,
+        follow: Option<&[EdgeCategoryId]>,
+        max_depth: usize,
+    ) -> Vec<NodeId> {
+        let adj = Adjacency::build(self, &follow_set(follow));
+        let ids = reach_ids(reach::bfs(&adj, &[sink], Walk::Backward, max_depth));
+        traverse_marker("predecessors", Walk::Backward, 1, ids.len(), adj.len());
+        ids
+    }
+
+    /// The `sources` that reach `sink` within `max_depth` hops, in `sources`
+    /// order. The sink itself is never a hit.
+    pub fn reachable_by(
+        &self,
+        sink: NodeId,
+        sources: &[NodeId],
+        follow: Option<&[EdgeCategoryId]>,
+        max_depth: usize,
+    ) -> Vec<NodeId> {
+        if sources.is_empty() {
+            traverse_marker("reachable_by", Walk::Backward, 1, 0, 0);
+            return Vec::new();
+        }
+        let adj = Adjacency::build(self, &follow_set(follow));
+        let hits = reach::reachable_by(&adj, sink, sources, max_depth);
+        traverse_marker("reachable_by", Walk::Backward, 1, hits.len(), adj.len());
+        hits
+    }
+
+    /// A shortest path by hop count from `from` to `to` along `reach`, or
+    /// `None` when `to` is not reached within `max_depth` hops. Each step is
+    /// `(node, category of the edge that entered it)`, `None` for `from`;
+    /// `from == to` is the zero-hop path `[(from, None)]`.
+    ///
+    /// The path follows the BFS parents from `to` back to `from`. A parent is
+    /// recorded at first discovery, so the path is a shortest one, and among
+    /// equally short paths it is the one global edge order meets first.
+    pub fn shortest_path(
+        &self,
+        from: NodeId,
+        to: NodeId,
+        reach: Reach,
+        follow: Option<&[EdgeCategoryId]>,
+        max_depth: usize,
+    ) -> Option<Vec<(NodeId, Option<EdgeCategoryId>)>> {
+        let walk = walk_of(reach);
+        if from == to {
+            traverse_marker("shortest_path", walk, 1, 0, 0);
+            return Some(vec![(from, None)]);
+        }
+        let adj = Adjacency::build(self, &follow_set(follow));
+        let reached = reach::bfs(&adj, &[from], walk, max_depth).reached;
+        traverse_marker("shortest_path", walk, 1, reached.len(), adj.len());
+        let entered: HashMap<NodeId, (EdgeCategoryId, NodeId)> =
+            reached.iter().map(|r| (r.id, (r.via, r.parent))).collect();
+        // Every reached node's parent is `from` (the only seed, never itself
+        // reached) or a node discovered before it, so the chain ends at
+        // `from` in at most `reached.len()` steps.
+        let mut path = Vec::new();
+        let mut cur = to;
+        while cur != from {
+            let &(via, parent) = entered.get(&cur)?;
+            path.push((cur, Some(via)));
+            cur = parent;
+        }
+        path.push((from, None));
+        path.reverse();
+        Some(path)
+    }
+
     /// Spreading activation over the full merged graph (all repos + cross edges).
     pub fn activate(
         &self,
