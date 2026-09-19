@@ -4522,6 +4522,7 @@
     "fixtures/swift-module-qnames",
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
+    "fixtures/test-reports-coverage",
     "fixtures/test-reports-fail",
     "fixtures/ts-enum-members",
     "fixtures/ts-route-per-method",
