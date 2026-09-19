@@ -33,6 +33,16 @@ pub use profile::{ActivationPreset, DomainProfile, DomainTables, EntryRule, Name
 /// CSR [`algo::Adjacency`] index, and reachability in [`algo::reach`].
 pub mod algo;
 
+/// Activation plan (LD.12a): [`plan::ActivationPlan`] runs PPR, a domain's
+/// ranking signals, filters and synth hooks in one pass and returns one
+/// [`plan::ActivatedView`]. [`activate`] is that pass with no hooks.
+pub mod plan;
+
+pub use plan::{
+    ActivatedView, ActivationPlan, DegreeSpecificity, FilterPredicate, RankingSignal, SliceGraph, SynthCell,
+    SynthHook,
+};
+
 // ============================================================================
 // Config
 // ============================================================================
@@ -128,18 +138,40 @@ impl ActivationResult {
 /// `edges` — all edges to consider (intra + cross, caller decides).
 /// `seeds` — query-relevant nodes that receive restart probability.
 /// `config` — direction, weights, specificity, damping, etc.
+///
+/// The [`ActivationPlan`] pass with no hooks: PPR, node specificity when
+/// configured, every node scoring above 0, sorted by score descending then
+/// node id, truncated to `top_k`.
 pub fn activate(
     node_ids: &[NodeId],
     edges: &[Edge],
     seeds: &[NodeId],
     config: &ActivationConfig,
 ) -> ActivationResult {
+    let view = plan::activate_view(&SliceGraph { nodes: node_ids, edges }, seeds, config);
+    ActivationResult {
+        scores: view.scores,
+        iterations: view.iterations,
+    }
+}
+
+/// The PPR score vector, index-aligned with `node_ids`, and the power
+/// iteration rounds that produced it. Empty, after 0 rounds, when there are
+/// no nodes, no seeds, or no seed is a node.
+///
+/// This is the pre-plan `activate()`'s arithmetic verbatim, in the same
+/// operation order: `plan`'s oracle test compares f64 bits, so do not
+/// "simplify" the dangling-mass sum or reorder the update. A repeated node id
+/// is indexed at its last occurrence; an earlier one scores 0.
+pub(crate) fn ppr_vector<'e>(
+    node_ids: &[NodeId],
+    edges: impl Iterator<Item = &'e Edge>,
+    seeds: &[NodeId],
+    config: &ActivationConfig,
+) -> (Vec<f64>, usize) {
     let n = node_ids.len();
     if n == 0 || seeds.is_empty() {
-        return ActivationResult {
-            scores: vec![],
-            iterations: 0,
-        };
+        return (Vec::new(), 0);
     }
 
     let id_to_idx: HashMap<NodeId, usize> =
@@ -191,10 +223,7 @@ pub fn activate(
         .filter(|s| id_to_idx.contains_key(s))
         .count();
     if seed_count == 0 {
-        return ActivationResult {
-            scores: vec![],
-            iterations: 0,
-        };
+        return (Vec::new(), 0);
     }
     let seed_weight = 1.0 / seed_count as f64;
     for seed in seeds {
@@ -249,48 +278,7 @@ pub fn activate(
         }
     }
 
-    // Node specificity adjustment (post-PPR).
-    if config.node_specificity != Specificity::None {
-        let mut degree = vec![0usize; n];
-        for edge in edges {
-            if let Some(&fi) = id_to_idx.get(&edge.from) {
-                degree[fi] += 1;
-            }
-            if let Some(&ti) = id_to_idx.get(&edge.to) {
-                degree[ti] += 1;
-            }
-        }
-
-        for i in 0..n {
-            let d = degree[i] as f64;
-            match config.node_specificity {
-                Specificity::Idf => scores[i] /= 1.0 + d,
-                Specificity::InverseIdf => scores[i] *= (1.0 + d).ln_1p(),
-                Specificity::None => unreachable!(),
-            }
-        }
-    }
-
-    // Collect, sort descending, truncate to top_k.
-    let mut result: Vec<(NodeId, f64)> = node_ids
-        .iter()
-        .zip(scores.iter())
-        .filter(|(_, s)| **s > 0.0)
-        .map(|(&id, &s)| (id, s))
-        .collect();
-    // Tiebreak on node id so exact-score ties at the top_k boundary don't
-    // resolve by caller-supplied input order (audit 2026-06-10).
-    result.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.0.cmp(&b.0.0))
-    });
-    result.truncate(config.top_k);
-
-    ActivationResult {
-        scores: result,
-        iterations,
-    }
+    (scores, iterations)
 }
 
 // ============================================================================
