@@ -7,12 +7,19 @@
 //! worker and maps on that pool (`parallel::par_map_ordered`). A build called
 //! from a plain thread uses the engine's own pool (`GLIA_THREADS`, default
 //! every core); `cli/tests/parallel_cli.rs` covers `GLIA_THREADS=1`.
+//!
+//! LG.1b: the walk's reads, the const-table scan, the RPC needle pass and the
+//! multi-repo walks run on the same pool; the tests at the bottom pin them.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use repo_graph_code_domain::node_kind;
-use repo_graph_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
+use repo_graph_code_domain::walk_gating::repo_identity;
+use repo_graph_core::{NodeKindId, RepoId};
+use repo_graph_engine::{
+    GenerateResult, ParseCache, generate_many, generate_one, generate_one_with_cache,
+};
 use repo_graph_store::write_merged_sharded;
 
 /// Worker stack for the test pools: the engine pool's own size.
@@ -411,5 +418,295 @@ fn deep_nesting_parses_on_worker_threads() {
     assert!(
         module_qnames(&r).contains("deep"),
         "the file's MODULE is in the graph"
+    );
+}
+
+/// Distinct nodes of `kind` across every graph (a marker id can sit in
+/// several language graphs).
+fn count_kind(r: &GenerateResult, kind: NodeKindId) -> usize {
+    r.merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&kind))
+                .map(|n| n.id.0)
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+const ORDERS_PROTO: &str = "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/shop/pb\";\n\nservice Orders {\n  rpc Get (GetRequest) returns (Order);\n}\n\nmessage GetRequest { string id = 1; }\nmessage Order { string id = 1; }\n";
+
+const ORDERS_SERVER: &str = "package main\n\nimport (\n\t\"context\"\n\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/shop/pb\"\n)\n\ntype server struct {\n\tpb.UnimplementedOrdersServer\n}\n\nfunc (s *server) Get(ctx context.Context, in *pb.GetRequest) (*pb.Order, error) {\n\treturn &pb.Order{}, nil\n}\n\nfunc main() {\n\ts := grpc.NewServer()\n\tpb.RegisterOrdersServer(s, &server{})\n}\n";
+
+/// A Go client repo: `pb.NewOrdersClient(conn)` names a service only the
+/// server repo's `.proto` declares, so `apply_rpc_needles` mints its
+/// GRPC_CLIENT from the build-wide service set; 30 more Go files give the
+/// needle pass files to gate off.
+fn write_orders_client(dir: &Path) {
+    write(dir, "go.mod", "module example.com/client\n\ngo 1.22\n");
+    write(
+        dir,
+        "main.go",
+        "package main\n\nimport (\n\t\"context\"\n\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/shop/pb\"\n)\n\nfunc main() {\n\tconn, _ := grpc.Dial(\"orders:50051\")\n\torders := pb.NewOrdersClient(conn)\n\t_, _ = orders.Get(context.Background(), &pb.GetRequest{})\n}\n",
+    );
+    for i in 0..30 {
+        write(
+            dir,
+            &format!("util/u{i}.go"),
+            &format!(
+                "package util\n\n// U{i} is helper {i}.\nfunc U{i}(x int) int {{ return x + {i} }}\n"
+            ),
+        );
+    }
+}
+
+/// A TS repo whose client URL is `${environment.apiUrl}/orders`: the const
+/// table binds `apiUrl` and the A11.2 endpoint fold re-keys the ENDPOINT.
+fn write_orders_web(dir: &Path) {
+    write(
+        dir,
+        "src/environments/environment.ts",
+        "export const environment = {\n  production: false,\n  apiUrl: 'http://orders.internal/api',\n};\n",
+    );
+    write(
+        dir,
+        "src/app/orders.service.ts",
+        "import { Injectable } from '@angular/core';\nimport { HttpClient } from '@angular/common/http';\nimport { environment } from '../environments/environment';\n\n@Injectable({ providedIn: 'root' })\nexport class OrdersService {\n  constructor(private http: HttpClient) {}\n\n  list() {\n    return this.http.get(`${environment.apiUrl}/orders`);\n  }\n}\n",
+    );
+    for i in 0..30 {
+        write(
+            dir,
+            &format!("src/app/lib/l{i}.ts"),
+            &format!(
+                "export const LABEL_{i} = 'label-{i}';\nexport function l{i}(x: number): number {{\n  return x + {i};\n}}\n"
+            ),
+        );
+    }
+}
+
+/// The committed LA.17 Connect fixture: its Go and TS clients take the
+/// Connect half of the needle pass (RPC_PROCEDURE / RPC_CALL).
+fn connect_fixture_dirs() -> Vec<String> {
+    let root = format!(
+        "{}/../bench/substrate-gap/fixtures/xcut-connect-rpc",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    ["server", "client", "web"]
+        .iter()
+        .map(|d| format!("{root}/{d}"))
+        .collect()
+}
+
+/// LG.1b: a multi-repo build walks its repos concurrently, scans the const
+/// table and runs the RPC needle pass on the pool. None of it may reach the
+/// store: 1 and 16 threads write the same bytes and report the same errors,
+/// and every needle half (gRPC client, gRPC server, Connect) fired.
+#[test]
+fn multi_repo_pool_size_does_not_change_a_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    let server = tmp.path().join("orders-server");
+    write(&server, "api.proto", ORDERS_PROTO);
+    write(&server, "main.go", ORDERS_SERVER);
+    let client = tmp.path().join("orders-client");
+    write_orders_client(&client);
+    let web = tmp.path().join("orders-web");
+    write_orders_web(&web);
+    let mut repos: Vec<String> = [&server, &client, &web]
+        .iter()
+        .map(|p| p.to_str().unwrap().to_string())
+        .collect();
+    repos.extend(connect_fixture_dirs());
+
+    let mut runs = Vec::new();
+    for n in [1usize, 16] {
+        let r = pool(n).install(|| generate_many(&repos)).unwrap();
+        let out = tmp.path().join(format!("out_{n}"));
+        write_merged_sharded(&r.merged, &out).unwrap();
+        runs.push((n, r, out));
+    }
+    let (_, one, out_1) = &runs[0];
+    assert!(one.parse_errors.is_empty(), "{:?}", one.parse_errors);
+    let clients = count_kind(one, node_kind::GRPC_CLIENT);
+    assert!(
+        clients > 0,
+        "the client repo's NewOrdersClient became a GRPC_CLIENT"
+    );
+    assert!(
+        count_kind(one, node_kind::GRPC_SERVER) > 0,
+        "the server half fired"
+    );
+    assert!(
+        count_kind(one, node_kind::RPC_PROCEDURE) > 0,
+        "the Connect half fired"
+    );
+    let endpoints: BTreeSet<String> = one
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nav
+                .kind_by_id
+                .iter()
+                .filter(|(_, k)| **k == node_kind::ENDPOINT)
+                .filter_map(|(id, _)| g.nav.qname_by_id.get(id).cloned())
+        })
+        .collect();
+    assert!(
+        endpoints
+            .iter()
+            .any(|q| q.contains("/orders") && !q.contains("${")),
+        "the const table folded the environment base: {endpoints:?}"
+    );
+
+    let (_, sixteen, out_16) = &runs[1];
+    assert_dirs_byte_identical(out_1, out_16, "multi-repo: 1 thread vs 16");
+    assert_eq!(sixteen.parse_errors, one.parse_errors);
+    assert_eq!(count_kind(sixteen, node_kind::GRPC_CLIENT), clients);
+    assert_eq!(sixteen.repo_labels, one.repo_labels);
+}
+
+/// The distinct `g.repo` values over `merged.graphs`, in graph order: the
+/// order that fixes shard indices.
+fn repo_order(r: &GenerateResult) -> Vec<RepoId> {
+    let mut out: Vec<RepoId> = Vec::new();
+    for g in &r.merged.graphs {
+        if out.last() != Some(&g.repo) {
+            out.push(g.repo);
+        }
+    }
+    out
+}
+
+fn repo_id_of(dir: &Path) -> RepoId {
+    RepoId::from_canonical(&repo_identity(dir).key)
+}
+
+/// LG.1b: the phase-1 walks run concurrently but come back in argument
+/// order. `alpha` holds 300 files and `beta` one, so a completion-order
+/// collect would put `beta` first; a missing path keeps its error slot.
+#[test]
+fn walk_order_is_argument_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alpha = tmp.path().join("alpha");
+    for i in 0..300 {
+        write(
+            &alpha,
+            &format!("pkg/m{i}.py"),
+            &format!("def f_{i}(x):\n    return x + {i}\n"),
+        );
+    }
+    let beta = tmp.path().join("beta");
+    write(&beta, "main.py", "def main():\n    return 0\n");
+    let (a, b) = (
+        alpha.to_str().unwrap().to_string(),
+        beta.to_str().unwrap().to_string(),
+    );
+    let missing = "/nonexistent-glia-lg1b".to_string();
+
+    let r = pool(16)
+        .install(|| generate_many(&[a.clone(), missing.clone(), b.clone()]))
+        .unwrap();
+    assert_eq!(
+        r.parse_errors,
+        vec!["not a directory: /nonexistent-glia-lg1b".to_string()]
+    );
+    assert_eq!(repo_order(&r), vec![repo_id_of(&alpha), repo_id_of(&beta)]);
+
+    let rev = pool(16)
+        .install(|| generate_many(&[b, missing, a]))
+        .unwrap();
+    assert_eq!(rev.parse_errors, r.parse_errors);
+    assert_eq!(
+        repo_order(&rev),
+        vec![repo_id_of(&beta), repo_id_of(&alpha)]
+    );
+}
+
+/// LG.1b: the walk reads on the pool, and a file its read rule rejects falls
+/// through exactly as the inline reads did. A 600 KB README is no doc, a
+/// 600 KB openapi.json is never sniffed, a 600 KB `Dockerfile.md` is no doc
+/// but passes the source rule and routes as a Dockerfile, and non-UTF-8 files
+/// are dropped. Same bytes on 1 and 16 threads.
+#[test]
+fn oversize_and_unreadable_files_fall_through_as_before() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let pad = "x".repeat(600_000);
+    write(
+        &repo,
+        "README.md",
+        &format!("# Big\n\nThe `serve` entry.\n\n{pad}\n"),
+    );
+    write(
+        &repo,
+        "docs/GUIDE.md",
+        "# Guide\n\nCall `serve` to start.\n",
+    );
+    write(
+        &repo,
+        "api/openapi.json",
+        &format!(
+            r#"{{"openapi":"3.0.0","info":{{"title":"Big","version":"1"}},"paths":{{"/big":{{"get":{{}}}}}},"x-pad":"{pad}"}}"#
+        ),
+    );
+    write(
+        &repo,
+        "api/small.json",
+        r#"{"openapi":"3.0.0","info":{"title":"Small","version":"1"},"paths":{"/small":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#,
+    );
+    write(
+        &repo,
+        "ops/Dockerfile.md",
+        &format!("FROM python:3.12-slim\nEXPOSE 8080\n# {pad}\n"),
+    );
+    write(&repo, "app.py", "def serve():\n    return 0\n");
+    std::fs::write(repo.join("broken.py"), b"def f():\n    return '\xff\xfe'\n").unwrap();
+    std::fs::write(repo.join("docs/BROKEN.md"), b"# Broken \xff\n").unwrap();
+    let repo_s = repo.to_str().unwrap();
+
+    let one = pool(1).install(|| generate_one(repo_s)).unwrap();
+    let sixteen = pool(16).install(|| generate_one(repo_s)).unwrap();
+    let (out_1, out_16) = (tmp.path().join("out_1"), tmp.path().join("out_16"));
+    write_merged_sharded(&one.merged, &out_1).unwrap();
+    write_merged_sharded(&sixteen.merged, &out_16).unwrap();
+    assert_dirs_byte_identical(&out_1, &out_16, "fall-through: 1 thread vs 16");
+    assert_eq!(one.parse_errors, sixteen.parse_errors);
+
+    let modules = module_qnames(&one);
+    for m in ["app", "api::small.json", "ops::Dockerfile.md"] {
+        assert!(modules.contains(m), "{m} is routed: {modules:?}");
+    }
+    for m in [
+        "api::openapi.json",
+        "broken",
+        "README.md",
+        "docs::BROKEN.md",
+    ] {
+        assert!(!modules.contains(m), "{m} is not routed: {modules:?}");
+    }
+    let doc_qnames: BTreeSet<String> = one
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nav
+                .kind_by_id
+                .iter()
+                .filter(|(_, k)| **k == node_kind::DOC_SECTION)
+                .filter_map(|(id, _)| g.nav.qname_by_id.get(id).cloned())
+        })
+        .collect();
+    assert!(
+        doc_qnames.iter().any(|q| q.contains("GUIDE")),
+        "the small doc is ingested: {doc_qnames:?}"
+    );
+    assert!(
+        !doc_qnames
+            .iter()
+            .any(|q| q.contains("README") || q.contains("BROKEN")),
+        "the oversize and non-UTF-8 docs are not: {doc_qnames:?}"
     );
 }

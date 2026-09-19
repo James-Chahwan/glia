@@ -1,6 +1,8 @@
 //! The engine's own rayon pool for the per-file route / parse / extract
 //! (LG.1a), thread-safe quiet panics, and the order-preserving map that keeps
-//! a parallel build byte-identical to a sequential one. Extended by LG.1b.
+//! a parallel build byte-identical to a sequential one. LG.1b maps four more
+//! stages through [`par_map_ordered`]: the walk's file reads, the const-table
+//! scan, the RPC needle pass and a multi-repo build's per-repo walks.
 //!
 //! Why a dedicated pool and not rayon's global one: the worker stack size is
 //! ours to set (see [`WORKER_STACK`]), and an embedding app that uses the

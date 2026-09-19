@@ -4,6 +4,7 @@
 //! calls (LA.17). `grafts::apply_post_cache` runs them.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{FileParse, attach_imports_cell};
@@ -22,6 +23,14 @@ pub(super) struct RpcContext {
     /// Sorted and deduplicated, so needle order (and therefore GRPC_CLIENT
     /// emission order) does not depend on walk or repo order.
     pub(super) services: Vec<ProtoServiceRef>,
+    /// LG.1b: the files the last [`apply_rpc_needles`] call ran its needles
+    /// on, drained by `build_graphs_for_repo` ([`Self::take_needle_files`])
+    /// for its `[parallel]` line. It rides the build-wide context because the
+    /// post-cache sequence that calls the pass (`grafts::apply_post_cache`)
+    /// returns nothing; repos are built one at a time, so the value is always
+    /// the current repo's. Removal path: once `apply_post_cache` returns its
+    /// tallies, return this count with them and drop the field.
+    needle_files: AtomicUsize,
 }
 
 impl RpcContext {
@@ -34,6 +43,11 @@ impl RpcContext {
         }
         self.services.sort_unstable();
         self.services.dedup();
+    }
+
+    /// The needle-pass file count of the repo just built, reset to 0.
+    pub(super) fn take_needle_files(&self) -> usize {
+        self.needle_files.swap(0, Ordering::Relaxed)
     }
 }
 
@@ -64,6 +78,17 @@ impl RpcContext {
 /// Twirp is gated per repo (`twirp_repo`: a go.mod requiring
 /// github.com/twitchtv/twirp, or a generated `.twirp.go`), because a Twirp
 /// client file imports nothing but its generated package.
+///
+/// LG.1b: two stages. Every file's three needle halves are computed on the
+/// engine pool ([`crate::parallel::par_map_ordered`], panics caught by
+/// [`crate::parallel::quiet`]) against the parses as the router left them;
+/// then one sequential loop grafts them in file order, client, server, then
+/// Connect / Twirp per file, and reports each caught panic where the inline
+/// pass did. Computing the server and Connect / Twirp halves before the
+/// client markers are grafted changes nothing: both read only the file's
+/// CLASS / STRUCT and METHOD / FUNCTION nodes (their spans, names and
+/// parents), and a graft adds only marker kinds. A file's parse is found
+/// through [`parse_index`], built once, instead of a scan of every parse.
 pub(super) fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -73,71 +98,163 @@ pub(super) fn apply_rpc_needles(
     parse_errors: &mut Vec<String>,
 ) -> RpcNeedleCounts {
     let mut added = RpcNeedleCounts::default();
+    rpc.needle_files.store(0, Ordering::Relaxed);
     if rpc.services.is_empty() {
         return added;
     }
     let twirp_repo = is_twirp_repo(files);
-    for (path, source) in files {
-        let client_side = grpc::file_has_grpc_context(source);
-        // Superset of `client_side`; the cheap text checks keep the parse
-        // lookup below off files that can hold neither half.
-        let grpc_side = grpc::may_hold_grpc_server(source);
-        let proto_rpc_side = grpc::may_hold_proto_rpc(source, twirp_repo);
-        if !grpc_side && !proto_rpc_side {
-            continue;
-        }
-        let Some(lang) = detect_language(path) else { continue };
-        if lang == "proto" {
-            continue;
-        }
-        let Some(parses) = parses_by_lang.get_mut(lang) else { continue };
-        let module_id = modules.module_id(path, repo);
-        // No match = the file failed to parse; there is no module to hang a marker on.
-        let Some(fp) = parses
-            .iter_mut()
-            .find(|fp| fp.nodes.first().is_some_and(|n| n.id == module_id))
-        else {
+    let index = parse_index(parses_by_lang);
+    let services = rpc.services.as_slice();
+    let parses: &HashMap<&'static str, Vec<FileParse>> = parses_by_lang;
+    let (outs, _threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
+        let file = NeedleFile {
+            path,
+            source,
+            repo,
+            services,
+            twirp_repo,
+        };
+        needle_one(&file, modules, &index, parses)
+    });
+    let mut needle_files = 0usize;
+    for ((path, _), out) in files.iter().zip(outs) {
+        let Some(out) = out else { continue };
+        needle_files += 1;
+        let NeedleOut {
+            lang,
+            slot,
+            module_id,
+            client,
+            server,
+            proto_rpc,
+        } = out;
+        let Some(fp) = parses_by_lang.get_mut(lang).and_then(|v| v.get_mut(slot)) else {
             continue;
         };
-        if grpc_side {
-            if client_side {
-                match crate::parallel::quiet(|| {
-                    grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
-                }) {
-                    Ok(out) => added.clients += graft_rpc_markers(fp, out, path, module_id, lang),
-                    Err(_) => parse_errors.push(format!("{path}: PANIC (grpc client needles)")),
-                }
-            }
-            match crate::parallel::quiet(|| {
-                grpc::extract_grpc_server_nodes(source, module_id, repo, &rpc.services, &fp.nodes, &fp.nav)
-            }) {
-                Ok(out) => added.servers += graft_rpc_markers(fp, out, path, module_id, lang),
-                Err(_) => parse_errors.push(format!("{path}: PANIC (grpc server needles)")),
-            }
+        match client {
+            Some(Ok(nodes)) => added.clients += graft_rpc_markers(fp, nodes, path, module_id, lang),
+            Some(Err(e)) => parse_errors.push(e),
+            None => {}
         }
-        if proto_rpc_side {
-            match crate::parallel::quiet(|| {
-                grpc::extract_proto_rpc_nodes(
-                    source,
-                    path,
-                    lang,
-                    module_id,
-                    repo,
-                    &rpc.services,
-                    &fp.nodes,
-                    &fp.nav,
-                    twirp_repo,
-                )
-            }) {
-                Ok(out) => {
-                    added.proto_rpc.add(out.counts);
-                    graft_proto_rpc(fp, out, lang);
-                }
-                Err(_) => parse_errors.push(format!("{path}: PANIC (proto rpc needles)")),
+        match server {
+            Some(Ok(nodes)) => added.servers += graft_rpc_markers(fp, nodes, path, module_id, lang),
+            Some(Err(e)) => parse_errors.push(e),
+            None => {}
+        }
+        match proto_rpc {
+            Some(Ok(out)) => {
+                added.proto_rpc.add(out.counts);
+                graft_proto_rpc(fp, out, lang);
+            }
+            Some(Err(e)) => parse_errors.push(e),
+            None => {}
+        }
+    }
+    rpc.needle_files.store(needle_files, Ordering::Relaxed);
+    added
+}
+
+/// LG.1b: `(language, MODULE id)` -> the parse's slot in
+/// `parses_by_lang[language]`, keyed by each parse's first node (every code
+/// parser emits the file's MODULE first). The first parse of a language wins
+/// a repeated id, as the linear `find` it replaces did.
+fn parse_index(
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+) -> HashMap<(&'static str, NodeId), usize> {
+    let mut index = HashMap::new();
+    for (lang, parses) in parses_by_lang {
+        for (slot, fp) in parses.iter().enumerate() {
+            if let Some(first) = fp.nodes.first() {
+                index.entry((*lang, first.id)).or_insert(slot);
             }
         }
     }
-    added
+    index
+}
+
+/// One walked file and the build-wide inputs of its needle halves.
+struct NeedleFile<'a> {
+    path: &'a str,
+    source: &'a str,
+    repo: RepoId,
+    services: &'a [ProtoServiceRef],
+    twirp_repo: bool,
+}
+
+/// One file's needle output, computed on a pool worker and grafted by the
+/// sequential loop of [`apply_rpc_needles`]. Each half is `None` when its
+/// text gate kept it off the file, else its nodes or the `parse_errors` line
+/// of a caught panic.
+struct NeedleOut {
+    lang: &'static str,
+    /// Index into `parses_by_lang[lang]`.
+    slot: usize,
+    module_id: NodeId,
+    client: Option<Result<grpc::GrpcNodes, String>>,
+    server: Option<Result<grpc::GrpcNodes, String>>,
+    proto_rpc: Option<Result<grpc::ProtoRpcNodes, String>>,
+}
+
+/// Compute one file's needle halves against its parse, read-only. `None` when
+/// the cheap text checks rule out every half, the file has no source language
+/// (or is a `.proto`), or it has no parse (it failed to parse: there is no
+/// module to hang a marker on).
+fn needle_one(
+    file: &NeedleFile<'_>,
+    modules: &ModuleQnames,
+    index: &HashMap<(&'static str, NodeId), usize>,
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+) -> Option<NeedleOut> {
+    let NeedleFile {
+        path,
+        source,
+        repo,
+        services,
+        twirp_repo,
+    } = *file;
+    let client_side = grpc::file_has_grpc_context(source);
+    // Superset of `client_side`; the cheap text checks keep the parse
+    // lookup below off files that can hold neither half.
+    let grpc_side = grpc::may_hold_grpc_server(source);
+    let proto_rpc_side = grpc::may_hold_proto_rpc(source, twirp_repo);
+    if !grpc_side && !proto_rpc_side {
+        return None;
+    }
+    let lang = detect_language(path)?;
+    if lang == "proto" {
+        return None;
+    }
+    let module_id = modules.module_id(path, repo);
+    let slot = *index.get(&(lang, module_id))?;
+    let fp = parses_by_lang.get(lang)?.get(slot)?;
+    let client = (grpc_side && client_side).then(|| {
+        crate::parallel::quiet(|| {
+            grpc::extract_known_grpc_client_nodes(source, module_id, repo, services)
+        })
+        .map_err(|_| format!("{path}: PANIC (grpc client needles)"))
+    });
+    let server = grpc_side.then(|| {
+        crate::parallel::quiet(|| {
+            grpc::extract_grpc_server_nodes(source, module_id, repo, services, &fp.nodes, &fp.nav)
+        })
+        .map_err(|_| format!("{path}: PANIC (grpc server needles)"))
+    });
+    let proto_rpc = proto_rpc_side.then(|| {
+        crate::parallel::quiet(|| {
+            grpc::extract_proto_rpc_nodes(
+                source, path, lang, module_id, repo, services, &fp.nodes, &fp.nav, twirp_repo,
+            )
+        })
+        .map_err(|_| format!("{path}: PANIC (proto rpc needles)"))
+    });
+    Some(NeedleOut {
+        lang,
+        slot,
+        module_id,
+        client,
+        server,
+        proto_rpc,
+    })
 }
 
 /// LA.17: does this repo speak Twirp? Its go.mod requires the runtime, or it

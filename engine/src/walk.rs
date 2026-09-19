@@ -2,7 +2,7 @@
 //! which files are queued for parsing, and the one-node-per-region graph.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::glia_config::{self, ProjectDecl, Spanned};
 use repo_graph_code_domain::project_roots::{self, ProjectRoot};
@@ -65,6 +65,11 @@ const JSON_CONTRACT_CAP: u64 = 512_000;
 /// held in memory for a table scan.
 const MIGRATION_SQL_CAP: u64 = 4 * 1024 * 1024;
 
+/// Largest markdown doc the walk reads (G18). A bigger `.md`, or one that is
+/// not UTF-8, is not a doc: it falls through to the source rule like any
+/// other file ([`PendingClass::Markdown`]).
+const MARKDOWN_CAP: u64 = 500_000;
+
 /// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
 /// `.json` the walk reached, `admitted` is the ones queued as contracts or
 /// (LA.16) as JSON Schemas, and `over_cap` is the ones never read because
@@ -74,6 +79,139 @@ struct JsonAdmission {
     sniffed: usize,
     admitted: usize,
     over_cap: usize,
+}
+
+/// A file the walk queued for a read (LG.1b). The descent only gates and
+/// classifies; every read runs afterwards on the engine pool
+/// ([`crate::parallel::par_map_ordered`]) and one sequential fold puts the
+/// texts into `files` / `md` in walk order, so both lists are the ones the
+/// inline reads built.
+struct Pending {
+    /// Repo-relative path, as `files` / `md` key it.
+    rel: String,
+    abs: PathBuf,
+    class: PendingClass,
+}
+
+/// Which read rule a [`Pending`] file takes, decided during the descent.
+#[derive(Clone, Copy)]
+enum PendingClass {
+    /// A `.md` doc (G18), read when it is at most [`MARKDOWN_CAP`] bytes.
+    /// `source_fallback`: the path also passes the source rule (a
+    /// `Dockerfile.md`, a `.env.md`), so a doc that is over the cap or not
+    /// UTF-8 is read as source instead, as the inline walk did: its markdown
+    /// branch only stopped the file on a successful read. A `.md` never
+    /// reaches the `.json` sniff or the migration cap (neither suffix
+    /// matches), so the source rule is the whole fall-through.
+    Markdown { source_fallback: bool },
+    /// A non-manifest `.json`, read only to be sniffed (A10.8, LA.16).
+    JsonSniff,
+    /// A language file or a bypass path (manifest, yaml, Dockerfile, ...).
+    Source,
+}
+
+/// The outcome of one [`Pending`] read.
+enum Read {
+    Md(String),
+    /// A sniffed `.json`: `over_cap` when it was never read, `admitted` its
+    /// text when it is an API contract or a JSON Schema.
+    Json { over_cap: bool, admitted: Option<String> },
+    Src(String),
+    /// Nothing to keep: a read failed, or a doc fell through to no rule.
+    Unreadable,
+}
+
+/// Read one queued file by its class's rule. Runs on a pool worker: touches
+/// nothing but the file.
+fn read_one(p: &Pending) -> Read {
+    let file_len = || std::fs::metadata(&p.abs).map(|m| m.len());
+    match p.class {
+        PendingClass::Markdown { source_fallback } => {
+            if file_len().is_ok_and(|n| n <= MARKDOWN_CAP)
+                && let Ok(text) = std::fs::read_to_string(&p.abs)
+            {
+                return Read::Md(text);
+            }
+            if source_fallback && let Ok(text) = std::fs::read_to_string(&p.abs) {
+                return Read::Src(text);
+            }
+            Read::Unreadable
+        }
+        PendingClass::JsonSniff => match file_len() {
+            Ok(n) if n > JSON_CONTRACT_CAP => Read::Json {
+                over_cap: true,
+                admitted: None,
+            },
+            Ok(_) => Read::Json {
+                over_cap: false,
+                admitted: std::fs::read_to_string(&p.abs)
+                    .ok()
+                    .filter(|t| sniff_json_contract(t).is_some() || sniff_json_schema(t)),
+            },
+            Err(_) => Read::Json {
+                over_cap: false,
+                admitted: None,
+            },
+        },
+        PendingClass::Source => match std::fs::read_to_string(&p.abs) {
+            Ok(text) => Read::Src(text),
+            Err(_) => Read::Unreadable,
+        },
+    }
+}
+
+/// `[parallel] walk` marker counts: files queued per [`PendingClass`].
+#[derive(Default)]
+struct ReadCounts {
+    md: usize,
+    json: usize,
+    source: usize,
+}
+
+/// Read every queued file on the pool, then fold the texts into `files` /
+/// `md` and the `[contract] json` counters in walk order (LG.1b).
+///
+/// fired_on marker, once per walk:
+///   `[parallel] walk <root>: read <n> files on <t> threads (md <m>, json <j>, source <s>)`
+/// `n` = `m + j + s`, the files the walk queued for a read by class (a `.md`
+/// that falls through to the source rule counts as md).
+fn read_pending(
+    root: &Path,
+    pending: Vec<Pending>,
+    files: &mut Vec<(String, String)>,
+    md: &mut Vec<(String, String)>,
+    json: &mut JsonAdmission,
+) {
+    let (reads, threads) = crate::parallel::par_map_ordered(&pending, read_one);
+    let mut counts = ReadCounts::default();
+    for (p, read) in pending.into_iter().zip(reads) {
+        match p.class {
+            PendingClass::Markdown { .. } => counts.md += 1,
+            PendingClass::JsonSniff => counts.json += 1,
+            PendingClass::Source => counts.source += 1,
+        }
+        match read {
+            Read::Md(text) => md.push((p.rel, text)),
+            Read::Json { over_cap, admitted } => {
+                json.sniffed += 1;
+                json.over_cap += usize::from(over_cap);
+                if let Some(text) = admitted {
+                    json.admitted += 1;
+                    files.push((p.rel, text));
+                }
+            }
+            Read::Src(text) => files.push((p.rel, text)),
+            Read::Unreadable => {}
+        }
+    }
+    eprintln!(
+        "[parallel] walk {}: read {} files on {threads} threads (md {}, json {}, source {})",
+        root.display(),
+        counts.md + counts.json + counts.source,
+        counts.md,
+        counts.json,
+        counts.source
+    );
 }
 
 pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
@@ -93,22 +231,24 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     // way back up, so each verdict sees exactly the files git would. (A8.2)
     let mut ignores = IgnoreStack::with_config(root, &config.walk);
     let mut declared = DeclaredDirs::new(&config.project);
+    let mut pending = Vec::new();
     let pushed = ignores.push_dir(root);
     walk_dir(
         root,
         root,
         &mut ignores,
-        &mut files,
+        &mut pending,
         &mut regions,
-        &mut md,
         &mut roots,
         &mut counts,
-        &mut json,
         &mut declared,
     );
     if pushed {
         ignores.pop();
     }
+    // LG.1b: the descent (gating, gitignore, project roots, regions) stays
+    // sequential; the reads it queued run on the pool.
+    read_pending(root, pending, &mut files, &mut md, &mut json);
     merge_declared_roots(&config.project, &declared, &regions, &mut roots);
     // A10.8 fired_on marker: `... 2>&1 | grep '^\[contract\] json sniffed='`.
     // Gated on non-zero like the other walk lines.
@@ -233,17 +373,18 @@ fn missing_reason(rel: &str, regions: &[RegionAnchor]) -> String {
     }
 }
 
+/// Descend `dir`: gate each directory, detect project roots, collapse
+/// regions, and queue every file a rule reads into `pending` (LG.1b: the
+/// reads themselves run afterwards, in [`read_pending`]).
 #[allow(clippy::too_many_arguments)]
 fn walk_dir(
     root: &Path,
     dir: &Path,
     ignores: &mut IgnoreStack,
-    files: &mut Vec<(String, String)>,
+    pending: &mut Vec<Pending>,
     regions: &mut Vec<RegionAnchor>,
-    md: &mut Vec<(String, String)>,
     roots: &mut Vec<ProjectRoot>,
     counts: &mut GateCounts,
-    json: &mut JsonAdmission,
     declared: &mut DeclaredDirs,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -307,7 +448,7 @@ fn walk_dir(
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, files, regions, md, roots, counts, json, declared);
+            walk_dir(root, &path, ignores, pending, regions, roots, counts, declared);
             if pushed {
                 ignores.pop();
             }
@@ -322,36 +463,31 @@ fn walk_dir(
             }
             let rel = path.strip_prefix(root).unwrap_or(&path);
             let rel_str = rel.to_string_lossy().to_string();
+            let lower = rel_str.to_ascii_lowercase();
+            let source_rule = || detect_language(&rel_str).is_some() || is_bypass_path(&rel_str);
             // Markdown docs (G18) — collected separately; the include/skip rules
-            // are applied in `build_docs_graph`.
-            if rel_str.to_ascii_lowercase().ends_with(".md")
-                && std::fs::metadata(&path).map(|m| m.len() <= 500_000).unwrap_or(false)
-                && let Ok(text) = std::fs::read_to_string(&path)
-            {
-                md.push((rel_str.clone(), text));
+            // are applied in `build_docs_graph`. An oversize or non-UTF-8 doc
+            // falls through to the source rule (`PendingClass::Markdown`).
+            if lower.ends_with(".md") {
+                let class = PendingClass::Markdown {
+                    source_fallback: source_rule(),
+                };
+                pending.push(Pending { rel: rel_str, abs: path, class });
                 continue;
             }
             // A10.8: a `.json` is read only to be sniffed, and queued only when
             // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact) or, since
             // LA.16 (A10.12), a JSON Schema. Lock files, tsconfig and test data
-            // are read once, dropped here, and never kept. `package.json` /
-            // `composer.json` are manifests (`is_bypass_path`) and keep their
-            // own route below. Anything under a collapsed region (node_modules,
-            // dist, ...) is never reached.
-            if rel_str.to_ascii_lowercase().ends_with(".json") && !is_bypass_path(&rel_str) {
-                json.sniffed += 1;
-                match std::fs::metadata(&path) {
-                    Ok(m) if m.len() > JSON_CONTRACT_CAP => json.over_cap += 1,
-                    Ok(_) => {
-                        if let Ok(text) = std::fs::read_to_string(&path)
-                            && (sniff_json_contract(&text).is_some() || sniff_json_schema(&text))
-                        {
-                            json.admitted += 1;
-                            files.push((rel_str, text));
-                        }
-                    }
-                    Err(_) => {}
-                }
+            // are read once, dropped by `read_pending`, and never kept.
+            // `package.json` / `composer.json` are manifests (`is_bypass_path`)
+            // and keep their own route below. Anything under a collapsed region
+            // (node_modules, dist, ...) is never reached.
+            if lower.ends_with(".json") && !is_bypass_path(&rel_str) {
+                pending.push(Pending {
+                    rel: rel_str,
+                    abs: path,
+                    class: PendingClass::JsonSniff,
+                });
                 continue;
             }
             // A13.9: `is_bypass_path` admits a migration `.sql`; one over the
@@ -362,12 +498,12 @@ fn walk_dir(
                 eprintln!("[migrations] skipped file={rel_str} over_cap={MIGRATION_SQL_CAP}");
                 continue;
             }
-            let matches_lang = detect_language(&rel_str).is_some();
-            let matches_bypass = is_bypass_path(&rel_str);
-            if (matches_lang || matches_bypass)
-                && let Ok(source) = std::fs::read_to_string(&path)
-            {
-                files.push((rel_str, source));
+            if source_rule() {
+                pending.push(Pending {
+                    rel: rel_str,
+                    abs: path,
+                    class: PendingClass::Source,
+                });
             }
         }
     }
@@ -1227,6 +1363,55 @@ mod walk_tests {
         assert_eq!(wt.provenance.provenance(), "worktree");
         let clone = regions.iter().find(|r| r.rel_path == "clone").unwrap();
         assert_eq!(clone.provenance, Collapse::NestedRepo);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LG.1b: the reads moved off the descent onto the pool, and a doc's
+    /// fall-through moved with them. The inline walk only stopped a `.md` on a
+    /// SUCCESSFUL doc read, so an oversize or non-UTF-8 doc went on to the
+    /// source rule: read as source when its path passes it (a
+    /// `Dockerfile.md`), dropped otherwise. Same rules on 1 and 8 threads,
+    /// and `files` / `md` keep walk (name) order.
+    #[test]
+    fn oversize_and_unreadable_docs_fall_through_to_the_source_rule() {
+        let root = walk_tmp("mdfall");
+        for d in ["ops/big", "ops/small", "notes", "api"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let over = "x".repeat(MARKDOWN_CAP as usize + 100_000);
+        let big_dockerfile = format!("FROM python:3.12\n# {over}\n");
+        let big_json = format!(r#"{{"openapi":"3.0.0","paths":{{}},"x-pad":"{over}"}}"#);
+        let not_utf8: &[u8] = b"# Notes\n\xff\xfe broken\n";
+        let files_in: [(&str, &[u8]); 10] = [
+            ("README.md", b"# Fixture\n"),
+            ("BIG.md", over.as_bytes()),
+            ("notes/broken.md", not_utf8),
+            ("ops/big/Dockerfile.md", big_dockerfile.as_bytes()),
+            ("ops/small/Dockerfile.md", b"# the small one is a doc\n"),
+            ("api/openapi.json", big_json.as_bytes()),
+            ("api/small.json", br#"{"openapi":"3.0.0","paths":{}}"#),
+            ("app.py", b"x = 1\n"),
+            ("bad.py", not_utf8),
+            ("zz.go", b"package zz\n"),
+        ];
+        for (rel, body) in files_in {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+
+        let expect_files = ["api/small.json", "app.py", "ops/big/Dockerfile.md", "zz.go"];
+        let expect_md = ["README.md", "ops/small/Dockerfile.md"];
+        let keys = |v: &[(String, String)]| v.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+        let pool = |n| rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+        let seq = pool(1).install(|| walk_source_files(&root));
+        let par = pool(8).install(|| walk_source_files(&root));
+        for (label, (files, _, md, _)) in [("1 thread", &seq), ("8 threads", &par)] {
+            assert_eq!(keys(files), expect_files, "{label}: files");
+            assert_eq!(keys(md), expect_md, "{label}: md");
+        }
+        assert_eq!(seq.0, par.0, "same texts on 1 and 8 threads");
+        assert_eq!(seq.2, par.2);
+        let big = seq.0.iter().find(|(p, _)| p == "ops/big/Dockerfile.md").unwrap();
+        assert_eq!(big.1, big_dockerfile, "the oversize doc is read whole, as source");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -353,18 +353,28 @@ pub(crate) fn assemble_many_with(
     // A missing path keeps its slot so errors stay in argument order.
     // Each input's identity (LB.1) is computed here too, so inputs that share
     // a key are disambiguated against each other BEFORE any RepoId is minted.
-    let mut rpc = RpcContext::default();
-    let mut walked: Vec<Result<Walked<'_>, String>> = Vec::with_capacity(repo_paths.len());
-    for path in repo_paths {
+    // LG.1b: the repos are walked concurrently on the engine pool (each walk
+    // reads its files on the same pool); the results come back in argument
+    // order and the proto service set is folded from them in that order. Walk
+    // markers of different repos may interleave; each repo's lines keep their
+    // order.
+    let (walks, _threads) = crate::parallel::par_map_ordered(repo_paths, |path| {
         let root = PathBuf::from(path);
         if !root.is_dir() {
-            walked.push(Err(format!("not a directory: {path}")));
-            continue;
+            return Err(format!("not a directory: {path}"));
         }
         let walk = walk_source_files(&root);
-        rpc.add_files(&walk.0);
         let ident = repo_identity(&root);
-        walked.push(Ok((path, root, walk, ident)));
+        Ok((root, walk, ident))
+    });
+    let mut walked: Vec<Result<Walked<'_>, String>> = repo_paths
+        .iter()
+        .zip(walks)
+        .map(|(path, w)| w.map(|(root, walk, ident)| (path, root, walk, ident)))
+        .collect();
+    let mut rpc = RpcContext::default();
+    for w in walked.iter().flatten() {
+        rpc.add_files(&w.2.0);
     }
     let mut idents: Vec<RepoIdentity> = walked.iter().flatten().map(|w| w.3.clone()).collect();
     let abs_paths: Vec<String> = walked.iter().flatten().map(|w| canonical_display(&w.1)).collect();

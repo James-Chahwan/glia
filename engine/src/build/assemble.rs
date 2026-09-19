@@ -27,16 +27,34 @@ use crate::route::parse_repo_files;
 /// `files` is name-sorted by the walk and the table is first-wins, so the
 /// result does not depend on the process. `.env` / yaml / Dockerfile have no
 /// source language and never reach the scan (env values are A13.7's ENV cell).
-fn build_const_table(files: &[(String, String)], parse_errors: &mut Vec<String>) -> ConstTable {
+///
+/// LG.1b: each file is scanned on the engine pool
+/// ([`crate::parallel::par_map_ordered`]), then merged into the table and its
+/// panics reported in file order, so the first-wins bindings, the conflict
+/// count and the `parse_errors` order are the sequential scan's. Returns the
+/// table, the files scanned and the pool's thread count, for the
+/// `[parallel]` line.
+fn build_const_table(
+    files: &[(String, String)],
+    parse_errors: &mut Vec<String>,
+) -> (ConstTable, usize, usize) {
+    let (scans, threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
+        let lang = detect_language(path)?;
+        Some(crate::parallel::quiet(|| {
+            ConstTable::scan_file(source, lang)
+        }))
+    });
     let mut table = ConstTable::default();
-    for (path, source) in files {
-        let Some(lang) = detect_language(path) else { continue };
-        match crate::parallel::quiet(|| ConstTable::scan_file(source, lang)) {
+    let mut scanned = 0usize;
+    for ((path, _), scan) in files.iter().zip(scans) {
+        let Some(scan) = scan else { continue };
+        scanned += 1;
+        match scan {
             Ok(file_table) => table.merge_from(&file_table),
             Err(_) => parse_errors.push(format!("{path}: PANIC (const table scan)")),
         }
     }
-    table
+    (table, scanned, threads)
 }
 
 /// LF.2d: pin the repo's `.glia/overlay.toml` `[constants]` into `table`,
@@ -122,7 +140,7 @@ pub(super) fn build_graphs_for_repo(
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
     // and live in `grafts::apply_post_cache`, beside `apply_rpc_needles`.
-    let mut const_table = build_const_table(files, &mut parse_errors);
+    let (mut const_table, const_files, threads) = build_const_table(files, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
             "[const] repo table: {} bindings from {} files ({} conflicts) repo={repo_label}",
@@ -164,6 +182,18 @@ pub(super) fn build_graphs_for_repo(
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);
     msgtype_marker(&graphs, repo_label);
+    // LG.1b fired_on marker, once per repo, after its graphs are built:
+    //   `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files on <t> threads`
+    // `c` = files the A11.1 const-table scan read (every file with a source
+    // language), `r` = files the RPC needle pass ran on (text-gated, with a
+    // parse; 0 when the build knows no proto service), `t` = the pool that ran
+    // both. The per-language graph builds stay sequential: `recv_stats` (the
+    // A6.2a `[recv]` counter) is one process-global count taken after each
+    // language's build, so concurrent builds would mix its per-language counts.
+    eprintln!(
+        "[parallel] {repo_label}: const-scan {const_files} files, rpc-needles {} files on {threads} threads",
+        rpc.take_needle_files()
+    );
 
     (graphs, parse_errors)
 }
