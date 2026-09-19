@@ -1,0 +1,12 @@
+version = 1
+
+[[wrapper]]
+call = "request"
+kind = "http"
+method_arg = 0
+path_arg = 1
+
+[[wrapper]]
+call = "api"
+kind = "http"
+receiver = true

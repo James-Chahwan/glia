@@ -44,10 +44,12 @@ impl PyGraph {
     /// `rows`: `{category, qname, kind, file, line, detail, suggest, tier}`,
     /// `line` 1-based, sorted by (category, file, line, qname). Categories, in
     /// order: `unpaired_endpoint`, `ambiguous_endpoint`,
-    /// `unresolved_endpoint`, `unpaired_route`, `tag_only_queue`,
-    /// `dead_symbol`, then the overlay's own rot — `orphaned_rule`,
-    /// `redundant_rule`, `orphaned_cell` — which read each repo's files
-    /// through `repo_roots` (listed in `skipped` for a graph that has none).
+    /// `unresolved_endpoint`, `wrapped_sink` (an `<unresolved>` sink owned by
+    /// a declared `[[wrapper]]`: informational), `unpaired_route`,
+    /// `tag_only_queue`, `dead_symbol`, then the overlay's own rot —
+    /// `orphaned_rule`, `redundant_rule`, `orphaned_cell`. `wrapped_sink` and
+    /// the last three read each repo's files through `repo_roots` (listed in
+    /// `skipped` for a graph that has none).
     /// `suggest` names the overlay section that could repair the row;
     /// `tier` is `fact` or `heuristic`. `counts`: the total per computed
     /// category, before `top_k`.
@@ -112,7 +114,7 @@ mod tests {
             gaps_of(&MergedGraph::new(Vec::new()), &BTreeMap::new(), None, None).expect("report");
         assert_eq!(
             serde_json::to_string(&empty).expect("json"),
-            r#"{"counts":{"ambiguous_endpoint":0,"dead_symbol":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
+            r#"{"counts":{"ambiguous_endpoint":0,"dead_symbol":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
         );
         assert!(
             gaps_of(

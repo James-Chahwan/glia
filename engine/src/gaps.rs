@@ -16,6 +16,7 @@
 //! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it), else `edge` |
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
+//! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not ORIGIN `test_fixture` | heuristic | `entrypoints` |
@@ -28,9 +29,10 @@
 //! [`Locator`] for a node, the stanza's header line for a rule, the row's line
 //! for a sidecar row.
 //!
-//! The last three categories read each repo's files, so they need its root:
-//! with no roots they are not computed and are listed in
-//! [`GapsReport::skipped`] instead of `counts`. Every qname binds through
+//! `wrapped_sink` and the last three categories read each repo's files (its
+//! `.glia/overlay.toml`, its sidecars), so they need its root: with no roots
+//! they are not computed and are listed in [`GapsReport::skipped`] instead of
+//! `counts`, and an `<unresolved>` sink stays an `unresolved_endpoint`. Every qname binds through
 //! `graph::cells::QnameIndex`, as the stage that applies it binds it: an
 //! `[[edge]]` side as the overlay edge stage (`external::overlay`) does, the
 //! exact qname in the stanza's own repo first, else in any repo of the build;
@@ -63,7 +65,7 @@ use serde::de::DeserializeOwned;
 
 use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
-use repo_graph_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE};
+use repo_graph_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::queues::is_framework_tag;
 use repo_graph_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
@@ -79,6 +81,7 @@ use crate::profile::CODE_PROFILE;
 pub const UNPAIRED_ENDPOINT: &str = "unpaired_endpoint";
 pub const AMBIGUOUS_ENDPOINT: &str = "ambiguous_endpoint";
 pub const UNRESOLVED_ENDPOINT: &str = "unresolved_endpoint";
+pub const WRAPPED_SINK: &str = "wrapped_sink";
 pub const UNPAIRED_ROUTE: &str = "unpaired_route";
 pub const TAG_ONLY_QUEUE: &str = "tag_only_queue";
 pub const DEAD_SYMBOL: &str = "dead_symbol";
@@ -87,10 +90,11 @@ pub const REDUNDANT_RULE: &str = "redundant_rule";
 pub const ORPHANED_CELL: &str = "orphaned_cell";
 
 /// Every category, in report order.
-pub const CATEGORIES: [&str; 9] = [
+pub const CATEGORIES: [&str; 10] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
+    WRAPPED_SINK,
     UNPAIRED_ROUTE,
     TAG_ONLY_QUEUE,
     DEAD_SYMBOL,
@@ -100,10 +104,13 @@ pub const CATEGORIES: [&str; 9] = [
 ];
 
 /// The categories that read a repo's files, so need its root.
-const ROOT_CATEGORIES: [&str; 3] = [ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL];
+const ROOT_CATEGORIES: [&str; 4] = [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL];
 
 /// The categories [`overlay_delta`] counts as orphans: a client-side sink the
-/// overlay exists to pair.
+/// overlay exists to pair. A `wrapped_sink` is not one: its identity lives at
+/// the wrapper's call sites, so declaring the `[[wrapper]]` takes the sink out
+/// of the `with` count (those call sites count instead, when they pair with
+/// nothing).
 const ORPHAN_CATEGORIES: [&str; 3] = [UNPAIRED_ENDPOINT, UNRESOLVED_ENDPOINT, TAG_ONLY_QUEUE];
 
 /// Read straight off the graph's edges.
@@ -206,7 +213,12 @@ pub fn gaps_report(
         .copied()
         .filter(|c| !skipped.contains(c))
         .collect();
-    let mut rows = collect_rows(merged, roots, &wanted);
+    let wrapped = if wanted.contains(&WRAPPED_SINK) {
+        declared_wrappers(roots)
+    } else {
+        Wrapped::new()
+    };
+    let mut rows = collect_rows(merged, roots, &wanted, &wrapped);
     rows.sort_by(row_order);
 
     let mut counts: BTreeMap<&'static str, usize> = wanted.iter().map(|c| (*c, 0)).collect();
@@ -250,7 +262,10 @@ pub fn gaps_report(
 
 /// Build `repo_paths` twice through `generate_*_opts` — the overlay off, then
 /// on — and measure what the overlay changed: edges per category, and the
-/// orphan count ([`ORPHAN_CATEGORIES`]) before and after. One path builds
+/// orphan count ([`ORPHAN_CATEGORIES`]) before and after. The `with` count
+/// reads the repos' `[[wrapper]]` stanzas, so a wrapper's `<unresolved>` sink
+/// is a `wrapped_sink` there and not an orphan; the `without` build applies
+/// no overlay, so it stays an `unresolved_endpoint`. One path builds
 /// through `generate_one_opts` (what `glia gaps <repo>` reads), several
 /// through `generate_many_opts`. Doubles the build cost by design: the
 /// extraction-only build is the only consistent "without" view (an overlay
@@ -287,14 +302,21 @@ pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<Overlay
             added_by_category.insert(*name, d);
         }
     }
-    let orphans = |m: &MergedGraph| collect_rows(m, &[], &ORPHAN_CATEGORIES).len();
+    let orphans = |m: &MergedGraph, wrapped: &Wrapped| {
+        collect_rows(m, &[], &ORPHAN_CATEGORIES, wrapped).len()
+    };
+    let with_roots: Vec<(u64, PathBuf)> = with
+        .repo_roots
+        .iter()
+        .map(|(r, p)| (*r, PathBuf::from(p)))
+        .collect();
     let delta = OverlayDelta {
         rules,
         edges_without: without.total_edges,
         edges_with: with.total_edges,
         added_by_category,
-        orphans_without: orphans(&without.merged),
-        orphans_with: orphans(&with.merged),
+        orphans_without: orphans(&without.merged, &Wrapped::new()),
+        orphans_with: orphans(&with.merged, &declared_wrappers(&with_roots)),
     };
     let added = i64::try_from(delta.edges_with).unwrap_or(i64::MAX)
         - i64::try_from(delta.edges_without).unwrap_or(i64::MAX);
@@ -526,11 +548,42 @@ fn label_of(labels: &BTreeMap<u64, String>, repo: u64) -> String {
         .unwrap_or_else(|| format!("repo{repo}"))
 }
 
-/// Every row of the `wanted` categories, unsorted.
+/// Per repo id, the declared http `[[wrapper]]` callees: the last segment of
+/// `call` (after its last `.` / `::`) -> the `call` as written, first stanza
+/// first.
+type Wrapped = BTreeMap<u64, BTreeMap<String, String>>;
+
+/// The http `[[wrapper]]` stanzas of each root's `.glia/overlay.toml`.
+fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
+    let mut out = Wrapped::new();
+    for (repo, root) in roots {
+        let Some(cfg) = glia_config::load(root) else {
+            continue;
+        };
+        for s in &cfg.config.wrapper {
+            let w = s.get_ref();
+            if w.wrapper_kind() != Some(WrapperKind::Http) {
+                continue;
+            }
+            let name = w.call.rsplit(['.', ':']).next().unwrap_or(&w.call);
+            if !name.is_empty() {
+                out.entry(*repo)
+                    .or_default()
+                    .entry(name.to_string())
+                    .or_insert_with(|| w.call.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Every row of the `wanted` categories, unsorted. `wrapped` is
+/// [`declared_wrappers`] (empty when no wrapper is known).
 fn collect_rows(
     merged: &MergedGraph,
     roots: &[(u64, PathBuf)],
     wanted: &[&'static str],
+    wrapped: &Wrapped,
 ) -> Vec<GapRow> {
     let want = |c: &str| wanted.contains(&c);
     let view = View::build(merged);
@@ -579,14 +632,45 @@ fn collect_rows(
                 let targets = view.http_out.get(&n.id).map(Vec::as_slice).unwrap_or(&[]);
                 let callers = view.callers.get(&n.id).map(Vec::as_slice).unwrap_or(&[]);
                 if targets.is_empty() && path == "<unresolved>" {
-                    if want(UNRESOLVED_ENDPOINT) {
-                        let owner = view.named(callers).unwrap_or_else(|| "(none)".to_string());
-                        rows.push(node_row(
-                            UNRESOLVED_ENDPOINT,
-                            format!("owner={owner}"),
-                            "wrapper",
-                            FACT,
-                        ));
+                    let owner = view.named(callers).unwrap_or_else(|| "(none)".to_string());
+                    // Every owner a declared wrapper (in the sink's repo): the
+                    // identity lives at the wrapper's call sites.
+                    let declared = view.repo_of.get(&n.id).and_then(|r| wrapped.get(r));
+                    let calls: Option<Vec<&str>> = declared.and_then(|d| {
+                        (!callers.is_empty())
+                            .then(|| {
+                                callers
+                                    .iter()
+                                    .map(|c| {
+                                        let q = view.qname(*c);
+                                        d.get(q.rsplit("::").next().unwrap_or(q))
+                                            .map(String::as_str)
+                                    })
+                                    .collect()
+                            })
+                            .flatten()
+                    });
+                    match calls {
+                        Some(mut calls) if want(WRAPPED_SINK) => {
+                            calls.sort_unstable();
+                            calls.dedup();
+                            rows.push(node_row(
+                                WRAPPED_SINK,
+                                format!("owner={owner}; wrapper={}", calls.join(", ")),
+                                "none",
+                                FACT,
+                            ));
+                        }
+                        Some(_) => {}
+                        None if want(UNRESOLVED_ENDPOINT) => {
+                            rows.push(node_row(
+                                UNRESOLVED_ENDPOINT,
+                                format!("owner={owner}"),
+                                "wrapper",
+                                FACT,
+                            ));
+                        }
+                        None => {}
                     }
                 } else if targets.is_empty() {
                     if want(UNPAIRED_ENDPOINT) {

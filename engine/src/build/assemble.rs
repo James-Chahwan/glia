@@ -92,7 +92,8 @@ fn pin_overlay_constants(
 /// vocabulary of the LB.4a HTTP owner segment. `config` is the repo's loaded
 /// `.glia/overlay.toml` (`RepoInputs::config`) and `opts` the build's options:
 /// together they decide the overlay stages that run before the graph is built
-/// (LF.2d's constant pins; LF.2e's wrappers reuse them).
+/// (LF.2d's constant pins; LF.2e's `[[wrapper]]` call sites, minted inside
+/// `grafts::apply_post_cache`).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
@@ -135,8 +136,9 @@ pub(super) fn build_graphs_for_repo(
     // LA.1a / LA.1b: the Cargo packages, read by the A16.4 IMPORTS filter
     // (a sibling crate is not a dependency) and by `build_rust`.
     let rust_crates = lang_build::rust_crates(files, roots);
-    // A11.2, LA.6d, LA.4, A5.2 / A5.3, A5.8, LB.4a / LB.8, A16.4: the
-    // post-cache grafts, in that order.
+    // LF.2e (http), A11.2, LA.6d, LA.4, LF.2e (queue), A5.2 / A5.3, A5.8,
+    // LB.4a / LB.8, A16.4: the post-cache grafts, in that order. The overlay
+    // `[[wrapper]]` stage runs only when the build applies the overlay.
     grafts::apply_post_cache(
         &mut parses_by_lang,
         files,
@@ -145,6 +147,7 @@ pub(super) fn build_graphs_for_repo(
         &const_table,
         roots,
         &rust_crates,
+        config.filter(|_| opts.overlay),
         &mut parse_errors,
         repo_label,
     );

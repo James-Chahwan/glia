@@ -1,0 +1,22 @@
+{
+  "framework": "xcut-overlay-wrapper",
+  "language": "typescript",
+  "dirs": ["web", "api"],
+  "note": "LF.2e: web's .glia/overlay.toml declares a [[wrapper]] request(method, path) and a client receiver `api` (verb = member name), so every literal call site mints its ENDPOINT (Weak, ORIGIN overlay:llm rule wrapper#<n>) with a CALLS edge from the enclosing function, and pairs with the flask routes; the commented-out `// request('GET', '/legacy')` and the non-literal `request(v, p)` mint nothing. Baseline 2026-09-19 (HEAD cb356fc, installed wheel = W24 code): only the wrapper's inner fetch(path) gives endpoint:GET:<unresolved>; api.get('/orders') mints nothing; no endpoint:GET:/users, POST:/users or GET:/orders.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/users"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/users"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/orders"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/users", "to": "GET /users", "category": "HTTP_CALLS"},
+    {"from": "src::client::loadUsers", "to": "endpoint:GET:/users", "category": "CALLS"},
+    {"from": "endpoint:GET:/orders", "to": "GET /orders", "category": "HTTP_CALLS"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/users", "cell": "ORIGIN", "contains": "overlay:llm"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/legacy"}
+  ]
+}

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use repo_graph_engine::gaps::{
     AMBIGUOUS_ENDPOINT, CATEGORIES, DEAD_SYMBOL, FACT, GapRow, GapsOptions, GapsReport, HEURISTIC,
     ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT,
-    UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, gaps_report, overlay_delta,
+    UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report, overlay_delta,
 };
 use repo_graph_engine::{GenerateResult, generate_many, generate_one};
 
@@ -92,6 +92,7 @@ fn reports_the_probe_r1_shapes() {
             (UNPAIRED_ENDPOINT, 0),
             (AMBIGUOUS_ENDPOINT, 0),
             (UNRESOLVED_ENDPOINT, 1),
+            (WRAPPED_SINK, 0),
             (UNPAIRED_ROUTE, 2),
             (TAG_ONLY_QUEUE, 0),
             (DEAD_SYMBOL, 1),
@@ -320,7 +321,7 @@ fn tag_only_queue_is_reported() {
 }
 
 /// `top_k_per_category` cuts rows after ranking, `category` keeps one
-/// category, and `counts` stay the totals; no root skips the three
+/// category, and `counts` stay the totals; no root skips the four
 /// root-reading categories; an unknown category is an error.
 #[test]
 fn options_cut_rows_not_counts() {
@@ -353,7 +354,10 @@ fn options_cut_rows_not_counts() {
     assert_eq!(one.count(UNRESOLVED_ENDPOINT), 1);
 
     let bare = gaps_report(&r.merged, &[], &GapsOptions::default()).expect("report");
-    assert_eq!(bare.skipped, [ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL]);
+    assert_eq!(
+        bare.skipped,
+        [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL]
+    );
     assert!(!bare.counts.contains_key(ORPHANED_RULE));
 
     let mut o = GapsOptions::default();

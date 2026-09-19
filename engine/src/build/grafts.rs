@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::evidence::{self, Evidence};
+use repo_graph_code_domain::glia_config::LoadedConfig;
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
     FileParse, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
@@ -20,19 +21,24 @@ use repo_graph_graph::rust_paths::RustCrate;
 
 use super::rpc_needles::{RpcContext, apply_rpc_needles};
 use crate::endpoint_fold;
+use crate::external::{WrapperPass, WrapperPhase};
 use crate::extract::{detect_language, merge_nav};
 use crate::http_owner;
 use crate::route::ModuleQnames;
 
-/// Run every post-cache graft over one repo's parses, in order: the A11.2
-/// endpoint fold, the LA.6d Next.js page graft, the LA.4 queue-topic const
-/// fold, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
+/// Run every post-cache graft over one repo's parses, in order: the LF.2e
+/// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
+/// Next.js page graft, the LA.4 queue-topic const fold, the LF.2e wrappers'
+/// queue half, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
 /// segment, then the A16.4 IMPORTS-cell
 /// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
 /// project roots (A8.4); `rust_crates` their Cargo packages, whose names the
-/// IMPORTS filter treats as intra-repo (LA.1b).
+/// IMPORTS filter treats as intra-repo (LA.1b). `wrappers` is the repo's
+/// `.glia/overlay.toml` when the build applies the overlay (`None` under
+/// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
+/// (`external::WrapperPass`).
 ///
 /// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
 /// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
@@ -50,6 +56,7 @@ pub(super) fn apply_post_cache(
     const_table: &ConstTable,
     roots: &[ProjectRoot],
     rust_crates: &[RustCrate],
+    wrappers: Option<&LoadedConfig>,
     parse_errors: &mut Vec<String>,
     repo_label: &str,
 ) {
@@ -57,6 +64,13 @@ pub(super) fn apply_post_cache(
     // (a pure function of it), so every graft below finds a file's parse by
     // the MODULE id the router gave it.
     let modules = ModuleQnames::plan(files);
+    // LF.2e: the overlay `[[wrapper]]` call sites. The http half mints its
+    // ENDPOINTs BEFORE the endpoint fold, so a `${X}` wrapper path folds
+    // through the const table like any other client call.
+    let mut wrappers = WrapperPass::scan(wrappers, files, parse_errors);
+    if let Some(w) = wrappers.as_mut() {
+        w.mint(WrapperPhase::Http, parses_by_lang, files, repo, &modules, parse_errors);
+    }
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse.
@@ -70,6 +84,13 @@ pub(super) fn apply_post_cache(
     // rewrites the folded nodes' IMPORTS cell like every other node's.
     apply_queue_const_topics(parses_by_lang, files, repo, &modules, const_table, parse_errors)
         .report(repo_label);
+    // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
+    // folded file's queue nodes from the queue scan and would drop a wrapper
+    // node) and above the owner pass, like every graft that mints an owned kind.
+    if let Some(w) = wrappers.as_mut() {
+        w.mint(WrapperPhase::Queue, parses_by_lang, files, repo, &modules, parse_errors);
+        w.report(repo_label);
+    }
 
     let rpc_added = apply_rpc_needles(parses_by_lang, files, repo, &modules, rpc, parse_errors);
     // A5.2 fired_on marker, once per repo. Printed whenever the build knows a

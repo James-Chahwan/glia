@@ -26,6 +26,11 @@
 //! - `[overlay] edges repo=<label> declared=<d> applied=<a> redundant=<r> orphaned=<o> rejected=<x> (llm=<l> human=<h>)`
 //!   (see [`overlay`]), or, on a build without the overlay,
 //!   `[overlay] disabled (--no-overlay) repo=<label>`;
+//! - `[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> receiver=<r>)`
+//!   once per repo whose overlay keeps a `[[wrapper]]` stanza (see
+//!   [`wrappers`]: unlike the edge stage it runs inside the per-repo build,
+//!   from `build::grafts::apply_post_cache`, because the sinks it mints
+//!   must reach the endpoint fold, the owner pass and the resolvers);
 //! - `[history] ingest repo=<label> head=<12 hex> commits=<n> modules=<m> unmapped=<u> attn=<a> blame_symbols=<b> cochange_pairs=<p> (support>=3 ratio>=300 max_files=30)`
 //!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]);
 //! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
@@ -37,6 +42,9 @@ mod cells;
 mod declared;
 mod history;
 mod overlay;
+mod wrappers;
+
+pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
 
 use std::path::PathBuf;
 

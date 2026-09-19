@@ -81,7 +81,7 @@ fn gaps_json_reports_the_unresolved_sink() {
 
     assert!(
         stderr.lines().any(|l| l.starts_with("[gaps] rows=4 (")
-            && l.contains("unresolved_endpoint=1 unpaired_route=2")
+            && l.contains("unresolved_endpoint=1 wrapped_sink=0 unpaired_route=2")
             && l.ends_with(" surface=cli")),
         "{stderr}"
     );
