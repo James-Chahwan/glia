@@ -41,7 +41,7 @@
 //!   once per repo with a complete `.glia/test-snapshot/` (see [`test_reports`]).
 
 mod cells;
-mod declared;
+pub(crate) mod declared;
 mod history;
 mod overlay;
 mod test_reports;
