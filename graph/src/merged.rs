@@ -364,6 +364,9 @@ impl MergedGraph {
 /// `cross_links` normalises them to `from <= to`. Without that the output
 /// flaps across processes exactly the way `impact` / `trace` did before
 /// `pick_primary`.
+///
+/// CO_CHANGES (LF.5b) is undirected too: the history stage orients each pair
+/// by file path, which says nothing about which service is `from`.
 const SYMMETRIC: &[EdgeCategoryId] = &[
     edge_category::SHARES_SCHEMA,
     edge_category::SHARES_DATA_ENTITY,
@@ -371,7 +374,15 @@ const SYMMETRIC: &[EdgeCategoryId] = &[
     edge_category::SHARES_CONFIG,
     edge_category::SHARES_INFRA_REF,
     edge_category::SHARES_DEPENDENCY,
+    edge_category::CO_CHANGES,
 ];
+
+/// The one channel of every CO_CHANGES link. Two modules that change together
+/// share no literal (their names differ, so the `from` end's name would split
+/// one pair into two rows by which end the edge started at): the link travels
+/// over the git history, and between two keys it is ONE row whose count is
+/// the number of co-changing module pairs.
+const COCHANGE_CHANNEL: &str = "history";
 
 /// One service-to-service link: every cross-repo edge running between the same
 /// pair of keys, over the same mechanism, on the same channel, collapsed into a
@@ -502,7 +513,11 @@ pub fn cross_links(
         // The channel is read off the `from` end; for every symmetric mechanism
         // the resolver paired the two nodes *because* the literal matched, so
         // both ends carry it and the choice is swap-invariant.
-        let mut channel = channel_of(fq, fname);
+        let mut channel = if e.category == edge_category::CO_CHANGES {
+            COCHANGE_CHANNEL.to_string()
+        } else {
+            channel_of(fq, fname)
+        };
         if channel.is_empty() {
             channel = channel_of(tq, tname);
         }
@@ -1002,6 +1017,54 @@ mod tests {
         assert_eq!(links[0].example_to_qname, "svc_b::UserDto");
         // Channel is the shared literal; both ends carry it.
         assert_eq!(links[0].channel, "UserDto");
+    }
+
+    /// LF.5b: CO_CHANGES is undirected. Two co-change edges between the same
+    /// two keys, one each way and over different module pairs, collapse into
+    /// ONE row, oriented `from <= to`, on the history channel.
+    #[test]
+    fn cochange_links_are_normalised() {
+        let r = RepoId::from_canonical("test://cl-cochange");
+        let g = synth_repo_graph(
+            r,
+            &[
+                ("api::orders", node_kind::MODULE),
+                ("api::billing", node_kind::MODULE),
+                ("web::cart", node_kind::MODULE),
+            ],
+        );
+        let orders = id_of(r, node_kind::MODULE, "api::orders");
+        let billing = id_of(r, node_kind::MODULE, "api::billing");
+        let cart = id_of(r, node_kind::MODULE, "web::cart");
+        let key = |id: NodeId| {
+            if id == cart {
+                Some("web".to_string())
+            } else if id == orders || id == billing {
+                Some("api".to_string())
+            } else {
+                None
+            }
+        };
+        let weak = |from, to| {
+            let mut e = xedge(from, to, edge_category::CO_CHANGES);
+            e.confidence = Confidence::Weak;
+            e
+        };
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.cross_edges = vec![weak(cart, orders), weak(billing, cart)];
+
+        let (links, unplaced) = cross_links(&merged, &key);
+        assert_eq!(unplaced, 0);
+        assert_eq!(links.len(), 1, "{links:?}");
+        let l = &links[0];
+        assert_eq!((l.from.as_str(), l.to.as_str()), ("api", "web"));
+        assert_eq!(l.mechanism, "CO_CHANGES");
+        assert_eq!(l.channel, COCHANGE_CHANNEL);
+        assert_eq!(l.count, 2);
+        assert_eq!(l.confidence, Confidence::Weak);
+        // The first edge (web -> api) swapped with its keys.
+        assert_eq!(l.example_from_qname, "api::orders");
+        assert_eq!(l.example_to_qname, "web::cart");
     }
 
     #[test]

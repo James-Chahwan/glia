@@ -25,9 +25,12 @@
 //!   (see [`cells`]);
 //! - `[overlay] edges repo=<label> declared=<d> applied=<a> redundant=<r> orphaned=<o> rejected=<x> (llm=<l> human=<h>)`
 //!   (see [`overlay`]), or, on a build without the overlay,
-//!   `[overlay] disabled (--no-overlay) repo=<label>`.
+//!   `[overlay] disabled (--no-overlay) repo=<label>`;
+//! - `[history] ingest repo=<label> head=<12 hex> commits=<n> modules=<m> unmapped=<u> attn=<a> blame_symbols=<b> cochange_pairs=<p> (support>=3 ratio>=300 max_files=30)`
+//!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]).
 
 mod cells;
+mod history;
 mod overlay;
 
 use std::path::PathBuf;
@@ -85,13 +88,14 @@ pub(crate) fn repo_inputs(repo: RepoId, root: PathBuf, label: String) -> RepoInp
 /// as a pairing), and the Finalize fill-then-sort locates and orders them.
 ///
 /// Per input in argument order and, within a repo, the stages in a FIXED
-/// order: the overlay `[[edge]]` stanzas (LF.2b) first; LF.5b's CO_CHANGES
-/// stage appends after it. Only the OVERLAY stage is switched by `overlay`
-/// (`BuildOptions::overlay`, the CLI's `--no-overlay`, pyo3's
-/// `overlay=False`): without it, a repo whose file has an overlay section
-/// prints `[overlay] disabled (--no-overlay) repo=<label>` and that stage is
-/// skipped, while fact inputs (history) still run. User-config and declared
-/// sections are never read here, so the switch cannot touch them.
+/// order: the overlay `[[edge]]` stanzas (LF.2b) first, then the git-history
+/// CO_CHANGES edges (LF.5b, [`history::history_edges`]). Only the OVERLAY
+/// stage is switched by `overlay` (`BuildOptions::overlay`, the CLI's
+/// `--no-overlay`, pyo3's `overlay=False`): without it, a repo whose file has
+/// an overlay section prints `[overlay] disabled (--no-overlay) repo=<label>`
+/// and that stage is skipped, while fact inputs (history) still run.
+/// User-config and declared sections are never read here, so the switch
+/// cannot touch them.
 pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInputs], overlay: bool) {
     let mut stage = overlay::EdgeStage::default();
     for input in inputs {
@@ -104,25 +108,30 @@ pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInput
             }
             _ => {}
         }
+        // History is a fact input: never gated by `overlay`.
+        history::history_edges(merged, input);
     }
 }
 
 /// Apply every repo's external node cells, per input in argument order and,
 /// within a repo, the stages in a FIXED order: the cell sidecars (LF.1a),
-/// then the stages LF.4a, LF.3b, LF.5b and LF.6b append, in the order their
-/// packets document.
+/// then the git-history ATTN cells (LF.5b, [`history::history_cells`]), then
+/// the stages LF.4a, LF.3b and LF.6b append, in the order their packets
+/// document.
 ///
 /// Runs after the code passes. When any stage changed the graph, the evidence
 /// fill and the cross-edge sort run again (LC.3a: fill-then-sort is the last
 /// step of every build), so a stage that adds an edge still leaves it located
 /// and in canonical order. The sidecar stage writes only CONSTRAINT /
-/// DECISION / CONV / VECTOR node cells, which neither the fill (it reads
-/// POSITION) nor the sort (edges only) reads. A repo with no external inputs
-/// takes no branch that writes anything.
+/// DECISION / CONV / VECTOR node cells and the history stage only ATTN node
+/// cells, which neither the fill (it reads POSITION) nor the sort (edges
+/// only) reads. A repo with no external inputs takes no branch that writes
+/// anything.
 pub(crate) fn apply_external_cells(merged: &mut MergedGraph, inputs: &[RepoInputs]) {
     let mut changed = false;
     for input in inputs {
         changed |= cells::apply_sidecar(merged, input);
+        changed |= history::history_cells(merged, input);
     }
     if changed {
         // The first fill's `[evidence]` marker already reported the build.

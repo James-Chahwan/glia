@@ -95,7 +95,9 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     effect_sinks: &[ec::ACCESSES_DATA, ec::QUEUE_FLOWS, ec::HTTP_CALLS, ec::EVENT_FLOWS],
     // `calls` and cross-stack calls highest, flows and handlers next, imports
     // medium, structural edges (`contains`, `defines`) lowest; any category
-    // not listed weighs 1.0.
+    // not listed weighs 1.0. CO_CHANGES (LF.5b) weighs 0: a git-history
+    // heuristic, it must not reshape any ranking (a 0 edge is skipped
+    // outright, so scores are those of the graph without it).
     activation_weights: &[
         (ec::CALLS, 5.0),
         (ec::HTTP_CALLS, 5.0),
@@ -116,6 +118,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         (ec::DEFINES, 1.0),
         (ec::CONTAINS, 1.0),
         (ec::DOCUMENTS, 0.5),
+        (ec::CO_CHANGES, 0.0),
     ],
     // Task-tuned lenses over the base weights (WP-F / GR-5); any other name,
     // `"default"` included, is the base.
@@ -180,6 +183,20 @@ mod tests {
             !CODE_TABLES.carries(ec::SHARES_DATA_SOURCE),
             "SHARES_DATA_SOURCE must stay OUT of CODE_TABLES.carry_edges"
         );
+    }
+
+    #[test]
+    fn co_changes_is_heuristic_everywhere() {
+        // REGRESSION GUARD (LF.5b). Files that change together are coupled,
+        // not linked: CO_CHANGES must never carry a blast radius or liveness,
+        // and must weigh 0 in every activation preset (an unlisted category
+        // would weigh 1.0 and reshape every ranking in a repo with history).
+        assert!(!CODE_TABLES.carries(ec::CO_CHANGES), "CO_CHANGES must stay OUT of carry_edges");
+        assert!(!CODE_TABLES.effect_sinks.contains(&ec::CO_CHANGES));
+        for preset in [None, Some("repair"), Some("review"), Some("onboard")] {
+            let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
+            assert_eq!(w, Some(0.0), "preset {preset:?}");
+        }
     }
 
     /// The presets are real lenses (moved from `graph::activation`, LD.14b):

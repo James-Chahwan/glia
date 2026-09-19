@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "generator": "glia history sync",
+  "head": "c500000000000000000000000000000000000000",
+  "commits": 5,
+  "max_commits": 2000,
+  "since": null,
+  "relative_to": "",
+  "blame_files": 1,
+  "data_hash": "27922500fe5bc675"
+}

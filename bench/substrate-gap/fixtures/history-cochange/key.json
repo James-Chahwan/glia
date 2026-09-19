@@ -1,0 +1,18 @@
+{
+  "framework": "history-cochange",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.5b: a committed .glia/history-snapshot/ (five commits, newest first; blame of svc/a.py) yields churn ATTN (cell 8) on every MODULE it touches, blame ATTN on the symbol whose POSITION span the blame runs cover, and one Weak CO_CHANGES (edge category 36) edge for the only pair that meets support (svc/a.py + svc/b.py co-changed in 4 commits, ratio 1000 permille); the a+c and b+c pairs share one commit and get none. The three modules have no static edge between them. Baseline 2026-09-19 (HEAD 4af6559): no ATTN, no CO_CHANGES.",
+  "expect_edges": [
+    {"from": "svc::a", "to": "svc::b", "category": "CO_CHANGES"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "svc::a", "cell": "ATTN", "contains": "\"commits\":4"},
+    {"kind": "MODULE", "node": "svc::c", "cell": "ATTN", "contains": "\"commits\":2"},
+    {"kind": "FUNCTION", "node": "svc::a::a", "cell": "ATTN", "contains": "git-blame"}
+  ],
+  "forbid": [
+    {"from": "svc::a", "to": "svc::c", "category": "CO_CHANGES"},
+    {"from": "svc::b", "to": "svc::c", "category": "CO_CHANGES"}
+  ]
+}
