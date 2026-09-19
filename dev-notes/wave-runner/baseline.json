@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "ca1ede8",
-  "after_wave": 7,
+  "measured_at_head": "f16faa9",
+  "after_wave": 8,
   "cargo_test_workspace": {
-    "passed": 1911,
+    "passed": 2003,
     "failed": 0
   },
   "history_passed": [
@@ -34,24 +34,21 @@
     1651,
     1744,
     1816,
-    1911
+    1911,
+    2003
   ],
   "run_py": {
-    "fixtures": 226,
-    "blind_spots": 7,
-    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 236,
+    "blind_spots": 3,
+    "blind_spot_detail": "blind: ['kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-retrofit: HTTP_CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
     "blind_list": [
-      "kotlin: CALLS",
-      "kotlin: IMPLEMENTS",
-      "kotlin: INHERITS_FROM",
       "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
-      "kotlin-retrofit: HTTP_CALLS",
-      "kotlin-spring: CALLS"
+      "kotlin-retrofit: HTTP_CALLS"
     ],
     "partial_list": [],
     "forbid_list": [],
@@ -63,11 +60,11 @@
     ]
   },
   "matrix_py": {
-    "full": 126,
-    "partial": 27,
+    "full": 130,
+    "partial": 26,
     "none": 14,
-    "unknown": 313,
-    "covered": 167,
+    "unknown": 310,
+    "covered": 170,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0

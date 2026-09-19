@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 226,
+  "fixtures": 236,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -46,6 +46,11 @@
       "per_category": {
         "HTTP_CALLS": 1.0
       }
+    },
+    "asyncapi-payload-fields": {
+      "framework": "asyncapi-payload-fields",
+      "language": "yaml",
+      "per_category": {}
     },
     "avro-field-drift": {
       "framework": "avro-field-drift",
@@ -281,6 +286,13 @@
         "CALLS": 1.0
       }
     },
+    "dart-body-owners": {
+      "framework": "dart-body-owners",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "dart-field-dispatch": {
       "framework": "dart-field-dispatch",
       "language": "dart",
@@ -435,11 +447,27 @@
         "IMPORTS": 1.0
       }
     },
+    "go-route-per-method": {
+      "framework": "go-route-per-method",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "go-route-registration-forms": {
       "framework": "go-route-registration-forms",
       "language": "go",
       "per_category": {
         "HANDLED_BY": 1.0
+      }
+    },
+    "go-split-receiver": {
+      "framework": "go-split-receiver",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "DEFINES": 1.0
       }
     },
     "go-wire-di": {
@@ -570,6 +598,14 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "java-iface-extends": {
+      "framework": "java-iface-extends",
+      "language": "java",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
     "java-package-qnames": {
       "framework": "java-package-qnames",
       "language": "java",
@@ -651,11 +687,11 @@
       "framework": "kotlin",
       "language": "kotlin",
       "per_category": {
-        "CALLS": 0.0,
+        "CALLS": 1.0,
         "DEFINES": 1.0,
-        "IMPLEMENTS": 0.0,
+        "IMPLEMENTS": 1.0,
         "IMPORTS": 1.0,
-        "INHERITS_FROM": 0.0
+        "INHERITS_FROM": 1.0
       }
     },
     "kotlin-flip-guard": {
@@ -685,7 +721,7 @@
       "framework": "kotlin-spring",
       "language": "kotlin",
       "per_category": {
-        "CALLS": 0.0,
+        "CALLS": 1.0,
         "HANDLED_BY": 1.0,
         "IMPORTS": 1.0,
         "INJECTS": 1.0
@@ -706,12 +742,25 @@
         "NAVIGATES_TO": 1.0
       }
     },
+    "nav-next-pages": {
+      "framework": "nav-next-pages",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
+      }
+    },
     "nav-react-links": {
       "framework": "nav-react-links",
       "language": "typescript",
       "per_category": {
         "NAVIGATES_TO": 1.0
       }
+    },
+    "nav-react-pages-dir-not-next": {
+      "framework": "nav-react-pages-dir-not-next",
+      "language": "typescript",
+      "per_category": {}
     },
     "nav-react-routes": {
       "framework": "nav-react-routes",
@@ -727,6 +776,11 @@
       "per_category": {
         "NAVIGATES_TO": 1.0
       }
+    },
+    "openapi-pact-fields": {
+      "framework": "openapi-pact-fields",
+      "language": "yaml+json",
+      "per_category": {}
     },
     "php-braced-use": {
       "framework": "php-braced-use",
@@ -1081,6 +1135,14 @@
         "EVENT_FLOWS": 1.0
       }
     },
+    "solidity-heritage-xfile": {
+      "framework": "solidity-heritage-xfile",
+      "language": "solidity",
+      "per_category": {
+        "IMPORTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
     "solidity-inherits_from": {
       "framework": "solidity-inherits_from",
       "language": "solidity",
@@ -1195,6 +1257,14 @@
       "language": "typescript",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "ts-iface-extends": {
+      "framework": "ts-iface-extends",
+      "language": "typescript",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "INHERITS_FROM": 1.0
       }
     },
     "ts-imports": {
@@ -1627,13 +1697,9 @@
   "schema": "substrate-gap-legacy/1",
   "summary": {
     "blind_spots": [
-      "kotlin: CALLS",
-      "kotlin: IMPLEMENTS",
-      "kotlin: INHERITS_FROM",
       "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
-      "kotlin-retrofit: HTTP_CALLS",
-      "kotlin-spring: CALLS"
+      "kotlin-retrofit: HTTP_CALLS"
     ],
     "forbid_violations": [],
     "grader_errors": [],

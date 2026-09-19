@@ -272,6 +272,30 @@
       ],
       "via": "cli"
     },
+    "csharp/cron": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/cron"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cron"
+    },
     "csharp/grpc": {
       "extract": [
         4,
@@ -576,29 +600,30 @@
     },
     "dart/calls": {
       "extract": [
-        5,
-        5
+        11,
+        11
       ],
       "fixtures": [
+        "fixtures/dart-body-owners",
         "fixtures/dart-field-dispatch",
         "fixtures/dart-top-level-bodies",
         "matrix/dart/calls"
       ],
       "forbid": [
-        2,
-        2
+        6,
+        6
       ],
       "level": "full",
       "literal": [
-        4,
-        4
+        10,
+        10
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        11,
-        11
+        19,
+        19
       ],
       "via": "call"
     },
@@ -1011,18 +1036,15 @@
         2,
         2
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        2,
+        3,
         3
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        2,
-        4
+        3,
+        3
       ],
       "via": "cron"
     },
@@ -1504,6 +1526,30 @@
       ],
       "via": "cli"
     },
+    "java/cron": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/java/cron"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cron"
+    },
     "java/db": {
       "extract": [
         1,
@@ -1652,25 +1698,26 @@
     },
     "java/impl": {
       "extract": [
-        3,
-        3
+        5,
+        5
       ],
       "fixtures": [
+        "fixtures/java-iface-extends",
         "fixtures/java-spring-inherits"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
-        3,
-        3
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        2,
-        2
+        4,
+        4
       ],
       "via": "type"
     },
@@ -2254,6 +2301,30 @@
         3
       ],
       "via": "config"
+    },
+    "python/cron": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/python/cron"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cron"
     },
     "python/db": {
       "extract": [
@@ -3500,10 +3571,11 @@
     },
     "solidity/impl": {
       "extract": [
-        2,
-        2
+        4,
+        4
       ],
       "fixtures": [
+        "fixtures/solidity-heritage-xfile",
         "fixtures/solidity-inherits_from"
       ],
       "forbid": [
@@ -3512,13 +3584,13 @@
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        4,
+        4
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "type"
     },
@@ -3831,26 +3903,27 @@
     },
     "typescript/impl": {
       "extract": [
-        5,
-        5
+        7,
+        7
       ],
       "fixtures": [
         "fixtures/ts-heritage-xfile",
+        "fixtures/ts-iface-extends",
         "matrix/typescript/impl"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
-        5,
-        5
+        7,
+        7
       ],
       "reasons": [],
       "route": [
-        3,
-        3
+        5,
+        5
       ],
       "via": "type"
     },
@@ -4193,6 +4266,7 @@
     "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
+    "fixtures/asyncapi-payload-fields",
     "fixtures/avro-field-drift",
     "fixtures/avro-schema",
     "fixtures/clojure-docs",
@@ -4222,7 +4296,9 @@
     "fixtures/event-verb-receivers",
     "fixtures/go-closure-handled_by",
     "fixtures/go-gorm",
+    "fixtures/go-route-per-method",
     "fixtures/go-route-registration-forms",
+    "fixtures/go-split-receiver",
     "fixtures/graphql-op-needle-precision",
     "fixtures/graphql-sdl-literal-scope",
     "fixtures/http-absolute-url-client",
@@ -4247,9 +4323,12 @@
     "fixtures/kotlin-spring",
     "fixtures/nav-angular-links",
     "fixtures/nav-angular-routes",
+    "fixtures/nav-next-pages",
     "fixtures/nav-react-links",
+    "fixtures/nav-react-pages-dir-not-next",
     "fixtures/nav-react-routes",
     "fixtures/nav-vue-links",
+    "fixtures/openapi-pact-fields",
     "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
@@ -4303,13 +4382,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 167,
+    "covered": 170,
     "error": 0,
-    "full": 126,
+    "full": 130,
     "grid": 480,
     "none": 14,
-    "partial": 27,
-    "unknown": 313
+    "partial": 26,
+    "unknown": 310
   },
   "vocabulary": {
     "digest": "82fbaf1daf5c",
