@@ -45,14 +45,33 @@
 //! node keeps its interned file id and its lines — they need no source read —
 //! but its bytes are `0..0`; a node with no POSITION cell gets
 //! `SpanRef::NONE` (file `0`, lines `0` = unknown).
+//!
+//! ## The identity story (v6, LG.9)
+//!
+//! `identity_hint` is `<file token>:<kind>:<ordinal>` (`build_identity_hints`).
+//! The file token is the file's path when its chain started and is carried
+//! across file moves along a `--since` chain: every bin run records the glia
+//! graph it exported in [`history_dir`] (`<out>.glia/`, the LC.9 layout), and
+//! the next run with `--since <that gmap>` pairs moved files against it (LB.6
+//! `detect_moves`), reads the prior tokens back out of the prior gmap's hints
+//! ([`prior_tokens`]) and carries them (LB.6 `carry_file_tokens`) into
+//! [`ExportOptions::file_identity`]. Without `--since` every token is the path.
+//!
+//! Keys are unique in an export. When several nodes share a qname (a Python
+//! method and the ATTRIBUTE its `self.m` read mints; a Java / PHP / Scala / C#
+//! public type and its file MODULE) exactly one is emitted, chosen by
+//! `key_rank`: the located node, then a declaration over a MODULE, then the
+//! one with a DOC cell, then the lowest `NodeId`. The others are counted in
+//! [`ExportStats::duplicate_keys`]; their edges still land on the shared key.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use engram_core::{Content, EdgeKind, Gmap, GmapEdge, GmapNode, SpanRef, content_digest};
 use glia_code_domain::{cell_type, edge_category as ec, node_kind};
-use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId};
+use glia_core::{Cell, CellPayload, EdgeCategoryId, Node, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
 pub mod diff;
@@ -68,8 +87,11 @@ pub struct ExportStats {
     pub files: usize,
     /// Nodes skipped for want of a qname (can't form a key).
     pub skipped_nodes: usize,
-    /// Nodes skipped because their qname duplicated an already-emitted key.
+    /// Nodes skipped because another node with the same qname won the key
+    /// (the located one first; see the crate docs).
     pub duplicate_keys: usize,
+    /// Emitted nodes carrying an `identity_hint` (every located one). (LG.9)
+    pub identity_hints: usize,
     /// Edges skipped: endpoint qname unknown, or a degenerate self-edge.
     pub skipped_edges: usize,
     /// Interned POSITION files that could not be read under `repo_root`, so
@@ -106,6 +128,11 @@ pub struct ExportOptions {
     pub include_noise: bool,
     /// Glob patterns (matched against node keys); any match drops the node.
     pub exclude: Vec<String>,
+    /// POSITION path -> file token for the `identity_hint`s: the token a
+    /// `--since` chain carried for the file (LB.6 `carry_file_tokens` over
+    /// [`prior_tokens`]). A path it does not name is its own token, so the
+    /// empty map (no `--since`) starts a chain. (LG.9)
+    pub file_identity: BTreeMap<String, String>,
 }
 
 /// `ORIGIN`-cell provenances dropped from the export by default. Region anchors
@@ -128,6 +155,45 @@ fn origin_provenance(cells: &[Cell]) -> Option<String> {
         return v.get("provenance")?.as_str().map(str::to_string);
     }
     None
+}
+
+/// Why [`build_gmap`] leaves a node out before it can hold a key.
+enum Filtered {
+    /// A caller `--exclude` glob matched its key.
+    Excluded,
+    /// Its ORIGIN provenance is in [`DROP_PROVENANCE`] and noise is not kept.
+    Noise,
+}
+
+/// The export filters, in order: caller exclude globs first (explicit
+/// intent), then the default noise drop.
+fn filtered(qname: &str, provenance: Option<&str>, opts: &ExportOptions) -> Option<Filtered> {
+    if opts.exclude.iter().any(|p| glob_match(p, qname)) {
+        return Some(Filtered::Excluded);
+    }
+    if !opts.include_noise && provenance.is_some_and(|p| DROP_PROVENANCE.contains(&p)) {
+        return Some(Filtered::Noise);
+    }
+    None
+}
+
+/// `(has a POSITION, is not a MODULE, has a DOC cell, lowest NodeId)`.
+type KeyRank = (bool, bool, bool, Reverse<u64>);
+
+/// How a node ranks for a key it shares; the maximum is exported (LG.9). The
+/// located node first: it alone carries a span and an `identity_hint`, and
+/// the hint's kind must not flip between exports (a Python method beats the
+/// ATTRIBUTE twin its `self.m` read mints). Then a declaration over its file
+/// MODULE (a Java / PHP / Scala / C# public type shares the MODULE's qname
+/// since LB.2 / LB.7: the type is the fact worth keeping, the MODULE's edges
+/// land on the same key). Then the one with a DOC cell, then the lowest id.
+fn key_rank(n: &Node, kind: Option<NodeKindId>) -> KeyRank {
+    (
+        position_of(&n.cells).is_some(),
+        kind != Some(node_kind::MODULE),
+        doc_cell(&n.cells).is_some(),
+        Reverse(n.id.0),
+    )
 }
 
 /// Minimal glob match supporting `*` (any run of chars, including none). Used
@@ -297,26 +363,85 @@ fn normalize_feature(s: &str) -> String {
 
 // ---- identity_hint (G4) — name-free structural location ----
 
-/// Build `NodeId → identity_hint` (`<file>:<kind>:<ordinal>`) for every node
-/// that has a POSITION cell. Ordinal = rank among nodes of the same kind in the
-/// same file, ordered by start line. Name-free, so it survives surface renames
-/// AND body edits (engram preserves the FactId + learned salience); it only
-/// shifts if same-kind siblings are reordered or the file moves. (glia-v3 G4)
-fn build_identity_hints(merged: &MergedGraph) -> HashMap<NodeId, String> {
-    let mut groups: HashMap<(String, u32), Vec<(u32, NodeId)>> = HashMap::new();
+/// Build `NodeId → identity_hint` (`<file token>:<kind>:<ordinal>`) for every
+/// node that has a POSITION cell. The file token is `file_identity[path]`, or
+/// the path itself when the map does not name it (always, without `--since`:
+/// the v5 hint). Ordinal = rank among nodes of the same kind in the same file,
+/// ordered by (start row, `NodeId`). Name-free, so it survives surface renames
+/// AND body edits (engram preserves the FactId + learned salience), and file
+/// moves along a `--since` chain (LG.9); it shifts only when same-kind
+/// siblings are reordered within a file. (glia-v3 G4)
+fn build_identity_hints(
+    merged: &MergedGraph,
+    file_identity: &BTreeMap<String, String>,
+) -> HashMap<NodeId, String> {
+    let mut groups: BTreeMap<(&str, u32), Vec<(u32, NodeId)>> = BTreeMap::new();
+    let mut positioned: Vec<(String, u32, u32, NodeId)> = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {
             if let Some((file, start_line, _)) = position_of(&n.cells) {
                 let kind = g.nav.kind_by_id.get(&n.id).map(|k| k.0).unwrap_or(0);
-                groups.entry((file, kind)).or_default().push((start_line, n.id));
+                positioned.push((file, kind, start_line, n.id));
             }
         }
     }
+    for (file, kind, start_line, id) in &positioned {
+        let token = file_identity.get(file).map_or(file.as_str(), String::as_str);
+        groups.entry((token, *kind)).or_default().push((*start_line, *id));
+    }
+    // Lookup only: the output is read by NodeId, never iterated into bytes.
     let mut out = HashMap::new();
-    for ((file, kind), mut v) in groups {
+    for ((token, kind), mut v) in groups {
         v.sort_by_key(|(line, id)| (*line, id.0));
         for (ordinal, (_, id)) in v.into_iter().enumerate() {
-            out.insert(id, format!("{file}:{kind}:{ordinal}"));
+            out.insert(id, format!("{token}:{kind}:{ordinal}"));
+        }
+    }
+    out
+}
+
+/// Every POSITION file path in `merged` — the paths [`build_gmap`] interns,
+/// and the current file list LB.6 `carry_file_tokens` assigns tokens to.
+pub fn position_paths(merged: &MergedGraph) -> BTreeSet<String> {
+    let mut paths = BTreeSet::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if let Some((file, _, _)) = position_of(&n.cells) {
+                paths.insert(file);
+            }
+        }
+    }
+    paths
+}
+
+/// The `path -> file token` map a prior export used, read back out of its
+/// hints: for each node with a hint and a span whose file id `prior.files`
+/// names, the hint minus its trailing `:<kind>:<ordinal>` (split from the
+/// right, so a path or token holding `:` survives). The first node of a path
+/// wins; every node of one path carries the same token by construction. A
+/// hint not in that shape is skipped.
+pub fn prior_tokens(prior: &Gmap) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for n in &prior.nodes {
+        let Some(hint) = n.identity_hint.as_deref() else {
+            continue;
+        };
+        let file = match &n.content {
+            Content::Symbol { span, .. } => span.file,
+            Content::Proposition { span: Some(span), .. } => span.file,
+            _ => continue,
+        };
+        let Some(path) = prior.files.get(&file) else {
+            continue;
+        };
+        let mut parts = hint.rsplitn(3, ':');
+        let (Some(ordinal), Some(kind), Some(token)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        if digits(ordinal) && digits(kind) && !token.is_empty() {
+            out.entry(path.clone()).or_insert_with(|| token.to_string());
         }
     }
     out
@@ -503,14 +628,7 @@ pub fn build_gmap(
     let mut stats = ExportStats::default();
 
     // Pass 1 — intern distinct POSITION file paths to stable, 1-based ids.
-    let mut paths: BTreeSet<String> = BTreeSet::new();
-    for g in &merged.graphs {
-        for n in &g.nodes {
-            if let Some((file, _, _)) = position_of(&n.cells) {
-                paths.insert(file);
-            }
-        }
-    }
+    let paths = position_paths(merged);
     let mut file_id: HashMap<String, u32> = HashMap::new();
     let mut id_to_path: BTreeMap<u32, String> = BTreeMap::new();
     for (i, p) in paths.iter().enumerate() {
@@ -533,7 +651,7 @@ pub fn build_gmap(
     }
 
     // Name-free stable identity per node (G4), for engram salience preservation.
-    let identity = build_identity_hints(merged);
+    let identity = build_identity_hints(merged, &opts.file_identity);
 
     // A node's qname can be the endpoint of a *cross-repo* edge, so flatten
     // every graph's nav into one lookup before walking edges.
@@ -544,34 +662,56 @@ pub fn build_gmap(
         }
     }
 
+    // Key winners — one node per qname among those the filters keep, by
+    // [`key_rank`]; an exact tie (one NodeId listed twice) goes to the first
+    // listed. Filters first: a filtered twin must not win and then be dropped,
+    // losing the key.
+    type Winner = (KeyRank, Reverse<(usize, usize)>);
+    let mut winners: BTreeMap<&str, Winner> = BTreeMap::new();
+    for (gi, g) in merged.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            if filtered(qname, origin_provenance(&n.cells).as_deref(), opts).is_some() {
+                continue;
+            }
+            let rank = (key_rank(n, g.nav.kind_by_id.get(&n.id).copied()), Reverse((gi, ni)));
+            let best = winners.entry(qname.as_str()).or_insert(rank);
+            if rank > *best {
+                *best = rank;
+            }
+        }
+    }
+
     // Pass 2 — nodes. Key = full qname; name = short symbol (qname tail as a
-    // fallback). Dedup on key so each engram concept-cell fact is unambiguous.
+    // fallback). One node per key, the winner, so each engram concept-cell
+    // fact is unambiguous.
     let mut nodes = Vec::new();
-    let mut seen_keys: BTreeSet<&str> = BTreeSet::new();
-    for g in &merged.graphs {
-        for n in &g.nodes {
+    for (gi, g) in merged.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                 stats.skipped_nodes += 1;
                 continue;
             };
-            // Caller exclude globs win first — explicit intent.
-            if opts.exclude.iter().any(|p| glob_match(p, qname)) {
-                stats.dropped_excluded += 1;
-                continue;
-            }
-            // Default-drop substrate-only synthetic pseudo-nodes (npm deps, event
-            // names, generated stubs) unless the caller asked to keep them. Region
-            // anchors are NOT in the drop set, so the spatial map survives.
+            // Caller exclude globs win first — explicit intent. Then the
+            // default drop of substrate-only synthetic pseudo-nodes (npm deps,
+            // event names, generated stubs) unless the caller asked to keep
+            // them. Region anchors are NOT in the drop set, so the spatial map
+            // survives.
             let provenance = origin_provenance(&n.cells);
-            if !opts.include_noise
-                && provenance
-                    .as_deref()
-                    .is_some_and(|p| DROP_PROVENANCE.contains(&p))
-            {
-                stats.dropped_noise += 1;
-                continue;
+            match filtered(qname, provenance.as_deref(), opts) {
+                Some(Filtered::Excluded) => {
+                    stats.dropped_excluded += 1;
+                    continue;
+                }
+                Some(Filtered::Noise) => {
+                    stats.dropped_noise += 1;
+                    continue;
+                }
+                None => {}
             }
-            if !seen_keys.insert(qname.as_str()) {
+            if winners.get(qname.as_str()).map(|w| w.1) != Some(Reverse((gi, ni))) {
                 stats.duplicate_keys += 1;
                 continue;
             }
@@ -644,12 +784,14 @@ pub fn build_gmap(
                     concept_hint_for(qname),
                 )
             };
+            let identity_hint = identity.get(&n.id).cloned();
+            stats.identity_hints += usize::from(identity_hint.is_some());
             nodes.push(GmapNode {
                 key: qname.clone(),
                 content,
                 provenance,
                 concept_hint,
-                identity_hint: identity.get(&n.id).cloned(),
+                identity_hint,
             });
         }
     }
@@ -663,7 +805,7 @@ pub fn build_gmap(
             stats.skipped_edges += 1;
             continue;
         };
-        if from == to || !seen_keys.contains(*from) || !seen_keys.contains(*to) {
+        if from == to || !winners.contains_key(*from) || !winners.contains_key(*to) {
             stats.skipped_edges += 1;
             continue;
         }
@@ -718,6 +860,18 @@ pub fn sidecar_path(out_path: &Path) -> std::path::PathBuf {
     let mut s = out_path.as_os_str().to_os_string();
     s.push(".files.json");
     std::path::PathBuf::from(s)
+}
+
+/// `<out_path>.glia` — the directory beside a gmap where the bin records the
+/// glia graph that gmap was exported from (the LC.9 layout, written by
+/// `glia_engine::persist::persist_result`). A later `--since <out_path>` run
+/// loads it as the prior graph LB.6 `detect_moves` compares against. Copy it
+/// with the gmap; keep `--out` outside the exported repo so the next build
+/// never walks it.
+pub fn history_dir(out_path: &Path) -> PathBuf {
+    let mut s = out_path.as_os_str().to_os_string();
+    s.push(".glia");
+    PathBuf::from(s)
 }
 
 /// Write to `<path>.tmp` then rename over `path` so readers never see a
@@ -1057,7 +1211,7 @@ mod tests {
     #[test]
     fn include_noise_keeps_everything() {
         let merged = three_node_graph();
-        let opts = ExportOptions { include_noise: true, exclude: vec![] };
+        let opts = ExportOptions { include_noise: true, exclude: vec![], ..Default::default() };
         let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &opts);
         assert_eq!(gmap.nodes.len(), 3);
         assert_eq!(stats.dropped_noise, 0);
@@ -1069,11 +1223,117 @@ mod tests {
         let opts = ExportOptions {
             include_noise: true,
             exclude: vec!["region:*".to_string()],
+            ..Default::default()
         };
         let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &opts);
         let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
         assert!(!keys.contains(&"region:www"));
         assert!(keys.contains(&"package:npm:react")); // include_noise kept the dep
         assert_eq!(stats.dropped_excluded, 1);
+    }
+
+    /// One graph of `(id, qname, kind, POSITION file, start row)` rows.
+    fn located_graph(rows: &[(u64, &str, NodeKindId, &str, u32)]) -> MergedGraph {
+        let repo = RepoId(1);
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        for (id, qname, kind, file, row) in rows {
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            nav.record(NodeId(*id), name, qname, *kind, None);
+            nodes.push(Node {
+                id: NodeId(*id),
+                repo,
+                confidence: Confidence::Strong,
+                cells: vec![pos_cell(file, *row, *row + 1)],
+            });
+        }
+        MergedGraph::new(vec![RepoGraph {
+            repo,
+            nodes,
+            edges: vec![],
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        }])
+    }
+
+    fn hint_of(gmap: &Gmap, key: &str) -> String {
+        let n = gmap.nodes.iter().find(|n| n.key == key);
+        n.and_then(|n| n.identity_hint.clone()).unwrap_or_else(|| panic!("{key}: no hint"))
+    }
+
+    /// A path and a carried token holding `:` (and `#`) come back out of the
+    /// hints they were written into; a hint in another shape is skipped.
+    #[test]
+    fn prior_tokens_round_trip_colons() {
+        let merged = located_graph(&[
+            (1, "c::w::a", node_kind::FUNCTION, "c:/w:x/a.py", 0),
+            (2, "c::w::a::g", node_kind::FUNCTION, "c:/w:x/a.py", 3),
+            (3, "b", node_kind::MODULE, "b.py", 0),
+        ]);
+        let opts = ExportOptions {
+            file_identity: [("b.py".to_string(), "old:dir/b.py#2".to_string())].into(),
+            ..Default::default()
+        };
+        let (mut gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &opts);
+        assert_eq!(stats.identity_hints, 3);
+        assert_eq!(hint_of(&gmap, "c::w::a::g"), format!("c:/w:x/a.py:{}:1", node_kind::FUNCTION.0));
+        assert_eq!(hint_of(&gmap, "b"), format!("old:dir/b.py#2:{}:0", node_kind::MODULE.0));
+        let want: BTreeMap<String, String> = [
+            ("b.py".to_string(), "old:dir/b.py#2".to_string()),
+            ("c:/w:x/a.py".to_string(), "c:/w:x/a.py".to_string()),
+        ]
+        .into();
+        assert_eq!(prior_tokens(&gmap), want);
+
+        for bad in ["no-colons", "x:y:z", ":1:0"] {
+            for n in &mut gmap.nodes {
+                n.identity_hint = Some(bad.to_string());
+            }
+            assert!(prior_tokens(&gmap).is_empty(), "{bad}");
+        }
+    }
+
+    /// The whole token chain in memory: hints of export 1 -> prior_tokens ->
+    /// LB.6 carry_file_tokens over a move -> hints of export 2. A file that
+    /// stayed keeps its token, the moved file keeps its first-sight token, and
+    /// a new file at the vacated path gets a fresh suffixed one.
+    #[test]
+    fn token_chain_carries_a_move_and_suffixes_the_vacated_path() {
+        use glia_graph::identity::{FileMove, MoveMap, MoveTier, carry_file_tokens};
+        let before = located_graph(&[
+            (1, "a", node_kind::MODULE, "a.py", 0),
+            (2, "a::f", node_kind::FUNCTION, "a.py", 2),
+            (3, "b", node_kind::MODULE, "b.py", 0),
+        ]);
+        let (g1, _, _) = build_gmap(&before, &std::env::temp_dir(), &ExportOptions::default());
+        let after = located_graph(&[
+            (4, "sub::a", node_kind::MODULE, "sub/a.py", 0),
+            (5, "sub::a::f", node_kind::FUNCTION, "sub/a.py", 2),
+            (6, "a", node_kind::MODULE, "a.py", 0),
+            (3, "b", node_kind::MODULE, "b.py", 0),
+        ]);
+        let moves = MoveMap {
+            files: vec![FileMove {
+                old_path: "a.py".into(),
+                new_path: "sub/a.py".into(),
+                tier: MoveTier::Identical,
+            }],
+            ..MoveMap::default()
+        };
+        let current: Vec<String> = position_paths(&after).into_iter().collect();
+        let file_identity = carry_file_tokens(&prior_tokens(&g1), &moves, &current);
+        let opts = ExportOptions { file_identity, ..Default::default() };
+        let (g2, _, _) = build_gmap(&after, &std::env::temp_dir(), &opts);
+        assert_eq!(hint_of(&g2, "sub::a"), hint_of(&g1, "a"));
+        assert_eq!(hint_of(&g2, "sub::a::f"), hint_of(&g1, "a::f"));
+        assert_eq!(hint_of(&g2, "b"), hint_of(&g1, "b"));
+        assert_eq!(hint_of(&g2, "a"), format!("a.py#2:{}:0", node_kind::MODULE.0));
+        // The next link reads the carried and the suffixed tokens back.
+        let t2 = prior_tokens(&g2);
+        assert_eq!(t2.get("sub/a.py").map(String::as_str), Some("a.py"));
+        assert_eq!(t2.get("a.py").map(String::as_str), Some("a.py#2"));
     }
 }
