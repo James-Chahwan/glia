@@ -78,6 +78,15 @@
 //! symbol: a tag is the symbol's own documentation. `@inheritdoc <Base>` is a
 //! `Documents` edge from `<base contract>::<name>` to the override. The rules
 //! live in `natspec`; every other symbol keeps the DOC-cell path.
+//!
+//! ## The edge story (v6, LG.11)
+//!
+//! Every glia edge category exports through one table, [`CATEGORY_MAP`]:
+//! one `(category, EdgeKind, weight)` row per registered id, guarded by a
+//! test over `edge_category::ALL`, so a new category cannot fall silently to
+//! `Cooccurs`. glia's DOCUMENTS edges (doc section / contract operation ->
+//! the code it describes) export as `Documents`, counted in
+//! [`ExportStats::documents_edges`] apart from the NatSpec ones.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -125,6 +134,11 @@ pub struct ExportStats {
     /// Propositions whose `span` is `Some` — every one with a POSITION.
     /// (glia-v6)
     pub propositions_anchored: usize,
+    /// Exported glia DOCUMENTS edges, kind `Documents` since v6 (they were
+    /// folded into `Cooccurs` before). NatSpec's Documents edges are not
+    /// glia edges and count in [`natspec_edges`](Self::natspec_edges) only.
+    /// (LG.11)
+    pub documents_edges: usize,
     /// Nodes dropped by the default noise filter (ORIGIN provenance in the
     /// drop set) — suppressed when `include_noise` is set. (glia-v2 G6/G9/G11)
     pub dropped_noise: usize,
@@ -263,67 +277,91 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     true
 }
 
-/// Map a glia [`EdgeCategoryId`] onto one of engram's five memory relations.
+/// How every glia edge category exports: `(category, engram kind, weight)`,
+/// exactly one row per id in [`ec::ALL`] (`tests::every_registered_category_is_mapped`
+/// fails the wave that registers a category without a row here). The weight
+/// is the per-edge conductance hint for engram's spreading activation (G13):
+/// definitional edges propagate strongest, weak co-occurrence weakest, and
+/// `None` means glia has no opinion (engram falls back to 1.0).
 ///
-/// engram's kinds are *memory* relations, not code-structure ones, so this is
-/// intentionally lossy. `Supersedes`/`Contradicts` are revision relations that
-/// only arise from lived experience (engram's Path B) and are never emitted
-/// from structure. Owner decisions baked in here:
-///   - `DEFINES` / `CONTAINS` → `Cooccurs` (plain association, not narrowing).
-///   - `INHERITS_FROM` → `Specializes` (the one true narrowing relation).
-///   - Directed "A triggers / depends on B" → `Causes`.
-///   - Everything else (imports, uses, docs, tests, shared-*, structural
-///     attributes, return types, config/infra refs) → `Cooccurs`.
-pub fn edge_kind(cat: EdgeCategoryId) -> EdgeKind {
-    match cat {
-        // Pure code-structure relations → the v3 code-shaped kinds (G12).
-        ec::DEFINES | ec::CONTAINS => EdgeKind::Contains,
-        ec::IMPORTS | ec::USES => EdgeKind::Imports,
-        ec::CALLS => EdgeKind::Calls,
-        // glia has no separate IMPLEMENTS category — INHERITS_FROM covers both
-        // `extends` and `implements`, so it maps to Extends. (handoff note)
-        ec::INHERITS_FROM => EdgeKind::Extends,
-        ec::IMPLEMENTS => EdgeKind::Implements,
-        ec::DEPENDS_ON => EdgeKind::DependsOn,
-        ec::RETURNS_TYPE => EdgeKind::Returns,
-        // Dynamic / cross-process flows: causal but not pure syntactic code
-        // edges — kept as Causes per the handoff.
-        ec::INJECTS
-        | ec::HANDLED_BY
-        | ec::HTTP_CALLS
-        | ec::GRPC_CALLS
-        | ec::QUEUE_FLOWS
-        | ec::GRAPHQL_CALLS
-        | ec::WS_CONNECTS
-        | ec::EVENT_FLOWS
-        | ec::CLI_INVOKES
-        | ec::ACCESSES_DATA
-        | ec::SCHEDULES
-        | ec::READS_CONFIG
-        | ec::INFRA_REFERENCES => EdgeKind::Causes,
-        // SHARES_*, DOCUMENTS, attributes, co-location → plain association.
-        _ => EdgeKind::Cooccurs,
-    }
+/// `Supersedes` / `Contradicts` / `Specializes` are revision relations that
+/// only arise from lived experience (engram's Path B), so no category maps to
+/// them. A new category takes the row its semantics give it:
+///   - a code-structure relation → the matching v3 code-shaped kind (G12);
+///   - a runtime hop from one side to another (a call site to what it calls
+///     across a process or transport, a route to its handler, a job to its
+///     target, a page link to the page) → `Causes`, `None`;
+///   - co-location or shared history (two nodes that touch the same schema,
+///     entity, config key, schedule, infra ref, package, data source, or
+///     change together) → `Cooccurs`, `0.3`;
+///   - documentation of a code element → `Documents`, `0.3` (v6; before v6
+///     DOCUMENTS fell through to `Cooccurs` beside the SHARES_* rows).
+///
+/// `USES` stays `Imports`: every USES edge is a static by-name reference from
+/// the code that names a thing to the thing named (a type, a constant, an enum
+/// variant, a member, a queue producer handle), the symbol-grain twin of an
+/// import, not a runtime hop.
+pub const CATEGORY_MAP: &[(EdgeCategoryId, EdgeKind, Option<f32>)] = &[
+    // Structural containment: definitional.
+    (ec::DEFINES, EdgeKind::Contains, Some(1.0)),
+    (ec::CONTAINS, EdgeKind::Contains, Some(1.0)),
+    // Direct code references: strong.
+    (ec::CALLS, EdgeKind::Calls, Some(0.8)),
+    (ec::INHERITS_FROM, EdgeKind::Extends, Some(0.8)),
+    (ec::IMPLEMENTS, EdgeKind::Implements, Some(0.8)),
+    // Indirect code references.
+    (ec::IMPORTS, EdgeKind::Imports, Some(0.5)),
+    (ec::USES, EdgeKind::Imports, Some(0.5)),
+    (ec::RETURNS_TYPE, EdgeKind::Returns, Some(0.5)),
+    (ec::DEPENDS_ON, EdgeKind::DependsOn, Some(0.5)),
+    // A doc section or contract operation -> the code it describes.
+    (ec::DOCUMENTS, EdgeKind::Documents, Some(0.3)),
+    // Runtime hops: dynamic / cross-process flows.
+    (ec::INJECTS, EdgeKind::Causes, None),
+    (ec::HANDLED_BY, EdgeKind::Causes, None),
+    (ec::HTTP_CALLS, EdgeKind::Causes, None),
+    (ec::GRPC_CALLS, EdgeKind::Causes, None),
+    (ec::RPC_CALLS, EdgeKind::Causes, None),
+    (ec::QUEUE_FLOWS, EdgeKind::Causes, None),
+    (ec::GRAPHQL_CALLS, EdgeKind::Causes, None),
+    (ec::WS_CONNECTS, EdgeKind::Causes, None),
+    (ec::EVENT_FLOWS, EdgeKind::Causes, None),
+    (ec::CLI_INVOKES, EdgeKind::Causes, None),
+    (ec::ACCESSES_DATA, EdgeKind::Causes, None),
+    (ec::SCHEDULES, EdgeKind::Causes, None),
+    (ec::READS_CONFIG, EdgeKind::Causes, None),
+    (ec::INFRA_REFERENCES, EdgeKind::Causes, None),
+    (ec::NAVIGATES_TO, EdgeKind::Causes, None),
+    // Co-location and shared history: weak co-occurrence.
+    (ec::SHARES_SCHEMA, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_DATA_ENTITY, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_CONFIG, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_CRON_SCHEDULE, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_INFRA_REF, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_DEPENDENCY, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::SHARES_DATA_SOURCE, EdgeKind::Cooccurs, Some(0.3)),
+    (ec::CO_CHANGES, EdgeKind::Cooccurs, Some(0.3)),
+    // Plain association glia puts no weight on.
+    (ec::TESTS, EdgeKind::Cooccurs, None),
+    (ec::HAS_ATTRIBUTE, EdgeKind::Cooccurs, None),
+    (ec::DEFINES_CONFIG, EdgeKind::Cooccurs, None),
+];
+
+/// The [`CATEGORY_MAP`] row for `cat`, `None` for an unregistered id.
+fn category_row(cat: EdgeCategoryId) -> Option<&'static (EdgeCategoryId, EdgeKind, Option<f32>)> {
+    CATEGORY_MAP.iter().find(|(c, ..)| *c == cat)
 }
 
-/// Per-edge conductance hint for engram's spreading activation (G13). Scale
-/// from the handoff: definitional edges propagate strongest, weak
-/// co-occurrence weakest. `None` = glia doesn't know; engram falls back to 1.0.
+/// The engram [`EdgeKind`] a glia edge category exports as ([`CATEGORY_MAP`]);
+/// `Cooccurs` only for an id no registry names.
+pub fn edge_kind(cat: EdgeCategoryId) -> EdgeKind {
+    category_row(cat).map_or(EdgeKind::Cooccurs, |(_, kind, _)| *kind)
+}
+
+/// The conductance hint a glia edge category exports with ([`CATEGORY_MAP`]);
+/// `None` (engram's 1.0) for an unweighted row or an unregistered id.
 pub fn edge_weight(cat: EdgeCategoryId) -> Option<f32> {
-    let w = match cat {
-        ec::DEFINES | ec::CONTAINS => 1.0, // definitional
-        ec::CALLS | ec::INHERITS_FROM | ec::IMPLEMENTS => 0.8, // strong direct reference
-        ec::IMPORTS | ec::USES | ec::RETURNS_TYPE | ec::DEPENDS_ON => 0.5, // indirect
-        ec::DOCUMENTS
-        | ec::SHARES_SCHEMA
-        | ec::SHARES_DATA_ENTITY
-        | ec::SHARES_CONFIG
-        | ec::SHARES_CRON_SCHEDULE
-        | ec::SHARES_INFRA_REF
-        | ec::SHARES_DEPENDENCY => 0.3, // weak co-occurrence
-        _ => return None, // dynamic flows etc — let engram default to 1.0
-    };
-    Some(w)
+    category_row(cat).and_then(|(_, _, weight)| *weight)
 }
 
 // ---- concept_hint (G14) — structural-aware feature-key heuristic ----
@@ -1008,9 +1046,11 @@ pub fn build_gmap(
             stats.skipped_edges += 1;
             continue;
         }
+        let kind = edge_kind(e.category);
+        stats.documents_edges += usize::from(kind == EdgeKind::Documents);
         edges.push(GmapEdge {
             from: (*from).to_string(),
-            kind: edge_kind(e.category),
+            kind,
             to: (*to).to_string(),
             weight: edge_weight(e.category),
         });
@@ -1185,16 +1225,59 @@ mod tests {
         assert_eq!(edge_kind(ec::USES), EdgeKind::Imports);
         assert_eq!(edge_kind(ec::DEPENDS_ON), EdgeKind::DependsOn);
         assert_eq!(edge_kind(ec::RETURNS_TYPE), EdgeKind::Returns);
-        // glia has no IMPLEMENTS category — INHERITS_FROM → Extends.
+        // Class extension and interface implementation are separate
+        // categories since v5 (G12.5), so separate kinds.
         assert_eq!(edge_kind(ec::INHERITS_FROM), EdgeKind::Extends);
-        // dynamic flows stay Causes; co-occurrence stays Cooccurs.
+        assert_eq!(edge_kind(ec::IMPLEMENTS), EdgeKind::Implements);
+        // v6 (LG.11): doc links are Documents, no longer folded into Cooccurs.
+        assert_eq!(edge_kind(ec::DOCUMENTS), EdgeKind::Documents);
+        assert_eq!(edge_weight(ec::DOCUMENTS), Some(0.3));
+        // Runtime hops are Causes: tRPC like gRPC / HTTP, page links too.
         assert_eq!(edge_kind(ec::HTTP_CALLS), EdgeKind::Causes);
+        assert_eq!(edge_kind(ec::GRPC_CALLS), EdgeKind::Causes);
+        assert_eq!(edge_kind(ec::RPC_CALLS), EdgeKind::Causes);
+        assert_eq!(edge_kind(ec::NAVIGATES_TO), EdgeKind::Causes);
+        // Co-location and history are weak co-occurrence, every SHARES_*
+        // row at the same weight.
+        assert_eq!(edge_kind(ec::SHARES_SCHEMA), EdgeKind::Cooccurs);
+        assert_eq!(edge_kind(ec::SHARES_DATA_SOURCE), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(ec::SHARES_DATA_SOURCE), Some(0.3));
+        assert_eq!(edge_kind(ec::CO_CHANGES), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(ec::CO_CHANGES), Some(0.3));
         assert_eq!(edge_kind(ec::TESTS), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(ec::TESTS), None);
         // G13 weights track the scale.
         assert_eq!(edge_weight(ec::CONTAINS), Some(1.0));
         assert_eq!(edge_weight(ec::CALLS), Some(0.8));
         assert_eq!(edge_weight(ec::IMPORTS), Some(0.5));
         assert_eq!(edge_weight(ec::HTTP_CALLS), None);
+        assert_eq!(edge_weight(ec::RPC_CALLS), None);
+        // An id no registry names: plain association, no weight.
+        let unregistered = EdgeCategoryId(ec::ALL.iter().map(|(c, _)| c.0).max().unwrap_or(0) + 1);
+        assert_eq!(ec::name(unregistered), "UNKNOWN");
+        assert_eq!(edge_kind(unregistered), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(unregistered), None);
+    }
+
+    /// Every registered edge category has exactly one CATEGORY_MAP row, and
+    /// every row is a registered category: a category added to the registry
+    /// without an export decision fails here, not silently as `Cooccurs`.
+    #[test]
+    fn every_registered_category_is_mapped() {
+        for (id, name) in ec::ALL {
+            let rows = CATEGORY_MAP.iter().filter(|(c, ..)| c == id).count();
+            assert_eq!(
+                rows, 1,
+                "edge category {name} ({id:?}) has {rows} CATEGORY_MAP rows: classify it in CATEGORY_MAP (exactly one row)"
+            );
+        }
+        for (id, kind, _) in CATEGORY_MAP {
+            assert!(
+                ec::ALL.iter().any(|(c, _)| c == id),
+                "CATEGORY_MAP row {id:?} -> {kind:?} names no registered edge category"
+            );
+        }
+        assert_eq!(CATEGORY_MAP.len(), ec::ALL.len());
     }
 
     #[test]

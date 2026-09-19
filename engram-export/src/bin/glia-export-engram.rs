@@ -330,6 +330,13 @@ fn run(args: &Args) -> i32 {
         stats.natspec_inheritdoc_resolved,
         stats.natspec_inheritdoc_resolved + stats.natspec_inheritdoc_unresolved,
     );
+    // The v6 documents marker (LG.11): glia DOCUMENTS edges exported as
+    // Documents (the NatSpec ones are on the line above, not counted here).
+    // Printed on every run, so a zero is a real zero.
+    eprintln!(
+        "[engram-export] v6 documents: {} Documents edges (DOCUMENTS was folded into Cooccurs before v6)",
+        stats.documents_edges,
+    );
     if stats.skipped_nodes > 0 || stats.duplicate_keys > 0 || stats.skipped_edges > 0 {
         eprintln!(
             "  skipped: {} unqualified nodes, {} duplicate keys, {} edges",
