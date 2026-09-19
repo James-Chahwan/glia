@@ -311,7 +311,7 @@ mod tests {
         let g = graph_for(
             "def sink(): pass\ndef mid(): sink()\ndef caller(): mid()\n",
         );
-        let mut facts = TestPatchFacts::default();
+        let facts = TestPatchFacts::default();
         // Treat top-level `sink` as a constructor sink — that path resolves
         // by class-name match, but here we route via class_attrs analog by
         // using a synthetic Class.attr binding through resolved_attrs.

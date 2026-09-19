@@ -3,7 +3,13 @@ over this one module. Inner/Outer and Target/Source are the class sources of
 composition.rs's one_hop_typed_return_path and
 docstring_backtick_fallback_enables_path tests; ListField/TupleField both
 define `bind(self, schema)`, called from two distinct callers, so the
-callsite-argflow hook sees one polymorphic name."""
+callsite-argflow hook sees one polymorphic name.
+
+LD.12e: ListField is a container, the marshmallow `_bind_to_schema` shape the
+derived-notes hook reads: its bind binds its inner leaf field too, passing the
+container (not the schema) as the leaf's schema. So the call-site cell shows a
+non-self receiver handing `self` over, and the polymorphism note names
+ListField as the container."""
 
 
 class Inner:
@@ -42,8 +48,12 @@ class Source:
 
 
 class ListField:
+    def __init__(self, inner):
+        self.inner = inner
+
     def bind(self, schema):
         self.schema = schema
+        self.inner.bind(self)
 
 
 class TupleField:

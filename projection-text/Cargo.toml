@@ -56,6 +56,12 @@ required-features = ["research"]
 name = "synth_derived_notes"
 required-features = ["research"]
 
+# synth_composition -> synth_callsite_argflow -> synth_key_symbols ->
+# synth_derived_notes as one ActivationPlan over one graph load (LD.12e).
+[[bin]]
+name = "synth_plan"
+required-features = ["research"]
+
 [[bin]]
 name = "synth_call_chain"
 required-features = ["research"]
