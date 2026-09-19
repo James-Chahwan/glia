@@ -4,19 +4,19 @@
   "dirs": ["."],
   "note": "LA.15 (programme A10.11). springdoc-openapi annotations on a Spring handler declare the operation in code: @Operation(summary, operationId) + @ApiResponse(responseCode). The op is a contract DOC_SECTION like an openapi.yaml op, keyed on the ROUTE its annotated method handles, and DOCUMENTS that ROUTE. createUser carries no annotation and must not become an op. Baseline 2026-09-18 (HEAD 7a4883b): no DOC_SECTION, no DOCUMENTS.",
   "expect_nodes": [
-    {"kind": "DOC_SECTION", "name": "contract::UserController::GET:/api/users/{id}", "note": "one op for the annotated handler"}
+    {"kind": "DOC_SECTION", "name": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "note": "one op for the annotated handler"}
   ],
   "expect_edges": [
-    {"from": "contract::UserController::GET:/api/users/{id}", "to": "GET /api/users/{id}", "category": "DOCUMENTS", "note": "the annotation op DOCUMENTS the route its method handles"}
+    {"from": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "to": "GET /api/users/{id}", "category": "DOCUMENTS", "note": "the annotation op DOCUMENTS the route its method handles"}
   ],
   "expect_cells": [
-    {"kind": "DOC_SECTION", "node": "contract::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"springdoc\",\"method\":\"GET\",\"path\":\"/api/users/{id}\"", "note": "method + path read off the HANDLED_BY route"},
-    {"kind": "DOC_SECTION", "node": "contract::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"operation_id\":\"getUser\"", "note": "operationId from @Operation"},
-    {"kind": "DOC_SECTION", "node": "contract::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "every @ApiResponse status, declaration order"},
-    {"kind": "DOC_SECTION", "node": "contract::UserController::GET:/api/users/{id}", "cell": "POSITION", "contains": "\"start_line\":9", "note": "0-indexed first annotation line"}
+    {"kind": "DOC_SECTION", "node": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"springdoc\",\"method\":\"GET\",\"path\":\"/api/users/{id}\"", "note": "method + path read off the HANDLED_BY route"},
+    {"kind": "DOC_SECTION", "node": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"operation_id\":\"getUser\"", "note": "operationId from @Operation"},
+    {"kind": "DOC_SECTION", "node": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "every @ApiResponse status, declaration order"},
+    {"kind": "DOC_SECTION", "node": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "cell": "POSITION", "contains": "\"start_line\":9", "note": "0-indexed first annotation line"}
   ],
   "forbid": [
-    {"kind": "DOC_SECTION", "name": "contract::UserController::POST:/api/users", "note": "PRECISION: an un-annotated handler is not a declared op"},
-    {"from": "contract::UserController::GET:/api/users/{id}", "to": "ANY /api/users", "category": "DOCUMENTS", "note": "the class-level ANY route is not what the op documents"}
+    {"kind": "DOC_SECTION", "name": "contract::src::main::java::com::shop::UserController::POST:/api/users", "note": "PRECISION: an un-annotated handler is not a declared op"},
+    {"from": "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}", "to": "ANY /api/users", "category": "DOCUMENTS", "note": "the class-level ANY route is not what the op documents"}
   ]
 }

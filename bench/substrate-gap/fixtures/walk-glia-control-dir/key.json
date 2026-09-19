@@ -9,7 +9,7 @@
     {"kind": "MODULE", "name": ".glia::notes"},
     {"kind": "FUNCTION", "name": ".glia::notes::g"},
     {"kind": "MODULE", "name": ".glia::scratch::spec"},
-    {"kind": "DOC_SECTION", "name": "contract::spec::GET:/x"}
+    {"kind": "DOC_SECTION", "name": "contract::.glia::scratch::spec::GET:/x"}
   ],
   "note": "LF.1d. .glia is glia's control directory: nothing under it is walked, parsed or contract-sniffed. Baseline 2026-09-19 (installed wheel = W11 HEAD e6289b1): .glia/notes.py is parsed and .glia/scratch/spec.json is sniffed as an OpenAPI contract, so all 4 forbids are violated. m::f is the control."
 }

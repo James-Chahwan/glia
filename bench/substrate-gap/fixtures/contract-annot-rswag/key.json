@@ -4,13 +4,13 @@
   "dirs": ["."],
   "note": "LA.15 (programme A10.11). rswag request specs declare the OpenAPI op in an RSpec DSL: `path '/users/{id}' do` + `get 'summary' do` + operationId + response codes. The route itself is a Rails route. Baseline 2026-09-18 (HEAD 7a4883b): ROUTE GET /users/:id exists, no DOC_SECTION, no DOCUMENTS.",
   "expect_nodes": [
-    {"kind": "DOC_SECTION", "name": "contract::users_spec::GET:/users/{id}", "note": "path block + verb block"}
+    {"kind": "DOC_SECTION", "name": "contract::spec::requests::users_spec::GET:/users/{id}", "note": "path block + verb block"}
   ],
   "expect_edges": [
-    {"from": "contract::users_spec::GET:/users/{id}", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link matcher"}
+    {"from": "contract::spec::requests::users_spec::GET:/users/{id}", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link matcher"}
   ],
   "expect_cells": [
-    {"kind": "DOC_SECTION", "node": "contract::users_spec::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"rswag\"", "note": "ORIGIN is set at extraction, so the spec file's test_fixture tagging never overrides it"},
-    {"kind": "DOC_SECTION", "node": "contract::users_spec::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "response blocks in order"}
+    {"kind": "DOC_SECTION", "node": "contract::spec::requests::users_spec::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"provenance\":\"contract\",\"source\":\"rswag\"", "note": "ORIGIN is set at extraction, so the spec file's test_fixture tagging never overrides it"},
+    {"kind": "DOC_SECTION", "node": "contract::spec::requests::users_spec::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "response blocks in order"}
   ]
 }

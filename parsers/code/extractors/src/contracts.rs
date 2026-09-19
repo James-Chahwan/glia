@@ -28,12 +28,17 @@
 //! parsed with serde_json, which the crate already depends on, but only after
 //! the sniff hits.
 //!
+//! LB.12: every op is scoped by the file that declares it —
+//! [`contract_op_qname`], `contract::<dirs ::-joined>::<stem>::<op>` — so two
+//! services' `openapi.yaml` files keep one op node each, while a yaml / json
+//! twin of one spec in one directory still declares one set of ops.
+//!
 //! Parsers EXTRACT — nothing here resolves anything; pairing operations with
 //! routes is the graph crate's job.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, dir_stem_qname, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 /// Everything one contract file contributes to the graph. `edges` is empty for
@@ -96,9 +101,23 @@ pub struct ContractCounts {
     /// feature slugs that declared at least one.
     pub speckit: usize,
     pub speckit_features: BTreeSet<String>,
+    /// LB.12: the distinct op nodes recorded, behind [`Self::collided`]. A
+    /// NodeId hashes (repo, kind, qname), so two repos' root `openapi.yaml`
+    /// ops are distinct here as they are in the graph. Feeds a count only.
+    distinct_ops: HashSet<NodeId>,
 }
 
 impl ContractCounts {
+    /// LB.12 `[contract] collided=`: op declarations that landed on an op
+    /// node an earlier declaration had already minted. Since ops are scoped
+    /// by directory + stem ([`contract_op_qname`]) only a yaml / json twin of
+    /// one spec in one directory does that, which is the merge A10.8 wants;
+    /// anything else here is two declarations sharing one identity.
+    pub fn collided(&self) -> usize {
+        let ops = self.openapi + self.asyncapi + self.pact + self.feature_yaml;
+        ops.saturating_sub(self.distinct_ops.len())
+    }
+
     /// Fold one file's extraction into the build counters. A file that sniffed
     /// as a contract but declared nothing counts nowhere.
     pub fn record(&mut self, out: &ContractNodes) {
@@ -113,6 +132,7 @@ impl ContractCounts {
             Some(ContractSource::FeatureYaml) => self.feature_yaml += n,
             None => return,
         }
+        self.distinct_ops.extend(out.nodes.iter().map(|op| op.id));
         if let Some(feature) = &out.feature {
             if out.source == Some(ContractSource::FeatureYaml) {
                 self.feature_yaml_features.insert(feature.clone());
@@ -837,7 +857,7 @@ pub fn extract_yaml_contracts(
     let Some(kind) = sniff(source) else {
         return out;
     };
-    let stem = scoped_stem(&mut out, path);
+    out.feature = speckit_feature(path).map(str::to_string);
     // LE.10b: the field reader walks the whole document, built once per file
     // and only when the file declares an op to read fields for.
     let tree = |empty: bool| (!empty).then(|| yaml_document(source));
@@ -846,24 +866,28 @@ pub fn extract_yaml_contracts(
             out.source = Some(ContractSource::OpenApi);
             let ops = scan_openapi(source);
             let doc = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, doc.as_ref(), &stem, path, module_id, repo);
+            emit_openapi(&mut out, ops, doc.as_ref(), path, module_id, repo);
         }
         Sniffed::AsyncApi => {
             out.source = Some(ContractSource::AsyncApi);
             let ops = scan_asyncapi(source);
             let doc = tree(ops.is_empty());
-            emit_asyncapi(&mut out, ops, doc.as_ref(), &stem, path, module_id, repo);
+            emit_asyncapi(&mut out, ops, doc.as_ref(), path, module_id, repo);
         }
     }
     out
 }
 
-/// The qname segment a contract file contributes: `openapi` for `openapi.yaml`.
-pub(crate) fn file_stem(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("spec")
+/// The qname of the op `op` (`GET:/orders`, `publish:orders`) declared by the
+/// file at repo-relative `file_path` (LB.12): `contract::` + the file's
+/// directories and stem ([`dir_stem_qname`]) + `::` + `op`.
+/// `services/orders/openapi.yaml` declares
+/// `contract::services::orders::openapi::GET:/orders`; a root-level
+/// `openapi.yaml` keeps `contract::openapi::GET:/orders`. Every contract
+/// format, a quokka feature list and the handler-annotation ops
+/// (`openapi_annot`) all name their ops here, so one file owns one scope.
+pub fn contract_op_qname(file_path: &str, op: &str) -> String {
+    format!("contract::{}::{op}", dir_stem_qname(file_path))
 }
 
 // ----------------------------------------------------------------------
@@ -873,9 +897,10 @@ pub(crate) fn file_stem(path: &str) -> &str {
 // Spec-driven repos declare their API per FEATURE. spec_status needs every
 // declared op attributed to the feature that declared it, so:
 //  - spec-kit puts each feature's contracts in `specs/<NNN-slug>/contracts/`,
-//    and every one of those files is typically named `openapi.yaml`. Keyed by
-//    the file stem alone, two features declaring the same op collided into one
-//    NodeId; the stem segment is qualified by the feature instead.
+//    and every one of those files is typically named `openapi.yaml`. Scoped
+//    by directory (LB.12, [`contract_op_qname`]) two features declaring the
+//    same op are two nodes; the slug is recorded for the ORIGIN `feature`
+//    field and the `[sdd]` counters.
 //  - quokka lists a feature's routes in `features/<f>/feature.yaml` under
 //    `backend_routes:`, items `- METHOD /path  # note`, optionally grouped
 //    under `protected:` / `public:`. Each item is an HTTP op with the node
@@ -903,21 +928,6 @@ fn is_speckit_slug(seg: &str) -> bool {
     digits >= 3
         && rest.bytes().next().is_some_and(slug_byte)
         && rest.bytes().all(|b| slug_byte(b) || b == b'-')
-}
-
-/// The qname segment `path`'s ops sit under: the file stem, qualified as
-/// `feature:<NNN-slug>:<stem>` inside a spec-kit feature, whose slug is also
-/// recorded on `out` for the ORIGIN cells and the `[sdd]` counters. A file
-/// outside that layout keeps its bare stem, byte for byte.
-fn scoped_stem(out: &mut ContractNodes, path: &str) -> String {
-    let stem = file_stem(path);
-    match speckit_feature(path) {
-        Some(slug) => {
-            out.feature = Some(slug.to_string());
-            format!("feature:{slug}:{stem}")
-        }
-        None => stem.to_string(),
-    }
 }
 
 /// `,"feature":"<slug>"` for an op declared under a feature, or nothing (the
@@ -1045,7 +1055,8 @@ fn scan_feature_yaml(source: &str) -> Option<Vec<RouteDecl>> {
 }
 
 /// One DOC_SECTION per `backend_routes` item: qname
-/// `contract::feature:<f>::<METHOD>:<path>`, ORIGIN
+/// `contract::features::<f>::feature::<METHOD>:<path>` ([`contract_op_qname`]
+/// of the list's own path), ORIGIN
 /// `{provenance: contract, source: feature_yaml, feature, group?, method, path, raw_path}`.
 fn emit_feature_yaml(
     out: &mut ContractNodes,
@@ -1056,7 +1067,7 @@ fn emit_feature_yaml(
     repo: RepoId,
 ) {
     for d in decls {
-        let qname = format!("contract::feature:{feature}::{}:{}", d.method, d.path);
+        let qname = contract_op_qname(path, &format!("{}:{}", d.method, d.path));
         let name = format!("{} {}", d.method, d.path);
         let group = d
             .group
@@ -1075,14 +1086,16 @@ fn emit_feature_yaml(
 }
 
 /// One DOC_SECTION per HTTP operation. The yaml and JSON paths both end here,
-/// so an `openapi.json` op is byte-for-byte the node its yaml twin would be.
+/// and an op is scoped by its file's directory + stem ([`contract_op_qname`]),
+/// so an `openapi.json` op is byte-for-byte the node its `openapi.yaml` twin
+/// in the same directory would be, while another directory's `openapi.yaml`
+/// declares its own.
 /// `doc` is the parsed document (LE.10b): an op declaring a request or
 /// response body schema also gets a SCHEMA_FIELDS cell.
 fn emit_openapi(
     out: &mut ContractNodes,
     ops: Vec<Op>,
     doc: Option<&YNode>,
-    stem: &str,
     path: &str,
     module_id: NodeId,
     repo: RepoId,
@@ -1090,7 +1103,7 @@ fn emit_openapi(
     let mut cx = doc.map(FieldCx::new);
     let feature = feature_field(out.feature.as_deref());
     for op in ops {
-        let qname = format!("contract::{stem}::{}:{}", op.method, op.path);
+        let qname = contract_op_qname(path, &format!("{}:{}", op.method, op.path));
         let name = format!("{} {}", op.method, op.path);
         let origin = format!(
             r#"{{"provenance":"contract","source":"openapi"{feature},"method":"{}","path":"{}","raw_path":"{}"{}}}"#,
@@ -1119,7 +1132,6 @@ fn emit_asyncapi(
     out: &mut ContractNodes,
     ops: Vec<ChannelOp>,
     doc: Option<&YNode>,
-    stem: &str,
     path: &str,
     module_id: NodeId,
     repo: RepoId,
@@ -1127,7 +1139,7 @@ fn emit_asyncapi(
     let mut cx = doc.map(FieldCx::new);
     let feature = feature_field(out.feature.as_deref());
     for op in ops {
-        let qname = format!("contract::{stem}::{}:{}", op.action, op.channel);
+        let qname = contract_op_qname(path, &format!("{}:{}", op.action, op.channel));
         let name = format!("{} {}", op.action, op.channel);
         let origin = format!(
             r#"{{"provenance":"contract","source":"asyncapi"{feature},"action":"{}","channel":"{}"{}}}"#,
@@ -1484,7 +1496,7 @@ pub fn extract_json_contract(
         return out;
     };
     let lines = LineIndex::new(source);
-    let stem = scoped_stem(&mut out, path);
+    out.feature = speckit_feature(path).map(str::to_string);
     let feature = feature_field(out.feature.as_deref());
     out.source = Some(kind);
     // LE.10b: the field reader walks an order-keeping tree (the `Value` map
@@ -1499,12 +1511,12 @@ pub fn extract_json_contract(
         ContractSource::OpenApi => {
             let ops = json_openapi_ops(source, &doc, &lines);
             let t = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, t.as_ref(), &stem, path, module_id, repo);
+            emit_openapi(&mut out, ops, t.as_ref(), path, module_id, repo);
         }
         ContractSource::AsyncApi => {
             let ops = json_asyncapi_ops(source, &doc, &lines);
             let t = tree(ops.is_empty());
-            emit_asyncapi(&mut out, ops, t.as_ref(), &stem, path, module_id, repo);
+            emit_asyncapi(&mut out, ops, t.as_ref(), path, module_id, repo);
         }
         // `sniff_json_contract` never answers it: a feature list is yaml-only.
         ContractSource::FeatureYaml => {}
@@ -1521,7 +1533,7 @@ pub fn extract_json_contract(
             };
             let parties = format!("{}{}", party("consumer"), party("provider"));
             for op in ops {
-                let qname = format!("contract::{stem}::{}:{}", op.method, op.path);
+                let qname = contract_op_qname(path, &format!("{}:{}", op.method, op.path));
                 let name = format!("{} {}", op.method, op.path);
                 let description = op
                     .description
@@ -2962,9 +2974,9 @@ components:
         assert_eq!(
             qnames,
             vec![
-                "contract::asyncapi::publish:orders",
-                "contract::asyncapi::subscribe:orders",
-                "contract::asyncapi::subscribe:user/signedup",
+                "contract::specs::asyncapi::publish:orders",
+                "contract::specs::asyncapi::subscribe:orders",
+                "contract::specs::asyncapi::subscribe:user/signedup",
             ]
         );
         let first = &out.nodes[0];
@@ -3115,6 +3127,81 @@ operations:
     }
 
     // ------------------------------------------------------------------
+    // LB.12 — an op is scoped by its file's directory + stem
+    // ------------------------------------------------------------------
+
+    const ORDERS_OP: &str = "openapi: 3.0.0\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
+    const ORDERS_OP_JSON: &str = r#"{"openapi":"3.0.0","paths":{"/orders":{"get":{"operationId":"listOrders"}}}}"#;
+
+    fn op_ids(out: &ContractNodes) -> Vec<(String, NodeId)> {
+        out.nodes.iter().map(|n| (out.nav.qname_by_id[&n.id].clone(), n.id)).collect()
+    }
+
+    #[test]
+    fn contract_op_qname_is_directory_and_stem() {
+        assert_eq!(
+            contract_op_qname("services/orders/openapi.yaml", "GET:/orders"),
+            "contract::services::orders::openapi::GET:/orders"
+        );
+        assert_eq!(contract_op_qname("openapi.json", "GET:/users"), "contract::openapi::GET:/users");
+        assert_eq!(
+            contract_op_qname("turps/docs/swagger.json", "POST:/auth/login"),
+            "contract::turps::docs::swagger::POST:/auth/login"
+        );
+        assert_eq!(
+            contract_op_qname(r"svc\api\asyncapi.yaml", "publish:orders"),
+            "contract::svc::api::asyncapi::publish:orders"
+        );
+    }
+
+    /// HEAD: both files minted `contract::openapi::GET:/orders`, one NodeId.
+    #[test]
+    fn two_services_one_op_are_two_nodes() {
+        let orders = op_ids(&yaml(ORDERS_OP, "services/orders/openapi.yaml"));
+        let billing = op_ids(&yaml(ORDERS_OP, "services/billing/openapi.yaml"));
+        assert_eq!(orders[0].0, "contract::services::orders::openapi::GET:/orders");
+        assert_eq!(billing[0].0, "contract::services::billing::openapi::GET:/orders");
+        assert_ne!(orders[0].1, billing[0].1);
+    }
+
+    /// A yaml / json twin of one spec in one directory is ONE set of ops
+    /// (A10.8's intent, kept by the directory + stem scope, James 2026-09-19).
+    #[test]
+    fn yaml_json_twins_are_one_node() {
+        let y = op_ids(&yaml(ORDERS_OP, "services/billing/openapi.yaml"));
+        let j = op_ids(&json(ORDERS_OP_JSON, "services/billing/openapi.json"));
+        assert_eq!(y, j);
+        assert_eq!(y[0].0, "contract::services::billing::openapi::GET:/orders");
+    }
+
+    #[test]
+    fn root_file_scope_is_its_stem() {
+        let y = op_ids(&yaml(ORDERS_OP, "openapi.yaml"));
+        assert_eq!(y[0].0, "contract::openapi::GET:/orders", "a root-level op keeps its pre-LB.12 qname");
+        let p = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[
+            {"request":{"method":"GET","path":"/orders"}}]}"#;
+        assert_eq!(op_ids(&json(p, "pact.json"))[0].0, "contract::pact::GET:/orders");
+    }
+
+    #[test]
+    fn contract_counts_report_collisions() {
+        let mut c = ContractCounts::default();
+        c.record(&yaml(ORDERS_OP, "services/orders/openapi.yaml"));
+        c.record(&yaml(ORDERS_OP, "services/billing/openapi.yaml"));
+        assert_eq!(c.collided(), 0, "two directories: two ops");
+        // The billing twin lands on the op its yaml already minted.
+        c.record(&json(ORDERS_OP_JSON, "services/billing/openapi.json"));
+        assert_eq!((c.files, c.openapi, c.collided()), (3, 3, 1));
+        // The same root file in another repo is another NodeId, not a collision.
+        c.record(&extract_yaml_contracts(ORDERS_OP, "openapi.yaml", module_id(), RepoId(2)));
+        c.record(&extract_yaml_contracts(ORDERS_OP, "openapi.yaml", module_id(), RepoId(3)));
+        assert_eq!((c.openapi, c.collided()), (5, 1));
+        // A sniffed file that declares nothing counts nowhere.
+        c.record(&yaml("openapi: 3.0.0\ninfo:\n  title: x\n", "empty/openapi.yaml"));
+        assert_eq!((c.files, c.collided()), (5, 1));
+    }
+
+    // ------------------------------------------------------------------
     // A10.8 — contracts shipped as JSON
     // ------------------------------------------------------------------
 
@@ -3258,12 +3345,12 @@ paths:
         assert_eq!(
             qnames,
             [
-                "contract::openapi::POST:/v1/b",
-                "contract::openapi::GET:/v1/b",
-                "contract::openapi::GET:/v1/a",
+                "contract::api::openapi::POST:/v1/b",
+                "contract::api::openapi::GET:/v1/b",
+                "contract::api::openapi::GET:/v1/a",
             ]
         );
-        assert_eq!(j.nodes[0].id, y.nodes[0].id, "same stem, same qname, same id");
+        assert_eq!(j.nodes[0].id, y.nodes[0].id, "a twin in one directory: same directory + stem, same qname, same id");
         assert_eq!(j.nav.parent_of[&j.nodes[0].id], module_id());
         // POSITION is the method key's line (`"post"` is the 7th line).
         assert!(cell_text(&j.nodes[0], cell_type::POSITION).contains(r#""file":"api/openapi.json","start_line":6"#));
@@ -3385,8 +3472,8 @@ paths:
         assert_eq!(
             got,
             [
-                ("contract::web-api::GET:/users", "GET /users"),
-                ("contract::web-api::GET:/users/42", "GET /users/42"),
+                ("contract::pacts::web-api::GET:/users", "GET /users"),
+                ("contract::pacts::web-api::GET:/users/42", "GET /users/42"),
             ],
             "duplicate request is one op; a message / path-less / non-HTTP interaction is none"
         );
@@ -3826,7 +3913,7 @@ components:
         // second interaction on POST /orders is the same op, first one wins;
         // an array of objects contributes the union of its items' keys.
         assert_eq!(
-            fields_of(&out, "contract::web-orders::POST:/orders"),
+            fields_of(&out, "contract::pacts::web-orders::POST:/orders"),
             Some(concat!(
                 r#"{"format":"pact","request":["#,
                 r#"{"name":"sku","type":"string"},{"name":"quantity","type":"integer"},"#,
@@ -3839,15 +3926,15 @@ components:
             ))
         );
         assert_eq!(
-            fields_of(&out, "contract::web-orders::GET:/orders"),
+            fields_of(&out, "contract::pacts::web-orders::GET:/orders"),
             Some(r#"{"format":"pact","response:200":[{"name":"[]","type":"object"},{"name":"[].id","type":"string"}]}"#)
         );
         // A v4 body wrapper is unwrapped; an encoded one lists nothing.
         assert_eq!(
-            fields_of(&out, "contract::web-orders::PUT:/orders/1"),
+            fields_of(&out, "contract::pacts::web-orders::PUT:/orders/1"),
             Some(r#"{"format":"pact","request":[{"name":"sku","type":"string"}]}"#)
         );
-        assert_eq!(fields_of(&out, "contract::web-orders::PATCH:/orders/1"), None);
+        assert_eq!(fields_of(&out, "contract::pacts::web-orders::PATCH:/orders/1"), None);
         assert_eq!(out.field_stats.ops_with_fields, 3);
         assert_eq!(out.field_stats.fields, 16);
     }
@@ -4105,7 +4192,7 @@ paths:
         );
         let w = json(pact, "pacts/web-orders.json");
         assert_eq!(
-            fields_of(&w, "contract::web-orders::POST:/orders"),
+            fields_of(&w, "contract::pacts::web-orders::POST:/orders"),
             Some(concat!(
                 r#"{"format":"pact","request":["#,
                 r#"{"name":"sku","type":"string"},{"name":"quantity","type":"integer"},"#,
@@ -4175,9 +4262,9 @@ data_model:
         assert_eq!(
             qnames,
             [
-                "contract::feature:activities::POST:/api/protected/activity",
-                "contract::feature:activities::GET:/api/protected/activity/:id",
-                "contract::feature:activities::GET:/api/public/activities",
+                "contract::features::activities::feature::POST:/api/protected/activity",
+                "contract::features::activities::feature::GET:/api/protected/activity/:id",
+                "contract::features::activities::feature::GET:/api/public/activities",
             ],
             "frontend_components and data_model are never read"
         );
@@ -4216,9 +4303,9 @@ data_model:
         assert_eq!(
             got,
             [
-                ("contract::feature:b::PUT:/c", false),
-                ("contract::feature:b::GET:/d", true),
-                ("contract::feature:b::POST:/e", true),
+                ("contract::features::b::feature::PUT:/c", false),
+                ("contract::features::b::feature::GET:/d", true),
+                ("contract::features::b::feature::POST:/e", true),
             ]
         );
     }
@@ -4250,8 +4337,8 @@ data_model:
         assert_eq!(
             qnames,
             [
-                "contract::feature:activities::GET:/api/protected/activities/city",
-                "contract::feature:activities::GET:/api/quoted",
+                "contract::features::activities::feature::GET:/api/protected/activities/city",
+                "contract::features::activities::feature::GET:/api/quoted",
             ]
         );
         assert!(ops[0].1.contains(r#""path":"/api/protected/activities/city","raw_path":"/api/protected/activities/city""#));
@@ -4272,13 +4359,17 @@ data_model:
         assert_eq!(feature_dir(r"features\win\feature.yml"), Some("win"));
     }
 
+    /// LE.9a's feature attribution, with LB.12's scope: a spec-kit op is
+    /// scoped by its file's directory + stem like every other op (the
+    /// directory already names the feature), and the slug still reaches the
+    /// ORIGIN `feature` field and the `[sdd]` counters.
     #[test]
-    fn speckit_path_qualifies_qname() {
+    fn speckit_ops_are_scoped_by_their_file() {
         let src = "openapi: 3.0.3\npaths:\n  /orders:\n    get:\n      operationId: listOrders\n";
         let a = yaml(src, "specs/001-orders/contracts/openapi.yaml");
         let b = yaml(src, "specs/002-admin/contracts/openapi.yaml");
-        assert_eq!(ops_of(&a)[0].0, "contract::feature:001-orders:openapi::GET:/orders");
-        assert_eq!(ops_of(&b)[0].0, "contract::feature:002-admin:openapi::GET:/orders");
+        assert_eq!(ops_of(&a)[0].0, "contract::specs::001-orders::contracts::openapi::GET:/orders");
+        assert_eq!(ops_of(&b)[0].0, "contract::specs::002-admin::contracts::openapi::GET:/orders");
         assert_ne!(a.nodes[0].id, b.nodes[0].id, "two features' ops never share a NodeId");
         assert_eq!(
             ops_of(&b)[0].1,
@@ -4287,15 +4378,18 @@ data_model:
         // AsyncAPI and the JSON formats take the same scope.
         let async_src = "asyncapi: 2.6.0\nchannels:\n  orders:\n    subscribe:\n      summary: x\n";
         let c = yaml(async_src, "docs/specs/0042-events/contracts/v1/asyncapi.yaml");
-        assert_eq!(ops_of(&c)[0].0, "contract::feature:0042-events:asyncapi::subscribe:orders");
+        assert_eq!(
+            ops_of(&c)[0].0,
+            "contract::docs::specs::0042-events::contracts::v1::asyncapi::subscribe:orders"
+        );
         assert!(ops_of(&c)[0].1.contains(r#""source":"asyncapi","feature":"0042-events","#));
         let pact = r#"{"consumer":{"name":"w"},"provider":{"name":"a"},"interactions":[
             {"request":{"method":"GET","path":"/orders"}}]}"#;
         let p = json(pact, "specs/003-web/contracts/web-api.json");
-        assert_eq!(ops_of(&p)[0].0, "contract::feature:003-web:web-api::GET:/orders");
+        assert_eq!(ops_of(&p)[0].0, "contract::specs::003-web::contracts::web-api::GET:/orders");
         assert!(ops_of(&p)[0].1.contains(r#""source":"pact","feature":"003-web","#));
         let oj = json(r#"{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}"#, "specs/004-x/contracts/openapi.json");
-        assert_eq!(ops_of(&oj)[0].0, "contract::feature:004-x:openapi::GET:/a");
+        assert_eq!(ops_of(&oj)[0].0, "contract::specs::004-x::contracts::openapi::GET:/a");
         assert_eq!(speckit_feature(r"specs\004-x\contracts\openapi.json"), Some("004-x"));
 
         let mut counts = ContractCounts::default();
@@ -4363,9 +4457,9 @@ data_model:
         assert_eq!(
             qnames,
             [
-                "contract::feature:activities::POST:/api/protected/activity",
-                "contract::feature:activities::GET:/api/protected/activity/:id",
-                "contract::feature:activities::POST:/api/protected/activity/:id/leave",
+                "contract::features::activities::feature::POST:/api/protected/activity",
+                "contract::features::activities::feature::GET:/api/protected/activity/:id",
+                "contract::features::activities::feature::POST:/api/protected/activity/:id/leave",
             ]
         );
     }

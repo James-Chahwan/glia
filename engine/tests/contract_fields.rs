@@ -172,7 +172,11 @@ fn openapi_vs_pact() {
     assert_eq!(r.producer.format, "openapi");
     assert_eq!(r.consumer.format, "pact");
     assert_eq!(r.producer.qname, "contract::openapi::POST:/orders");
-    assert_eq!(r.consumer.qname, "contract::web-orders::POST:/orders");
+    // LB.12: a contract op is scoped by its file's directory + stem.
+    assert_eq!(
+        r.consumer.qname,
+        "contract::pacts::web-orders::POST:/orders"
+    );
     assert_eq!(r.status, "compatible", "{r:#?}");
     assert_eq!(
         r.changes.len(),

@@ -21,7 +21,7 @@
     },
     {
       "kind": "DOC_SECTION",
-      "node": "contract::web-orders::POST:/orders",
+      "node": "contract::pacts::web-orders::POST:/orders",
       "cell": "SCHEMA_FIELDS",
       "contains": "\"name\":\"giftWrap\""
     }

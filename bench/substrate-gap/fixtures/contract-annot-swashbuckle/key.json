@@ -4,17 +4,17 @@
   "dirs": ["."],
   "note": "LA.15 (programme A10.11). Swashbuckle annotations on an ASP.NET action: [SwaggerOperation(Summary, OperationId)] + [ProducesResponseType(typeof(T), code)] (the StatusCodes.StatusNNN form too). Delete carries none and must not become an op. Baseline 2026-09-18 (HEAD 7a4883b): no DOC_SECTION, no DOCUMENTS.",
   "expect_nodes": [
-    {"kind": "DOC_SECTION", "name": "contract::UsersController::GET:/api/users/{id}", "note": "one op for the annotated action"}
+    {"kind": "DOC_SECTION", "name": "contract::Controllers::UsersController::GET:/api/users/{id}", "note": "one op for the annotated action"}
   ],
   "expect_edges": [
-    {"from": "contract::UsersController::GET:/api/users/{id}", "to": "GET /api/users/{id}", "category": "DOCUMENTS", "note": "op DOCUMENTS the action's route"}
+    {"from": "contract::Controllers::UsersController::GET:/api/users/{id}", "to": "GET /api/users/{id}", "category": "DOCUMENTS", "note": "op DOCUMENTS the action's route"}
   ],
   "expect_cells": [
-    {"kind": "DOC_SECTION", "node": "contract::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"source\":\"swashbuckle\"", "note": "framework discriminator"},
-    {"kind": "DOC_SECTION", "node": "contract::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"operation_id\":\"GetUser\"", "note": "OperationId from [SwaggerOperation]"},
-    {"kind": "DOC_SECTION", "node": "contract::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "typeof form and StatusCodes.Status404NotFound form both read"}
+    {"kind": "DOC_SECTION", "node": "contract::Controllers::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"source\":\"swashbuckle\"", "note": "framework discriminator"},
+    {"kind": "DOC_SECTION", "node": "contract::Controllers::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"operation_id\":\"GetUser\"", "note": "OperationId from [SwaggerOperation]"},
+    {"kind": "DOC_SECTION", "node": "contract::Controllers::UsersController::GET:/api/users/{id}", "cell": "ORIGIN", "contains": "\"responses\":[\"200\",\"404\"]", "note": "typeof form and StatusCodes.Status404NotFound form both read"}
   ],
   "forbid": [
-    {"kind": "DOC_SECTION", "name": "contract::UsersController::DELETE:/api/users/{id}", "note": "PRECISION: an un-annotated action is not a declared op"}
+    {"kind": "DOC_SECTION", "name": "contract::Controllers::UsersController::DELETE:/api/users/{id}", "note": "PRECISION: an un-annotated action is not a declared op"}
   ]
 }

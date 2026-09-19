@@ -761,17 +761,20 @@ pub(crate) fn parse_repo_files(
     }
 
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
-    // Only printed when a build actually saw a spec file.
+    // Only printed when a build actually saw a spec file. LB.12 `collided=`:
+    // op declarations that landed on an op node an earlier one minted - with
+    // ops scoped by directory + stem, a yaml / json twin (the A10.8 merge).
     let contract_ops =
         contracts.openapi + contracts.asyncapi + contracts.pact + contracts.feature_yaml;
     if contract_ops > 0 {
         eprintln!(
-            "[contract] files={} ops={contract_ops} (openapi={} asyncapi={} pact={} feature_yaml={})",
+            "[contract] files={} ops={contract_ops} (openapi={} asyncapi={} pact={} feature_yaml={}) collided={}",
             contracts.files,
             contracts.openapi,
             contracts.asyncapi,
             contracts.pact,
-            contracts.feature_yaml
+            contracts.feature_yaml,
+            contracts.collided()
         );
     }
     // LE.9a fired_on marker: declared ops attributed to the spec-driven
@@ -1484,17 +1487,18 @@ mod tests {
             .collect();
         ops.sort();
         let qnames: Vec<&str> = ops.iter().map(|(q, _)| q.as_str()).collect();
+        // LB.12: each op is scoped by its file's directory + stem.
         assert_eq!(
             qnames,
             [
-                "contract::feature:001-orders:openapi::GET:/orders",
-                "contract::feature:002-admin:openapi::GET:/orders",
-                "contract::feature:003-web:openapi::GET:/orders",
-                "contract::feature:activities::POST:/api/protected/activity",
+                "contract::features::activities::feature::POST:/api/protected/activity",
+                "contract::specs::001-orders::contracts::openapi::GET:/orders",
+                "contract::specs::002-admin::contracts::openapi::GET:/orders",
+                "contract::specs::003-web::contracts::openapi::GET:/orders",
             ]
         );
-        assert!(ops[1].1.contains(r#""feature":"002-admin""#), "{}", ops[1].1);
-        assert!(ops[3].1.contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#), "{}", ops[3].1);
+        assert!(ops[2].1.contains(r#""feature":"002-admin""#), "{}", ops[2].1);
+        assert!(ops[0].1.contains(r#""source":"feature_yaml","feature":"activities","group":"protected""#), "{}", ops[0].1);
     }
 
     // ---- LB.9b: MODULEs named by file name across build groups ----------

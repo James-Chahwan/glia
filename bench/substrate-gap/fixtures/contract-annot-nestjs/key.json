@@ -4,16 +4,16 @@
   "dirs": ["."],
   "note": "LA.15 (programme A10.11). @nestjs/swagger decorators: @ApiOperation({summary, operationId}) + @ApiResponse({status}) in the decorator block of a NestJS handler; method + path compose from that block's @Get(':id') and the class @Controller('users'), the composition ts_routes already uses. create() carries no swagger decorator. Baseline 2026-09-18 (HEAD 7a4883b): ROUTE route:/users/:id exists, no DOC_SECTION, no DOCUMENTS.",
   "expect_nodes": [
-    {"kind": "DOC_SECTION", "name": "contract::users.controller::GET:/users/:id", "note": "one op for the decorated handler"}
+    {"kind": "DOC_SECTION", "name": "contract::src::users.controller::GET:/users/:id", "note": "one op for the decorated handler"}
   ],
   "expect_edges": [
-    {"from": "contract::users.controller::GET:/users/:id", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link route matcher; the ts_routes ROUTE is `GET /users/:id` since LB.11b (was `route:/users/:id`)"}
+    {"from": "contract::src::users.controller::GET:/users/:id", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "paired by the contract-link route matcher; the ts_routes ROUTE is `GET /users/:id` since LB.11b (was `route:/users/:id`)"}
   ],
   "expect_cells": [
-    {"kind": "DOC_SECTION", "node": "contract::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"source\":\"nestjs\"", "note": "framework discriminator"},
-    {"kind": "DOC_SECTION", "node": "contract::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"responses\":[\"200\"]", "note": "@ApiResponse status"}
+    {"kind": "DOC_SECTION", "node": "contract::src::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"source\":\"nestjs\"", "note": "framework discriminator"},
+    {"kind": "DOC_SECTION", "node": "contract::src::users.controller::GET:/users/:id", "cell": "ORIGIN", "contains": "\"responses\":[\"200\"]", "note": "@ApiResponse status"}
   ],
   "forbid": [
-    {"kind": "DOC_SECTION", "name": "contract::users.controller::POST:/users", "note": "PRECISION: no swagger decorator, no op"}
+    {"kind": "DOC_SECTION", "name": "contract::src::users.controller::POST:/users", "note": "PRECISION: no swagger decorator, no op"}
   ]
 }

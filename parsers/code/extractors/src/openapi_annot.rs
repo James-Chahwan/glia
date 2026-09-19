@@ -30,7 +30,7 @@ use repo_graph_core::{CellPayload, NodeId, RepoId};
 
 use crate::anchor;
 use crate::contracts::{
-    ContractNodes, METHODS, esc, file_stem, fold_server_base, operation_id_field, push_op,
+    ContractNodes, METHODS, contract_op_qname, esc, fold_server_base, operation_id_field, push_op,
 };
 use crate::ts_routes::{combine_nest_paths, extract_decorator_string};
 
@@ -321,9 +321,10 @@ fn scan(
         }
     }
 
-    let stem = file_stem(path);
     for p in pending {
-        let qname = format!("contract::{stem}::{}:{}", p.method, p.path);
+        // LB.12: scoped by the handler file's directory + stem, like every
+        // spec-file op, so two packages' `users.go` keep their own ops.
+        let qname = contract_op_qname(path, &format!("{}:{}", p.method, p.path));
         let name = format!("{} {}", p.method, p.path);
         let origin = origin_json(&p);
         let oid = p.decl.operation_id.as_deref();
@@ -1387,7 +1388,7 @@ public class UserController {
         assert_eq!(
             ops,
             vec![(
-                "contract::UserController::GET:/api/users/{id}".to_string(),
+                "contract::src::UserController::GET:/api/users/{id}".to_string(),
                 r#"{"provenance":"contract","source":"springdoc","method":"GET","path":"/api/users/{id}","raw_path":"/api/users/{id}","operation_id":"getUser","summary":"Get a user","responses":["200","404"],"response_types":{"200":"UserDto"}}"#
                     .to_string()
             )]
@@ -1499,7 +1500,7 @@ public class UsersController : ControllerBase
         assert_eq!(
             ops,
             vec![(
-                "contract::UsersController::GET:/api/users/{id}".to_string(),
+                "contract::Controllers::UsersController::GET:/api/users/{id}".to_string(),
                 r#"{"provenance":"contract","source":"swashbuckle","method":"GET","path":"/api/users/{id}","raw_path":"/api/users/{id}","operation_id":"GetUser","summary":"Get a user","responses":["200","404"],"response_types":{"200":"UserDto"}}"#
                     .to_string()
             )]
@@ -1578,7 +1579,7 @@ export class UsersController {
         assert_eq!(
             ops,
             vec![(
-                "contract::users.controller::GET:/users/:id".to_string(),
+                "contract::src::users.controller::GET:/users/:id".to_string(),
                 r#"{"provenance":"contract","source":"nestjs","method":"GET","path":"/users/:id","raw_path":"/users/:id","operation_id":"getUser","summary":"Get a user","responses":["200","404"],"response_types":{"200":"UserDto[]"}}"#
                     .to_string()
             )]
@@ -1919,7 +1920,7 @@ end
         assert_eq!(
             ops,
             vec![(
-                "contract::users_spec::GET:/users/{id}".to_string(),
+                "contract::spec::requests::users_spec::GET:/users/{id}".to_string(),
                 r#"{"provenance":"contract","source":"rswag","method":"GET","path":"/users/{id}","raw_path":"/users/{id}","operation_id":"getUser","summary":"Retrieves a user","responses":["200","404"]}"#
                     .to_string()
             )]
@@ -1941,8 +1942,11 @@ end
             REPO,
         );
         assert!(
-            position_of(&out, "contract::users_spec::GET:/users/{id}")
-                .is_some_and(|p| p.contains(r#""start_line":4,"#)),
+            position_of(
+                &out,
+                "contract::spec::requests::users_spec::GET:/users/{id}"
+            )
+            .is_some_and(|p| p.contains(r#""start_line":4,"#)),
             "POSITION is the 0-indexed verb line"
         );
     }
@@ -1983,7 +1987,7 @@ end
         let (ops, stats) = run(src, "spec/users_spec.rb", "ruby", &FileParse::default());
         let got: Vec<(&str, &str)> = ops.iter().map(|(q, o)| (q.as_str(), o.as_str())).collect();
         assert_eq!(got.len(), 3, "{got:?}");
-        assert_eq!(got[0].0, "contract::users_spec::GET:/users/{id}");
+        assert_eq!(got[0].0, "contract::spec::users_spec::GET:/users/{id}");
         assert!(
             got[0].1.contains(
                 r#""operation_id":"getUser","summary":"Retrieves a user","responses":["200"]}"#
@@ -1991,7 +1995,7 @@ end
             "{}",
             got[0].1
         );
-        assert_eq!(got[1].0, "contract::users_spec::DELETE:/users/{id}");
+        assert_eq!(got[1].0, "contract::spec::users_spec::DELETE:/users/{id}");
         assert!(
             got[1]
                 .1
@@ -2000,7 +2004,7 @@ end
             got[1].1
         );
         assert!(!got[1].1.contains("operation_id"), "{}", got[1].1);
-        assert_eq!(got[2].0, "contract::users_spec::POST:/users");
+        assert_eq!(got[2].0, "contract::spec::users_spec::POST:/users");
         assert!(
             got[2].1.contains(
                 r#""operation_id":"createUser","summary":"Creates a user","responses":["201"]}"#

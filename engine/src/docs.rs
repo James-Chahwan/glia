@@ -251,9 +251,11 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
     // Dedup DOC_SPACE nodes by qname (a space maps to many pages/records).
     let mut spaces: HashMap<String, NodeId> = HashMap::new();
     // For the `[docs] sections=` marker: DOC_SECTIONs emitted, and the docs
-    // that contributed at least one.
+    // that contributed at least one; LB.12 `dir_scoped=`: those among them
+    // whose sections carry a directory scope (a repo file below the root).
     let mut sections = 0usize;
     let mut section_docs = 0usize;
+    let mut dir_scoped = 0usize;
 
     for rec in records {
         let (path, text) = (&rec.rel_path, &rec.text);
@@ -291,23 +293,33 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
             sid
         });
 
-        let stem = std::path::Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("doc")
-            .to_string();
+        // LB.12: a repo file's sections are scoped by its directories + stem
+        // (`docs/a/guide.md` -> `docs::docs::a::guide::<slug>`), so two
+        // directories' `guide.md` keep their own nodes; a root README keeps
+        // `docs::README::<slug>`. An external record is scoped by its
+        // container (the DOC_SPACE) + stem, as before: its `rel_path`
+        // directories (`confluence/<space>/`) only restate the container.
+        let scope = match rec.provenance.container.as_deref() {
+            Some(container) => {
+                let stem = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("doc");
+                format!("{container}::{stem}")
+            }
+            None => repo_graph_code_domain::dir_stem_qname(path),
+        };
 
         let chunks = chunk_markdown(text);
         if !chunks.is_empty() {
             section_docs += 1;
             sections += chunks.len();
+            if is_file && path.contains(['/', '\\']) {
+                dir_scoped += 1;
+            }
         }
         for chunk in chunks {
-            // File qname unchanged; external qnames are namespaced by container.
-            let qname = match rec.provenance.container.as_deref() {
-                Some(container) => format!("docs::{container}::{stem}::{}", chunk.slug),
-                None => format!("docs::{stem}::{}", chunk.slug),
-            };
+            let qname = format!("docs::{scope}::{}", chunk.slug);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, &qname);
             let pos = format!(
                 r#"{{"file":"{}","start_line":{},"end_line":{}}}"#,
@@ -348,7 +360,9 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
         }
     }
     if sections > 0 {
-        eprintln!("[docs] sections={sections} from {section_docs} doc(s) (rows 0-indexed, end inclusive)");
+        eprintln!(
+            "[docs] sections={sections} from {section_docs} doc(s) (rows 0-indexed, end inclusive) dir_scoped={dir_scoped}"
+        );
     }
     if nodes.is_empty() {
         return None;
@@ -410,5 +424,66 @@ mod docs_tests {
         assert!(include_doc("docs/architecture.md"));
         assert!(!include_doc("LICENSE.md"));
         assert!(!include_doc("src/notes.md")); // not root-wellknown / docs/ / .ai/
+    }
+
+    /// LB.12: a repo doc's sections are scoped by its directories + stem, so
+    /// `docs/a/guide.md` and `docs/b/guide.md` (HEAD: both `docs::guide::setup`,
+    /// one NodeId) are two nodes; a root README and an external page keep the
+    /// qname they had.
+    #[test]
+    fn doc_sections_are_scoped_by_their_directory() {
+        use repo_graph_code_domain::{DocProvenance, DocSourceKind};
+        let file = |rel: &str| DocRecord {
+            rel_path: rel.to_string(),
+            text: "# Guide\nintro\n## Setup\nrun it\n".to_string(),
+            provenance: DocProvenance::file(),
+        };
+        let page = DocRecord {
+            rel_path: "confluence/ENG/guide.md".to_string(),
+            text: "## Setup\nrun it\n".to_string(),
+            provenance: DocProvenance {
+                kind: DocSourceKind::Confluence,
+                url: Some("https://x/wiki/ENG/guide".to_string()),
+                container: Some("ENG".to_string()),
+                version: None,
+            },
+        };
+        let records = [file("docs/a/guide.md"), file("docs/b/guide.md"), file("README.md"), page];
+        let repo = RepoId(7);
+        let Some(g) = build_docs_graph(&records, repo) else {
+            panic!("four docs, no graph");
+        };
+        let mut setup: Vec<&str> = g
+            .nav
+            .qname_by_id
+            .values()
+            .map(String::as_str)
+            .filter(|q| q.ends_with("::setup"))
+            .collect();
+        setup.sort();
+        assert_eq!(
+            setup,
+            [
+                "docs::ENG::guide::setup",
+                "docs::README::setup",
+                "docs::docs::a::guide::setup",
+                "docs::docs::b::guide::setup",
+            ]
+        );
+        // One node per section: no id is pushed twice.
+        let mut ids: Vec<u64> = g
+            .nodes
+            .iter()
+            .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION))
+            .map(|n| n.id.0)
+            .collect();
+        let sections = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!((sections, ids.len()), (7, 7), "3 files x 2 sections + 1 page section");
+        let a = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, "docs::docs::a::guide::setup");
+        let b = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, "docs::docs::b::guide::setup");
+        assert_ne!(a, b);
+        assert!(g.nav.qname_by_id.contains_key(&a) && g.nav.qname_by_id.contains_key(&b));
     }
 }

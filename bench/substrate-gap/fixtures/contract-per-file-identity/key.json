@@ -1,0 +1,29 @@
+{
+  "framework": "contract-per-file-identity",
+  "language": "yaml+json+python+markdown",
+  "dirs": ["."],
+  "note": "LB.12 identity fixture (legacy-only, no matrix cell). A contract op is scoped by the DIRECTORY + STEM of the file that declares it (`contract::<dir>::...::<stem>::<METHOD>:<path>`, James 2026-09-19), and a markdown DOC_SECTION likewise (`docs::<dir>::...::<stem>::<slug>`): two services' openapi.yaml files keep one op node each, while the openapi.yaml + openapi.json twin in one directory stays ONE set of ops (the A10.8 intent). A root-level file's qnames are unchanged. Baseline 2026-09-19 (installed leap wheel, HEAD 1e82ac3): all three files declaring GET /orders share one DOC_SECTION `contract::openapi::GET:/orders`, and docs/orders/guide.md + docs/billing/guide.md share `docs::guide::setup` - nodes 1/6, DOCUMENTS 0/3, POSITION 0/2, FORBID VIOLATIONS 2.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "contract::services::orders::openapi::GET:/orders"},
+    {"kind": "DOC_SECTION", "name": "contract::services::billing::openapi::GET:/orders", "note": "declared by both billing/openapi.yaml and its openapi.json twin: one op"},
+    {"kind": "DOC_SECTION", "name": "contract::services::billing::openapi::POST:/invoices"},
+    {"kind": "DOC_SECTION", "name": "contract::openapi::GET:/health", "note": "control: a root-level contract is scoped by its stem alone, as before"},
+    {"kind": "DOC_SECTION", "name": "docs::docs::orders::guide::setup"},
+    {"kind": "DOC_SECTION", "name": "docs::docs::billing::guide::setup"}
+  ],
+  "expect_edges": [
+    {"from": "contract::services::orders::openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS"},
+    {"from": "contract::services::billing::openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS", "note": "the contract-link pass pairs on ORIGIN, so the billing op still documents the one GET /orders route"},
+    {"from": "contract::services::billing::openapi::POST:/invoices", "to": "POST /invoices", "category": "DOCUMENTS"}
+  ],
+  "expect_cells": [
+    {"kind": "DOC_SECTION", "node": "contract::services::orders::openapi::GET:/orders", "cell": "POSITION", "contains": "\"file\":\"services/orders/openapi.yaml\""},
+    {"kind": "DOC_SECTION", "node": "docs::docs::billing::guide::setup", "cell": "POSITION", "contains": "\"file\":\"docs/billing/guide.md\""}
+  ],
+  "forbid": [
+    {"kind": "DOC_SECTION", "name": "contract::openapi::GET:/orders", "note": "the directory-blind op three files collapsed into"},
+    {"kind": "DOC_SECTION", "name": "docs::guide::setup", "note": "the directory-blind section two guides collapsed into"},
+    {"kind": "DOC_SECTION", "name": "contract::services::billing::openapi.json::GET:/orders", "note": "a yaml / json twin is one spec: its ops are not split by file extension"},
+    {"kind": "DOC_SECTION", "name": "GET /orders", "max_nodes": 3, "note": "one op per declaring directory; the billing twin's op is recorded once per format graph (yaml + json), so 3 records, 2 distinct ids"}
+  ]
+}

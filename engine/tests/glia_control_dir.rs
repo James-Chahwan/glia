@@ -82,7 +82,8 @@ fn assert_no_control_dir_nodes(r: &GenerateResult, context: &str) {
         all.iter().filter(|(k, _)| *k == node_kind::REGION.0).map(|(_, q)| q).collect();
     assert!(regions.iter().all(|q| !q.contains(".glia")), "{context}: {regions:?}");
     assert!(
-        !all.iter().any(|(k, q)| *k == node_kind::DOC_SECTION.0 && q == "contract::spec::GET:/x"),
+        // LB.12: the qname a sniffed .glia/scratch/spec.json op would mint.
+        !all.iter().any(|(k, q)| *k == node_kind::DOC_SECTION.0 && q == "contract::.glia::scratch::spec::GET:/x"),
         "{context}: .glia/scratch/spec.json was contract-sniffed"
     );
     // The control: ordinary source beside `.glia` is still parsed.

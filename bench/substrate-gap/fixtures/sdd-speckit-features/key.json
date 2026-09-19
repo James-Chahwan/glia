@@ -1,20 +1,20 @@
 {
   "framework": "sdd-speckit-features",
   "language": "python",
-  "note": "LE.9a: spec-kit contract files under specs/<NNN-slug>/contracts/ get a feature-scoped qname (contract::feature:<NNN-slug>:<stem>::<METHOD>:<path>) and an ORIGIN `feature` field, so two features declaring GET /orders stay two ops, and both pair with the one flask route. Baseline 2026-09-19 (installed leap wheel, HEAD 77ba62f): both files are named openapi.yaml, so the two GET /orders ops collapse into one contract::openapi::GET:/orders node - nodes 0/3, DOCUMENTS 0/2, ORIGIN 0/1, forbid 1 violation.",
+  "note": "LE.9a: spec-kit contract files under specs/<NNN-slug>/contracts/ give their ops an ORIGIN `feature` field, and (LB.12) every op is scoped by its file's directory + stem (contract::specs::<NNN-slug>::contracts::<stem>::<METHOD>:<path>), so two features declaring GET /orders stay two ops, and both pair with the one flask route. Baseline 2026-09-19 (installed leap wheel, HEAD 77ba62f): both files are named openapi.yaml, so the two GET /orders ops collapse into one contract::openapi::GET:/orders node - nodes 0/3, DOCUMENTS 0/2, ORIGIN 0/1, forbid 1 violation.",
   "expect_nodes": [
-    {"kind": "DOC_SECTION", "name": "contract::feature:001-orders:openapi::GET:/orders"},
-    {"kind": "DOC_SECTION", "name": "contract::feature:002-admin:openapi::GET:/orders"},
-    {"kind": "DOC_SECTION", "name": "contract::feature:002-admin:openapi::POST:/admin/purge"}
+    {"kind": "DOC_SECTION", "name": "contract::specs::001-orders::contracts::openapi::GET:/orders"},
+    {"kind": "DOC_SECTION", "name": "contract::specs::002-admin::contracts::openapi::GET:/orders"},
+    {"kind": "DOC_SECTION", "name": "contract::specs::002-admin::contracts::openapi::POST:/admin/purge"}
   ],
   "expect_edges": [
-    {"from": "contract::feature:001-orders:openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS"},
-    {"from": "contract::feature:002-admin:openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS"}
+    {"from": "contract::specs::001-orders::contracts::openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS"},
+    {"from": "contract::specs::002-admin::contracts::openapi::GET:/orders", "to": "GET /orders", "category": "DOCUMENTS"}
   ],
   "expect_cells": [
-    {"kind": "DOC_SECTION", "node": "contract::feature:002-admin:openapi::POST:/admin/purge", "cell": "ORIGIN", "contains": "\"feature\":\"002-admin\""}
+    {"kind": "DOC_SECTION", "node": "contract::specs::002-admin::contracts::openapi::POST:/admin/purge", "cell": "ORIGIN", "contains": "\"feature\":\"002-admin\""}
   ],
   "forbid": [
-    {"kind": "DOC_SECTION", "name": "contract::openapi::GET:/orders", "note": "the HEAD collision: two features' ops sharing one NodeId"}
+    {"kind": "DOC_SECTION", "name": "GET /orders", "max_nodes": 2, "note": "one op per feature file (LB.12: the directory-blind contract::openapi::GET:/orders the HEAD collision minted can no longer come from a file under specs/)"}
   ]
 }

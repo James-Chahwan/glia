@@ -4,7 +4,8 @@
 //! `grade.py` reads the installed wheel, so it cannot see this change until the
 //! end-of-wave rebuild; this grades the working tree directly. Each op is the
 //! A10.1 contract DOC_SECTION, keyed on the ROUTE its handler implements, and
-//! `link_contract_routes` pairs it with that ROUTE unchanged. Run with
+//! `link_contract_routes` pairs it with that ROUTE unchanged; since LB.12 its
+//! qname is scoped by the handler file's directory + stem. Run with
 //! `-- --nocapture` to see the `[openapi-annot]` / `[contract-link]` markers.
 
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
@@ -63,7 +64,7 @@ fn annotation_ops_document_their_routes() {
     let op = node(
         &m,
         node_kind::DOC_SECTION,
-        "contract::UserController::GET:/api/users/{id}",
+        "contract::src::main::java::com::shop::UserController::GET:/api/users/{id}",
     );
     let route = node(&m, node_kind::ROUTE, "GET /api/users/{id}");
     let any = node(&m, node_kind::ROUTE, "ANY /api/users");
@@ -89,7 +90,7 @@ fn annotation_ops_document_their_routes() {
         find(
             &m,
             node_kind::DOC_SECTION,
-            "contract::UserController::POST:/api/users"
+            "contract::src::main::java::com::shop::UserController::POST:/api/users"
         )
         .is_none(),
         "an un-annotated handler is not a declared op"
@@ -100,7 +101,7 @@ fn annotation_ops_document_their_routes() {
     let op = node(
         &m,
         node_kind::DOC_SECTION,
-        "contract::UsersController::GET:/api/users/{id}",
+        "contract::Controllers::UsersController::GET:/api/users/{id}",
     );
     let route = node(&m, node_kind::ROUTE, "GET /api/users/{id}");
     assert_eq!(documents(&m, op), vec![route]);
@@ -117,7 +118,7 @@ fn annotation_ops_document_their_routes() {
         find(
             &m,
             node_kind::DOC_SECTION,
-            "contract::UsersController::DELETE:/api/users/{id}"
+            "contract::Controllers::UsersController::DELETE:/api/users/{id}"
         )
         .is_none()
     );
@@ -127,7 +128,7 @@ fn annotation_ops_document_their_routes() {
     let op = node(
         &m,
         node_kind::DOC_SECTION,
-        "contract::users.controller::GET:/users/:id",
+        "contract::src::users.controller::GET:/users/:id",
     );
     // LB.11b: the ts_routes ROUTE is one node per (method, path).
     let route = node(&m, node_kind::ROUTE, "GET /users/:id");
@@ -140,7 +141,7 @@ fn annotation_ops_document_their_routes() {
         find(
             &m,
             node_kind::DOC_SECTION,
-            "contract::users.controller::POST:/users"
+            "contract::src::users.controller::POST:/users"
         )
         .is_none()
     );
@@ -185,7 +186,7 @@ fn path_declaring_annotations_document_routes() {
     let op = node(
         &m,
         node_kind::DOC_SECTION,
-        "contract::users_spec::GET:/users/{id}",
+        "contract::spec::requests::users_spec::GET:/users/{id}",
     );
     let route = node(&m, node_kind::ROUTE, "GET /users/:id");
     assert_eq!(documents(&m, op), vec![route]);

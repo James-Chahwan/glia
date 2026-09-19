@@ -143,7 +143,8 @@ pub mod node_kind {
     pub const REGION: NodeKindId = NodeKindId(41);
 
     // v0.4.14 — a prose section from an external `.md` doc (README, ARCHITECTURE,
-    // docs/). qname `docs::<file_stem>::<section_slug>`; the CODE cell holds the
+    // docs/). qname `docs::<dirs ::-joined>::<file_stem>::<section_slug>` (LB.12,
+    // `dir_stem_qname`; a root README is `docs::README::<slug>`); the CODE cell holds the
     // chunk text. The engram exporter maps this kind to `Content::Proposition`
     // (not Symbol) with provenance `documentation`. (glia-v5 G18)
     pub const DOC_SECTION: NodeKindId = NodeKindId(42);
@@ -733,6 +734,36 @@ pub fn line_of(source: &str, byte_offset: usize) -> u32 {
     let end = byte_offset.min(bytes.len());
     let rows = bytes[..end].iter().filter(|&&b| b == b'\n').count();
     u32::try_from(rows).unwrap_or(u32::MAX)
+}
+
+/// The scope a file gives the nodes it DECLARES by content rather than by
+/// code structure (LB.12): its repo-relative directories `::`-joined, then
+/// its file STEM - `services/orders/openapi.yaml` -> `services::orders::openapi`,
+/// root `openapi.json` -> `openapi`, `docs/a/guide.md` -> `docs::a::guide`.
+/// A contract op is `contract::<this>::<op>` and a markdown section
+/// `docs::<this>::<slug>`, so two directories' same-named files keep their
+/// own nodes, while a yaml / json twin of ONE spec in one directory
+/// (`swagger.yaml` + `swagger.json`) still declares one set of ops. Only the
+/// last extension goes (`users.controller.ts` -> `users.controller`), as
+/// `Path::file_stem` has it; a `\` separator reads as `/`.
+///
+/// Not a MODULE qname: a non-code file's MODULE keeps its full file name
+/// (LB.9a, `engine::extract::synthetic_module_qname`), so a twin's two files
+/// stay two MODULEs while their ops merge.
+pub fn dir_stem_qname(path: &str) -> String {
+    let p = path.replace('\\', "/");
+    let (dir, file) = match p.rsplit_once('/') {
+        Some((dir, file)) => (Some(dir), file),
+        None => (None, p.as_str()),
+    };
+    let stem = std::path::Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file);
+    match dir {
+        Some(dir) => format!("{}::{stem}", dir.replace('/', "::")),
+        None => stem.to_string(),
+    }
 }
 
 /// Classification of a call site by its syntactic shape. Resolution (which
@@ -2672,7 +2703,8 @@ impl DocProvenance {
 
 /// One document to ingest: a logical path/id + its markdown text + provenance.
 /// The DOC_SECTION builder chunks `text` by heading and keys nodes off
-/// `rel_path`'s stem, exactly as the file walk did.
+/// `rel_path`: a repo file by its directories + stem ([`dir_stem_qname`],
+/// LB.12), an external record by its container + stem.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DocRecord {
     pub rel_path: String,
@@ -2683,6 +2715,24 @@ pub struct DocRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dir_stem_qname_scopes_by_directory_and_stem() {
+        assert_eq!(dir_stem_qname("services/orders/openapi.yaml"), "services::orders::openapi");
+        assert_eq!(dir_stem_qname("services/billing/openapi.json"), "services::billing::openapi");
+        // A root-level file is its stem alone: the pre-LB.12 qname, unchanged.
+        assert_eq!(dir_stem_qname("openapi.json"), "openapi");
+        assert_eq!(dir_stem_qname("README.md"), "README");
+        assert_eq!(dir_stem_qname("docs/a/guide.md"), "docs::a::guide");
+        assert_eq!(dir_stem_qname(".glia/scratch/spec.json"), ".glia::scratch::spec");
+        // Only the last extension goes; a dotfile is its own stem.
+        assert_eq!(dir_stem_qname("src/users.controller.ts"), "src::users.controller");
+        assert_eq!(dir_stem_qname("svc/Dockerfile"), "svc::Dockerfile");
+        assert_eq!(dir_stem_qname("cfg/.env"), "cfg::.env");
+        // A backslash separator normalises, so a Windows path scopes the same.
+        assert_eq!(dir_stem_qname(r"specs\004-x\contracts\openapi.json"), "specs::004-x::contracts::openapi");
+        assert_eq!(dir_stem_qname(r"a.b\c.yaml"), "a.b::c");
+    }
 
     #[test]
     fn line_of_counts_newlines_on_bytes() {
