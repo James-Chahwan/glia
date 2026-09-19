@@ -19,8 +19,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use regex::Regex;
 use repo_graph_code_domain::node_kind;
+use repo_graph_code_domain::profile::CODE_TABLES;
 use repo_graph_core::NodeId;
-use repo_graph_graph::{RepoGraph, code_activation_defaults};
+use repo_graph_graph::RepoGraph;
 use repo_graph_projection_text::driver_utils::{build_repo_graph, extract_position_cell, write_json};
 use serde::Serialize;
 
@@ -260,7 +261,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut config = code_activation_defaults();
+    let mut config = CODE_TABLES.activation_config(None);
     config.top_k = args.top_k;
     let result = graph.activate(&seeds, &config);
     eprintln!("[seeder] activated top-{}: {} nodes", args.top_k, result.scores.len());

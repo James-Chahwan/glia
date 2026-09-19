@@ -1,9 +1,8 @@
 //! `blast_radius` — the P3 answer-shaped primitive (handoff v6).
 
-use repo_graph_code_domain::edge_category;
+use repo_graph_activation::profile::DomainTables;
 use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
 
-use crate::activation::code_activation_defaults;
 use crate::merged::MergedGraph;
 
 // ============================================================================
@@ -46,45 +45,6 @@ pub struct BlastHit {
     pub score: f64,
 }
 
-/// Edge categories that carry blast radius — semantic dependencies only.
-/// Structural edges (`DEFINES`/`CONTAINS`/`IMPORTS`/`HAS_ATTRIBUTE`) are
-/// EXCLUDED: they pull in unrelated code via shared containers/imports, the
-/// exact noise the handoff v6 P1 "edge-category-aware traversal" calls out
-/// (bullet 4 — `impact` fanning out through `imports`).
-pub fn blast_carry_edges() -> Vec<EdgeCategoryId> {
-    use edge_category as ec;
-    vec![
-        ec::CALLS,
-        ec::USES,
-        ec::HTTP_CALLS,
-        ec::GRPC_CALLS,
-        ec::RPC_CALLS,
-        ec::GRAPHQL_CALLS,
-        ec::QUEUE_FLOWS,
-        ec::WS_CONNECTS,
-        ec::EVENT_FLOWS,
-        ec::CLI_INVOKES,
-        // LA.6a: renaming or removing a route breaks every page that links to
-        // it, and page flow becomes traceable end to end.
-        ec::NAVIGATES_TO,
-        ec::HANDLED_BY,
-        ec::INJECTS,
-        ec::ACCESSES_DATA,
-        ec::TESTS,
-        ec::DOCUMENTS,
-        ec::IMPLEMENTS,
-        ec::INHERITS_FROM,
-        ec::RETURNS_TYPE,
-        ec::SHARES_SCHEMA,
-        ec::SHARES_DATA_ENTITY,
-        ec::INFRA_REFERENCES,
-        ec::DEPENDS_ON,
-        ec::SCHEDULES,
-        ec::READS_CONFIG,
-        ec::DEFINES_CONFIG,
-    ]
-}
-
 impl MergedGraph {
     /// The complete, deduped, edge-category-aware, PPR-ranked closure around
     /// `seed` — the answer `impact`+`activate` composed to, in one pass. Each
@@ -92,20 +52,25 @@ impl MergedGraph {
     /// PPR score; the caller adds location/kind. Result is sorted by score
     /// (desc), then node id (asc) for determinism.
     ///
-    /// `follow` overrides the carry set; `None` uses [`blast_carry_edges`]
-    /// (semantic edges only — no structural import/contain noise).
+    /// The domain's `tables` say what to follow and how to rank (LD.14b): the
+    /// walk follows `tables.carry_edges` only — semantic dependencies, never
+    /// the structural `DEFINES` / `CONTAINS` / `IMPORTS` / `HAS_ATTRIBUTE`
+    /// edges that pull in unrelated code through shared containers and
+    /// imports (handoff v6 P1, bullet 4: `impact` fanning out through
+    /// `imports`) — and the ranking is `tables.activation_config(None)`. The
+    /// code domain passes `repo_graph_code_domain::profile::CODE_TABLES`; a
+    /// caller that needs another carry set passes its own tables.
     pub fn blast_radius(
         &self,
         seed: NodeId,
         reach: Reach,
         max_depth: usize,
-        follow: Option<&[EdgeCategoryId]>,
+        tables: &DomainTables,
     ) -> Vec<BlastHit> {
         use repo_graph_activation::Direction;
         use std::collections::{HashMap, HashSet, VecDeque};
 
-        let carry = follow.map(|f| f.to_vec()).unwrap_or_else(blast_carry_edges);
-        let allow: HashSet<EdgeCategoryId> = carry.iter().copied().collect();
+        let allow: HashSet<EdgeCategoryId> = tables.carry_edges.iter().copied().collect();
         let edges: Vec<&Edge> = self.all_edges().collect();
 
         let fwd = reach != Reach::Backward;
@@ -144,7 +109,7 @@ impl MergedGraph {
         }
 
         // Rank the closure by PPR seeded at the target.
-        let mut config = code_activation_defaults();
+        let mut config = tables.activation_config(None);
         config.direction = match reach {
             Reach::Forward => Direction::Forward,
             Reach::Backward => Direction::Backward,
@@ -179,7 +144,8 @@ mod tests {
     use std::collections::HashSet;
     use crate::test_support::{flow_graph, repo};
     use crate::types::{RepoGraph, SymbolTable};
-    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+    use repo_graph_code_domain::profile::CODE_TABLES;
+    use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
     use repo_graph_core::{Confidence, Node};
 
     #[test]
@@ -209,7 +175,7 @@ mod tests {
             properties: HashSet::new(),
         };
         let merged = MergedGraph::new(vec![g]);
-        let hits = merged.blast_radius(x, Reach::Forward, 4, None);
+        let hits = merged.blast_radius(x, Reach::Forward, 4, &CODE_TABLES);
         // y is reached via CALLS; z (imports-only) is NOT in the radius.
         let ids: Vec<NodeId> = hits.iter().map(|h| h.id).collect();
         assert!(ids.contains(&y), "CALLS target must be in radius");
@@ -227,7 +193,7 @@ mod tests {
         let b = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::b");
         let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
         let d = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::d");
-        let hits = merged.blast_radius(a, Reach::Forward, 5, None);
+        let hits = merged.blast_radius(a, Reach::Forward, 5, &CODE_TABLES);
         let ids: Vec<NodeId> = hits.iter().map(|h| h.id).collect();
         assert!(ids.contains(&b) && ids.contains(&c));
         assert!(!ids.contains(&d), "d is upstream of c, not in forward radius of a");

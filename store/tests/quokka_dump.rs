@@ -254,7 +254,7 @@ fn dump_quokka_gmap() {
     eprintln!("\nReopened: {total_edges} total edges across all shards");
 
     // --- Activation smoke test on the merged graph.
-    let defaults = repo_graph_graph::code_activation_defaults();
+    let defaults = repo_graph_code_domain::profile::CODE_TABLES.activation_config(None);
 
     // Pick a known Go route as seed (any route node will do).
     let route_seeds: Vec<_> = merged

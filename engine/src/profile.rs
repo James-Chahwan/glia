@@ -22,9 +22,17 @@
 //! [`DomainProfile`]: the data tables (`code_domain::profile::CODE_TABLES` —
 //! registries, entry rule, carry edges, effect sinks, activation weights and
 //! presets) plus [`CODE_PASSES`]. [`run_code_passes`] runs the passes through
-//! it. The query consumers (liveness, blast radius, PPR) switch to its tables
-//! in LD.14b; until then `code_profile_matches_head_tables` pins the tables
-//! equal to the hardcoded functions they replace.
+//! it.
+//!
+//! LD.14b: its tables are the only source of the code domain's query dials.
+//! Liveness (`answers::entrypoint_reachable`) seeds from `tables.entry` and
+//! walks `tables.carry_edges`; `cross_stack_trace` walks the same carry set;
+//! blast radius passes `&CODE_PROFILE.tables` to `MergedGraph::blast_radius`;
+//! `resolve_signal_located` ranks with `tables.activation_config(None)`. The
+//! hardcoded lists they replaced (the engine's entrypoint predicate, the graph
+//! crate's blast carry list and its activation default / preset functions) are
+//! deleted; `code_profile_matches_head_tables` pins the tables to their values
+//! as literals.
 
 use repo_graph_activation::passes::{PassRegistry, PassSpec, Stage};
 use repo_graph_activation::profile::DomainProfile;
@@ -227,25 +235,112 @@ mod tests {
         );
     }
 
-    /// LD.14a: [`CODE_PROFILE`]'s tables equal the HEAD hardcoding they
-    /// replace — the carry edges in order, the activation config of every
-    /// preset field by field (exact f64), and the entrypoint truth table —
-    /// until LD.14b switches the consumers and deletes the originals.
+    /// LD.14a / LD.14b: [`CODE_PROFILE`]'s tables equal the hardcoding they
+    /// replaced, pinned as literals now the originals are deleted — the carry
+    /// edges in order, the activation config of every preset field by field
+    /// (exact f64), and the entrypoint truth table. A change here is a
+    /// deliberate change to liveness, blast radius or PPR ranking.
     #[test]
     fn code_profile_matches_head_tables() {
-        use repo_graph_activation::ActivationConfig;
+        use repo_graph_activation::{ActivationConfig, Direction, Specificity};
         use repo_graph_code_domain::{edge_category as ec, node_kind as nk};
-        use repo_graph_core::NodeKindId;
-        use repo_graph_graph::{blast_carry_edges, code_activation_defaults, code_activation_profile};
+        use repo_graph_core::{EdgeCategoryId, NodeKindId};
+        use std::collections::HashMap;
 
         let t = &CODE_PROFILE.tables;
-        assert_eq!(t.carry_edges, blast_carry_edges().as_slice());
-        assert_eq!(t.carry_edges.len(), 26);
+        // The carry list `graph::blast` hardcoded before LD.14b, in order.
+        const HEAD_CARRY: [EdgeCategoryId; 26] = [
+            ec::CALLS,
+            ec::USES,
+            ec::HTTP_CALLS,
+            ec::GRPC_CALLS,
+            ec::RPC_CALLS,
+            ec::GRAPHQL_CALLS,
+            ec::QUEUE_FLOWS,
+            ec::WS_CONNECTS,
+            ec::EVENT_FLOWS,
+            ec::CLI_INVOKES,
+            ec::NAVIGATES_TO,
+            ec::HANDLED_BY,
+            ec::INJECTS,
+            ec::ACCESSES_DATA,
+            ec::TESTS,
+            ec::DOCUMENTS,
+            ec::IMPLEMENTS,
+            ec::INHERITS_FROM,
+            ec::RETURNS_TYPE,
+            ec::SHARES_SCHEMA,
+            ec::SHARES_DATA_ENTITY,
+            ec::INFRA_REFERENCES,
+            ec::DEPENDS_ON,
+            ec::SCHEDULES,
+            ec::READS_CONFIG,
+            ec::DEFINES_CONFIG,
+        ];
+        assert_eq!(t.carry_edges, HEAD_CARRY);
 
+        // The base weights `graph::activation` hardcoded before LD.14b.
+        const HEAD_WEIGHTS: [(EdgeCategoryId, f64); 19] = [
+            (ec::CALLS, 5.0),
+            (ec::HTTP_CALLS, 5.0),
+            (ec::GRPC_CALLS, 5.0),
+            (ec::RPC_CALLS, 5.0),
+            (ec::GRAPHQL_CALLS, 5.0),
+            (ec::QUEUE_FLOWS, 4.0),
+            (ec::WS_CONNECTS, 4.0),
+            (ec::EVENT_FLOWS, 4.0),
+            (ec::CLI_INVOKES, 3.0),
+            (ec::NAVIGATES_TO, 3.0),
+            (ec::HANDLED_BY, 4.0),
+            (ec::IMPORTS, 3.0),
+            (ec::USES, 3.0),
+            (ec::SHARES_SCHEMA, 2.0),
+            (ec::TESTS, 2.0),
+            (ec::INJECTS, 2.0),
+            (ec::DEFINES, 1.0),
+            (ec::CONTAINS, 1.0),
+            (ec::DOCUMENTS, 0.5),
+        ];
+        // The preset overrides `graph::activation` hardcoded before LD.14b;
+        // any other name, `"default"` included, is the base.
+        let head_overrides = |preset: Option<&str>| -> &'static [(EdgeCategoryId, f64)] {
+            match preset {
+                Some("repair") => &[
+                    (ec::CALLS, 8.0),
+                    (ec::USES, 6.0),
+                    (ec::ACCESSES_DATA, 6.0),
+                    (ec::READS_CONFIG, 5.0),
+                    (ec::IMPORTS, 5.0),
+                    (ec::TESTS, 4.0),
+                ],
+                Some("review") => &[
+                    (ec::CALLS, 6.0),
+                    (ec::TESTS, 6.0),
+                    (ec::IMPLEMENTS, 5.0),
+                    (ec::INHERITS_FROM, 5.0),
+                    (ec::RETURNS_TYPE, 4.0),
+                ],
+                Some("onboard") => &[
+                    (ec::CONTAINS, 5.0),
+                    (ec::IMPORTS, 5.0),
+                    (ec::HANDLED_BY, 6.0),
+                    (ec::DEFINES, 3.0),
+                    (ec::DOCUMENTS, 3.0),
+                ],
+                _ => &[],
+            }
+        };
         for p in [None, Some("default"), Some("repair"), Some("review"), Some("onboard"), Some("nonsense")] {
-            let head: ActivationConfig = match p {
-                None => code_activation_defaults(),
-                Some(name) => code_activation_profile(name),
+            let mut weights: HashMap<EdgeCategoryId, f64> = HEAD_WEIGHTS.into_iter().collect();
+            weights.extend(head_overrides(p).iter().copied());
+            let head = ActivationConfig {
+                damping: 0.5,
+                direction: Direction::Forward,
+                edge_weights: weights,
+                node_specificity: Specificity::None,
+                top_k: 50,
+                max_iterations: 100,
+                epsilon: 1e-6,
             };
             let got = t.activation_config(p);
             assert_eq!(got.edge_weights, head.edge_weights, "edge_weights, preset {p:?}");
@@ -256,12 +351,16 @@ mod tests {
             assert_eq!(got.max_iterations, head.max_iterations, "max_iterations, preset {p:?}");
             assert_eq!(got.epsilon, head.epsilon, "epsilon, preset {p:?}");
         }
-        assert_eq!(t.activation_weights.len(), 19);
+        assert_eq!(t.activation_weights, HEAD_WEIGHTS);
         let presets: Vec<(&str, usize)> =
             t.activation_presets.iter().map(|p| (p.name, p.overrides.len())).collect();
         assert_eq!(presets, [("repair", 6), ("review", 5), ("onboard", 5)]);
+        for p in t.activation_presets {
+            assert_eq!(p.overrides, head_overrides(Some(p.name)), "preset {}", p.name);
+        }
 
-        // HEAD `engine::answers::is_entrypoint(kind, name, roles)`, literally.
+        // The entrypoint predicate `engine::answers` hardcoded before LD.14b,
+        // literally.
         const ENTRY_KINDS: [NodeKindId; 6] = [
             nk::ROUTE,
             nk::GRPC_SERVICE,

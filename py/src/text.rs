@@ -54,10 +54,8 @@ impl PyGraph {
         profile: Option<String>,
     ) -> Vec<(u64, f64)> {
         let seeds: Vec<NodeId> = seed_ids.into_iter().map(NodeId).collect();
-        let mut config = match profile.as_deref() {
-            Some(p) => repo_graph_graph::code_activation_profile(p),
-            None => repo_graph_graph::code_activation_defaults(),
-        };
+        let mut config =
+            repo_graph_code_domain::profile::CODE_TABLES.activation_config(profile.as_deref());
         if let Some(k) = top_k {
             config.top_k = k;
         }

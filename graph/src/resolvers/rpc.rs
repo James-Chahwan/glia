@@ -174,7 +174,7 @@ mod tests {
             id(client, CALL, "rpc_call:user.list"),
             crate::blast::Reach::Forward,
             2,
-            None,
+            &repo_graph_code_domain::profile::CODE_TABLES,
         );
         let proc_id = id(server, PROC, "rpc:user.list");
         let hit = hits.iter().find(|h| h.id == proc_id).map(|h| (h.depth, h.reason));

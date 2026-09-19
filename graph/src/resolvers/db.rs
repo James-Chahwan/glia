@@ -532,17 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn shares_data_source_is_not_a_blast_carry_edge() {
-        // REGRESSION GUARD. A shared Postgres is an operational fact, not a
-        // code dependency: carrying it would fan every blast radius across
-        // every service in the stack. Do not "fix" this by adding the row.
-        assert!(
-            !crate::blast::blast_carry_edges().contains(&edge_category::SHARES_DATA_SOURCE),
-            "SHARES_DATA_SOURCE must stay OUT of blast_carry_edges()"
-        );
-    }
-
-    #[test]
     fn db_resolver_pairs_same_entity_across_repos() {
         let repo_a = RepoId(11);
         let repo_b = RepoId(12);

@@ -7,17 +7,20 @@
 //! LD.14a: [`CODE_TABLES`] is the code domain's [`DomainTables`] — the data
 //! half of the engine's `profile::CODE_PROFILE`, here beside the ids it names
 //! so the graph, store and projection crates (which cannot depend on the
-//! engine) read the same tables. Every list is the HEAD hardcoding it
-//! replaces, with the same members in the same order:
-//! - `entry`: `engine::answers::is_entrypoint`;
-//! - `carry_edges`: `graph::blast::blast_carry_edges`;
-//! - `activation_weights` / `activation_presets`:
-//!   `graph::activation::code_activation_defaults` / `code_activation_profile`.
+//! engine) read the same tables. Every list is the hardcoding it replaced,
+//! with the same members in the same order:
+//! - `entry`: the entrypoint predicate in `engine::answers`;
+//! - `carry_edges`: the blast carry list in `graph::blast`;
+//! - `activation_weights` / `activation_presets`: the activation default and
+//!   preset functions in `graph::activation`.
 //!
-//! The engine's `profile::tests::code_profile_matches_head_tables` pins each
-//! against its original until LD.14b switches the consumers and deletes them.
-//! `effect_sinks` has no HEAD hardcoding: it is seeded with the four effects
-//! LE.4 names, and LE.4 owns its final content.
+//! LD.14b switched every consumer to these tables and deleted the originals:
+//! liveness, cross-stack trace and blast radius (`MergedGraph::blast_radius`
+//! takes `&CODE_TABLES`), signal resolution, `PyGraph.activate`, and the
+//! store / projection research harnesses. The engine's
+//! `profile::tests::code_profile_matches_head_tables` pins each list to the
+//! original's values as literals. `effect_sinks` had no hardcoding: it is
+//! seeded with the four effects LE.4 names, and LE.4 owns its final content.
 
 use repo_graph_activation::profile::{
     ActivationPreset, DomainTables, EntryRule, NamedEntry, Registries,
@@ -177,5 +180,25 @@ mod tests {
             !CODE_TABLES.carries(ec::SHARES_DATA_SOURCE),
             "SHARES_DATA_SOURCE must stay OUT of CODE_TABLES.carry_edges"
         );
+    }
+
+    /// The presets are real lenses (moved from `graph::activation`, LD.14b):
+    /// `repair` weighs CALLS above the base, `onboard` weighs CONTAINS above
+    /// it, and `"default"` or a name no preset has is exactly the base.
+    #[test]
+    fn activation_presets_shift_weights() {
+        let base = CODE_TABLES.activation_config(None);
+        let repair = CODE_TABLES.activation_config(Some("repair"));
+        let onboard = CODE_TABLES.activation_config(Some("onboard"));
+        assert!(repair.edge_weights[&ec::CALLS] > base.edge_weights[&ec::CALLS]);
+        assert!(onboard.edge_weights[&ec::CONTAINS] > base.edge_weights[&ec::CONTAINS]);
+        assert_ne!(repair.edge_weights, onboard.edge_weights, "the presets differ");
+        for name in ["default", "nonsense"] {
+            assert_eq!(
+                CODE_TABLES.activation_config(Some(name)).edge_weights,
+                base.edge_weights,
+                "preset {name:?} is the base"
+            );
+        }
     }
 }

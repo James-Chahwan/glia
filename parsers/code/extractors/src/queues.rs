@@ -529,7 +529,7 @@ pub struct QueueNodes {
     /// when two files published the same topic one of them simply vanished.
     ///
     /// CONTAINS is deliberate rather than a semantic category: it is excluded
-    /// from `blast_carry_edges`, so linking the publishing file does NOT fan
+    /// from `CODE_TABLES.carry_edges`, so linking the publishing file does NOT fan
     /// the blast radius back out through every symbol in that file.
     /// `QUEUE_FLOWS` stays the semantic path.
     pub edges: Vec<Edge>,
@@ -2861,7 +2861,7 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
         );
 
         // One CONTAINS edge module → topic. CONTAINS, not a semantic category,
-        // because `blast_carry_edges` excludes it.
+        // because `CODE_TABLES.carry_edges` excludes it.
         assert_eq!(r.edges.len(), 1);
         assert_eq!(r.edges[0].from, module_id());
         assert_eq!(r.edges[0].to, r.nodes[0].id);

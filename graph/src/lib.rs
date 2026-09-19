@@ -15,7 +15,6 @@
 //! Other stack resolvers (GraphQL, gRPC, queues, shared-schema) land at v0.4.10
 //! against the same trait.
 
-mod activation;
 mod blast;
 mod build;
 mod calls;
@@ -41,7 +40,6 @@ mod test_support;
 // that must stay crate-internal is `pub(crate)`, never `pub`. `calls`,
 // `imports`, `signal` and `traversal` declare no free `pub` items (their public
 // methods hang off `RepoGraph` / `MergedGraph`), so they are not globbed.
-pub use activation::*;
 pub use blast::*;
 pub use build::*;
 pub use merged::*;

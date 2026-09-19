@@ -15,6 +15,7 @@ Designed to be domain-agnostic: code is the first primitive, but other domains (
 ```
 core/               Node, Edge, QName, shared primitives (no domain assumptions)
 code-domain/        Code-specific registries: NodeKind, EdgeCategory, CellType (u32 IDs)
+                    + the code DomainTables (profile.rs)
 graph/              Per-repo graph builder, universal resolver, cross-graph resolvers
                     src/ is MODULES, not one lib.rs (see "Module layout" below)
 engine/             Orchestration: walk → parse → extract → build → merge → resolve.
@@ -56,7 +57,7 @@ older prose — `grep -rn` the symbol name.**
 The facade rules:
 
 1. **The pre-0.5.0 API stays flat.** `engine` glob re-exports `answers`, `build`,
-   `coverage`, `extract`; `graph` globs `activation`, `blast`, `build`, `merged`,
+   `coverage`, `extract`; `graph` globs `blast`, `build`, `merged`,
    `resolvers`, `types`. A `pub` item in a globbed module IS public API, so a helper
    another module needs is `pub(crate)`, never `pub`. Modules that declare no free `pub`
    items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
@@ -107,7 +108,7 @@ engine/src/   lib.rs        facade (rules above)
 
 graph/src/    lib.rs        facade (rules above)
               types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
-              blast.rs activation.rs signal.rs
+              blast.rs signal.rs
               resolvers/    one module per mechanism (http, grpc, queue, graphql,
                             websocket, eventbus, shared_schema, db, cron, config,
                             iac, package, cli) + mod.rs
@@ -215,6 +216,17 @@ IDs ref: `dev-notes/glia-memory/reference_kind_category_ids.md` and `reference_c
 ## Activation (PPR)
 
 Personalised PageRank with damping = 0.5 (not custom spreading activation). `ActivationConfig` is domain-agnostic: direction, edge weights, and node specificity are all provided by the domain, not hardcoded. Code-graph adaptations: edge weights, direction, node specificity — three dials the domain sets.
+
+The domain sets them in its **profile** (LD.14a/b), and nowhere else. The code domain's
+`DomainTables` is `CODE_TABLES` in `code-domain/src/profile.rs`: the entry rule (the
+kinds, roles and `main` / `test*` names liveness seeds from), `carry_edges` (what blast
+radius, cross-stack trace and liveness follow), `effect_sinks`, the base
+`activation_weights` and the named `activation_presets` (`repair` / `review` /
+`onboard`). The engine wraps it with the build passes as `CODE_PROFILE`
+(`engine/src/profile.rs`). A PPR config is `CODE_TABLES.activation_config(None |
+Some(preset))`; `MergedGraph::blast_radius` takes `&DomainTables`. The graph, store and
+projection crates read `CODE_TABLES` directly (they cannot depend on the engine); a new
+entry kind, carry edge or weight is one table row there, never a list in a consumer.
 
 ## Adding a New Language Parser
 

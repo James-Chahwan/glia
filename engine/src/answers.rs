@@ -12,6 +12,7 @@ use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
 use crate::absence::{self, Answer};
 use crate::find::{self, FindOptions};
+use crate::profile::CODE_PROFILE;
 
 /// One node in a blast-radius answer: identity + kind + why-it's-here (`reason`)
 /// + PPR `score` + `file`:`line` + `live`. Serialized straight to pyo3/CLI.
@@ -51,42 +52,6 @@ pub struct BlastAnswer {
     pub line: Option<i64>,
 }
 
-/// Is this node an entrypoint — an externally-triggered root from which live
-/// code is reachable? Routes, gRPC/WS/event handlers, CLI commands, framework
-/// components, and `main`/`test*` functions.
-///
-/// `roles` is the node's `repo_graph_graph::roles::roles_in` (LB.3b). Since
-/// the LB.3a fold an Angular `@Component` is a CLASS carrying ROLE COMPONENT,
-/// not a COMPONENT node, so a COMPONENT role is an entry exactly as the
-/// COMPONENT kind is. The other roles (SERVICE, HOOK, COMPOSABLE, DIRECTIVE,
-/// PIPE, GUARD) were never entry kinds and stay non-entries. Pass `&[]` to ask
-/// whether the kind / name alone make the node an entry.
-fn is_entrypoint(
-    kind: Option<repo_graph_core::NodeKindId>,
-    name: &str,
-    roles: &[repo_graph_core::NodeKindId],
-) -> bool {
-    if roles.contains(&node_kind::COMPONENT) {
-        return true;
-    }
-    match kind {
-        Some(k)
-            if k == node_kind::ROUTE
-                || k == node_kind::GRPC_SERVICE
-                || k == node_kind::WS_HANDLER
-                || k == node_kind::EVENT_HANDLER
-                || k == node_kind::CLI_COMMAND
-                || k == node_kind::COMPONENT =>
-        {
-            true
-        }
-        Some(k) if k == node_kind::FUNCTION || k == node_kind::METHOD => {
-            name == "main" || name.starts_with("test") || name.starts_with("Test")
-        }
-        _ => false,
-    }
-}
-
 /// Types whose liveness a live METHOD they declare implies (A7.8): the
 /// method's direct `parent_of` must be one of these for the owner step to fire.
 const OWNER_KINDS: [repo_graph_core::NodeKindId; 3] =
@@ -113,10 +78,18 @@ struct LiveWalk {
 /// this set is likely dead code. Conservative (generous entrypoint set) to avoid
 /// false-dead flags — the failure mode the handoff warns about.
 ///
+/// Both halves come from the code domain's profile (LD.14b): an entrypoint is
+/// what `CODE_PROFILE.tables.entry` says one is — routes, gRPC / WS / event
+/// handlers, CLI commands, framework components, `main` / `test*` / `Test*`
+/// functions and methods, and (LB.3b) any node carrying the COMPONENT role:
+/// since the LB.3a fold an Angular `@Component` is a CLASS with ROLE
+/// COMPONENT, not a COMPONENT node. The walk carries on
+/// `CODE_PROFILE.tables.carry_edges`.
+///
 /// Two steps besides the forward carry walk (A7.8), each applied as a node is
 /// popped from the queue:
 /// - **Owner.** A live METHOD makes its owning CLASS / STRUCT / INTERFACE (its
-///   direct `parent_of`) live. DEFINES stays out of `blast_carry_edges`, since
+///   direct `parent_of`) live. DEFINES stays out of the carry edges, since
 ///   pulling in a whole container is the impact fan-out that list exists to
 ///   prevent. Liveness is a different question: a controller whose action is
 ///   route-reachable is not dead, and it is the CLASS, not the METHOD, that
@@ -130,29 +103,26 @@ struct LiveWalk {
 ///   carry edge. INHERITS_FROM stays forward-only: a live base class does not
 ///   make its subclasses live.
 ///
-/// Prints `[live] entrypoints=E (kind=K role=R) owners=O implementers=I
-/// reached=N/M` once per process (MCP sessions call this per query): `kind`
-/// counts entries by kind / name, `role` the ones only a ROLE cell made entries
-/// (LB.3b), `owners` / `implementers` the nodes each A7.8 step made live, `N`
-/// the live set and `M` every node. The returned set does not depend on
-/// whether the line was printed.
+/// Prints `[live] profile=P entrypoints=E (kind=K role=R) owners=O
+/// implementers=I reached=N/M` once per call — one line per liveness
+/// computation, so one per blast-radius query, as `[scope]` / `[locate]` print
+/// per query: `P` is the profile's graph type, `kind` counts entries by kind /
+/// name, `role` the ones only a ROLE cell made entries (LB.3b), `owners` /
+/// `implementers` the nodes each A7.8 step made live, `N` the live set and `M`
+/// every node.
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static PRINTED: AtomicBool = AtomicBool::new(false);
-
     let w = live_walk(merged);
-    if !PRINTED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "[live] entrypoints={} (kind={} role={}) owners={} implementers={} reached={}/{}",
-            w.by_kind + w.by_role,
-            w.by_kind,
-            w.by_role,
-            w.owners,
-            w.implementers,
-            w.live.len(),
-            w.total
-        );
-    }
+    eprintln!(
+        "[live] profile={} entrypoints={} (kind={} role={}) owners={} implementers={} reached={}/{}",
+        CODE_PROFILE.tables.graph_type,
+        w.by_kind + w.by_role,
+        w.by_kind,
+        w.by_role,
+        w.owners,
+        w.implementers,
+        w.live.len(),
+        w.total
+    );
     w.live
 }
 
@@ -162,8 +132,8 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
 fn live_walk(merged: &MergedGraph) -> LiveWalk {
     use std::collections::{HashSet, VecDeque};
 
-    let carry: HashSet<repo_graph_core::EdgeCategoryId> =
-        repo_graph_graph::blast_carry_edges().into_iter().collect();
+    let t = &CODE_PROFILE.tables;
+    let carry: HashSet<repo_graph_core::EdgeCategoryId> = t.carry_edges.iter().copied().collect();
     let edges: Vec<&Edge> = merged.all_edges().collect();
     // Reverse IMPLEMENTS: interface (or interface method) -> its implementers.
     let mut implementers_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -194,9 +164,9 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
                 owner_of.insert(n.id, p);
             }
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
-            let seeded = if is_entrypoint(kind, name, &[]) {
+            let seeded = if t.entry.is_entry(kind, name, &[]) {
                 &mut w.by_kind
-            } else if is_entrypoint(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
+            } else if t.entry.is_entry(kind, name, &repo_graph_graph::roles::roles_in(kind, &n.cells))
             {
                 &mut w.by_role
             } else {
@@ -302,7 +272,7 @@ pub fn blast_radius_by_qname(
         o => return Err(format!("direction must be forward|backward|both, got `{o}`")),
     };
     let live = entrypoint_reachable(merged);
-    let hits = merged.blast_radius(seed, reach, max_depth, None);
+    let hits = merged.blast_radius(seed, reach, max_depth, &CODE_PROFILE.tables);
     let loc = Locator::new(merged);
     let out: Vec<BlastAnswer> = hits
         .iter()
@@ -378,7 +348,7 @@ pub fn cross_stack_trace(
         }
     }
     let carry: HashSet<repo_graph_core::EdgeCategoryId> =
-        repo_graph_graph::blast_carry_edges().into_iter().collect();
+        CODE_PROFILE.tables.carry_edges.iter().copied().collect();
     let edges: Vec<&Edge> = merged.all_edges().collect();
     let loc = Locator::new(merged);
 
@@ -474,7 +444,7 @@ pub fn resolve_signal_located(
             ),
         });
     }
-    let mut config = repo_graph_graph::code_activation_defaults();
+    let mut config = CODE_PROFILE.tables.activation_config(None);
     config.direction = repo_graph_activation::Direction::Undirected;
     config.top_k = usize::MAX;
     let scores: HashMap<NodeId, f64> =
@@ -1978,7 +1948,8 @@ mod contracts_tests {
 
 #[cfg(test)]
 mod role_live_tests {
-    use super::{entrypoint_reachable, is_entrypoint};
+    use super::entrypoint_reachable;
+    use crate::profile::CODE_PROFILE;
     use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
     use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
     use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
@@ -2036,12 +2007,13 @@ mod role_live_tests {
         assert!(!entrypoint_reachable(&m).contains(&api), "SERVICE is not an entry role");
 
         // The kind / name arms are unchanged and need no roles.
+        let entry = &CODE_PROFILE.tables.entry;
         let class = Some(node_kind::CLASS);
-        assert!(is_entrypoint(class, "Page", &[node_kind::COMPONENT]));
-        assert!(!is_entrypoint(class, "Page", &[node_kind::SERVICE, node_kind::HOOK]));
-        assert!(is_entrypoint(Some(node_kind::COMPONENT), "Card", &[]));
-        assert!(is_entrypoint(Some(node_kind::FUNCTION), "main", &[]));
-        assert!(!is_entrypoint(class, "Page", &[]));
+        assert!(entry.is_entry(class, "Page", &[node_kind::COMPONENT]));
+        assert!(!entry.is_entry(class, "Page", &[node_kind::SERVICE, node_kind::HOOK]));
+        assert!(entry.is_entry(Some(node_kind::COMPONENT), "Card", &[]));
+        assert!(entry.is_entry(Some(node_kind::FUNCTION), "main", &[]));
+        assert!(!entry.is_entry(class, "Page", &[]));
     }
 }
 
@@ -2051,7 +2023,8 @@ mod live_tests {
     //! type live, a live interface makes its implementers live, and neither
     //! step turns into "everything is live".
 
-    use super::{entrypoint_reachable, is_entrypoint, live_walk};
+    use super::{entrypoint_reachable, live_walk};
+    use crate::profile::CODE_PROFILE;
     use repo_graph_code_domain::{
         CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind,
     };
@@ -2219,7 +2192,7 @@ mod live_tests {
             .find(|x| x.id == comp_class)
             .expect("the CLASS survives");
         let roles = roles_in(Some(node_kind::CLASS), &comp.cells);
-        assert!(is_entrypoint(
+        assert!(CODE_PROFILE.tables.entry.is_entry(
             Some(node_kind::CLASS),
             "UsersComponent",
             &roles

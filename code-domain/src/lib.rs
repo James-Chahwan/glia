@@ -402,7 +402,7 @@ pub mod edge_category {
     /// BLOB_STORE / SEARCH_INDEX / EMAIL_SERVICE nodes, always at
     /// `Confidence::Weak` (the provider needles are substring matches).
     ///
-    /// Deliberately NOT in `blast_carry_edges()`: a shared Postgres is an
+    /// Deliberately NOT in `CODE_TABLES.carry_edges`: a shared Postgres is an
     /// operational fact, not a code dependency, and carrying it would fan every
     /// blast radius across every service in the stack. (A13.3)
     pub const SHARES_DATA_SOURCE: EdgeCategoryId = EdgeCategoryId(33);
@@ -411,7 +411,7 @@ pub mod edge_category {
     /// it names. The transport-generic counterpart of `GRPC_CALLS`; tRPC today,
     /// Connect / Twirp when those land. Emitted by `RpcStackResolver` on an
     /// exact procedure-path match (`rpc_call:<path>` ↔ `rpc:<path>`) — no
-    /// substring fallback. In `blast_carry_edges()`. (A10.10)
+    /// substring fallback. In `CODE_TABLES.carry_edges`. (A10.10)
     pub const RPC_CALLS: EdgeCategoryId = EdgeCategoryId(34);
 
     /// RESERVED (LA.6a) — a frontend navigation link (`routerLink`, `<Link to>`,
@@ -424,7 +424,7 @@ pub mod edge_category {
 
     /// RESERVED (LF.5b) — `MODULE` ↔ `MODULE`: two files that repeatedly change
     /// together in the git-history snapshot. HEURISTIC, always
-    /// `Confidence::Weak`, activation weight 0, NOT in `blast_carry_edges()`,
+    /// `Confidence::Weak`, activation weight 0, NOT in `CODE_TABLES.carry_edges`,
     /// symmetric in cross_links. Emitter LF.5b; read by LF.5c / LF.5d and the
     /// Engram edge table (LG.11); the overlay loader (LF.2a) rejects it by name.
     pub const CO_CHANGES: EdgeCategoryId = EdgeCategoryId(36);
