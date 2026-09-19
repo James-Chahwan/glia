@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 217,
+  "fixtures": 226,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -302,6 +302,13 @@
         "IMPORTS": 1.0
       }
     },
+    "dart-top-level-bodies": {
+      "framework": "dart-top-level-bodies",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "docs-md-section-lines": {
       "framework": "docs-md-section-lines",
       "language": "markdown",
@@ -548,6 +555,14 @@
         "USES": 1.0
       }
     },
+    "java-field-dispatch": {
+      "framework": "java-field-dispatch",
+      "language": "java",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "java-http-clients": {
       "framework": "java-http-clients",
       "language": "java",
@@ -655,7 +670,7 @@
       "language": "kotlin",
       "per_category": {
         "CALLS": 0.0,
-        "HANDLED_BY": 0.0,
+        "HANDLED_BY": 1.0,
         "IMPORTS": 1.0
       }
     },
@@ -676,6 +691,13 @@
         "INJECTS": 1.0
       }
     },
+    "nav-angular-links": {
+      "framework": "nav-angular-links",
+      "language": "typescript",
+      "per_category": {
+        "NAVIGATES_TO": 1.0
+      }
+    },
     "nav-angular-routes": {
       "framework": "nav-angular-routes",
       "language": "typescript",
@@ -684,11 +706,25 @@
         "NAVIGATES_TO": 1.0
       }
     },
+    "nav-react-links": {
+      "framework": "nav-react-links",
+      "language": "typescript",
+      "per_category": {
+        "NAVIGATES_TO": 1.0
+      }
+    },
     "nav-react-routes": {
       "framework": "nav-react-routes",
       "language": "typescript",
       "per_category": {
         "HANDLED_BY": 1.0,
+        "NAVIGATES_TO": 1.0
+      }
+    },
+    "nav-vue-links": {
+      "framework": "nav-vue-links",
+      "language": "typescript",
+      "per_category": {
         "NAVIGATES_TO": 1.0
       }
     },
@@ -971,6 +1007,16 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "rust-inline-mod-enum": {
+      "framework": "rust-inline-mod-enum",
+      "language": "rust",
+      "per_category": {
+        "CALLS": 1.0,
+        "CONTAINS": 1.0,
+        "HAS_ATTRIBUTE": 1.0,
+        "USES": 1.0
+      }
+    },
     "rust-macro-arg-calls": {
       "framework": "rust-macro-arg-calls",
       "language": "rust",
@@ -1135,6 +1181,15 @@
         "IMPORTS": 1.0
       }
     },
+    "ts-heritage-xfile": {
+      "framework": "ts-heritage-xfile",
+      "language": "typescript",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "IMPORTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
     "ts-http-fetch": {
       "framework": "ts-http-fetch",
       "language": "typescript",
@@ -1231,6 +1286,15 @@
       "per_category": {
         "DEFINES_CONFIG": 1.0,
         "READS_CONFIG": 1.0
+      }
+    },
+    "xcut-connect-rpc": {
+      "framework": "xcut-connect-rpc",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-eventbus-event_flows": {
@@ -1448,6 +1512,14 @@
         "USES": 1.0
       }
     },
+    "xcut-twirp-rpc": {
+      "framework": "xcut-twirp-rpc",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0
+      }
+    },
     "xcut-websocket-client-forms": {
       "framework": "xcut-websocket-client-forms",
       "language": "typescript",
@@ -1560,7 +1632,6 @@
       "kotlin: INHERITS_FROM",
       "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
-      "kotlin-ktor: HANDLED_BY",
       "kotlin-retrofit: HTTP_CALLS",
       "kotlin-spring: CALLS"
     ],

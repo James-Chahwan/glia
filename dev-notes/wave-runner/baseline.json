@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "f92d557",
-  "after_wave": 6,
+  "measured_at_head": "ca1ede8",
+  "after_wave": 7,
   "cargo_test_workspace": {
-    "passed": 1816,
+    "passed": 1911,
     "failed": 0
   },
   "history_passed": [
@@ -33,12 +33,13 @@
     1552,
     1651,
     1744,
-    1816
+    1816,
+    1911
   ],
   "run_py": {
-    "fixtures": 217,
-    "blind_spots": 8,
-    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-ktor: HANDLED_BY', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 226,
+    "blind_spots": 7,
+    "blind_spot_detail": "blind: ['kotlin: CALLS', 'kotlin: IMPLEMENTS', 'kotlin: INHERITS_FROM', 'kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-retrofit: HTTP_CALLS', 'kotlin-spring: CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
@@ -49,7 +50,6 @@
       "kotlin: INHERITS_FROM",
       "kotlin-flip-guard: CALLS",
       "kotlin-ktor: CALLS",
-      "kotlin-ktor: HANDLED_BY",
       "kotlin-retrofit: HTTP_CALLS",
       "kotlin-spring: CALLS"
     ],
@@ -63,11 +63,11 @@
     ]
   },
   "matrix_py": {
-    "full": 123,
-    "partial": 28,
+    "full": 126,
+    "partial": 27,
     "none": 14,
-    "unknown": 315,
-    "covered": 165,
+    "unknown": 313,
+    "covered": 167,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0

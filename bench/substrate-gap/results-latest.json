@@ -576,28 +576,29 @@
     },
     "dart/calls": {
       "extract": [
-        3,
-        3
+        5,
+        5
       ],
       "fixtures": [
         "fixtures/dart-field-dispatch",
+        "fixtures/dart-top-level-bodies",
         "matrix/dart/calls"
       ],
       "forbid": [
-        0,
-        0
+        2,
+        2
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        4,
+        4
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        4,
-        4
+        11,
+        11
       ],
       "via": "call"
     },
@@ -874,6 +875,30 @@
         1
       ],
       "via": "service"
+    },
+    "elixir/ws": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/elixir/ws"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "websocket"
     },
     "go/amqp": {
       "extract": [
@@ -1432,10 +1457,11 @@
     },
     "java/calls": {
       "extract": [
-        2,
-        2
+        5,
+        5
       ],
       "fixtures": [
+        "fixtures/java-field-dispatch",
         "fixtures/java-spring-calls"
       ],
       "forbid": [
@@ -1444,13 +1470,13 @@
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        5,
+        5
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        3,
+        3
       ],
       "via": "call"
     },
@@ -3025,29 +3051,54 @@
       ],
       "via": "test"
     },
+    "ruby/ws": {
+      "extract": [
+        3,
+        3
+      ],
+      "fixtures": [
+        "matrix/ruby/ws"
+      ],
+      "forbid": [
+        2,
+        2
+      ],
+      "level": "full",
+      "literal": [
+        3,
+        3
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "websocket"
+    },
     "rust/calls": {
       "extract": [
-        8,
-        8
+        12,
+        12
       ],
       "fixtures": [
         "fixtures/rust-axum-calls",
         "fixtures/rust-crate-path-calls",
+        "fixtures/rust-inline-mod-enum",
         "fixtures/rust-macro-arg-calls"
       ],
       "forbid": [
-        3,
-        3
+        5,
+        5
       ],
       "level": "full",
       "literal": [
-        8,
-        8
+        12,
+        12
       ],
       "reasons": [],
       "route": [
-        11,
-        11
+        16,
+        16
       ],
       "via": "call"
     },
@@ -3780,27 +3831,26 @@
     },
     "typescript/impl": {
       "extract": [
-        2,
-        2
+        5,
+        5
       ],
       "fixtures": [
+        "fixtures/ts-heritage-xfile",
         "matrix/typescript/impl"
       ],
       "forbid": [
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        2,
-        2
+        5,
+        5
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
-        1
+        3,
+        3
       ],
       "via": "type"
     },
@@ -4195,8 +4245,11 @@
     "fixtures/kotlin-ktor",
     "fixtures/kotlin-retrofit",
     "fixtures/kotlin-spring",
+    "fixtures/nav-angular-links",
     "fixtures/nav-angular-routes",
+    "fixtures/nav-react-links",
     "fixtures/nav-react-routes",
+    "fixtures/nav-vue-links",
     "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
@@ -4222,6 +4275,7 @@
     "fixtures/walk-project-roots",
     "fixtures/xcli-invokes",
     "fixtures/xcut-config-env-value",
+    "fixtures/xcut-connect-rpc",
     "fixtures/xcut-graphql-precision",
     "fixtures/xcut-graphql-sdl",
     "fixtures/xcut-proto-shared",
@@ -4235,6 +4289,7 @@
     "fixtures/xcut-queue-tag-unpairable",
     "fixtures/xcut-queue-wildcard",
     "fixtures/xcut-trpc",
+    "fixtures/xcut-twirp-rpc",
     "fixtures/xcut-websocket-client-forms",
     "fixtures/xcut-websocket-generic-route",
     "fixtures/xcut-websocket-go-route",
@@ -4248,13 +4303,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 165,
+    "covered": 167,
     "error": 0,
-    "full": 123,
+    "full": 126,
     "grid": 480,
     "none": 14,
-    "partial": 28,
-    "unknown": 315
+    "partial": 27,
+    "unknown": 313
   },
   "vocabulary": {
     "digest": "82fbaf1daf5c",
