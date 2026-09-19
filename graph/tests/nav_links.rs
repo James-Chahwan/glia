@@ -101,6 +101,7 @@ fn link(from: NodeId, from_module: NodeId, target: &str) -> UnresolvedRef {
         from_module,
         qualifier: CallQualifier::Bare(target.into()),
         category: edge_category::NAVIGATES_TO,
+        line: 0 ,
     }
 }
 

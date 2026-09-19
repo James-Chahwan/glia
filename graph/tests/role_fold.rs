@@ -142,6 +142,7 @@ fn component_file() -> FileParse {
             from_module: n,
             qualifier: CallQualifier::Bare("UserService".into()),
             category: edge_category::INJECTS,
+            line: 0 ,
         }],
         nav,
     )

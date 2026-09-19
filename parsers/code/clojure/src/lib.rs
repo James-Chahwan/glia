@@ -507,6 +507,7 @@ fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                         path: req,
                         alias: None,
                     },
+                    line: line_at(child),
                 });
             }
         }
@@ -518,6 +519,7 @@ fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                     path: sym.to_string(),
                     alias: None,
                 },
+                line: line_at(child),
             });
         }
     }
@@ -538,16 +540,19 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                         base: parts[0].to_string(),
                         name: parts[1].to_string(),
                     },
+                    line: line_at(n),
                 });
             } else if let Some(stripped) = head.strip_prefix('.') {
                 acc.calls.push(CallSite {
                     from,
                     qualifier: CallQualifier::SelfMethod(stripped.to_string()),
+                    line: line_at(n),
                 });
             } else {
                 acc.calls.push(CallSite {
                     from,
                     qualifier: CallQualifier::Bare(head.to_string()),
+                    line: line_at(n),
                 });
             }
         }
@@ -558,6 +563,12 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             }
         }
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

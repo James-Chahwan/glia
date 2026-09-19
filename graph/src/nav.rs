@@ -79,7 +79,7 @@ use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{CallQualifier, UnresolvedRef, cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
 
-use crate::calls::{graph_evidence, position_file};
+use crate::calls::{SiteFiles, graph_evidence, position_file};
 use crate::resolvers::{normalise_http_path, weakest};
 use crate::roles::roles_in;
 use crate::types::RepoGraph;
@@ -504,7 +504,11 @@ fn split_link(raw: &str) -> (bool, &str) {
 /// Bind every `NAVIGATES_TO` ref in `refs` (see the module doc): an edge per
 /// matched route, a dead link kept in `g.unresolved_refs`, everything else
 /// dropped and counted.
-pub(crate) fn resolve_nav_links(g: &mut RepoGraph, refs: &[&UnresolvedRef]) -> NavStats {
+pub(crate) fn resolve_nav_links(
+    g: &mut RepoGraph,
+    refs: &[&UnresolvedRef],
+    files: &SiteFiles,
+) -> NavStats {
     let mut s = NavStats::default();
     if refs.is_empty() {
         return s;
@@ -549,7 +553,9 @@ pub(crate) fn resolve_nav_links(g: &mut RepoGraph, refs: &[&UnresolvedRef]) -> N
                 } else {
                     tier.confidence()
                 };
-                let ev = graph_evidence("graph:nav", tier.rule(href));
+                // LC.3b: the link's (or redirect's) own row, in the file it
+                // was read in.
+                let ev = files.place(graph_evidence("graph:nav", tier.rule(href)), r);
                 for to in targets {
                     if linked.insert((r.from, to)) {
                         let edge = Edge::new(r.from, to, edge_category::NAVIGATES_TO, confidence);

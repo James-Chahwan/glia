@@ -509,6 +509,7 @@ fn collect_import(node: TsNode, file: &File, acc: &mut Acc) {
     acc.imports.push(ImportStmt {
         from_module: file.module_qname.to_string(),
         target,
+        line: line_at(node),
     });
 }
 
@@ -579,6 +580,12 @@ fn scoped(scope: &str, name: &str) -> String {
     } else {
         format!("{scope}::{name}")
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+pub(crate) fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

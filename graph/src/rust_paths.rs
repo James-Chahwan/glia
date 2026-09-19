@@ -726,7 +726,10 @@ impl RustIndex {
                 _ => None,
             };
             match hit {
-                Some(to) => push_edge(g, r.from, to, edge_category::USES, rust_ev("enum_variant")),
+                Some(to) => {
+                    let ev = rust_ev("enum_variant").line(r.line);
+                    push_edge(g, r.from, to, edge_category::USES, ev);
+                }
                 None => g.unresolved_refs.push(r),
             }
         }
@@ -1441,6 +1444,8 @@ struct UseLeaf<'a> {
     /// A `crate::` / `super::` Symbol: HEAD resolved these, so a miss in a
     /// loose file keeps HEAD's tail fallback. Never an external crate's path.
     tail_fallback: bool,
+    /// The `use` leaf's 0-based row: its IMPORTS edge's site line (LC.3b).
+    line: u32,
 }
 
 /// A leaf whose path resolved: what it binds (`None` when the member it
@@ -1482,6 +1487,7 @@ fn use_leaves<'a>(g: &RepoGraph, imports: &'a [ImportStmt]) -> Vec<UseLeaf<'a>> 
                     let first = path.as_ref().and_then(|p| p.first()).map(String::as_str);
                     UseLeaf {
                         scope,
+                        line: stmt.line,
                         tail_fallback: !glob && matches!(first, Some("crate" | "super")),
                         path,
                         member: (!glob).then_some(name.as_str()),
@@ -1494,6 +1500,7 @@ fn use_leaves<'a>(g: &RepoGraph, imports: &'a [ImportStmt]) -> Vec<UseLeaf<'a>> 
                 }
                 ImportTarget::Module { path, alias } => UseLeaf {
                     scope,
+                    line: stmt.line,
                     tail_fallback: false,
                     path: split_path(path),
                     member: None,
@@ -1704,7 +1711,7 @@ pub(crate) fn resolve_imports_rust(
             continue;
         };
         if from != *to && drawn.insert((from, *to)) {
-            push_edge(g, from, *to, edge_category::IMPORTS, rust_ev(rule));
+            push_edge(g, from, *to, edge_category::IMPORTS, rust_ev(rule).line(leaf.line));
         }
     }
     stats.imports_edges = drawn.len();
@@ -2149,6 +2156,7 @@ mod tests {
                     alias: None,
                     level: 0,
                 },
+                line: 0,
             });
         }
 
@@ -2160,6 +2168,7 @@ mod tests {
                     receiver: receiver.to_string(),
                     name: name.to_string(),
                 },
+                line: 0,
             });
         }
 

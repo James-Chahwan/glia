@@ -212,6 +212,8 @@ struct MemberRef {
     name: String,
     /// The enclosing enum's qname, for a bare reference.
     enum_ctx: Option<String>,
+    /// 0-based row of the reference (LC.3b); not part of the dedup key.
+    line: u32,
 }
 
 /// LA.30b: per-file tallies for the `[java-enums]` marker.
@@ -736,7 +738,7 @@ fn visit_type_decl(
     if let Some(superclass) = node.child_by_field_name("superclass") {
         let mut sc_cursor = superclass.walk();
         for sc in superclass.named_children(&mut sc_cursor) {
-            emit_heritage_ref(text_of(sc, src), edge_category::INHERITS_FROM, id, module_id, acc);
+            emit_heritage_ref(text_of(sc, src), edge_category::INHERITS_FROM, id, module_id, line_at(sc), acc);
         }
     }
     if let Some(interfaces) = node.child_by_field_name("interfaces") {
@@ -745,7 +747,7 @@ fn visit_type_decl(
         for type_list in interfaces.named_children(&mut if_cursor) {
             let mut tl_cursor = type_list.walk();
             for iface in type_list.named_children(&mut tl_cursor) {
-                emit_heritage_ref(text_of(iface, src), edge_category::IMPLEMENTS, id, module_id, acc);
+                emit_heritage_ref(text_of(iface, src), edge_category::IMPLEMENTS, id, module_id, line_at(iface), acc);
             }
         }
     }
@@ -766,7 +768,7 @@ fn visit_type_decl(
                     if sup.kind() == "comment" {
                         continue;
                     }
-                    emit_heritage_ref(text_of(sup, src), edge_category::INHERITS_FROM, id, module_id, acc);
+                    emit_heritage_ref(text_of(sup, src), edge_category::INHERITS_FROM, id, module_id, line_at(sup), acc);
                 }
             }
         }
@@ -1142,6 +1144,7 @@ fn emit_heritage_ref(
     category: repo_graph_core::EdgeCategoryId,
     from_id: NodeId,
     from_module: NodeId,
+    line: u32,
     acc: &mut Acc,
 ) {
     // Strip generic args (e.g. `Comparable<Foo>` → `Comparable`) and take the
@@ -1156,6 +1159,7 @@ fn emit_heritage_ref(
         from_module,
         qualifier: CallQualifier::Bare(simple.to_string()),
         category,
+        line,
     });
 }
 
@@ -1629,6 +1633,7 @@ fn push_inject_ref(
     from_module: NodeId,
     type_name: String,
     shape: DiShape,
+    line: u32,
     acc: &mut Acc,
 ) {
     if !acc.inject_seen.insert((from, type_name.clone())) {
@@ -1640,6 +1645,7 @@ fn push_inject_ref(
         from_module,
         qualifier: CallQualifier::Bare(type_name),
         category: edge_category::INJECTS,
+        line,
     });
 }
 
@@ -1677,7 +1683,7 @@ fn emit_params_as_injects(
             continue;
         };
         if let Some(name) = injectable_type_name(ty, src) {
-            push_inject_ref(class_id, module_id, name, shape, acc);
+            push_inject_ref(class_id, module_id, name, shape, line_at(ty), acc);
         }
     }
 }
@@ -1700,7 +1706,7 @@ fn emit_field_inject(
         return;
     };
     if let Some(name) = injectable_type_name(ty, src) {
-        push_inject_ref(class_id, module_id, name, DiShape::JavaField, acc);
+        push_inject_ref(class_id, module_id, name, DiShape::JavaField, line_at(ty), acc);
     }
 }
 
@@ -1747,7 +1753,7 @@ fn emit_lombok_field_inject(
         return;
     };
     if let Some(name) = injectable_type_name(ty, src) {
-        push_inject_ref(class_id, module_id, name, DiShape::JavaLombok, acc);
+        push_inject_ref(class_id, module_id, name, DiShape::JavaLombok, line_at(ty), acc);
     }
 }
 
@@ -2175,6 +2181,7 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                 path: module_path,
                 alias: None,
             },
+            line: line_at(node),
         });
     } else if let Some(last_dot) = path.rfind('.') {
         let module_part = &path[..last_dot];
@@ -2187,6 +2194,7 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                 alias: None,
                 level: 0,
             },
+            line: line_at(node),
         });
     }
 }
@@ -2208,7 +2216,7 @@ fn collect_calls_in(
             // HttpStackResolver can pair it with a server ROUTE.
             try_detect_java_endpoint(n, src, from, repo, file_rel, acc);
             let qualifier = classify_method_invocation(n, src);
-            acc.calls.push(CallSite { from, qualifier });
+            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
         } else if n.kind() == "object_creation_expression" {
             // LA.22a: Apache `new HttpGet(url)` is a request, not a call.
             try_detect_java_request_object(n, src, from, repo, file_rel, acc);
@@ -2231,6 +2239,7 @@ fn collect_calls_in(
                         base: Some(text_of(obj, src).to_string()),
                         name: text_of(field, src).to_string(),
                         enum_ctx: None,
+                        line: line_at(n),
                     },
                 );
             }
@@ -2252,6 +2261,7 @@ fn collect_calls_in(
                         base: None,
                         name: text.to_string(),
                         enum_ctx: Some(scope.enum_qname.to_string()),
+                        line: line_at(n),
                     },
                 );
             }
@@ -2404,6 +2414,7 @@ fn resolve_member_refs(module_id: NodeId, acc: &mut Acc) -> (usize, usize) {
                                 name: r.name.clone(),
                             },
                             category: edge_category::USES,
+                            line: r.line,
                         });
                         unresolved += 1;
                     }
@@ -2938,6 +2949,12 @@ fn unwrap_url_wrappers<'a>(arg: TsNode<'a>, src: &[u8]) -> TsNode<'a> {
 /// Inner text of a Java `string_literal` node (strip the surrounding quotes).
 fn java_string_inner(node: TsNode, src: &[u8]) -> String {
     text_of(node, src).trim_matches('"').to_string()
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

@@ -431,6 +431,7 @@ fn collect_interface_elems(
                         from_module: module_id,
                         qualifier,
                         category: edge_category::INHERITS_FROM,
+                        line: line_at(term),
                     });
                 }
             }
@@ -1005,6 +1006,7 @@ fn record_import(
             path: qname,
             alias,
         },
+        line: line_at(spec),
     });
 }
 
@@ -1065,6 +1067,7 @@ fn collect_calls_in(
                 acc.calls.push(CallSite {
                     from,
                     qualifier: q,
+                    line: line_at(child),
                 });
             }
             // Pattern A: outbound client HTTP call (`http.Get('http://…/x')`) →
@@ -1239,6 +1242,7 @@ fn try_detect_go_provider_set(call: TsNode, src: &[u8], from: NodeId, acc: &mut 
             from_module,
             qualifier,
             category: edge_category::INJECTS,
+            line: line_at(arg),
         });
         di_stats::record(DiShape::GoProvider);
     }
@@ -2413,6 +2417,7 @@ fn emit_route_from_call(
             from_module: module_id,
             qualifier: q,
             category: edge_category::HANDLED_BY,
+            line: line_at(call),
         });
     }
 
@@ -2429,12 +2434,13 @@ fn emit_route_from_call(
     if let Some(h) = literal
         && acc.func_literal_expanded.insert((h.start_byte(), route_id))
     {
-        for qualifier in func_literal_callees(h, src, &acc.external_pkgs) {
+        for (qualifier, line) in func_literal_callees(h, src, &acc.external_pkgs) {
             acc.refs.push(UnresolvedRef {
                 from: route_id,
                 from_module: module_id,
                 qualifier,
                 category: edge_category::HANDLED_BY,
+                line,
             });
             acc.func_literal_refs += 1;
         }
@@ -2469,7 +2475,7 @@ fn func_literal_callees(
     lit: TsNode,
     src: &[u8],
     external_pkgs: &std::collections::HashSet<String>,
-) -> Vec<CallQualifier> {
+) -> Vec<(CallQualifier, u32)> {
     let mut params: Vec<&str> = Vec::new();
     if let Some(list) = lit.child_by_field_name("parameters") {
         let mut cursor = list.walk();
@@ -2492,7 +2498,7 @@ fn collect_literal_callees(
     src: &[u8],
     params: &[&str],
     external_pkgs: &std::collections::HashSet<String>,
-    out: &mut Vec<CallQualifier>,
+    out: &mut Vec<(CallQualifier, u32)>,
 ) {
     let mut cursor = n.walk();
     for child in n.named_children(&mut cursor) {
@@ -2504,9 +2510,9 @@ fn collect_literal_callees(
         }
         if child.kind() == "call_expression"
             && let Some(q) = literal_callee(child, src, params, external_pkgs)
-            && !out.contains(&q)
+            && !out.iter().any(|(seen, _)| *seen == q)
         {
-            out.push(q);
+            out.push((q, line_at(child)));
         }
         collect_literal_callees(child, src, params, external_pkgs, out);
     }
@@ -2635,6 +2641,12 @@ fn position_cell(node: TsNode, file_rel: &str) -> Cell {
         kind: cell_type::POSITION,
         payload: CellPayload::Json(repo_graph_doc::position_json(&node, file_rel)),
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode, src: &'a [u8]) -> &'a str {

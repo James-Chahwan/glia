@@ -46,6 +46,7 @@
 
 use std::borrow::Cow;
 
+use repo_graph_code_domain::line_of;
 use repo_graph_core::{NodeId, RepoId};
 
 use crate::nav_routes::{NavRouteOut, RouteRecord, emit_nav_routes};
@@ -299,6 +300,13 @@ const MAX_EXPR: usize = 512;
 /// anonymous function, an arrow or an object literal names nothing: `None`.
 /// Comments are masked first, so a commented-out export never counts.
 pub fn default_export_component(source: &str) -> Option<String> {
+    default_export(source).map(|(name, _)| name)
+}
+
+/// [`default_export_component`] with the 0-based row of the `export` that
+/// names it: the page's HANDLED_BY site line (LC.3b). `mask_comments` keeps
+/// every byte offset and newline, so the row is the source's.
+fn default_export(source: &str) -> Option<(String, u32)> {
     let text = mask_comments(source);
     let text = text.as_ref();
     let mut from = 0;
@@ -309,15 +317,16 @@ pub fn default_export_component(source: &str) -> Option<String> {
             continue;
         }
         let after = text.get(from..).unwrap_or("").trim_start();
+        let line = line_of(text, at);
         if let Some(rest) = after.strip_prefix("default")
             && rest.starts_with(|c: char| c.is_whitespace())
         {
-            return default_target(text, rest.trim_start());
+            return default_target(text, rest.trim_start()).map(|name| (name, line));
         }
         if let Some(rest) = after.strip_prefix('{')
             && let Some(name) = export_list_default(rest)
         {
-            return declared_in(text, name).then(|| name.to_string());
+            return declared_in(text, name).then(|| (name.to_string(), line));
         }
     }
     None
@@ -528,11 +537,13 @@ pub fn graft_page(
     repo: RepoId,
 ) -> Option<PageGraft> {
     let route = page_route(rel_under_root)?;
+    let (handler, line) = default_export(source).map_or((None, 0), |(h, l)| (Some(h), l));
     let rec = RouteRecord {
         path: route.path.clone(),
-        handler: default_export_component(source),
+        handler,
         redirect: None,
         catchall: route.catchall,
+        line,
     };
     let out = emit_nav_routes(&[rec], module_id, repo);
     Some(PageGraft { route, out })

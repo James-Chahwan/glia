@@ -615,7 +615,7 @@ fn visit_class_heritage(node: TsNode, src: &[u8], id: NodeId, module_id: NodeId,
         // field is the hidden `_type_not_void`); mixins (`with`) nest as a
         // `mixins` child holding one or more types.
         for head in heritage_type_heads(superclass, src) {
-            emit_heritage_ref(head, edge_category::INHERITS_FROM, id, module_id, acc);
+            emit_heritage_ref(head, edge_category::INHERITS_FROM, id, module_id, line_at(superclass), acc);
         }
         let mut sc_cursor = superclass.walk();
         for child in superclass.named_children(&mut sc_cursor) {
@@ -639,7 +639,7 @@ fn emit_mixin_or_interface_refs(
     acc: &mut Acc,
 ) {
     for head in heritage_type_heads(clause, src) {
-        emit_heritage_ref(head, edge_category::IMPLEMENTS, id, module_id, acc);
+        emit_heritage_ref(head, edge_category::IMPLEMENTS, id, module_id, line_at(clause), acc);
     }
 }
 
@@ -681,6 +681,7 @@ fn emit_heritage_ref(
     category: repo_graph_core::EdgeCategoryId,
     from_id: NodeId,
     module_id: NodeId,
+    line: u32,
     acc: &mut Acc,
 ) {
     // Strip generic args (`Comparable<Foo>` → `Comparable`) and take the trailing
@@ -695,6 +696,7 @@ fn emit_heritage_ref(
         from_module: module_id,
         qualifier: CallQualifier::Bare(simple.to_string()),
         category,
+        line,
     });
 }
 
@@ -1057,6 +1059,7 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
             path: path.to_string(),
             alias: None,
         },
+        line: line_at(node),
     });
 }
 
@@ -1180,16 +1183,22 @@ fn push_selector_chain_calls(
             .copied()
             .collect();
         i += 1 + selectors.len();
-        for qualifier in chain_call_sites(primary, &selectors, src) {
+        for (qualifier, line) in chain_call_sites(primary, &selectors, src) {
             if let Some(qualifier) = scope.classify(qualifier, &mut acc.bare_calls) {
-                acc.calls.push(CallSite { from, qualifier });
+                acc.calls.push(CallSite { from, qualifier, line });
             }
         }
     }
 }
 
 /// The call sites of one primary + selector chain, in source order.
-fn chain_call_sites(primary: TsNode, selectors: &[TsNode], src: &[u8]) -> Vec<CallQualifier> {
+/// Each call with its 0-based row (LC.3b): the member selector's for
+/// `x.m()`, the primary's for a bare `f()`.
+fn chain_call_sites(
+    primary: TsNode,
+    selectors: &[TsNode],
+    src: &[u8],
+) -> Vec<(CallQualifier, u32)> {
     let head = text_of(primary, src);
     let is_this = primary.kind() == "this";
     let mut out = Vec::new();
@@ -1210,6 +1219,9 @@ fn chain_call_sites(primary: TsNode, selectors: &[TsNode], src: &[u8]) -> Vec<Ca
                 bare = false;
             }
             SelectorPart::Call => {
+                let line = pending
+                    .and_then(|(at, _)| selectors.get(at))
+                    .map_or(line_at(primary), |sel| line_at(*sel));
                 let site = match pending.take() {
                     // `this.m()` / `x.m()`: the member hangs off the primary.
                     Some((0, name)) if is_this => Some(CallQualifier::SelfMethod(name.to_string())),
@@ -1232,7 +1244,7 @@ fn chain_call_sites(primary: TsNode, selectors: &[TsNode], src: &[u8]) -> Vec<Ca
                     None if bare && !is_this => Some(CallQualifier::Bare(head.to_string())),
                     None => None,
                 };
-                out.extend(site);
+                out.extend(site.map(|q| (q, line)));
                 bare = false;
             }
         }
@@ -1649,6 +1661,12 @@ fn collect_dart_field_types(class_body: TsNode, src: &[u8], class_id: NodeId, ac
             }
         }
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

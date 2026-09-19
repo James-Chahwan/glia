@@ -173,6 +173,7 @@ fn visit_block(
                         path: source_attr,
                         alias: None,
                     },
+                    line: line_at(node),
                 });
             }
         }
@@ -388,6 +389,12 @@ fn ref_address_of(expr: TsNode, src: &[u8]) -> Option<String> {
         return None;
     }
     Some(format!("{ty}.{name}"))
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

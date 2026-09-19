@@ -533,12 +533,14 @@ mod tests {
         let mut calls = vec![CallSite {
             from: svc,
             qualifier: CallQualifier::Bare("x".into()),
+            line: 0,
         }];
         let mut refs = vec![UnresolvedRef {
             from: svc,
             from_module: module,
             qualifier: CallQualifier::Bare("y".into()),
             category: edge_category::INJECTS,
+            line: 0,
         }];
 
         let stats = fold_role_overlays(&mut g, &mut calls, &mut refs);

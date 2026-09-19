@@ -425,6 +425,7 @@ fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                     path: path.to_string(),
                     alias: None,
                 },
+                line: line_at(node),
             });
         }
     }
@@ -447,6 +448,7 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, ivars: bool, acc: &mut A
             acc.calls.push(CallSite {
                 from,
                 qualifier: CallQualifier::SelfMethod(method_name.to_string()),
+                line: line_at(node),
             });
         } else if recv.kind() == "identifier" || recv.kind() == "constant" {
             acc.calls.push(CallSite {
@@ -455,6 +457,7 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, ivars: bool, acc: &mut A
                     base: recv_text.to_string(),
                     name: method_name.to_string(),
                 },
+                line: line_at(node),
             });
         } else if ivars && recv.kind() == "instance_variable" {
             // `@repo.find(id)`: the receiver text is the `field_types` key
@@ -468,12 +471,14 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, ivars: bool, acc: &mut A
                     receiver: recv_text.to_string(),
                     name: method_name.to_string(),
                 },
+                line: line_at(node),
             });
         }
     } else {
         acc.calls.push(CallSite {
             from,
             qualifier: CallQualifier::Bare(method_name.to_string()),
+            line: line_at(node),
         });
     }
 }
@@ -769,6 +774,12 @@ fn plain_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
     }
     let trimmed = out.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
@@ -1134,7 +1145,7 @@ fn try_emit_rails_route(
             // Under a namespace the root IS the namespace path; with no prefix
             // `join_path("", "/")` is a pass-through and `abs_path` keeps "/".
             let path = abs_path(&join_path(prefix, "/"));
-            emit_rails_route("GET", &path, h, module_id, repo, acc);
+            emit_rails_route("GET", &path, h, module_id, repo, line_at(call), acc);
             return;
         }
         "resources" | "resource" => {
@@ -1148,7 +1159,7 @@ fn try_emit_rails_route(
                 return;
             }
             let path = abs_path(&join_path(prefix, &format!("/{name}")));
-            emit_rails_route("ANY", &path, None, module_id, repo, acc);
+            emit_rails_route("ANY", &path, None, module_id, repo, line_at(call), acc);
             return;
         }
         _ => return,
@@ -1185,7 +1196,7 @@ fn try_emit_rails_route(
     }
     let handler = handler_spec.as_deref().and_then(parse_handler);
     let path = abs_path(&join_path(prefix, &path));
-    emit_rails_route(verb, &path, handler, module_id, repo, acc);
+    emit_rails_route(verb, &path, handler, module_id, repo, line_at(call), acc);
 }
 
 /// Trim the surrounding quotes off a tree-sitter `string` node's text.
@@ -1331,7 +1342,7 @@ fn try_emit_sinatra_route(call: TsNode, src: &[u8], module_id: NodeId, repo: Rep
     }
 
     // Sinatra handlers are inline blocks, not named — no HANDLED_BY handler.
-    emit_rails_route(verb, path, None, module_id, repo, acc);
+    emit_rails_route(verb, path, None, module_id, repo, line_at(call), acc);
 }
 
 fn call_has_block(call: TsNode) -> bool {
@@ -1348,12 +1359,15 @@ fn call_has_block(call: TsNode) -> bool {
     matches!(last.map(|n| n.kind()), Some("do_block") | Some("block"))
 }
 
+/// `line` is the route call's 0-based row: the site of its HANDLED_BY ref
+/// (LC.3b).
 fn emit_rails_route(
     method: &str,
     path: &str,
     handler: Option<(String, String)>,
     module_id: NodeId,
     repo: RepoId,
+    line: u32,
     acc: &mut Acc,
 ) {
     let path = abs_path(path);
@@ -1380,6 +1394,7 @@ fn emit_rails_route(
             from_module: module_id,
             qualifier: CallQualifier::Attribute { base, name },
             category: edge_category::HANDLED_BY,
+            line,
         });
     }
 }

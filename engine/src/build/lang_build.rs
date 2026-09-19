@@ -119,6 +119,9 @@ pub(super) fn build_language_graphs(
             Ok(mut g) => {
                 stamp_graph_edges(&mut g, unattributed);
                 heritage.push(HeritageTally::of(lang, &g));
+                if let Some(line) = LineTally::of(&g).marker(lang) {
+                    eprintln!("{line}");
+                }
                 graphs.push(g);
             }
             Err(e) => parse_errors.push(format!("{lang} graph: {e}")),
@@ -132,6 +135,9 @@ pub(super) fn build_language_graphs(
             Ok(mut g) => {
                 stamp_graph_edges(&mut g, unattributed);
                 heritage.push(HeritageTally::of("typescript", &g));
+                if let Some(line) = LineTally::of(&g).marker("typescript") {
+                    eprintln!("{line}");
+                }
                 graphs.push(g);
             }
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
@@ -190,6 +196,85 @@ fn stamp_graph_edges(g: &mut RepoGraph, mut unattributed: HashMap<EdgeKey, usize
             continue;
         }
         evidence::attach(e, ev.clone());
+    }
+}
+
+/// The evidence of an edge bound from an `UnresolvedRef`, by
+/// `(emitter, rule)` (`None`: any rule): `resolve_refs`, the nav link
+/// resolver, Rust's leftover enum-variant refs and Go's interface embeds.
+const REF_EMITTERS: &[(&str, Option<&str>)] = &[
+    ("graph:refs", None),
+    ("graph:nav", None),
+    ("graph:rust_paths", Some("enum_variant")),
+    ("graph:go_packages", Some("embed_package")),
+    ("graph:go_packages", Some("embed_import")),
+];
+
+/// LC.3b: one built language graph's `[evidence-lines]` counts. `calls`:
+/// CALLS edges into a declaration (a call-site-shaped target, an ENDPOINT
+/// and the other [`evidence::SITE_KINDS`], is located at itself instead);
+/// `imports`: IMPORTS edges; `refs`: edges bound from an `UnresolvedRef`
+/// ([`REF_EMITTERS`]). Each `*_site` is how many carry the asserting
+/// construct's own line (basis `site`), so a site count below its total names
+/// an emitter that dropped the line.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LineTally {
+    calls: usize,
+    calls_site: usize,
+    imports: usize,
+    imports_site: usize,
+    refs: usize,
+    refs_site: usize,
+}
+
+impl LineTally {
+    fn of(g: &RepoGraph) -> Self {
+        let mut t = LineTally::default();
+        for e in &g.edges {
+            let ev = evidence::Evidence::of(e);
+            let site = ev.as_ref().is_some_and(|ev| ev.basis == evidence::Basis::Site);
+            let (total, sited) = if e.category == edge_category::CALLS {
+                let to_site_kind = g
+                    .nav
+                    .kind_by_id
+                    .get(&e.to)
+                    .is_some_and(|k| evidence::SITE_KINDS.contains(k));
+                if to_site_kind {
+                    continue;
+                }
+                (&mut t.calls, &mut t.calls_site)
+            } else if e.category == edge_category::IMPORTS {
+                (&mut t.imports, &mut t.imports_site)
+            } else if ev.as_ref().is_some_and(|ev| {
+                REF_EMITTERS.iter().any(|(emitter, rule)| {
+                    ev.emitter == *emitter && rule.is_none_or(|r| ev.rule.as_deref() == Some(r))
+                })
+            }) {
+                (&mut t.refs, &mut t.refs_site)
+            } else {
+                continue;
+            };
+            *total += 1;
+            *sited += usize::from(site);
+        }
+        t
+    }
+
+    /// LC.3b fired_on, once per language graph built:
+    /// `[evidence-lines] lang=<lang> calls=c site=cs imports=i site=is refs=r site=rs`.
+    /// `None` for a graph with no such edge.
+    fn marker(&self, lang: &str) -> Option<String> {
+        (self.calls + self.imports + self.refs > 0).then(|| {
+            format!(
+                "[evidence-lines] lang={lang} calls={} site={} imports={} site={} refs={} site={}",
+                self.calls,
+                self.calls_site,
+                self.imports,
+                self.imports_site,
+                self.refs,
+                self.refs_site
+            )
+        })
     }
 }
 
@@ -418,6 +503,65 @@ mod tests {
                  unresolved: dart=0 solidity=1 typescript=0 repo=fx"
             )
         );
+    }
+
+    fn edge(
+        from: u64,
+        to: u64,
+        category: EdgeCategoryId,
+        ev: Option<evidence::Evidence>,
+    ) -> repo_graph_core::Edge {
+        let e = repo_graph_core::Edge::new(
+            NodeId(from),
+            NodeId(to),
+            category,
+            repo_graph_core::Confidence::Strong,
+        );
+        match ev {
+            Some(ev) => e.with_cell(ev.to_cell()),
+            None => e,
+        }
+    }
+
+    /// Calls into an ENDPOINT are not counted; a site is basis `site` only;
+    /// refs are recognised by their resolver's emitter (and rule), whatever
+    /// their category.
+    #[test]
+    fn line_tally_counts_sites_per_kind() {
+        use evidence::Evidence;
+        let mut g = RepoGraph {
+            repo: RepoId(1),
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: Default::default(),
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        };
+        g.nav.kind_by_id.insert(NodeId(2), node_kind::FUNCTION);
+        g.nav.kind_by_id.insert(NodeId(3), node_kind::ENDPOINT);
+        let site = |e: &str| Evidence::emitter(e).line(4);
+        g.edges = vec![
+            edge(1, 2, edge_category::CALLS, Some(site("graph:calls"))),
+            edge(1, 2, edge_category::CALLS, Some(Evidence::emitter("graph:build"))),
+            edge(1, 3, edge_category::CALLS, Some(Evidence::emitter("parser:python"))),
+            edge(1, 2, edge_category::IMPORTS, Some(site("graph:imports"))),
+            edge(1, 2, edge_category::HANDLED_BY, Some(site("graph:refs"))),
+            edge(1, 2, edge_category::USES, Some(Evidence::emitter("graph:rust_paths").rule("enum_variant"))),
+            edge(1, 2, edge_category::USES, Some(site("graph:rust_paths").rule("glob"))),
+            edge(1, 2, edge_category::DEFINES, None),
+        ];
+        let t = LineTally::of(&g);
+        assert_eq!(
+            t,
+            LineTally { calls: 2, calls_site: 1, imports: 1, imports_site: 1, refs: 2, refs_site: 1 }
+        );
+        assert_eq!(
+            t.marker("rust").as_deref(),
+            Some("[evidence-lines] lang=rust calls=2 site=1 imports=1 site=1 refs=2 site=1")
+        );
+        assert_eq!(LineTally::default().marker("go"), None);
     }
 
     #[test]

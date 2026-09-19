@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint;
+use repo_graph_code_domain::evidence;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -111,9 +112,10 @@ struct Acc {
     /// LA.30c: `(enum name, member name)` -> the member's ATTRIBUTE node.
     enum_members: HashMap<(String, String), NodeId>,
     /// LA.30c: `X.Y` reads that are not a call's callee, as
-    /// `(from, X, Y)`, deduped per triple in walk order. Resolved into USES
-    /// edges / refs in `resolve_intra_file` once every enum is known.
-    member_refs: Vec<(NodeId, String, String)>,
+    /// `(from, X, Y, row)`, deduped per `(from, X, Y)` in walk order (the row
+    /// is the first read's, LC.3b). Resolved into USES edges / refs in
+    /// `resolve_intra_file` once every enum is known.
+    member_refs: Vec<(NodeId, String, String, u32)>,
     member_ref_seen: std::collections::HashSet<(NodeId, String, String)>,
     /// The file's MODULE node: `from_module` of the member USES refs.
     module_id: Option<NodeId>,
@@ -151,6 +153,29 @@ struct UnresolvedCall {
     from: NodeId,
     enclosing_class: Option<NodeId>,
     qualifier: CallQualifier,
+    /// 0-based row of the call expression (LC.3b).
+    line: u32,
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
+}
+
+/// The engine's routing tag for a file this parser reads, for the
+/// `parser:<tag>` emitter of the CALLS edges it resolves itself (LC.3b), so
+/// they name the same parser as the file's other edges, which the engine
+/// stamps with the tag. The angular and vue crates parse through
+/// [`parse_file`]; the split mirrors the engine's `detect_language`.
+fn lang_tag(file_rel: &str) -> &'static str {
+    if file_rel.ends_with(".vue") {
+        "vue"
+    } else if file_rel.contains(".component.ts") {
+        "angular"
+    } else {
+        "typescript"
+    }
 }
 
 /// A class field initialised by a bare call whose argument names a type:
@@ -167,6 +192,8 @@ struct InjectFnCandidate {
     /// A6.2b: `(field name, declared type)` for an unannotated field, recorded
     /// on `CodeNav::field_types` once the callee passes the `inject` import gate.
     field_type: Option<(String, String)>,
+    /// 0-based row of the `inject(...)` call (LC.3b).
+    line: u32,
 }
 
 /// An HTTP-call shape detected during the call walk. Resolved into an Endpoint
@@ -468,6 +495,7 @@ fn collect_constructor_injects(
             from_module: module_id,
             qualifier: CallQualifier::Bare(type_name.to_string()),
             category: edge_category::INJECTS,
+            line: line_at(param),
         });
         di_stats::record(shape);
     }
@@ -600,6 +628,7 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
         callee: text(callee, src).to_string(),
         type_name: type_name.to_string(),
         field_type,
+        line: line_at(value),
     });
 }
 
@@ -667,6 +696,7 @@ fn collect_class_heritage(
                     from_module: module_id,
                     qualifier: CallQualifier::Bare(base.to_string()),
                     category,
+                    line: line_at(ty),
                 });
             }
         }
@@ -774,6 +804,7 @@ fn collect_interface_heritage(
                 from_module: module_id,
                 qualifier: CallQualifier::Bare(base.to_string()),
                 category: edge_category::INHERITS_FROM,
+                line: line_at(ty),
             });
         }
     }
@@ -1197,6 +1228,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                 path: source,
                 alias: None,
             },
+            line: line_at(n),
         });
         return;
     };
@@ -1214,6 +1246,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                         alias: Some(text(part, src).to_string()),
                         level: 0,
                     },
+                    line: line_at(n),
                 });
             }
             "namespace_import" => {
@@ -1228,6 +1261,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                             path: source.clone(),
                             alias: Some(text(id, src).to_string()),
                         },
+                        line: line_at(n),
                     });
                 }
             }
@@ -1253,6 +1287,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                             alias,
                             level: 0,
                         },
+                        line: line_at(n),
                     });
                 }
             }
@@ -1302,6 +1337,7 @@ fn collect_calls_in(
                     from,
                     enclosing_class,
                     qualifier: q,
+                    line: line_at(node),
                 });
             }
             try_detect_endpoint(node, src, from, acc);
@@ -1338,9 +1374,9 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     if object.kind() != "identifier" || property.kind() != "property_identifier" {
         return;
     }
-    let key = (from, text(object, src).to_string(), text(property, src).to_string());
-    if acc.member_ref_seen.insert(key.clone()) {
-        acc.member_refs.push(key);
+    let (base, name) = (text(object, src).to_string(), text(property, src).to_string());
+    if acc.member_ref_seen.insert((from, base.clone(), name.clone())) {
+        acc.member_refs.push((from, base, name, line_at(node)));
     }
 }
 
@@ -2062,16 +2098,13 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             _ => None,
         };
         match resolved {
-            Some(to) => out.edges.push(Edge {
-                from: uc.from,
-                to,
-                category: edge_category::CALLS,
-                confidence: Confidence::Strong,
-                cells: Vec::new(),
-            }),
+            Some(to) => out
+                .edges
+                .push(evidence::intra_file_call(lang_tag(&acc.file_rel), uc.from, to, uc.line)),
             None => out.calls.push(CallSite {
                 from: uc.from,
                 qualifier: uc.qualifier,
+                line: uc.line,
             }),
         }
     }
@@ -2092,7 +2125,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // dropped, so it never reaches the persisted unresolved refs.
     let mut member_uses = 0usize;
     let mut member_ref_count = 0usize;
-    for (from, base, name) in std::mem::take(&mut acc.member_refs) {
+    for (from, base, name, line) in std::mem::take(&mut acc.member_refs) {
         if let Some(&member) = acc.enum_members.get(&(base.clone(), name.clone())) {
             out.edges.push(Edge {
                 from,
@@ -2117,6 +2150,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 from_module: module_id,
                 qualifier: CallQualifier::Attribute { base, name },
                 category: edge_category::USES,
+                line,
             });
             member_ref_count += 1;
         }
@@ -2149,6 +2183,7 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             from_module: cand.module_id,
             qualifier: CallQualifier::Bare(cand.type_name),
             category: edge_category::INJECTS,
+            line: cand.line,
         });
         di_stats::record(DiShape::TsInjectFn);
     }
@@ -2308,6 +2343,41 @@ mod tests {
 
     fn repo() -> RepoId {
         RepoId::from_canonical("test://ts_smoke")
+    }
+
+    /// LC.3b: a CALLS edge this parser resolves in-file carries the call's own
+    /// row (not the caller's declaration row), rule `intra_file`, and the
+    /// emitter of the file's routing tag; the cross-file call site keeps its
+    /// row for the graph crate.
+    #[test]
+    fn intra_file_calls_carry_the_call_row_and_the_file_tag() {
+        use repo_graph_code_domain::evidence::{Basis, Evidence};
+        let src = "import { far } from \"./far\";\n\nfunction near() {\n  return 1;\n}\n\n\
+                   export function run() {\n  const x = 2;\n  far();\n  return near() + x;\n}\n";
+        for (path, tag) in [
+            ("src/run.ts", "parser:typescript"),
+            ("src/run.component.ts", "parser:angular"),
+        ] {
+            let parse = parse_file(src, path, "src::run", repo()).unwrap();
+            let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::run::run");
+            let near = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "src::run::near");
+            let edge = parse
+                .edges
+                .iter()
+                .find(|e| e.from == run && e.to == near && e.category == edge_category::CALLS)
+                .expect("run -> near resolves in-file");
+            let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
+            assert_eq!(ev.emitter, tag, "{path}");
+            assert_eq!(ev.rule.as_deref(), Some("intra_file"));
+            assert_eq!((ev.line, ev.basis), (Some(9), Basis::Site), "`return near() + x;` is row 9");
+            let far = parse
+                .calls
+                .iter()
+                .find(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "far"))
+                .expect("far() stays a cross-file CallSite");
+            assert_eq!(far.line, 8);
+            assert_eq!(parse.imports.first().map(|i| i.line), Some(0));
+        }
     }
 
     #[test]

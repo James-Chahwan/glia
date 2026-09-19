@@ -1,5 +1,6 @@
 use repo_graph_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
+    node_kind,
 };
 use repo_graph_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
@@ -68,13 +69,21 @@ pub struct CliNodes {
 struct CliDecl {
     framework: CliFramework,
     name: String,
-    handler: Option<CallQualifier>,
+    /// The code the command runs, with the 0-based row of the declaration
+    /// that registers it (the annotation, decorator, builder call or
+    /// `set_defaults`): the HANDLED_BY ref's site line (LC.3b).
+    handler: Option<(CallQualifier, u32)>,
 }
 
 impl CliDecl {
-    fn new(framework: CliFramework, name: String, handler: Option<CallQualifier>) -> Self {
+    fn new(framework: CliFramework, name: String, handler: Option<(CallQualifier, u32)>) -> Self {
         CliDecl { framework, name, handler }
     }
+}
+
+/// `handler` placed at the row of byte `at` of `source` (LC.3b).
+fn at_row(handler: Option<CallQualifier>, source: &str, at: usize) -> Option<(CallQualifier, u32)> {
+    handler.map(|h| (h, line_of(source, at)))
 }
 
 /// A line-at-a-time declaration reader.
@@ -164,7 +173,7 @@ pub fn extract_cli_command_nodes(
 
     let mut out = CliNodes::default();
     let mut minted: std::collections::HashMap<String, NodeId> = std::collections::HashMap::new();
-    let mut handled: Vec<(NodeId, CallQualifier)> = Vec::new();
+    let mut handled: Vec<(NodeId, CallQualifier, u32)> = Vec::new();
     for decl in decls {
         let id = match minted.get(&decl.name) {
             Some(&id) => id,
@@ -178,12 +187,12 @@ pub fn extract_cli_command_nodes(
                 id
             }
         };
-        if let Some(handler) = decl.handler {
-            handled.push((id, handler));
+        if let Some((handler, line)) = decl.handler {
+            handled.push((id, handler, line));
         }
     }
     let mut bound: Vec<(NodeId, CallQualifier)> = Vec::new();
-    for (id, handler) in handled {
+    for (id, handler, line) in handled {
         // LA.20b stopgap: a CLI_COMMAND is a child of its file's MODULE, and
         // `build_symbol_table` (graph/src/build.rs) indexes every module child
         // by name, the command last. A `Bare(h)` handler with `h` equal to a
@@ -199,6 +208,7 @@ pub fn extract_cli_command_nodes(
                 from_module: module_id,
                 qualifier: handler,
                 category: edge_category::HANDLED_BY,
+                line,
             });
         }
     }
@@ -980,7 +990,7 @@ fn scan_picocli(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         from = close;
         let Some(name) = attr_kv(span, "name") else { continue };
         let handler = picocli_handler(source, code, close + 1, at);
-        out.push(CliDecl::new(CliFramework::Picocli, name, handler));
+        out.push(CliDecl::new(CliFramework::Picocli, name, at_row(handler, source, at)));
     }
     out
 }
@@ -1093,7 +1103,7 @@ fn scan_system_commandline(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>)
         let Some(name) = source.get(first..).and_then(extract_quoted) else { continue };
         let handler =
             assigned_variable(source, at).and_then(|v| set_handler_target(source, code, v));
-        out.push(CliDecl::new(CliFramework::SystemCommandLine, name, handler));
+        out.push(CliDecl::new(CliFramework::SystemCommandLine, name, at_row(handler, source, at)));
     }
 }
 
@@ -1185,7 +1195,7 @@ fn scan_spectre_cli(source: &str, code: &CodeMap, out: &mut Vec<CliDecl>) {
                 continue;
             };
             let handler = if handled { ty.map(|t| CallQualifier::Bare(t.to_string())) } else { None };
-            out.push(CliDecl::new(CliFramework::SpectreCli, name, handler));
+            out.push(CliDecl::new(CliFramework::SpectreCli, name, at_row(handler, source, at)));
         }
     }
 }
@@ -1711,7 +1721,7 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         let func = py_decorated_function(source, code, end);
         let Some(name) = py_command_name(explicit, func, framework, typer || click, &defs) else { continue };
         let handler = func.map(|f| CallQualifier::Bare(f.to_string()));
-        found.push((at, CliDecl::new(framework, name, handler)));
+        found.push((at, CliDecl::new(framework, name, at_row(handler, source, at))));
     }
     if typer || click {
         // `app.command("x")(fn)`: the decorator applied by hand.
@@ -1734,7 +1744,7 @@ fn scan_typer_click(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             let func = segs.last().copied();
             let explicit = py_explicit_name(source, code, span);
             let Some(name) = py_command_name(explicit, func, framework, true, &defs) else { continue };
-            found.push((at, CliDecl::new(framework, name, callable_qualifier(&segs))));
+            found.push((at, CliDecl::new(framework, name, at_row(callable_qualifier(&segs), source, at))));
         }
     }
     if typer {
@@ -1840,7 +1850,7 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                 .filter(|rest| rest.starts_with(".set_defaults"))
                 .and_then(|_| call_args(source, code, span.1 + 1 + ".set_defaults".len()))
                 .and_then(|defaults| py_set_defaults_handler(source, code, defaults));
-            out.push(CliDecl::new(CliFramework::Argparse, name, chained));
+            out.push(CliDecl::new(CliFramework::Argparse, name, at_row(chained, source, at)));
             out.len() - 1
         });
         if let Some(var) = var {
@@ -1859,7 +1869,7 @@ fn scan_argparse(source: &str, code: &CodeMap) -> Vec<CliDecl> {
             && decl.handler.is_none()
             && let Some(span) = call_args(source, code, at + "set_defaults".len())
         {
-            decl.handler = py_set_defaults_handler(source, code, span);
+            decl.handler = at_row(py_set_defaults_handler(source, code, span), source, at);
         }
     }
     out
@@ -1954,7 +1964,7 @@ fn scan_thor(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                         k[..end.unwrap_or(k.len())].rsplit("::").next().filter(|s| !s.is_empty())
                     });
                     let handler = klass.map(|k| CallQualifier::Bare(k.to_string()));
-                    out.push(CliDecl::new(CliFramework::Thor, name.to_string(), handler));
+                    out.push(CliDecl::new(CliFramework::Thor, name.to_string(), at_row(handler, source, off)));
                 }
                 "def" => {
                     let (method, end) = read_ident(t, skip_ws(t.as_bytes(), after));
@@ -1967,7 +1977,11 @@ fn scan_thor(source: &str, code: &CodeMap) -> Vec<CliDecl> {
                     if valid_cli_name(name) {
                         let handler =
                             CallQualifier::Attribute { base: class.to_string(), name: method.to_string() };
-                        out.push(CliDecl::new(CliFramework::Thor, name.to_string(), Some(handler)));
+                        out.push(CliDecl::new(
+                            CliFramework::Thor,
+                            name.to_string(),
+                            at_row(Some(handler), source, off),
+                        ));
                     }
                 }
                 _ => {}
@@ -2071,7 +2085,7 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
         let names: Vec<&str> = if aliases { names.split('|').collect() } else { vec![names] };
         for name in names.into_iter().filter(|n| valid_cli_name(n)) {
             let handler = class.map(|c| CallQualifier::Bare(c.to_string()));
-            found.push((at, CliDecl::new(framework, name.to_string(), handler)));
+            found.push((at, CliDecl::new(framework, name.to_string(), at_row(handler, source, at))));
         }
     };
     for at in code_words(source, code, 0, source.len(), "AsCommand") {

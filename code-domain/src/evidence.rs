@@ -16,8 +16,10 @@
 //!     (`extractor:queues`, `extractor:anchor`, ...), a synthetic parse
 //!     (`extractor:<lang key>`: yaml, proto, graphql, ...) or a post-cache
 //!     graft (`extractor:rpc_needles`);
-//!   - `graph`     — per-repo resolution in the graph crate (`graph:build`
-//!     until LC.3d names each mechanism);
+//!   - `graph`     — per-repo resolution in the graph crate, one emitter per
+//!     mechanism (LC.3d): `graph:calls`, `graph:refs`, `graph:imports`,
+//!     `graph:iface`, `graph:rust_paths`, `graph:go_packages`, `graph:nav`;
+//!     `graph:build` stamps whatever edge the build added without naming one;
 //!   - `resolver`  — a cross-graph resolver (`resolver:http`, ...);
 //!   - `pass`      — an engine post-pass (`pass:doclink`, `pass:tests`, ...);
 //!   - `docs`      — doc ingestion (`docs:<source tag>`);
@@ -29,12 +31,18 @@
 //!   boundary (LD.1) converts to an editor line.
 //! - `basis` — how `file` / `line` were obtained ([`Basis`]).
 //!
+//! A CALLS / IMPORTS edge, and an edge resolved from an `UnresolvedRef`, is a
+//! `site`: its line is the call / import / reference row the parser recorded
+//! on the `CallSite` / `ImportStmt` / `UnresolvedRef` (LC.3b), and so is a
+//! CALLS edge a parser resolves inside its own file (`parser:<lang>`, rule
+//! `intra_file`).
+//!
 //! Emitters that know no location stamp the emitter alone; the engine's fill
 //! pass (`passes::fill_evidence_sites`) then completes `file` / `line` from the
 //! edge's endpoints through [`Evidence::fill`], never overwriting a location an
 //! emitter recorded.
 
-use repo_graph_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeKindId};
+use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::{cell_type, edge_category, endpoint, node_kind};
 
@@ -221,6 +229,16 @@ pub fn attach(e: &mut Edge, ev: Evidence) {
         }
         None => e.cells.push(cell),
     }
+}
+
+/// A CALLS edge a parser resolved inside its own file (LC.3b), with its
+/// evidence: emitter `parser:<lang>`, rule `intra_file`, and the call's 0-based
+/// `line` (basis `site`; the fill pass takes the file from `from`, the caller).
+pub fn intra_file_call(lang: &str, from: NodeId, to: NodeId, line: u32) -> Edge {
+    let ev = Evidence::emitter(format!("parser:{lang}"))
+        .rule("intra_file")
+        .line(line);
+    Edge::new(from, to, edge_category::CALLS, Confidence::Strong).with_cell(ev.to_cell())
 }
 
 /// Attach `Evidence::emitter(emitter)` to every edge of `edges` that carries
@@ -559,6 +577,26 @@ mod tests {
         assert_eq!(
             (ev.file.as_deref(), ev.basis),
             (Some("a.py"), Basis::ToNode)
+        );
+    }
+
+    #[test]
+    fn intra_file_call_is_a_parser_site() {
+        let e = intra_file_call("python", NodeId(1), NodeId(2), 7);
+        assert_eq!((e.from, e.to, e.category), (NodeId(1), NodeId(2), edge_category::CALLS));
+        assert_eq!(e.confidence, Confidence::Strong);
+        let ev = Evidence::of(&e).expect("one EVIDENCE cell");
+        assert_eq!(
+            ev,
+            Evidence::emitter("parser:python").rule("intra_file").line(7)
+        );
+        // The fill pass keeps the line and takes the caller's file.
+        let mut filled = ev.clone();
+        let from: Location = ("b.py".to_string(), Some(3));
+        filled.fill(edge_category::CALLS, Some(node_kind::FUNCTION), Some(&from), None);
+        assert_eq!(
+            (filled.file.as_deref(), filled.line, filled.basis),
+            (Some("b.py"), Some(7), Basis::Site)
         );
     }
 

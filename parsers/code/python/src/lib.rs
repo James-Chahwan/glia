@@ -20,6 +20,7 @@ pub use repo_graph_code_domain::{
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
 use repo_graph_code_domain::data_entity;
+use repo_graph_code_domain::evidence;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
@@ -331,6 +332,14 @@ struct UnresolvedCall {
     from: NodeId,
     enclosing_class: Option<NodeId>,
     qualifier: CallQualifier,
+    /// 0-based row of the call expression (LC.3b).
+    line: u32,
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -392,6 +401,7 @@ fn visit_class(
                     from_module: module_id,
                     qualifier: CallQualifier::Bare(base.clone()),
                     category: edge_category::INHERITS_FROM,
+                    line: line_at(arg),
                 });
                 out.push(base);
             }
@@ -912,6 +922,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                 acc.imports.push(ImportStmt {
                     from_module: from_module.to_string(),
                     target: ImportTarget::Module { path, alias: None },
+                    line: line_at(n),
                 });
             }
             "aliased_import" => {
@@ -927,6 +938,7 @@ fn collect_import(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
                         path: text(name_n, src).to_string(),
                         alias: Some(text(alias_n, src).to_string()),
                     },
+                    line: line_at(n),
                 });
             }
             _ => {}
@@ -966,6 +978,7 @@ fn collect_import_from(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) 
                         alias: None,
                         level,
                     },
+                    line: line_at(n),
                 });
             }
             "aliased_import" => {
@@ -983,6 +996,7 @@ fn collect_import_from(n: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) 
                         alias,
                         level,
                     },
+                    line: line_at(n),
                 });
             }
             _ => {}
@@ -1037,6 +1051,7 @@ fn collect_calls_in(
                     from,
                     enclosing_class,
                     qualifier: q,
+                    line: line_at(node),
                 });
             }
         }
@@ -1520,6 +1535,7 @@ fn collect_test_targets(body: TsNode, src: &[u8], from: NodeId, module_id: NodeI
                     from_module: module_id,
                     qualifier: CallQualifier::Bare(name.to_string()),
                     category: edge_category::TESTS,
+                    line: line_at(node),
                 });
             }
         }
@@ -1861,6 +1877,7 @@ fn push_depends_target(
         from_module: module_id,
         qualifier: CallQualifier::Bare(name),
         category: edge_category::INJECTS,
+        line: line_at(expr),
     });
     di_stats::record(DiShape::PyFastapiDepends);
 }
@@ -1993,6 +2010,7 @@ fn emit_type_idents(ty: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc
                         from_module: module_id,
                         qualifier: CallQualifier::Bare(s.to_string()),
                         category: edge_category::USES,
+                        line: line_at(n),
                     });
                 }
             }
@@ -2006,6 +2024,7 @@ fn emit_type_idents(ty: TsNode, src: &[u8], from: NodeId, module_id: NodeId, acc
                             from_module: module_id,
                             qualifier: CallQualifier::Bare(s.to_string()),
                             category: edge_category::USES,
+                            line: line_at(attr),
                         });
                     }
                 }
@@ -2051,6 +2070,7 @@ fn collect_return_type_ref(
                         from_module: module_id,
                         qualifier: CallQualifier::Bare(s.to_string()),
                         category: edge_category::RETURNS_TYPE,
+                        line: line_at(n),
                     });
                 }
             }
@@ -2063,6 +2083,7 @@ fn collect_return_type_ref(
                             from_module: module_id,
                             qualifier: CallQualifier::Bare(s.to_string()),
                             category: edge_category::RETURNS_TYPE,
+                            line: line_at(attr),
                         });
                     }
                 }
@@ -2101,6 +2122,7 @@ fn collect_attr_type_ref(
                         from_module: module_id,
                         qualifier: CallQualifier::Bare(s.to_string()),
                         category: edge_category::USES,
+                        line: line_at(n),
                     });
                 }
             }
@@ -2113,6 +2135,7 @@ fn collect_attr_type_ref(
                             from_module: module_id,
                             qualifier: CallQualifier::Bare(s.to_string()),
                             category: edge_category::USES,
+                            line: line_at(attr),
                         });
                     }
                 }
@@ -2234,6 +2257,7 @@ fn emit_rhs_constructor_refs(
         from_module: module_id,
         qualifier: CallQualifier::Bare(name.to_string()),
         category: edge_category::USES,
+        line: line_at(rhs),
     });
 }
 
@@ -2503,16 +2527,13 @@ fn resolve_intra_file(mut acc: Acc, _repo: RepoId) -> Result<FileParse, ParseErr
             _ => None,
         };
         match resolved {
-            Some(to) => out.edges.push(Edge {
-                from: uc.from,
-                to,
-                category: edge_category::CALLS,
-                confidence: Confidence::Strong,
-                cells: Vec::new(),
-            }),
+            Some(to) => out
+                .edges
+                .push(evidence::intra_file_call("python", uc.from, to, uc.line)),
             None => out.calls.push(CallSite {
                 from: uc.from,
                 qualifier: uc.qualifier,
+                line: uc.line,
             }),
         }
     }

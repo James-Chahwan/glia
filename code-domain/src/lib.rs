@@ -652,6 +652,11 @@ pub struct ImportStmt {
     /// qname of the module doing the importing (`myapp::auth`, `svc::users`).
     pub from_module: String,
     pub target: ImportTarget,
+    /// 0-based row of the import statement (the POSITION `start_line`
+    /// convention). One statement that imports several names gives each of
+    /// its `ImportStmt`s the statement's row. The IMPORTS edge it resolves to
+    /// carries it as its EVIDENCE site line (LC.3b).
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -683,6 +688,9 @@ pub enum ImportTarget {
 pub struct CallSite {
     pub from: NodeId,
     pub qualifier: CallQualifier,
+    /// 0-based row of the call expression (POSITION convention), not of the
+    /// enclosing declaration: the CALLS edge's EVIDENCE site line (LC.3b).
+    pub line: u32,
 }
 
 /// An identifier reference that needs cross-file resolution into an edge of
@@ -696,6 +704,7 @@ pub struct CallSite {
 ///     from_module: server_module_id,      // whose binding table resolves the qualifier
 ///     qualifier: Attribute { base: "controllers", name: "AuthHandler" },
 ///     category: HANDLED_BY,
+///     line: 41,                           // the 0-based row of `r.POST(...)`
 /// }
 /// ```
 /// `from_module` is separate from `from` because Route nodes are path-only
@@ -709,6 +718,21 @@ pub struct UnresolvedRef {
     pub from_module: NodeId,
     pub qualifier: CallQualifier,
     pub category: EdgeCategoryId,
+    /// 0-based row of the reference (POSITION convention): the registration
+    /// call naming a handler, the heritage clause, the link. The edge it
+    /// resolves to carries it as its EVIDENCE site line (LC.3b).
+    pub line: u32,
+}
+
+/// The 0-based row of `byte_offset` in `source`, for emitters that find a
+/// construct by scanning text rather than walking a tree: the number of `\n`
+/// bytes before the offset. Counted on bytes, so an offset inside a multi-byte
+/// character cannot panic; an offset past the end counts the whole source.
+pub fn line_of(source: &str, byte_offset: usize) -> u32 {
+    let bytes = source.as_bytes();
+    let end = byte_offset.min(bytes.len());
+    let rows = bytes[..end].iter().filter(|&&b| b == b'\n').count();
+    u32::try_from(rows).unwrap_or(u32::MAX)
 }
 
 /// Classification of a call site by its syntactic shape. Resolution (which
@@ -2604,6 +2628,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn line_of_counts_newlines_on_bytes() {
+        let src = "a\nbé\nc";
+        assert_eq!(line_of(src, 0), 0);
+        assert_eq!(line_of(src, 1), 0, "the newline itself is still row 0");
+        assert_eq!(line_of(src, 2), 1);
+        // Byte 4 is inside the two-byte `é`: no panic, still row 1.
+        assert_eq!(line_of(src, 4), 1);
+        assert_eq!(line_of(src, src.len()), 2);
+        assert_eq!(line_of(src, usize::MAX), 2, "past the end counts the whole source");
+        assert_eq!(line_of("", 3), 0);
+    }
+
+    #[test]
     fn node_kind_names_resolve_and_cover() {
         // Every ALL entry resolves to its own name via name().
         for (id, n) in node_kind::ALL {
@@ -2666,6 +2703,7 @@ mod tests {
         ImportStmt {
             from_module: String::new(),
             target: ImportTarget::Module { path: path.to_string(), alias: None },
+            line: 0,
         }
     }
 
@@ -2678,6 +2716,7 @@ mod tests {
                 alias: None,
                 level: 0,
             },
+            line: 0,
         }
     }
 

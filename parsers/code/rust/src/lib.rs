@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, push_client_endpoint, route_qname, url_to_path,
 };
+use repo_graph_code_domain::line_of;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -484,7 +485,7 @@ fn walk_use_tree(node: TsNode, src: &[u8], prefix: &str, from_module: &str, acc:
             };
             let full = join_use_path(prefix, &use_path_text(path, src));
             let alias = Some(text_of(alias, src).to_string());
-            push_use(&full, alias, from_module, acc);
+            push_use(&full, alias, line_at(node), from_module, acc);
         }
         "use_list" => {
             let mut cursor = node.walk();
@@ -515,11 +516,12 @@ fn walk_use_tree(node: TsNode, src: &[u8], prefix: &str, from_module: &str, acc:
                     alias: None,
                     level: 0,
                 },
+                line: line_at(node),
             });
         }
         "identifier" | "scoped_identifier" | "crate" | "self" | "super" => {
             let full = join_use_path(prefix, &use_path_text(node, src));
-            push_use(&full, None, from_module, acc);
+            push_use(&full, None, line_at(node), from_module, acc);
         }
         // `$crate::x` (a macro metavariable) and comments name nothing.
         _ => {}
@@ -528,7 +530,8 @@ fn walk_use_tree(node: TsNode, src: &[u8], prefix: &str, from_module: &str, acc:
 
 /// One leaf path of a use tree: `a::b::self` names the module `a::b`; a
 /// multi-segment path is a symbol in its parent path; one segment is a module.
-fn push_use(full: &str, alias: Option<String>, from_module: &str, acc: &mut Acc) {
+/// `line` is the leaf's 0-based row (LC.3b).
+fn push_use(full: &str, alias: Option<String>, line: u32, from_module: &str, acc: &mut Acc) {
     if full.is_empty() {
         return;
     }
@@ -551,6 +554,7 @@ fn push_use(full: &str, alias: Option<String>, from_module: &str, acc: &mut Acc)
     acc.imports.push(ImportStmt {
         from_module: from_module.to_string(),
         target,
+        line,
     });
 }
 
@@ -673,6 +677,7 @@ fn scan_axum_routes(source: &str, module_id: NodeId, repo: RepoId, acc: &mut Acc
                             from_module: module_id,
                             qualifier: CallQualifier::Bare(handler),
                             category: edge_category::HANDLED_BY,
+                            line: line_of(source, start),
                         });
                     }
                 }
@@ -917,7 +922,7 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, from_qname: &str, ac
                     && variant_path(func, src).is_none()
                 {
                     let qualifier = classify_call(func, src);
-                    acc.calls.push(CallSite { from, qualifier });
+                    acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
                 }
             }
             // A macro's arguments are a flat token tree, never a call_expression,
@@ -1473,6 +1478,7 @@ fn push_variant_ref(
         from_module,
         qualifier: CallQualifier::Attribute { base, name },
         category: edge_category::USES,
+        line: line_at(node),
     });
 }
 
@@ -1592,6 +1598,7 @@ fn scan_token_tree(
             acc.calls.push(CallSite {
                 from,
                 qualifier: method_qualifier(&toks, i, name, src),
+                line: line_at(toks[i + 1]),
             });
             found += 1 + scan_token_tree(toks[i + 2], src, from, false, depth + 1, acc);
             i += 3;
@@ -1645,7 +1652,7 @@ fn scan_token_tree(
                     [] => None,
                 };
                 if let Some(qualifier) = qualifier.filter(|_| !defining) {
-                    acc.calls.push(CallSite { from, qualifier });
+                    acc.calls.push(CallSite { from, qualifier, line: line_at(t) });
                     found += 1;
                 }
                 found += scan_token_tree(args, src, from, false, depth + 1, acc);
@@ -1900,6 +1907,12 @@ fn expand_format_holes(s: &str) -> String {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
+}
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")

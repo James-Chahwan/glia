@@ -453,7 +453,7 @@ fn visit_type_decl(
             } else {
                 edge_category::INHERITS_FROM
             };
-            emit_heritage_ref(raw, category, id, module_id, acc);
+            emit_heritage_ref(raw, category, id, module_id, line_at(base), acc);
         }
     }
 
@@ -647,6 +647,7 @@ fn emit_param_injects(
             from_module: module_id,
             qualifier: CallQualifier::Bare(type_name),
             category: edge_category::INJECTS,
+            line: line_at(type_node),
         });
         di_stats::record(shape);
     }
@@ -872,6 +873,7 @@ fn emit_heritage_ref(
     category: repo_graph_core::EdgeCategoryId,
     from_id: NodeId,
     module_id: NodeId,
+    line: u32,
     acc: &mut Acc,
 ) {
     let base = raw.split('<').next().unwrap_or(raw).trim();
@@ -884,6 +886,7 @@ fn emit_heritage_ref(
         from_module: module_id,
         qualifier: CallQualifier::Bare(simple.to_string()),
         category,
+        line,
     });
 }
 
@@ -1658,6 +1661,7 @@ fn minimal_api_route(
                 route_id,
                 module_id,
                 CallQualifier::Bare(text_of(h, src).to_string()),
+                line_at(h),
                 acc,
             );
         }
@@ -1673,6 +1677,7 @@ fn minimal_api_route(
                             base: text_of(b, src).to_string(),
                             name: m.to_string(),
                         },
+                        line_at(h),
                         acc,
                     );
                 }
@@ -1684,12 +1689,20 @@ fn minimal_api_route(
     true
 }
 
-fn push_handler_ref(route_id: NodeId, module_id: NodeId, qualifier: CallQualifier, acc: &mut Acc) {
+/// `line` is the handler argument's 0-based row (LC.3b).
+fn push_handler_ref(
+    route_id: NodeId,
+    module_id: NodeId,
+    qualifier: CallQualifier,
+    line: u32,
+    acc: &mut Acc,
+) {
     acc.refs.push(UnresolvedRef {
         from: route_id,
         from_module: module_id,
         qualifier,
         category: edge_category::HANDLED_BY,
+        line,
     });
 }
 
@@ -2097,6 +2110,7 @@ fn collect_using(node: TsNode, src: &[u8], acc: &mut Acc) {
                     path: module_part.replace('.', "::"),
                     alias: None,
                 },
+                line: line_at(node),
             });
         } else {
             acc.imports.push(ImportStmt {
@@ -2107,6 +2121,7 @@ fn collect_using(node: TsNode, src: &[u8], acc: &mut Acc) {
                     alias: None,
                     level: 0,
                 },
+                line: line_at(node),
             });
         }
     } else {
@@ -2116,6 +2131,7 @@ fn collect_using(node: TsNode, src: &[u8], acc: &mut Acc) {
                 path: path.replace('.', "::"),
                 alias: None,
             },
+            line: line_at(node),
         });
     }
 }
@@ -2125,7 +2141,7 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     while let Some(n) = stack.pop() {
         if n.kind() == "invocation_expression" {
             let qualifier = classify_invocation(n, src);
-            acc.calls.push(CallSite { from, qualifier });
+            acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
@@ -2189,6 +2205,12 @@ fn classify_invocation(node: TsNode, src: &[u8]) -> CallQualifier {
     } else {
         CallQualifier::Bare(String::new())
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {

@@ -18,10 +18,44 @@ use crate::types::RepoGraph;
 /// The evidence a graph-resolved edge carries: the mechanism that bound it
 /// (`graph:calls`, `graph:refs`, `graph:imports`, `graph:iface`,
 /// `graph:rust_paths`, `graph:go_packages`, `graph:nav`) and the branch
-/// inside it. No location: the engine's fill pass places it from the edge's
-/// endpoints.
+/// inside it. No location: an edge resolved from a `CallSite` /
+/// `ImportStmt` / `UnresolvedRef` adds the site's line (LC.3b,
+/// [`Evidence::line`]); the engine's fill pass places the rest from the
+/// edge's endpoints.
 pub(crate) fn graph_evidence(emitter: &str, rule: &str) -> Evidence {
     Evidence::emitter(emitter).rule(rule)
+}
+
+/// Node id -> its file, as the engine's fill pass locates it
+/// ([`evidence::locate`]), for the site evidence of edges `resolve_refs`
+/// binds (LC.3b). A ref's `from` may carry no location (a nav ROUTE, a
+/// CRON_JOB, a CLI_COMMAND) or several (a Go ROUTE registered in two files);
+/// its `from_module` is the file the reference was read in.
+pub(crate) struct SiteFiles(HashMap<NodeId, String>);
+
+impl SiteFiles {
+    pub(crate) fn of(g: &RepoGraph) -> Self {
+        let mut files: HashMap<NodeId, String> = HashMap::new();
+        for n in &g.nodes {
+            if files.contains_key(&n.id) {
+                continue;
+            }
+            if let Some((file, _)) = evidence::locate(&n.cells) {
+                files.insert(n.id, file);
+            }
+        }
+        SiteFiles(files)
+    }
+
+    /// `ev` at 0-based `line` of `r`'s file: its `from_module`'s, else its
+    /// `from`'s; with neither located, the line alone (the fill pass then
+    /// takes the file from the edge's `from`).
+    pub(crate) fn place(&self, ev: Evidence, r: &UnresolvedRef) -> Evidence {
+        match self.0.get(&r.from_module).or_else(|| self.0.get(&r.from)) {
+            Some(file) => ev.at(file.clone(), r.line),
+            None => ev.line(r.line),
+        }
+    }
 }
 
 /// The branch of [`resolve_calls`] / [`resolve_refs`] that bound a site,
@@ -207,7 +241,8 @@ pub(crate) fn resolve_calls<H>(
         };
 
         match resolved {
-            Some((to, ev)) => push_edge(g, site.from, to, edge_category::CALLS, ev),
+            // LC.3b: the call expression's own row, basis site.
+            Some((to, ev)) => push_edge(g, site.from, to, edge_category::CALLS, ev.line(site.line)),
             None => g.unresolved_calls.push(site.clone()),
         }
     }
@@ -376,6 +411,11 @@ pub(crate) fn position_file(node: &repo_graph_core::Node) -> Option<String> {
 pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mut EvidenceTally) {
     let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) =
         refs.iter().partition(|r| r.category == edge_category::NAVIGATES_TO);
+    let files = if refs.is_empty() && nav_refs.is_empty() {
+        SiteFiles(HashMap::new())
+    } else {
+        SiteFiles::of(g)
+    };
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
     let mut iface_extends = IfaceExtends::default();
@@ -480,7 +520,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
         match resolved {
             Some((to, branch)) => {
                 tally.refs[branch as usize] += 1;
-                let ev = graph_evidence("graph:refs", branch.rule());
+                let ev = files.place(graph_evidence("graph:refs", branch.rule()), r);
                 push_edge(g, r.from, to, r.category, ev);
             }
             None => g.unresolved_refs.push(r.clone()),
@@ -497,7 +537,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
     if let Some(line) = iface_extends.marker(g) {
         eprintln!("{line}");
     }
-    let mut nav = crate::nav::resolve_nav_links(g, &nav_refs);
+    let mut nav = crate::nav::resolve_nav_links(g, &nav_refs, &files);
     nav.lifted = crate::nav::lift_nav_endpoints(g);
     if nav.fired() {
         eprintln!("{}", nav.marker());
@@ -1012,6 +1052,7 @@ mod tests {
                     path: "MyApp.Accounts".to_string(),
                     alias: None,
                 },
+                line: 0,
             }],
             calls: vec![CallSite {
                 from: caller,
@@ -1019,6 +1060,7 @@ mod tests {
                     base: "Accounts".to_string(),
                     name: "get_user".to_string(),
                 },
+                line: 0,
             }],
             refs: vec![],
             nav: nav1,
@@ -1088,6 +1130,7 @@ mod tests {
                 alias: None,
                 level: 0,
             },
+            line: 0,
         }
     }
 
@@ -1119,7 +1162,7 @@ mod tests {
         let e = s.add(node_kind::ENUM, "m::E", Some(m));
         let a = s.add(node_kind::METHOD, "m::E::a", Some(e));
         let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
-        let site = CallSite { from: a, qualifier: CallQualifier::SelfMethod("b".to_string()) };
+        let site = CallSite { from: a, qualifier: CallQualifier::SelfMethod("b".to_string()), line: 0 };
         let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(a, b)]);
         assert!(g.unresolved_calls.is_empty());
@@ -1135,7 +1178,7 @@ mod tests {
         let x = s.add(node_kind::ATTRIBUTE, "m::E::X", Some(e));
         let inner = s.add(node_kind::METHOD, "m::E::X::m", Some(x));
         let b = s.add(node_kind::METHOD, "m::E::b", Some(e));
-        let site = CallSite { from: inner, qualifier: CallQualifier::SelfMethod("b".to_string()) };
+        let site = CallSite { from: inner, qualifier: CallQualifier::SelfMethod("b".to_string()), line: 0 };
         let g = build_dotted(repo(), vec![s.file(vec![], vec![site], vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(inner, b)]);
     }
@@ -1150,7 +1193,7 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "E")],
-            vec![CallSite { from: f, qualifier: attr("E", "pick") }],
+            vec![CallSite { from: f, qualifier: attr("E", "pick"), line: 0 }],
             vec![],
         );
         let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
@@ -1170,6 +1213,7 @@ mod tests {
             from_module: m1,
             qualifier: attr("E", "RED"),
             category: edge_category::USES,
+            line: 0,
         };
         let caller = s.file(vec![import_symbol("m1", "m2", "E")], vec![], vec![uses]);
         let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
@@ -1193,6 +1237,7 @@ mod tests {
             from_module: m1,
             qualifier: attr("C", "X"),
             category: edge_category::USES,
+            line: 0,
         };
         let caller = s.file(vec![import_symbol("m1", "m2", "C")], vec![], vec![uses]);
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
@@ -1210,7 +1255,7 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "E")],
-            vec![CallSite { from: f, qualifier: attr("E", "RED") }],
+            vec![CallSite { from: f, qualifier: attr("E", "RED"), line: 0 }],
             vec![],
         );
         let g = build_dotted(repo(), vec![enum_file, caller]).unwrap();
@@ -1236,6 +1281,7 @@ mod tests {
             from_module: m1,
             qualifier: attr("h", "run"),
             category: edge_category::HANDLED_BY,
+            line: 0,
         };
         let caller = s.file(vec![], vec![], vec![handled]);
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
@@ -1278,7 +1324,7 @@ mod tests {
         let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
         let get = s.add(node_kind::METHOD, "m1::A::get", Some(a));
         s.nav.record_field_type(a, "repo", "UserRepo");
-        (s.file(imports, vec![CallSite { from: get, qualifier }], vec![]), a, get)
+        (s.file(imports, vec![CallSite { from: get, qualifier, line: 0 }], vec![]), a, get)
     }
 
     #[test]
@@ -1335,7 +1381,7 @@ mod tests {
         let run = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "m1::B::run");
         caller.nav.record(b, "B", "m1::B", node_kind::CLASS, Some(m1));
         caller.nav.record(run, "run", "m1::B::run", node_kind::METHOD, Some(b));
-        caller.calls.push(CallSite { from: run, qualifier: attr("repo", "find") });
+        caller.calls.push(CallSite { from: run, qualifier: attr("repo", "find"), line: 0 });
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 2);
@@ -1383,9 +1429,9 @@ mod tests {
         let free = s.add(node_kind::FUNCTION, "m1::free", Some(m1));
         s.nav.record_local_type(free, "r", "UserRepo");
         let calls = vec![
-            CallSite { from: free, qualifier: recv("r", "find") },
+            CallSite { from: free, qualifier: recv("r", "find"), line: 0 },
             // Not a local of `free`: nothing to type it by.
-            CallSite { from: free, qualifier: recv("q", "find") },
+            CallSite { from: free, qualifier: recv("q", "find"), line: 0 },
         ];
         let g = build_dotted(repo(), vec![repo_file, s.file(vec![], calls, vec![])]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(free, find)]);
@@ -1400,12 +1446,12 @@ mod tests {
         let (repo_file, _, find) = repo_module();
         let (mut caller, _, get) = caller_module(recv("repo", "find"), vec![]);
         caller.nav.record_local_type(get, "repo", "");
-        caller.calls.push(CallSite { from: get, qualifier: attr("repo", "find") });
+        caller.calls.push(CallSite { from: get, qualifier: attr("repo", "find"), line: 0 });
         let g = build_dotted(repo(), vec![repo_file.clone(), caller.clone()]).unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
         assert_eq!(g.unresolved_calls.len(), 2);
 
-        caller.calls = vec![CallSite { from: get, qualifier: recv("self.repo", "find") }];
+        caller.calls = vec![CallSite { from: get, qualifier: recv("self.repo", "find"), line: 0 }];
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
     }
@@ -1432,7 +1478,7 @@ mod tests {
         let (mut caller, _, get) = caller_module(recv("r", "find"), vec![]);
         caller.nav.record_local_type(get, "r", "self.repo");
         caller.nav.record_local_type(get, "o", "self.other");
-        caller.calls.push(CallSite { from: get, qualifier: recv("o", "find") });
+        caller.calls.push(CallSite { from: get, qualifier: recv("o", "find"), line: 0 });
         let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
         assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
         assert_eq!(g.unresolved_calls.len(), 1);
@@ -1481,7 +1527,7 @@ mod tests {
         let f = s.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s.file(
             vec![import_symbol("m1", "m2", "UserRepo")],
-            vec![CallSite { from: f, qualifier: attr("UserRepo", "find") }],
+            vec![CallSite { from: f, qualifier: attr("UserRepo", "find"), line: 0 }],
             vec![],
         );
         let g = build_dotted(repo(), vec![iface_file, caller]).unwrap();
@@ -1513,7 +1559,7 @@ mod tests {
         let a = s.add(node_kind::CLASS, "m1::A", Some(m1));
         let caller = s.add(node_kind::METHOD, &format!("m1::A::{method}"), Some(a));
         s.nav.record_field_type(a, "repo", "UserRepo");
-        let mut file = s.file(vec![], vec![CallSite { from: caller, qualifier }], vec![]);
+        let mut file = s.file(vec![], vec![CallSite { from: caller, qualifier, line: 0 }], vec![]);
         place(&mut file, caller, path);
         (file, caller)
     }
@@ -1605,6 +1651,7 @@ mod tests {
             from_module: module,
             qualifier: CallQualifier::Bare(name.to_string()),
             category: cat,
+            line: 0,
         }
     }
 
@@ -1720,6 +1767,7 @@ mod tests {
                 alias: Some(local.to_string()),
                 level: 0,
             },
+            line: 0,
         };
         let child_file = c.file(
             vec![default_import("Base"), default_import("Renamed")],
@@ -1867,7 +1915,7 @@ mod tests {
         let f = s1.add(node_kind::FUNCTION, "m1::f", Some(m1));
         let caller = s1.file(
             vec![import_symbol("m1", "m2", "helper")],
-            vec![CallSite { from: f, qualifier: bare("helper") }],
+            vec![CallSite { from: f, qualifier: bare("helper"), line: 0 }],
             vec![],
         );
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
@@ -1878,7 +1926,7 @@ mod tests {
         let m = s.add(node_kind::MODULE, "m", None);
         let a = s.add(node_kind::FUNCTION, "m::a", Some(m));
         let b = s.add(node_kind::FUNCTION, "m::b", Some(m));
-        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b") }], vec![]);
+        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b"), line: 0 }], vec![]);
         let g = build_dotted(repo(), vec![file]).unwrap();
         assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("module_symbol"));
 
@@ -1889,7 +1937,7 @@ mod tests {
         let pkg = s.add(node_kind::PACKAGE, "lib::MyApp", Some(m));
         let a = s.add(node_kind::FUNCTION, "lib::MyApp::a", Some(pkg));
         let b = s.add(node_kind::FUNCTION, "lib::MyApp::b", Some(pkg));
-        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b") }], vec![]);
+        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b"), line: 0 }], vec![]);
         let g = build_dotted(repo(), vec![file]).unwrap();
         assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("package_symbol"));
     }
@@ -1909,6 +1957,7 @@ mod tests {
             from_module: m1,
             qualifier: bare("list_users"),
             category: edge_category::HANDLED_BY,
+            line: 0,
         };
         let caller = s1.file(vec![], vec![], vec![handled]);
         let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();

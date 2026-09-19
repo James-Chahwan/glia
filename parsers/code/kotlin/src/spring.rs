@@ -83,7 +83,8 @@ use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use tree_sitter::Node as TsNode;
 
 use crate::{
-    Acc, File, GRAPH_TYPE, cell_type, edge_category, named_child_of_kind, node_kind, text_of,
+    Acc, File, GRAPH_TYPE, cell_type, edge_category, line_at, named_child_of_kind, node_kind,
+    text_of,
 };
 
 /// Stereotypes that make a type a DI-managed bean, as simple names — the Java
@@ -250,7 +251,7 @@ pub(crate) fn on_property(node: TsNode, owner: NodeId, file: &File, acc: &mut Ac
         return;
     };
     if let Some(name) = declared_type(var).and_then(|t| injectable_type(t, file.src)) {
-        push_inject(owner, name, DiShape::KotlinField, file, acc);
+        push_inject(owner, name, DiShape::KotlinField, line_at(var), file, acc);
     }
 }
 
@@ -288,16 +289,25 @@ fn requests_injection(node: TsNode, src: &[u8]) -> bool {
 /// bean type, unless it is a value type.
 fn inject_from_param(param: TsNode, owner: NodeId, shape: DiShape, file: &File, acc: &mut Acc) {
     if let Some(name) = declared_type(param).and_then(|t| injectable_type(t, file.src)) {
-        push_inject(owner, name, shape, file, acc);
+        push_inject(owner, name, shape, line_at(param), file, acc);
     }
 }
 
-fn push_inject(owner: NodeId, type_name: String, shape: DiShape, file: &File, acc: &mut Acc) {
+/// `line` is the injecting declaration's 0-based row (LC.3b).
+fn push_inject(
+    owner: NodeId,
+    type_name: String,
+    shape: DiShape,
+    line: u32,
+    file: &File,
+    acc: &mut Acc,
+) {
     acc.refs.push(UnresolvedRef {
         from: owner,
         from_module: file.module_id,
         qualifier: CallQualifier::Bare(type_name),
         category: edge_category::INJECTS,
+        line,
     });
     acc.spring.injects += 1;
     di_stats::record(shape);

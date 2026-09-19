@@ -28,7 +28,7 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
                 // `import foo.bar` — convert `.` → `::` and look up by qname.
                 let target_qname = path.replace('.', "::");
                 if let Some(target_id) = g.symbols.module_by_qname.get(&target_qname).copied() {
-                    import_edge(g, from_mod_id, target_id, "module");
+                    import_edge(g, from_mod_id, target_id, "module", stmt.line);
                     let bound_name = alias.clone().unwrap_or_else(|| {
                         path.split('.').next().unwrap_or(path).to_string()
                     });
@@ -51,7 +51,7 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
                     if let Some(target_id) =
                         unique_global_function(g, tail).or_else(|| unique_global_module(g, tail))
                     {
-                        import_edge(g, from_mod_id, target_id, "tail_unique");
+                        import_edge(g, from_mod_id, target_id, "tail_unique", stmt.line);
                         g.symbols
                             .module_import_bindings
                             .entry(from_mod_id)
@@ -76,7 +76,7 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
                 if let Some(submodule_id) = g.symbols.module_by_qname.get(&submodule_qname).copied()
                 {
                     // `from pkg import mod` where mod is a submodule.
-                    import_edge(g, from_mod_id, submodule_id, "submodule");
+                    import_edge(g, from_mod_id, submodule_id, "submodule", stmt.line);
                     g.symbols
                         .module_import_bindings
                         .entry(from_mod_id)
@@ -89,7 +89,7 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
                     .copied()
                 {
                     // `from pkg.mod import Name` — target is a symbol inside pkg.mod.
-                    import_edge(g, from_mod_id, target_mod_id, "symbol");
+                    import_edge(g, from_mod_id, target_mod_id, "symbol", stmt.line);
                     if let Some(symbol_id) = g
                         .symbols
                         .module_symbols
@@ -107,7 +107,7 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
                     // Tail fallback (Pattern B): `from a.b import Name` where `a.b`
                     // isn't a resolvable module (flat layout) — bind the imported
                     // symbol by its unique global name. Miss-only + ambiguity-safe.
-                    import_edge(g, from_mod_id, symbol_id, "tail_unique");
+                    import_edge(g, from_mod_id, symbol_id, "tail_unique", stmt.line);
                     g.symbols
                         .module_import_bindings
                         .entry(from_mod_id)
@@ -172,7 +172,7 @@ pub(crate) fn resolve_imports_go(
         let Some((target_id, rule)) = target else {
             continue;
         };
-        import_edge(g, from_mod_id, target_id, rule);
+        import_edge(g, from_mod_id, target_id, rule, stmt.line);
         let bound = alias
             .clone()
             .unwrap_or_else(|| path.rsplit("::").next().unwrap_or(path).to_string());
@@ -204,7 +204,7 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
         let Some(target_id) = g.symbols.module_by_qname.get(&target_qname).copied() else {
             continue;
         };
-        import_edge(g, from_mod_id, target_id, "module");
+        import_edge(g, from_mod_id, target_id, "module", stmt.line);
         let bound = alias
             .clone()
             .unwrap_or_else(|| target_qname.rsplit("::").next().unwrap_or(&target_qname).to_string());
@@ -241,7 +241,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 let Some(target_id) = g.symbols.module_by_qname.get(&target_qname).copied() else {
                     continue;
                 };
-                import_edge(g, from_mod_id, target_id, "module");
+                import_edge(g, from_mod_id, target_id, "module", stmt.line);
                 // Namespace import alias is the binding; bare side-effect has none.
                 if let Some(a) = alias {
                     g.symbols
@@ -264,7 +264,7 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 else {
                     continue;
                 };
-                import_edge(g, from_mod_id, target_mod_id, "symbol");
+                import_edge(g, from_mod_id, target_mod_id, "symbol", stmt.line);
                 let bound = alias.clone().unwrap_or_else(|| name.clone());
                 // Default import — bind to the module itself.
                 // Named import — bind to the specific symbol inside that module.
@@ -295,8 +295,9 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
 /// imported name), `package_dir` (a Go package directory, LA.13b) or
 /// `tail_unique` (the repo-unique short name, a guess the full path could not
 /// confirm).
-fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str) {
-    let ev = graph_evidence("graph:imports", rule);
+/// `line` is the import statement's 0-based row (LC.3b, basis site).
+fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str, line: u32) {
+    let ev = graph_evidence("graph:imports", rule).line(line);
     push_edge(g, from, to, edge_category::IMPORTS, ev);
 }
 

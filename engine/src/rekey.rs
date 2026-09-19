@@ -183,8 +183,9 @@ mod tests {
             from_module: module,
             qualifier: CallQualifier::Bare("health".into()),
             category: edge_category::HANDLED_BY,
+            line: 0,
         });
-        fp.calls.push(CallSite { from: handler, qualifier: CallQualifier::Bare("a".into()) });
+        fp.calls.push(CallSite { from: handler, qualifier: CallQualifier::Bare("a".into()), line: 0 });
         (fp, [module, route, handler, a, b])
     }
 

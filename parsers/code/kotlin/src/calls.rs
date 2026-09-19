@@ -101,7 +101,7 @@ use repo_graph_code_domain::{CallQualifier, CallSite, UnresolvedRef, endpoint, j
 use repo_graph_core::{EdgeCategoryId, NodeId};
 use tree_sitter::Node as TsNode;
 
-use crate::{Acc, File, android, edge_category, named_child_of_kind, routes, text_of};
+use crate::{Acc, File, android, edge_category, line_at, named_child_of_kind, routes, text_of};
 
 /// The declaration a function belongs to, as its body's receiver-less calls
 /// see it.
@@ -202,6 +202,7 @@ pub(crate) fn visit_call(call: TsNode, ctx: &Body, file: &File, acc: &mut Acc) {
         acc.calls.push(CallSite {
             from: ctx.from,
             qualifier,
+            line: line_at(call),
         });
     }
     spring_client(call, ctx.from, file, acc);
@@ -475,7 +476,7 @@ pub(crate) fn heritage(decl: TsNode, from: NodeId, is_interface: bool, file: &Fi
         else {
             continue;
         };
-        push_heritage_ref(name, category, from, file, acc);
+        push_heritage_ref(name, category, from, line_at(part), file, acc);
     }
 }
 
@@ -486,6 +487,7 @@ fn push_heritage_ref(
     name: String,
     category: EdgeCategoryId,
     from: NodeId,
+    line: u32,
     file: &File,
     acc: &mut Acc,
 ) {
@@ -494,6 +496,7 @@ fn push_heritage_ref(
         from_module: file.module_id,
         qualifier: CallQualifier::Bare(name),
         category,
+        line,
     });
 }
 

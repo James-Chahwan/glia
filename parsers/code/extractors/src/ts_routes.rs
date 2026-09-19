@@ -28,7 +28,7 @@
 //! registered with a NAMED handler (`app.get('/users/:id', getUser)`) carries a
 //! HANDLED_BY `UnresolvedRef` for the graph builder to bind.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use repo_graph_code_domain::{
     CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, endpoint,
@@ -85,8 +85,10 @@ pub fn extract_ts_backend_routes(
 ) -> RouteNodes {
     let mut by_route: RouteMap = BTreeMap::new();
     // (path, METHOD, handler) triples for the HANDLED_BY refs, deduped and
-    // ordered; each ref leaves from its own per-method node.
-    let mut handled_by: BTreeSet<(String, &'static str, String)> = BTreeSet::new();
+    // ordered; each ref leaves from its own per-method node. The value is the
+    // 0-based row of the first registration that named that handler: the
+    // ref's site line (LC.3b).
+    let mut handled_by: BTreeMap<(String, &'static str, String), u32> = BTreeMap::new();
     let mut skipped_client_calls = 0usize;
 
     // Shape 1: Express-style `<x>.<method>('/...', ...)` and Hono/Koa routers.
@@ -135,7 +137,7 @@ pub fn extract_ts_backend_routes(
             if let Some(key) = add_method(&mut by_route, route, method, handler.unwrap_or(""), row)
                 && let Some(h) = handler
             {
-                handled_by.insert((key.0, key.1, h.to_string()));
+                handled_by.entry((key.0, key.1, h.to_string())).or_insert(row);
             }
         }
     }
@@ -212,7 +214,7 @@ pub fn extract_ts_backend_routes(
 
     let refs = handled_by
         .into_iter()
-        .map(|(route, method, handler)| {
+        .map(|((route, method, handler), line)| {
             let qname = endpoint::route_qname(method, &route);
             let qualifier = match handler.split_once('.') {
                 Some((base, name)) => CallQualifier::Attribute {
@@ -226,6 +228,7 @@ pub fn extract_ts_backend_routes(
                 from_module: module_id,
                 qualifier,
                 category: edge_category::HANDLED_BY,
+                line,
             }
         })
         .collect();

@@ -3054,6 +3054,7 @@ public class AuditFunction
                     path: "kafkajs".into(),
                     alias: None,
                 },
+                line: 0,
             });
             attach_imports_cell(&mut fp, "typescript");
         }

@@ -44,7 +44,7 @@
 //! `@hourly` job and a manifest's `0 * * * *` share one identity.
 
 use repo_graph_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, line_of, node_kind,
 };
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -64,8 +64,25 @@ struct CronJob {
     /// hangfire / robfig / gocron / apscheduler / whenever / sidekiq_cron /
     /// laravel / oban
     source: &'static str,
-    /// The code the job runs: `Bare(fn)` or `Attribute { base, name }`.
-    handler: Option<CallQualifier>,
+    /// The code the job runs, `Bare(fn)` or `Attribute { base, name }`, with
+    /// the 0-based row of the construct that registers it (the scheduling
+    /// call, annotation or decorator; the job line of a whenever block): the
+    /// HANDLED_BY ref's site line (LC.3b).
+    handler: Option<(CallQualifier, u32)>,
+}
+
+/// `handler` placed at the row of byte `at` of `source` (LC.3b).
+fn at_row(handler: Option<CallQualifier>, source: &str, at: usize) -> Option<(CallQualifier, u32)> {
+    handler.map(|h| (h, line_of(source, at)))
+}
+
+/// The byte offset of `part` in `source` when `part` is a sub-slice of it,
+/// else `fallback`. Scanners hand back sub-slices; the offset gives their row.
+fn offset_in(source: &str, part: &str, fallback: usize) -> usize {
+    (part.as_ptr() as usize)
+        .checked_sub(source.as_ptr() as usize)
+        .filter(|o| *o <= source.len())
+        .unwrap_or(fallback)
 }
 
 /// Per-file tally of code-sourced jobs, for the LA.19a `[cron] code` and the
@@ -242,7 +259,7 @@ pub fn extract_cron_nodes(
         }
         // A duplicate qname is one node, but a second handler spelling for it
         // is still a distinct ref.
-        if let Some(handler) = job.handler
+        if let Some((handler, line)) = job.handler
             && !refs.iter().any(|r| r.from == id && r.qualifier == handler)
         {
             refs.push(UnresolvedRef {
@@ -250,6 +267,7 @@ pub fn extract_cron_nodes(
                 from_module: module_id,
                 qualifier: handler,
                 category: edge_category::HANDLED_BY,
+                line,
             });
             if is_script_source(job.source) {
                 script_refs += 1;
@@ -648,7 +666,7 @@ fn extract_scheduled_annotation(source: &str) -> Vec<CronJob> {
                             schedule,
                             target: method.unwrap_or_else(|| "anon".to_string()),
                             source: "scheduled_annot",
-                            handler,
+                            handler: at_row(handler, source, pos),
                         });
                     }
                 }
@@ -947,7 +965,7 @@ fn extract_quartz(source: &str) -> Vec<CronJob> {
                 schedule,
                 target,
                 source: "quartz",
-                handler,
+                handler: at_row(handler, source, pos),
             });
         }
     }
@@ -1018,7 +1036,7 @@ fn extract_hangfire(source: &str) -> Vec<CronJob> {
             schedule,
             target,
             source: "hangfire",
-            handler,
+            handler: at_row(handler, source, pos),
         });
     }
     out
@@ -1187,13 +1205,13 @@ fn hangfire_lambda(arg: &str, generic: Option<&str>) -> (Option<String>, Option<
 /// `gocron.CronJob("spec", secs), gocron.NewTask(fn, ..)`.
 fn extract_go_cron(source: &str, robfig: bool, gocron: bool) -> Vec<CronJob> {
     let mut out = Vec::new();
-    let mut push = |schedule: Option<String>, (target, handler), src: &'static str| {
+    let mut push = |schedule: Option<String>, (target, handler), src: &'static str, at: usize| {
         if let Some(schedule) = schedule {
             out.push(CronJob {
                 schedule,
                 target,
                 source: src,
-                handler,
+                handler: at_row(handler, source, at),
             });
         }
     };
@@ -1216,7 +1234,7 @@ fn extract_go_cron(source: &str, robfig: bool, gocron: bool) -> Vec<CronJob> {
                 } else {
                     go_job_handler(job)
                 };
-                push(spec(&args), handler, "robfig");
+                push(spec(&args), handler, "robfig", pos);
             }
         }
     }
@@ -1228,7 +1246,7 @@ fn extract_go_cron(source: &str, robfig: bool, gocron: bool) -> Vec<CronJob> {
                 };
                 let handler = chained_call_arg(source, end, "Do")
                     .map_or_else(|| ("anon".to_string(), None), func_arg_handler);
-                push(spec(&args), handler, "gocron");
+                push(spec(&args), handler, "gocron", pos);
             }
         }
         for (pos, needle) in source.match_indices("gocron.CronJob(") {
@@ -1242,7 +1260,7 @@ fn extract_go_cron(source: &str, robfig: bool, gocron: bool) -> Vec<CronJob> {
                 call_args(source, open).and_then(|(a, _)| a.first().copied())
             });
             let handler = task.map_or_else(|| ("anon".to_string(), None), func_arg_handler);
-            push(spec(&args), handler, "gocron");
+            push(spec(&args), handler, "gocron", pos);
         }
     }
     out
@@ -1330,7 +1348,7 @@ fn extract_apscheduler(source: &str) -> Vec<CronJob> {
             schedule,
             target: func.clone().unwrap_or_else(|| "anon".to_string()),
             source: "apscheduler",
-            handler: func.map(CallQualifier::Bare),
+            handler: at_row(func.map(CallQualifier::Bare), source, pos),
         });
     }
     for needle in [".add_job(", ".add_schedule("] {
@@ -1356,7 +1374,7 @@ fn extract_apscheduler(source: &str) -> Vec<CronJob> {
                 schedule,
                 target,
                 source: "apscheduler",
-                handler,
+                handler: at_row(handler, source, pos),
             });
         }
     }
@@ -1827,11 +1845,16 @@ fn extract_whenever(src: &str) -> Vec<CronJob> {
             .get(i..)
             .unwrap_or(&[])
             .iter()
-            .map(|l| l.trim())
-            .take_while(|l| *l != "end" && !l.starts_with("every "))
-            .find_map(whenever_job_line);
+            .enumerate()
+            .map(|(k, l)| (i + k, l.trim()))
+            .take_while(|(_, l)| *l != "end" && !l.starts_with("every "))
+            .find_map(|(row, l)| whenever_job_line(l).map(|job| (row, job)));
         let (target, handler) = job
-            .and_then(|(kind, arg)| whenever_job(kind, arg))
+            .and_then(|(row, (kind, arg))| {
+                let (target, handler) = whenever_job(kind, arg)?;
+                let row = u32::try_from(row).unwrap_or(u32::MAX);
+                Some((target, handler.map(|h| (h, row))))
+            })
             .unwrap_or_else(|| ("anon".to_string(), None));
         out.push(CronJob {
             schedule,
@@ -2060,7 +2083,7 @@ fn extract_sidekiq_cron(source: &str, is_yaml: bool) -> Vec<CronJob> {
             let Some(class) = get("class").and_then(ruby_class_value) else {
                 continue;
             };
-            if let Some(job) = sidekiq_job(Some(&cron), None, &class, true) {
+            if let Some(job) = sidekiq_job(Some(&cron), None, &class, Some(line_of(source, pos))) {
                 out.push(job);
             }
         }
@@ -2098,11 +2121,13 @@ fn ruby_class_value(v: &str) -> Option<String> {
 }
 
 /// One sidekiq job from its unquoted `cron` / `every` and `class` values.
+/// `handler_line` is `Some(row of the Ruby call)` for the code form, which
+/// binds the class as the handler; the YAML form binds none.
 fn sidekiq_job(
     cron: Option<&str>,
     every: Option<&str>,
     class: &str,
-    code: bool,
+    handler_line: Option<u32>,
 ) -> Option<CronJob> {
     let schedule = match (cron, every) {
         (Some(c), _) => normalise_schedule(c)?,
@@ -2113,12 +2138,10 @@ fn sidekiq_job(
     if class.is_empty() {
         return None;
     }
-    let handler = if code {
+    let handler = handler_line.and_then(|line| {
         ruby_const_path(class)
-            .and_then(|segs| segs.last().map(|s| CallQualifier::Bare(s.to_string())))
-    } else {
-        None
-    };
+            .and_then(|segs| segs.last().map(|s| (CallQualifier::Bare(s.to_string()), line)))
+    });
     Some(CronJob {
         schedule,
         target: class.to_string(),
@@ -2244,7 +2267,7 @@ fn extract_sidekiq_yaml(source: &str) -> Vec<CronJob> {
                 first_yaml_string(v)
             }
         });
-        if let Some(job) = sidekiq_job(cron.as_deref(), every.as_deref(), &class, false) {
+        if let Some(job) = sidekiq_job(cron.as_deref(), every.as_deref(), &class, None) {
             out.push(job);
         }
     }
@@ -2290,7 +2313,7 @@ fn extract_laravel_schedule(src: &str) -> Vec<CronJob> {
                 schedule,
                 target,
                 source: "laravel",
-                handler,
+                handler: at_row(handler, src, pos),
             });
         }
     }
@@ -2659,7 +2682,11 @@ fn extract_oban_crontab(src: &str) -> Vec<CronJob> {
                 schedule,
                 target: module.to_string(),
                 source: "oban",
-                handler: Some(CallQualifier::Bare(short.to_string())),
+                handler: at_row(
+                    Some(CallQualifier::Bare(short.to_string())),
+                    src,
+                    offset_in(src, item, pos),
+                ),
             });
         }
     }

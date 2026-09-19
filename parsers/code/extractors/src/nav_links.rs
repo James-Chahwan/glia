@@ -130,7 +130,7 @@ pub fn extract_nav_links(source: &str, lang: &str, module_id: NodeId) -> NavLink
         return NavLinkOut::default();
     }
     let text = mask_comments(source, true);
-    let mut em = Emitter::new(module_id);
+    let mut em = Emitter::new(module_id, &text);
     if routed {
         let ctx = Ctx::of(&text, lang);
         scan_calls(&text, &ctx, &mut em);
@@ -150,7 +150,7 @@ pub fn extract_nav_links(source: &str, lang: &str, module_id: NodeId) -> NavLink
 /// like the component file's own.
 pub fn extract_template_links(source: &str, module_id: NodeId) -> NavLinkOut {
     let text = mask_comments(source, false);
-    let mut em = Emitter::new(module_id);
+    let mut em = Emitter::new(module_id, &text);
     let ctx = Ctx::default();
     scan_calls(&text, &ctx, &mut em);
     scan_tags(&text, &ctx, &mut em);
@@ -208,27 +208,38 @@ struct Emitter {
     module_id: NodeId,
     seen: HashSet<String>,
     out: NavLinkOut,
+    /// Byte offset of every `\n` of the scanned text (masking keeps them), so
+    /// a site's byte offset gives its 0-based row (LC.3b).
+    newlines: Vec<usize>,
 }
 
 impl Emitter {
-    fn new(module_id: NodeId) -> Self {
+    fn new(module_id: NodeId, text: &str) -> Self {
         Self {
             module_id,
             seen: HashSet::new(),
             out: NavLinkOut::default(),
+            newlines: text
+                .bytes()
+                .enumerate()
+                .filter(|(_, b)| *b == b'\n')
+                .map(|(i, _)| i)
+                .collect(),
         }
     }
 
-    /// One link site: each `Link` target becomes a ref (once per file); a site
-    /// with no link and a non-literal target counts as dynamic.
-    fn site(&mut self, targets: Vec<Target>, tier: Tier, origin: bool) {
+    /// One link site at byte `at`: each `Link` target becomes a ref (once per
+    /// file, at its first site's row); a site with no link and a non-literal
+    /// target counts as dynamic.
+    fn site(&mut self, targets: Vec<Target>, tier: Tier, origin: bool, at: usize) {
         let mut linked = false;
         let mut dynamic = false;
+        let line = u32::try_from(self.newlines.partition_point(|&n| n < at)).unwrap_or(u32::MAX);
         for t in targets {
             match t {
                 Target::Link(path) => {
                     linked = true;
-                    self.emit(path, tier, origin);
+                    self.emit(path, tier, origin, line);
                 }
                 Target::Dynamic => dynamic = true,
                 Target::Skip => {}
@@ -239,7 +250,7 @@ impl Emitter {
         }
     }
 
-    fn emit(&mut self, path: String, tier: Tier, origin: bool) {
+    fn emit(&mut self, path: String, tier: Tier, origin: bool, line: u32) {
         let link = match tier {
             Tier::Router => path,
             Tier::Href => format!("href:{path}"),
@@ -261,6 +272,7 @@ impl Emitter {
             from_module: self.module_id,
             qualifier: CallQualifier::Bare(link),
             category: edge_category::NAVIGATES_TO,
+            line,
         });
     }
 }
@@ -825,7 +837,7 @@ fn scan_calls(text: &str, ctx: &Ctx, em: &mut Emitter) {
     for needle in [".navigate(", ".navigateByUrl("] {
         for (at, _) in text.match_indices(needle) {
             if let Some(arg) = first_arg(text, at + needle.len()) {
-                em.site(targets_of(arg), Tier::Router, false);
+                em.site(targets_of(arg), Tier::Router, false, at);
             }
         }
     }
@@ -836,7 +848,7 @@ fn scan_calls(text: &str, ctx: &Ctx, em: &mut Emitter) {
     for name in bare {
         for open in bare_calls(text, name) {
             if let Some(arg) = first_arg(text, open) {
-                em.site(targets_of(arg), Tier::Router, false);
+                em.site(targets_of(arg), Tier::Router, false, open);
             }
         }
     }
@@ -848,7 +860,7 @@ fn scan_calls(text: &str, ctx: &Ctx, em: &mut Emitter) {
                     continue;
                 }
                 if let Some(arg) = first_arg(text, at + needle.len()) {
-                    em.site(targets_of(arg), Tier::Router, false);
+                    em.site(targets_of(arg), Tier::Router, false, at);
                 }
             }
         }
@@ -872,7 +884,7 @@ fn scan_location(text: &str, em: &mut Emitter) {
         }
         let from = after + (rest.len() - value.len()) + 1;
         if let Some(expr) = read_expr(text, from, b";,\n") {
-            em.site(targets_of(expr), Tier::Href, false);
+            em.site(targets_of(expr), Tier::Href, false, at);
         }
     }
     for needle in ["location.assign(", "location.replace("] {
@@ -881,7 +893,7 @@ fn scan_location(text: &str, em: &mut Emitter) {
                 continue;
             }
             if let Some(arg) = first_arg(text, at + needle.len()) {
-                em.site(targets_of(arg), Tier::Href, false);
+                em.site(targets_of(arg), Tier::Href, false, at);
             }
         }
     }
@@ -919,7 +931,7 @@ fn scan_origin(text: &str, em: &mut Emitter) {
             } else {
                 continue;
             };
-            origin_site(text.get(after_ws + 1..body_end).unwrap_or(""), em);
+            origin_site(text.get(after_ws + 1..body_end).unwrap_or(""), at, em);
         } else if trimmed.starts_with('+') {
             // `window.location.origin + '/path' + id`.
             if in_http_call(text, start) {
@@ -933,18 +945,18 @@ fn scan_origin(text: &str, em: &mut Emitter) {
             for p in parts.iter().skip(1) {
                 s.push_str(literal_text(p).unwrap_or("${...}"));
             }
-            origin_site(&s, em);
+            origin_site(&s, at, em);
         }
     }
 }
 
 /// The text after the origin: a path is a router-tier link; a `${...}` head
 /// (`${origin}${base}/x`) is dynamic; anything else is not a page link.
-fn origin_site(after: &str, em: &mut Emitter) {
+fn origin_site(after: &str, at: usize, em: &mut Emitter) {
     if after.starts_with('/') && !after.starts_with("//") {
-        em.site(vec![path_target(after)], Tier::Router, true);
+        em.site(vec![path_target(after)], Tier::Router, true, at);
     } else if after.starts_with("${") {
-        em.site(vec![Target::Dynamic], Tier::Router, true);
+        em.site(vec![Target::Dynamic], Tier::Router, true, at);
     }
 }
 
@@ -1174,39 +1186,39 @@ fn scan_tags(text: &str, ctx: &Ctx, em: &mut Emitter) {
                 continue;
             }
             if let Some(v) = tag.attr("to") {
-                em.site(attr_targets(v, false), Tier::Router, false);
+                em.site(attr_targets(v, false), Tier::Router, false, lt);
             } else if short == "Link"
                 && ctx.next_link
                 && let Some(v) = tag.attr("href")
             {
-                em.site(attr_targets(v, false), Tier::Router, false);
+                em.site(attr_targets(v, false), Tier::Router, false, lt);
                 next_link = true;
             }
         }
         if ctx.vue && matches!(tag.name, "router-link" | "RouterLink") {
             if let Some(v) = tag.attr("to") {
-                em.site(attr_targets(v, false), Tier::Router, false);
+                em.site(attr_targets(v, false), Tier::Router, false, lt);
             } else if let Some(v) = tag.attr(":to").or_else(|| tag.attr("v-bind:to")) {
-                em.site(attr_targets(v, true), Tier::Router, false);
+                em.site(attr_targets(v, true), Tier::Router, false, lt);
             }
         }
         if let Some(v) = tag.attr("routerLink") {
-            em.site(attr_targets(v, false), Tier::Router, false);
+            em.site(attr_targets(v, false), Tier::Router, false, lt);
         }
         if let Some(v) = tag.attr("[routerLink]") {
-            em.site(attr_targets(v, true), Tier::Router, false);
+            em.site(attr_targets(v, true), Tier::Router, false, lt);
         }
         if next_link || matches!(tag.name, "base" | "link") {
             continue;
         }
         if let Some(v) = tag.attr("href") {
-            em.site(attr_targets(v, false), Tier::Href, false);
+            em.site(attr_targets(v, false), Tier::Href, false, lt);
         } else if let Some(v) = tag
             .attr(":href")
             .or_else(|| tag.attr("v-bind:href"))
             .or_else(|| tag.attr("[href]"))
         {
-            em.site(attr_targets(v, true), Tier::Href, false);
+            em.site(attr_targets(v, true), Tier::Href, false, lt);
         }
     }
 }

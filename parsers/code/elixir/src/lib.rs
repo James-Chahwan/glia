@@ -6,6 +6,7 @@ pub use repo_graph_code_domain::{
     UnresolvedRef, cell_type, edge_category, node_kind,
 };
 use repo_graph_code_domain::endpoint::{ClientEndpoint, join_scope, push_client_endpoint, url_to_path};
+use repo_graph_code_domain::line_of;
 
 pub fn parse_file(
     source: &str,
@@ -407,6 +408,7 @@ fn collect_import(node: TsNode, src: &[u8], acc: &mut Acc) {
                 path,
                 alias: None,
             },
+            line: line_at(node),
         });
     }
 }
@@ -458,6 +460,7 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                         acc.calls.push(CallSite {
                             from,
                             qualifier: CallQualifier::Bare(name.to_string()),
+                            line: line_at(n),
                         });
                     }
                 }
@@ -470,6 +473,7 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                                 base: text[..pos].to_string(),
                                 name: text[pos + 1..].to_string(),
                             },
+                            line: line_at(n),
                         });
                     }
                 }
@@ -483,6 +487,12 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             }
         }
     }
+}
+
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
 }
 
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
@@ -693,7 +703,15 @@ fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut 
                     let action = route_action(rest);
                     let route_name = format!("{method} {full}");
                     if seen.insert(route_name.clone()) {
-                        emit_phoenix_route(&method, &full, action.as_deref(), repo, module_id, acc);
+                        emit_phoenix_route(
+                            &method,
+                            &full,
+                            action.as_deref(),
+                            repo,
+                            module_id,
+                            line_of(source, i),
+                            acc,
+                        );
                     }
                 }
                 i = word_end;
@@ -707,7 +725,7 @@ fn scan_phoenix_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut 
                         if seen.insert(route_name.clone()) {
                             // `resources` derives standard RESTful actions from the
                             // controller implicitly; no explicit action to link.
-                            emit_phoenix_route(m, &full, None, repo, module_id, acc);
+                            emit_phoenix_route(m, &full, None, repo, module_id, line_of(source, i), acc);
                         }
                     }
                 }
@@ -768,12 +786,15 @@ fn first_quoted(s: &str) -> Option<String> {
     None
 }
 
+/// `line` is the route line's 0-based row: the site of its HANDLED_BY ref
+/// (LC.3b).
 fn emit_phoenix_route(
     method: &str,
     path: &str,
     action: Option<&str>,
     repo: RepoId,
     module_id: NodeId,
+    line: u32,
     acc: &mut Acc,
 ) {
     let route_name = format!("{method} {path}");
@@ -801,6 +822,7 @@ fn emit_phoenix_route(
                 from_module: module_id,
                 qualifier: CallQualifier::Bare(action.to_string()),
                 category: edge_category::HANDLED_BY,
+                line,
             });
         }
     }

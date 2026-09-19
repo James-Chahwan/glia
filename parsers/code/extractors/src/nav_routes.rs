@@ -45,7 +45,8 @@
 use std::collections::HashSet;
 
 use repo_graph_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, line_of,
+    node_kind,
 };
 use repo_graph_core::{Cell, CellPayload, Confidence, EdgeCategoryId, Node, NodeId, RepoId};
 
@@ -81,6 +82,10 @@ pub struct RouteRecord {
     pub redirect: Option<String>,
     /// The last segment is a wildcard (`**`, `*`, `:x*`, `[...x]`).
     pub catchall: bool,
+    /// 0-based row of the declaration (the route object's `{`, the `<Route`
+    /// tag, a Next page's default export): the site line of its HANDLED_BY /
+    /// NAVIGATES_TO refs (LC.3b).
+    pub line: u32,
 }
 
 /// What a file's route tables contribute to its `FileParse`, plus the
@@ -165,6 +170,7 @@ pub fn emit_nav_routes(recs: &[RouteRecord], module_id: NodeId, repo: RepoId) ->
                 from_module: module_id,
                 qualifier: handler_qualifier(h),
                 category: edge_category::HANDLED_BY,
+                line: rec.line,
             });
             out.bound += 1;
         }
@@ -176,6 +182,7 @@ pub fn emit_nav_routes(recs: &[RouteRecord], module_id: NodeId, repo: RepoId) ->
                 from_module: module_id,
                 qualifier: CallQualifier::Bare(t.to_string()),
                 category: edge_category::NAVIGATES_TO,
+                line: rec.line,
             });
             out.redirects += 1;
         }
@@ -693,6 +700,7 @@ fn scan_jsx_routes(source: &str) -> Scan {
             let mut rec = RouteRecord {
                 path: path.clone(),
                 catchall: is_catchall(path),
+                line: line_of(source, lt),
                 ..RouteRecord::default()
             };
             match tag.attr("element").and_then(|v| jsx_element(attr_expr(v))) {
@@ -1207,6 +1215,7 @@ fn scan_route_records(source: &str) -> Scan {
             path: own.clone(),
             handler: f.handler.clone(),
             redirect,
+            line: line_of(source, f.open),
         });
         composed.push(Some(own));
     }
@@ -1547,11 +1556,13 @@ const saved: Array<Route> = [];
             handler: Some("DocPage".to_string()),
             redirect: None,
             catchall: true,
+            line: 7,
         }];
         let out = emit_nav_routes(&recs, module_id(), repo());
         assert_eq!(out.nav_routes, 1);
         assert_eq!(out.catchalls, 1);
         assert_eq!(out.bound, 1);
         assert_eq!(out.refs[0].from, route_id("/docs/:slug*"));
+        assert_eq!(out.refs[0].line, 7, "the record's row is the ref's site line");
     }
 }

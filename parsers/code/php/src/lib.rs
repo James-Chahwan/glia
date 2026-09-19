@@ -6,6 +6,7 @@ use tree_sitter::{Node as TsNode, Parser};
 use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{self, ClientEndpoint, push_client_endpoint};
+use repo_graph_code_domain::line_of;
 pub use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -566,6 +567,7 @@ fn emit_ctor_injects(ctor: TsNode, src: &[u8], class_id: NodeId, module_id: Node
             from_module: module_id,
             qualifier: CallQualifier::Bare(name),
             category: edge_category::INJECTS,
+            line: line_at(ty),
         });
         di_stats::record(DiShape::PhpCtor);
     }
@@ -997,6 +999,7 @@ fn scan_laravel_routes(
                         from_module: module_id,
                         qualifier,
                         category: edge_category::HANDLED_BY,
+                        line: line_of(source, search_from + rel),
                     });
                 }
                 search_from = start + consumed.max(1);
@@ -1318,6 +1321,7 @@ fn collect_use(node: TsNode, src: &[u8], acc: &mut Acc) {
                 alias: None,
                 level: 0,
             },
+            line: line_at(node),
         });
     } else {
         acc.imports.push(ImportStmt {
@@ -1326,6 +1330,7 @@ fn collect_use(node: TsNode, src: &[u8], acc: &mut Acc) {
                 path: path.replace('\\', "::"),
                 alias: None,
             },
+            line: line_at(node),
         });
     }
 }
@@ -1446,6 +1451,7 @@ fn collect_calls_in(
                     acc.calls.push(CallSite {
                         from,
                         qualifier: CallQualifier::Bare(text_of(func, src).to_string()),
+                        line: line_at(n),
                     });
                 }
             }
@@ -1462,6 +1468,7 @@ fn collect_calls_in(
                     acc.calls.push(CallSite {
                         from,
                         qualifier: CallQualifier::SelfMethod(name.to_string()),
+                        line: line_at(n),
                     });
                 } else if let Some(cls) = types.get(obj) {
                     if bind_debug_enabled() {
@@ -1477,6 +1484,7 @@ fn collect_calls_in(
                             base: cls.clone(),
                             name: name.to_string(),
                         },
+                        line: line_at(n),
                     });
                 } else {
                     acc.calls.push(CallSite {
@@ -1485,6 +1493,7 @@ fn collect_calls_in(
                             base: obj.to_string(),
                             name: name.to_string(),
                         },
+                        line: line_at(n),
                     });
                 }
             }
@@ -1503,6 +1512,7 @@ fn collect_calls_in(
                         base: scope.to_string(),
                         name: name.to_string(),
                     },
+                    line: line_at(n),
                 });
                 eloquent_query_site(n, src, from, repo, acc);
             }
@@ -2300,6 +2310,12 @@ fn collect_client_endpoints_in(
     }
 }
 
+/// The 0-based row a node starts on: the `line` of the `CallSite` /
+/// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
+fn line_at(n: TsNode) -> u32 {
+    u32::try_from(n.start_position().row).unwrap_or(u32::MAX)
+}
+
 fn text_of<'a>(node: TsNode<'a>, src: &'a [u8]) -> &'a str {
     node.utf8_text(src).unwrap_or("")
 }
@@ -2612,6 +2628,8 @@ namespace App\Http\Controllers {
                     alias: None,
                     level: 0,
                 },
+                // LC.3b: the `use` statement's 0-based row.
+                line: 2,
             }]
         );
     }

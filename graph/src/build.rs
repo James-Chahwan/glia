@@ -170,7 +170,7 @@ pub fn build_rust(
     for site in all_calls {
         match idx.resolve_scoped_bare(&g, &site, &bindings) {
             Some((to, rule)) => {
-                push_edge(&mut g, site.from, to, edge_category::CALLS, rust_ev(rule));
+                push_edge(&mut g, site.from, to, edge_category::CALLS, rust_ev(rule).line(site.line));
                 mod_scoped += usize::from(rule == MOD_ITEM);
             }
             None => rest.push(site),
@@ -828,7 +828,7 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
     if embeds.is_empty() {
         return;
     }
-    let mut bound: Vec<(NodeId, NodeId, &str)> = Vec::new();
+    let mut bound: Vec<(NodeId, NodeId, &str, u32)> = Vec::new();
     let mut unbound: Vec<UnresolvedRef> = Vec::new();
     {
         let nav = &g.nav;
@@ -890,13 +890,13 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
                 _ => None,
             };
             match hit {
-                Some((to, rule)) if to != r.from => bound.push((r.from, to, rule)),
+                Some((to, rule)) if to != r.from => bound.push((r.from, to, rule, r.line)),
                 _ => unbound.push(r.clone()),
             }
         }
     }
-    for (from, to, rule) in bound {
-        push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule));
+    for (from, to, rule, line) in bound {
+        push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule).line(line));
     }
     g.unresolved_refs.extend(unbound);
 }
@@ -1153,6 +1153,7 @@ mod tests {
                     alias: None,
                     level: 0,
                 },
+                line: 0,
             }],
             calls: vec![],
             refs: vec![],
@@ -1204,6 +1205,7 @@ mod tests {
                     path: "foo/bar".to_string(),
                     alias: None,
                 },
+                line: 0,
             }],
             calls: vec![],
             refs: vec![],
@@ -1267,6 +1269,7 @@ mod tests {
                 from_module: m,
                 qualifier: repo_graph_code_domain::CallQualifier::Bare("IUserService".to_string()),
                 category: edge_category::IMPLEMENTS,
+                line: 0,
             }],
             nav,
             properties: HashSet::new(),
@@ -1396,6 +1399,7 @@ mod tests {
                 name: "GetById".to_string(),
             },
             category: edge_category::HANDLED_BY,
+            line: 0,
         });
         let g = build_dotted(r, vec![file]).unwrap();
         let handled: Vec<_> = g
@@ -1482,13 +1486,14 @@ mod tests {
         );
         let get = gid(node_kind::METHOD, "service::UserService::Get");
         service.calls = vec![
-            CallSite { from: get, qualifier: CallQualifier::SelfMethod("audit".to_string()) },
+            CallSite { from: get, qualifier: CallQualifier::SelfMethod("audit".to_string()), line: 0 },
             CallSite {
                 from: get,
                 qualifier: CallQualifier::ComplexReceiver {
                     receiver: "self.repo".to_string(),
                     name: "Find".to_string(),
                 },
+                line: 0,
             },
         ];
         vec![types, service]
@@ -1610,6 +1615,7 @@ mod tests {
         handlers.imports = vec![ImportStmt {
             from_module: "app::handlers".to_string(),
             target: ImportTarget::Module { path: "store".to_string(), alias: None },
+            line: 0,
         }];
         let (handle, helper, write_json, run) = (
             gid(node_kind::METHOD, "app::handlers::Server::Handle"),
@@ -1617,7 +1623,7 @@ mod tests {
             gid(node_kind::FUNCTION, "app::handlers::writeJSON"),
             gid(node_kind::FUNCTION, "app::handlers::run"),
         );
-        let site = |from, qualifier| CallSite { from, qualifier };
+        let site = |from, qualifier| CallSite { from, qualifier, line: 0 };
         handlers.calls = vec![
             site(handle, CallQualifier::Bare("writeJSON".to_string())),
             site(
@@ -1655,6 +1661,7 @@ mod tests {
             from_module: gid(node_kind::MODULE, module),
             qualifier,
             category: edge_category::INHERITS_FROM,
+            line: 0,
         }
     }
 
@@ -1901,10 +1908,12 @@ mod tests {
             ImportStmt {
                 from_module: "backend::svc::api".to_string(),
                 target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+                line: 0,
             },
             ImportStmt {
                 from_module: "backend::svc::api".to_string(),
                 target: ImportTarget::Module { path: "io".to_string(), alias: None },
+                line: 0,
             },
         ];
         let port = "backend::svc::api::Port";
@@ -1991,18 +2000,20 @@ mod tests {
         main.imports = vec![ImportStmt {
             from_module: "cmd::main".to_string(),
             target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+            line: 0,
         }];
         let from = gid(node_kind::FUNCTION, "cmd::main::main");
         let attr = |name: &str| CallQualifier::Attribute { base: "store".to_string(), name: name.to_string() };
         main.calls = vec![
-            CallSite { from, qualifier: attr("Save") },
-            CallSite { from, qualifier: attr("Load") },
+            CallSite { from, qualifier: attr("Save"), line: 0 },
+            CallSite { from, qualifier: attr("Load"), line: 0 },
         ];
         let mut store =
             go_file("internal::store::store", &[(node_kind::FUNCTION, "internal::store::store::Save", None)]);
         store.calls = vec![CallSite {
             from: gid(node_kind::FUNCTION, "internal::store::store::Save"),
             qualifier: CallQualifier::Bare("helper".to_string()),
+            line: 0,
         }];
         let load = go_file(
             "internal::store::load",
