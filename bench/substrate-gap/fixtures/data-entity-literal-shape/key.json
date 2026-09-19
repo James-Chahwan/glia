@@ -1,0 +1,70 @@
+{
+  "framework": "data-entity-literal-shape",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "LA.42. The declaration scanners in parsers/code/extractors/src/data_entities.rs (mongoose.model( / models.model(, TableName: / TableName =, dynamodb.Table(, __tablename__ / db_table, beanie `class Settings:` name) call first_quoted_string, which returns the FIRST quoted literal anywhere after the needle, across lines: `mongoose.model(modelName, schema)` takes a later unrelated string (Registry), `TableName: process.env.ORDERS_TABLE` takes an attribute value (pending), a `def __tablename__(cls)` takes a constant further down (audit), a beanie `name = collection_name()` takes the next field's value (strict), and a needle table mints the text between two table strings (`, `). The glia self-build mints data_entity:nosql:`<Name>`, `, `, `...` and three multi-line names from data_entities.rs itself. The name now has to be a single-line literal that starts the argument or assignment, and an entity name with whitespace or punctuation is noise at the emit funnel. The literal forms in each file are the controls. No cells binding: a precision guard.",
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:User",
+      "note": "mongoose.model(\"User\", userSchema) - the control"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:orders",
+      "note": "__tablename__ = \"orders\" - the control"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:events",
+      "note": "beanie Settings name = \"events\" - the control"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:sessions",
+      "note": "TableName: \"sessions\" - the control"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "models::registry",
+      "to": "data_entity:nosql:User",
+      "category": "ACCESSES_DATA",
+      "note": "declaration keeps its module edge (LE.4a leaves declarations at module level)"
+    },
+    {
+      "from": "app::models",
+      "to": "data_entity:sql:orders",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:Registry",
+      "note": "mongoose.model(modelName, schema) read the later REGISTRY_LABEL string"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:, ",
+      "note": "scripts/entity_needles.py needle table"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:sql:audit",
+      "note": "@declared_attr def __tablename__(cls) read AUDIT_LABEL"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:strict",
+      "note": "beanie name = collection_name() read the next field's literal"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:pending",
+      "note": "TableName: process.env.ORDERS_TABLE read an Item attribute value"
+    }
+  ]
+}

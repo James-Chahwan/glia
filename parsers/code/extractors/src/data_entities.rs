@@ -24,6 +24,8 @@
 //!     `Schema::create`, EF Core `migrationBuilder.CreateTable`
 //!   - SQLAlchemy / Django: `__tablename__ = '...'` / `db_table = '...'`
 //!   - Mongoose: `mongoose.model('<Name>', ...)`
+//!   - DynamoDB: `TableName: '...'` / `TableName='...'`, `dynamodb.Table('...')`
+//!   - Beanie: the `name = '...'` line of a `class Settings:` block
 //!   - Driver collection calls: `.collection('x')` (Node / Firestore),
 //!     `.Collection("x")` (Go mongo-driver / Firestore), `.getCollection("x")`
 //!     (Java), `.GetCollection<T>("x" | nameof(T))` (C# MongoDB.Driver)
@@ -33,9 +35,15 @@
 //!     INTO`, prose and comments are not Cypher; `::` and property-map values
 //!     are never labels.
 //!
+//! A declaration (ORM table, Mongoose, DynamoDB, Beanie) is named only by the
+//! single-line literal that starts its argument or assignment
+//! ([`leading_literal`] / [`inline_literal`], LA.42), never by a later string,
+//! and every scanner's name must be [`entity_shaped`] at the emit funnel.
+//!
 //! Debug markers, one line per file that produced or rejected anything:
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='` (LG.3b)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] cypher '` (LA.28)
+//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] decl '` (LA.42)
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -169,7 +177,11 @@ pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) 
             sink.emit(DataEntityFlavor::Sql, &name);
         }
     }
-    for name in scan_orm_table_decls(source) {
+    // LA.42: the declaration scanners name an entity only from the literal
+    // that starts the argument / assignment; `decl` feeds their marker.
+    let mut decl = DeclStats::default();
+    for name in scan_orm_table_decls(source, &mut decl) {
+        decl.funnel(&name);
         sink.emit(DataEntityFlavor::Sql, &name);
     }
     // A13.9: a migration DSL call (`op.create_table("users")`, Rails
@@ -182,18 +194,24 @@ pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) 
     for line in crate::migrations::dsl_markers(&dsl) {
         eprintln!("{line}");
     }
-    for name in scan_mongoose_models(source) {
+    for name in scan_mongoose_models(source, &mut decl) {
+        decl.funnel(&name);
         sink.emit(DataEntityFlavor::Nosql, &name);
     }
-    for name in scan_dynamodb_tables(source) {
+    for name in scan_dynamodb_tables(source, &mut decl) {
+        decl.funnel(&name);
         sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_collection_calls(source) {
         stats.note_collection(&name);
         sink.emit(DataEntityFlavor::Nosql, &name);
     }
-    for name in scan_beanie_documents(source) {
+    for name in scan_beanie_documents(source, &mut decl) {
+        decl.funnel(&name);
         sink.emit(DataEntityFlavor::Nosql, &name);
+    }
+    if debug_enabled() && decl.needles > 0 {
+        eprintln!("{}", decl.marker());
     }
     for name in scan_cypher_labels(source) {
         sink.emit(DataEntityFlavor::Graph, &name);
@@ -1769,10 +1787,11 @@ fn find_keyword_ci(hay: &str, kw_upper: &str, kw_lower: &str) -> Option<usize> {
 /// flavor: pure numerics (`FROM 2`) and English/JS keywords that follow
 /// `from`/`into` in prose or get passed to `.collection(...)`. Applied at the
 /// single `emit` funnel so SQL, NoSQL and graph flavors are all protected.
-/// (glia-v2 G7)
+/// (glia-v2 G7) Also true for any name that is not [`entity_shaped`] (LA.42):
+/// one gate for every scanner and flavor.
 fn is_noise_entity_name(name: &str) -> bool {
-    let name = name.trim();
-    if name.is_empty() {
+    // Shape first, on the name as emitted: ` users` is not a name either.
+    if !entity_shaped(name) {
         return true;
     }
     if name.chars().all(|c| c.is_ascii_digit()) {
@@ -1826,6 +1845,20 @@ fn is_noise_entity_name(name: &str) -> bool {
     )
 }
 
+/// True for a name a table, collection or label can have (LA.42): 1..=128
+/// bytes, starting with an alphanumeric char or `_`, every char alphanumeric
+/// or one of `_ - . /` (Mongo `system.users`, DynamoDB `orders-v2`, Firestore
+/// `users/abc/orders`). Non-ASCII letters pass (`usuários`). Whitespace,
+/// quotes, brackets and code (`, `, `<Name>`, `...`, `${t}`) do not.
+fn entity_shaped(name: &str) -> bool {
+    let mut chars = name.chars();
+    (1..=128).contains(&name.len())
+        && chars
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+}
+
 /// Strip schema prefix and noise; reject SQL keywords / placeholders that
 /// would otherwise leak through (`SELECT`, `?`, `:param`).
 pub(crate) fn canonical_sql_name(raw: &str) -> Option<String> {
@@ -1870,72 +1903,158 @@ const SQL_NAME_KEYWORDS: &[&str] = &[
 // `db_table = 'users'` (Django Meta inner class).
 // ----------------------------------------------------------------------------
 
-fn scan_orm_table_decls(source: &str) -> Vec<String> {
+fn scan_orm_table_decls(source: &str, stats: &mut DeclStats) -> Vec<String> {
     let mut out = Vec::new();
     for needle in ["__tablename__", "db_table"] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
-            let after = &source[pos + needle.len()..];
-            // Look for `= '<name>'` or `= "<name>"`.
-            if let Some(eq) = after.find('=') {
-                let tail = &after[eq + 1..];
-                if let Some(name) = first_quoted_string(tail) {
-                    if let Some(cleaned) = canonical_sql_name(&name) {
-                        out.push(cleaned);
-                    }
+            search_from = pos + needle.len();
+            stats.needles += 1;
+            // `__tablename__ = 'users'`, `__tablename__: str = "users"`; a
+            // `def __tablename__(cls):` or a later `=` names nothing.
+            let lit = assigned_value(&source[pos + needle.len()..])
+                .map_or(LeadingLit::NotLiteral, inline_literal);
+            if let Some(name) = stats.take(lit) {
+                match canonical_sql_name(name) {
+                    Some(cleaned) => out.push(cleaned),
+                    None => stats.rejected_shape += 1,
                 }
             }
-            search_from = pos + needle.len();
         }
     }
     out
 }
 
-/// Read the first single-/double-quoted string literal in `s`.
-fn first_quoted_string(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'\'' || c == b'"' || c == b'`' {
-            let delim = c;
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != delim {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    j += 2;
-                } else {
-                    j += 1;
-                }
-            }
-            if j < bytes.len() {
-                return Some(s[start..j].to_string());
-            }
-            return None;
-        }
-        i += 1;
+/// The value of an assignment whose target just ended at the start of `s`:
+/// spaces / tabs, an optional `: <annotation>`, then `=` (not `==`), all on
+/// the target's line. `None` for any other shape (`(cls):`, `_name = …`, a
+/// newline before the `=`).
+fn assigned_value(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let mut i = blank_prefix_len(s);
+    if b.get(i) == Some(&b':') {
+        i += 1 + b[i + 1..].iter().position(|&c| c == b'=' || c == b'\n')?;
     }
-    None
+    if b.get(i) != Some(&b'=') || b.get(i + 1) == Some(&b'=') {
+        return None;
+    }
+    Some(&s[i + 1..])
+}
+
+/// What a declaration's name position holds (LA.42). A declaration scanner
+/// names an entity only from `Lit`: never from a literal further on, which
+/// belongs to some other expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeadingLit<'a> {
+    /// A `'…'`, `"…"` or backtick literal that starts the text and closes on
+    /// its line; the body between the quotes.
+    Lit(&'a str),
+    /// A quote starts the text but the literal does not close on its line,
+    /// holds a backslash, or is empty (a Python `"""` reads as `""`).
+    Malformed,
+    /// The text starts with something else: an identifier, a call, an
+    /// f-string or template prefix, code.
+    NotLiteral,
+}
+
+/// The literal that starts a call argument: whitespace, newlines included,
+/// may precede it (`mongoose.model(\n  'User',`).
+fn leading_literal(s: &str) -> LeadingLit<'_> {
+    literal_after(s, |c| matches!(c, b' ' | b'\t' | b'\r' | b'\n')).0
+}
+
+/// The literal that starts an assignment's value or an object key's value:
+/// only spaces and tabs may precede it, as the value is on its line.
+fn inline_literal(s: &str) -> LeadingLit<'_> {
+    literal_after(s, |c| matches!(c, b' ' | b'\t')).0
+}
+
+/// The literal at the first byte of `s` that `skip` does not match, and the
+/// offset just past its closing quote (0 unless `Lit`). The body is sliced at
+/// ASCII quote bytes, so it is always on a char boundary.
+fn literal_after(s: &str, skip: fn(u8) -> bool) -> (LeadingLit<'_>, usize) {
+    let b = s.as_bytes();
+    let open = b.iter().position(|&c| !skip(c)).unwrap_or(b.len());
+    let Some(&q @ (b'\'' | b'"' | b'`')) = b.get(open) else {
+        return (LeadingLit::NotLiteral, 0);
+    };
+    let start = open + 1;
+    for (k, &c) in b[start..].iter().enumerate() {
+        if c == q {
+            if k == 0 {
+                break;
+            }
+            return (LeadingLit::Lit(&s[start..start + k]), start + k + 1);
+        }
+        if matches!(c, b'\n' | b'\r' | b'\\') {
+            break;
+        }
+    }
+    (LeadingLit::Malformed, 0)
+}
+
+/// What the declaration scanners (ORM table, Mongoose, DynamoDB, Beanie) read
+/// in one file, for the `[data-entity] decl` marker (LA.42). Every needle hit
+/// lands in exactly one of `kept`, `rejected_nonliteral`, `rejected_shape`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DeclStats {
+    needles: usize,
+    kept: usize,
+    /// Needle hits whose name position held no literal (`NotLiteral`,
+    /// `Malformed`, an ORM needle that is not assigned on its line, a Beanie
+    /// `Settings` block with no `name` line).
+    rejected_nonliteral: usize,
+    /// Literals the emit funnel (or `canonical_sql_name`) rejected.
+    rejected_shape: usize,
+}
+
+impl DeclStats {
+    /// The literal's body, or `None` after counting the non-literal.
+    fn take<'a>(&mut self, lit: LeadingLit<'a>) -> Option<&'a str> {
+        match lit {
+            LeadingLit::Lit(name) => Some(name),
+            LeadingLit::Malformed | LeadingLit::NotLiteral => {
+                self.rejected_nonliteral += 1;
+                None
+            }
+        }
+    }
+
+    /// Count a scanner's capture at the funnel: kept or shape-rejected.
+    fn funnel(&mut self, name: &str) {
+        if is_noise_entity_name(name) {
+            self.rejected_shape += 1;
+        } else {
+            self.kept += 1;
+        }
+    }
+
+    fn marker(&self) -> String {
+        format!(
+            "[data-entity] decl needles={} kept={} rejected_nonliteral={} rejected_shape={}",
+            self.needles, self.kept, self.rejected_nonliteral, self.rejected_shape
+        )
+    }
 }
 
 // ----------------------------------------------------------------------------
 // Mongoose: `mongoose.model('User', schema)` and `model('User', schema)`.
 // ----------------------------------------------------------------------------
 
-fn scan_mongoose_models(source: &str) -> Vec<String> {
+fn scan_mongoose_models(source: &str, stats: &mut DeclStats) -> Vec<String> {
     let mut out = Vec::new();
     for needle in ["mongoose.model(", "models.model("] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
-            let after = &source[pos + needle.len()..];
-            if let Some(name) = first_quoted_string(after) {
-                if !name.is_empty() && name.len() < 128 {
-                    out.push(name);
-                }
-            }
             search_from = pos + needle.len();
+            stats.needles += 1;
+            // The model name is argument 1: `mongoose.model(modelName, s)`
+            // names nothing, whatever string comes later.
+            if let Some(name) = stats.take(leading_literal(&source[search_from..])) {
+                out.push(name.to_string());
+            }
         }
     }
     out
@@ -1946,46 +2065,44 @@ fn scan_mongoose_models(source: &str) -> Vec<String> {
 // (Python boto3 kwargs), and `dynamodb.Table('users')` (boto3 resource API).
 // ----------------------------------------------------------------------------
 
-fn scan_dynamodb_tables(source: &str) -> Vec<String> {
+fn scan_dynamodb_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
     let mut out = Vec::new();
 
     // Object-key / kwarg form: `TableName: '...'`, `TableName: "..."`,
-    // `TableName='...'`. The needle ends at the colon/equals so any whitespace
-    // before the value is allowed.
+    // `TableName='...'`. The needle ends at the colon/equals; the value is the
+    // literal that follows on the same line (`TableName: process.env.T` names
+    // nothing, whatever string comes later).
     for needle in ["TableName:", "TableName =", "TableName="] {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
+            search_from = pos + needle.len();
             // Word-boundary check on the preceding char so we don't match
             // `MyTableName:`.
             let prev_ok = pos == 0 || {
                 let p = source.as_bytes()[pos - 1];
                 !(p.is_ascii_alphanumeric() || p == b'_' || p == b'$')
             };
-            let after = &source[pos + needle.len()..];
-            if prev_ok {
-                if let Some(name) = first_quoted_string(after) {
-                    if !name.is_empty() && name.len() < 128 {
-                        out.push(name);
-                    }
-                }
+            if !prev_ok {
+                continue;
             }
-            search_from = pos + needle.len();
+            stats.needles += 1;
+            if let Some(name) = stats.take(inline_literal(&source[search_from..])) {
+                out.push(name.to_string());
+            }
         }
     }
 
     // boto3 resource form: `dynamodb.Table('users')`. The `dynamodb.` prefix
     // disambiguates from generic `.Table(...)` builders in other libs.
+    let needle = "dynamodb.Table(";
     let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("dynamodb.Table(") {
-        let pos = search_from + rel;
-        let after = &source[pos + "dynamodb.Table(".len()..];
-        if let Some(name) = first_quoted_string(after) {
-            if !name.is_empty() && name.len() < 128 {
-                out.push(name);
-            }
+    while let Some(rel) = source[search_from..].find(needle) {
+        search_from += rel + needle.len();
+        stats.needles += 1;
+        if let Some(name) = stats.take(leading_literal(&source[search_from..])) {
+            out.push(name.to_string());
         }
-        search_from = pos + "dynamodb.Table(".len();
     }
     out
 }
@@ -2073,28 +2190,22 @@ fn skip_type_args(b: &[u8], i: usize) -> Option<usize> {
 }
 
 /// The collection name a call's FIRST argument (starting at `i`, just past
-/// the `(`) spells: a string literal, or C# `nameof(Ident)` (the name is the
-/// last segment of `Ident`). Anything else — a variable, an interpolated
-/// `$"…"` / `` `${x}` `` — names nothing.
+/// the `(`) spells: a single-line string literal that starts the argument
+/// ([`leading_literal`]'s rule, LA.42), or C# `nameof(Ident)` (the name is
+/// the last segment of `Ident`). Anything else — a variable, an interpolated
+/// `$"…"` / `` `${x}` ``, a literal that does not close on its line — names
+/// nothing.
 fn collection_arg(source: &str, i: usize) -> Option<String> {
     let b = source.as_bytes();
     let mut k = i;
     while k < b.len() && b[k].is_ascii_whitespace() {
         k += 1;
     }
-    let (name, end) = match b.get(k)? {
-        &q @ (b'\'' | b'"' | b'`') => {
-            let start = k + 1;
-            let mut j = start;
-            while j < b.len() && b[j] != q && b[j] != b'\n' {
-                j += if b[j] == b'\\' { 2 } else { 1 };
-            }
-            if b.get(j) != Some(&q) {
-                return None;
-            }
-            (&source[start..j], j + 1)
-        }
-        _ if b[k..].starts_with(b"nameof(") => {
+    // `k` is already past the whitespace, so the reader skips nothing.
+    let (name, end) = match literal_after(&source[k..], |_| false) {
+        (LeadingLit::Lit(name), past) => (name, k + past),
+        (LeadingLit::Malformed, _) => return None,
+        (LeadingLit::NotLiteral, _) if b[k..].starts_with(b"nameof(") => {
             let start = k + "nameof(".len();
             let close = start + b[start..].iter().take(256).position(|&c| c == b')')?;
             let inner = source[start..close].trim();
@@ -2125,59 +2236,63 @@ fn collection_arg(source: &str, i: usize) -> Option<String> {
 // ----------------------------------------------------------------------------
 // Beanie (Pydantic + Motor): `class Foo(Document): class Settings: name = "..."`.
 // The collection name lives on a `Settings` inner class. Scan for `class
-// Settings:` and pull `name = '<value>'` from the next ~256 bytes.
+// Settings:` and read the `name = '<value>'` line of its block, within the
+// next ~256 bytes.
 // ----------------------------------------------------------------------------
 
-fn scan_beanie_documents(source: &str) -> Vec<String> {
+fn scan_beanie_documents(source: &str, stats: &mut DeclStats) -> Vec<String> {
     let mut out = Vec::new();
     let needle = "class Settings:";
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find(needle) {
         let pos = search_from + rel;
         let after = pos + needle.len();
+        search_from = after;
+        stats.needles += 1;
         // Snap DOWN: a multibyte char on the cut would panic the slice.
         let win_end = source.floor_char_boundary((after + 256).min(source.len()));
-        let window = &source[after..win_end];
-        if let Some(name_idx) = find_word_in(window, "name") {
-            let tail = &window[name_idx + "name".len()..];
-            // Expect `name = '...'` or `name='...'`; require the equals.
-            if let Some(eq) = tail.find('=') {
-                let after_eq = &tail[eq + 1..];
-                if let Some(name) = first_quoted_string(after_eq) {
-                    if !name.is_empty() && name.len() < 128 {
-                        out.push(name);
-                    }
-                }
-            }
+        let line_start = source[..pos].rfind('\n').map_or(0, |n| n + 1);
+        let indent = blank_prefix_len(&source[line_start..pos]);
+        if let Some(name) = stats.take(settings_name(&source[after..win_end], indent)) {
+            out.push(name.to_string());
         }
-        search_from = after;
     }
     out
 }
 
-/// Find the first occurrence of `word` in `s` with word-boundary checks on
-/// both sides. Returns the byte offset of the start of the match.
-fn find_word_in(s: &str, word: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let wb = word.as_bytes();
-    let mut i = 0;
-    while i + wb.len() <= bytes.len() {
-        if &bytes[i..i + wb.len()] == wb {
-            let prev_ok = i == 0 || {
-                let p = bytes[i - 1];
-                !(p.is_ascii_alphanumeric() || p == b'_')
-            };
-            let next_ok = i + wb.len() == bytes.len() || {
-                let n = bytes[i + wb.len()];
-                !(n.is_ascii_alphanumeric() || n == b'_')
-            };
-            if prev_ok && next_ok {
-                return Some(i);
-            }
+/// The `name` a Beanie `Settings` block assigns. `block` starts right after
+/// `class Settings:` (its first line is that line's remainder); `indent` is
+/// the byte width of the `class Settings:` line's leading spaces / tabs. The
+/// block's lines are walked — blank and comment-only lines skipped, stopping
+/// at the first line not indented deeper — and the first line that assigns
+/// the word `name` (`name = …`, `name: str = …`) decides: its value must be a
+/// literal on that line. A later field's literal is never read.
+fn settings_name(block: &str, indent: usize) -> LeadingLit<'_> {
+    for line in block.split('\n').skip(1) {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let body = line.trim_start_matches([' ', '\t']);
+        if body.is_empty() || body.starts_with('#') {
+            continue;
         }
-        i += 1;
+        if line.len() - body.len() <= indent {
+            break;
+        }
+        let Some(rest) = body.strip_prefix("name") else {
+            continue;
+        };
+        if rest.bytes().next().is_some_and(is_word_byte) {
+            continue;
+        }
+        if let Some(value) = assigned_value(rest) {
+            return inline_literal(value);
+        }
     }
-    None
+    LeadingLit::NotLiteral
+}
+
+/// Byte length of `s`'s leading spaces and tabs.
+fn blank_prefix_len(s: &str) -> usize {
+    s.len() - s.trim_start_matches([' ', '\t']).len()
 }
 
 // ----------------------------------------------------------------------------
@@ -3440,6 +3555,155 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
         assert_eq!(
             stats.marker(src),
             "[data-entity] literals=4 sql=1 tables=orders@1,payments@1 ctes=1 collections=events rejected_fn=0 rejected_fmt=1"
+        );
+    }
+
+    // ---- LA.42: declaration names come from a leading single-line literal --
+
+    #[test]
+    fn collection_argument_must_start_with_a_literal() {
+        assert_eq!(
+            sorted_qnames("db.collection(name);\nconst LABEL = 'users';\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            sorted_qnames("db.collection(\n  'orders'\n)\n"),
+            ["data_entity:nosql:orders"]
+        );
+        // data_entities.rs's own comment shape: the backtick literal
+        // ` matches but ` starts the argument and closes on its line.
+        assert_eq!(
+            sorted_qnames("// so `someother.collection(` matches but `_collection(` does not.\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn mongoose_model_needs_a_literal_first_argument() {
+        assert_eq!(
+            sorted_qnames("mongoose.model(modelName, schema);\nexport const LABEL = 'Registry';\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            sorted_qnames("mongoose.model(\n  'User',\n  userSchema,\n)\n"),
+            ["data_entity:nosql:User"]
+        );
+    }
+
+    #[test]
+    fn needle_tables_are_not_entities() {
+        for src in [
+            "NEEDLES = [\"mongoose.model(\", \"TableName:\", \"dynamodb.Table(\"]\n",
+            "//! Mongoose: mongoose.model('<Name>', ...)\n",
+            "// TableName: '...'\n",
+        ] {
+            assert_eq!(sorted_qnames(src), Vec::<String>::new(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn tablename_needs_an_assigned_literal() {
+        assert_eq!(
+            sorted_qnames(
+                "@declared_attr\ndef __tablename__(cls):\n    return cls.__name__.lower()\n\nAUDIT = \"audit\"\n"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            sorted_qnames("__tablename__: str = \"orders\"\n"),
+            ["data_entity:sql:orders"]
+        );
+    }
+
+    #[test]
+    fn beanie_name_must_be_a_literal_in_the_block() {
+        assert_eq!(
+            sorted_qnames(
+                "class Settings:\n    name = collection_name()\n    validate_on_save = \"strict\"\n"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            sorted_qnames(
+                "class Settings:\n    use_state_management = True\n    name = \"events\"\n"
+            ),
+            ["data_entity:nosql:events"]
+        );
+    }
+
+    #[test]
+    fn dynamodb_table_name_needs_a_literal() {
+        assert_eq!(
+            sorted_qnames(
+                "{ TableName: process.env.ORDERS_TABLE, Item: { status: { S: \"pending\" } } }\n"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            sorted_qnames("table = dynamodb.Table(table_name)\nx = 'cache'\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn entity_shape_is_enforced_at_the_funnel() {
+        for noise in [", ", "<Name>", "...", ") {\n let", "a b", "${t}"] {
+            assert!(is_noise_entity_name(noise), "{noise:?} must be noise");
+        }
+        for name in [
+            "users",
+            "audit_log",
+            "orders-v2",
+            "system.users",
+            "users/abc/orders",
+            "OrderReadModel",
+            "usuários",
+        ] {
+            assert!(!is_noise_entity_name(name), "{name:?} must be kept");
+        }
+    }
+
+    /// The four declaration scanners plus the funnel count, as
+    /// `extract_data_entity_nodes` runs them.
+    fn decl_stats(src: &str) -> DeclStats {
+        let mut decl = DeclStats::default();
+        let names = [
+            scan_orm_table_decls(src, &mut decl),
+            scan_mongoose_models(src, &mut decl),
+            scan_dynamodb_tables(src, &mut decl),
+            scan_beanie_documents(src, &mut decl),
+        ]
+        .concat();
+        for name in &names {
+            decl.funnel(name);
+        }
+        decl
+    }
+
+    #[test]
+    fn decl_marker_counts_every_needle_hit() {
+        let needles = "NEEDLES = [\"mongoose.model(\", \"TableName:\", \"dynamodb.Table(\"]\n";
+        assert_eq!(
+            decl_stats(needles).marker(),
+            "[data-entity] decl needles=3 kept=0 rejected_nonliteral=1 rejected_shape=2"
+        );
+        let registry = "export const User = mongoose.model(\"User\", userSchema);\n\
+                        export const f = (m) => mongoose.model(modelName, schema);\n\
+                        export const LABEL = \"Registry\";\n";
+        assert_eq!(
+            decl_stats(registry).marker(),
+            "[data-entity] decl needles=2 kept=1 rejected_nonliteral=1 rejected_shape=0"
+        );
+        let models = "class Order:\n    __tablename__ = \"orders\"\n\n\
+                      class Base:\n    def __tablename__(cls):\n        return 'x'\n    db_table = '...'\n";
+        assert_eq!(
+            decl_stats(models),
+            DeclStats {
+                needles: 3,
+                kept: 1,
+                rejected_nonliteral: 1,
+                rejected_shape: 1
+            }
         );
     }
 }
