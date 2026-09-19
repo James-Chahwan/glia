@@ -12,8 +12,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use repo_graph_code_domain::{CallSite, CodeNav, UnresolvedRef};
-use repo_graph_core::{Edge, NodeId, NodeKindId, RepoId};
+use repo_graph_code_domain::{
+    CallSite, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
+};
+use repo_graph_core::{CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use repo_graph_graph::{RepoGraph, SymbolTable};
 
 use crate::container::{
@@ -276,12 +278,30 @@ impl Container {
     }
 }
 
+/// Code-domain `(id, name)` pairs from one of its `ALL` tables.
+fn code_pairs<I: Copy>(table: &[(I, &'static str)], id: fn(I) -> u32) -> Vec<(u32, &'static str)> {
+    table.iter().map(|(i, name)| (id(*i), *name)).collect()
+}
+
 impl Header {
-    /// Header for a code-domain container. v0.4.5a leaves the registries
-    /// empty — they're diagnostic surfaces and the per-domain crates haven't
-    /// exposed a registration API yet (lands at v0.4.10).
+    /// Header for a code-domain container (LC.4): self-describing, its three
+    /// registries filled from code-domain's `node_kind::ALL`,
+    /// `edge_category::ALL` and `cell_type::ALL`, so every code shard and
+    /// `cross_stack.gmap` names its ids without a reader linking code-domain.
+    ///
+    /// Infallible: `for_domain` only fails on an id repeated within one table,
+    /// and the code tables are unique by construction
+    /// (`code_registries_have_unique_ids` pins it). Were that ever broken, the
+    /// file would still be written, with empty registries (`Header::new`),
+    /// rather than panic mid-build.
     pub fn for_code() -> Self {
-        Self::new("code")
+        Self::for_domain(
+            GRAPH_TYPE,
+            &code_pairs(node_kind::ALL, |k: NodeKindId| k.0),
+            &code_pairs(edge_category::ALL, |c: EdgeCategoryId| c.0),
+            &code_pairs(cell_type::ALL, |c: CellTypeId| c.0),
+        )
+        .unwrap_or_else(|_| Self::new(GRAPH_TYPE))
     }
 }
 
@@ -378,6 +398,23 @@ pub fn write_repo_graph(g: &RepoGraph, path: &Path) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LC.4: `for_code`'s fallback to empty registries is unreachable - every
+    /// code-domain table is unique by id, so `for_domain` accepts all three.
+    #[test]
+    fn code_registries_have_unique_ids() {
+        let full = Header::for_domain(
+            GRAPH_TYPE,
+            &code_pairs(node_kind::ALL, |k: NodeKindId| k.0),
+            &code_pairs(edge_category::ALL, |c: EdgeCategoryId| c.0),
+            &code_pairs(cell_type::ALL, |c: CellTypeId| c.0),
+        )
+        .expect("code-domain ALL tables repeat an id");
+        assert_eq!(Header::for_code(), full);
+        assert_eq!(full.node_kind_registry.len(), node_kind::ALL.len());
+        assert_eq!(full.edge_category_registry.len(), edge_category::ALL.len());
+        assert_eq!(full.cell_registry.len(), cell_type::ALL.len());
+    }
 
     #[test]
     fn nav_store_sorts_by_node_id() {

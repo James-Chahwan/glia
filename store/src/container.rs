@@ -125,9 +125,13 @@ pub struct OwnedFile {
     pub sections: Vec<EncodedSection>,
 }
 
-/// File header. Magic + version are checked on load. Registries are
-/// diagnostic-only at v0.4.5a — not load-bearing — but they let a future
-/// `gmap inspect` command name the u32 ids.
+/// File header. Magic + version are checked on load. The three registries make
+/// the file self-describing (LC.4): they name every node-kind, edge-category
+/// and cell-type id the writing domain knows, sorted by id, so a reader
+/// (`inspect_path`, `glia inspect`) labels a file's ids from the file alone,
+/// with no domain crate linked, and a file written by a newer build names the
+/// ids an older reader has never heard of. Not load-bearing for decoding:
+/// `Header::new` writes them empty, `Header::for_domain` fills them.
 #[derive(Debug, Clone, PartialEq)]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
@@ -142,7 +146,8 @@ pub struct Header {
 
 impl Header {
     /// A header for a graph of `graph_type` (`"code"`, `"toy"`, ...): this
-    /// build's magic and format version, empty registries.
+    /// build's magic and format version, empty registries. A file written with
+    /// it names none of its ids; `for_domain` is the self-describing form.
     pub fn new(graph_type: impl Into<String>) -> Self {
         Self {
             magic: MAGIC,
@@ -153,6 +158,46 @@ impl Header {
             node_kind_registry: Vec::new(),
         }
     }
+
+    /// A self-describing header for a domain (LC.4): this build's magic and
+    /// format version, and the domain's node-kind, edge-category and
+    /// cell-type tables as `(id, name)` pairs, each copied into its registry
+    /// sorted by id (the input order does not matter, so the bytes are
+    /// deterministic). An id that appears twice in one table is `Corrupt`
+    /// ("duplicate registry id ..."): a reader could not tell which name is
+    /// meant. The same id in two different tables is fine - they are separate
+    /// id spaces.
+    pub fn for_domain(
+        graph_type: impl Into<String>,
+        kinds: &[(u32, &str)],
+        categories: &[(u32, &str)],
+        cells: &[(u32, &str)],
+    ) -> Result<Header, StoreError> {
+        Ok(Self {
+            node_kind_registry: registry("node_kind", kinds)?,
+            edge_category_registry: registry("edge_category", categories)?,
+            cell_registry: registry("cell_type", cells)?,
+            ..Self::new(graph_type)
+        })
+    }
+}
+
+/// `pairs` as registry entries sorted by id; a repeated id is `Corrupt`.
+fn registry(table: &str, pairs: &[(u32, &str)]) -> Result<Vec<RegistryEntry>, StoreError> {
+    let mut out: Vec<RegistryEntry> = pairs
+        .iter()
+        .map(|(id, name)| RegistryEntry { id: *id, name: (*name).to_string() })
+        .collect();
+    out.sort_by_key(|e| e.id);
+    if let Some(w) = out.windows(2).find(|w| w[0].id == w[1].id) {
+        return Err(StoreError::Corrupt {
+            detail: format!(
+                "duplicate registry id {} in the {table} table ({} and {})",
+                w[0].id, w[0].name, w[1].name
+            ),
+        });
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -696,6 +741,40 @@ mod tests {
         assert_eq!(archived.header.magic, MAGIC);
         assert_eq!(archived.header.version.to_native(), FORMAT_VERSION);
         assert_eq!(archived.header.graph_type.as_str(), "code");
+        assert_eq!(archived.header.node_kind_registry.len(), 0, "Header::new names nothing");
+
+        // LC.4: a for_domain header's registries survive the archive, sorted.
+        let mut c = empty_container();
+        c.header = Header::for_domain("toy", &[(2, "B"), (1, "A")], &[(1, "E")], &[]).unwrap();
+        let core = encoded_core(&c);
+        let archived =
+            rkyv::access::<ArchivedContainer, rkyv::rancor::Error>(&core).unwrap();
+        let kinds: Vec<(u32, &str)> = archived
+            .header
+            .node_kind_registry
+            .iter()
+            .map(|e| (e.id.to_native(), e.name.as_str()))
+            .collect();
+        assert_eq!(kinds, vec![(1, "A"), (2, "B")]);
+        assert_eq!(archived.header.edge_category_registry.len(), 1);
+        assert_eq!(archived.header.cell_registry.len(), 0);
+    }
+
+    #[test]
+    fn for_domain_rejects_a_duplicate_id_within_one_table() {
+        let err = Header::for_domain("toy", &[(3, "X"), (3, "Y")], &[], &[]).unwrap_err();
+        match err {
+            StoreError::Corrupt { detail } => {
+                assert!(detail.contains("duplicate registry id 3"), "{detail}");
+                assert!(detail.contains("node_kind"), "{detail}");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+        // One id in two different tables is two id spaces, not a duplicate.
+        let h = Header::for_domain("toy", &[(1, "K")], &[(1, "C")], &[(1, "T")]).unwrap();
+        assert_eq!(h.magic, MAGIC);
+        assert_eq!(h.version, FORMAT_VERSION);
+        assert_eq!(h.graph_type, "toy");
     }
 
     #[test]

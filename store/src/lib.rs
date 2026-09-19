@@ -34,13 +34,17 @@
 //! - `layout` — `DEFAULT_GMAP_SUBDIR`, the sharded manifest layout, the
 //!   `MergedGraph` round-trip, `upsert_cell_sharded`, `is_gmap_stale`.
 //! - `error` — `StoreError`.
+//! - `inspect` — `inspect_path` / `Inspection` (LC.4): a file or layout
+//!   decoded from its core and header registries alone, no domain crate.
 
 mod error;
 mod container;
 mod code_section;
 mod layout;
+mod inspect;
 
 pub use error::*;
 pub use container::*;
 pub use code_section::*;
 pub use layout::*;
+pub use inspect::*;
