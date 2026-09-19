@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/implementors.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.implementors(qname: &str, direction: &str = "down", transitive: bool = true) -> PyResult<Py<PyAny>>

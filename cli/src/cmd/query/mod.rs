@@ -10,6 +10,7 @@ use clap::Subcommand;
 
 mod find;
 mod flows;
+mod implementors;
 mod pages;
 mod serves;
 
@@ -26,6 +27,13 @@ pub(crate) enum QueryCmd {
     /// it reaches, whether it crosses a service, the mechanisms it uses and
     /// where the entry is. Rows sharing a key are all kept. Exits 0.
     Flows(flows::Args),
+    /// Implementors (LD.7c): who implements or extends a type, or overrides a
+    /// method, over IMPLEMENTS / INHERITS_FROM — the whole hierarchy unless
+    /// `--direct`, the supertypes with `--up`. Each row is located, names the
+    /// edge that entered it and its tier: FACT (declared), DERIVED (inferred,
+    /// e.g. Go method sets) or HEURISTIC, the weakest edge on its path.
+    /// Nothing found is a FACT with the language's heritage caveats: exits 0.
+    Implementors(implementors::Args),
     /// Pages (LA.6e): the frontend's client-router pages with their handlers,
     /// the navigation links between them, dead deep links (a router link no
     /// route serves, with the catch-all that absorbs it) and pages no in-repo
@@ -43,6 +51,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
+        QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
     }

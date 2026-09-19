@@ -142,6 +142,45 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "a method call on a value (`x.m()`) binds through the type of a struct field, a parameter, or a `let` with a type annotation or a `T::new()` / `T::default()` / `T::from(..)` / `T { .. }` / enum-variant initialiser (`&`, `Arc`, `Rc`, `Box` peeled); it stays unresolved when the receiver's type comes from a function's return value (`let r = make()`), a chain (`a.b().m()`) or a container (`Option<T>`, `Vec<T>`), is generic, `dyn` or `impl Trait`, when the name is rebound to another type in the same fn, or when the method is a trait's default body the type does not override (a `trait`'s own fns have no node)",
         verify: "grep the method name",
     },
+    // LD.7c: the heritage rows `glia implementors` carries, measured at HEAD.
+    // Rust `impl Trait for Type` is IMPLEMENTS; its supertraits are not.
+    CoverageCaveat {
+        language: "rust",
+        edge_category: "INHERITS_FROM",
+        note: "supertraits (`trait A: B`) are not extracted, and a trait's own method declarations are not nodes, so a trait has no supertype and a trait method no implementors (`impl Trait for Type` IS extracted as IMPLEMENTS)",
+        verify: "grep the trait bound (`trait .*: <Name>`)",
+    },
+    // LD.7b: Go satisfaction is inferred, so its edges are Medium (DERIVED).
+    CoverageCaveat {
+        language: "go",
+        edge_category: "IMPLEMENTS",
+        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method NAMES: signatures are not compared, so same-named methods with different signatures pair (gRPC clients and servers share method names); pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind (another package's, `comparable`) is skipped as open; constraint type terms are ignored",
+        verify: "check the method signatures and receivers against the interface",
+    },
+    CoverageCaveat {
+        language: "php",
+        edge_category: "IMPLEMENTS",
+        note: "`class X implements I` clauses are not extracted: no PHP class has an IMPLEMENTS edge",
+        verify: "grep 'implements' for the interface name",
+    },
+    CoverageCaveat {
+        language: "php",
+        edge_category: "INHERITS_FROM",
+        note: "`class X extends Base` and `interface A extends B` clauses are not extracted, and traits (`use T;` in a class) are not nodes: no PHP type has an INHERITS_FROM edge",
+        verify: "grep 'extends' / 'use' for the type or trait name",
+    },
+    CoverageCaveat {
+        language: "swift",
+        edge_category: "IMPLEMENTS",
+        note: "protocol conformance (`class X: P`, `struct X: P`, `extension X: P`) is not extracted: no Swift type has an IMPLEMENTS edge",
+        verify: "grep ': <Protocol>' in type and extension declarations",
+    },
+    CoverageCaveat {
+        language: "swift",
+        edge_category: "INHERITS_FROM",
+        note: "class inheritance (`class Child: Base`) and protocol inheritance (`protocol A: B`) are not extracted: no Swift type has an INHERITS_FROM edge",
+        verify: "grep ': <Base>' in class and protocol declarations",
+    },
     CoverageCaveat {
         language: "dart",
         edge_category: "HTTP_CALLS",
@@ -492,7 +531,10 @@ mod tests {
         // LA.35a narrows to the untyped receivers; a repo without Rust gets
         // no such row.
         let report = coverage_report(&graph_with_file("src/lib.rs"));
-        let rust: Vec<_> = report.iter().filter(|n| n.language == "rust").collect();
+        let rust: Vec<_> = report
+            .iter()
+            .filter(|n| n.language == "rust" && n.edge_category == "CALLS")
+            .collect();
         assert_eq!(rust.len(), 1);
         assert_eq!((rust[0].edge_category, rust[0].edges_found), ("CALLS", 0));
         let note = rust[0].note;
@@ -505,7 +547,45 @@ mod tests {
         assert_eq!(rust[0].verify, "grep the method name");
         let go = coverage_report(&graph_with_file("main.go"));
         assert!(go.iter().all(|n| n.language != "rust"));
-        assert_eq!(go.len(), report.len() - 1);
+        // Both reports share the universal rows; each adds its own language's.
+        let own = |r: &[CoverageNote], lang: &str| r.iter().filter(|n| n.language == lang).count();
+        assert_eq!(
+            go.len() - own(&go, "go"),
+            report.len() - own(&report, "rust")
+        );
+    }
+
+    #[test]
+    fn heritage_caveats_name_the_blind_languages() {
+        // LD.7c: an implementors answer over Go, PHP, Swift or Rust carries the
+        // heritage rows its language needs; Java, whose heritage is extracted,
+        // gets none.
+        let rows = |file: &str| -> Vec<(&'static str, &'static str)> {
+            let mut r: Vec<_> = coverage_report(&graph_with_file(file))
+                .iter()
+                .filter(|n| matches!(n.edge_category, "IMPLEMENTS" | "INHERITS_FROM"))
+                .map(|n| (n.language, n.edge_category))
+                .collect();
+            r.sort_unstable();
+            r
+        };
+        assert_eq!(rows("main.go"), [("go", "IMPLEMENTS")]);
+        assert_eq!(
+            rows("Repo.php"),
+            [("php", "IMPLEMENTS"), ("php", "INHERITS_FROM")]
+        );
+        assert_eq!(
+            rows("Repo.swift"),
+            [("swift", "IMPLEMENTS"), ("swift", "INHERITS_FROM")]
+        );
+        assert_eq!(rows("src/lib.rs"), [("rust", "INHERITS_FROM")]);
+        assert!(rows("Repo.java").is_empty());
+        let go = coverage_report(&graph_with_file("main.go"));
+        let go_row = go.iter().find(|n| n.language == "go").map(|n| n.note);
+        assert!(
+            go_row.is_some_and(|n| n.contains("DERIVED") && n.contains("pointer and value receivers")),
+            "{go_row:?}"
+        );
     }
 
     #[test]
