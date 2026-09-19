@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 278,
+  "fixtures": 280,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1124,6 +1124,13 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "py-test-cells": {
+      "framework": "py-test-cells",
+      "language": "python",
+      "per_category": {
+        "TESTS": 1.0
+      }
+    },
     "py-tests": {
       "framework": "py-tests",
       "language": "python",
@@ -1711,6 +1718,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "xcut-overlay-wrapper": {
+      "framework": "xcut-overlay-wrapper",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "xcut-proto-shared": {
