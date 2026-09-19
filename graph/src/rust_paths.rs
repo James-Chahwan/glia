@@ -28,6 +28,12 @@
 //! the persisted `module_import_bindings`; a fn's and every glob stay in the
 //! build-time [`RustBindings`] the call passes read.
 //!
+//! LA.35b binds the typed receivers the generic receiver pass (A6.2a /
+//! LA.35a) misses ([`RustIndex::resolve_call`]'s `ComplexReceiver` arm): a
+//! method from an `impl` in another file than its type, `self.f.m()` inside
+//! such an `impl`, and a receiver type only Rust scoping names (a fn-body
+//! `use`, a glob, an inline mod, the one crate-local type of that name).
+//!
 //! Every lookup is by key, and every candidate list is sorted by qname before
 //! a tie-break, so no winner is ever picked by iterating a `HashMap`.
 
@@ -35,11 +41,14 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{
-    CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category,
+    node_kind, recv_stats,
 };
 use repo_graph_core::{CellPayload, NodeId, NodeKindId};
 
-use crate::calls::{position_file, push_edge, unique_global_function, unique_global_module};
+use crate::calls::{
+    position_file, push_edge, receiver_type, unique_global_function, unique_global_module,
+};
 use crate::types::RepoGraph;
 
 /// One Cargo package's crate roots, as the engine found them in the walk.
@@ -104,12 +113,29 @@ struct Package {
     roots_by_prefix: HashMap<String, Vec<String>>,
 }
 
+/// How the hook bound a typed receiver (LA.35b); the `[rust-recv]` marker
+/// counts each, one per bound call, first matching rule wins.
+#[derive(Clone, Copy)]
+enum Recv {
+    /// `self.f.m()` in an `impl` written in another file than its type: the
+    /// owner came from the caller's qname.
+    CrossFileSelfField,
+    /// The receiver's type is an ENUM.
+    EnumMember,
+    /// The method sits in an `impl` in another file than its type.
+    ImplElsewhere,
+    /// A type the generic pass cannot name (a fn-body `use`, a glob, an
+    /// inline mod, the one crate-local type of that name), method on the type.
+    ScopedType,
+}
+
 #[derive(Default)]
 struct Stats {
     by_rule: [Cell<usize>; 8],
     resolved: Cell<usize>,
     unique_in_crate: Cell<usize>,
     receiver_skipped: Cell<usize>,
+    recv: [Cell<usize>; 4],
 }
 
 impl Stats {
@@ -273,9 +299,10 @@ impl RustIndex {
     }
 
     /// The `extra_hook` body: resolve one Attribute call site as a Rust path,
-    /// (LA.3) one `self.m()` the generic owner walk missed, or (LA.1b) one
-    /// Bare call through the file module's `use ..::*` globs, the last scope
-    /// Rust consults. `None` for every other qualifier shape.
+    /// (LA.3) one `self.m()` the generic owner walk missed, (LA.1b) one Bare
+    /// call through the file module's `use ..::*` globs, the last scope Rust
+    /// consults, or (LA.35b) one method call on a typed value
+    /// ([`Self::resolve_typed_receiver`]). `None` for every other shape.
     pub(crate) fn resolve_call(
         &self,
         g: &RepoGraph,
@@ -290,6 +317,9 @@ impl RustIndex {
             CallQualifier::Bare(name) => {
                 let file_module = enclosing(&g.nav, site.from, false)?;
                 return self.glob_member(g, rb, file_module, name, is_callable);
+            }
+            CallQualifier::ComplexReceiver { name, .. } => {
+                return self.resolve_typed_receiver(g, rb, site, name);
             }
             _ => return None,
         };
@@ -329,11 +359,18 @@ impl RustIndex {
         Some(hit)
     }
 
+    /// The fired_on markers of one `build_rust`: LA.1a's path line, then
+    /// LA.35b's [`Self::report_recv`] line.
+    pub(crate) fn report(&self) {
+        self.report_paths();
+        self.report_recv();
+    }
+
     /// LA.1a fired_on marker, once per `build_rust` that examined a path call:
     /// `[rust-paths] path calls resolved R/P (crate=.. self=.. super=.. Self=..
     /// import=.. child=.. type=.. crate_name=.. unique_in_crate=..) crates=N`,
     /// plus ` receiver_skipped=K` when the lone-base guard dropped any site.
-    pub(crate) fn report(&self) {
+    fn report_paths(&self) {
         let n = |r: Rule| self.stats.by_rule[r as usize].get();
         let examined: usize = self.stats.by_rule.iter().map(Cell::get).sum();
         if examined == 0 {
@@ -360,6 +397,168 @@ impl RustIndex {
             self.stats.unique_in_crate.get(),
             self.crates,
         );
+    }
+
+    /// LA.35b fired_on marker, once per `build_rust` whose hook bound a typed
+    /// receiver: `[rust-recv] typed receivers via hook: impl_elsewhere=A
+    /// cross_file_self_field=B enum_member=C`, plus ` scoped_type=D` when any
+    /// bind needed only Rust scoping. One count per bound call ([`Recv`]).
+    fn report_recv(&self) {
+        let n = |r: Recv| self.stats.recv[r as usize].get();
+        if self.stats.recv.iter().all(|c| c.get() == 0) {
+            return;
+        }
+        let scoped = n(Recv::ScopedType);
+        let tail = if scoped > 0 {
+            format!(" scoped_type={scoped}")
+        } else {
+            String::new()
+        };
+        eprintln!(
+            "[rust-recv] typed receivers via hook: impl_elsewhere={} cross_file_self_field={} \
+             enum_member={}{tail}",
+            n(Recv::ImplElsewhere),
+            n(Recv::CrossFileSelfField),
+            n(Recv::EnumMember),
+        );
+    }
+
+    // ---- LA.35b: typed receivers --------------------------------------------
+
+    /// `x.m()` / `self.f.m()` the generic receiver pass missed. The receiver's
+    /// type name is [`receiver_type`]'s (a local, else a field of the
+    /// enclosing type), else, for `self.f` in an `impl` written in another
+    /// file than its type, field `f` of the type the caller's qname names
+    /// ([`Self::cross_file_field_type`]). The name becomes a type the Rust way
+    /// ([`Self::type_in_scope`]) and the method is found on it by
+    /// [`Self::final_name`]: its own methods, a trait's, then (crate-scoped,
+    /// unique) the `impl`s in other files. A receiver no rule types binds
+    /// nothing: a shadowing local of unknown type stays unresolved.
+    fn resolve_typed_receiver(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        site: &CallSite,
+        name: &str,
+    ) -> Option<NodeId> {
+        if name.is_empty() {
+            return None;
+        }
+        let (pos, cross_file) = match receiver_type(g, site) {
+            Some(ty) => (self.type_in_scope(g, rb, site.from, ty)?, false),
+            None => (self.cross_file_field_type(g, rb, site)?, true),
+        };
+        let file_module = enclosing(&g.nav, site.from, false)?;
+        let caller_pkg = g
+            .nav
+            .qname_by_id
+            .get(&file_module)
+            .and_then(|q| self.covering(q));
+        let mut unused = false;
+        let hit = self.final_name(g, rb, &pos, name, caller_pkg, &mut unused)?;
+        let kind = |id: &NodeId| g.nav.kind_by_id.get(id).copied();
+        let rule = if cross_file {
+            Recv::CrossFileSelfField
+        } else if matches!(&pos, Pos::Type(t) if kind(t) == Some(node_kind::ENUM)) {
+            Recv::EnumMember
+        } else if g
+            .nav
+            .parent_of
+            .get(&hit)
+            .and_then(kind)
+            .is_some_and(is_scope_kind)
+        {
+            Recv::ImplElsewhere
+        } else {
+            Recv::ScopedType
+        };
+        Stats::bump(&self.stats.recv[rule as usize]);
+        recv_stats::record();
+        Some(hit)
+    }
+
+    /// The type a type name written in `from`'s scope names: a `use` (the
+    /// fn's own first), a type or glob-imported type in the enclosing scopes,
+    /// innermost first; else the one top-level type of that name in `from`'s
+    /// crate. No such type in the crate -> `Pos::TypeName` (an `impl` in the
+    /// crate may still name it); two or more -> `None`. Never a same-named
+    /// type of another crate the scope does not import.
+    fn type_in_scope(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        from: NodeId,
+        ty: &str,
+    ) -> Option<Pos> {
+        let scope = enclosing(&g.nav, from, true)?;
+        let file_module = enclosing(&g.nav, from, false)?;
+        if let Some((Pos::Type(id), _)) = self.start(g, rb, from, scope, file_module, ty) {
+            return Some(Pos::Type(id));
+        }
+        match self.crate_types(g, file_module, ty).as_slice() {
+            [only] => Some(Pos::Type(*only)),
+            [] => Some(Pos::TypeName(ty.to_string())),
+            _ => None,
+        }
+    }
+
+    /// `self.f` (or a local bound to `self.f`) in a method whose `impl` lives
+    /// in another file than its type: the owner is the one crate-local STRUCT
+    /// / ENUM named by the caller's qname (`<module>::<Type>::<m>`, LA.3's
+    /// `Self` rule), and `f`'s declared type is resolved from the owner's
+    /// scope, where the field was written. Ambiguity -> `None`.
+    fn cross_file_field_type(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        site: &CallSite,
+    ) -> Option<Pos> {
+        let field = self_field(g, site)?;
+        let Pos::TypeName(owner_name) = self_type(&g.nav, site.from)? else {
+            return None;
+        };
+        let file_module = enclosing(&g.nav, site.from, false)?;
+        let owners: Vec<NodeId> = self
+            .crate_types(g, file_module, &owner_name)
+            .into_iter()
+            .filter(|id| {
+                g.nav
+                    .kind_by_id
+                    .get(id)
+                    .is_some_and(|k| *k == node_kind::STRUCT || *k == node_kind::ENUM)
+            })
+            .collect();
+        let [owner] = owners.as_slice() else {
+            return None;
+        };
+        let ty = g
+            .nav
+            .field_types
+            .get(owner)?
+            .get(field)
+            .filter(|t| !t.is_empty())?;
+        self.type_in_scope(g, rb, *owner, ty)
+    }
+
+    /// The top-level types named `ty` in the crate of `file_module`, sorted
+    /// by qname. Empty when the crate is unknown.
+    fn crate_types(&self, g: &RepoGraph, file_module: NodeId, ty: &str) -> Vec<NodeId> {
+        let root = g
+            .nav
+            .qname_by_id
+            .get(&file_module)
+            .and_then(|q| self.crate_root(g, q));
+        let Some(Root::Module(root)) = root else {
+            return Vec::new();
+        };
+        self.items
+            .get(&root)
+            .and_then(|names| names.get(ty))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| g.nav.kind_by_id.get(id).is_some_and(|k| is_type_kind(*k)))
+            .collect()
     }
 
     // ---- LA.3: self calls, inline-mod scoping, enum variants --------------
@@ -397,24 +596,7 @@ impl RustIndex {
         let Pos::TypeName(ty) = &pos else {
             return pos;
         };
-        let root = g
-            .nav
-            .qname_by_id
-            .get(&file_module)
-            .and_then(|q| self.crate_root(g, q));
-        let Some(Root::Module(root)) = root else {
-            return pos;
-        };
-        let types: Vec<NodeId> = self
-            .items
-            .get(&root)
-            .and_then(|names| names.get(ty.as_str()))
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|id| g.nav.kind_by_id.get(id).is_some_and(|k| is_type_kind(*k)))
-            .collect();
-        match types.as_slice() {
+        match self.crate_types(g, file_module, ty).as_slice() {
             [only] => Pos::Type(*only),
             _ => pos,
         }
@@ -1665,6 +1847,26 @@ fn self_type(nav: &CodeNav, from: NodeId) -> Option<Pos> {
     }
 }
 
+/// The field a receiver reads off `self` (LA.35b): `self.f` as written, or a
+/// local the caller recorded as the alias `self.f` (`let c = &self.f`). A
+/// chain, any other receiver, or a local of another / unknown type -> `None`.
+fn self_field<'g>(g: &'g RepoGraph, site: &'g CallSite) -> Option<&'g str> {
+    let CallQualifier::ComplexReceiver { receiver, .. } = &site.qualifier else {
+        return None;
+    };
+    let field = match receiver.strip_prefix("self.") {
+        Some(f) => f,
+        None => g
+            .nav
+            .local_types
+            .get(&site.from)?
+            .get(receiver.as_str())?
+            .strip_prefix("self.")?,
+    };
+    let ident = !field.is_empty() && field.chars().all(|c| c.is_alphanumeric() || c == '_');
+    ident.then_some(field)
+}
+
 /// `scope`, then each enclosing MODULE / PACKAGE out to `file_module`
 /// inclusive: the scopes a name written in `scope` is looked up in.
 fn scope_chain(nav: &CodeNav, scope: NodeId, file_module: NodeId) -> Vec<NodeId> {
@@ -1827,6 +2029,306 @@ mod tests {
         assert!(!joined_by(code, "api", "::", "other"), "xapi is not api");
         assert!(!joined_by(code, "api", "::", "help"), "helper is not help");
         assert!(joined_by(code, "é", ".", "x"));
+    }
+
+    // ---- LA.35b: typed receivers through the hook -------------------------
+
+    use crate::build::build_rust;
+    use crate::test_support::repo;
+    use repo_graph_code_domain::{FileParse, GRAPH_TYPE};
+    use repo_graph_core::{Confidence, Node};
+
+    /// One parsed file, built by hand in the Rust parser's shapes.
+    struct File {
+        module: NodeId,
+        nav: CodeNav,
+        nodes: Vec<Node>,
+        imports: Vec<ImportStmt>,
+        calls: Vec<CallSite>,
+    }
+
+    impl File {
+        fn new(module_q: &str) -> Self {
+            let mut f = File {
+                module: NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_q),
+                nav: CodeNav::default(),
+                nodes: vec![],
+                imports: vec![],
+                calls: vec![],
+            };
+            f.add(node_kind::MODULE, module_q, None);
+            f
+        }
+
+        fn add(&mut self, kind: NodeKindId, qname: &str, parent: Option<NodeId>) -> NodeId {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+            self.nav.record(id, last_seg(qname), qname, kind, parent);
+            self.nodes.push(Node {
+                id,
+                repo: repo(),
+                confidence: Confidence::Strong,
+                cells: vec![],
+            });
+            id
+        }
+
+        /// `use <module>::<name>;` written in this file.
+        fn use_item(&mut self, module: &str, name: &str) {
+            let from_module = self.nav.qname_by_id[&self.module].clone();
+            self.imports.push(ImportStmt {
+                from_module,
+                target: ImportTarget::Symbol {
+                    module: module.to_string(),
+                    name: name.to_string(),
+                    alias: None,
+                    level: 0,
+                },
+            });
+        }
+
+        /// `<receiver>.<name>()` written in `from`.
+        fn call(&mut self, from: NodeId, receiver: &str, name: &str) {
+            self.calls.push(CallSite {
+                from,
+                qualifier: CallQualifier::ComplexReceiver {
+                    receiver: receiver.to_string(),
+                    name: name.to_string(),
+                },
+            });
+        }
+
+        fn parse(self) -> FileParse {
+            FileParse {
+                nodes: self.nodes,
+                edges: vec![],
+                imports: self.imports,
+                calls: self.calls,
+                refs: vec![],
+                nav: self.nav,
+                properties: HashSet::new(),
+            }
+        }
+    }
+
+    fn krate(name: &str, dir: &str) -> RustCrate {
+        let lib = if dir.is_empty() {
+            "src::lib".to_string()
+        } else {
+            format!("{dir}::src::lib")
+        };
+        RustCrate {
+            name: name.to_string(),
+            dir: dir.to_string(),
+            lib_root: Some(lib),
+            other_roots: vec![],
+        }
+    }
+
+    /// Every CALLS edge out of `from`, as target qnames, sorted.
+    fn calls_from(g: &RepoGraph, from: NodeId) -> Vec<String> {
+        let mut out: Vec<String> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS && e.from == from)
+            .filter_map(|e| g.nav.qname_by_id.get(&e.to).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `struct Cache` in `<p>::repo`, its `lookup` in an `impl Cache` in
+    /// `<p>::cache_impl` (parented to that MODULE, as the parser does).
+    fn cache_crate(p: &str) -> Vec<FileParse> {
+        let mut repo_rs = File::new(&format!("{p}::repo"));
+        let m = repo_rs.module;
+        repo_rs.add(node_kind::STRUCT, &format!("{p}::repo::Cache"), Some(m));
+        let mut impl_rs = File::new(&format!("{p}::cache_impl"));
+        let m = impl_rs.module;
+        impl_rs.use_item("crate::repo", "Cache");
+        impl_rs.add(
+            node_kind::METHOD,
+            &format!("{p}::cache_impl::Cache::lookup"),
+            Some(m),
+        );
+        vec![repo_rs.parse(), impl_rs.parse()]
+    }
+
+    #[test]
+    fn typed_receiver_binds_impl_in_another_file() {
+        let mut lib = File::new("src::lib");
+        let m = lib.module;
+        lib.use_item("crate::repo", "Cache");
+        let svc = lib.add(node_kind::STRUCT, "src::lib::Service", Some(m));
+        lib.nav.record_field_type(svc, "cache", "Cache");
+        let cached = lib.add(node_kind::METHOD, "src::lib::Service::cached", Some(svc));
+        lib.call(cached, "self.cache", "lookup");
+        let free = lib.add(node_kind::FUNCTION, "src::lib::free", Some(m));
+        lib.nav.record_local_type(free, "c", "Cache");
+        lib.call(free, "c", "lookup");
+        let mut parses = cache_crate("src");
+        parses.push(lib.parse());
+        let g = build_rust(repo(), parses, &[krate("recv", "")]).expect("builds");
+        let lookup = vec!["src::cache_impl::Cache::lookup".to_string()];
+        assert_eq!(calls_from(&g, cached), lookup, "self.cache: Cache field");
+        assert_eq!(calls_from(&g, free), lookup, "c: Cache parameter");
+    }
+
+    #[test]
+    fn self_field_in_a_cross_file_impl_uses_the_qname_owner() {
+        // `struct Service { repo: Repo }` in lib.rs, which imports the
+        // `Repo` of repo.rs; `impl Service` in service_impl.rs, which imports
+        // another `Repo`. `self.repo` has the type the STRUCT's file names.
+        let mut repo_rs = File::new("src::repo");
+        let m = repo_rs.module;
+        let repo_ty = repo_rs.add(node_kind::STRUCT, "src::repo::Repo", Some(m));
+        repo_rs.add(node_kind::METHOD, "src::repo::Repo::find", Some(repo_ty));
+        let mut other_rs = File::new("src::other");
+        let m = other_rs.module;
+        let other_ty = other_rs.add(node_kind::STRUCT, "src::other::Repo", Some(m));
+        other_rs.add(node_kind::METHOD, "src::other::Repo::find", Some(other_ty));
+        let mut lib = File::new("src::lib");
+        let m = lib.module;
+        lib.use_item("crate::repo", "Repo");
+        let svc = lib.add(node_kind::STRUCT, "src::lib::Service", Some(m));
+        lib.nav.record_field_type(svc, "repo", "Repo");
+        let mut imp = File::new("src::service_impl");
+        let m = imp.module;
+        imp.use_item("crate::other", "Repo");
+        let get = imp.add(
+            node_kind::METHOD,
+            "src::service_impl::Service::get",
+            Some(m),
+        );
+        imp.call(get, "self.repo", "find");
+        let aliased = imp.add(
+            node_kind::METHOD,
+            "src::service_impl::Service::aliased",
+            Some(m),
+        );
+        imp.nav.record_local_type(aliased, "r", "self.repo");
+        imp.call(aliased, "r", "find");
+        let parses = vec![repo_rs.parse(), other_rs.parse(), lib.parse(), imp.parse()];
+        let g = build_rust(repo(), parses, &[krate("recv", "")]).expect("builds");
+        let find = vec!["src::repo::Repo::find".to_string()];
+        assert_eq!(calls_from(&g, get), find, "self.repo in a cross-file impl");
+        assert_eq!(calls_from(&g, aliased), find, "let r = &self.repo");
+    }
+
+    #[test]
+    fn enum_typed_receiver_binds_enum_method() {
+        // Two crates each define `enum Mode` with `label` on it; crate `a`
+        // names its own through a glob, which the generic pass cannot read,
+        // and `describe` sits in an `impl Mode` in another file.
+        let mut parses = Vec::new();
+        for p in ["a", "b"] {
+            let mut mode = File::new(&format!("{p}::src::mode"));
+            let m = mode.module;
+            let e = mode.add(node_kind::ENUM, &format!("{p}::src::mode::Mode"), Some(m));
+            mode.add(
+                node_kind::ATTRIBUTE,
+                &format!("{p}::src::mode::Mode::On"),
+                Some(e),
+            );
+            mode.add(
+                node_kind::METHOD,
+                &format!("{p}::src::mode::Mode::label"),
+                Some(e),
+            );
+            let mut imp = File::new(&format!("{p}::src::mode_impl"));
+            let m = imp.module;
+            imp.use_item("crate::mode", "Mode");
+            imp.add(
+                node_kind::METHOD,
+                &format!("{p}::src::mode_impl::Mode::describe"),
+                Some(m),
+            );
+            parses.extend([mode.parse(), imp.parse()]);
+        }
+        let mut lib = File::new("a::src::lib");
+        let m = lib.module;
+        lib.use_item("crate::mode", "*");
+        let run = lib.add(node_kind::FUNCTION, "a::src::lib::run", Some(m));
+        lib.nav.record_local_type(run, "m", "Mode");
+        lib.call(run, "m", "label");
+        lib.call(run, "m", "describe");
+        parses.push(lib.parse());
+        let crates = [krate("a", "a"), krate("b", "b")];
+        let g = build_rust(repo(), parses, &crates).expect("builds");
+        assert_eq!(
+            calls_from(&g, run),
+            vec![
+                "a::src::mode::Mode::label",
+                "a::src::mode_impl::Mode::describe"
+            ],
+        );
+    }
+
+    #[test]
+    fn shadowed_local_is_not_resolved_by_the_hook() {
+        // `let repo = index();` (type unknown) shadows `self.repo`, in an
+        // `impl` in another file and in one beside its type.
+        let mut repo_rs = File::new("src::repo");
+        let m = repo_rs.module;
+        let repo_ty = repo_rs.add(node_kind::STRUCT, "src::repo::Repo", Some(m));
+        repo_rs.add(node_kind::METHOD, "src::repo::Repo::find", Some(repo_ty));
+        let mut lib = File::new("src::lib");
+        let m = lib.module;
+        lib.use_item("crate::repo", "Repo");
+        let svc = lib.add(node_kind::STRUCT, "src::lib::Service", Some(m));
+        lib.nav.record_field_type(svc, "repo", "Repo");
+        let near = lib.add(node_kind::METHOD, "src::lib::Service::near", Some(svc));
+        lib.nav.record_local_type(near, "repo", "");
+        lib.call(near, "repo", "find");
+        let mut imp = File::new("src::service_impl");
+        let m = imp.module;
+        let far = imp.add(
+            node_kind::METHOD,
+            "src::service_impl::Service::far",
+            Some(m),
+        );
+        imp.nav.record_local_type(far, "repo", "");
+        imp.call(far, "repo", "find");
+        let parses = vec![repo_rs.parse(), lib.parse(), imp.parse()];
+        let g = build_rust(repo(), parses, &[krate("recv", "")]).expect("builds");
+        assert!(calls_from(&g, near).is_empty());
+        assert!(calls_from(&g, far).is_empty());
+    }
+
+    #[test]
+    fn ambiguous_impl_elsewhere_is_unresolved() {
+        // Crates `a` and `b` each `impl Cache { fn lookup }` in another file;
+        // `c` names no `Cache`, so its `cache.lookup()` binds neither. Inside
+        // `d`, two `Cache` types each with an other-file `lookup` are a tie.
+        let mut parses = cache_crate("a::src");
+        parses.extend(cache_crate("b::src"));
+        let mut lib = File::new("c::src::lib");
+        let m = lib.module;
+        let run = lib.add(node_kind::FUNCTION, "c::src::lib::run", Some(m));
+        lib.nav.record_local_type(run, "cache", "Cache");
+        lib.call(run, "cache", "lookup");
+        parses.push(lib.parse());
+        for sub in ["x", "y"] {
+            parses.extend(cache_crate(&format!("d::src::{sub}")));
+        }
+        let mut dlib = File::new("d::src::lib");
+        let m = dlib.module;
+        let drun = dlib.add(node_kind::FUNCTION, "d::src::lib::run", Some(m));
+        dlib.nav.record_local_type(drun, "cache", "Cache");
+        dlib.call(drun, "cache", "lookup");
+        parses.push(dlib.parse());
+        let crates = [
+            krate("a", "a"),
+            krate("b", "b"),
+            krate("c", "c"),
+            krate("d", "d"),
+        ];
+        let g = build_rust(repo(), parses, &crates).expect("builds");
+        assert!(calls_from(&g, run).is_empty(), "{:?}", calls_from(&g, run));
+        assert!(
+            calls_from(&g, drun).is_empty(),
+            "{:?}",
+            calls_from(&g, drun)
+        );
     }
 
     #[test]

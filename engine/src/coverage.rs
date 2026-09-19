@@ -126,11 +126,12 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // LA.1b: with crate paths (LA.1a), macro-argument calls (LA.2), inline
     // mods (LA.3) and `use` trees (LA.1b) resolved, the Rust CALLS gap left
     // was a method call on a typed local or field. LA.35a binds those whose
-    // type the parser can read; the row keeps the receivers it cannot.
+    // type the parser can read, LA.35b those whose method sits in an `impl`
+    // in another file than its type; the row keeps the receivers no rule types.
     CoverageCaveat {
         language: "rust",
         edge_category: "CALLS",
-        note: "a method call on a value (`x.m()`) binds through the type of a struct field, a parameter, or a `let` with a type annotation or a `T::new()` / `T::default()` / `T::from(..)` / `T { .. }` / enum-variant initialiser (`&`, `Arc`, `Rc`, `Box` peeled); it stays unresolved when the receiver's type comes from a function's return value (`let r = make()`), a chain (`a.b().m()`) or a container (`Option<T>`, `Vec<T>`), is generic, `dyn` or `impl Trait`, when the name is rebound to another type in the same fn, or when the method sits in an `impl` block in another file than its type",
+        note: "a method call on a value (`x.m()`) binds through the type of a struct field, a parameter, or a `let` with a type annotation or a `T::new()` / `T::default()` / `T::from(..)` / `T { .. }` / enum-variant initialiser (`&`, `Arc`, `Rc`, `Box` peeled); it stays unresolved when the receiver's type comes from a function's return value (`let r = make()`), a chain (`a.b().m()`) or a container (`Option<T>`, `Vec<T>`), is generic, `dyn` or `impl Trait`, when the name is rebound to another type in the same fn, or when the method is a trait's default body the type does not override (a `trait`'s own fns have no node)",
         verify: "grep the method name",
     },
     CoverageCaveat {
@@ -467,7 +468,9 @@ mod tests {
         // LA.35a: typed receivers bind; the row names the receivers that do not.
         assert!(!note.contains("not implemented"), "{note}");
         assert!(note.contains("a function's return value"), "{note}");
-        assert!(note.contains("in another file than its type"), "{note}");
+        // LA.35b: an `impl` in another file than its type binds through the hook.
+        assert!(!note.contains("in another file than its type"), "{note}");
+        assert!(note.contains("a trait's default body"), "{note}");
         assert_eq!(rust[0].verify, "grep the method name");
         let go = coverage_report(&graph_with_file("main.go"));
         assert!(go.iter().all(|n| n.language != "rust"));

@@ -7,10 +7,14 @@
 //!
 //! Run with `-- --nocapture` to see the `[recv]` marker's `rust=` tokens.
 //!
-//! `Service::cached -> Cache::lookup` (an `impl` in another file than its
-//! type) is LA.35b's row and is not asserted here.
+//! LA.35b: what the generic pass misses, the Rust hook
+//! (graph/src/rust_paths.rs) binds: a method from an `impl` in another file
+//! than its type (`Service::cached -> Cache::lookup`), `self.f.m()` inside
+//! such an `impl`, and an enum-typed receiver. Its `[rust-recv]` marker
+//! counts each.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use repo_graph_code_domain::edge_category;
 use repo_graph_core::NodeId;
@@ -92,4 +96,72 @@ fn a_value_receiver_is_never_a_field_or_a_path() {
         0,
         "a method call on a value must not bind the module fn; CALLS = {calls:?}"
     );
+}
+
+#[test]
+fn impl_in_another_file_resolves() {
+    // LA.35b: `self.cache.lookup("k")` with `cache: Arc<Cache>` and
+    // `impl Cache` in src/cache_impl.rs, whose METHOD the parser parents to
+    // that file's MODULE: the generic pass has no `lookup` on `Cache`, the
+    // Rust hook finds it among the other-file impls of the type's crate.
+    let r = generate_one(&fixture()).expect("fixture builds");
+    let calls = calls(&r);
+    assert_eq!(
+        count(&calls, "src::lib::Service::cached", "src::cache_impl::Cache::lookup"),
+        1,
+        "CALLS = {calls:?}"
+    );
+}
+
+fn write(root: &Path, rel: &str, text: &str) {
+    let path = root.join(rel);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).expect("mkdir");
+    }
+    std::fs::write(path, text).expect("write");
+}
+
+/// The parser's own shapes for LA.35b's other two rows: `self.repo.find()`
+/// in an `impl Service` written in another file than `struct Service` (the
+/// owner comes from the method's qname, the field type from the struct's
+/// file), and a method call on an enum-typed local whose `impl` sits in
+/// another file than the enum.
+#[test]
+fn cross_file_self_field_and_enum_receivers_resolve() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write(root, "Cargo.toml", "[package]\nname = \"xf\"\n");
+    write(
+        root,
+        "src/lib.rs",
+        "pub mod mode;\npub mod mode_impl;\npub mod repo;\npub mod service_impl;\n\n\
+         use crate::repo::Repo;\n\npub struct Service {\n    repo: Repo,\n}\n",
+    );
+    write(
+        root,
+        "src/repo.rs",
+        "pub struct Repo;\n\nimpl Repo {\n    pub fn find(&self) -> u32 {\n        1\n    }\n}\n",
+    );
+    write(
+        root,
+        "src/service_impl.rs",
+        "use crate::Service;\nuse crate::mode::Mode;\n\nimpl Service {\n    \
+         pub fn get(&self) -> u32 {\n        self.repo.find()\n    }\n\n    \
+         pub fn label(&self) -> &'static str {\n        let m = Mode::On;\n        m.describe()\n    }\n}\n",
+    );
+    write(root, "src/mode.rs", "pub enum Mode {\n    On,\n    Off,\n}\n");
+    write(
+        root,
+        "src/mode_impl.rs",
+        "use crate::mode::Mode;\n\nimpl Mode {\n    pub fn describe(&self) -> &'static str {\n        \
+         \"mode\"\n    }\n}\n",
+    );
+    let r = generate_one(root.to_str().expect("utf-8 path")).expect("builds");
+    let calls = calls(&r);
+    for (from, to) in [
+        ("src::service_impl::Service::get", "src::repo::Repo::find"),
+        ("src::service_impl::Service::label", "src::mode_impl::Mode::describe"),
+    ] {
+        assert_eq!(count(&calls, from, to), 1, "{from} -> {to}; CALLS = {calls:?}");
+    }
 }
