@@ -2,10 +2,11 @@
 //! provenance tagging, TESTS edges, and the confidence demotions — plus the
 //! deterministic cross-edge sort that locks the written bytes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use repo_graph_code_domain::evidence::{self, Basis, Evidence, Location};
 use repo_graph_code_domain::{edge_category, node_kind};
-use repo_graph_core::{Confidence, Edge, NodeId};
+use repo_graph_core::{Confidence, Edge, NodeId, NodeKindId};
 use repo_graph_graph::MergedGraph;
 
 pub(crate) fn post_passes(merged: &mut MergedGraph) {
@@ -15,6 +16,10 @@ pub(crate) fn post_passes(merged: &mut MergedGraph) {
     link_doc_sections(merged);
     link_contract_routes(merged);
     tag_synthetic_provenance(merged);
+    // LC.3a: locate every edge's evidence, after every pass that adds an edge
+    // and before the sort, whose canonical order compares cells. A stage
+    // added after `post_passes` runs this and the sort again.
+    fill_evidence_sites(merged).report();
     // Deterministic cross-edge order: several resolvers emit pairs by
     // iterating HashMap indexes (per-process seed), so the edge SET was stable
     // but its Vec order — and therefore cross_stack.gmap's bytes — flapped
@@ -36,6 +41,112 @@ fn edge_cells_marker(merged: &MergedGraph) {
         "[edge-cells] intra={intra} cross={} with_cells={with_cells}",
         merged.cross_edges.len()
     );
+}
+
+/// LC.3a: what [`fill_evidence_sites`] found, for the `[evidence]` marker.
+#[derive(Debug, Default)]
+pub(crate) struct FillStats {
+    /// Edges visited, intra and cross.
+    pub(crate) edges: usize,
+    /// Edges carrying no EVIDENCE cell: an emitter no stage attributes.
+    /// Counted, never invented.
+    pub(crate) missing: usize,
+    /// Edges with evidence, by final basis.
+    pub(crate) site: usize,
+    pub(crate) from_node: usize,
+    pub(crate) to_node: usize,
+    pub(crate) file: usize,
+    pub(crate) none: usize,
+    /// Edges with evidence per emitter, sorted by name.
+    pub(crate) emitters: BTreeMap<String, usize>,
+}
+
+impl FillStats {
+    /// LC.3a fired_on marker, once per build, un-gated:
+    ///   `[evidence] edges=<n> missing=<m> site=<s> from_node=<f> to_node=<t> file=<o> none=<x> emitters=<name>=<count>,...`
+    pub(crate) fn report(&self) {
+        let emitters: Vec<String> = self
+            .emitters
+            .iter()
+            .map(|(name, n)| format!("{name}={n}"))
+            .collect();
+        eprintln!(
+            "[evidence] edges={} missing={} site={} from_node={} to_node={} file={} none={} emitters={}",
+            self.edges,
+            self.missing,
+            self.site,
+            self.from_node,
+            self.to_node,
+            self.file,
+            self.none,
+            emitters.join(",")
+        );
+    }
+}
+
+/// LC.3a: complete every edge's EVIDENCE location from its endpoints
+/// ([`Evidence::fill`]), over intra AND cross edges. A node's location is
+/// [`evidence::locate`] of its FIRST instance in graph order (one id can sit
+/// in several of a repo's language graphs; graph order is deterministic), its
+/// kind that graph's nav kind. The map is only looked up, never iterated.
+///
+/// An edge without evidence is counted `missing`, not given one. A location
+/// already recorded is never overwritten, so a re-run (LC.10b re-runs the
+/// passes over loaded graphs) changes nothing. Runs after every pass that
+/// adds an edge and before the cross-edge sort (cells are part of LC.2's
+/// canonical order).
+pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
+    let mut at: HashMap<NodeId, (Option<Location>, Option<NodeKindId>)> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            at.entry(n.id).or_insert_with(|| {
+                (
+                    evidence::locate(&n.cells),
+                    g.nav.kind_by_id.get(&n.id).copied(),
+                )
+            });
+        }
+    }
+    let mut stats = FillStats::default();
+    let MergedGraph {
+        graphs,
+        cross_edges,
+        ..
+    } = merged;
+    let edges = graphs
+        .iter_mut()
+        .flat_map(|g| g.edges.iter_mut())
+        .chain(cross_edges.iter_mut());
+    for e in edges {
+        stats.edges += 1;
+        let Some(mut ev) = Evidence::of(e) else {
+            stats.missing += 1;
+            continue;
+        };
+        if ev.file.is_none() {
+            let before = ev.clone();
+            let from = at.get(&e.from);
+            let to = at.get(&e.to);
+            ev.fill(
+                e.category,
+                to.and_then(|t| t.1),
+                from.and_then(|f| f.0.as_ref()),
+                to.and_then(|t| t.0.as_ref()),
+            );
+            if ev != before {
+                evidence::attach(e, ev.clone());
+            }
+        }
+        match ev.basis {
+            Basis::Site => stats.site += 1,
+            Basis::FromNode => stats.from_node += 1,
+            Basis::ToNode => stats.to_node += 1,
+            Basis::File => stats.file += 1,
+            Basis::None => stats.none += 1,
+        }
+        *stats.emitters.entry(ev.emitter).or_default() += 1;
+    }
+    stats
 }
 
 /// WP-H / #7: link `.md` DOC_SECTION nodes to the code symbols they document so
@@ -91,7 +202,7 @@ fn link_doc_sections(merged: &mut MergedGraph) {
             // Iterate RAW spans: `identifier_from_span` would throw away the
             // qualifier the doc author supplied, which is the whole signal.
             for span in backtick_spans(text) {
-                let Some((sym, confidence)) = resolve_doc_mention(span, &idx) else {
+                let Some((sym, confidence, rule)) = resolve_doc_mention(span, &idx) else {
                     continue;
                 };
                 if sym == n.id || !seen.insert(sym) {
@@ -102,13 +213,10 @@ fn link_doc_sections(merged: &mut MergedGraph) {
                     Confidence::Medium => medium += 1,
                     Confidence::Weak => weak += 1,
                 }
-                new_edges.push(Edge {
-                    from: n.id,
-                    to: sym,
-                    category: edge_category::DOCUMENTS,
-                    confidence,
-                    cells: Vec::new(),
-                });
+                new_edges.push(
+                    Edge::new(n.id, sym, edge_category::DOCUMENTS, confidence)
+                        .with_cell(Evidence::emitter("pass:doclink").rule(rule).to_cell()),
+                );
                 if seen.len() >= MAX_LINKS_PER_DOC {
                     break;
                 }
@@ -286,13 +394,12 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
                 Confidence::Strong if !exact => Confidence::Medium,
                 c => c,
             };
-            edges.push(Edge {
-                from: *op_id,
-                to: h.route,
-                category: edge_category::DOCUMENTS,
-                confidence,
-                cells: Vec::new(),
-            });
+            let rule = if exact { "exact" } else { "prefix" };
+            let ev = Evidence::emitter("pass:contract_link").rule(rule);
+            edges.push(
+                Edge::new(*op_id, h.route, edge_category::DOCUMENTS, confidence)
+                    .with_cell(ev.to_cell()),
+            );
         }
     }
     (edges, stats)
@@ -380,12 +487,12 @@ fn channel_edges(
         } else {
             (&sides.consumers, &sides.producers)
         };
-        let (hits, tier) = match same.get(key) {
-            Some(h) => (h, Confidence::Strong),
+        let (hits, tier, rule) = match same.get(key) {
+            Some(h) => (h, Confidence::Strong, "same_side"),
             None => match other.get(key) {
                 Some(h) => {
                     stats.crossed += 1;
-                    (h, Confidence::Medium)
+                    (h, Confidence::Medium, "other_side")
                 }
                 None => {
                     stats.channel_unmatched += 1;
@@ -394,14 +501,15 @@ fn channel_edges(
             },
         };
         stats.paired += 1;
+        let cell = Evidence::emitter("pass:contract_channel")
+            .rule(rule)
+            .to_cell();
         for &(to, node_conf) in hits {
-            edges.push(Edge {
-                from: *op_id,
-                to,
-                category: edge_category::DOCUMENTS,
-                confidence: weaker(tier, node_conf),
-                cells: Vec::new(),
-            });
+            let confidence = weaker(tier, node_conf);
+            edges.push(
+                Edge::new(*op_id, to, edge_category::DOCUMENTS, confidence)
+                    .with_cell(cell.clone()),
+            );
             stats.channel_edges += 1;
         }
     }
@@ -521,9 +629,13 @@ impl DocSymbolIndex {
     }
 }
 
-/// (target, confidence) for one inline-code span, or `None` when it names
-/// nothing in the graph.
-fn resolve_doc_mention(span: &str, idx: &DocSymbolIndex) -> Option<(NodeId, Confidence)> {
+/// (target, confidence, evidence rule) for one inline-code span, or `None`
+/// when it names nothing in the graph. The rule is the tier that matched:
+/// `qualified` (tier 1), `unique` / `ambiguous` (the bare-name tiers 2 / 3).
+fn resolve_doc_mention(
+    span: &str,
+    idx: &DocSymbolIndex,
+) -> Option<(NodeId, Confidence, &'static str)> {
     let norm = span.trim().trim_end_matches("()").replace('.', "::");
     // Tier 1 — qualified mention, e.g. `PaymentGateway.charge` / `mod::Thing`.
     if norm.contains("::") {
@@ -533,13 +645,22 @@ fn resolve_doc_mention(span: &str, idx: &DocSymbolIndex) -> Option<(NodeId, Conf
             && is_identifier(last)
             && let Some(&(id, n)) = idx.by_tail2.get(&format!("{prev}::{last}"))
         {
-            return Some((id, if n == 1 { Confidence::Strong } else { Confidence::Medium }));
+            let confidence = if n == 1 {
+                Confidence::Strong
+            } else {
+                Confidence::Medium
+            };
+            return Some((id, confidence, "qualified"));
         }
     }
     // Tiers 2/3 — bare tail name (the pre-A16.3 behaviour), graded by ambiguity.
     let ident = identifier_from_span(span)?;
     let &(id, n) = idx.by_name.get(&ident)?;
-    Some((id, if n == 1 { Confidence::Medium } else { Confidence::Weak }))
+    Some(if n == 1 {
+        (id, Confidence::Medium, "unique")
+    } else {
+        (id, Confidence::Weak, "ambiguous")
+    })
 }
 
 /// Node kinds a doc section can meaningfully document.
@@ -770,13 +891,10 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
             } else {
                 stats.camel += 1;
             }
-            edges.push(Edge {
-                from: *from_id,
-                to: to_id,
-                category: edge_category::TESTS,
-                confidence: Confidence::Strong,
-                cells: Vec::new(),
-            });
+            edges.push(
+                Edge::new(*from_id, to_id, edge_category::TESTS, Confidence::Strong)
+                    .with_cell(Evidence::emitter("pass:tests").rule("name_match").to_cell()),
+            );
         }
     }
     (edges, stats)
@@ -1018,12 +1136,12 @@ mod passes_tests {
         assert_eq!(idx.by_tail2["PaymentGateway::charge"], (NodeId(7), 1));
         assert_eq!(
             resolve_doc_mention("PaymentGateway.charge", &idx),
-            Some((NodeId(7), Confidence::Strong))
+            Some((NodeId(7), Confidence::Strong, "qualified"))
         );
         // The `::` spelling and a trailing `()` reach the same tier-1 answer.
         assert_eq!(
             resolve_doc_mention("PaymentGateway::charge()", &idx),
-            Some((NodeId(7), Confidence::Strong))
+            Some((NodeId(7), Confidence::Strong, "qualified"))
         );
     }
 
@@ -1032,7 +1150,7 @@ mod passes_tests {
         let idx = fixture_index();
         assert_eq!(
             resolve_doc_mention("get_user", &idx),
-            Some((NodeId(3), Confidence::Medium))
+            Some((NodeId(3), Confidence::Medium, "unique"))
         );
     }
 
@@ -1044,7 +1162,7 @@ mod passes_tests {
         assert_eq!(idx.by_name["save"], (NodeId(4), 2));
         assert_eq!(
             resolve_doc_mention("save", &idx),
-            Some((NodeId(4), Confidence::Weak))
+            Some((NodeId(4), Confidence::Weak, "ambiguous"))
         );
     }
 
@@ -1056,12 +1174,12 @@ mod passes_tests {
         assert!(!idx.by_tail2.contains_key("Invoice::charge"));
         assert_eq!(
             resolve_doc_mention("Invoice.charge", &idx),
-            Some((NodeId(7), Confidence::Medium))
+            Some((NodeId(7), Confidence::Medium, "unique"))
         );
         // Ambiguous bare fallback still degrades to Weak.
         assert_eq!(
             resolve_doc_mention("Whatever.save", &idx),
-            Some((NodeId(4), Confidence::Weak))
+            Some((NodeId(4), Confidence::Weak, "ambiguous"))
         );
     }
 

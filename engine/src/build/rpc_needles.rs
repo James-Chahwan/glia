@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{FileParse, GRAPH_TYPE, attach_imports_cell, node_kind};
 use repo_graph_code_extractors::anchor;
 use repo_graph_code_extractors::grpc::{self, ProtoServiceRef};
@@ -179,7 +180,14 @@ fn graft_rpc_markers(
     let first_new = fp.nodes.len();
     fp.nodes.extend(nodes);
     merge_nav(&mut fp.nav, nav);
+    // LC.3a: the anchor pass only appends, so the owner edges it adds here,
+    // post-cache, are the tail.
+    let first_edge = fp.edges.len();
     anchor::attach(fp, path, module_id, &mut anchors);
+    if let Some(added) = fp.edges.get_mut(first_edge..) {
+        let ev = Evidence::emitter("extractor:rpc_needles").rule("anchor");
+        evidence::stamp_missing_with(added, &ev);
+    }
     // The same raw G15 IMPORTS cell the router gave every other node in the
     // file; `filter_imports_cells` rewrites it with the rest of the file's.
     let mut extra = FileParse {
@@ -200,11 +208,17 @@ fn graft_rpc_markers(
 /// file's.
 fn graft_proto_rpc(fp: &mut FileParse, out: grpc::ProtoRpcNodes, lang: &str) {
     let grpc::ProtoRpcNodes {
-        nodes, edges, nav, ..
+        nodes,
+        mut edges,
+        nav,
+        ..
     } = out;
     if nodes.is_empty() {
         return;
     }
+    // LC.3a: the procedure / call edges land post-cache, unstamped.
+    let ev = Evidence::emitter("extractor:rpc_needles").rule("proto_rpc");
+    evidence::stamp_missing_with(&mut edges, &ev);
     let mut extra = FileParse {
         nodes,
         imports: fp.imports.clone(),

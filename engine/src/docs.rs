@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{
     CodeNav, DocProvenance, DocRecord, GRAPH_TYPE, edge_category, node_kind,
 };
@@ -337,13 +338,12 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<re
             });
             nav.record(id, &chunk.slug, &qname, node_kind::DOC_SECTION, space_id);
             if let Some(sid) = space_id {
-                edges.push(Edge {
-                    from: sid,
-                    to: id,
-                    category: edge_category::CONTAINS,
-                    confidence: Confidence::Strong,
-                    cells: Vec::new(),
-                });
+                // LC.3a: the edge's emitter is the doc source that ingested it.
+                let ev = Evidence::emitter(format!("docs:{}", source_tag(rec.provenance.kind)));
+                edges.push(
+                    Edge::new(sid, id, edge_category::CONTAINS, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
             }
         }
     }

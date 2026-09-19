@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 
 use repo_graph_code_domain::project_roots::ProjectRoot;
-use repo_graph_code_domain::{FileParse, edge_category, node_kind, recv_stats};
-use repo_graph_core::RepoId;
+use repo_graph_code_domain::{
+    FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
+};
+use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
 use repo_graph_graph::RepoGraph;
 use repo_graph_graph::rust_paths::RustCrate;
 
@@ -101,6 +103,7 @@ pub(super) fn build_language_graphs(
             ts_family.extend(parses);
             continue;
         }
+        let unattributed = unattributed_parse_edges(&parses);
         let graph = match lang {
             "python" => repo_graph_graph::build_python(repo, parses),
             "go" => repo_graph_graph::build_go(repo, parses),
@@ -113,7 +116,8 @@ pub(super) fn build_language_graphs(
         };
         recv_bound.push((lang, recv_stats::take()));
         match graph {
-            Ok(g) => {
+            Ok(mut g) => {
+                stamp_graph_edges(&mut g, unattributed);
                 heritage.push(HeritageTally::of(lang, &g));
                 graphs.push(g);
             }
@@ -121,10 +125,12 @@ pub(super) fn build_language_graphs(
         }
     }
     if !ts_family.is_empty() {
+        let unattributed = unattributed_parse_edges(&ts_family);
         let graph = repo_graph_graph::build_typescript(repo, ts_family, resolve_ts_source);
         recv_bound.push(("typescript", recv_stats::take()));
         match graph {
-            Ok(g) => {
+            Ok(mut g) => {
+                stamp_graph_edges(&mut g, unattributed);
                 heritage.push(HeritageTally::of("typescript", &g));
                 graphs.push(g);
             }
@@ -143,6 +149,48 @@ pub(super) fn build_language_graphs(
     }
 
     (graphs, di_refs)
+}
+
+/// An edge's identity without its cells ([`repo_graph_core::Edge::key`]).
+type EdgeKey = (NodeId, NodeId, EdgeCategoryId);
+
+/// LC.3a: the keys, with multiplicity, of the parse edges that reach the graph
+/// build with no EVIDENCE cell. Every stage before the build stamps its own
+/// edges, so this is empty unless an emitter went unattributed. Only looked
+/// up, never iterated.
+fn unattributed_parse_edges(parses: &[FileParse]) -> HashMap<EdgeKey, usize> {
+    let mut keys: HashMap<EdgeKey, usize> = HashMap::new();
+    for e in parses.iter().flat_map(|fp| &fp.edges) {
+        if !e.cells.iter().any(|c| c.kind == cell_type::EVIDENCE) {
+            *keys.entry(e.key()).or_default() += 1;
+        }
+    }
+    keys
+}
+
+/// LC.3a: stamp `graph:build` on the edges the graph build itself added
+/// (resolved calls, refs, imports; LC.3d names each mechanism). An edge that
+/// came in from a parse unstamped (`unattributed`, matched by key and
+/// multiplicity) is NOT filed under the graph stage: it stays without
+/// evidence, so the fill pass counts it `missing` and the corpus test names it.
+fn stamp_graph_edges(g: &mut RepoGraph, mut unattributed: HashMap<EdgeKey, usize>) {
+    if unattributed.is_empty() {
+        evidence::stamp_missing(&mut g.edges, "graph:build");
+        return;
+    }
+    let ev = evidence::Evidence::emitter("graph:build");
+    for e in &mut g.edges {
+        if e.cells.iter().any(|c| c.kind == cell_type::EVIDENCE) {
+            continue;
+        }
+        if let Some(n) = unattributed.get_mut(&e.key())
+            && *n > 0
+        {
+            *n -= 1;
+            continue;
+        }
+        evidence::attach(e, ev.clone());
+    }
 }
 
 /// One built language graph's A6.3 `[heritage]` marker input.

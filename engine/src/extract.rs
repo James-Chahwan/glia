@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{CodeNav, FileParse};
+use repo_graph_code_domain::{CodeNav, FileParse, evidence};
 use repo_graph_core::{NodeId, RepoId};
 
 // ----------------------------------------------------------------------------
@@ -195,9 +195,12 @@ pub(crate) fn apply_cross_cutting_extractors(
         }};
     }
 
+    // LC.3a: `$name` is the extractor's evidence name; its edges are stamped
+    // `extractor:<name>` before they join the file's.
     macro_rules! run_with_edges {
-        ($call:expr) => {{
-            let out = $call;
+        ($name:literal, $call:expr) => {{
+            let mut out = $call;
+            evidence::stamp_missing(&mut out.edges, concat!("extractor:", $name));
             fp.nodes.extend(out.nodes);
             fp.edges.extend(out.edges);
             merge_nav(&mut fp.nav, out.nav);
@@ -207,12 +210,14 @@ pub(crate) fn apply_cross_cutting_extractors(
     // A2.8: `run_with_edges!`, not `run!` — queue nodes now carry a CONTAINS
     // edge from the module that publishes/consumes the topic. Dropping
     // `out.edges` here would silently discard them.
-    run_with_edges!(queues::extract_queue_consumer_nodes(
-        source, path, module_id, repo
-    ));
-    run_with_edges!(queues::extract_queue_producer_nodes(
-        source, path, module_id, repo
-    ));
+    run_with_edges!(
+        "queues",
+        queues::extract_queue_consumer_nodes(source, path, module_id, repo)
+    );
+    run_with_edges!(
+        "queues",
+        queues::extract_queue_producer_nodes(source, path, module_id, repo)
+    );
     // LA.20a: not `run!` — declarations are dispatched by language and carry
     // `cli:<name> --HANDLED_BY--> <implementation>` refs (bound by the graph
     // builder's `resolve_refs`). Per-file marker, printed only when the file
@@ -243,24 +248,30 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(graphql::extract_graphql_operation_nodes(source, module_id, repo));
     run_marked!(graphql::extract_graphql_resolver_nodes(source, lang, module_id, repo));
     run_marked!(grpc::extract_grpc_client_nodes(source, module_id, repo));
-    run_with_edges!(data_sources::extract_data_source_nodes(
-        source, module_id, repo
-    ));
-    run_with_edges!(data_entities::extract_data_entity_nodes(
-        source, module_id, repo
-    ));
+    run_with_edges!(
+        "data_sources",
+        data_sources::extract_data_source_nodes(source, module_id, repo)
+    );
+    run_with_edges!(
+        "data_entities",
+        data_entities::extract_data_entity_nodes(source, module_id, repo)
+    );
     // LA.19a: not `run_with_edges!` — code-sourced jobs (Quartz, Hangfire,
     // robfig / gocron, APScheduler, Spring `@Scheduled`) also carry
     // `CRON_JOB --HANDLED_BY--> handler` refs, bound by the graph builder's
     // `resolve_refs`. The extractor prints its own `[cron] code` marker.
     {
-        let out = cron::extract_cron_nodes(source, path, module_id, repo);
+        let mut out = cron::extract_cron_nodes(source, path, module_id, repo);
+        evidence::stamp_missing(&mut out.edges, "extractor:cron");
         fp.nodes.extend(out.nodes);
         fp.edges.extend(out.edges);
         fp.refs.extend(out.refs);
         merge_nav(&mut fp.nav, out.nav);
     }
-    run_with_edges!(config::extract_config_reads(source, module_id, repo));
+    run_with_edges!(
+        "config",
+        config::extract_config_reads(source, module_id, repo)
+    );
     // A13.8: secrets-manager refs (`config:secret:<provider>/<ref>`) and
     // feature-flag checks (`config:flag:<key>`), language-blind, so every
     // code file of every language is scanned. Per-file marker, printed only
@@ -271,8 +282,8 @@ pub(crate) fn apply_cross_cutting_extractors(
         if let Some(marker) = secrets_flags::marker(&[&secrets, &flags], lang) {
             eprintln!("{marker} path={path}");
         }
-        run_with_edges!(secrets);
-        run_with_edges!(flags);
+        run_with_edges!("secrets_flags", secrets);
+        run_with_edges!("secrets_flags", flags);
     }
 
     if matches!(lang, "typescript" | "react" | "angular" | "vue") {
@@ -389,14 +400,17 @@ pub(crate) fn apply_cross_cutting_extractors(
     // every extractor above so the owner index sees all of the file's spans.
     // The result is a function of this file alone, so it is cached with the
     // parse; the build-level `[marker-anchor]` marker counts it post-cache.
+    let before = fp.edges.len();
     anchor::attach(fp, path, module_id, &mut anchors);
+    evidence::stamp_missing(&mut fp.edges[before..], "extractor:anchor");
 
     // G14: cross-language SERVICE classification. Runs LAST so the per-file
     // nav already has every CLASS / STRUCT and its METHOD children populated
     // by the language parser + framework extractors above. Emits SERVICE
     // nodes + CONTAINS edges to owned methods.
     {
-        let svc = services::extract_service_nodes(source, lang, &fp.nav, module_id, repo);
+        let mut svc = services::extract_service_nodes(source, lang, &fp.nav, module_id, repo);
+        evidence::stamp_missing(&mut svc.edges, "extractor:services");
         fp.nodes.extend(svc.nodes);
         fp.edges.extend(svc.edges);
         merge_nav(&mut fp.nav, svc.nav);

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
     FileParse, GRAPH_TYPE, LocalModuleIndex, attach_imports_cell_filtered, cell_type, node_kind,
@@ -352,11 +353,17 @@ fn apply_queue_const_topics(
             queues::extract_queue_nodes_with_consts(source, path, module_id, repo, &resolve)
         }));
         match fold {
-            Ok(fold) => {
+            Ok(mut fold) => {
                 stats.folded += fold.counts.folded;
                 stats.unresolved += fold.counts.unresolved;
                 if fold.counts.folded > 0 {
                     stats.files += 1;
+                    // LC.3a: the re-emitted `module -> queue node` CONTAINS
+                    // edges replace ones the queue extractor stamped in the
+                    // parse closure; these land post-cache, unstamped.
+                    let ev = Evidence::emitter("extractor:queues").rule("const_fold");
+                    evidence::stamp_missing_with(&mut fold.consumers.edges, &ev);
+                    evidence::stamp_missing_with(&mut fold.producers.edges, &ev);
                     queues::replace_queue_nodes(fp, module_id, lang, fold);
                 }
             }

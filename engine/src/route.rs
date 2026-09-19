@@ -9,7 +9,7 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, node_kind};
+use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
 use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
@@ -516,6 +516,10 @@ pub(crate) fn parse_repo_files(
         // kill an N-file repo build — log it, skip it, keep going.
         let parse_result = catch_unwind(AssertUnwindSafe(|| {
             let mut fp = parse_one_with(source, path, lang, repo, go_module_prefix)?;
+            // LC.3a: the edges present now are the parser's own. Stamped here,
+            // inside the closure and before the extractors, so the parse cache
+            // stores the stamp and a cache hit replays it.
+            evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
             let module_id = NodeId::from_parts(
                 GRAPH_TYPE,
                 repo,
@@ -725,6 +729,23 @@ pub(crate) fn parse_repo_files(
             contracts.refs_resolved,
             contracts.refs_external
         );
+    }
+
+    // LC.3a: the synthetic parses (`stash_synthetic_parse`: yaml, proto,
+    // graphql, ...) and the anchor pass run on the graphql one carry no
+    // evidence yet. Only their keys are swept: a language parse was stamped
+    // inside the parse closure, so an edge missing there is an unattributed
+    // emitter, left missing for the `[evidence]` count (and the corpus test)
+    // to name instead of being filed under `extractor:<lang>`. Per FileParse,
+    // so HashMap order cannot leak.
+    for lang_key in SYNTHETIC_MODULE_KEYS {
+        let Some(parses) = parses_by_lang.get_mut(lang_key) else {
+            continue;
+        };
+        let emitter = format!("extractor:{lang_key}");
+        for fp in parses.iter_mut() {
+            evidence::stamp_missing(&mut fp.edges, &emitter);
+        }
     }
 
     (parses_by_lang, parse_errors)
