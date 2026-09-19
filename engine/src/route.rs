@@ -1730,7 +1730,9 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let fps = &parses["c_cpp"];
         assert_eq!(fps.len(), 2);
-        for (qname, child) in [("src::Widget.h", "src::Widget.h::Widget"), ("src::Widget.cpp", "src::Widget.cpp::make")] {
+        // LB.10b: a header's global class takes the header's directory, not
+        // its file, as scope (`src::Widget`); the free function keeps its file.
+        for (qname, child) in [("src::Widget.h", "src::Widget"), ("src::Widget.cpp", "src::Widget.cpp::make")] {
             let module = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname);
             let fp = fps
                 .iter()

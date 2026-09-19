@@ -1,0 +1,94 @@
+{
+  "framework": "cpp-namespace-qnames",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.10b identity fixture (legacy-only, no matrix cell). A type a header declares is the same type in every file that includes it, so its qname is its C++ name: the namespace path (shop::Cart), or the directory for the global namespace (src::Widget, LB.2's monorepo rule) - never the header file. A type a source file declares is visible only in that translation unit and keeps the file scope (src::Widget.cpp::Local). An out-of-line member definition of a class the same file declares binds to that class at parse time (Local::a); one whose class lives in another file is a METHOD at the header rule's qname (src::Widget::run, shop::Cart::total), which LB.10c joins to the class. Before LB.10a the include-guarded header was parsed as C and its class dropped, the namespaced class was include::shop::cart::shop::Cart, source-file types were src::Widget::Local, and every out-of-line definition was a FUNCTION named Q::m under the file MODULE; after LB.10a (this packet's HEAD) the same shapes sit under the file-named MODULE: CLASS src::Widget.h::Widget, CLASS include::shop::cart.hpp::shop::Cart, FUNCTION src::Widget.cpp::Local::a.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "src::Widget::helper",
+      "note": "header class, global namespace -> directory scope"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "src::Point"
+    },
+    {
+      "kind": "METHOD",
+      "name": "shop::Cart::tax",
+      "note": "header class in a named namespace -> namespace scope (the substring also matches HEAD's include::shop::cart.hpp::shop::Cart::tax; the exact forbids below are the gate)"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::Widget.cpp::Local::a",
+      "note": "out-of-line member of a source-file class, bound in-file"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::Widget::run",
+      "note": "out-of-line member of a header class: METHOD at the class's qname (LB.10c binds its parent)"
+    },
+    {
+      "kind": "METHOD",
+      "name": "shop::Cart::total",
+      "note": "out-of-line member inside `namespace shop { }` of a class another directory's header declares"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::Widget.cpp::Local::a",
+      "to": "src::Widget.cpp::Local::b",
+      "category": "CALLS",
+      "note": "this->b() resolves because the in-file binding makes Local the method's parent"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CLASS",
+      "name": "include::shop::cart::shop::Cart",
+      "note": "pre-LB.10a: file-scoped namespaced class"
+    },
+    {
+      "kind": "CLASS",
+      "name": "include::shop::cart.hpp::shop::Cart",
+      "note": "LB.10a's shape: a namespaced header class is not scoped by its header file"
+    },
+    {
+      "kind": "CLASS",
+      "name": "src::Widget.h::Widget",
+      "note": "LB.10a's shape: a header class is not scoped by its header file"
+    },
+    {
+      "kind": "CLASS",
+      "name": "src::Local",
+      "note": "precision guard: a source-file class keeps its file scope, it does not take the header directory rule"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Widget::Widget::run",
+      "note": "pre-LB.10a: out-of-line definition as a FUNCTION under a doubled segment"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Widget.cpp::Widget::run",
+      "note": "LB.10a's shape: out-of-line definition as a FUNCTION under the file MODULE"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Widget::Local::a",
+      "note": "pre-LB.10a shape of the in-file out-of-line member"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::Widget.cpp::Local::a",
+      "note": "LB.10a's shape of the in-file out-of-line member"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::cart.cpp::shop::Cart::total",
+      "note": "LB.10a's shape of an out-of-line member inside a namespace block"
+    }
+  ]
+}

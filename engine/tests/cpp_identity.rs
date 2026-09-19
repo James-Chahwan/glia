@@ -7,8 +7,15 @@
 //! Before LB.10a the header / implementation pair was ONE MODULE `src::Widget`
 //! with a self-IMPORTS edge, every include-guarded header was empty (so no
 //! CLASS Widget), and `class Gadget;` minted CLASS `src::main::Gadget`. Built
-//! on a tempdir copy of the `cpp-header-impl-files` fixture. LB.10b / LB.10c
-//! add their tests here.
+//! on a tempdir copy of the `cpp-header-impl-files` fixture.
+//!
+//! LB.10b (`types_take_their_cpp_name`, on `cpp-namespace-qnames`): a type a
+//! header declares is named by its C++ name - the namespace path
+//! (`shop::Cart`), or the header's directory in the global namespace
+//! (`src::Widget`) - a source file's type keeps the file scope
+//! (`src::Widget.cpp::Local`), and an out-of-line member definition is a
+//! METHOD, bound to its class when the same file defines it. LB.10c adds its
+//! tests here.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,6 +27,7 @@ use repo_graph_engine::generate_one;
 use repo_graph_graph::MergedGraph;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-header-impl-files";
+const NAMESPACE_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-namespace-qnames";
 
 /// Copy the fixture's sources (not its key.json, not a stray `.ai` cache)
 /// into `dst`.
@@ -40,9 +48,13 @@ fn copy_fixture(src: &Path, dst: &Path) {
 }
 
 fn fixture_copy() -> tempfile::TempDir {
+    copy_of(FIXTURE)
+}
+
+fn copy_of(fixture: &str) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(tmp.path().join("repo")).expect("mkdir repo");
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
     copy_fixture(&src, &tmp.path().join("repo"));
     tmp
 }
@@ -152,12 +164,13 @@ fn header_and_impl_are_two_modules() {
     }
 
     // (3) The include-guarded header is walked and read as C++: CLASS Widget
-    // with its inline method; the C header's struct is there too.
+    // with its inline method; the C header's struct is there too. (LB.10b:
+    // a header's global types take its directory, not its file, as scope.)
     assert!(names_of(&merged, node_kind::CLASS).contains(&"Widget".to_string()));
     let methods = qnames_of(&merged, node_kind::METHOD);
-    assert!(methods.contains(&"src::Widget.h::Widget::helper".to_string()), "{methods:?}");
+    assert!(methods.contains(&"src::Widget::helper".to_string()), "{methods:?}");
     let structs = qnames_of(&merged, node_kind::STRUCT);
-    assert_eq!(structs, ["c::point.h::point"], "the declaration's `struct point` mints nothing");
+    assert_eq!(structs, ["c::point"], "the declaration's `struct point` mints nothing");
     // A header misread by the C grammar turns `class Widget {..}` into a
     // FUNCTION named Widget.
     assert!(!names_of(&merged, node_kind::FUNCTION).contains(&"Widget".to_string()));
@@ -169,11 +182,13 @@ fn header_and_impl_are_two_modules() {
         nav.values().filter(|(_, n, _)| n == "Gadget").collect::<Vec<_>>()
     );
 
-    // (5) Symbols follow their file's MODULE.
+    // (5) Free functions follow their file's MODULE; `Widget::run` is an
+    // out-of-line member, a METHOD at the header class's qname (LB.10b).
     let functions = qnames_of(&merged, node_kind::FUNCTION);
-    for want in ["c::point.c::point_new", "src::main.cpp::main", "src::Widget.cpp::Widget::run"] {
+    for want in ["c::point.c::point_new", "src::main.cpp::main"] {
         assert!(functions.contains(&want.to_string()), "{want} missing: {functions:?}");
     }
+    assert!(methods.contains(&"src::Widget::run".to_string()), "{methods:?}");
 
     // (6) The IMPORTS-cell local filter still knows every quoted include is
     // the repo's own header: the file-named MODULE keeps its stem as nav
@@ -230,4 +245,56 @@ fn incremental_builds_match_a_clean_build() {
     let clean_bytes = store_bytes(&clean, &tmp.path().join("clean"));
     assert_eq!(store_bytes(&cold, &tmp.path().join("cold")), clean_bytes, "cold vs clean");
     assert_eq!(store_bytes(&warm, &tmp.path().join("warm")), clean_bytes, "warm vs clean");
+}
+
+/// LB.10b on `cpp-namespace-qnames`: header types by C++ name, source-file
+/// types file-local, an in-file out-of-line member bound to its class (so
+/// `this->b()` resolves), the others provisional METHODs at the header
+/// rule's qname.
+#[test]
+fn types_take_their_cpp_name() {
+    let tmp = copy_of(NAMESPACE_FIXTURE);
+    let merged = build(&tmp);
+    let classes = qnames_of(&merged, node_kind::CLASS);
+    let structs = qnames_of(&merged, node_kind::STRUCT);
+    let methods = qnames_of(&merged, node_kind::METHOD);
+
+    for want in ["src::Widget", "shop::Cart", "src::Widget.cpp::Local"] {
+        assert!(classes.contains(&want.to_string()), "CLASS {want} missing: {classes:?}");
+    }
+    assert!(structs.contains(&"src::Point".to_string()), "{structs:?}");
+    for want in [
+        "src::Widget::helper",
+        "shop::Cart::tax",
+        "src::Widget.cpp::Local::a",
+        "src::Widget.cpp::Local::b",
+        "src::Widget::run",
+        "shop::Cart::total",
+    ] {
+        assert!(methods.contains(&want.to_string()), "METHOD {want} missing: {methods:?}");
+    }
+    for q in classes.iter().chain(&structs) {
+        assert!(
+            !q.starts_with("src::Widget.h::") && !q.starts_with("include::shop::cart.hpp::"),
+            "a header type scoped by its file: {q}"
+        );
+    }
+    // No out-of-line definition is left a FUNCTION.
+    let functions = qnames_of(&merged, node_kind::FUNCTION);
+    assert!(functions.is_empty(), "{functions:?}");
+
+    let calls = edges(&merged, edge_category::CALLS);
+    assert!(
+        calls.contains(&pair("src::Widget.cpp::Local::a", "src::Widget.cpp::Local::b")),
+        "{calls:?}"
+    );
+    // The in-file-bound member hangs off its class: DEFINES Local -> a.
+    let defines = edges(&merged, edge_category::DEFINES);
+    assert!(
+        defines.contains(&pair("src::Widget.cpp::Local", "src::Widget.cpp::Local::a")),
+        "{defines:?}"
+    );
+    // The provisional ones keep the lexical parent until LB.10c binds them.
+    assert!(defines.contains(&pair("src::Widget.cpp", "src::Widget::run")), "{defines:?}");
+    assert!(defines.contains(&pair("src::cart.cpp::shop", "shop::Cart::total")), "{defines:?}");
 }
