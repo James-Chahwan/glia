@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "f16faa9",
-  "after_wave": 8,
+  "measured_at_head": "a96435d",
+  "after_wave": 9,
   "cargo_test_workspace": {
-    "passed": 2003,
+    "passed": 2087,
     "failed": 0
   },
   "history_passed": [
@@ -35,36 +35,31 @@
     1744,
     1816,
     1911,
-    2003
+    2003,
+    2087
   ],
   "run_py": {
-    "fixtures": 236,
-    "blind_spots": 3,
-    "blind_spot_detail": "blind: ['kotlin-flip-guard: CALLS', 'kotlin-ktor: CALLS', 'kotlin-retrofit: HTTP_CALLS']; missing nodes: [\"kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'\", \"kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'\", \"kotlin-retrofit: ENDPOINT 'GET /api/users'\"]; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
+    "fixtures": 241,
+    "blind_spots": 1,
+    "blind_spot_detail": "blind: ['kotlin-ktor: CALLS']; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
     "blind_list": [
-      "kotlin-flip-guard: CALLS",
-      "kotlin-ktor: CALLS",
-      "kotlin-retrofit: HTTP_CALLS"
+      "kotlin-ktor: CALLS"
     ],
     "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],
-    "missing_nodes_list": [
-      "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
-      "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
-      "kotlin-retrofit: ENDPOINT 'GET /api/users'"
-    ]
+    "missing_nodes_list": []
   },
   "matrix_py": {
-    "full": 130,
-    "partial": 26,
-    "none": 14,
-    "unknown": 310,
-    "covered": 170,
+    "full": 141,
+    "partial": 23,
+    "none": 11,
+    "unknown": 305,
+    "covered": 175,
     "grid": 480,
     "invalid_cell_declarations": 0,
     "check_exit": 0

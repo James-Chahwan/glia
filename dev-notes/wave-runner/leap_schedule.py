@@ -43,6 +43,7 @@ LANDED = {
     6: "LA.18b LA.1a LA.6b LC.5a LA.34 A14.4 LB.14 A7.8",
     7: "LC.1 LA.6c LA.3 LA.17 LA.18c LA.37a A6.3 A14.5 A6.2c",
     8: "LB.11a LA.6d LA.37b LA.19a LE.10b A14.3 LA.23d LD.7a LA.6e A6.4",
+    9: "LB.8 LC.5b LA.19b A13.8 LA.20c LD.7b A14.6 A6.5",
 }
 
 ITEM_RE = re.compile(r"^(L[A-G]\.\d+)$")

@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 236,
+  "fixtures": 241,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -76,6 +76,17 @@
       "language": "c++",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "channel-monorepo-owner": {
+      "framework": "channel-monorepo-owner",
+      "language": "python+typescript+go+proto",
+      "per_category": {
+        "GRAPHQL_CALLS": 1.0,
+        "GRPC_CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "QUEUE_FLOWS": 1.0,
+        "WS_CONNECTS": 1.0
       }
     },
     "clojure-calls": {
@@ -300,6 +311,15 @@
         "CALLS": 1.0
       }
     },
+    "dart-heritage": {
+      "framework": "dart-heritage",
+      "language": "dart",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "IMPORTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
     "dart-http-dio": {
       "framework": "dart-http-dio",
       "language": "dart",
@@ -438,6 +458,21 @@
       "language": "go",
       "per_category": {
         "HANDLED_BY": 1.0
+      }
+    },
+    "go-iface-embed": {
+      "framework": "go-iface-embed",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0,
+        "INHERITS_FROM": 1.0
+      }
+    },
+    "go-implicit-iface": {
+      "framework": "go-implicit-iface",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "go-imports": {
@@ -698,7 +733,7 @@
       "framework": "kotlin-flip-guard",
       "language": "kotlin",
       "per_category": {
-        "CALLS": 0.0
+        "CALLS": 1.0
       }
     },
     "kotlin-ktor": {
@@ -714,7 +749,9 @@
       "framework": "kotlin-retrofit",
       "language": "kotlin",
       "per_category": {
-        "HTTP_CALLS": 0.0
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "kotlin-spring": {
@@ -1119,6 +1156,13 @@
       "language": "scala",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "secrets-vault-aws": {
+      "framework": "secrets-vault-aws",
+      "language": "python",
+      "per_category": {
+        "READS_CONFIG": 1.0
       }
     },
     "solidity-calls": {
@@ -1697,18 +1741,12 @@
   "schema": "substrate-gap-legacy/1",
   "summary": {
     "blind_spots": [
-      "kotlin-flip-guard: CALLS",
-      "kotlin-ktor: CALLS",
-      "kotlin-retrofit: HTTP_CALLS"
+      "kotlin-ktor: CALLS"
     ],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
-    "missing_nodes": [
-      "kotlin-flip-guard: ENDPOINT 'endpoint:GET:/api/users'",
-      "kotlin-flip-guard: ENDPOINT 'endpoint:POST:/api/orders'",
-      "kotlin-retrofit: ENDPOINT 'GET /api/users'"
-    ],
+    "missing_nodes": [],
     "partial_cells": []
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
