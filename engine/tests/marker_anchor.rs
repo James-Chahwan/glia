@@ -11,9 +11,10 @@
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 use repo_graph_engine::{
-    ParseCache, blast_radius_by_qname, cross_stack_trace, generate_many, generate_one,
-    generate_one_with_cache, locate_node, node_file, service_map,
+    ParseCache, blast_radius_by_qname, generate_many, generate_one, generate_one_with_cache,
+    locate_node, node_file, service_map,
 };
+use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
 use repo_graph_graph::MergedGraph;
 use std::path::Path;
 
@@ -99,7 +100,11 @@ fn go_grpc_client_is_located_owned_and_traceable() {
 
     // The point of the packet: a trace from the function crosses into the
     // gRPC hop instead of dying at the file boundary.
-    let hops = cross_stack_trace(&m, "main::FetchUser", 4).expect("seed resolves");
+    let mut opts = TraceOptions::default();
+    opts.depth = 4;
+    let answer = cross_stack_trace(&m, "main::FetchUser", &opts);
+    assert!(answer.seed.is_some(), "seed resolves");
+    let hops = answer.hops;
     let path: Vec<(&str, &str, bool)> = hops
         .iter()
         .map(|h| (h.mechanism, h.to_qname.as_str(), h.cross_service))

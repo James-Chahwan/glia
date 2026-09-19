@@ -11,8 +11,9 @@ use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId};
 use repo_graph_engine::find::{FindOptions, find_nodes};
 use repo_graph_engine::profile::{CODE_PROFILE, entry_kinds};
+use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
 use repo_graph_engine::{
-    cross_stack_trace, entrypoint_reachable, generate_many, governing_docs, resolve_signal_located,
+    entrypoint_reachable, generate_many, governing_docs, resolve_signal_located,
     resolve_signal_located_with_live,
 };
 use repo_graph_graph::{MergedGraph, RepoGraph, SymbolTable};
@@ -192,7 +193,11 @@ fn resolve_rows_carry_live() {
     let module = module.iter().find(|r| r.kind == "MODULE" && r.qname == "app").expect("module app");
     assert!(!module.live);
 
-    let hops = cross_stack_trace(&m, "app::create_order", 4).expect("seed resolves");
+    let mut opts = TraceOptions::default();
+    opts.depth = 4;
+    let answer = cross_stack_trace(&m, "app::create_order", &opts);
+    assert!(answer.seed.is_some(), "seed resolves");
+    let hops = answer.hops;
     assert!(!hops.is_empty());
     for h in &hops {
         let to = find_nodes(&m, &h.to_qname, &FindOptions::default()).results;

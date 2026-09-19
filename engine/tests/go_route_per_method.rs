@@ -17,7 +17,8 @@ use std::collections::BTreeSet;
 
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::NodeId;
-use repo_graph_engine::{cross_stack_trace, generate_many};
+use repo_graph_engine::generate_many;
+use repo_graph_engine::trace::{TraceHop, TraceOptions, cross_stack_trace};
 use repo_graph_graph::MergedGraph;
 
 const FIXTURE: &str = "../../bench/substrate-gap/fixtures/go-route-per-method";
@@ -139,10 +140,19 @@ fn http_calls_reach_only_the_route_of_their_method() {
     }
 }
 
+/// The trace BFS tree from `feature`, 4 hops deep.
+fn trace_hops(m: &MergedGraph, feature: &str) -> Vec<TraceHop> {
+    let mut opts = TraceOptions::default();
+    opts.depth = 4;
+    let answer = cross_stack_trace(m, feature, &opts);
+    assert!(answer.seed.is_some(), "{feature} resolves");
+    answer.hops
+}
+
 #[test]
 fn a_get_trace_never_reaches_the_post_handler() {
     let (_td, m) = build();
-    let hops = cross_stack_trace(&m, "loadUsers", 4).expect("seed resolves");
+    let hops = trace_hops(&m, "loadUsers");
     let reached: Vec<&str> = hops.iter().map(|h| h.to_qname.as_str()).collect();
     assert!(reached.contains(&"GET /users"), "{reached:?}");
     assert!(reached.contains(&"main::listUsers"), "{reached:?}");
@@ -150,7 +160,7 @@ fn a_get_trace_never_reaches_the_post_handler() {
         assert!(!reached.contains(&wrong), "loadUsers reached {wrong}: {reached:?}");
     }
 
-    let hops = cross_stack_trace(&m, "dropUser", 4).expect("seed resolves");
+    let hops = trace_hops(&m, "dropUser");
     let reached: Vec<&str> = hops.iter().map(|h| h.to_qname.as_str()).collect();
     assert!(reached.contains(&"main::deleteUser"), "{reached:?}");
     assert!(!reached.contains(&"main::getUser"), "a DELETE never traces into GET: {reached:?}");

@@ -102,9 +102,9 @@ fn answers_report_1_based_lines() {
 
     // trace --json: the hop into `app::helper` lands on line 4.
     let v = json(&glia(&repo.0, &["trace", d, "app::main", "--json"]));
-    let hop = v
+    let hop = v["hops"]
         .as_array()
-        .expect("a JSON array")
+        .expect("a `hops` array")
         .iter()
         .find(|h| h["to_qname"] == "app::helper")
         .unwrap_or_else(|| panic!("main's trace reaches helper: {v}"));
@@ -250,7 +250,7 @@ fn resolve_and_trace_rows_carry_live() {
     );
 
     let v = json(&glia(&repo.0, &["trace", d, "app::main", "--json"]));
-    let hops = v.as_array().expect("a JSON array");
+    let hops = v["hops"].as_array().expect("a `hops` array");
     assert!(!hops.is_empty(), "{v}");
     for h in hops {
         assert!(h["to_live"].is_boolean(), "hop carries a bool `to_live`: {h}");

@@ -20,7 +20,8 @@
 //! easy thing to get wrong (twice, or not at all), and `is_some()` would not
 //! catch an off-by-one.
 
-use repo_graph_engine::{Locator, cross_stack_trace, generate_many, locate_node};
+use repo_graph_engine::trace::{TraceOptions, cross_stack_trace};
+use repo_graph_engine::{Locator, generate_many, locate_node};
 use repo_graph_graph::MergedGraph;
 
 /// Three services under one tempdir:
@@ -139,7 +140,11 @@ fn trace_hops_into_http_nodes_carry_a_location() {
     // `cross_stack_trace` is the one whose hop target is typically an HTTP
     // node, so prove the fallback reaches it end to end.
     let (_td, m) = fixture();
-    let hops = cross_stack_trace(&m, "loadUsers", 4).expect("seed resolves");
+    let mut opts = TraceOptions::default();
+    opts.depth = 4;
+    let answer = cross_stack_trace(&m, "loadUsers", &opts);
+    assert!(answer.seed.is_some(), "seed resolves");
+    let hops = answer.hops;
     let located: Vec<(&str, Option<&str>, Option<i64>)> = hops
         .iter()
         .map(|h| (h.to_qname.as_str(), h.to_file.as_deref(), h.to_line))

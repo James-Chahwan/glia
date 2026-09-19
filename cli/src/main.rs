@@ -74,8 +74,9 @@ enum Cmd {
     /// no SHARES_SCHEMA edge is emitted.
     Contracts(cmd::contracts::Args),
     /// Cross-stack trace (P3): follow <feature> forward across service
-    /// boundaries and print the ordered path, each hop labeled with its
-    /// mechanism (http/queue/grpc/call) and whether it crossed a service.
+    /// boundaries and print the ranked distinct paths it takes, each hop
+    /// labeled with its mechanism (http/queue/grpc/call) and whether it
+    /// crossed a service; `--to` gives the paths between two nodes.
     Trace(cmd::trace::Args),
     /// Resolve (P3): a failure/change signal (stacktrace, diff, test id) → the
     /// ranked, located nodes it points at, in one call.
