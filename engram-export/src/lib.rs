@@ -14,29 +14,37 @@
 //! cross-repo dependency, which keeps the rest of the workspace clean for the
 //! planned glia repo split.
 //!
-//! ## The span story
+//! ## The span story (v6)
 //!
-//! engram's `SpanRef { file, start, end, .. }` is a **byte range** into an
-//! interned file (the v6 `start_line` / `end_line` fields are left `0`,
-//! unknown, by [`SpanRef::bytes`]). glia stores POSITION cells as
-//! `{"file": "<repo-relative path>", "start_line": r, "end_line": r}` — row
-//! numbers, no columns, no byte offsets, path as a string. We close the gap at
-//! export time (the repo source is present, since we export straight off a
-//! freshly generated graph):
+//! engram's `SpanRef { file, start, end, start_line, end_line }` names one
+//! region of an interned file twice: a half-open **byte range** for editors
+//! and tools that slice source, and a **1-based, inclusive line range** for
+//! humans and renderers (`orders.py:7`), so neither has to re-read the file.
+//! glia stores POSITION cells as
+//! `{"file": "<repo-relative path>", "start_line": r, "end_line": r}` —
+//! 0-based, end-inclusive rows, no columns, no byte offsets, path as a string.
+//! Both halves of the span come from those same rows at export time (the repo
+//! source is present, since we export straight off a freshly generated graph):
 //!
 //!   1. Distinct file paths are interned to **stable, 1-based** `u32` ids
 //!      (sorted order; `0` is reserved for "no/unknown position").
-//!   2. Each source file is read once and its line-start byte offsets indexed,
-//!      converting `(start_line, end_line)` → a real `(start_byte, end_byte)`
-//!      range spanning those whole lines.
+//!   2. Each source file is read once and its line-start byte offsets indexed:
+//!      `byte_range` turns the rows into the bytes of those whole lines, and
+//!      `line_span` — the one place rows become lines — turns them into
+//!      1-based lines, clamped to the file's real line count.
 //!   3. The `id → path` table is written as a sidecar `*.files.json` next to
-//!      the bincode, so the span round-trips back to a path. The sidecar is
-//!      glia's own concern — engram reads only the bincode and never computes
-//!      on the span; it just hands it back.
+//!      the bincode and inlined as `Gmap.files`, so the span round-trips back
+//!      to a path. engram never computes on the span; it hands it back.
+//!
+//! Doc sections export as `Content::Proposition`, anchored by the same
+//! `SpanRef` built the same way: `span: Some(..)` whenever the section has a
+//! POSITION (every markdown section and contract operation does), `None` only
+//! when it has none.
 //!
 //! If a POSITION file can't be read (e.g. exporting against a moved repo) the
-//! node keeps its interned file id but gets a `SpanRef::bytes(file, 0, 0)`
-//! span; nodes with no POSITION cell get `SpanRef::NONE`.
+//! node keeps its interned file id and its lines — they need no source read —
+//! but its bytes are `0..0`; a node with no POSITION cell gets
+//! `SpanRef::NONE` (file `0`, lines `0` = unknown).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -63,8 +71,20 @@ pub struct ExportStats {
     /// Edges skipped: endpoint qname unknown, or a degenerate self-edge.
     pub skipped_edges: usize,
     /// Interned POSITION files that could not be read under `repo_root`, so
-    /// their nodes fell back to a `{file, 0, 0}` span.
+    /// their nodes' spans carry lines but bytes `0..0`.
     pub unreadable_files: usize,
+    /// Emitted nodes (Symbols and Propositions) that have a POSITION cell.
+    /// (glia-v6)
+    pub positioned: usize,
+    /// Emitted nodes whose span carries a line (`start_line > 0`). Equal to
+    /// `positioned` by construction; the bin prints both, so a regression in
+    /// the row → line conversion shows as a mismatch. (glia-v6)
+    pub spans_with_lines: usize,
+    /// Doc sections emitted as `Content::Proposition`. (glia-v6)
+    pub propositions: usize,
+    /// Propositions whose `span` is `Some` — every one with a POSITION.
+    /// (glia-v6)
+    pub propositions_anchored: usize,
     /// Nodes dropped by the default noise filter (ORIGIN provenance in the
     /// drop set) — suppressed when `include_noise` is set. (glia-v2 G6/G9/G11)
     pub dropped_noise: usize,
@@ -368,8 +388,12 @@ fn clean_and_cap_doc(s: String) -> Option<String> {
 }
 
 /// Recover the POSITION cell as `(repo_relative_file, start_row, end_row)`.
-/// Rows are 0-indexed (tree-sitter `Point::row`), matching what the parsers
-/// write. Returns `None` when the node has no parseable POSITION cell.
+/// Rows are 0-indexed and end-inclusive (tree-sitter `Point::row`), matching
+/// what the parsers write. FIRST PARSEABLE POSITION WINS — the A2.8 rule
+/// `engine::answers::locate_node` documents: a node can carry several
+/// POSITION cells (`merge_parses` appends one per file that minted it), and
+/// every glia surface places it by the first. Returns `None` when the node
+/// has no parseable POSITION cell, or the winning one lacks a field.
 fn position_of(cells: &[Cell]) -> Option<(String, u32, u32)> {
     for c in cells {
         if c.kind != cell_type::POSITION {
@@ -378,13 +402,31 @@ fn position_of(cells: &[Cell]) -> Option<(String, u32, u32)> {
         let CellPayload::Json(j) = &c.payload else {
             continue;
         };
-        let v: serde_json::Value = serde_json::from_str(j).ok()?;
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(j) else {
+            continue;
+        };
         let file = v.get("file")?.as_str()?.to_string();
         let start = v.get("start_line")?.as_u64()? as u32;
         let end = v.get("end_line")?.as_u64()? as u32;
         return Some((file, start, end));
     }
     None
+}
+
+/// One source file read for span conversion: its line-start byte offsets
+/// ([`line_starts`]), its byte length and its line count ([`line_count`]).
+struct SourceLines {
+    starts: Vec<u32>,
+    len: u32,
+    lines: u32,
+}
+
+impl SourceLines {
+    fn new(bytes: &[u8]) -> SourceLines {
+        let starts = line_starts(bytes);
+        let lines = line_count(bytes, &starts);
+        SourceLines { starts, len: bytes.len() as u32, lines }
+    }
 }
 
 /// Byte offset of the first byte of each 0-indexed line. `[0]` is always 0;
@@ -400,13 +442,47 @@ fn line_starts(bytes: &[u8]) -> Vec<u32> {
     starts
 }
 
-/// `(start_byte, end_byte)` covering whole lines `[start_line, end_line]`.
-/// `end_byte` is the start of the line *after* `end_line` (or EOF), so the
-/// range includes `end_line`'s trailing newline. Clamped to be non-empty.
-fn byte_range(starts: &[u32], file_len: u32, start_line: u32, end_line: u32) -> (u32, u32) {
-    let s = starts.get(start_line as usize).copied().unwrap_or(0);
+/// The number of lines an editor shows for `bytes`, given its
+/// [`line_starts`]: a trailing `\n` ends the last line rather than opening an
+/// empty one, and an empty file still has line 1.
+fn line_count(bytes: &[u8], starts: &[u32]) -> u32 {
+    let n = starts.len() as u32;
+    if bytes.last() == Some(&b'\n') { n - 1 } else { n }
+}
+
+/// 1-based, inclusive `(start_line, end_line)` for a POSITION's
+/// `(start_row, end_row)` — the ONLY place the exporter turns rows into lines.
+///
+/// Source of truth for the rows: `glia_doc::position_json` (every parser's
+/// POSITION writer, and the markdown sections since LG.10a) — 0-based
+/// tree-sitter rows, end-inclusive. So a line is its row + 1, and an inverted
+/// POSITION is read as one line. A node's end row can sit one past the last
+/// line (tree-sitter's end point after a file's trailing newline: a module
+/// spanning rows `0..=12` of a 12-line file), so when the file was read
+/// (`line_count` is `Some`) both ends are clamped to its real line count.
+/// Without the file the rows are all there is and pass through unclamped.
+/// If POSITION cells ever stored 1-based lines (LD.1 moved only the answer
+/// records), this function is what changes, and `tests/spans_v6.rs` fails first.
+fn line_span(start_row: u32, end_row: u32, line_count: Option<u32>) -> (u32, u32) {
+    let start = start_row.saturating_add(1);
+    let end = end_row.max(start_row).saturating_add(1);
+    match line_count {
+        // max(1): an empty file still has line 1, so a span never reads 0 (unknown).
+        Some(n) => {
+            let n = n.max(1);
+            (start.min(n), end.min(n))
+        }
+        None => (start, end),
+    }
+}
+
+/// `(start_byte, end_byte)` covering whole 0-indexed rows `[start_row, end_row]`.
+/// `end_byte` is the start of the row *after* `end_row` (or EOF), so the
+/// range includes `end_row`'s trailing newline. Clamped so `end >= start`.
+fn byte_range(starts: &[u32], file_len: u32, start_row: u32, end_row: u32) -> (u32, u32) {
+    let s = starts.get(start_row as usize).copied().unwrap_or(0);
     let e = starts
-        .get(end_line as usize + 1)
+        .get(end_row as usize + 1)
         .copied()
         .unwrap_or(file_len);
     (s, e.max(s))
@@ -442,13 +518,13 @@ pub fn build_gmap(
     }
     stats.files = id_to_path.len();
 
-    // Read each source file once for line → byte conversion (span ranges).
-    let mut line_cache: HashMap<String, (Vec<u32>, u32)> = HashMap::new();
+    // Read each source file once for row → byte conversion and the line-count
+    // clamp. Lookup only: nothing iterates this map into the output.
+    let mut line_cache: HashMap<String, SourceLines> = HashMap::new();
     for p in &paths {
         match std::fs::read(repo_root.join(p)) {
             Ok(bytes) => {
-                let len = bytes.len() as u32;
-                line_cache.insert(p.clone(), (line_starts(&bytes), len));
+                line_cache.insert(p.clone(), SourceLines::new(&bytes));
             }
             Err(_) => stats.unreadable_files += 1,
         }
@@ -503,20 +579,25 @@ pub fn build_gmap(
                 .get(&n.id)
                 .cloned()
                 .unwrap_or_else(|| qname.rsplit("::").next().unwrap_or(qname).to_string());
+            // One SpanRef per node, for either content kind: bytes from the
+            // read file (0..0 when unreadable), lines from the rows (v6).
             let pos = position_of(&n.cells);
             let span = match &pos {
-                Some((file, sl, el)) => {
+                Some((file, sr, er)) => {
                     let fid = file_id.get(file).copied().unwrap_or(0);
-                    match line_cache.get(file) {
-                        Some((starts, len)) => {
-                            let (start, end) = byte_range(starts, *len, *sl, *el);
-                            SpanRef::bytes(fid, start, end)
-                        }
-                        None => SpanRef::bytes(fid, 0, 0),
-                    }
+                    let src = line_cache.get(file);
+                    let (start, end) = src.map_or((0, 0), |s| byte_range(&s.starts, s.len, *sr, *er));
+                    let (start_line, end_line) = line_span(*sr, *er, src.map(|s| s.lines));
+                    SpanRef { file: fid, start, end, start_line, end_line }
                 }
                 None => SpanRef::NONE,
             };
+            if pos.is_some() {
+                stats.positioned += 1;
+            }
+            if span.start_line > 0 {
+                stats.spans_with_lines += 1;
+            }
             // Leading documentation (D1). Every parser emits a DOC cell via the
             // shared AST `leading_doc` walk (Python via its docstring extractor),
             // so this is purely DOC-cell-driven — no source line-scan. Skip
@@ -542,7 +623,13 @@ pub fn build_gmap(
                 let prose = code_cell(&n.cells).unwrap_or_else(|| name.clone());
                 // concept_hint = `docs::<stem>` (key minus the section slug).
                 let ch = qname.rsplit_once("::").map(|(h, _)| h.to_string());
-                (Content::Proposition { text: prose, span: None }, ch)
+                // v6: anchored whenever the section has a POSITION.
+                let anchor = pos.as_ref().map(|_| span);
+                stats.propositions += 1;
+                if anchor.is_some() {
+                    stats.propositions_anchored += 1;
+                }
+                (Content::Proposition { text: prose, span: anchor }, ch)
             } else {
                 (
                     Content::Symbol {
@@ -822,9 +909,11 @@ mod tests {
             Content::Symbol { name, span, qname, .. } => {
                 assert_eq!(name, "login"); // short name, not the qname
                 assert_eq!(qname.as_deref(), Some("app::User::login")); // full qname carried (G2)
-                assert_eq!(span.file, 1);
-                assert_eq!(span.start, 12);
-                assert_eq!(span.end, 20);
+                // rows 2..=3 -> bytes [12, 20) and 1-based lines 3..=4 (v6).
+                assert_eq!(
+                    *span,
+                    SpanRef { file: 1, start: 12, end: 20, start_line: 3, end_line: 4 }
+                );
             }
             other => panic!("expected Symbol, got {other:?}"),
         }
@@ -844,8 +933,54 @@ mod tests {
         assert_eq!(gmap.edges[0].weight, Some(0.8)); // CALLS weight (G13)
 
         assert_eq!(sidecar.get(&1).map(String::as_str), Some("a.py"));
+        assert_eq!((stats.positioned, stats.spans_with_lines), (1, 1));
+        assert_eq!((stats.propositions, stats.propositions_anchored), (0, 0));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Rows are 0-based and end-inclusive; lines are 1-based and inclusive,
+    /// clamped to the file's line count only when the file was read.
+    #[test]
+    fn line_span_converts_and_clamps() {
+        assert_eq!(line_span(6, 8, Some(12)), (7, 9));
+        assert_eq!(line_span(0, 0, Some(12)), (1, 1));
+        // A module's end row one past the last line of a 12-line file.
+        assert_eq!(line_span(0, 12, Some(12)), (1, 12));
+        // An inverted POSITION reads as its start line.
+        assert_eq!(line_span(5, 2, Some(12)), (6, 6));
+        // A start past EOF (stale POSITION) stays inside the file, not inverted.
+        assert_eq!(line_span(20, 22, Some(12)), (12, 12));
+        // Unreadable file: rows pass through unclamped.
+        assert_eq!(line_span(0, 12, None), (1, 13));
+        assert_eq!(line_span(u32::MAX, u32::MAX, None), (u32::MAX, u32::MAX));
+        // An empty file still has line 1, so the span is never "unknown".
+        assert_eq!(line_span(0, 1, Some(0)), (1, 1));
+    }
+
+    #[test]
+    fn line_count_follows_editor_lines() {
+        for (src, lines) in [
+            (&b""[..], 1),
+            (b"a", 1),
+            (b"a\n", 1),
+            (b"a\nb", 2),
+            (b"a\nb\n", 2),
+            (b"\n\n", 2),
+        ] {
+            assert_eq!(line_count(src, &line_starts(src)), lines, "{src:?}");
+            assert_eq!(SourceLines::new(src).lines, lines, "{src:?}");
+        }
+    }
+
+    /// FIRST PARSEABLE POSITION WINS (A2.8): a malformed cell is skipped, and
+    /// a later POSITION never overrides the first parseable one.
+    #[test]
+    fn position_of_takes_first_parseable() {
+        let bad = Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{".into()) };
+        let cells = vec![bad, pos_cell("a.go", 4, 6), pos_cell("b.go", 1, 2)];
+        assert_eq!(position_of(&cells), Some(("a.go".to_string(), 4, 6)));
+        assert_eq!(position_of(&[]), None);
     }
 
     #[test]

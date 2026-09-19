@@ -92,6 +92,17 @@ fn run(args: &Args) -> i32 {
         stats.digest,
         sidecar_path(&out_path).display(),
     );
+    // The v6 span marker (LG.10): how many positioned nodes got 1-based lines
+    // and how many doc Propositions got a source anchor. A healthy export has
+    // both pairs equal; an unreadable file still keeps its lines (bytes 0..0).
+    eprintln!(
+        "[engram-export] v6 spans: {}/{} positioned nodes carry lines, {}/{} propositions anchored, {} unreadable file(s)",
+        stats.spans_with_lines,
+        stats.positioned,
+        stats.propositions_anchored,
+        stats.propositions,
+        stats.unreadable_files,
+    );
     if stats.skipped_nodes > 0 || stats.duplicate_keys > 0 || stats.skipped_edges > 0 {
         eprintln!(
             "  skipped: {} unqualified nodes, {} duplicate keys, {} edges",
@@ -108,7 +119,7 @@ fn run(args: &Args) -> i32 {
     }
     if stats.unreadable_files > 0 {
         eprintln!(
-            "  warning: {} POSITION file(s) unreadable under {} — those nodes got placeholder spans",
+            "  warning: {} POSITION file(s) unreadable under {} — those nodes' spans carry lines but no bytes (0..0)",
             stats.unreadable_files,
             repo_root.display()
         );
