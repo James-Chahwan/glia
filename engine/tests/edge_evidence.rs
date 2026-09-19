@@ -118,6 +118,19 @@ fn graph_edges_are_attributed() {
     assert!(matches!(ev.basis, Basis::FromNode | Basis::Site), "{ev:?}");
 }
 
+/// LC.3d: a graph-resolved edge names the mechanism and the branch that
+/// bound it, not only the graph stage: `from a import bar` + `bar()` is an
+/// import binding.
+#[test]
+fn cross_file_call_names_the_resolver_branch() {
+    let (_tmp, m) = build();
+    let (baz, bar) = (by_qname(&m, "b::baz"), by_qname(&m, "a::bar"));
+    let ev = evidence_of(edge(&m, baz, bar, edge_category::CALLS));
+    assert_eq!(ev.emitter, "graph:calls", "{ev:?}");
+    assert_eq!(ev.rule.as_deref(), Some("import_binding"), "{ev:?}");
+    assert_eq!(ev.file.as_deref(), Some("b.py"));
+}
+
 #[test]
 fn resolver_and_pass_edges_are_attributed() {
     let (_tmp, m) = build();

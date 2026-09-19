@@ -40,6 +40,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
+use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category,
     node_kind, recv_stats,
@@ -47,7 +48,8 @@ use repo_graph_code_domain::{
 use repo_graph_core::{CellPayload, NodeId, NodeKindId};
 
 use crate::calls::{
-    position_file, push_edge, receiver_type, unique_global_function, unique_global_module,
+    graph_evidence, position_file, push_edge, receiver_type, unique_global_function,
+    unique_global_module,
 };
 use crate::types::RepoGraph;
 
@@ -82,6 +84,35 @@ enum Rule {
     Type,
     CrateName,
 }
+
+impl Rule {
+    /// The EVIDENCE rule of an edge whose path started here (LC.3d).
+    fn as_str(self) -> &'static str {
+        match self {
+            Rule::Crate => "crate",
+            Rule::SelfMod => "self_mod",
+            Rule::Super => "super",
+            Rule::SelfType => "self_type",
+            Rule::Import => "import",
+            Rule::Child => "child",
+            Rule::Type => "type",
+            Rule::CrateName => "crate_name",
+        }
+    }
+}
+
+/// The evidence of an edge this resolver drew (LC.3d): emitter
+/// `graph:rust_paths`, `rule` the branch that bound it. A path call or `use`
+/// names the rule its first segment started by ([`Rule::as_str`]), or
+/// `unique_in_crate` when the crate-root name fallback supplied a segment;
+/// the other rules are named where they bind.
+pub(crate) fn rust_ev(rule: &str) -> Evidence {
+    graph_evidence("graph:rust_paths", rule)
+}
+
+/// [`RustIndex::resolve_scoped_bare`]'s rule for an inline mod's own fn: the
+/// LA.3 bind the `[rust-items]` marker's `mod_scoped_calls` counts.
+pub(crate) const MOD_ITEM: &str = "mod_item";
 
 /// Where a path stands after some of its segments.
 enum Pos {
@@ -302,24 +333,29 @@ impl RustIndex {
     /// (LA.3) one `self.m()` the generic owner walk missed, (LA.1b) one Bare
     /// call through the file module's `use ..::*` globs, the last scope Rust
     /// consults, or (LA.35b) one method call on a typed value
-    /// ([`Self::resolve_typed_receiver`]). `None` for every other shape.
+    /// ([`Self::resolve_typed_receiver`]). `None` for every other shape. The
+    /// hit carries its evidence: the path's start rule (or `unique_in_crate`),
+    /// `self_method`, `glob` or `receiver_type`.
     pub(crate) fn resolve_call(
         &self,
         g: &RepoGraph,
         site: &CallSite,
         rb: &RustBindings,
-    ) -> Option<NodeId> {
+    ) -> Option<(NodeId, Evidence)> {
         let (base, name) = match &site.qualifier {
             CallQualifier::Attribute { base, name } => (base, name),
             CallQualifier::SelfMethod(name) => {
-                return self.resolve_self_method(g, rb, site.from, name);
+                let hit = self.resolve_self_method(g, rb, site.from, name)?;
+                return Some((hit, rust_ev("self_method")));
             }
             CallQualifier::Bare(name) => {
                 let file_module = enclosing(&g.nav, site.from, false)?;
-                return self.glob_member(g, rb, file_module, name, is_callable);
+                let hit = self.glob_member(g, rb, file_module, name, is_callable)?;
+                return Some((hit, rust_ev("glob")));
             }
             CallQualifier::ComplexReceiver { name, .. } => {
-                return self.resolve_typed_receiver(g, rb, site, name);
+                let hit = self.resolve_typed_receiver(g, rb, site, name)?;
+                return Some((hit, rust_ev("receiver_type")));
             }
             _ => return None,
         };
@@ -355,8 +391,9 @@ impl RustIndex {
         Stats::bump(&self.stats.resolved);
         if used_fallback {
             Stats::bump(&self.stats.unique_in_crate);
+            return Some((hit, rust_ev("unique_in_crate")));
         }
-        Some(hit)
+        Some((hit, rust_ev(rule.as_str())))
     }
 
     /// The fired_on markers of one `build_rust`: LA.1a's path line, then
@@ -611,15 +648,17 @@ impl RustIndex {
     /// would lose to a file-level `fn helper`, and a fn-body
     /// `use lib::generate_many as gm` to a file-level `fn gm`. A site whose
     /// caller has no fn-scoped `use` and sits in no inline mod finds nothing
-    /// here and keeps the generic order exactly. The bool is true for a hit
-    /// on an inline mod's own fn, the LA.3 rule the `[rust-items]` marker's
-    /// `mod_scoped_calls` counts.
+    /// here and keeps the generic order exactly. The rule names the branch
+    /// (LC.3d): `fn_use` / `glob` (the fn's own `use`s / globs), [`MOD_ITEM`]
+    /// (an inline mod's own fn, the LA.3 rule the `[rust-items]` marker's
+    /// `mod_scoped_calls` counts), `mod_use` / `glob` (an inline mod's `use`
+    /// binding / globs).
     pub(crate) fn resolve_scoped_bare(
         &self,
         g: &RepoGraph,
         site: &CallSite,
         rb: &RustBindings,
-    ) -> Option<(NodeId, bool)> {
+    ) -> Option<(NodeId, &'static str)> {
         let CallQualifier::Bare(name) = &site.qualifier else {
             return None;
         };
@@ -630,9 +669,13 @@ impl RustIndex {
             .and_then(|m| m.get(name))
             .copied()
             .filter(callable)
-            .or_else(|| self.glob_member(g, rb, site.from, name, is_callable));
-        if let Some(id) = fn_hit {
-            return Some((id, false));
+            .map(|id| (id, "fn_use"))
+            .or_else(|| {
+                self.glob_member(g, rb, site.from, name, is_callable)
+                    .map(|id| (id, "glob"))
+            });
+        if fn_hit.is_some() {
+            return fn_hit;
         }
         let mut cur = site.from;
         loop {
@@ -648,14 +691,18 @@ impl RustIndex {
                         .copied()
                         .filter(callable);
                     if let Some(id) = own {
-                        return Some((id, true));
+                        return Some((id, MOD_ITEM));
                     }
                     let used = rb
                         .bound(g, parent, name)
                         .filter(callable)
-                        .or_else(|| self.glob_member(g, rb, parent, name, is_callable));
-                    if let Some(id) = used {
-                        return Some((id, false));
+                        .map(|id| (id, "mod_use"))
+                        .or_else(|| {
+                            self.glob_member(g, rb, parent, name, is_callable)
+                                .map(|id| (id, "glob"))
+                        });
+                    if used.is_some() {
+                        return used;
                     }
                 }
                 _ => {}
@@ -679,7 +726,7 @@ impl RustIndex {
                 _ => None,
             };
             match hit {
-                Some(to) => push_edge(g, r.from, to, edge_category::USES),
+                Some(to) => push_edge(g, r.from, to, edge_category::USES, rust_ev("enum_variant")),
                 None => g.unresolved_refs.push(r),
             }
         }
@@ -1397,12 +1444,15 @@ struct UseLeaf<'a> {
 }
 
 /// A leaf whose path resolved: what it binds (`None` when the member it
-/// names is not found there), and the MODULE / PACKAGE its file's IMPORTS
-/// edge points at.
+/// names is not found there), the MODULE / PACKAGE its file's IMPORTS edge
+/// points at, and the EVIDENCE rule of that edge (LC.3d): the path's start
+/// rule, `unique_in_crate` when a crate-root name fallback supplied a step,
+/// or `tail_unique` for HEAD's repo-unique tail fallback.
 #[derive(Clone, Copy)]
 struct UseHit {
     target: Option<NodeId>,
     imports: Option<NodeId>,
+    rule: &'static str,
 }
 
 /// Every `use` of one Rust graph whose `from_module` names a node, as leaves
@@ -1589,6 +1639,7 @@ pub(crate) fn resolve_imports_rust(
         *hit = Some(UseHit {
             target: Some(t),
             imports: Some(t),
+            rule: "tail_unique",
         });
         if let Some(b) = leaf.bound {
             tables
@@ -1637,10 +1688,14 @@ pub(crate) fn resolve_imports_rust(
                 .extend(names);
         }
     }
+    // One edge per (from, to): the first leaf in statement order draws it
+    // and names its rule.
     let mut drawn: HashSet<(NodeId, NodeId)> = HashSet::new();
     for (leaf, hit) in leaves.iter().zip(&results) {
         let Some(UseHit {
-            imports: Some(to), ..
+            imports: Some(to),
+            rule,
+            ..
         }) = hit
         else {
             continue;
@@ -1649,7 +1704,7 @@ pub(crate) fn resolve_imports_rust(
             continue;
         };
         if from != *to && drawn.insert((from, *to)) {
-            push_edge(g, from, *to, edge_category::IMPORTS);
+            push_edge(g, from, *to, edge_category::IMPORTS, rust_ev(rule));
         }
     }
     stats.imports_edges = drawn.len();
@@ -1682,9 +1737,14 @@ impl RustIndex {
         let path = leaf.path.as_ref()?;
         let scope = enclosing(&g.nav, leaf.scope, true)?;
         let file_module = enclosing(&g.nav, leaf.scope, false)?;
-        let (start, _) = self.start(g, sc, leaf.scope, scope, file_module, &path[0])?;
-        let mut unused = false;
-        let pos = self.walk(g, sc, start, &path[1..], &mut unused)?;
+        let (start, start_rule) = self.start(g, sc, leaf.scope, scope, file_module, &path[0])?;
+        let mut fallback = false;
+        let pos = self.walk(g, sc, start, &path[1..], &mut fallback)?;
+        let rule = if fallback {
+            "unique_in_crate"
+        } else {
+            start_rule.as_str()
+        };
         let module = match pos {
             Pos::Scope(id) => Some(id),
             _ => None,
@@ -1693,6 +1753,7 @@ impl RustIndex {
             return Some(UseHit {
                 target: module,
                 imports: module,
+                rule,
             });
         }
         let Some(name) = leaf.member else {
@@ -1703,6 +1764,7 @@ impl RustIndex {
             return Some(UseHit {
                 target,
                 imports: module,
+                rule,
             });
         };
         let target = self.use_member(g, sc, &pos, name);
@@ -1710,7 +1772,11 @@ impl RustIndex {
             Some(t) if g.nav.kind_by_id.get(&t).is_some_and(|k| is_scope_kind(*k)) => Some(t),
             _ => module,
         };
-        Some(UseHit { target, imports })
+        Some(UseHit {
+            target,
+            imports,
+            rule,
+        })
     }
 
     /// The item `use <pos>::name` binds: an item the module defines, else its

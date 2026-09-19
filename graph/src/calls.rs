@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, UnresolvedRef, cell_type, edge_category, node_kind,
     recv_stats,
@@ -9,6 +10,99 @@ use repo_graph_code_domain::{
 use repo_graph_core::{Confidence, Edge, EdgeCategoryId, NodeId};
 
 use crate::types::RepoGraph;
+
+// ============================================================================
+// Resolution evidence (LC.3d)
+// ============================================================================
+
+/// The evidence a graph-resolved edge carries: the mechanism that bound it
+/// (`graph:calls`, `graph:refs`, `graph:imports`, `graph:iface`,
+/// `graph:rust_paths`, `graph:go_packages`, `graph:nav`) and the branch
+/// inside it. No location: the engine's fill pass places it from the edge's
+/// endpoints.
+pub(crate) fn graph_evidence(emitter: &str, rule: &str) -> Evidence {
+    Evidence::emitter(emitter).rule(rule)
+}
+
+/// The branch of [`resolve_calls`] / [`resolve_refs`] that bound a site,
+/// written as the EVIDENCE `rule` of the edge it draws. The name-only
+/// fallbacks (`global_unique`, `global_unique_method`) are the edges a
+/// reviewer discounts.
+#[derive(Clone, Copy)]
+enum Branch {
+    ImportBinding,
+    ModuleSymbol,
+    PackageSymbol,
+    Attribute,
+    SelfMethod,
+    ReceiverType,
+    GlobalUnique,
+    EnumMember,
+    GlobalUniqueMethod,
+}
+
+impl Branch {
+    const COUNT: usize = 9;
+
+    fn rule(self) -> &'static str {
+        match self {
+            Branch::ImportBinding => "import_binding",
+            Branch::ModuleSymbol => "module_symbol",
+            Branch::PackageSymbol => "package_symbol",
+            Branch::Attribute => "attribute",
+            Branch::SelfMethod => "self_method",
+            Branch::ReceiverType => "receiver_type",
+            Branch::GlobalUnique => "global_unique",
+            Branch::EnumMember => "enum_member",
+            Branch::GlobalUniqueMethod => "global_unique_method",
+        }
+    }
+}
+
+/// One graph build's `[evidence-graph]` tallies: the edges `resolve_calls`
+/// drew per branch (a hit of its `extra_hook` counts `extra_hook`, whatever
+/// rule the hook named) and the name-only / enum-member binds of
+/// `resolve_refs`. A builder that runs `resolve_calls` twice (Go) sums both.
+#[derive(Default)]
+pub(crate) struct EvidenceTally {
+    calls: [usize; Branch::COUNT],
+    extra_hook: usize,
+    refs: [usize; Branch::COUNT],
+}
+
+impl EvidenceTally {
+    /// LC.3d fired_on marker, fixed order, `None` when no call resolved:
+    /// `[evidence-graph] calls import_binding=a module_symbol=b package_symbol=c
+    /// attribute=d self_method=e receiver_type=f extra_hook=g refs
+    /// global_unique=h enum_member=i`.
+    fn marker(&self) -> Option<String> {
+        let c = |b: Branch| self.calls[b as usize];
+        let resolved: usize = self.calls.iter().sum::<usize>() + self.extra_hook;
+        (resolved > 0).then(|| {
+            format!(
+                "[evidence-graph] calls import_binding={} module_symbol={} package_symbol={} \
+                 attribute={} self_method={} receiver_type={} extra_hook={} refs global_unique={} \
+                 enum_member={}",
+                c(Branch::ImportBinding),
+                c(Branch::ModuleSymbol),
+                c(Branch::PackageSymbol),
+                c(Branch::Attribute),
+                c(Branch::SelfMethod),
+                c(Branch::ReceiverType),
+                self.extra_hook,
+                self.refs[Branch::GlobalUnique as usize],
+                self.refs[Branch::EnumMember as usize],
+            )
+        })
+    }
+
+    /// Print the marker, once per graph build, after its last resolve pass.
+    pub(crate) fn report(&self) {
+        if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+    }
+}
 
 // ============================================================================
 // Call resolution
@@ -20,10 +114,16 @@ use crate::types::RepoGraph;
 /// that the generic pass doesn't cover, consulted only after every generic
 /// lookup misses. Rust passes its path resolver (`crate::rust_paths`, LA.1a)
 /// and Go its package-directory hook (`build::GoPackages`, LA.13b); every
-/// other builder passes `|_, _| None`.
-pub(crate) fn resolve_calls<H>(g: &mut RepoGraph, calls: &[CallSite], extra_hook: H)
-where
-    H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,
+/// other builder passes `|_, _| None`. A hook hit carries the hook's own
+/// evidence (its mechanism and branch); every generic hit is `graph:calls`
+/// with the [`Branch`] that bound it.
+pub(crate) fn resolve_calls<H>(
+    g: &mut RepoGraph,
+    calls: &[CallSite],
+    extra_hook: H,
+    tally: &mut EvidenceTally,
+) where
+    H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)>,
 {
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
@@ -38,24 +138,9 @@ where
         };
         let bindings = g.symbols.module_import_bindings.get(&from_module);
 
-        let resolved: Option<NodeId> = match &site.qualifier {
+        let resolved: Option<(NodeId, Branch)> = match &site.qualifier {
             CallQualifier::Bare(name) => {
-                // Priority: local import binding → same-module top-level def →
-                // enclosing PACKAGE's def (Elixir: `def`s live under a defmodule
-                // PACKAGE, not the file MODULE).
-                bindings
-                    .and_then(|b| b.get(name).copied())
-                    .or_else(|| {
-                        g.symbols
-                            .module_symbols
-                            .get(&from_module)
-                            .and_then(|s| s.get(name).copied())
-                    })
-                    .or_else(|| {
-                        enclosing_package(&g.nav, site.from).and_then(|pkg| {
-                            g.symbols.module_symbols.get(&pkg).and_then(|s| s.get(name).copied())
-                        })
-                    })
+                bare_call_target(g, bindings, from_module, site.from, name)
             }
             CallQualifier::Attribute { base, name } => {
                 let hit = resolve_attribute_target(g, bindings, base, name);
@@ -70,7 +155,7 @@ where
                         _ => {}
                     }
                 }
-                hit
+                hit.map(|to| (to, Branch::Attribute))
             }
             CallQualifier::SelfMethod(name) => {
                 let owner = enclosing_class_or_struct(&g.nav, site.from);
@@ -86,7 +171,7 @@ where
                     enum_hits.self_method += 1;
                     enum_hits.enums.push(owner_id);
                 }
-                hit
+                hit.map(|to| (to, Branch::SelfMethod))
             }
             // Python `super().m()` — intra-file super calls are resolved by
             // the Python parser before emitting the CallSite. Anything that
@@ -110,13 +195,19 @@ where
                     iface_recv += 1;
                 }
             }
-            hit
+            hit.map(|to| (to, Branch::ReceiverType))
         });
 
-        let resolved = resolved.or_else(|| extra_hook(g, site));
+        let resolved = match resolved {
+            Some((to, branch)) => {
+                tally.calls[branch as usize] += 1;
+                Some((to, graph_evidence("graph:calls", branch.rule())))
+            }
+            None => extra_hook(g, site).inspect(|_| tally.extra_hook += 1),
+        };
 
         match resolved {
-            Some(to) => push_edge(g, site.from, to, edge_category::CALLS),
+            Some((to, ev)) => push_edge(g, site.from, to, edge_category::CALLS, ev),
             None => g.unresolved_calls.push(site.clone()),
         }
     }
@@ -140,6 +231,32 @@ where
     if let Some(line) = gate.marker() {
         eprintln!("{line}");
     }
+}
+
+/// A Bare call's target and the branch that found it, in the fixed priority:
+/// the caller module's import binding, its own top-level def, then the
+/// enclosing PACKAGE's def (Elixir: `def`s live under a defmodule PACKAGE, not
+/// the file MODULE). The first hit wins, so the branch is the one that bound.
+fn bare_call_target(
+    g: &RepoGraph,
+    bindings: Option<&HashMap<String, NodeId>>,
+    from_module: NodeId,
+    from: NodeId,
+    name: &str,
+) -> Option<(NodeId, Branch)> {
+    if let Some(to) = bindings.and_then(|b| b.get(name).copied()) {
+        return Some((to, Branch::ImportBinding));
+    }
+    let own = |module: NodeId| {
+        g.symbols
+            .module_symbols
+            .get(&module)
+            .and_then(|s| s.get(name).copied())
+    };
+    if let Some(to) = own(from_module) {
+        return Some((to, Branch::ModuleSymbol));
+    }
+    own(enclosing_package(&g.nav, from)?).map(|to| (to, Branch::PackageSymbol))
 }
 
 /// True when `id` is a METHOD owned directly by an INTERFACE.
@@ -256,7 +373,7 @@ pub(crate) fn position_file(node: &repo_graph_core::Node) -> Option<String> {
 /// moves file-level page-flow endpoints onto their page component. The
 /// partition keeps the other refs in their original order, so every other
 /// edge list is unchanged.
-pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
+pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mut EvidenceTally) {
     let (nav_refs, refs): (Vec<&UnresolvedRef>, Vec<&UnresolvedRef>) =
         refs.iter().partition(|r| r.category == edge_category::NAVIGATES_TO);
     let mut pkg_base_bound = 0usize;
@@ -265,20 +382,23 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
     for r in refs {
         let extends_iface = extends_interface(g, r);
         let bindings = g.symbols.module_import_bindings.get(&r.from_module);
-        let resolved: Option<NodeId> = match &r.qualifier {
+        let resolved: Option<(NodeId, Branch)> = match &r.qualifier {
             CallQualifier::Bare(name) => match bindings.and_then(|b| b.get(name).copied()) {
                 // A6.3: a supertype is a type, never a file. A TS default
                 // import (`import Base from "./base"`) binds its local name to
                 // the MODULE; heritage looks through it to that module's
                 // same-named def. The name is import-bound, so a miss stays
                 // unresolved instead of falling back to a repo-wide lookup.
-                Some(id) if is_heritage(r.category) => heritage_through_module(g, id, name),
-                Some(id) => Some(id),
+                Some(id) if is_heritage(r.category) => {
+                    heritage_through_module(g, id, name).map(|to| (to, Branch::ImportBinding))
+                }
+                Some(id) => Some((id, Branch::ImportBinding)),
                 None => g
                     .symbols
                     .module_symbols
                     .get(&r.from_module)
                     .and_then(|s| s.get(name).copied())
+                    .map(|to| (to, Branch::ModuleSymbol))
                     // Global fallback for HANDLED_BY refs: a route registers
                     // `r.GET("/p", handler)` where `handler` is a top-level fn
                     // in the same package — but `bindings` doesn't see local
@@ -302,7 +422,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                             // type by its bare name; resolve to the uniquely-named class/
                             // interface across the repo (module_symbols indexes them,
                             // incl. namespace/PACKAGE members). Ambiguity → None.
-                            unique_global_function(g, name)
+                            unique_global_function(g, name).map(|to| (to, Branch::GlobalUnique))
                         } else {
                             None
                         }
@@ -310,7 +430,8 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
             },
             CallQualifier::Attribute { base, name } => {
                 let bound_base = attribute_base(g, bindings, base);
-                let hit = resolve_attribute_target(g, bindings, base, name);
+                let hit = resolve_attribute_target(g, bindings, base, name)
+                    .map(|to| (to, Branch::Attribute));
                 if hit.is_some() && bound_base.map(|(_, k)| k) == Some(node_kind::PACKAGE) {
                     pkg_base_bound += 1;
                 }
@@ -326,7 +447,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                             enum_hits.uses += 1;
                             enum_hits.enums.push(base_id);
                         }
-                        member
+                        member.map(|to| (to, Branch::EnumMember))
                     }
                     _ => None,
                 });
@@ -338,7 +459,7 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
                 // only when exactly one match exists.
                 hit.or_else(|| {
                     if r.category == edge_category::HANDLED_BY {
-                        unique_global_method(g, name)
+                        unique_global_method(g, name).map(|to| (to, Branch::GlobalUniqueMethod))
                     } else {
                         None
                     }
@@ -357,7 +478,11 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef]) {
             iface_extends.ifaces.push(r.from);
         }
         match resolved {
-            Some(to) => push_edge(g, r.from, to, r.category),
+            Some((to, branch)) => {
+                tally.refs[branch as usize] += 1;
+                let ev = graph_evidence("graph:refs", branch.rule());
+                push_edge(g, r.from, to, r.category, ev);
+            }
             None => g.unresolved_refs.push(r.clone()),
         }
     }
@@ -804,7 +929,8 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
     pairs.dedup();
     pairs.retain(|p| !existing.contains(p));
     for &(from, to) in &pairs {
-        push_edge(g, from, to, edge_category::IMPLEMENTS);
+        let ev = graph_evidence("graph:iface", "same_name");
+        push_edge(g, from, to, edge_category::IMPLEMENTS, ev);
     }
     if !pairs.is_empty() {
         eprintln!(
@@ -815,14 +941,19 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
     }
 }
 
-pub(crate) fn push_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, category: EdgeCategoryId) {
-    g.edges.push(Edge {
-        from,
-        to,
-        category,
-        confidence: Confidence::Strong,
-        cells: Vec::new(),
-    });
+/// Push one resolved edge, carrying `ev` as its EVIDENCE cell: the graph
+/// mechanism and branch that bound it ([`graph_evidence`], LC.3d). The
+/// engine's `graph:build` stage stamp then leaves it alone.
+pub(crate) fn push_edge(
+    g: &mut RepoGraph,
+    from: NodeId,
+    to: NodeId,
+    category: EdgeCategoryId,
+    ev: Evidence,
+) {
+    let mut e = Edge::new(from, to, category, Confidence::Strong);
+    evidence::attach(&mut e, ev);
+    g.edges.push(e);
 }
 
 #[cfg(test)]
@@ -1697,5 +1828,114 @@ mod tests {
         assert!(!extends_interface(&g, &heritage_ref(catalog, m, "Readable", edge_category::IMPLEMENTS)));
         assert!(!extends_interface(&g, &heritage_ref(class, km, "Base", edge_category::INHERITS_FROM)));
         assert_eq!(IfaceExtends::default().marker(&g), None);
+    }
+
+    // ---- LC.3d: the resolving branch in each edge's evidence -----------------
+
+    /// `(emitter, rule)` of the one `from -> to` edge of `category`.
+    fn evidence_rule(
+        g: &RepoGraph,
+        from: NodeId,
+        to: NodeId,
+        category: EdgeCategoryId,
+    ) -> Option<(String, Option<String>)> {
+        g.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == category)
+            .and_then(repo_graph_code_domain::evidence::Evidence::of)
+            .map(|ev| (ev.emitter, ev.rule))
+    }
+
+    fn calls_rule(rule: &str) -> Option<(String, Option<String>)> {
+        Some(("graph:calls".to_string(), Some(rule.to_string())))
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    /// Three graphs, each resolvable by exactly one Bare branch: an import
+    /// binding, a same-module def, the enclosing PACKAGE's def.
+    #[test]
+    fn bare_call_names_its_branch() {
+        // import_binding: `from m2 import helper` + `helper()`.
+        let mut s2 = Shape::new();
+        let m2 = s2.add(node_kind::MODULE, "m2", None);
+        let helper = s2.add(node_kind::FUNCTION, "m2::helper", Some(m2));
+        let mut s1 = Shape::new();
+        let m1 = s1.add(node_kind::MODULE, "m1", None);
+        let f = s1.add(node_kind::FUNCTION, "m1::f", Some(m1));
+        let caller = s1.file(
+            vec![import_symbol("m1", "m2", "helper")],
+            vec![CallSite { from: f, qualifier: bare("helper") }],
+            vec![],
+        );
+        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+        assert_eq!(evidence_rule(&g, f, helper, edge_category::CALLS), calls_rule("import_binding"));
+
+        // module_symbol: a sibling top-level def of the caller's module.
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "m", None);
+        let a = s.add(node_kind::FUNCTION, "m::a", Some(m));
+        let b = s.add(node_kind::FUNCTION, "m::b", Some(m));
+        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b") }], vec![]);
+        let g = build_dotted(repo(), vec![file]).unwrap();
+        assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("module_symbol"));
+
+        // package_symbol: Elixir `defmodule` PACKAGE siblings, which the file
+        // MODULE's own symbols do not list.
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "lib", None);
+        let pkg = s.add(node_kind::PACKAGE, "lib::MyApp", Some(m));
+        let a = s.add(node_kind::FUNCTION, "lib::MyApp::a", Some(pkg));
+        let b = s.add(node_kind::FUNCTION, "lib::MyApp::b", Some(pkg));
+        let file = s.file(vec![], vec![CallSite { from: a, qualifier: bare("b") }], vec![]);
+        let g = build_dotted(repo(), vec![file]).unwrap();
+        assert_eq!(evidence_rule(&g, a, b, edge_category::CALLS), calls_rule("package_symbol"));
+    }
+
+    /// A HANDLED_BY ref no import or same-module def can bind falls back to
+    /// the repo-unique name, and says so: rule `global_unique`.
+    #[test]
+    fn global_fallback_is_named() {
+        let mut s2 = Shape::new();
+        let m2 = s2.add(node_kind::MODULE, "m2", None);
+        let handler = s2.add(node_kind::FUNCTION, "m2::list_users", Some(m2));
+        let mut s1 = Shape::new();
+        let m1 = s1.add(node_kind::MODULE, "m1", None);
+        let routes = s1.add(node_kind::FUNCTION, "m1::routes", Some(m1));
+        let handled = UnresolvedRef {
+            from: routes,
+            from_module: m1,
+            qualifier: bare("list_users"),
+            category: edge_category::HANDLED_BY,
+        };
+        let caller = s1.file(vec![], vec![], vec![handled]);
+        let g = build_dotted(repo(), vec![s2.file(vec![], vec![], vec![]), caller]).unwrap();
+        assert_eq!(
+            evidence_rule(&g, routes, handler, edge_category::HANDLED_BY),
+            Some(("graph:refs".to_string(), Some("global_unique".to_string())))
+        );
+    }
+
+    /// The `[evidence-graph]` marker: silent until a call resolves, then every
+    /// counter in its fixed order.
+    #[test]
+    fn evidence_marker_is_fixed_order() {
+        let mut t = EvidenceTally::default();
+        t.refs[Branch::GlobalUnique as usize] = 4;
+        assert_eq!(t.marker(), None, "refs alone do not fire it");
+        t.calls[Branch::ImportBinding as usize] = 3;
+        t.calls[Branch::ReceiverType as usize] = 1;
+        t.extra_hook = 2;
+        t.refs[Branch::EnumMember as usize] = 5;
+        assert_eq!(
+            t.marker().as_deref(),
+            Some(
+                "[evidence-graph] calls import_binding=3 module_symbol=0 package_symbol=0 \
+                 attribute=0 self_method=0 receiver_type=1 extra_hook=2 refs global_unique=4 \
+                 enum_member=5"
+            )
+        );
     }
 }

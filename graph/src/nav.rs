@@ -43,7 +43,9 @@
 //! | scoped | the link sits under a SCOPED catch-all (`/docs/**`, `/docs/[...slug]`) | Medium |
 //! | suffix | the route's segments are a proper suffix of the link's (a child table whose parent prefix is in another file) | Weak |
 //!
-//! A plain-anchor (`href:`) edge is capped at Medium. A ROOT catch-all (`**`,
+//! A plain-anchor (`href:`) edge is capped at Medium. Every edge's EVIDENCE is
+//! `graph:nav` with its tier as the rule (`href_<tier>` for a plain anchor,
+//! LC.3d). A ROOT catch-all (`**`,
 //! `*`, `/:pathMatch(.*)*`: the whole path is the wildcard) is the 404 /
 //! redirect fallback and is never a target — it would otherwise absorb every
 //! dead link. Under LB.4a owner segments, routes of the linking file's project
@@ -77,7 +79,7 @@ use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::{CallQualifier, UnresolvedRef, cell_type, edge_category, node_kind};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
 
-use crate::calls::position_file;
+use crate::calls::{graph_evidence, position_file};
 use crate::resolvers::{normalise_http_path, weakest};
 use crate::roles::roles_in;
 use crate::types::RepoGraph;
@@ -271,6 +273,22 @@ enum Tier {
 }
 
 impl Tier {
+    /// The EVIDENCE rule of a link this tier bound (LC.3d): the tier name,
+    /// `href_`-prefixed for a plain anchor (`href:` links, confidence capped
+    /// at Medium).
+    fn rule(self, href: bool) -> &'static str {
+        match (self, href) {
+            (Tier::Exact, false) => "exact",
+            (Tier::Param, false) => "param",
+            (Tier::Scoped, false) => "scoped",
+            (Tier::Suffix, false) => "suffix",
+            (Tier::Exact, true) => "href_exact",
+            (Tier::Param, true) => "href_param",
+            (Tier::Scoped, true) => "href_scoped",
+            (Tier::Suffix, true) => "href_suffix",
+        }
+    }
+
     fn confidence(self) -> Confidence {
         match self {
             Tier::Exact => Confidence::Strong,
@@ -531,15 +549,11 @@ pub(crate) fn resolve_nav_links(g: &mut RepoGraph, refs: &[&UnresolvedRef]) -> N
                 } else {
                     tier.confidence()
                 };
+                let ev = graph_evidence("graph:nav", tier.rule(href));
                 for to in targets {
                     if linked.insert((r.from, to)) {
-                        g.edges.push(Edge {
-                            from: r.from,
-                            to,
-                            category: edge_category::NAVIGATES_TO,
-                            confidence,
-                            cells: Vec::new(),
-                        });
+                        let edge = Edge::new(r.from, to, edge_category::NAVIGATES_TO, confidence);
+                        g.edges.push(edge.with_cell(ev.to_cell()));
                     }
                 }
             }

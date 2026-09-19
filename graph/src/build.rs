@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use repo_graph_code_domain::evidence::Evidence;
 use repo_graph_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, ImportTarget, UnresolvedRef,
     edge_category, node_kind,
@@ -10,12 +11,13 @@ use repo_graph_code_domain::{
 use repo_graph_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
 use crate::calls::{
-    emit_method_level_implements, enclosing_module, push_edge, resolve_calls, resolve_refs,
+    EvidenceTally, emit_method_level_implements, enclosing_module, graph_evidence, push_edge,
+    resolve_calls, resolve_refs,
 };
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
-use crate::rust_paths::{RustCrate, RustIndex, resolve_imports_rust};
+use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
 // ============================================================================
@@ -23,13 +25,19 @@ use crate::types::{GraphError, RepoGraph, SymbolTable};
 // ============================================================================
 
 /// Build a per-repo Python graph from a set of file-parse outputs.
+///
+/// Every builder ends with the LC.3d `[evidence-graph]` marker
+/// ([`EvidenceTally::report`]): which branch of `resolve_calls` /
+/// `resolve_refs` bound how many edges of this graph.
 pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
     resolve_imports_python(&mut g, &all_imports);
-    resolve_calls(&mut g, &all_calls, |_, _| None);
-    resolve_refs(&mut g, &all_refs);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
     Ok(g)
 }
 
@@ -77,14 +85,17 @@ fn build_go_passes(
     build_symbol_table(&mut g);
     let packages = GoPackages::build(&g, &all_imports);
     let dir_bound_imports = resolve_imports_go(&mut g, &all_imports, &packages);
-    resolve_go_calls(&mut g, &all_calls, &split, |g, site| packages.resolve(g, site));
+    let mut tally = EvidenceTally::default();
+    let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
+    resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
     let package_stats = packages.stats(dir_bound_imports);
     let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
-    resolve_refs(&mut g, &refs);
+    resolve_refs(&mut g, &refs, &mut tally);
     resolve_go_embeds(&mut g, &embeds, &all_imports);
     let implicit = emit_go_implicit_implements(&mut g);
     emit_method_level_implements(&mut g);
+    tally.report();
     (g, split, implicit, package_stats)
 }
 
@@ -102,9 +113,11 @@ where
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
     resolve_imports_ts(&mut g, &all_imports, &resolve_source);
-    resolve_calls(&mut g, &all_calls, |_, _| None);
-    resolve_refs(&mut g, &all_refs);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
     Ok(g)
 }
 
@@ -117,9 +130,11 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
     resolve_imports_python(&mut g, &all_imports);
-    resolve_calls(&mut g, &all_calls, |_, _| None);
-    resolve_refs(&mut g, &all_refs);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
     Ok(g)
 }
 
@@ -154,21 +169,26 @@ pub fn build_rust(
     let mut mod_scoped = 0usize;
     for site in all_calls {
         match idx.resolve_scoped_bare(&g, &site, &bindings) {
-            Some((to, mod_item)) => {
-                push_edge(&mut g, site.from, to, edge_category::CALLS);
-                mod_scoped += usize::from(mod_item);
+            Some((to, rule)) => {
+                push_edge(&mut g, site.from, to, edge_category::CALLS, rust_ev(rule));
+                mod_scoped += usize::from(rule == MOD_ITEM);
             }
             None => rest.push(site),
         }
     }
-    resolve_calls(&mut g, &rest, |g, site| {
-        idx.resolve_call(g, site, &bindings)
-    });
-    resolve_refs(&mut g, &all_refs);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(
+        &mut g,
+        &rest,
+        |g, site| idx.resolve_call(g, site, &bindings),
+        &mut tally,
+    );
+    resolve_refs(&mut g, &all_refs, &mut tally);
     idx.resolve_leftover_refs(&mut g, &bindings);
     emit_method_level_implements(&mut g);
     idx.report();
     idx.report_items(&g, mod_scoped);
+    tally.report();
     Ok(g)
 }
 
@@ -179,9 +199,11 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
     resolve_imports_slash(&mut g, &all_imports);
-    resolve_calls(&mut g, &all_calls, |_, _| None);
-    resolve_refs(&mut g, &all_refs);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
     Ok(g)
 }
 
@@ -455,7 +477,8 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
             kids.retain(|k| *k != method);
         }
         g.nav.children_of.entry(strukt).or_default().push(method);
-        push_edge(g, strukt, method, edge_category::DEFINES);
+        let ev = go_ev("split_receiver");
+        push_edge(g, strukt, method, edge_category::DEFINES, ev);
     }
     stats.bound = binds;
     stats
@@ -475,12 +498,17 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
 /// LA.13b). It scopes a site by its nearest MODULE too, so in the second pass
 /// a bound method's Bare call reaches the other files of its OWN file's
 /// package.
-fn resolve_go_calls<H>(g: &mut RepoGraph, calls: &[CallSite], split: &SplitStats, hook: H)
-where
-    H: Fn(&RepoGraph, &CallSite) -> Option<NodeId> + Copy,
+fn resolve_go_calls<H>(
+    g: &mut RepoGraph,
+    calls: &[CallSite],
+    split: &SplitStats,
+    hook: H,
+    tally: &mut EvidenceTally,
+) where
+    H: Fn(&RepoGraph, &CallSite) -> Option<(NodeId, Evidence)> + Copy,
 {
     if split.bound.is_empty() {
-        resolve_calls(g, calls, hook);
+        resolve_calls(g, calls, hook, tally);
         return;
     }
     let bound: HashSet<NodeId> = split.bound.iter().map(|&(m, _, _)| m).collect();
@@ -489,11 +517,11 @@ where
             matches!(s.qualifier, CallQualifier::Bare(_) | CallQualifier::Attribute { .. })
                 && under_bound_method(&g.nav, &bound, s.from)
         });
-    resolve_calls(g, &rest, hook);
+    resolve_calls(g, &rest, hook, tally);
     for &(method, module, _) in &split.bound {
         g.nav.parent_of.insert(method, module);
     }
-    resolve_calls(g, &file_scoped, hook);
+    resolve_calls(g, &file_scoped, hook, tally);
     for &(method, _, strukt) in &split.bound {
         g.nav.parent_of.insert(method, strukt);
     }
@@ -686,24 +714,31 @@ impl GoPackages {
     /// A METHOD never answers (Go calls one only through a value), nor do
     /// `init` (several per package, never callable) or `_`. Two answers (a
     /// build-tag pair, a package and its `_test` twin) bind nothing.
-    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+    ///
+    /// The hit's evidence (LC.3d) is `graph:go_packages` with rule
+    /// `package_sibling` (Bare) or `package_import` (Attribute).
+    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
         let module = enclosing_module(&g.nav, site.from)?;
         let from_test = self.tests.contains(&module);
-        let hit = match &site.qualifier {
-            CallQualifier::Bare(name) => {
-                self.unique_in(g, self.dir_of.get(&module)?, name, module, from_test)
-            }
+        let (hit, rule) = match &site.qualifier {
+            CallQualifier::Bare(name) => (
+                self.unique_in(g, self.dir_of.get(&module)?, name, module, from_test)?,
+                "package_sibling",
+            ),
             CallQualifier::Attribute { base, name }
                 if name.chars().next().is_some_and(char::is_uppercase) =>
             {
                 let dir = self.imported_dir(g, module, base)?;
                 let same_dir = self.dir_of.get(&module).is_some_and(|d| d == dir);
-                self.unique_in(g, dir, name, module, from_test && same_dir)
+                (
+                    self.unique_in(g, dir, name, module, from_test && same_dir)?,
+                    "package_import",
+                )
             }
-            _ => None,
-        }?;
+            _ => return None,
+        };
         self.sibling_calls.set(self.sibling_calls.get() + 1);
-        Some(hit)
+        Some((hit, go_ev(rule)))
     }
 
     /// The package directory `module`'s import bound as `base` stands for
@@ -793,7 +828,7 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
     if embeds.is_empty() {
         return;
     }
-    let mut bound: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut bound: Vec<(NodeId, NodeId, &str)> = Vec::new();
     let mut unbound: Vec<UnresolvedRef> = Vec::new();
     {
         let nav = &g.nav;
@@ -835,7 +870,8 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
             let hit = match &r.qualifier {
                 CallQualifier::Bare(name) => by_dir_name
                     .get(&(go_package_dir(module_qname), name.as_str()))
-                    .and_then(|ids| only(ids)),
+                    .and_then(|ids| only(ids))
+                    .map(|id| (id, "embed_package")),
                 CallQualifier::Attribute { base, name } => {
                     import_paths.get(&(module_qname, base.as_str())).and_then(|&path| {
                         let suffix = format!("::{path}");
@@ -848,21 +884,29 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
                             })
                             .map(|&(_, id)| id)
                             .collect();
-                        only(&ids)
+                        only(&ids).map(|id| (id, "embed_import"))
                     })
                 }
                 _ => None,
             };
             match hit {
-                Some(to) if to != r.from => bound.push((r.from, to)),
+                Some((to, rule)) if to != r.from => bound.push((r.from, to, rule)),
                 _ => unbound.push(r.clone()),
             }
         }
     }
-    for (from, to) in bound {
-        push_edge(g, from, to, edge_category::INHERITS_FROM);
+    for (from, to, rule) in bound {
+        push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule));
     }
     g.unresolved_refs.extend(unbound);
+}
+
+/// The evidence of an edge a Go package-as-directory pass drew (LC.3d):
+/// `graph:go_packages` with rule `split_receiver` (LA.23d), `package_sibling`
+/// / `package_import` (the LA.13b call hook) or `embed_package` /
+/// `embed_import` (LD.7b interface embeds).
+fn go_ev(rule: &str) -> Evidence {
+    graph_evidence("graph:go_packages", rule)
 }
 
 /// Method sets of the predeclared interfaces a Go interface can embed. No
@@ -1065,8 +1109,11 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
     pairs.retain(|p| !existing.contains(p));
     stats.types = pairs.iter().map(|&(ty, _)| ty).collect::<HashSet<_>>().len();
     stats.edges = pairs.len();
+    // LC.3d: a method-name-set match, `graph:iface` rule `method_set`.
+    let ev = graph_evidence("graph:iface", "method_set").to_cell();
     for (from, to) in pairs {
-        g.edges.push(Edge { from, to, category: edge_category::IMPLEMENTS, confidence: Confidence::Medium, cells: Vec::new() });
+        let edge = Edge::new(from, to, edge_category::IMPLEMENTS, Confidence::Medium);
+        g.edges.push(edge.with_cell(ev.clone()));
     }
     Some(stats)
 }
