@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 280,
+  "fixtures": 283,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -551,6 +551,21 @@
       "language": "go",
       "per_category": {
         "HANDLED_BY": 1.0
+      }
+    },
+    "go-nested-modules": {
+      "framework": "go-nested-modules",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "go-overlay-data-wrapper": {
+      "framework": "go-overlay-data-wrapper",
+      "language": "go",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
       }
     },
     "go-package-multifile-calls": {
@@ -1455,6 +1470,11 @@
       "per_category": {
         "INFRA_REFERENCES": 1.0
       }
+    },
+    "test-reports-fail": {
+      "framework": "test-reports-fail",
+      "language": "python",
+      "per_category": {}
     },
     "ts-angular-di": {
       "framework": "ts-angular-di",
