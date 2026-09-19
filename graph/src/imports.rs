@@ -3,6 +3,7 @@
 
 use repo_graph_code_domain::{ImportStmt, ImportTarget, edge_category};
 
+use crate::build::{DirImport, GoPackages};
 use crate::calls::{push_edge, unique_global_function, unique_global_module};
 use crate::types::RepoGraph;
 
@@ -121,7 +122,22 @@ pub(crate) fn resolve_imports_python(g: &mut RepoGraph, imports: &[ImportStmt]) 
 /// `ImportTarget::Module { path }` with `path` = repo-local `::` qname for
 /// imports that resolve inside this module. External imports keep the raw
 /// `std::io`-style form and won't match anything.
-pub(crate) fn resolve_imports_go(g: &mut RepoGraph, imports: &[ImportStmt]) {
+///
+/// An import path names a package, which is a DIRECTORY, while every Go file
+/// is its own MODULE (`internal/store/store.go` -> `internal::store::store`).
+/// So the lookup order is: a MODULE whose qname is the path (unchanged from
+/// before LA.13b), then the package directory `path` itself, bound to one of
+/// its files ([`GoPackages::import_target`]; the call-level hook reaches the
+/// package's other files), then the tail fallback. A directory whose only
+/// file is the importer binds nothing and skips the tail fallback, which
+/// could only guess a same-named package elsewhere. Returns the number of
+/// imports the directory step bound (LA.13b, the `[go-package]` marker).
+pub(crate) fn resolve_imports_go(
+    g: &mut RepoGraph,
+    imports: &[ImportStmt],
+    packages: &GoPackages,
+) -> usize {
+    let mut dir_bound = 0usize;
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -134,12 +150,24 @@ pub(crate) fn resolve_imports_go(g: &mut RepoGraph, imports: &[ImportStmt]) {
         let ImportTarget::Module { path, alias } = &stmt.target else {
             continue;
         };
-        let Some(target_id) = g.symbols.module_by_qname.get(path).copied().or_else(|| {
-            // Tail fallback (Pattern B): the go.mod-stripped path doesn't match a
-            // module qname exactly — bind the imported package by its unique short
-            // name (last `::` segment). Miss-only + ambiguity-safe.
-            unique_global_module(g, path.rsplit("::").next().unwrap_or(path))
-        }) else {
+        let target = match g.symbols.module_by_qname.get(path).copied() {
+            Some(exact) => Some(exact),
+            None => match packages.import_target(path, from_mod_id) {
+                DirImport::Bound(id) => {
+                    dir_bound += 1;
+                    Some(id)
+                }
+                DirImport::OnlyImporter => None,
+                // Tail fallback (Pattern B): the go.mod-stripped path doesn't
+                // match a module qname or a package directory — bind the
+                // imported package by its unique short name (last `::`
+                // segment). Miss-only + ambiguity-safe.
+                DirImport::NoDir => {
+                    unique_global_module(g, path.rsplit("::").next().unwrap_or(path))
+                }
+            },
+        };
+        let Some(target_id) = target else {
             continue;
         };
         push_edge(g, from_mod_id, target_id, edge_category::IMPORTS);
@@ -152,6 +180,7 @@ pub(crate) fn resolve_imports_go(g: &mut RepoGraph, imports: &[ImportStmt]) {
             .or_default()
             .insert(bound, target_id);
     }
+    dir_bound
 }
 
 /// Ruby imports: `require 'foo/bar'` gives a slash-delimited path. Convert

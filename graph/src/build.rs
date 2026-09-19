@@ -9,7 +9,9 @@ use repo_graph_code_domain::{
 };
 use repo_graph_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
-use crate::calls::{emit_method_level_implements, push_edge, resolve_calls, resolve_refs};
+use crate::calls::{
+    emit_method_level_implements, enclosing_module, push_edge, resolve_calls, resolve_refs,
+};
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
@@ -47,13 +49,20 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// satisfied implicitly, [`emit_go_implicit_implements`] derives each type ->
 /// interface IMPLEMENTS edge from method names, before A6.6 pairs them
 /// method by method.
+///
+/// LA.13b: a package is a directory, so an import binds the imported
+/// directory and a call every generic lookup missed resolves across the
+/// package's files ([`GoPackages`]), with no qname or persisted-table change.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (g, split, implicit) = build_go_passes(repo, parses);
+    let (g, split, implicit, packages) = build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
     if let Some(stats) = implicit {
         eprintln!("{}", stats.marker());
+    }
+    if let Some(line) = packages.marker() {
+        eprintln!("{line}");
     }
     Ok(g)
 }
@@ -62,19 +71,21 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
 fn build_go_passes(
     repo: RepoId,
     parses: Vec<FileParse>,
-) -> (RepoGraph, SplitStats, Option<GoImplicitStats>) {
+) -> (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats) {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
-    resolve_imports_go(&mut g, &all_imports);
-    resolve_go_calls(&mut g, &all_calls, &split);
+    let packages = GoPackages::build(&g, &all_imports);
+    let dir_bound_imports = resolve_imports_go(&mut g, &all_imports, &packages);
+    resolve_go_calls(&mut g, &all_calls, &split, |g, site| packages.resolve(g, site));
+    let package_stats = packages.stats(dir_bound_imports);
     let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
     resolve_refs(&mut g, &refs);
     resolve_go_embeds(&mut g, &embeds, &all_imports);
     let implicit = emit_go_implicit_implements(&mut g);
     emit_method_level_implements(&mut g);
-    (g, split, implicit)
+    (g, split, implicit, package_stats)
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -168,7 +179,9 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
 
 // ============================================================================
 // Shared merge: multi-file modules with the same NodeId collapse — their cells
-// stack on a single Module node (Go packages, TS re-exports, etc.).
+// stack on a single Module node (TS re-exports, or Go files when a caller
+// passes one qname per package, as tests/go_smoke does; the engine gives each
+// Go file its own MODULE, see [`GoPackages`]).
 // ============================================================================
 
 fn merge_parses(
@@ -444,9 +457,17 @@ fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
 /// second pass with every bound method pointed back at its file MODULE; the
 /// struct parents are restored after it. With no bound method this is one
 /// `resolve_calls` over every site, as before LA.23d.
-fn resolve_go_calls(g: &mut RepoGraph, calls: &[CallSite], split: &SplitStats) {
+///
+/// `hook` is the `extra_hook` of both passes ([`GoPackages::resolve`],
+/// LA.13b). It scopes a site by its nearest MODULE too, so in the second pass
+/// a bound method's Bare call reaches the other files of its OWN file's
+/// package.
+fn resolve_go_calls<H>(g: &mut RepoGraph, calls: &[CallSite], split: &SplitStats, hook: H)
+where
+    H: Fn(&RepoGraph, &CallSite) -> Option<NodeId> + Copy,
+{
     if split.bound.is_empty() {
-        resolve_calls(g, calls, |_, _| None);
+        resolve_calls(g, calls, hook);
         return;
     }
     let bound: HashSet<NodeId> = split.bound.iter().map(|&(m, _, _)| m).collect();
@@ -455,11 +476,11 @@ fn resolve_go_calls(g: &mut RepoGraph, calls: &[CallSite], split: &SplitStats) {
             matches!(s.qualifier, CallQualifier::Bare(_) | CallQualifier::Attribute { .. })
                 && under_bound_method(&g.nav, &bound, s.from)
         });
-    resolve_calls(g, &rest, |_, _| None);
+    resolve_calls(g, &rest, hook);
     for &(method, module, _) in &split.bound {
         g.nav.parent_of.insert(method, module);
     }
-    resolve_calls(g, &file_scoped, |_, _| None);
+    resolve_calls(g, &file_scoped, hook);
     for &(method, _, strukt) in &split.bound {
         g.nav.parent_of.insert(method, strukt);
     }
@@ -485,6 +506,250 @@ fn under_bound_method(nav: &CodeNav, bound: &HashSet<NodeId>, mut id: NodeId) ->
 /// (`svc::users::store` -> `svc::users`, a root-level file -> `""`).
 fn go_package_dir(module_qname: &str) -> &str {
     module_qname.rsplit_once("::").map_or("", |(dir, _)| dir)
+}
+
+// ============================================================================
+// Go package = directory (LA.13b)
+// ============================================================================
+
+/// The Go packages of one graph, used only while resolving. A Go package is
+/// a directory, but every Go file is its own MODULE (the engine passes the
+/// file path as the qname: `internal/store/store.go` ->
+/// `internal::store::store`), so on its own the generic pass sees one file
+/// where Go sees the package: an import binds a single file of the imported
+/// package, and a Bare call only finds a def in the caller's own file.
+///
+/// Neither qnames nor the persisted `module_symbols` change: one MODULE per
+/// package would stack every file's cells onto one node and change every Go
+/// id, and copying the package's symbols into each file's table would store
+/// a 50-file package's table 50 times. Instead [`resolve_imports_go`] binds an
+/// import of a directory to one of its files ([`GoPackages::import_target`]),
+/// and [`GoPackages::resolve`], `resolve_calls`' `extra_hook`, searches the
+/// rest of the package for a call every generic lookup missed. An edge that
+/// resolved before still resolves to the same node.
+///
+/// A `_test.go` file (a MODULE whose last segment ends in `_test`) is built
+/// only by `go test`: an importer never sees it and a non-test file never
+/// calls into it. It may also be an external `package x_test`, which the
+/// directory cannot tell apart (the package clause is not in the parse).
+///
+/// Deterministic: member lists are sorted by qname and a lookup binds only
+/// when exactly one node answers, never the first of several.
+pub(crate) struct GoPackages {
+    /// Package dir -> its file MODULEs, sorted by qname.
+    by_dir: HashMap<String, Vec<NodeId>>,
+    /// Package dir -> its file named after the dir (Go's `store/store.go`
+    /// convention), when it has one.
+    dir_named: HashMap<String, NodeId>,
+    /// File MODULE -> its package dir.
+    dir_of: HashMap<NodeId, String>,
+    /// The `_test.go` file MODULEs.
+    tests: HashSet<NodeId>,
+    /// Importing file MODULE -> local package name -> import path, for every
+    /// `ImportTarget::Module` except a blank (`_`) or dot (`.`) import.
+    import_path: HashMap<NodeId, HashMap<String, String>>,
+    /// Calls [`GoPackages::resolve`] bound.
+    sibling_calls: std::cell::Cell<usize>,
+}
+
+/// Where an import of a package directory binds ([`GoPackages::import_target`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DirImport {
+    /// No Go file sits in exactly that directory.
+    NoDir,
+    /// The directory's only file is the importer itself (an external
+    /// `x_test` package importing `x` whose other files are not parsed).
+    OnlyImporter,
+    /// The file the IMPORTS edge and binding point at.
+    Bound(NodeId),
+}
+
+/// What [`GoPackages`] did to one Go graph, for the `[go-package]` marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GoPackageStats {
+    /// Package directories (a root-level file's package is `""`).
+    dirs: usize,
+    /// Directories holding two or more files.
+    multi_file: usize,
+    /// Imports bound by the package-directory step of
+    /// [`resolve_imports_go`].
+    dir_bound_imports: usize,
+    /// Calls bound in another file of a package by [`GoPackages::resolve`].
+    sibling_calls: usize,
+}
+
+impl GoPackageStats {
+    /// `[go-package] dirs=D multi_file=M dir_bound_imports=I sibling_calls=S`,
+    /// once per Go graph with any MODULE.
+    fn marker(&self) -> Option<String> {
+        (self.dirs > 0).then(|| {
+            format!(
+                "[go-package] dirs={} multi_file={} dir_bound_imports={} sibling_calls={}",
+                self.dirs, self.multi_file, self.dir_bound_imports, self.sibling_calls
+            )
+        })
+    }
+}
+
+impl GoPackages {
+    /// Index the MODULEs of `g` (after [`build_symbol_table`]) by package
+    /// directory, and the imports by importing file and local name.
+    fn build(g: &RepoGraph, imports: &[ImportStmt]) -> Self {
+        let mut modules: Vec<(&str, NodeId)> =
+            g.symbols.module_by_qname.iter().map(|(q, id)| (q.as_str(), *id)).collect();
+        modules.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        let mut by_dir: HashMap<String, Vec<NodeId>> = HashMap::new();
+        let mut dir_named: HashMap<String, NodeId> = HashMap::new();
+        let mut dir_of: HashMap<NodeId, String> = HashMap::new();
+        let mut tests: HashSet<NodeId> = HashSet::new();
+        for (qname, id) in modules {
+            let dir = go_package_dir(qname);
+            let stem = qname.rsplit("::").next().unwrap_or(qname);
+            by_dir.entry(dir.to_string()).or_default().push(id);
+            dir_of.insert(id, dir.to_string());
+            if stem.ends_with("_test") {
+                tests.insert(id);
+            } else if !dir.is_empty() && dir.rsplit("::").next() == Some(stem) {
+                dir_named.insert(dir.to_string(), id);
+            }
+        }
+        let mut import_path: HashMap<NodeId, HashMap<String, String>> = HashMap::new();
+        for stmt in imports {
+            let ImportTarget::Module { path, alias } = &stmt.target else {
+                continue;
+            };
+            let local = match alias.as_deref() {
+                Some("_") | Some(".") => continue,
+                Some(a) => a,
+                None => path.rsplit("::").next().unwrap_or(path),
+            };
+            if let Some(&from) = g.symbols.module_by_qname.get(&stmt.from_module) {
+                import_path.entry(from).or_default().insert(local.to_string(), path.clone());
+            }
+        }
+        GoPackages {
+            by_dir,
+            dir_named,
+            dir_of,
+            tests,
+            import_path,
+            sibling_calls: std::cell::Cell::new(0),
+        }
+    }
+
+    /// The file an import of package directory `dir` by file `importer`
+    /// binds: the dir-named file, else the first non-test file by qname, else
+    /// the first test file; never the importer itself.
+    pub(crate) fn import_target(&self, dir: &str, importer: NodeId) -> DirImport {
+        let Some(members) = self.by_dir.get(dir) else {
+            return DirImport::NoDir;
+        };
+        let others = || members.iter().copied().filter(move |&m| m != importer);
+        self.dir_named
+            .get(dir)
+            .copied()
+            .filter(|&m| m != importer)
+            .or_else(|| others().find(|m| !self.tests.contains(m)))
+            .or_else(|| others().next())
+            .map_or(DirImport::OnlyImporter, DirImport::Bound)
+    }
+
+    /// `resolve_calls`' `extra_hook`, consulted only after every generic
+    /// lookup missed:
+    ///
+    /// * `Bare(name)`: the def `name` of another file in the caller's package
+    ///   (a package's top-level names are one scope in Go). A test file's
+    ///   defs answer only a test file.
+    /// * `Attribute { base, name }` with `base` an import of the caller's
+    ///   file: the exported def `name` of a non-test file of the imported
+    ///   package (a test file of the same directory also sees its test
+    ///   files, the `export_test.go` pattern). That package is the import
+    ///   path when the tree has that directory; else, for an import the tail
+    ///   fallback bound, the bound file's directory. An import bound to a
+    ///   file whose qname IS the path (a file `a/b.go` for an import of `a/b`,
+    ///   with no `a/b/` directory) is not widened: that file is not the
+    ///   imported package.
+    ///
+    /// A METHOD never answers (Go calls one only through a value), nor do
+    /// `init` (several per package, never callable) or `_`. Two answers (a
+    /// build-tag pair, a package and its `_test` twin) bind nothing.
+    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+        let module = enclosing_module(&g.nav, site.from)?;
+        let from_test = self.tests.contains(&module);
+        let hit = match &site.qualifier {
+            CallQualifier::Bare(name) => {
+                self.unique_in(g, self.dir_of.get(&module)?, name, module, from_test)
+            }
+            CallQualifier::Attribute { base, name }
+                if name.chars().next().is_some_and(char::is_uppercase) =>
+            {
+                let dir = self.imported_dir(g, module, base)?;
+                let same_dir = self.dir_of.get(&module).is_some_and(|d| d == dir);
+                self.unique_in(g, dir, name, module, from_test && same_dir)
+            }
+            _ => None,
+        }?;
+        self.sibling_calls.set(self.sibling_calls.get() + 1);
+        Some(hit)
+    }
+
+    /// The package directory `module`'s import bound as `base` stands for
+    /// (see [`GoPackages::resolve`]).
+    fn imported_dir(&self, g: &RepoGraph, module: NodeId, base: &str) -> Option<&str> {
+        let path = self.import_path.get(&module)?.get(base)?;
+        if let Some((dir, _)) = self.by_dir.get_key_value(path) {
+            return Some(dir);
+        }
+        let bound = *g.symbols.module_import_bindings.get(&module)?.get(base)?;
+        if g.nav.kind_by_id.get(&bound) != Some(&node_kind::MODULE)
+            || g.nav.qname_by_id.get(&bound) == Some(path)
+        {
+            return None;
+        }
+        self.dir_of.get(&bound).map(String::as_str)
+    }
+
+    /// The one non-METHOD top-level def `name` across the files of `dir`
+    /// other than `caller`, test files included only `with_tests`.
+    fn unique_in(
+        &self,
+        g: &RepoGraph,
+        dir: &str,
+        name: &str,
+        caller: NodeId,
+        with_tests: bool,
+    ) -> Option<NodeId> {
+        if name == "init" || name == "_" {
+            return None;
+        }
+        let mut hit: Option<NodeId> = None;
+        for &m in self.by_dir.get(dir)? {
+            if m == caller || (!with_tests && self.tests.contains(&m)) {
+                continue;
+            }
+            let Some(&id) = g.symbols.module_symbols.get(&m).and_then(|s| s.get(name)) else {
+                continue;
+            };
+            if g.nav.kind_by_id.get(&id) == Some(&node_kind::METHOD) {
+                continue;
+            }
+            match hit {
+                Some(existing) if existing == id => {}
+                Some(_) => return None,
+                None => hit = Some(id),
+            }
+        }
+        hit
+    }
+
+    fn stats(&self, dir_bound_imports: usize) -> GoPackageStats {
+        GoPackageStats {
+            dirs: self.by_dir.len(),
+            multi_file: self.by_dir.values().filter(|m| m.len() > 1).count(),
+            dir_bound_imports,
+            sibling_calls: self.sibling_calls.get(),
+        }
+    }
 }
 
 // ============================================================================
@@ -1333,7 +1598,7 @@ mod tests {
 
     /// `build_go` with the implicit pass's stats.
     fn go_implicit(parses: Vec<FileParse>) -> (RepoGraph, Option<GoImplicitStats>) {
-        let (g, _, stats) = build_go_passes(repo(), parses);
+        let (g, _, stats, _) = build_go_passes(repo(), parses);
         (g, stats)
     }
 
@@ -1652,5 +1917,98 @@ mod tests {
         );
         let (_, none) = go_implicit(vec![go_file("x", &[(node_kind::STRUCT, "x::T", None)])]);
         assert_eq!(none, None);
+    }
+
+    // ---- LA.13b: Go package = directory -------------------------------------
+
+    /// The fixtures/go-package-multifile-calls shape: `cmd/main.go` imports
+    /// `internal/store` and calls `store.Save()` / `store.Load()`; `Save`
+    /// (store.go) calls `helper()` (load.go).
+    fn multifile_package_shape() -> Vec<FileParse> {
+        let mut main = go_file("cmd::main", &[(node_kind::FUNCTION, "cmd::main::main", None)]);
+        main.imports = vec![ImportStmt {
+            from_module: "cmd::main".to_string(),
+            target: ImportTarget::Module { path: "internal::store".to_string(), alias: None },
+        }];
+        let from = gid(node_kind::FUNCTION, "cmd::main::main");
+        let attr = |name: &str| CallQualifier::Attribute { base: "store".to_string(), name: name.to_string() };
+        main.calls = vec![
+            CallSite { from, qualifier: attr("Save") },
+            CallSite { from, qualifier: attr("Load") },
+        ];
+        let mut store =
+            go_file("internal::store::store", &[(node_kind::FUNCTION, "internal::store::store::Save", None)]);
+        store.calls = vec![CallSite {
+            from: gid(node_kind::FUNCTION, "internal::store::store::Save"),
+            qualifier: CallQualifier::Bare("helper".to_string()),
+        }];
+        let load = go_file(
+            "internal::store::load",
+            &[
+                (node_kind::FUNCTION, "internal::store::load::Load", None),
+                (node_kind::FUNCTION, "internal::store::load::helper", None),
+            ],
+        );
+        vec![main, store, load]
+    }
+
+    /// The `[go-package]` marker counts the package directories, the
+    /// multi-file ones, the imports the directory step bound and the calls
+    /// bound in a sibling file; the fixture prints the packet's marker.
+    #[test]
+    fn go_package_stats_and_marker() {
+        let (g, _, _, stats) = build_go_passes(repo(), multifile_package_shape());
+        assert_eq!(
+            stats,
+            GoPackageStats { dirs: 2, multi_file: 1, dir_bound_imports: 1, sibling_calls: 2 }
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[go-package] dirs=2 multi_file=1 dir_bound_imports=1 sibling_calls=2")
+        );
+        let main = gid(node_kind::FUNCTION, "cmd::main::main");
+        let save = gid(node_kind::FUNCTION, "internal::store::store::Save");
+        assert!(has_edge(&g, main, save, edge_category::CALLS));
+        assert!(has_edge(&g, main, gid(node_kind::FUNCTION, "internal::store::load::Load"), edge_category::CALLS));
+        assert!(has_edge(&g, save, gid(node_kind::FUNCTION, "internal::store::load::helper"), edge_category::CALLS));
+        assert!(g.unresolved_calls.is_empty());
+
+        let (_, _, _, empty) = build_go_passes(repo(), vec![]);
+        assert_eq!(empty.marker(), None, "no MODULE, no marker");
+    }
+
+    /// An import of a directory binds its dir-named file, else its first
+    /// non-test file by qname, else its first test file, never the importer,
+    /// whatever order the files arrive in; a root-level file's package is
+    /// `""`.
+    #[test]
+    fn go_import_target_prefers_dir_named_then_non_test_files() {
+        let m = |q: &str| gid(node_kind::MODULE, q);
+        for order in [[0, 1, 2, 3, 4, 5, 6], [6, 5, 4, 3, 2, 1, 0]] {
+            let files = [
+                go_file("a::store::zeta", &[]),
+                go_file("a::store::store", &[]),
+                go_file("b::util::y", &[]),
+                go_file("b::util::a_test", &[]),
+                go_file("c::only::only_test", &[]),
+                go_file("c::only::more_test", &[]),
+                go_file("main", &[]),
+            ];
+            let parses: Vec<FileParse> = order.iter().map(|&i| files[i].clone()).collect();
+            let (mut g, imports, _, _) = merge_parses(repo(), parses);
+            build_symbol_table(&mut g);
+            let pk = GoPackages::build(&g, &imports);
+            let importer = m("main");
+            assert_eq!(pk.import_target("a::store", importer), DirImport::Bound(m("a::store::store")));
+            assert_eq!(pk.import_target("b::util", importer), DirImport::Bound(m("b::util::y")));
+            assert_eq!(pk.import_target("c::only", importer), DirImport::Bound(m("c::only::more_test")));
+            assert_eq!(
+                pk.import_target("c::only", m("c::only::more_test")),
+                DirImport::Bound(m("c::only::only_test"))
+            );
+            assert_eq!(pk.import_target("a", importer), DirImport::NoDir);
+            assert_eq!(pk.import_target("", m("a::store::zeta")), DirImport::Bound(importer));
+            assert_eq!(pk.import_target("", importer), DirImport::OnlyImporter);
+        }
     }
 }

@@ -18,8 +18,9 @@ use crate::types::RepoGraph;
 ///
 /// `extra_hook` is an escape hatch for language-specific resolution shapes
 /// that the generic pass doesn't cover, consulted only after every generic
-/// lookup misses. Rust passes its path resolver (`crate::rust_paths`, LA.1a);
-/// every other builder passes `|_, _| None`.
+/// lookup misses. Rust passes its path resolver (`crate::rust_paths`, LA.1a)
+/// and Go its package-directory hook (`build::GoPackages`, LA.13b); every
+/// other builder passes `|_, _| None`.
 pub(crate) fn resolve_calls<H>(g: &mut RepoGraph, calls: &[CallSite], extra_hook: H)
 where
     H: Fn(&RepoGraph, &CallSite) -> Option<NodeId>,
@@ -515,7 +516,9 @@ pub(crate) fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId
 
 /// Walk `parent_of` until we hit a module node. For a top-level function this
 /// returns its module directly; for a method it walks method → class → module.
-fn enclosing_module(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
+/// `pub(crate)` for the Go package hook (`build::GoPackages`, LA.13b), which
+/// scopes a call to its caller's file the same way.
+pub(crate) fn enclosing_module(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
     loop {
         if nav.kind_by_id.get(&id) == Some(&node_kind::MODULE) {
             return Some(id);

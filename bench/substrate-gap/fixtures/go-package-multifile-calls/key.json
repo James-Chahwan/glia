@@ -1,0 +1,18 @@
+{
+  "framework": "go-package-multifile-calls",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["go/calls"],
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "internal/store/load/Load"},
+    {"kind": "FUNCTION", "name": "internal/store/load/helper"}
+  ],
+  "expect_edges": [
+    {"from": "cmd/main/main", "to": "internal/store/store/Save", "category": "CALLS", "note": "control: the imported package's file whose stem matches the dir (resolves on HEAD)"},
+    {"from": "cmd/main/main", "to": "internal/store/load/Load", "category": "CALLS", "note": "store.Load() — defined in a SIBLING file of the imported package"},
+    {"from": "internal/store/store/Save", "to": "internal/store/load/helper", "category": "CALLS", "note": "same-package bare call across two files"}
+  ],
+  "forbid": [],
+  "note": "LA.13b. A Go package is a directory, but module qnames are per file (internal::store::store, internal::store::load). Baseline HEAD 7a4883b (installed 0.4.18+p3d23e8828e7ba01a wheel): the import binds to store.go only, so store.Load() and the bare helper() call across files are both unresolved."
+}
