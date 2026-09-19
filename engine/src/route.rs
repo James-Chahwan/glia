@@ -3,13 +3,14 @@
 //! dotenv / migration `.sql` / Prisma `.prisma` / contract and JSON Schema
 //! `.json` / `.proto` / `.graphql`), the WP-D incremental parse-cache lookup,
 //! and the per-file panic isolation.
-//! Split out of `build_graphs_for_repo`.
+//! Split out of `build_graphs_for_repo`. LG.1a: each file is routed by
+//! `route_one` on the engine's rayon pool and folded back in walk order.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
+use repo_graph_code_extractors::contracts::ContractNodes;
 use repo_graph_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::cache::{self, ParseCache};
@@ -26,47 +27,39 @@ use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 /// synthetic parse (A5.1), so they get a MODULE node and a file position.
 /// `repo_label` only prefixes the `[incremental]` marker (A1.4). `go` is the
 /// repo's go.mod set every Go file maps its imports through (LA.13).
+///
+/// LG.1a: every file is routed by [`route_one`] on the engine's rayon pool
+/// (`parallel::par_map_ordered`), which reads the parse cache and never
+/// writes shared state. ONE sequential fold then visits the results in walk
+/// order and does everything the pre-LG.1a loop did in place: counters, the
+/// cache diff inputs, the per-lang pushes, the parse errors. So every
+/// `Vec<FileParse>`, error list, cache entry and marker count is the one a
+/// sequential build produces, whatever the pool size.
+///
+/// fired_on marker, once per call:
+///   `[parallel] <repo>: routed <n> files on <t> threads (synthetic <s>, reused <r>, reparsed <p>, failed <f>)`
+/// `n` = `s + r + p + f`: files a branch took (non-code, served from the
+/// cache, parsed, or failed); files no branch reads are not counted.
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
     go: &GoModules,
-    mut cache: Option<&mut ParseCache>,
+    cache: Option<&mut ParseCache>,
     repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
     let mut parse_errors = Vec::new();
-    // LB.9b: which code files name their MODULE by file name. Planned from the
-    // walked list before any parse, so a cache hit is checked against it.
+    // LB.9b: which code files name their MODULE by file name. Planned ONCE
+    // from the walked list, before any parse, so a cache hit is checked
+    // against it (LB.10a's c_cpp rule included).
     let modules = ModuleQnames::plan(files);
     // LB.9b: cached parses rejected because the plan renamed their MODULE (a
     // same-stem file of any build group, LB.13 included, appeared or vanished).
     let mut requalified: Vec<String> = Vec::new();
-    // A5.1 `[proto]` marker counters.
-    let mut proto_files = 0usize;
-    let mut proto_services = 0usize;
-    let mut proto_rpcs = 0usize;
-    let mut proto_packages = 0usize;
-    // A10.5 `[proto] files=` marker counters.
-    let mut proto_messages = 0usize;
-    let mut proto_enums = 0usize;
-    // A10.4 `[graphql-sdl]` marker counters.
-    let mut sdl_files = 0usize;
-    let mut sdl_resolvers = 0usize;
-    // A10.6 `[avro]` marker counters.
-    let mut avro_files = 0usize;
-    let mut avro_records = 0usize;
-    let mut avro_enums = 0usize;
-    let mut avro_fixed = 0usize;
-    // LE.10a `[schema-fields]` marker counters: proto messages / Avro records
-    // given a SCHEMA_FIELDS cell, and the fields those cells list.
-    let mut proto_field_messages = 0usize;
-    let mut proto_fields = 0usize;
-    let mut avro_field_records = 0usize;
-    let mut avro_fields = 0usize;
-    // LA.16 (A10.12) `[jsonschema]` marker counters.
-    let mut jsonschema_files = 0usize;
-    let mut jsonschema_types = 0usize;
-    let mut jsonschema_defs = 0usize;
+    // The non-code branches' marker counters (A5.1 / A10.5 `[proto]`, A10.4
+    // `[graphql-sdl]`, A10.6 `[avro]`, LE.10a `[schema-fields]`, LA.16
+    // `[jsonschema]`, LA.6c `[nav-links]`), summed by the fold.
+    let mut tally = SynthTally::default();
     // A10.1 `[contract]` marker counters: yaml (A10.1 / A10.3) and sniffed
     // JSON (A10.8) contracts both fold in through `ContractCounts::record`.
     let mut contracts = repo_graph_code_extractors::contracts::ContractCounts::default();
@@ -92,14 +85,6 @@ pub(crate) fn parse_repo_files(
     let mut nav_catchalls = 0usize;
     // A3.5 `[extract] ts-routes` marker counter, same reparsed-only caveat.
     let mut ts_client_calls_skipped = 0usize;
-    // LA.6c `[nav-links]` marker counters: link sites of the reparsed
-    // TS-family files (same reparsed-only caveat) plus every `.component.html`
-    // template, which is never cached.
-    let mut links_router = 0usize;
-    let mut links_href = 0usize;
-    let mut links_origin = 0usize;
-    let mut links_template = 0usize;
-    let mut links_dynamic = 0usize;
     // A13.16: a prismaSchemaFolder schema declares its `datasource` in one
     // `.prisma` file and its models in the others; a model file with no
     // datasource of its own takes the provider every schema file agrees on.
@@ -109,498 +94,124 @@ pub(crate) fn parse_repo_files(
             .filter(|(p, _)| repo_graph_code_extractors::prisma::is_prisma_schema(p))
             .map(|(_, s)| s.as_str()),
     );
+    let ctx = RouteCtx {
+        repo,
+        go,
+        modules: &modules,
+        prisma_provider: prisma_provider.as_deref(),
+    };
 
-    for (path, source) in files {
-        let yaml_ext = matches!(
-            std::path::Path::new(path)
-                .extension()
-                .and_then(|e| e.to_str()),
-            Some("yml" | "yaml")
-        );
-        if yaml_ext {
-            let module_id = synthetic_module_id(repo, path);
-            let cron_out = repo_graph_code_extractors::cron::extract_cron_nodes(
-                source, path, module_id, repo,
-            );
-            let cfg_out = repo_graph_code_extractors::config::extract_yaml_env_defs(
-                source, module_id, repo,
-            );
-            let iac_out =
-                repo_graph_code_extractors::iac::extract_yaml(source, module_id, repo);
-            // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
-            // API surface. Non-contract yaml takes a cheap sniff-miss here.
-            let contract_out = repo_graph_code_extractors::contracts::extract_yaml_contracts(
-                source, path, module_id, repo,
-            );
-            // A10.3: the same call also covers `asyncapi.yaml`; `record`
-            // routes the count to the format the file sniffed as.
-            contracts.record(&contract_out);
-            if !cron_out.nodes.is_empty()
-                || !cfg_out.nodes.is_empty()
-                || !iac_out.nodes.is_empty()
-                || !contract_out.nodes.is_empty()
-            {
-                stash_synthetic_parse(
-                    "yaml",
-                    path,
-                    module_id,
-                    repo,
-                    vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes, contract_out.nodes],
-                    vec![cron_out.edges, cfg_out.edges, iac_out.edges, contract_out.edges],
-                    vec![cron_out.nav, cfg_out.nav, iac_out.nav, contract_out.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
+    // Read-only on the workers; the fresh parses are put after the fold.
+    let cache_ro = cache.as_deref();
+    let (routed, threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
+        route_one(path, source, &ctx, cache_ro)
+    });
 
-        if is_dockerfile_path(path) {
-            let module_id = synthetic_module_id(repo, path);
-            let cfg_out = repo_graph_code_extractors::config::extract_dockerfile_defs(
-                source, module_id, repo,
-            );
-            let iac_out = repo_graph_code_extractors::iac::extract_dockerfile(
-                source, path, module_id, repo,
-            );
-            if !cfg_out.nodes.is_empty() || !iac_out.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "dockerfile",
-                    path,
-                    module_id,
-                    repo,
-                    vec![cfg_out.nodes, iac_out.nodes],
-                    vec![cfg_out.edges, iac_out.edges],
-                    vec![cfg_out.nav, iac_out.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
+    // LG.1a: the one sequential fold, in walk order.
+    let (mut n_synthetic, mut n_reused, mut n_reparsed, mut n_failed) = (0usize, 0, 0, 0);
+    for ((path, _), r) in files.iter().zip(routed) {
+        match r {
+            Routed::Skip => {}
+            Routed::NonCode { key, fp, tally: t } => {
+                n_synthetic += 1;
+                for line in &t.lines {
+                    eprintln!("{line}");
+                }
+                for c in &t.contracts {
+                    contracts.record(c);
+                }
+                tally.add(&t);
+                if let Some(fp) = fp {
+                    parses_by_lang.entry(key).or_default().push(fp);
+                }
             }
-            continue;
-        }
-
-        if repo_graph_code_extractors::packages::is_manifest_path(path) {
-            let module_id = synthetic_module_id(repo, path);
-            let pkg_out = repo_graph_code_extractors::packages::extract_for_path(
-                source, path, module_id, repo,
-            );
-            // LA.20c: the binaries the manifest declares (pyproject scripts,
-            // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
-            // invocation's argv0 pairs with them. A manifest that declares a
-            // binary but no dependency is still stashed.
-            let bin_out = repo_graph_code_extractors::cli::extract_manifest_binaries(
-                source, path, module_id, repo,
-            );
-            if let Some(marker) = repo_graph_code_extractors::cli::manifest_marker(path, &bin_out)
-            {
-                eprintln!("{marker}");
-            }
-            if !pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "manifest",
-                    path,
-                    module_id,
-                    repo,
-                    vec![pkg_out.nodes, bin_out.nodes],
-                    vec![pkg_out.edges],
-                    vec![pkg_out.nav, bin_out.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        if is_dotenv_path(path) {
-            let module_id = synthetic_module_id(repo, path);
-            let cfg_out = repo_graph_code_extractors::config::extract_dotenv_defs(
-                source, module_id, repo,
-            );
-            if !cfg_out.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "dotenv",
-                    path,
-                    module_id,
-                    repo,
-                    vec![cfg_out.nodes],
-                    vec![cfg_out.edges],
-                    vec![cfg_out.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        // A13.9: a migration `.sql` (the walk admits one only through
-        // `is_migration_path`). Its DDL names the tables it creates, alters or
-        // drops, each an ACCESSES_DATA target of the file's MODULE. Before
-        // detect_language, which has no sql arm on purpose: the const-table
-        // scan would bind `UPDATE t SET name = 'x'` as a constant.
-        if repo_graph_code_extractors::migrations::is_migration_path(path) {
-            let module_id = synthetic_module_id(repo, path);
-            let out = repo_graph_code_extractors::migrations::extract_sql_migration(
-                source, path, module_id, repo,
-            );
-            eprintln!("{}", out.marker(path));
-            if !out.entities.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "migration",
-                    path,
-                    module_id,
-                    repo,
-                    vec![out.entities.nodes],
-                    vec![out.entities.edges],
-                    vec![out.entities.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        // A13.16: a Prisma schema (the walk admits `.prisma` only through
-        // `is_prisma_schema`). Each `model` is a model-keyed DATA_ENTITY and an
-        // ACCESSES_DATA target of the file's MODULE; `@@map` rides a table
-        // cell. Before detect_language, which has no prisma arm on purpose:
-        // the const-table scan would bind `provider = "postgresql"`.
-        if repo_graph_code_extractors::prisma::is_prisma_schema(path) {
-            let module_id = synthetic_module_id(repo, path);
-            let out = repo_graph_code_extractors::prisma::extract_prisma_models(
-                source,
-                module_id,
-                repo,
-                prisma_provider.as_deref(),
-            );
-            eprintln!("{}", out.marker(path));
-            if !out.entities.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "prisma",
-                    path,
-                    module_id,
-                    repo,
-                    vec![out.entities.nodes],
-                    vec![out.entities.edges],
-                    vec![out.entities.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        // LA.6c: an Angular `.component.html` template (admitted by the walk)
-        // holds its component's navigation links. It borrows the MODULE id
-        // of its `.component.ts`, so the refs go out from that module under
-        // the `angular` key, into the TS-family graph where the nav routes
-        // and the component's page live. A bare `FileParse`, never
-        // `stash_synthetic_parse`: that mints a MODULE node, and this id is
-        // the `.component.ts` parse's. Before detect_language, which has no
-        // html arm. The one non-code branch that keeps the CODE form (not
-        // `synthetic_module_id`, LB.9a): the file-name form would orphan every
-        // link it reads. The id is the LB.9b plan's for the `.component.ts`
-        // sibling, so a component named by its file name keeps its links.
-        if is_angular_template_path(path) {
-            let module_id = modules.module_id(&angular_component_source(path, &modules), repo);
-            match catch_unwind(AssertUnwindSafe(|| {
-                repo_graph_code_extractors::nav_links::extract_template_links(source, module_id)
-            })) {
-                Ok(links) => {
-                    links_router += links.router;
-                    links_href += links.href;
-                    links_origin += links.origin;
-                    links_template += links.template;
-                    links_dynamic += links.dynamic_skipped;
-                    if !links.refs.is_empty() {
-                        parses_by_lang
-                            .entry("angular")
-                            .or_default()
-                            .push(FileParse {
-                                refs: links.refs,
-                                ..Default::default()
-                            });
+            Routed::Code {
+                lang,
+                hash,
+                requalified: was_requalified,
+                outcome,
+            } => {
+                if let Some(h) = hash {
+                    current.push((path.clone(), h));
+                }
+                if was_requalified {
+                    requalified.push(path.clone());
+                }
+                match outcome {
+                    CodeOutcome::Cached(fp) => {
+                        n_reused += 1;
+                        live_paths.insert(path.clone());
+                        parses_by_lang.entry(lang).or_default().push(fp);
+                    }
+                    CodeOutcome::Parsed(fp, stats) => {
+                        n_reparsed += 1;
+                        nav_routes_marked += stats.nav_routes;
+                        nav_bound += stats.nav_bound;
+                        nav_redirects += stats.nav_redirects;
+                        nav_children += stats.nav_children;
+                        nav_rejected += stats.nav_rejected;
+                        nav_catchalls += stats.nav_catchalls;
+                        ts_client_calls_skipped += stats.ts_client_calls_skipped;
+                        tally.links_router += stats.nav_links_router;
+                        tally.links_href += stats.nav_links_href;
+                        tally.links_origin += stats.nav_links_origin;
+                        tally.links_dynamic += stats.nav_links_dynamic;
+                        if let Some(h) = hash {
+                            pending.push((path.clone(), h, lang, fp.clone()));
+                        }
+                        live_paths.insert(path.clone());
+                        parses_by_lang.entry(lang).or_default().push(fp);
+                    }
+                    CodeOutcome::Failed(e) => {
+                        n_failed += 1;
+                        parse_errors.push(e);
                     }
                 }
-                Err(payload) => parse_errors.push(format!(
-                    "{path}: PANIC (nav template links): {}",
-                    panic_payload_str(&payload)
-                )),
             }
-            continue;
-        }
-
-        // A10.8: the walker queues a `.json` only when it sniffed as an API
-        // contract or (LA.16) a JSON Schema. After the manifest branch, so
-        // package.json / composer.json never land here; before detect_language,
-        // which has no json arm.
-        let json_ext = std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("json"));
-        if json_ext {
-            let module_id = synthetic_module_id(repo, path);
-            // LA.16 (A10.12): a JSON Schema that is not an API contract
-            // declares MESSAGE_TYPEs, the shape a `.proto` message or an
-            // `.avsc` record gets, so MessageSchemaResolver can pair them
-            // across repos. A contract keeps the A10.8 path below.
-            if repo_graph_code_extractors::contracts::sniff_json_contract(source).is_none()
-                && repo_graph_code_extractors::schemas::sniff_json_schema(source)
-            {
-                let recs = repo_graph_code_extractors::schemas::extract_json_schema_types(
-                    source, path, module_id, repo,
-                );
-                jsonschema_files += 1;
-                jsonschema_types += recs.nodes.len();
-                jsonschema_defs += recs.def_count;
-                if !recs.nodes.is_empty() {
-                    stash_synthetic_parse(
-                        "json",
-                        path,
-                        module_id,
-                        repo,
-                        vec![recs.nodes],
-                        vec![recs.edges],
-                        vec![recs.nav],
-                        recs.module_cells,
-                        &mut parses_by_lang,
-                    );
-                }
-                continue;
-            }
-            let out = repo_graph_code_extractors::contracts::extract_json_contract(
-                source, path, module_id, repo,
-            );
-            contracts.record(&out);
-            if !out.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "json",
-                    path,
-                    module_id,
-                    repo,
-                    vec![out.nodes],
-                    vec![out.edges],
-                    vec![out.nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        let Some(lang) = detect_language(path) else { continue };
-
-        if lang == "proto" {
-            let module_id = synthetic_module_id(repo, path);
-            let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
-                source, path, module_id, repo,
-            );
-            // A10.5: the file's `message` / `enum` declarations, as
-            // MESSAGE_TYPE nodes under the same MODULE.
-            let msgs = repo_graph_code_extractors::schemas::extract_proto_messages(
-                source, path, module_id, repo,
-            );
-            proto_files += 1;
-            proto_services += out.service_count;
-            proto_rpcs += out.rpc_count;
-            proto_messages += msgs.message_count;
-            proto_enums += msgs.enum_count;
-            proto_field_messages += msgs.schema_field_cells;
-            proto_fields += msgs.schema_fields;
-            if out.package.is_some() {
-                proto_packages += 1;
-            }
-            // A messages-only `.proto` (a shared `common.proto`) is still a
-            // parsed file, not a skipped one.
-            if !out.nodes.is_empty() || !msgs.nodes.is_empty() {
-                // Same synthetic path as yaml / Dockerfile / manifest / dotenv:
-                // the file itself becomes a MODULE (with a POSITION cell) that
-                // parents the GRPC_SERVICE, so `locate_node` / `docs-for` can
-                // answer "where is this service declared".
-                stash_synthetic_parse(
-                    "proto",
-                    path,
-                    module_id,
-                    repo,
-                    vec![out.nodes, msgs.nodes],
-                    vec![out.edges, msgs.edges],
-                    vec![out.nav, msgs.nav],
-                    out.module_cells,
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan, so a
-        // schema-first service has resolvers for its clients' operations to
-        // pair with. LA.27: the file is read whole as SDL; a code file reads
-        // SDL only inside a GraphQL-marked literal. Resolver side only: a
-        // schema declares server fields, and the operation needles would mint
-        // client ops from its keywords.
-        if lang == "graphql" {
-            let module_id = synthetic_module_id(repo, path);
-            let repo_graph_code_extractors::graphql::GraphqlNodes {
-                nodes,
-                nav,
-                mut anchors,
-            } = repo_graph_code_extractors::graphql::extract_graphql_sdl_file_nodes(
-                source, module_id, repo,
-            );
-            sdl_files += 1;
-            sdl_resolvers += nodes.len();
-            if !nodes.is_empty() {
-                stash_synthetic_parse(
-                    "graphql",
-                    path,
-                    module_id,
-                    repo,
-                    vec![nodes],
-                    vec![],
-                    vec![nav],
-                    vec![],
-                    &mut parses_by_lang,
-                );
-                // A5.8: POSITION on each field, and the MODULE CONTAINS
-                // fallback, since no function in a schema owns a field.
-                if let Some(fp) = parses_by_lang.get_mut("graphql").and_then(|v| v.last_mut()) {
-                    repo_graph_code_extractors::anchor::attach(fp, path, module_id, &mut anchors);
-                }
-            }
-            continue;
-        }
-
-        // A10.6: an Avro `.avsc` is the shared contract under a Kafka stack.
-        // Its named types (record / enum / fixed) become MESSAGE_TYPE nodes
-        // under the file's MODULE, the shape A10.5 gives a `.proto` message.
-        if lang == "avro" {
-            let module_id = synthetic_module_id(repo, path);
-            let recs = repo_graph_code_extractors::schemas::extract_avro_records(
-                source, path, module_id, repo,
-            );
-            avro_files += 1;
-            avro_records += recs.message_count;
-            avro_enums += recs.enum_count;
-            avro_fixed += recs.fixed_count;
-            avro_field_records += recs.schema_field_cells;
-            avro_fields += recs.schema_fields;
-            if !recs.nodes.is_empty() {
-                stash_synthetic_parse(
-                    "avro",
-                    path,
-                    module_id,
-                    repo,
-                    vec![recs.nodes],
-                    vec![recs.edges],
-                    vec![recs.nav],
-                    recs.module_cells,
-                    &mut parses_by_lang,
-                );
-            }
-            continue;
-        }
-
-        // Every branch above routed its own files, so `parser_route` is
-        // `Some(lang)` here; reading it as the gate keeps the LB.9b plan
-        // (built from `parser_route`) and this loop on one routing.
-        let Some(lang) = parser_route(path) else { continue };
-        let module_qname = modules.module_qname(path);
-
-        // WP-D incremental: reuse the cached parse if the source is unchanged;
-        // only changed / new files pay tree-sitter.
-        let hash = cache.is_some().then(|| cache::content_hash(source));
-        if let Some(h) = hash {
-            current.push((path.clone(), h));
-        }
-        let cached_fp = match hash {
-            Some(h) => cache.as_deref().and_then(|c| c.get(path, h, lang)),
-            None => None,
-        };
-        // LB.9b: a parse cached under this file's other MODULE form (a
-        // same-stem sibling, of any build group since LB.13, appeared or
-        // vanished since) is stale although its content is not.
-        let cached_fp = match cached_fp {
-            Some(fp) if cached_under_other_form(&fp, path, &module_qname) => {
-                requalified.push(path.clone());
-                None
-            }
-            other => other,
-        };
-        if let Some(fp) = cached_fp {
-            live_paths.insert(path.clone());
-            parses_by_lang.entry(lang).or_default().push(fp);
-            continue;
-        }
-
-        // Per-file panic isolation. Parsers occasionally hit slice/regex bugs
-        // on adversarial inputs (e.g. parsers/code/rust/src/lib.rs:511 slice
-        // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
-        // kill an N-file repo build — log it, skip it, keep going.
-        let parse_result = catch_unwind(AssertUnwindSafe(|| {
-            let mut fp =
-                parse_one_as(source, path, lang, repo, go, &module_qname)?;
-            // LC.3a: the edges present now are the parser's own. Stamped here,
-            // inside the closure and before the extractors, so the parse cache
-            // stores the stamp and a cache hit replays it.
-            evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
-            let module_id = modules.module_id(path, repo);
-            // LB.9b: a MODULE named by its file name keeps its stem as nav
-            // name (`user` for `api::user.py`), the name `bare_module_qname`
-            // reads the bare path back from. Before the cache put, so a cache
-            // hit replays it.
-            if modules.is_qualified(path)
-                && let Some(name) = fp.nav.name_by_id.get_mut(&module_id)
-            {
-                *name = module_stem(path);
-            }
-            let mut stats = ExtractStats::default();
-            apply_cross_cutting_extractors(
-                &mut fp, source, path, lang, module_id, repo, &mut stats,
-            );
-            // G15: denormalize the file's library names onto every node as an
-            // IMPORTS cell (one place, all languages). This is the RAW list:
-            // telling a dependency from the repo's own module needs the whole
-            // repo, so `build::filter_imports_cells` rewrites it in place after
-            // the cache (A16.4). The cell also marks a language-parser parse —
-            // synthetic parses above never get one.
-            repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
-            Ok::<_, String>((fp, stats))
-        }));
-        match parse_result {
-            Ok(Ok((fp, stats))) => {
-                nav_routes_marked += stats.nav_routes;
-                nav_bound += stats.nav_bound;
-                nav_redirects += stats.nav_redirects;
-                nav_children += stats.nav_children;
-                nav_rejected += stats.nav_rejected;
-                nav_catchalls += stats.nav_catchalls;
-                ts_client_calls_skipped += stats.ts_client_calls_skipped;
-                links_router += stats.nav_links_router;
-                links_href += stats.nav_links_href;
-                links_origin += stats.nav_links_origin;
-                links_dynamic += stats.nav_links_dynamic;
-                if let Some(h) = hash {
-                    pending.push((path.clone(), h, lang, fp.clone()));
-                }
-                live_paths.insert(path.clone());
-                parses_by_lang.entry(lang).or_default().push(fp);
-            }
-            Ok(Err(e)) => {
-                parse_errors.push(format!("{path}: {e}"));
-            }
-            Err(payload) => {
-                parse_errors.push(format!(
-                    "{path}: PANIC ({lang} parser/extractors): {}",
-                    panic_payload_str(&payload)
-                ));
+            Routed::Failed(e) => {
+                n_failed += 1;
+                parse_errors.push(e);
             }
         }
     }
+    eprintln!(
+        "[parallel] {repo_label}: routed {} files on {threads} threads (synthetic {n_synthetic}, reused {n_reused}, reparsed {n_reparsed}, failed {n_failed})",
+        n_synthetic + n_reused + n_reparsed + n_failed
+    );
+    let SynthTally {
+        proto_files,
+        proto_services,
+        proto_rpcs,
+        proto_packages,
+        proto_messages,
+        proto_enums,
+        proto_field_messages,
+        proto_fields,
+        sdl_files,
+        sdl_resolvers,
+        avro_files,
+        avro_records,
+        avro_enums,
+        avro_fixed,
+        avro_field_records,
+        avro_fields,
+        jsonschema_files,
+        jsonschema_types,
+        jsonschema_defs,
+        links_router,
+        links_href,
+        links_origin,
+        links_template,
+        links_dynamic,
+        contracts: _,
+        lines: _,
+    } = tally;
 
     // WP-D: diff the inputs against the pre-build cache (LA.12), store the
     // fresh parses, evict cached parses for files gone (or no longer
     // parseable) this build, and emit the greppable marker so a cycle can
     // confirm the cache engaged.
-    if let Some(c) = cache.as_deref_mut() {
+    if let Some(c) = cache {
         let mut diff = c.diff(&current);
         // LB.9b: `diff` classifies by content hash, so a parse rejected for
         // its MODULE qname reads as reused there; it was reparsed.
@@ -803,7 +414,7 @@ pub(crate) fn parse_repo_files(
         );
     }
 
-    // LC.3a: the synthetic parses (`stash_synthetic_parse`: yaml, proto,
+    // LC.3a: the synthetic parses (`synthetic_parse`: yaml, proto,
     // graphql, ...) and the anchor pass run on the graphql one carry no
     // evidence yet. Only their keys are swept: a language parse was stamped
     // inside the parse closure, so an edge missing there is an unattributed
@@ -821,6 +432,623 @@ pub(crate) fn parse_repo_files(
     }
 
     (parses_by_lang, parse_errors)
+}
+
+/// What [`route_one`] needs besides the file: the repo, its go.mod set
+/// (LA.13), the ONE LB.9b module plan of this build, and the A13.16 shared
+/// Prisma provider. Read-only, shared by every pool worker.
+struct RouteCtx<'a> {
+    repo: RepoId,
+    go: &'a GoModules,
+    modules: &'a ModuleQnames,
+    prisma_provider: Option<&'a str>,
+}
+
+/// One walked file's routing outcome: [`route_one`] builds it on a pool
+/// worker, [`parse_repo_files`] folds it in walk order.
+enum Routed {
+    /// No branch reads the file.
+    Skip,
+    /// A non-code branch took it (yaml, Dockerfile, manifest, dotenv,
+    /// migration, prisma, the Angular template's links, json, proto, graphql,
+    /// avro). `fp` is what it files under the lang `key`: `None` when the
+    /// branch routed the file but had nothing to stash (still counted).
+    NonCode {
+        key: &'static str,
+        fp: Option<FileParse>,
+        tally: SynthTally,
+    },
+    /// A language parser's file: its content hash when the build has a cache
+    /// (the LA.12 diff input), whether a cached parse was rejected for its
+    /// MODULE form (LB.9b), and the outcome.
+    Code {
+        lang: &'static str,
+        hash: Option<u64>,
+        requalified: bool,
+        outcome: CodeOutcome,
+    },
+    /// A panic outside a language parse, caught per file:
+    /// `<path>: PANIC (<branch>): <payload>`.
+    Failed(String),
+}
+
+/// What happened to a language-parser file.
+enum CodeOutcome {
+    /// Served from the parse cache.
+    Cached(FileParse),
+    /// Parsed now, with the cross-cutting extractors' counters.
+    Parsed(FileParse, ExtractStats),
+    /// The parser's `Err`, or its caught panic, as the parse_errors line.
+    Failed(String),
+}
+
+/// One non-code file's marker counters, and the fold's per-build sum.
+#[derive(Default)]
+struct SynthTally {
+    // A5.1 `[proto]`.
+    proto_files: usize,
+    proto_services: usize,
+    proto_rpcs: usize,
+    proto_packages: usize,
+    // A10.5 `[proto] files=`.
+    proto_messages: usize,
+    proto_enums: usize,
+    // LE.10a `[schema-fields]`: proto messages / Avro records given a
+    // SCHEMA_FIELDS cell, and the fields those cells list.
+    proto_field_messages: usize,
+    proto_fields: usize,
+    // A10.4 `[graphql-sdl]`.
+    sdl_files: usize,
+    sdl_resolvers: usize,
+    // A10.6 `[avro]`.
+    avro_files: usize,
+    avro_records: usize,
+    avro_enums: usize,
+    avro_fixed: usize,
+    avro_field_records: usize,
+    avro_fields: usize,
+    // LA.16 (A10.12) `[jsonschema]`.
+    jsonschema_files: usize,
+    jsonschema_types: usize,
+    jsonschema_defs: usize,
+    // LA.6c `[nav-links]`: link sites of the reparsed TS-family files (added
+    // by the fold from `ExtractStats`) plus every `.component.html` template,
+    // which is never cached.
+    links_router: usize,
+    links_href: usize,
+    links_origin: usize,
+    links_template: usize,
+    links_dynamic: usize,
+    /// A10.1 / A10.3 / A10.8: the file's contract ops, as a counting copy the
+    /// fold hands to `ContractCounts::record` (its op set is private, so two
+    /// counts cannot be summed after the fact).
+    contracts: Vec<ContractNodes>,
+    /// Per-file marker lines (`[cli] manifest`, `[migration]`, `[prisma]`),
+    /// printed by the fold so they keep walk order on any pool size.
+    lines: Vec<String>,
+}
+
+impl SynthTally {
+    /// Add one file's counters. `contracts` and `lines` are consumed by the
+    /// fold itself and not summed.
+    fn add(&mut self, t: &SynthTally) {
+        self.proto_files += t.proto_files;
+        self.proto_services += t.proto_services;
+        self.proto_rpcs += t.proto_rpcs;
+        self.proto_packages += t.proto_packages;
+        self.proto_messages += t.proto_messages;
+        self.proto_enums += t.proto_enums;
+        self.proto_field_messages += t.proto_field_messages;
+        self.proto_fields += t.proto_fields;
+        self.sdl_files += t.sdl_files;
+        self.sdl_resolvers += t.sdl_resolvers;
+        self.avro_files += t.avro_files;
+        self.avro_records += t.avro_records;
+        self.avro_enums += t.avro_enums;
+        self.avro_fixed += t.avro_fixed;
+        self.avro_field_records += t.avro_field_records;
+        self.avro_fields += t.avro_fields;
+        self.jsonschema_files += t.jsonschema_files;
+        self.jsonschema_types += t.jsonschema_types;
+        self.jsonschema_defs += t.jsonschema_defs;
+        self.links_router += t.links_router;
+        self.links_href += t.links_href;
+        self.links_origin += t.links_origin;
+        self.links_template += t.links_template;
+        self.links_dynamic += t.links_dynamic;
+    }
+
+    /// Keep `out`'s ops for `ContractCounts::record`: ids only, no cells,
+    /// edges or nav (the count reads nothing else). A file with no op counts
+    /// nowhere, as `record` itself decides.
+    fn keep_contract(&mut self, out: &ContractNodes) {
+        if out.nodes.is_empty() {
+            return;
+        }
+        self.contracts.push(ContractNodes {
+            nodes: out
+                .nodes
+                .iter()
+                .map(|n| Node {
+                    id: n.id,
+                    repo: n.repo,
+                    confidence: n.confidence,
+                    cells: Vec::new(),
+                })
+                .collect(),
+            source: out.source,
+            field_stats: out.field_stats,
+            feature: out.feature.clone(),
+            ..Default::default()
+        });
+    }
+}
+
+/// Route ONE walked file (LG.1a): the pre-LG.1a loop body, returning what it
+/// used to push. Runs on a pool worker, so it reads `cache` and writes
+/// nothing shared. The whole body is panic-isolated through
+/// `parallel::quiet`: a panic in any branch becomes a
+/// `<path>: PANIC (<branch>): <payload>` error instead of ending the build
+/// (before LG.1a only the language branch and the template links were).
+fn route_one(path: &str, source: &str, ctx: &RouteCtx, cache: Option<&ParseCache>) -> Routed {
+    let mut branch: &'static str = "route";
+    match crate::parallel::quiet(|| route_branches(path, source, ctx, cache, &mut branch)) {
+        Ok(r) => r,
+        Err(payload) => Routed::Failed(format!(
+            "{path}: PANIC ({branch}): {}",
+            panic_payload_str(&payload)
+        )),
+    }
+}
+
+/// [`route_one`]'s body. Each branch names itself in `branch` first, so a
+/// caught panic says which extractor it came from.
+fn route_branches(
+    path: &str,
+    source: &str,
+    ctx: &RouteCtx,
+    cache: Option<&ParseCache>,
+    branch: &mut &'static str,
+) -> Routed {
+    let repo = ctx.repo;
+    let modules = ctx.modules;
+    let mut t = SynthTally::default();
+    let yaml_ext = matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str()),
+        Some("yml" | "yaml")
+    );
+    if yaml_ext {
+        *branch = "yaml";
+        let module_id = synthetic_module_id(repo, path);
+        let cron_out = repo_graph_code_extractors::cron::extract_cron_nodes(
+            source, path, module_id, repo,
+        );
+        let cfg_out = repo_graph_code_extractors::config::extract_yaml_env_defs(
+            source, module_id, repo,
+        );
+        let iac_out =
+            repo_graph_code_extractors::iac::extract_yaml(source, module_id, repo);
+        // A10.1: an `openapi.yaml` / `swagger.yaml` declares the service's
+        // API surface. Non-contract yaml takes a cheap sniff-miss here.
+        let contract_out = repo_graph_code_extractors::contracts::extract_yaml_contracts(
+            source, path, module_id, repo,
+        );
+        // A10.3: the same call also covers `asyncapi.yaml`; `record`
+        // routes the count to the format the file sniffed as.
+        t.keep_contract(&contract_out);
+        let fp = (!cron_out.nodes.is_empty()
+            || !cfg_out.nodes.is_empty()
+            || !iac_out.nodes.is_empty()
+            || !contract_out.nodes.is_empty())
+        .then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![cron_out.nodes, cfg_out.nodes, iac_out.nodes, contract_out.nodes],
+                vec![cron_out.edges, cfg_out.edges, iac_out.edges, contract_out.edges],
+                vec![cron_out.nav, cfg_out.nav, iac_out.nav, contract_out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "yaml", fp, tally: t };
+    }
+
+    if is_dockerfile_path(path) {
+        *branch = "dockerfile";
+        let module_id = synthetic_module_id(repo, path);
+        let cfg_out = repo_graph_code_extractors::config::extract_dockerfile_defs(
+            source, module_id, repo,
+        );
+        let iac_out = repo_graph_code_extractors::iac::extract_dockerfile(
+            source, path, module_id, repo,
+        );
+        let fp = (!cfg_out.nodes.is_empty() || !iac_out.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![cfg_out.nodes, iac_out.nodes],
+                vec![cfg_out.edges, iac_out.edges],
+                vec![cfg_out.nav, iac_out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "dockerfile", fp, tally: t };
+    }
+
+    if repo_graph_code_extractors::packages::is_manifest_path(path) {
+        *branch = "manifest";
+        let module_id = synthetic_module_id(repo, path);
+        let pkg_out = repo_graph_code_extractors::packages::extract_for_path(
+            source, path, module_id, repo,
+        );
+        // LA.20c: the binaries the manifest declares (pyproject scripts,
+        // npm `bin`, Cargo `[[bin]]`) as `cli:<bin>` CLI_COMMANDs, so an
+        // invocation's argv0 pairs with them. A manifest that declares a
+        // binary but no dependency is still stashed.
+        let bin_out = repo_graph_code_extractors::cli::extract_manifest_binaries(
+            source, path, module_id, repo,
+        );
+        if let Some(marker) = repo_graph_code_extractors::cli::manifest_marker(path, &bin_out) {
+            t.lines.push(marker);
+        }
+        let fp = (!pkg_out.nodes.is_empty() || !bin_out.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![pkg_out.nodes, bin_out.nodes],
+                vec![pkg_out.edges],
+                vec![pkg_out.nav, bin_out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "manifest", fp, tally: t };
+    }
+
+    if is_dotenv_path(path) {
+        *branch = "dotenv";
+        let module_id = synthetic_module_id(repo, path);
+        let cfg_out = repo_graph_code_extractors::config::extract_dotenv_defs(
+            source, module_id, repo,
+        );
+        let fp = (!cfg_out.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![cfg_out.nodes],
+                vec![cfg_out.edges],
+                vec![cfg_out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "dotenv", fp, tally: t };
+    }
+
+    // A13.9: a migration `.sql` (the walk admits one only through
+    // `is_migration_path`). Its DDL names the tables it creates, alters or
+    // drops, each an ACCESSES_DATA target of the file's MODULE. Before
+    // detect_language, which has no sql arm on purpose: the const-table
+    // scan would bind `UPDATE t SET name = 'x'` as a constant.
+    if repo_graph_code_extractors::migrations::is_migration_path(path) {
+        *branch = "migration";
+        let module_id = synthetic_module_id(repo, path);
+        let out = repo_graph_code_extractors::migrations::extract_sql_migration(
+            source, path, module_id, repo,
+        );
+        t.lines.push(out.marker(path));
+        let fp = (!out.entities.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![out.entities.nodes],
+                vec![out.entities.edges],
+                vec![out.entities.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "migration", fp, tally: t };
+    }
+
+    // A13.16: a Prisma schema (the walk admits `.prisma` only through
+    // `is_prisma_schema`). Each `model` is a model-keyed DATA_ENTITY and an
+    // ACCESSES_DATA target of the file's MODULE; `@@map` rides a table
+    // cell. Before detect_language, which has no prisma arm on purpose:
+    // the const-table scan would bind `provider = "postgresql"`.
+    if repo_graph_code_extractors::prisma::is_prisma_schema(path) {
+        *branch = "prisma";
+        let module_id = synthetic_module_id(repo, path);
+        let out = repo_graph_code_extractors::prisma::extract_prisma_models(
+            source,
+            module_id,
+            repo,
+            ctx.prisma_provider,
+        );
+        t.lines.push(out.marker(path));
+        let fp = (!out.entities.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![out.entities.nodes],
+                vec![out.entities.edges],
+                vec![out.entities.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "prisma", fp, tally: t };
+    }
+
+    // LA.6c: an Angular `.component.html` template (admitted by the walk)
+    // holds its component's navigation links. It borrows the MODULE id
+    // of its `.component.ts`, so the refs go out from that module under
+    // the `angular` key, into the TS-family graph where the nav routes
+    // and the component's page live. A bare `FileParse`, never
+    // `synthetic_parse`: that mints a MODULE node, and this id is
+    // the `.component.ts` parse's. Before detect_language, which has no
+    // html arm. The one non-code branch that keeps the CODE form (not
+    // `synthetic_module_id`, LB.9a): the file-name form would orphan every
+    // link it reads. The id is the LB.9b plan's for the `.component.ts`
+    // sibling, so a component named by its file name keeps its links.
+    if is_angular_template_path(path) {
+        *branch = "nav template links";
+        let module_id = modules.module_id(&angular_component_source(path, modules), repo);
+        let links =
+            repo_graph_code_extractors::nav_links::extract_template_links(source, module_id);
+        t.links_router += links.router;
+        t.links_href += links.href;
+        t.links_origin += links.origin;
+        t.links_template += links.template;
+        t.links_dynamic += links.dynamic_skipped;
+        let fp = (!links.refs.is_empty()).then(|| FileParse {
+            refs: links.refs,
+            ..Default::default()
+        });
+        return Routed::NonCode { key: "angular", fp, tally: t };
+    }
+
+    // A10.8: the walker queues a `.json` only when it sniffed as an API
+    // contract or (LA.16) a JSON Schema. After the manifest branch, so
+    // package.json / composer.json never land here; before detect_language,
+    // which has no json arm.
+    let json_ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if json_ext {
+        *branch = "json";
+        let module_id = synthetic_module_id(repo, path);
+        // LA.16 (A10.12): a JSON Schema that is not an API contract
+        // declares MESSAGE_TYPEs, the shape a `.proto` message or an
+        // `.avsc` record gets, so MessageSchemaResolver can pair them
+        // across repos. A contract keeps the A10.8 path below.
+        if repo_graph_code_extractors::contracts::sniff_json_contract(source).is_none()
+            && repo_graph_code_extractors::schemas::sniff_json_schema(source)
+        {
+            let recs = repo_graph_code_extractors::schemas::extract_json_schema_types(
+                source, path, module_id, repo,
+            );
+            t.jsonschema_files += 1;
+            t.jsonschema_types += recs.nodes.len();
+            t.jsonschema_defs += recs.def_count;
+            let fp = (!recs.nodes.is_empty()).then(|| {
+                synthetic_parse(
+                    path,
+                    module_id,
+                    repo,
+                    vec![recs.nodes],
+                    vec![recs.edges],
+                    vec![recs.nav],
+                    recs.module_cells,
+                )
+            });
+            return Routed::NonCode { key: "json", fp, tally: t };
+        }
+        let out = repo_graph_code_extractors::contracts::extract_json_contract(
+            source, path, module_id, repo,
+        );
+        t.keep_contract(&out);
+        let fp = (!out.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![out.nodes],
+                vec![out.edges],
+                vec![out.nav],
+                vec![],
+            )
+        });
+        return Routed::NonCode { key: "json", fp, tally: t };
+    }
+
+    let Some(lang) = detect_language(path) else { return Routed::Skip };
+
+    if lang == "proto" {
+        *branch = "proto";
+        let module_id = synthetic_module_id(repo, path);
+        let out = repo_graph_code_extractors::grpc::extract_grpc_service_nodes(
+            source, path, module_id, repo,
+        );
+        // A10.5: the file's `message` / `enum` declarations, as
+        // MESSAGE_TYPE nodes under the same MODULE.
+        let msgs = repo_graph_code_extractors::schemas::extract_proto_messages(
+            source, path, module_id, repo,
+        );
+        t.proto_files += 1;
+        t.proto_services += out.service_count;
+        t.proto_rpcs += out.rpc_count;
+        t.proto_messages += msgs.message_count;
+        t.proto_enums += msgs.enum_count;
+        t.proto_field_messages += msgs.schema_field_cells;
+        t.proto_fields += msgs.schema_fields;
+        if out.package.is_some() {
+            t.proto_packages += 1;
+        }
+        // A messages-only `.proto` (a shared `common.proto`) is still a
+        // parsed file, not a skipped one.
+        //
+        // Same synthetic path as yaml / Dockerfile / manifest / dotenv:
+        // the file itself becomes a MODULE (with a POSITION cell) that
+        // parents the GRPC_SERVICE, so `locate_node` / `docs-for` can
+        // answer "where is this service declared".
+        let fp = (!out.nodes.is_empty() || !msgs.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![out.nodes, msgs.nodes],
+                vec![out.edges, msgs.edges],
+                vec![out.nav, msgs.nav],
+                out.module_cells,
+            )
+        });
+        return Routed::NonCode { key: "proto", fp, tally: t };
+    }
+
+    // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan, so a
+    // schema-first service has resolvers for its clients' operations to
+    // pair with. LA.27: the file is read whole as SDL; a code file reads
+    // SDL only inside a GraphQL-marked literal. Resolver side only: a
+    // schema declares server fields, and the operation needles would mint
+    // client ops from its keywords.
+    if lang == "graphql" {
+        *branch = "graphql";
+        let module_id = synthetic_module_id(repo, path);
+        let repo_graph_code_extractors::graphql::GraphqlNodes {
+            nodes,
+            nav,
+            mut anchors,
+        } = repo_graph_code_extractors::graphql::extract_graphql_sdl_file_nodes(
+            source, module_id, repo,
+        );
+        t.sdl_files += 1;
+        t.sdl_resolvers += nodes.len();
+        let fp = (!nodes.is_empty()).then(|| {
+            let mut fp = synthetic_parse(path, module_id, repo, vec![nodes], vec![], vec![nav], vec![]);
+            // A5.8: POSITION on each field, and the MODULE CONTAINS
+            // fallback, since no function in a schema owns a field.
+            repo_graph_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
+            fp
+        });
+        return Routed::NonCode { key: "graphql", fp, tally: t };
+    }
+
+    // A10.6: an Avro `.avsc` is the shared contract under a Kafka stack.
+    // Its named types (record / enum / fixed) become MESSAGE_TYPE nodes
+    // under the file's MODULE, the shape A10.5 gives a `.proto` message.
+    if lang == "avro" {
+        *branch = "avro";
+        let module_id = synthetic_module_id(repo, path);
+        let recs = repo_graph_code_extractors::schemas::extract_avro_records(
+            source, path, module_id, repo,
+        );
+        t.avro_files += 1;
+        t.avro_records += recs.message_count;
+        t.avro_enums += recs.enum_count;
+        t.avro_fixed += recs.fixed_count;
+        t.avro_field_records += recs.schema_field_cells;
+        t.avro_fields += recs.schema_fields;
+        let fp = (!recs.nodes.is_empty()).then(|| {
+            synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![recs.nodes],
+                vec![recs.edges],
+                vec![recs.nav],
+                recs.module_cells,
+            )
+        });
+        return Routed::NonCode { key: "avro", fp, tally: t };
+    }
+
+    // Every branch above routed its own files, so `parser_route` is
+    // `Some(lang)` here; reading it as the gate keeps the LB.9b plan
+    // (built from `parser_route`) and this router on one routing.
+    let Some(lang) = parser_route(path) else { return Routed::Skip };
+    *branch = "parse cache";
+    let module_qname = modules.module_qname(path);
+
+    // WP-D incremental: reuse the cached parse if the source is unchanged;
+    // only changed / new files pay tree-sitter.
+    let hash = cache.is_some().then(|| cache::content_hash(source));
+    let cached_fp = match hash {
+        Some(h) => cache.and_then(|c| c.get(path, h, lang)),
+        None => None,
+    };
+    // LB.9b: a parse cached under this file's other MODULE form (a
+    // same-stem sibling, of any build group since LB.13, appeared or
+    // vanished since) is stale although its content is not.
+    let mut requalified = false;
+    let cached_fp = match cached_fp {
+        Some(fp) if cached_under_other_form(&fp, path, &module_qname) => {
+            requalified = true;
+            None
+        }
+        other => other,
+    };
+    if let Some(fp) = cached_fp {
+        return Routed::Code {
+            lang,
+            hash,
+            requalified,
+            outcome: CodeOutcome::Cached(fp),
+        };
+    }
+
+    // Per-file panic isolation. Parsers occasionally hit slice/regex bugs
+    // on adversarial inputs (e.g. parsers/code/rust/src/lib.rs:511 slice
+    // OOB on glia's own source as of 2026-05-09). One bad file shouldn't
+    // kill an N-file repo build — log it, skip it, keep going. Its own
+    // `quiet` inside `route_one`'s, so a parse panic keeps the hash and the
+    // LB.9b rejection the fold needs.
+    let parse_result = crate::parallel::quiet(|| {
+        let mut fp = parse_one_as(source, path, lang, repo, ctx.go, &module_qname)?;
+        // LC.3a: the edges present now are the parser's own. Stamped here,
+        // inside the closure and before the extractors, so the parse cache
+        // stores the stamp and a cache hit replays it.
+        evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
+        let module_id = modules.module_id(path, repo);
+        // LB.9b: a MODULE named by its file name keeps its stem as nav
+        // name (`user` for `api::user.py`), the name `bare_module_qname`
+        // reads the bare path back from. Before the cache put, so a cache
+        // hit replays it.
+        if modules.is_qualified(path)
+            && let Some(name) = fp.nav.name_by_id.get_mut(&module_id)
+        {
+            *name = module_stem(path);
+        }
+        let mut stats = ExtractStats::default();
+        apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
+        // G15: denormalize the file's library names onto every node as an
+        // IMPORTS cell (one place, all languages). This is the RAW list:
+        // telling a dependency from the repo's own module needs the whole
+        // repo, so `build::filter_imports_cells` rewrites it in place after
+        // the cache (A16.4). The cell also marks a language-parser parse —
+        // synthetic parses above never get one.
+        repo_graph_code_domain::attach_imports_cell(&mut fp, lang);
+        Ok::<_, String>((fp, stats))
+    });
+    let outcome = match parse_result {
+        Ok(Ok((fp, stats))) => CodeOutcome::Parsed(fp, stats),
+        Ok(Err(e)) => CodeOutcome::Failed(format!("{path}: {e}")),
+        Err(payload) => CodeOutcome::Failed(format!(
+            "{path}: PANIC ({lang} parser/extractors): {}",
+            panic_payload_str(&payload)
+        )),
+    };
+    Routed::Code {
+        lang,
+        hash,
+        requalified,
+        outcome,
+    }
 }
 
 /// Where the router sends `path`: the language tag iff [`parse_repo_files`]
@@ -1076,9 +1304,10 @@ fn panic_payload_str(payload: &Box<dyn Any + Send>) -> String {
     }
 }
 
-/// The lang keys [`stash_synthetic_parse`] files a non-code MODULE under (the
-/// `[modules]` marker counts these). A new non-code branch adds its key here;
-/// `synthetic_modules_are_named_by_file_name` fails on a routed key it lacks.
+/// The lang keys the [`synthetic_parse`] branches file a non-code MODULE
+/// under (the `[modules]` marker counts these). A new non-code branch adds its
+/// key here; `synthetic_modules_are_named_by_file_name` fails on a routed key
+/// it lacks.
 const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
     "avro",
     "dockerfile",
@@ -1095,7 +1324,7 @@ const SYNTHETIC_MODULE_KEYS: [&str; 10] = [
 /// A non-code file's MODULE id (LB.9a): keyed on [`synthetic_module_qname`],
 /// the full file name, so `api/user.proto` never shares a NodeId with
 /// `api/user.go`, nor `svc/Dockerfile.prod` with `svc/Dockerfile`. Every
-/// branch that stashes through [`stash_synthetic_parse`] mints its id here,
+/// branch that builds its parse through [`synthetic_parse`] mints its id here,
 /// the id that function records under the same qname.
 fn synthetic_module_id(repo: RepoId, path: &str) -> NodeId {
     NodeId::from_parts(
@@ -1106,8 +1335,11 @@ fn synthetic_module_id(repo: RepoId, path: &str) -> NodeId {
     )
 }
 
-fn stash_synthetic_parse(
-    lang_key: &'static str,
+/// A non-code file's parse (LB.9a): its MODULE node, named by the full file
+/// name, then the extractors' node / edge / nav groups in order. Pure: the
+/// caller files it under its lang key (the fold, in walk order), and the
+/// graphql branch attaches its anchors to the returned parse (A5.8).
+fn synthetic_parse(
     path: &str,
     module_id: NodeId,
     repo: RepoId,
@@ -1118,8 +1350,7 @@ fn stash_synthetic_parse(
     // POSITION). Empty for the extractors that have nothing to say about the
     // file as a whole.
     module_cells: Vec<Cell>,
-    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
-) {
+) -> FileParse {
     let mut nodes = vec![Node {
         id: module_id,
         repo,
@@ -1144,13 +1375,12 @@ fn stash_synthetic_parse(
     for nav in nav_groups {
         merge_nav(&mut merged_nav, nav);
     }
-    let fp = FileParse {
+    FileParse {
         nodes,
         edges,
         nav: merged_nav,
         ..Default::default()
-    };
-    parses_by_lang.entry(lang_key).or_default().push(fp);
+    }
 }
 
 #[cfg(test)]
@@ -1794,7 +2024,7 @@ mod tests {
     /// the display name the MODULE already carried, so a `.proto` beside a
     /// same-stem `.go`, a `.json` beside a same-stem `.yaml`, and a
     /// `Dockerfile.prod` beside a `Dockerfile` are separate MODULEs. One case
-    /// per branch that stashes through `stash_synthetic_parse`.
+    /// per branch that builds its parse through `synthetic_parse`.
     #[test]
     fn synthetic_modules_are_named_by_file_name() {
         assert_eq!(

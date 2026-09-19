@@ -1,8 +1,6 @@
 //! Per-repo graph assembly: `build_graphs_for_repo` and the facts and markers
 //! it owns (the A11.1 const table and its LF.2d overlay pins, the A12.1
-//! `[msgtype]` census, the panic-hook guard that covers the whole assembly).
-
-use std::panic::{AssertUnwindSafe, catch_unwind};
+//! `[msgtype]` census, the quiet-panic scope that covers the whole assembly).
 
 use repo_graph_code_domain::endpoint::split_owner;
 use repo_graph_code_domain::glia_config::LoadedConfig;
@@ -33,7 +31,7 @@ fn build_const_table(files: &[(String, String)], parse_errors: &mut Vec<String>)
     let mut table = ConstTable::default();
     for (path, source) in files {
         let Some(lang) = detect_language(path) else { continue };
-        match catch_unwind(AssertUnwindSafe(|| ConstTable::scan_file(source, lang))) {
+        match crate::parallel::quiet(|| ConstTable::scan_file(source, lang)) {
             Ok(file_table) => table.merge_from(&file_table),
             Err(_) => parse_errors.push(format!("{path}: PANIC (const table scan)")),
         }
@@ -107,12 +105,14 @@ pub(super) fn build_graphs_for_repo(
     config: Option<&LoadedConfig>,
     opts: &BuildOptions,
 ) -> (Vec<repo_graph_graph::RepoGraph>, Vec<String>) {
-    // Suppress the default panic-print-to-stderr while we run per-file parsers
-    // — we catch panics below and report them as parse_errors. The default
-    // hook would otherwise spam stderr (with a backtrace) for every bad file
-    // even though we recover. Restored on scope exit via Drop guard so a
-    // panic in non-loop code still gets the user-visible report.
-    let _hook_guard = SuppressPanicHook::install();
+    // Keep caught per-file panics off stderr: the default hook would print
+    // (with a backtrace) for every bad file even though it becomes a
+    // parse_errors line. LG.1a: the flag is per thread (`parallel`), so this
+    // scope covers every `catch_unwind` the assembly runs on THIS thread
+    // (grafts, the overlay wrapper stage, the needle passes), the pool
+    // workers go through `parallel::quiet`, and a panic on any other thread
+    // of the process still reaches the original hook.
+    let _quiet = crate::parallel::quiet_scope();
     // A7.0: shape counters describe only the detectors that run in THIS build.
     di_stats::reset();
 
@@ -200,30 +200,5 @@ fn msgtype_marker(graphs: &[repo_graph_graph::RepoGraph], repo_label: &str) {
         eprintln!(
             "[msgtype] queue_nodes={queue_nodes} typed={typed} tag_topics={tags} repo={repo_label}"
         );
-    }
-}
-
-/// RAII guard: replaces the global panic hook with a no-op for the lifetime
-/// of the guard, then restores. Used by `build_graphs_for_repo` so caught
-/// per-file panics don't flood stderr with backtraces. Process-global state,
-/// so this assumes single-threaded parsing (true today). If parsing ever
-/// goes parallel, switch to `panic::update_hook` filtering by thread.
-struct SuppressPanicHook {
-    prev: Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>,
-}
-
-impl SuppressPanicHook {
-    fn install() -> Self {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        Self { prev: Some(prev) }
-    }
-}
-
-impl Drop for SuppressPanicHook {
-    fn drop(&mut self) {
-        if let Some(prev) = self.prev.take() {
-            std::panic::set_hook(prev);
-        }
     }
 }

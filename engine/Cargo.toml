@@ -45,6 +45,11 @@ twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
 # neither calls the store for a layout. One-way: the store depends on core,
 # code-domain, graph and stamp, never on the engine, so there is no cycle.
 repo-graph-store = { path = "../store" }
+# LG.1a: the per-file route / parse / extract runs on the engine's own rayon
+# pool (`parallel`): order-preserving indexed collect, work stealing over
+# skewed file sizes, a worker stack size we set. Its crossbeam deps were
+# already in the lock through `ignore`.
+rayon = "1"
 
 [dev-dependencies]
 tempfile = "3"

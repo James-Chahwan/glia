@@ -4,7 +4,6 @@
 //! calls (LA.17). `grafts::apply_post_cache` runs them.
 
 use std::collections::HashMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{FileParse, attach_imports_cell};
@@ -102,22 +101,22 @@ pub(super) fn apply_rpc_needles(
         };
         if grpc_side {
             if client_side {
-                match catch_unwind(AssertUnwindSafe(|| {
+                match crate::parallel::quiet(|| {
                     grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
-                })) {
+                }) {
                     Ok(out) => added.clients += graft_rpc_markers(fp, out, path, module_id, lang),
                     Err(_) => parse_errors.push(format!("{path}: PANIC (grpc client needles)")),
                 }
             }
-            match catch_unwind(AssertUnwindSafe(|| {
+            match crate::parallel::quiet(|| {
                 grpc::extract_grpc_server_nodes(source, module_id, repo, &rpc.services, &fp.nodes, &fp.nav)
-            })) {
+            }) {
                 Ok(out) => added.servers += graft_rpc_markers(fp, out, path, module_id, lang),
                 Err(_) => parse_errors.push(format!("{path}: PANIC (grpc server needles)")),
             }
         }
         if proto_rpc_side {
-            match catch_unwind(AssertUnwindSafe(|| {
+            match crate::parallel::quiet(|| {
                 grpc::extract_proto_rpc_nodes(
                     source,
                     path,
@@ -129,7 +128,7 @@ pub(super) fn apply_rpc_needles(
                     &fp.nav,
                     twirp_repo,
                 )
-            })) {
+            }) {
                 Ok(out) => {
                     added.proto_rpc.add(out.counts);
                     graft_proto_rpc(fp, out, lang);
