@@ -1,0 +1,3 @@
+# pyo3 surface of py/src/feature_flows.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.feature_flows(group_by: &str = "feature", depth: usize = 6, feature: Option<&str> = None, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
+method PyGraph.write_feature_flows(out_dir: Option<&str> = None, group_by: &str = "feature", depth: usize = 6) -> PyResult<Py<PyAny>>
