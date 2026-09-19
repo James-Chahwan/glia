@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 285,
+  "fixtures": 287,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -983,6 +983,11 @@
       "language": "python",
       "per_category": {}
     },
+    "overlay-entrypoints": {
+      "framework": "overlay-entrypoints",
+      "language": "python",
+      "per_category": {}
+    },
     "php-braced-use": {
       "framework": "php-braced-use",
       "language": "php",
@@ -1577,6 +1582,13 @@
       "language": "typescript",
       "per_category": {
         "TESTS": 1.0
+      }
+    },
+    "ts-tsconfig-paths": {
+      "framework": "ts-tsconfig-paths",
+      "language": "typescript",
+      "per_category": {
+        "IMPORTS": 1.0
       }
     },
     "ts-typeorm": {

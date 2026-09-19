@@ -4079,14 +4079,15 @@
     },
     "typescript/imports": {
       "extract": [
-        5,
-        5
+        7,
+        7
       ],
       "fixtures": [
         "fixtures/angular-imports",
         "fixtures/react-imports",
         "fixtures/ts-imports",
         "fixtures/ts-imports-rel",
+        "fixtures/ts-tsconfig-paths",
         "fixtures/vue-imports"
       ],
       "forbid": [
@@ -4095,15 +4096,15 @@
       ],
       "level": "full",
       "literal": [
-        1,
-        1
+        3,
+        3
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        5,
-        5
+        6,
+        6
       ],
       "via": "import"
     },
@@ -4498,6 +4499,7 @@
     "fixtures/nav-vue-links",
     "fixtures/openapi-pact-fields",
     "fixtures/overlay-declared-cells",
+    "fixtures/overlay-entrypoints",
     "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
     "fixtures/php-eloquent",
