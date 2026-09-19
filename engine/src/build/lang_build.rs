@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use repo_graph_code_domain::project_roots::ProjectRoot;
 use repo_graph_code_domain::{
-    FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
+    CallQualifier, FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
 };
 use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
 use repo_graph_graph::RepoGraph;
@@ -20,10 +20,11 @@ use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 // "typescript"), and imports cross those tags. They build as a single graph
 // (their `extract::build_group` is "typescript") so intra-repo ref/import
 // resolution works across the tag boundary (Pattern E DI, Pattern B imports).
-// Other `_`-arm langs (dart/swift/c_cpp/solidity/terraform) keep separate
-// graphs — distinct symbol spaces that must not cross-resolve. ts_family
-// accumulates in the sorted lang order and is built last, so graph/shard order
-// stays deterministic. The LB.9b module plan reads the same `build_group`.
+// The `c_cpp` arm and the other `_`-arm langs (dart/swift/solidity/terraform)
+// keep separate graphs — distinct symbol spaces that must not cross-resolve.
+// ts_family accumulates in the sorted lang order and is built last, so
+// graph/shard order stays deterministic. The LB.9b module plan reads the same
+// `build_group`.
 
 /// A14.2: the JVM family. `.kt` parses under its own `kotlin` tag (its own
 /// parser), but Kotlin and Java share one symbol space — a Kotlin controller
@@ -114,6 +115,13 @@ pub(super) fn build_language_graphs(
             }
             "rust" => repo_graph_graph::build_rust(repo, parses, rust_crates),
             "ruby" => repo_graph_graph::build_ruby(repo, parses),
+            "c_cpp" => repo_graph_graph::build_typescript(repo, parses, resolve_include_source)
+                .map(|mut g| {
+                    if let Some(line) = resolve_include_calls(&mut g).marker(repo_label) {
+                        eprintln!("{line}");
+                    }
+                    g
+                }),
             _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
         };
         recv_bound.push((lang, recv_stats::take()));
@@ -445,18 +453,16 @@ fn resolve_ts_source(from_module: &str, specifier: &str) -> Option<String> {
     Some(segs.join("::"))
 }
 
-/// Relative-import resolver for the non-TS `_`-arm languages (dart / c_cpp /
-/// solidity). Handles dotted specifiers (`./x`, `../a/b`) AND bare filenames
-/// that carry a source extension (`import 'models.dart'`, `#include
-/// "mathutil.h"`) — both resolve against the importing file's directory to the
-/// `path_to_qname` form. A bare specifier with no source extension (a package /
-/// system import like `package:collection`, `import Foundation`, `<stdio.h>`)
-/// is external → None. Superset of `resolve_ts_source`; kept separate so the
-/// verified TS-family path is untouched.
+/// Relative-import resolver for the non-TS `_`-arm languages (dart / swift /
+/// solidity / terraform). Handles dotted specifiers (`./x`, `../a/b`) AND bare
+/// filenames that carry a source extension (`import 'models.dart'`) — both
+/// resolve against the importing file's directory to the `path_to_qname`
+/// form. A bare specifier with no source extension (a package / system import
+/// like `package:collection`, `import Foundation`) is external → None.
+/// Superset of `resolve_ts_source`; kept separate so the verified TS-family
+/// path is untouched. C/C++ has [`resolve_include_source`].
 fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String> {
-    const SRC_EXT: &[&str] = &[
-        ".dart", ".h", ".hpp", ".hh", ".hxx", ".sol", ".swift", ".ts", ".tsx", ".js", ".jsx",
-    ];
+    const SRC_EXT: &[&str] = &[".dart", ".sol", ".swift", ".ts", ".tsx", ".js", ".jsx"];
     let spec = specifier
         .trim()
         .trim_matches(|c| c == '"' || c == '\'' || c == '<' || c == '>');
@@ -487,9 +493,195 @@ fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String>
     Some(segs.join("::"))
 }
 
+/// LB.10a: a quoted `#include "x/y.h"` names a FILE relative to the including
+/// file's directory, and every C/C++ MODULE is `<dir>::<file name>`
+/// (`route::ModuleQnames`), so the target keeps its extension. An absolute
+/// path, or one that climbs above the repo root, is outside the repo → None.
+/// Angle includes never reach here (the parser keeps quoted ones only);
+/// includes found through `-I` search paths stay unresolved.
+fn resolve_include_source(from_module: &str, specifier: &str) -> Option<String> {
+    let spec = specifier.trim().trim_matches('"');
+    if spec.is_empty() || spec.starts_with(['/', '\\']) {
+        return None;
+    }
+    let mut segs: Vec<&str> = from_module.split("::").collect();
+    segs.pop(); // the including file itself
+    for part in spec.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segs.pop()?;
+            }
+            p => segs.push(p),
+        }
+    }
+    (!segs.is_empty()).then(|| segs.join("::"))
+}
+
+/// What [`resolve_include_calls`] did to one C/C++ graph.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct IncludeCalls {
+    /// Bare calls bound to the one included MODULE's symbol of their name.
+    bound: usize,
+    /// Bare calls two or more included MODULEs could answer, left unresolved.
+    ambiguous: usize,
+}
+
+impl IncludeCalls {
+    /// fired_on, once per C/C++ graph that bound or refused a call:
+    /// `[c-includes] bare calls bound through a direct #include: N (ambiguous=A) repo=<label>`.
+    fn marker(&self, repo_label: &str) -> Option<String> {
+        (self.bound + self.ambiguous > 0).then(|| {
+            format!(
+                "[c-includes] bare calls bound through a direct #include: {} (ambiguous={}) repo={repo_label}",
+                self.bound, self.ambiguous
+            )
+        })
+    }
+}
+
+/// LB.10a stopgap: a quoted `#include "x.h"` makes the header's top-level
+/// names visible in the including file (textual inclusion). Before LB.10a a
+/// header and its same-stem implementation were ONE MODULE, so a call in
+/// `x.cpp` to an inline function of `x.h` bound as a module symbol; with every
+/// C/C++ file its own MODULE the generic pass leaves it unresolved. This binds
+/// each Bare call the C/C++ build left unresolved to the one top-level symbol
+/// of that name among the MODULEs the calling file directly includes (the
+/// IMPORTS edges `resolve_include_source` bound); a name two included files
+/// define stays unresolved rather than guess. One level: an include of an
+/// include is not followed.
+///
+/// Removal path: LB.10c's `build_c_cpp` gives `resolve_calls` a C/C++ hook;
+/// this lookup moves into that hook (graph crate, same evidence) and this
+/// pass and its call in the `c_cpp` arm are deleted.
+fn resolve_include_calls(g: &mut RepoGraph) -> IncludeCalls {
+    let mut stats = IncludeCalls::default();
+    // Including MODULE -> the MODULEs it includes, in edge order (lookup only).
+    let mut includes: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in g.edges.iter().filter(|e| e.category == edge_category::IMPORTS) {
+        let to = includes.entry(e.from).or_default();
+        if !to.contains(&e.to) {
+            to.push(e.to);
+        }
+    }
+    if includes.is_empty() {
+        return stats;
+    }
+    for site in std::mem::take(&mut g.unresolved_calls) {
+        let hits: Vec<NodeId> = match &site.qualifier {
+            CallQualifier::Bare(name) => {
+                let mut hits: Vec<NodeId> = enclosing_module(&g.nav, site.from)
+                    .and_then(|m| includes.get(&m))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|h| g.symbols.module_symbols.get(h)?.get(name).copied())
+                    .collect();
+                hits.sort_unstable_by_key(|id| id.0);
+                hits.dedup();
+                hits
+            }
+            _ => Vec::new(),
+        };
+        match hits[..] {
+            [to] => {
+                let ev = evidence::Evidence::emitter("graph:c_includes")
+                    .rule("include")
+                    .line(site.line);
+                g.edges.push(
+                    repo_graph_core::Edge::new(
+                        site.from,
+                        to,
+                        edge_category::CALLS,
+                        repo_graph_core::Confidence::Strong,
+                    )
+                    .with_cell(ev.to_cell()),
+                );
+                stats.bound += 1;
+            }
+            [] => g.unresolved_calls.push(site),
+            _ => {
+                stats.ambiguous += 1;
+                g.unresolved_calls.push(site);
+            }
+        }
+    }
+    stats
+}
+
+/// The MODULE a node sits in, walking nav parents (bounded by the nav's size,
+/// so a malformed parent cycle ends in None).
+fn enclosing_module(nav: &repo_graph_code_domain::CodeNav, mut id: NodeId) -> Option<NodeId> {
+    for _ in 0..=nav.parent_of.len() {
+        if nav.kind_by_id.get(&id) == Some(&node_kind::MODULE) {
+            return Some(id);
+        }
+        id = *nav.parent_of.get(&id)?;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LB.10a stopgap: a Bare call binds the one directly included file's
+    /// top-level symbol; two includes answering is refused, a name no include
+    /// answers stays unresolved, and the edge is a site at the call's row.
+    #[test]
+    fn a_bare_call_binds_through_a_direct_include() {
+        let files = [
+            ("src/a.h", "static inline int sq(int x) { return x * x; }\nstatic inline int dup(int x) { return x; }\n"),
+            ("src/b.h", "static inline int dup(int x) { return x; }\n"),
+            (
+                "src/a.cpp",
+                "#include \"a.h\"\n#include \"b.h\"\nint f(int x) { return sq(x) + dup(x) + nowhere(x); }\n",
+            ),
+        ];
+        let parses: Vec<FileParse> = files
+            .iter()
+            .map(|(path, src)| crate::extract::parse_one(src, path, "c_cpp", RepoId(1)).expect("parse"))
+            .collect();
+        let mut g = repo_graph_graph::build_typescript(RepoId(1), parses, resolve_include_source)
+            .expect("build");
+        assert_eq!(g.unresolved_calls.len(), 3, "the generic pass binds none of them");
+        let stats = resolve_include_calls(&mut g);
+        assert_eq!(stats, IncludeCalls { bound: 1, ambiguous: 1 });
+        assert_eq!(
+            stats.marker("r").as_deref(),
+            Some("[c-includes] bare calls bound through a direct #include: 1 (ambiguous=1) repo=r")
+        );
+        assert_eq!(g.unresolved_calls.len(), 2);
+        let id = |kind, q: &str| NodeId::from_parts(repo_graph_code_domain::GRAPH_TYPE, RepoId(1), kind, q);
+        let f = id(node_kind::FUNCTION, "src::a.cpp::f");
+        let sq = id(node_kind::FUNCTION, "src::a.h::sq");
+        let calls: Vec<&repo_graph_core::Edge> =
+            g.edges.iter().filter(|e| e.category == edge_category::CALLS).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].from, calls[0].to), (f, sq));
+        let ev = evidence::Evidence::of(calls[0]).expect("evidence");
+        assert_eq!((ev.emitter.as_str(), ev.rule.as_deref(), ev.line), ("graph:c_includes", Some("include"), Some(2)));
+        assert_eq!(ev.basis, evidence::Basis::Site);
+        assert_eq!(IncludeCalls::default().marker("r"), None);
+    }
+
+    /// LB.10a: an include resolves against the includer's directory to the
+    /// header's file-named MODULE; nothing outside the repo resolves.
+    #[test]
+    fn resolve_include_source_keeps_the_file_name() {
+        for (from, spec, want) in [
+            ("src::main.cpp", "Widget.h", Some("src::Widget.h")),
+            ("src::cart.cpp", "../include/shop/cart.hpp", Some("include::shop::cart.hpp")),
+            ("main.cpp", "mathutil.h", Some("mathutil.h")),
+            ("src::a.cpp", "./detail/b.h", Some("src::detail::b.h")),
+            ("src::a.cpp", "\"quoted.h\"", Some("src::quoted.h")),
+            ("win::a.cpp", "sub\\b.h", Some("win::sub::b.h")),
+            ("a.cpp", "../x.h", None),
+            ("src::a.c", "/usr/include/x.h", None),
+            ("src::a.c", "", None),
+        ] {
+            assert_eq!(resolve_include_source(from, spec).as_deref(), want, "{from} {spec}");
+        }
+    }
 
     fn tally(lang: &'static str, bound: usize, unresolved: usize) -> HeritageTally {
         HeritageTally { lang, bound, unresolved }

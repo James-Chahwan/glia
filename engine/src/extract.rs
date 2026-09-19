@@ -93,13 +93,21 @@ pub fn parse_one_with(
     repo: RepoId,
     go_module_prefix: &str,
 ) -> Result<FileParse, String> {
-    parse_one_as(source, path, lang, repo, go_module_prefix, &path_to_qname(path))
+    // LB.10a: every C/C++ MODULE is named by its full file name, so a
+    // single-file parse names it exactly as the repo build does.
+    let module_qname = if lang == "c_cpp" {
+        synthetic_module_qname(path)
+    } else {
+        path_to_qname(path)
+    };
+    parse_one_as(source, path, lang, repo, go_module_prefix, &module_qname)
 }
 
 /// [`parse_one_with`] under an explicit MODULE qname. The router passes the
 /// LB.9b plan's qname (`route::ModuleQnames::module_qname`): the file-name
 /// form (`api::user.py`) when a file of another build group shares the
-/// stem, [`path_to_qname`] otherwise. Every symbol qname follows it.
+/// stem, and for every C/C++ file (LB.10a), [`path_to_qname`] otherwise.
+/// Every symbol qname follows it.
 pub(crate) fn parse_one_as(
     source: &str,
     path: &str,
@@ -130,14 +138,14 @@ pub(crate) fn parse_one_as(
             .map_err(|e| e.to_string()),
         "swift" => repo_graph_parser_swift::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
-        "c_cpp" => {
-            let is_cpp = matches!(
-                Path::new(path).extension().and_then(|e| e.to_str()),
-                Some("cpp" | "cc" | "cxx" | "hpp")
-            );
-            repo_graph_parser_c_cpp::parse_file(source, path, &module_qname, is_cpp, repo)
-                .map_err(|e| e.to_string())
-        }
+        "c_cpp" => repo_graph_parser_c_cpp::parse_file(
+            source,
+            path,
+            &module_qname,
+            repo_graph_parser_c_cpp::Dialect::from_path(path),
+            repo,
+        )
+        .map_err(|e| e.to_string()),
         "scala" => repo_graph_parser_scala::parse_file(source, path, &module_qname, repo)
             .map_err(|e| e.to_string()),
         "clojure" => repo_graph_parser_clojure::parse_file(source, path, &module_qname, repo)
@@ -492,7 +500,9 @@ pub(crate) fn path_to_qname(path: &str) -> String {
 /// (imports name the stem) but lets `api/user.proto` share `api::user` with
 /// `api/user.go`, and folds `Dockerfile.prod` into `Dockerfile`. Nothing
 /// imports a non-code module by qname and its children are never
-/// path-qualified, so the full name costs no code qname.
+/// path-qualified, so the full name costs no code qname. Code files take the
+/// same form when LB.9b qualifies a cross-group stem, and every C/C++ file
+/// always does (LB.10a: an `#include` names the file with its extension).
 pub(crate) fn synthetic_module_qname(path: &str) -> String {
     let p = path.replace('\\', "/");
     match p.rsplit_once('/') {

@@ -1,0 +1,85 @@
+{
+  "framework": "cpp-header-impl-files",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "LB.10a identity fixture (legacy-only, no matrix cell). Every C/C++ file is its own MODULE, named by its full file name, because an #include names a file with its extension: Widget.h and Widget.cpp are src::Widget.h and src::Widget.cpp, and each #include \"Widget.h\" IMPORTS src::Widget.h. A .h is parsed with the C++ grammar unless the C grammar parses it with fewer errors (c/point.h names a parameter `template`, a C identifier the C++ grammar rejects; tree-sitter-cpp reads `class` / `new` / `this` as identifiers without an error), declarations inside #ifndef include guards are visited, and a bodiless class/struct specifier (a forward declaration) mints no type. HEAD: both halves are MODULE src::Widget (with a self-IMPORTS edge), the guarded class is dropped so no CLASS Widget exists, and `class Gadget;` mints a CLASS.",
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "src::Widget.h"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::Widget.cpp"
+    },
+    {
+      "kind": "MODULE",
+      "name": "c::point.h"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Widget",
+      "note": "the guarded header class, parsed as C++"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Widget::helper",
+      "note": "inline method inside the include guard"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "point",
+      "note": "control: the C header's struct (which grammar parsed c/point.h is pinned by the parser unit test header_dialect_prefers_cpp_and_falls_back_to_c)"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "point_new",
+      "note": "control: C function in a .c file"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::Widget.cpp",
+      "to": "src::Widget.h",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::main.cpp",
+      "to": "src::Widget.h",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "c::point.c",
+      "to": "c::point.h",
+      "category": "IMPORTS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "MODULE",
+      "name": "src::Widget"
+    },
+    {
+      "kind": "MODULE",
+      "name": "c::point"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "Widget",
+      "note": "precision guard: a .h read with the C grammar turns `class Widget {...}` into a FUNCTION named Widget (HEAD does this for an unguarded header)"
+    },
+    {
+      "kind": "CLASS",
+      "name": "Gadget",
+      "note": "a bodiless `class Gadget;` is a forward declaration, not a type: HEAD mints CLASS src::main::Gadget from it"
+    },
+    {
+      "from": "src::Widget",
+      "to": "src::Widget",
+      "category": "IMPORTS",
+      "note": "HEAD self-import of the merged header/impl module"
+    }
+  ]
+}

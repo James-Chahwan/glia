@@ -1038,8 +1038,10 @@ fn symbol_evidence_applies(lang: &str) -> bool {
 }
 
 /// The form of a candidate library name that is looked up in the index. A
-/// C/C++ candidate is an include path (`mathutil.h`), and the header's MODULE
-/// qname carries no extension (`c::mathutil`).
+/// C/C++ candidate is an include path (`mathutil.h`). The header's MODULE is
+/// named by its file name (`c::mathutil.h`, LB.10a) with its stem as nav
+/// name, so the index holds LB.9b's bare form (`c::mathutil`) and the
+/// candidate is looked up by its stem.
 fn local_lookup_key<'a>(lib: &'a str, lang: &str) -> &'a str {
     if lang == "c_cpp" {
         if let Some((stem, ext)) = lib.rsplit_once('.') {

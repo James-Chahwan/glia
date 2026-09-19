@@ -748,6 +748,11 @@ pub(crate) fn parse_repo_files(
     if let Some(line) = modules.marker(repo_label) {
         eprintln!("{line}");
     }
+    // LB.10a fired_on marker: every C/C++ file names its MODULE by its file
+    // name. Printed whenever the walk routed one to the C/C++ parser.
+    if let Some(line) = modules.c_cpp_marker(repo_label) {
+        eprintln!("{line}");
+    }
 
     // A10.1 fired_on marker: the repo's own API contract is now substrate.
     // Only printed when a build actually saw a spec file.
@@ -848,45 +853,72 @@ pub(crate) fn parser_route(path: &str) -> Option<&'static str> {
 /// MODULE is `<dir>::<file name>` (`api::user.py`) and every symbol under it
 /// follows. Its nav name stays the stem, and each language graph aliases the
 /// bare path to it (`repo_graph_graph` `build_symbol_table`), so bare-path
-/// imports still bind. Same-group pairs (`Widget.h` + `Widget.cpp`,
-/// `util.js` + `util.ts`) keep their shared MODULE.
+/// imports still bind. Same-group pairs (`util.js` + `util.ts`) keep their
+/// shared MODULE.
+///
+/// LB.10a: every C/C++ file (`parser_route` `c_cpp`) is named by its file
+/// name, whatever its siblings: an `#include` names a file WITH its
+/// extension, so `src/Widget.h` + `src/Widget.cpp` are `src::Widget.h` +
+/// `src::Widget.cpp` and adding one never renames the other. A C/C++ file
+/// never enters the cross-group key map, so it never makes a same-stem file
+/// of another group qualify (`native/w.cpp` leaves `native/w.dart` as
+/// `native::w`).
 ///
 /// A pure function of the walked file list, BTree collections only, so the
 /// router, the post-cache grafts and a warm cache all agree on every id.
 #[derive(Debug, Default)]
 pub(crate) struct ModuleQnames {
-    /// Paths whose MODULE is named by file name.
+    /// Paths whose MODULE is named by file name: the cross-group stems and
+    /// every C/C++ file.
     qualified: BTreeSet<String>,
+    /// Files qualified for a cross-group stem (LB.9b's marker count).
+    cross_group_files: usize,
     /// `path_to_qname` keys claimed by two or more build groups.
     stems: usize,
     /// ... of which one group holds two or more files (`util.js` + `util.ts`
     /// beside `util.py`): that group's bare alias is ambiguous and is not
     /// registered.
     same_group_dupes: usize,
+    /// LB.10a: C/C++ files, all named by file name ...
+    c_cpp_files: usize,
+    /// ... of which headers (`.h` / `.hh` / `.hpp` / `.hxx`).
+    c_cpp_headers: usize,
 }
 
 impl ModuleQnames {
     /// Plan the MODULE qnames of one repo's walked `files`.
     pub(crate) fn plan(files: &[(String, String)]) -> Self {
+        let mut plan = Self::default();
         let mut by_key: BTreeMap<String, BTreeMap<&'static str, Vec<&str>>> = BTreeMap::new();
         for (path, _) in files {
-            if let Some(lang) = parser_route(path) {
-                by_key
-                    .entry(path_to_qname(path))
-                    .or_default()
-                    .entry(build_group(lang))
-                    .or_default()
-                    .push(path);
+            match parser_route(path) {
+                Some("c_cpp") => {
+                    plan.c_cpp_files += 1;
+                    if is_c_cpp_header(path) {
+                        plan.c_cpp_headers += 1;
+                    }
+                    plan.qualified.insert(path.clone());
+                }
+                Some(lang) => {
+                    by_key
+                        .entry(path_to_qname(path))
+                        .or_default()
+                        .entry(build_group(lang))
+                        .or_default()
+                        .push(path);
+                }
+                None => {}
             }
         }
-        let mut plan = Self::default();
         for groups in by_key.values().filter(|g| g.len() > 1) {
             plan.stems += 1;
             if groups.values().any(|paths| paths.len() > 1) {
                 plan.same_group_dupes += 1;
             }
-            plan.qualified
-                .extend(groups.values().flatten().map(|p| (*p).to_string()));
+            for path in groups.values().flatten() {
+                plan.cross_group_files += 1;
+                plan.qualified.insert((*path).to_string());
+            }
         }
         plan
     }
@@ -910,18 +942,37 @@ impl ModuleQnames {
         NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &self.module_qname(path))
     }
 
-    /// fired_on marker, once per repo with a qualified file:
+    /// fired_on marker, once per repo with a cross-group qualified file:
     ///   `[modules] cross-language stems: files={f} stems={s} same-group-ambiguous={a} repo=<label>`
     fn marker(&self, repo_label: &str) -> Option<String> {
-        (!self.qualified.is_empty()).then(|| {
+        (self.cross_group_files > 0).then(|| {
             format!(
                 "[modules] cross-language stems: files={} stems={} same-group-ambiguous={} repo={repo_label}",
-                self.qualified.len(),
+                self.cross_group_files,
                 self.stems,
                 self.same_group_dupes
             )
         })
     }
+
+    /// LB.10a fired_on marker, once per repo walking a C/C++ file:
+    ///   `[modules] c_cpp: {n} files named by file name ({h} headers) repo=<label>`
+    fn c_cpp_marker(&self, repo_label: &str) -> Option<String> {
+        (self.c_cpp_files > 0).then(|| {
+            format!(
+                "[modules] c_cpp: {} files named by file name ({} headers) repo={repo_label}",
+                self.c_cpp_files, self.c_cpp_headers
+            )
+        })
+    }
+}
+
+/// A C/C++ header by extension (the LB.10a marker's `headers` count).
+fn is_c_cpp_header(path: &str) -> bool {
+    matches!(
+        std::path::Path::new(path).extension().and_then(|e| e.to_str()),
+        Some("h" | "hh" | "hpp" | "hxx")
+    )
 }
 
 /// The stem a code file's MODULE is named by: the last segment of
@@ -1482,9 +1533,8 @@ mod tests {
             qualified(&["api/user.py", "api/user.ts", "api/main.py"]),
             ["api/user.py", "api/user.ts"]
         );
-        // One build group each: the TS family, a C/C++ header + impl.
+        // One build group: the TS family.
         assert!(qualified(&["a/x.js", "a/x.ts"]).is_empty());
-        assert!(qualified(&["src/W.h", "src/W.cpp"]).is_empty());
         assert!(qualified(&["web/x.component.ts", "web/x.ts", "web/x.vue"]).is_empty());
         // Kotlin joins Java's graph (A14.2).
         assert!(qualified(&["jvm/A.java", "jvm/A.kt"]).is_empty());
@@ -1494,7 +1544,9 @@ mod tests {
         assert!(qualified(&["a/user.py", "b/user.ts"]).is_empty());
         // Three groups, one of them holding two files.
         let plan = ModuleQnames::plan(&files_of(&["u.py", "u.ts", "u.js", "v.go"]));
-        assert_eq!((plan.qualified.len(), plan.stems, plan.same_group_dupes), (3, 1, 1));
+        assert_eq!((plan.cross_group_files, plan.stems, plan.same_group_dupes), (3, 1, 1));
+        assert_eq!(plan.qualified.len(), 3);
+        assert_eq!(plan.c_cpp_marker("r"), None);
         assert_eq!(
             plan.marker("r").as_deref(),
             Some("[modules] cross-language stems: files=3 stems=1 same-group-ambiguous=1 repo=r")
@@ -1536,6 +1588,64 @@ mod tests {
                 "{lang}: {:?}",
                 fp.nav.qname_by_id
             );
+        }
+    }
+
+    /// LB.10a: every C/C++ file is named by its file name, with or without a
+    /// same-stem sibling, and never qualifies a file of another group.
+    #[test]
+    fn c_cpp_files_are_always_named_by_file_name() {
+        assert_eq!(qualified(&["src/W.h", "src/W.cpp"]), ["src/W.h", "src/W.cpp"]);
+        let plan = ModuleQnames::plan(&files_of(&["src/W.h", "src/W.cpp", "main.cpp"]));
+        assert_eq!(plan.module_qname("src/W.h"), "src::W.h");
+        assert_eq!(plan.module_qname("src/W.cpp"), "src::W.cpp");
+        assert_eq!(plan.module_qname("main.cpp"), "main.cpp");
+        assert_eq!(
+            plan.c_cpp_marker("r").as_deref(),
+            Some("[modules] c_cpp: 3 files named by file name (1 headers) repo=r")
+        );
+        assert_eq!(plan.marker("r"), None, "no cross-group stem");
+        assert_eq!(qualified(&["src/main.cpp"]), ["src/main.cpp"]);
+        // A C/C++ file never makes a same-stem file of another group qualify.
+        assert_eq!(qualified(&["native/w.cpp", "native/w.dart"]), ["native/w.cpp"]);
+        let plan = ModuleQnames::plan(&files_of(&["native/w.cpp", "native/w.dart"]));
+        assert_eq!(plan.module_qname("native/w.dart"), "native::w");
+        assert_eq!(plan.marker("r"), None);
+        // `.hh` / `.hxx` are headers by extension but the walk never routes
+        // them (`detect_language`), so they are not counted.
+        let plan = ModuleQnames::plan(&files_of(&["a.h", "b.hpp", "c.c", "d.hh"]));
+        assert_eq!((plan.c_cpp_files, plan.c_cpp_headers), (3, 2));
+        assert!(is_c_cpp_header("x/d.hh") && is_c_cpp_header("d.hxx") && !is_c_cpp_header("d.cc"));
+    }
+
+    /// LB.10a through the router: a header + implementation pair parses to
+    /// two MODULEs named by file name, each keeping its stem as nav name, and
+    /// every symbol follows its file.
+    #[test]
+    fn a_c_cpp_pair_parses_to_two_file_named_modules() {
+        let files: Vec<(String, String)> = vec![
+            (
+                "src/Widget.h".to_string(),
+                "#ifndef W_H\n#define W_H\nclass Widget {\n public:\n  int helper() { return 1; }\n};\n#endif\n"
+                    .to_string(),
+            ),
+            (
+                "src/Widget.cpp".to_string(),
+                "#include \"Widget.h\"\nint make() { return 0; }\n".to_string(),
+            ),
+        ];
+        let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
+        assert!(errors.is_empty(), "{errors:?}");
+        let fps = &parses["c_cpp"];
+        assert_eq!(fps.len(), 2);
+        for (qname, child) in [("src::Widget.h", "src::Widget.h::Widget"), ("src::Widget.cpp", "src::Widget.cpp::make")] {
+            let module = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, qname);
+            let fp = fps
+                .iter()
+                .find(|fp| fp.nodes.first().map(|n| n.id) == Some(module))
+                .unwrap_or_else(|| panic!("MODULE {qname}"));
+            assert_eq!(fp.nav.name_by_id[&module], "Widget", "the stem stays the name");
+            assert!(fp.nav.qname_by_id.values().any(|q| q == child), "{:?}", fp.nav.qname_by_id);
         }
     }
 
