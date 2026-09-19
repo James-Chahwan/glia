@@ -207,6 +207,17 @@ fn run(args: &Args) -> i32 {
         "[engram-export] v6 identity: {}/{} hints, {carried} file(s) under a prior identity ({moves} move(s) detected), {} duplicate key(s) resolved to the located node",
         stats.identity_hints, stats.nodes, stats.duplicate_keys,
     );
+    // The v6 NatSpec marker (LG.12): Solidity tags exported as Propositions
+    // and the Documents edges joining them (plus @inheritdoc base -> override)
+    // to their symbols. Printed on every run, so a zero is a real zero.
+    eprintln!(
+        "[engram-export] v6 natspec: {} tag facts + {} Documents edges on {} symbols (inheritdoc {}/{} resolved)",
+        stats.natspec_facts,
+        stats.natspec_edges,
+        stats.natspec_symbols,
+        stats.natspec_inheritdoc_resolved,
+        stats.natspec_inheritdoc_resolved + stats.natspec_inheritdoc_unresolved,
+    );
     if stats.skipped_nodes > 0 || stats.duplicate_keys > 0 || stats.skipped_edges > 0 {
         eprintln!(
             "  skipped: {} unqualified nodes, {} duplicate keys, {} edges",

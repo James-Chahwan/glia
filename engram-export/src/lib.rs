@@ -63,6 +63,18 @@
 //! `key_rank`: the located node, then a declaration over a MODULE, then the
 //! one with a DOC cell, then the lowest `NodeId`. The others are counted in
 //! [`ExportStats::duplicate_keys`]; their edges still land on the shared key.
+//!
+//! ## The NatSpec story (v6, LG.12)
+//!
+//! A Solidity symbol with LA.8's natspec DOC_TAGS cell exports its `@notice`
+//! (else its `@title`) as `Symbol.doc`, never the flat DOC string, which
+//! repeats every tag. Each other tag is a `Content::Proposition` pushed right
+//! after its symbol: key `<symbol key>#natspec:<tag>[:<name>][:<n>]` (`#` is
+//! in no glia qname), provenance `"natspec"`, the symbol's span, concept hint
+//! and `<identity hint>#<suffix>`, with a weight-1.0 `Documents` edge to the
+//! symbol: a tag is the symbol's own documentation. `@inheritdoc <Base>` is a
+//! `Documents` edge from `<base contract>::<name>` to the override. The rules
+//! live in `natspec`; every other symbol keeps the DOC-cell path.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -75,6 +87,7 @@ use glia_core::{Cell, CellPayload, EdgeCategoryId, Node, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
 pub mod diff;
+mod natspec;
 
 /// Counts surfaced after an export so callers can flag lossy runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -114,6 +127,19 @@ pub struct ExportStats {
     pub dropped_noise: usize,
     /// Nodes dropped by a caller `--exclude <glob>` pattern. (glia-v2 G15)
     pub dropped_excluded: usize,
+    /// Emitted Symbols documented by a natspec DOC_TAGS cell, facts or not.
+    /// (LG.12)
+    pub natspec_symbols: usize,
+    /// NatSpec tag facts emitted as `natspec` Propositions. (LG.12)
+    pub natspec_facts: usize,
+    /// `Documents` edges from NatSpec: one per tag fact, plus one per resolved
+    /// `@inheritdoc`. (LG.12)
+    pub natspec_edges: usize,
+    /// `@inheritdoc` tags whose base function was exported (an edge each).
+    /// (LG.12)
+    pub natspec_inheritdoc_resolved: usize,
+    /// `@inheritdoc` tags with no exported base function (no edge). (LG.12)
+    pub natspec_inheritdoc_unresolved: usize,
     /// [`engram_core::content_digest`] of the gmap bytes [`export_engram_gmap`]
     /// wrote — the content address a `GmapDiff` names as its base or target.
     /// `0` from [`build_gmap`], which serializes nothing. (glia-v6)
@@ -486,7 +512,7 @@ fn doc_cell(cells: &[Cell]) -> Option<String> {
 /// Applied to DOC-cell content: AST-extracted comment docs arrive pre-cleaned
 /// from the shared `glia-doc` helper, but Python docstrings come through
 /// the parser's DOC cell uncapped, so this re-bounds them.
-fn clean_and_cap_doc(s: String) -> Option<String> {
+pub(crate) fn clean_and_cap_doc(s: String) -> Option<String> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -504,14 +530,19 @@ fn clean_and_cap_doc(s: String) -> Option<String> {
     {
         return None;
     }
+    Some(cap_doc(s))
+}
+
+/// `s` cut to [`DOC_MAX`] bytes on a char boundary, trailing space trimmed.
+pub(crate) fn cap_doc(s: &str) -> String {
     if s.len() <= DOC_MAX {
-        return Some(s.to_string());
+        return s.to_string();
     }
     let mut end = DOC_MAX;
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    Some(s[..end].trim_end().to_string())
+    s[..end].trim_end().to_string()
 }
 
 /// Recover the POSITION cell as `(repo_relative_file, start_row, end_row)`.
@@ -615,6 +646,81 @@ fn byte_range(starts: &[u32], file_len: u32, start_row: u32, end_row: u32) -> (u
     (s, e.max(s))
 }
 
+/// One exported Symbol with a natspec DOC_TAGS cell, kept for the
+/// `Documents` edges [`build_gmap`] appends after the glia edge pass (LG.12).
+struct NatspecSymbol {
+    /// Its graph (index into `merged.graphs`) and id, to walk `parent_of`.
+    graph: usize,
+    id: NodeId,
+    key: String,
+    /// Short name: the `<name>` of an `@inheritdoc` base's `<base>::<name>`.
+    name: String,
+    /// Its tag facts' keys, in source order.
+    facts: Vec<String>,
+    /// Its `@inheritdoc` base names, in source order.
+    inheritdoc: Vec<String>,
+}
+
+/// Heritage (`INHERITS_FROM` / `IMPLEMENTS`) targets per source node, in
+/// edge order. Lookup only: never iterated into the output.
+fn heritage_targets(merged: &MergedGraph) -> HashMap<NodeId, Vec<NodeId>> {
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in merged.all_edges() {
+        if e.category == ec::INHERITS_FROM || e.category == ec::IMPLEMENTS {
+            out.entry(e.from).or_default().push(e.to);
+        }
+    }
+    out
+}
+
+/// The key of the contract / interface an `@inheritdoc <base>` on `s` names:
+/// among the heritage edges out of `s`'s enclosing CLASS / INTERFACE, the
+/// first target whose qname's last segment is `base`; else the only exported
+/// CLASS / INTERFACE named `base` (`types`, short name -> keys). The fallback
+/// exists because a base declared in another file can leave the heritage
+/// edge's target outside the graph. `None` when neither finds one, or the
+/// name is ambiguous.
+fn inheritdoc_base(
+    merged: &MergedGraph,
+    heritage: &HashMap<NodeId, Vec<NodeId>>,
+    qname_of: &HashMap<NodeId, &str>,
+    types: &BTreeMap<String, BTreeSet<String>>,
+    s: &NatspecSymbol,
+    base: &str,
+) -> Option<String> {
+    let mut owner = None;
+    if let Some(g) = merged.graphs.get(s.graph) {
+        let nav = &g.nav;
+        let mut at = s.id;
+        // An acyclic parent chain is at most `parent_of.len()` long, so the
+        // bound only stops a malformed cyclic one.
+        for _ in 0..=nav.parent_of.len() {
+            let Some(p) = nav.parent_of.get(&at).copied() else {
+                break;
+            };
+            let kind = nav.kind_by_id.get(&p).copied();
+            if kind == Some(node_kind::CLASS) || kind == Some(node_kind::INTERFACE) {
+                owner = Some(p);
+                break;
+            }
+            at = p;
+        }
+    }
+    let via_heritage = owner
+        .and_then(|p| heritage.get(&p))
+        .and_then(|targets| {
+            targets
+                .iter()
+                .filter_map(|t| qname_of.get(t).copied())
+                .find(|q| q.rsplit("::").next() == Some(base))
+        })
+        .map(str::to_string);
+    via_heritage.or_else(|| {
+        let keys = types.get(base)?;
+        if keys.len() == 1 { keys.iter().next().cloned() } else { None }
+    })
+}
+
 /// Build an [`engram_core::Gmap`] plus the file-id → path sidecar table from a
 /// resolved [`MergedGraph`]. `repo_root` is joined with each POSITION path to
 /// read source for byte-range spans; point it at the repo the graph was built
@@ -686,8 +792,13 @@ pub fn build_gmap(
 
     // Pass 2 — nodes. Key = full qname; name = short symbol (qname tail as a
     // fallback). One node per key, the winner, so each engram concept-cell
-    // fact is unambiguous.
+    // fact is unambiguous. A NatSpec-documented Symbol is followed by its tag
+    // facts (LG.12), whose keys join `fact_keys`; `natspec_symbols` and the
+    // exported CLASS / INTERFACE names feed the edges after the glia pass.
     let mut nodes = Vec::new();
+    let mut fact_keys: BTreeSet<String> = BTreeSet::new();
+    let mut natspec_symbols: Vec<NatspecSymbol> = Vec::new();
+    let mut exported_types: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (gi, g) in merged.graphs.iter().enumerate() {
         for (ni, n) in g.nodes.iter().enumerate() {
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
@@ -747,20 +858,34 @@ pub fn build_gmap(
             // Python docstrings, which the python parser doesn't bound.
             // doc (D1) + imports (G15) share the same provenance skip — test /
             // generated nodes carry boilerplate docs + test-only imports that
-            // poison the semantic surface.
-            let (doc, imports) = if provenance
+            // poison the semantic surface. NatSpec tags (LG.12) are docs too.
+            let skip_docs = provenance
                 .as_deref()
-                .is_some_and(|p| matches!(p, "test_fixture" | "generated" | "generated_proto"))
-            {
+                .is_some_and(|p| matches!(p, "test_fixture" | "generated" | "generated_proto"));
+            let kind = g.nav.kind_by_id.get(&n.id).copied();
+            // G18: doc-section nodes carry prose, not a symbol → Proposition.
+            let is_doc = kind == Some(node_kind::DOC_SECTION);
+            // LG.12: a natspec DOC_TAGS cell replaces the flat DOC string,
+            // which repeats every tag; without one (every other language, a
+            // plain `//` Solidity comment) the DOC path is unchanged.
+            let natspec = if skip_docs || is_doc {
+                None
+            } else {
+                natspec::tags_of(&n.cells).map(|tags| natspec::map(&name, &tags))
+            };
+            let (doc, imports) = if skip_docs {
                 (None, None)
             } else {
-                (
-                    doc_cell(&n.cells).and_then(clean_and_cap_doc),
-                    imports_cell(&n.cells),
-                )
+                let doc = match &natspec {
+                    Some(m) => m.doc.clone(),
+                    None => doc_cell(&n.cells).and_then(clean_and_cap_doc),
+                };
+                (doc, imports_cell(&n.cells))
             };
-            // G18: doc-section nodes carry prose, not a symbol → Proposition.
-            let is_doc = g.nav.kind_by_id.get(&n.id).copied() == Some(node_kind::DOC_SECTION);
+            if !is_doc && (kind == Some(node_kind::CLASS) || kind == Some(node_kind::INTERFACE)) {
+                exported_types.entry(name.clone()).or_default().insert(qname.clone());
+            }
+            let short = natspec.as_ref().map(|_| name.clone());
             let (content, concept_hint) = if is_doc {
                 let prose = code_cell(&n.cells).unwrap_or_else(|| name.clone());
                 // concept_hint = `docs::<stem>` (key minus the section slug).
@@ -786,12 +911,49 @@ pub fn build_gmap(
             };
             let identity_hint = identity.get(&n.id).cloned();
             stats.identity_hints += usize::from(identity_hint.is_some());
+            let (fact_concept, fact_hint) = (concept_hint.clone(), identity_hint.clone());
             nodes.push(GmapNode {
                 key: qname.clone(),
                 content,
                 provenance,
                 concept_hint,
                 identity_hint,
+            });
+            let (Some(m), Some(short)) = (natspec, short) else {
+                continue;
+            };
+            // Tag facts right after their symbol, in source order, anchored
+            // on the symbol's span (none without a POSITION).
+            let anchor = pos.as_ref().map(|_| span);
+            let mut facts = Vec::new();
+            for f in m.facts {
+                let key = format!("{qname}#{}", f.suffix);
+                // `#` is in no glia qname and suffixes are unique per symbol,
+                // so this only guards the one-node-per-key invariant.
+                if winners.contains_key(key.as_str()) || !fact_keys.insert(key.clone()) {
+                    stats.duplicate_keys += 1;
+                    continue;
+                }
+                let identity_hint = fact_hint.as_ref().map(|h| format!("{h}#{}", f.suffix));
+                stats.identity_hints += usize::from(identity_hint.is_some());
+                nodes.push(GmapNode {
+                    key: key.clone(),
+                    content: Content::Proposition { text: f.text, span: anchor },
+                    provenance: Some("natspec".to_string()),
+                    concept_hint: fact_concept.clone(),
+                    identity_hint,
+                });
+                facts.push(key);
+            }
+            stats.natspec_symbols += 1;
+            stats.natspec_facts += facts.len();
+            natspec_symbols.push(NatspecSymbol {
+                graph: gi,
+                id: n.id,
+                key: qname.clone(),
+                name: short,
+                facts,
+                inheritdoc: m.inheritdoc,
             });
         }
     }
@@ -815,6 +977,43 @@ pub fn build_gmap(
             to: (*to).to_string(),
             weight: edge_weight(e.category),
         });
+    }
+
+    // LG.12 — NatSpec `Documents` edges, in node order: each symbol's tag
+    // facts (weight 1.0: a tag is the symbol's own documentation, definitional
+    // like Contains), then each `@inheritdoc` base function it resolves to.
+    let heritage = if natspec_symbols.iter().any(|s| !s.inheritdoc.is_empty()) {
+        heritage_targets(merged)
+    } else {
+        HashMap::new()
+    };
+    for s in &natspec_symbols {
+        for f in &s.facts {
+            edges.push(GmapEdge {
+                from: f.clone(),
+                kind: EdgeKind::Documents,
+                to: s.key.clone(),
+                weight: Some(1.0),
+            });
+            stats.natspec_edges += 1;
+        }
+        for base in &s.inheritdoc {
+            let from = inheritdoc_base(merged, &heritage, &qname_of, &exported_types, s, base)
+                .map(|b| format!("{b}::{}", s.name))
+                .filter(|f| *f != s.key && winners.contains_key(f.as_str()));
+            let Some(from) = from else {
+                stats.natspec_inheritdoc_unresolved += 1;
+                continue;
+            };
+            edges.push(GmapEdge {
+                from,
+                kind: EdgeKind::Documents,
+                to: s.key.clone(),
+                weight: Some(1.0),
+            });
+            stats.natspec_inheritdoc_resolved += 1;
+            stats.natspec_edges += 1;
+        }
     }
     stats.edges = edges.len();
 
@@ -1257,6 +1456,86 @@ mod tests {
             unresolved_refs: Vec::new(),
             properties: Default::default(),
         }])
+    }
+
+    /// `@inheritdoc IB` on `c::A::A::f` (LG.12). `heritage` = the IMPLEMENTS
+    /// target of `A`: `None` (no edge), `Some(999)` (a NodeId outside the
+    /// graph, as a cross-file base can leave it) or `Some(id)` of an
+    /// interface; `twin` adds a second interface named `IB`.
+    fn inheritdoc_graph(heritage: Option<u64>, twin: bool) -> MergedGraph {
+        let repo = RepoId(1);
+        let tags = |json: &str| Cell { kind: cell_type::DOC_TAGS, payload: CellPayload::Json(json.into()) };
+        type Row<'a> = (u64, &'a str, &'a str, NodeKindId, Option<u64>, Vec<Cell>);
+        let mut rows: Vec<Row> = vec![
+            (1, "A", "c::A::A", node_kind::CLASS, None, vec![]),
+            (
+                2,
+                "f",
+                "c::A::A::f",
+                node_kind::METHOD,
+                Some(1),
+                vec![tags(r#"{"style":"natspec","tags":[{"tag":"inheritdoc","name":"IB","text":""}]}"#)],
+            ),
+            (3, "IB", "c::IB::IB", node_kind::INTERFACE, None, vec![]),
+            (4, "f", "c::IB::IB::f", node_kind::METHOD, Some(3), vec![]),
+        ];
+        if twin {
+            rows.push((5, "IB", "d::IB::IB", node_kind::INTERFACE, None, vec![]));
+            rows.push((6, "f", "d::IB::IB::f", node_kind::METHOD, Some(5), vec![]));
+        }
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        for (id, name, qname, kind, parent, cells) in rows {
+            nav.record(NodeId(id), name, qname, kind, parent.map(NodeId));
+            nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
+        }
+        let edges = heritage
+            .map(|to| glia_core::Edge {
+                from: NodeId(1),
+                to: NodeId(to),
+                category: ec::IMPLEMENTS,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            })
+            .into_iter()
+            .collect();
+        MergedGraph::new(vec![RepoGraph {
+            repo,
+            nodes,
+            edges,
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        }])
+    }
+
+    /// The base function keys documenting `c::A::A::f`, and the resolved /
+    /// unresolved inheritdoc counts.
+    fn inheritdoc_edges(merged: &MergedGraph) -> (Vec<String>, (usize, usize)) {
+        let (gmap, _, stats) = build_gmap(merged, &std::env::temp_dir(), &ExportOptions::default());
+        let from = gmap
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Documents && e.to == "c::A::A::f")
+            .map(|e| e.from.clone())
+            .collect();
+        (from, (stats.natspec_inheritdoc_resolved, stats.natspec_inheritdoc_unresolved))
+    }
+
+    /// Heritage edges first; a dangling or missing one falls back to the only
+    /// exported CLASS / INTERFACE of that short name; an ambiguous name with
+    /// no heritage match stays unresolved (no edge, never a guess).
+    #[test]
+    fn inheritdoc_resolves_via_heritage_then_a_unique_short_name() {
+        let base = vec!["c::IB::IB::f".to_string()];
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(None, false)), (base.clone(), (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(999), false)), (base.clone(), (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(999), true)), (vec![], (0, 1)));
+        let via_heritage = vec!["d::IB::IB::f".to_string()];
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(5), true)), (via_heritage, (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(3), true)), (base, (1, 0)));
     }
 
     fn hint_of(gmap: &Gmap, key: &str) -> String {
