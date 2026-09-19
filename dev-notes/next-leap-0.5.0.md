@@ -391,3 +391,9 @@ the run. The leap brief now forbids the wheel on other repos.
   nothing changed. LC.11 is glia's half; the watcher fix is the wrapper's and is now first in LG.5a's handoff. It is
   scheduled into W21 (a sequencing-only dependency on LD.14a keeps it out of the landed waves); no other wave moved.
   The leap is now 249 packets. James kept the MCP watcher on (*"we probs don't wanna turn it off"*).
+- **LG.1c — finish LG.1b** (added 2026-09-19 after W28). LG.1b landed partial: the walk reads, const scan and RPC
+  needle pass run on the engine pool, but the per-language graph builds stayed serial because code-domain's
+  `recv_stats` is one process-global counter, and its file was held by LE.4b that wave. LG.1c makes the counter
+  per thread, runs the builds through `par_map_owned`, and returns the needle counts from `apply_post_cache`. It
+  lands in W30 through a sequencing-only dependency on LE.4d (a dependency on a landed packet reorders landed
+  waves in the from-scratch replan). 250 packets.

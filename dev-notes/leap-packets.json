@@ -16007,6 +16007,43 @@
    "risks": "The dependency on LD.14a is SEQUENCING ONLY: the packet was added after W19 landed and the scheduler replans from scratch, so without a dependency on a not-yet-landed packet it would be placed in an already-landed wave and fail `leap_schedule.py --verify`. It has no code relation to LD.14a. mtime-based freshness: store::scan_for_newer compares source mtimes against the layout, not the parse cache, so an unchanged cache keeping an old mtime cannot make a build look stale (verify by name: grep scan_for_newer).",
    "fixtures": [],
    "spec_group": "LC"
+  },
+  {
+   "id": "LG.1c",
+   "title": "Finish LG.1b: per-language graph builds run in parallel (thread-local recv_stats, par_map_owned), and apply_post_cache returns the RPC needle counts instead of an AtomicUsize side channel",
+   "batch": "LG",
+   "area": "engine + code-domain - parallel build, the part LG.1b could not take",
+   "loc": 160,
+   "rationale": "Added mid-run 2026-09-19 after W28: LG.1b (585578b) landed PARTIAL. The walk reads, const-table scan and RPC needle pass run on the engine pool with byte-exact parity (grpc-go: `[parallel] walk ... read 1008 files on 16 threads`), but the per-language graph builds in engine/src/build/lang_build.rs build_language_graphs stay serial. The blocker: code-domain recv_stats is ONE process-global AtomicUsize (BOUND); build_language_graphs does `recv_stats::reset()` then `recv_stats::take()` after each language to fill the A6.2a `[recv]` marker, so concurrent builds would mix counts. The fix needs code-domain/src/lib.rs, which LE.4b held that wave. Also left behind: grafts::apply_post_cache discards apply_rpc_needles's return, so LG.1b carried the needle-file count on RpcContext as a private AtomicUsize (needle_files / take_needle_files) with its removal path documented. The rule is no deferrals, so the rest lands here.",
+   "entry_points": [
+    "code-domain/src/lib.rs `pub mod recv_stats` - BOUND becomes `thread_local! { static BOUND: Cell<usize> }`; record / reset / take act on the calling thread; doc comments say so; LANGS / flush_marker unchanged",
+    "engine/src/parallel.rs - add `pub(crate) fn par_map_owned` (`items.into_par_iter().map(f).collect()` on the engine pool, order-preserving like par_map_ordered; GLIA_THREADS=1 runs on the caller's thread); extend the module doc's stage list",
+    "engine/src/build/lang_build.rs build_language_graphs - run each non-TS-family language build through par_map_owned; each closure does `recv_stats::reset(); let g = build_x(..); (g, recv_stats::take())`; fold graphs, errors and recv_bound in sorted language order; the TS family stays last and serial, exactly as today",
+    "engine/src/build/grafts.rs apply_post_cache - return the RpcNeedleCounts from apply_rpc_needles (gains a `files` field); engine/src/build/rpc_needles.rs - delete RpcContext::needle_files / take_needle_files; engine/src/build/assemble.rs build_graphs_for_repo - read the count from that return value for the `[parallel] <repo>: const-scan ..., rpc-needles <r> files` line"
+   ],
+   "files_touched": [
+    "code-domain/src/lib.rs",
+    "engine/src/parallel.rs",
+    "engine/src/build/lang_build.rs",
+    "engine/src/build/grafts.rs",
+    "engine/src/build/rpc_needles.rs",
+    "engine/src/build/assemble.rs"
+   ],
+   "implementation": "Why this is exact: the graph crate has no rayon dependency, so one language build and every recv_stats::record() it makes stay on one worker thread; a thread-local counter therefore attributes each bind to the build that made it. LineTally / HeritageTally are computed from the built graphs, not counters, and are unaffected. Keep graph order, error order and the recv_bound order identical to the serial build (sorted languages, TS family last), so the `[recv]` line and every output byte are unchanged.",
+   "acceptance": "BUILD PARITY with engine/tests/build_parity.rs unchanged: before (HEAD) vs after over arch-monorepo-flows, a frozen glia copy, quokka-stack, grpc-go and the xstack-go-http pair -> `diff -r -x manifest.json` empty, manifests equal minus build_stamp, and the `[recv]` lines identical (not just present). `cargo test -p <engine> --test byte_identical` green; `cargo test -p <code-domain>` green with a new recv_stats test proving counts stay per thread (two threads record different counts, each take() sees only its own). Timing: report the glia self-build and grpc-go wall time before/after with GLIA_THREADS unset and =1 (GLIA_THREADS=1 must equal the serial path). The `[parallel]` marker gains `, <g> language graphs` (the clause LG.1b had to drop).",
+   "fired_on_marker": "[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [],
+    "what_changes": "Nothing observable except build time and the restored `<g> language graphs` clause in the [parallel] marker. recv_stats' public functions keep their signatures; their counter becomes per thread.",
+    "in_repo_consumers": []
+   },
+   "depends_on": [
+    "LE.4d"
+   ],
+   "risks": "depends_on LE.4d is SEQUENCING ONLY (no code relation): the scheduler replans from scratch and sorts ready packets by how many packets they unblock, so a dependency on any landed packet (LG.1b, or LE.4b which held code-domain/src/lib.rs in W28) reorders landed waves and fails --verify. LE.4d first became ready in W29, so raising its count moves nothing landed; LG.1c lands in W30. A language build that itself spawns threads would split its record() calls across threads - none does today (the graph crate has no rayon); the per-thread unit test pins the assumption. Memory: building several language graphs at once raises peak memory on very large polyglot repos; report peak RSS for grpc-go before/after.",
+   "fixtures": [],
+   "spec_group": "LG"
   }
  ],
  "batch_c": [
