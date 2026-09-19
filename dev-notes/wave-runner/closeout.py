@@ -26,11 +26,17 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SG = ROOT / "bench" / "substrate-gap"
 JOURNALS = Path.home() / ".claude/projects/-home-ivy-Code-glia"
-# The wheel's name changes with the release and with the 0.5.0 rename; take the newest.
+# Since LD.11b the wheel is glia_py-<ver>-cp311-abi3-*.whl (dist glia-py, import glia_py);
+# the version changes with the release, so take the newest by mtime. The 0.4.x wheels
+# in the same dir carry the old dist name and never match.
 WHEELS = ROOT / "target/wheels"
+WHEEL_GLOB = "glia_py-*.whl"
 # --leap installs and grades the leap wheel in its own venv. The user-site wheel
 # (/usr/bin/python3) stays the pre-leap build: James's repo-graph MCP server imports
-# it, and the leap's pyo3 breaks would take that server down in every repo.
+# it, and the leap's pyo3 breaks would take that server down in every repo. After the
+# Python rename (LD.11b) the venv holds BOTH wheels: the old module from W0..W32 and
+# glia_py. Everything below imports glia_py; importing the old name would grade the
+# frozen W32 build.
 LEAP_PY = os.path.expanduser(os.environ.get("GLIA_LEAP_PY", "~/.venvs/glia-leap/bin/python"))
 CRATES = "engine py graph parsers code-domain store stamp doc-sources".split()
 
@@ -104,7 +110,7 @@ def main():
     gates, lines = [], []
     say = lambda s: (print(s), lines.append(s))
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
-    py = LEAP_PY if leap else "python3"   # every command that imports repo_graph_py
+    py = LEAP_PY if leap else "python3"   # every command that imports the wheel (glia_py)
 
     res = journal_results(run)
     got = {r["packet"].split("—")[0].strip(): r for r in res}
@@ -154,14 +160,27 @@ def main():
 
     sh(f"cargo clean -p {engine_pkg} -p {py_pkg}")
     out, rc = sh("maturin build -m py/Cargo.toml --release 2>&1", timeout=2400)
-    wheel = max(WHEELS.glob("*.whl"), key=lambda p: p.stat().st_mtime)
-    sh(f"{py} -m pip install --force-reinstall --no-deps -q {wheel}")
-    so, _ = sh(f"{py} -c \"import repo_graph_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(repo_graph_py.__file__),'*.so'))[0])\"")
+    wheels = sorted(WHEELS.glob(WHEEL_GLOB), key=lambda p: p.stat().st_mtime)
+    if wheels:
+        sh(f"{py} -m pip install --force-reinstall --no-deps -q {wheels[-1]}")
+    so, _ = sh(f"{py} -c \"import glia_py,glob,os;print(glob.glob(os.path.join(os.path.dirname(glia_py.__file__),'*.so'))[0])\"")
     stale, _ = sh(f"find {' '.join(CRATES)} -name '*.rs' -newer {so.strip()}")
-    stamp, _ = sh(f"{py} -c 'import repo_graph_py as r; print(r.build_stamp())'")
-    say(f"== wheel: build rc={rc}, stale={len(stale.split())}, stamp {stamp.strip()}")
-    if rc or stale.strip():
+    stamp, _ = sh(f"{py} -c 'import glia_py as r; print(r.build_stamp())'")
+    say(f"== wheel: {wheels[-1].name if wheels else f'NO {WHEEL_GLOB}'} build rc={rc}, "
+        f"stale={len(stale.split())}, stamp {stamp.strip()}")
+    if rc or not wheels or stale.strip():
         gates.append("wheel rebuild/stale")
+    # LG.6a: the installed wheel's surface (module name included: py/api_surface/lib.txt's
+    # `pymodule` line) against the committed snapshots.
+    out, rc = sh(f"{py} py/check_api_surface.py 2>&1")
+    say(f"== api surface: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+    if rc:
+        gates.append("py/check_api_surface.py")
+    # A12: the CLI and the installed wheel report the same message contracts.
+    out, rc = sh(f"PYTHON={py} bash bench/message-contracts/check.sh 2>&1")
+    say(f"== message-contracts: {(out.strip().splitlines() or ['(no output)'])[-1]}")
+    if rc:
+        gates.append("bench/message-contracts/check.sh")
     # LD.2: the pyo3 surface behaves as its convention says, over the wheel just installed.
     # One file per py/src module; each ends on `[surface] <module>: N checks, M failed`.
     for t in sorted((ROOT / "py/tests/surface").glob("test_*.py")):

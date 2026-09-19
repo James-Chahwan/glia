@@ -3,13 +3,15 @@ name = "glia-py"
 version.workspace = true
 edition = "2024"
 publish = false
-description = "Native Rust engine for mcp-repo-graph — parses, builds, and stores code graphs."
+description = "pyo3 bindings for glia, published to PyPI as glia-py (import glia_py): parses, builds, and stores code graphs."
 license-file = "../LICENSE"
 repository = "https://github.com/James-Chahwan/glia"
 readme = "README.md"
 
 [lib]
-name = "repo_graph_py"
+# The Python import name: equal to the #[pymodule] fn in src/lib.rs and to
+# pyproject.toml's [tool.maturin] module-name.
+name = "glia_py"
 crate-type = ["cdylib"]
 
 [dependencies]

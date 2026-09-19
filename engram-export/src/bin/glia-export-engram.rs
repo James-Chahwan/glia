@@ -4,7 +4,7 @@
 //! Lives here, not in the main `glia` CLI, on purpose: this is the ONLY code
 //! path that touches `engram-core` in the sibling `Engram` repo (a `../../`
 //! path dep that doesn't exist in CI or a fresh clone). Keeping it in its own
-//! excluded crate lets the engine workspace — and the published `repo-graph-py`
+//! excluded crate lets the engine workspace — and the published `glia-py`
 //! wheel build — stay free of that cross-repo dependency.
 //!
 //! Run it from this crate when `Engram` is checked out next to `glia`:

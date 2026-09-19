@@ -13,7 +13,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import repo_graph_py
+import glia_py
 
 NODE_KINDS = {
     1: "MODULE", 2: "CLASS", 3: "FUNCTION", 4: "METHOD", 5: "ROUTE",
@@ -76,7 +76,7 @@ FRAMEWORK_EXPECTATIONS: dict[str, dict] = {
 def eval_one(path: Path) -> dict:
     """Generate graph for one path, return per-kind counts."""
     try:
-        g = repo_graph_py.generate(str(path))
+        g = glia_py.generate(str(path))
     except Exception as exc:
         return {"error": str(exc)}
     nodes = json.loads(g.nodes_json())

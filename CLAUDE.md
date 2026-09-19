@@ -43,7 +43,7 @@ parsers/code/
 stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
-py/                 pyo3 bindings — the only Rust crate published to PyPI (as repo-graph-py)
+py/                 pyo3 bindings — the only Rust crate published to PyPI (as glia-py, module glia_py)
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh
 ```
@@ -267,7 +267,7 @@ WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
 - **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability now (LD.15a), graph delta (LE.1) and SCC / cycles (LE.6) next; a graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node.
-- **Publish gate.** Only `rust/py/` publishes to PyPI (as `repo-graph-py`). Everything else is internal workspace.
+- **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
 ## Query & Answer Surface (v6 P2/P3)
@@ -316,11 +316,12 @@ behind `glia arch`), `pages::page_flow` (behind `glia pages`).
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
 - **0.5.0** — finish the **glia** rename; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain.
-  Renamed: the repo, the `glia` binary (`cli/Cargo.toml`) and every library crate —
-  packages `glia-*`, Rust paths `glia_*` (LD.11a, table-driven by
-  `dev-notes/rename-0.5.0.py`; `--check` lists anything left on the old names). Still
-  `repo-graph-py` / `repo_graph_py`: the PyPI package and the Python module (LD.11b); py's
-  cargo package is already `glia-py`.
+  Renamed, all table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists anything
+  left on the old names): the repo, the `glia` binary (`cli/Cargo.toml`), every library
+  crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python package: PyPI
+  dist `glia-py`, module `glia_py`, wheel `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b,
+  `--python`). The repo-graph MCP wrapper still imports the old module until its own
+  session moves to `glia-py` (LG.5), so both wheels stay installed side by side.
 
 ## Memory
 

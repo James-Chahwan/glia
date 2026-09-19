@@ -315,7 +315,7 @@ def check_legacy(payload, path=LEGACY_PATH):
 
 def _engine_version():
     try:
-        import repo_graph_py as rg
+        import glia_py as rg
         return rg.version()
     except Exception:  # noqa: BLE001
         return "unknown"
@@ -326,7 +326,7 @@ def _build_stamp():
     `engine` but different stamps graded different parser code; the same stamp
     across a claimed rebuild means maturin repackaged a stale .so."""
     try:
-        import repo_graph_py as rg
+        import glia_py as rg
         return rg.build_stamp()
     except Exception:  # noqa: BLE001 — older wheel without the symbol
         return "unknown"

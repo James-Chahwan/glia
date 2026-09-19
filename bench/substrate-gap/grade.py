@@ -78,7 +78,7 @@ from pathlib import Path
 
 # Never scatter .gmap dirs into the fixture folders; keep grading hermetic.
 os.environ.setdefault("GLIA_NO_PERSIST", "1")
-import repo_graph_py as rg  # noqa: E402
+import glia_py as rg  # noqa: E402
 
 _CAT_BY_NAME = {n: i for i, n in rg.category_names()}
 _CAT_BY_ID = {i: n for i, n in rg.category_names()}

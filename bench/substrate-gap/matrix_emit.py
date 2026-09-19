@@ -127,7 +127,7 @@ def engine_version():
     records the gap.
     """
     try:
-        import repo_graph_py as rg
+        import glia_py as rg
         return str(rg.version())
     except Exception:  # noqa: BLE001 -- recorded, never fatal
         return "unknown"

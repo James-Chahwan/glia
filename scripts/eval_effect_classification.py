@@ -24,7 +24,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-import repo_graph_py
+import glia_py
 
 # Effect-pattern table. Order matters — first match wins per source line.
 EFFECT_PATTERNS: list[tuple[str, list[str]]] = [
@@ -88,7 +88,7 @@ def classify_source(src: str) -> Counter:
 
 def eval_repo(path: Path) -> dict:
     try:
-        g = repo_graph_py.generate(str(path))
+        g = glia_py.generate(str(path))
     except Exception as exc:
         return {"path": str(path), "error": str(exc)}
 

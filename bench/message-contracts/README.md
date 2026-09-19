@@ -53,11 +53,13 @@ cargo run -p glia-cli -- contracts bench/message-contracts/svc \
     --with bench/message-contracts/worker --json     # the rows check.sh asserts
 ```
 
-The pyo3 half imports the **installed** `repo_graph_py` wheel, not the working
-tree. After a Rust change, rebuild the wheel before trusting that half. Run
-`cargo clean -p glia-engine -p glia-py` before `maturin build`,
-otherwise maturin can repackage a stale `.so`. The script **fails** if the
-wheel is missing or has no `contracts()`. It never skips that half.
+The pyo3 half imports the **installed** `glia_py` wheel, not the working
+tree, through `$PYTHON` (default `python3`; the 0.5.0 leap sets
+`PYTHON=~/.venvs/glia-leap/bin/python`). After a Rust change, rebuild the
+wheel before trusting that half. Run `cargo clean -p glia-engine -p glia-py`
+before `maturin build`, otherwise maturin can repackage a stale `.so`. The
+script **fails** if the wheel is missing or has no `contracts()`. It never
+skips that half.
 
 ## Expected (asserted by `./check.sh`)
 
@@ -72,7 +74,7 @@ wheel is missing or has no `contracts()`. It never skips that half.
   catches phantom topics.
 - No row has `topic_is_tag` or `pattern` set, and in every row the producer and
   consumer have different `repo_id`s.
-- `PyGraph.contracts()` from `repo_graph_py.generate_many([svc, worker])`
+- `PyGraph.contracts()` from `glia_py.generate_many([svc, worker])`
   returns the same (topic, status, confidence, tag, producer type, consumer
   type) rows as the CLI, and prints `[contracts] surface=pyo3 repos=2`.
 

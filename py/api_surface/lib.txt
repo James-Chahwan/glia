@@ -1,2 +1,2 @@
 # pyo3 surface of py/src/lib.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-pymodule repo_graph_py
+pymodule glia_py

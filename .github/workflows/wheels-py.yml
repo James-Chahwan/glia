@@ -1,12 +1,10 @@
-name: build wheels — repo-graph-py
+name: build wheels — glia-py
 
-# Builds abi3 wheels for repo-graph-py (the Rust pyo3 engine) across the
-# canonical platform matrix. Triggers on `v*` tag pushes and on manual
-# dispatch. Uses maturin's official action.
-#
-# Publishing: uncomment the `release` job and configure either OIDC trusted
-# publishing on PyPI (preferred, no secret needed) or set PYPI_API_TOKEN as
-# a repository secret.
+# Builds abi3 wheels for glia-py (PyPI dist glia-py, import glia_py; the Rust
+# pyo3 engine) across the canonical platform matrix: glia_py-<ver>-cp311-abi3-*.whl
+# plus an sdist. Triggers on `v*` tag pushes, manual dispatch, and PRs that
+# touch a crate the wheel links. Uses maturin's official action. The `release`
+# job below publishes to PyPI by OIDC trusted publishing.
 
 on:
   push:
@@ -135,11 +133,18 @@ jobs:
   #   - on manual workflow_dispatch → backfill missing-platform wheels for the
   #     current version (skip-existing leaves already-uploaded files untouched)
   #
-  # Auth: PyPI OIDC trusted publishing — NO stored secret. One-time setup on
-  # https://pypi.org/manage/project/repo-graph-py/settings/publishing/ :
+  # Auth: PyPI OIDC trusted publishing — NO stored secret. The project is
+  # glia-py (0.4.x shipped under the old repo-graph dist, which this job no
+  # longer publishes). glia-py does not exist on PyPI before its first
+  # upload, so the one-time setup is a PENDING publisher, added BEFORE the
+  # v0.5.0 tag (without it this job fails) on
+  # https://pypi.org/manage/account/publishing/ :
+  #   PyPI project name: glia-py
   #   Publisher: GitHub Actions
   #   Owner: James-Chahwan   Repository: glia
   #   Workflow: wheels-py.yml   Environment: (leave blank)
+  # After the first upload it is managed at
+  # https://pypi.org/manage/project/glia-py/settings/publishing/
   release:
     name: publish
     runs-on: ubuntu-latest

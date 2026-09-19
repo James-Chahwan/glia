@@ -3,9 +3,9 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "repo-graph-py"
+name = "glia-py"
 version = "0.4.18"
-description = "Native Rust engine for mcp-repo-graph — parses, builds, and stores code graphs."
+description = "glia, the Rust cross-language code-graph engine (pyo3): parses, builds, and stores code graphs. The engine behind mcp-repo-graph."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
@@ -25,10 +25,12 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/James-Chahwan/repo-graph"
-Repository = "https://github.com/James-Chahwan/repo-graph"
-Issues = "https://github.com/James-Chahwan/repo-graph/issues"
+Homepage = "https://github.com/James-Chahwan/glia"
+Repository = "https://github.com/James-Chahwan/glia"
+Issues = "https://github.com/James-Chahwan/glia/issues"
 
 [tool.maturin]
-module-name = "repo_graph_py"
+# Must equal py/Cargo.toml's [lib] name and the #[pymodule] fn in py/src/lib.rs
+# (pyo3 exports PyInit_<name>); the three move together.
+module-name = "glia_py"
 features = ["pyo3/extension-module"]

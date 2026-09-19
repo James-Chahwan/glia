@@ -116,10 +116,10 @@ Each fix is proven when its eval cell flips 0→1 in `results.jsonl` (fired_on
 marker); the full matrix is the regression guard. `results.jsonl` is machine-local;
 the committed proof of record is `legacy-latest.json` (`run.py --no-log --emit`
 writes it, `--check` fails naming any cell that moved since). Rebuild the wheel — `cargo clean -p
-glia-engine -p glia-py && maturin build && pip install --force-reinstall
-target/wheels/<wheel>`. There is no venv on this machine, so the `develop` flow does
-not apply, and the `clean` is load-bearing — see the stale-`.so` warning in the
-PROGRESS LOG below. Then `run.py` + `cargo test` +
+glia-engine -p glia-py && maturin build -m py/Cargo.toml --release && pip install
+--force-reinstall --no-deps target/wheels/glia_py-*.whl` (the 0.5.0 leap installs it
+into `~/.venvs/glia-leap`, never the user site). The `clean` is load-bearing — see the
+stale-`.so` warning in the PROGRESS LOG below. Then `run.py` + `cargo test` +
 byte-identical determinism gate after each.
 
 ---

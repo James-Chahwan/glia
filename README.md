@@ -2,7 +2,7 @@
 
 Cross-service code graph engine. Builds a graph of every component, every cross-service call, every shared resource across one repo or many. Other tools (LLM assistants, impact analyzers, service catalogs) read from this instead of reimplementing.
 
-Rust engine. CLI (`glia`) and Python wheel (`repo-graph-py`). MCP server [repo-graph](https://github.com/James-Chahwan/repo-graph) wraps the wheel.
+Rust engine. CLI (`glia`) and Python wheel (`glia-py`, `import glia_py`; formerly `repo-graph-py`, up to 0.4.18). MCP server [repo-graph](https://github.com/James-Chahwan/repo-graph) wraps the wheel.
 
 > **Licensed [Glia Software License v0.1](./LICENSE).** PolyForm Noncommercial 1.0.0 + worker-protection overlay. Free for individuals, students, researchers, nonprofits, OSS projects, orgs <500 STEM workers, worker-owned coops, B Corps, unionized workplaces. Commercial license required otherwise. Contact `j.r.chahwan@gmail.com`. Not OSI-approved by design. See [License](#license).
 
@@ -89,7 +89,7 @@ cargo build --release -p glia-cli
 cp target/release/glia ~/.local/bin/
 
 # Python wheel (works for scripts and the MCP server)
-pip install repo-graph-py     # ships pyo3 wheels for Linux / macOS / Windows
+pip install glia-py          # 0.5.0+; abi3 pyo3 wheels for Linux / macOS / Windows, import glia_py
 ```
 
 For LLM/MCP usage see [repo-graph](https://github.com/James-Chahwan/repo-graph), which wraps the wheel as an MCP server with 13 navigation tools.

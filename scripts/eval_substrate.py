@@ -2,7 +2,7 @@
 """glia v0.4.x substrate eval harness.
 
 Walks each clone in /home/ivy/Code/glia-eval/, runs the full pipeline via
-repo_graph_py, and tabulates counts by node-kind + edge-category. For
+glia_py, and tabulates counts by node-kind + edge-category. For
 multi-service repos, the pyo3 entrypoint already merges sub-graphs under
 one call; we rely on that.
 
@@ -18,7 +18,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-import repo_graph_py
+import glia_py
 
 # Mirror the constants in code-domain/src/lib.rs.
 NODE_KINDS = {
@@ -126,7 +126,7 @@ def eval_repo(path: Path) -> dict:
     """Run the full pipeline on `path` and return summary stats."""
     t0 = time.time()
     try:
-        graph = repo_graph_py.generate(str(path))
+        graph = glia_py.generate(str(path))
     except Exception as exc:
         return {"path": str(path), "error": str(exc), "elapsed_ms": 0}
     elapsed_ms = int((time.time() - t0) * 1000)
@@ -320,7 +320,7 @@ def main():
     print(f"# merging {len(repos)} repos for cross-graph eval", file=sys.stderr)
     t0 = time.time()
     try:
-        merged = repo_graph_py.generate_many([str(r) for r in repos])
+        merged = glia_py.generate_many([str(r) for r in repos])
     except Exception as exc:
         print(f"merge failed: {exc}", file=sys.stderr)
         merged = None

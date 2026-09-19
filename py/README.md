@@ -1,16 +1,34 @@
-# repo-graph-py
+# glia-py
 
-Native Rust engine for [`mcp-repo-graph`](https://pypi.org/project/mcp-repo-graph/) — parses source, builds a unified cross-language graph, stores it in a zero-copy `.gmap` file.
+Python bindings for [glia](https://github.com/James-Chahwan/glia), the Rust
+engine that parses source, builds one cross-language code graph (every
+component, cross-service call and shared resource across one repo or many) and
+stores it in a zero-copy `.gmap` file. Built with pyo3 + maturin.
 
-This package is the Rust engine (via pyo3 + maturin). Users install it transitively through `mcp-repo-graph`; there is usually no reason to install it directly.
+The [repo-graph](https://github.com/James-Chahwan/repo-graph) MCP server
+(`mcp-repo-graph` on PyPI) depends on this package. Install it directly to call
+the engine from your own Python code.
 
 ## Install
 
 ```bash
-pip install mcp-repo-graph
+pip install glia-py
 ```
 
-This pulls `repo-graph-py` as a dependency and gives you the `repo-graph` CLI.
+```python
+import glia_py
+
+g = glia_py.generate("path/to/repo")
+print(glia_py.version(), glia_py.build_stamp())
+```
+
+**Names and versions.** The distribution is `glia-py` and the module is
+`glia_py`, from 0.5.0 on. The 0.4.x releases (up to 0.4.18) shipped under the
+old repo-graph package name. 0.5.0 is also the release that changes the API
+conventions below, so an existing caller moves both in one step. `version()`
+is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
+content hash of every graph-shaping source file, so two builds of one release
+that parse differently report different stamps.
 
 ## API conventions
 
@@ -61,9 +79,11 @@ Every function and `PyGraph` method follows these rules (since 0.5.0, LD.2):
 
 ## Platform support
 
-- **v0.4.12** — Linux x86_64 only (prebuilt wheel). Other platforms will need Rust + maturin at install time until v0.4.13 adds the full wheel matrix.
-- **v0.4.13 (planned)** — Linux x86_64/aarch64 (manylinux), macOS x86_64/arm64, Windows x86_64 × Python 3.11–3.14 via maturin GitHub Actions.
+abi3 wheels for CPython 3.11 and newer: Linux x86_64 and aarch64 (manylinux
+2_28), macOS x86_64 and arm64, Windows x86_64, plus an sdist. Building the
+sdist needs a Rust toolchain.
 
 ## License
 
-MIT
+[Glia Software License v0.1](https://github.com/James-Chahwan/glia/blob/main/LICENSE):
+PolyForm Noncommercial 1.0.0 plus a worker-protection overlay. See `LICENSE`.

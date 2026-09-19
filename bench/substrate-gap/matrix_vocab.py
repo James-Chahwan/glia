@@ -46,7 +46,7 @@ re-invent:
                has the measured table.
 
 Every kind and category name here is checked against the LOCKED code-domain
-registries via repo_graph_py's decode tables (`--selftest`), so the vocabulary
+registries via glia_py's decode tables (`--selftest`), so the vocabulary
 cannot drift from code-domain/src/lib.rs. Only SHIPPED registry entries may be
 named: a reserved-but-unemitted id is absent from the installed wheel's tables and
 will fail the self-test.
@@ -323,7 +323,7 @@ def resolve_via(mid, present_kinds):
 # ---------------------------------------------------------------------------
 
 def _selftest():
-    import repo_graph_py as rg
+    import glia_py as rg
 
     expected_ids = [
         "http_client", "http_server", "kafka", "amqp", "sqs_sns", "pubsub",
@@ -345,7 +345,7 @@ def _selftest():
     known_cells = set(dict(rg.cell_type_names()).values())
     assert ROLE_CELL in known_cells, (
         f"ROLE_CELL {ROLE_CELL!r} is not in the locked cell_type registry "
-        f"(repo_graph_py.cell_type_names())")
+        f"(glia_py.cell_type_names())")
     kinds_seen, cats_seen = set(), set()
     anchors = roled = 0
     for m in MECHANISMS:
@@ -371,7 +371,7 @@ def _selftest():
                 if k not in known_kinds:
                     raise ValueError(
                         f"{m['id']}: node kind {k!r} is not in the locked code-domain "
-                        f"registry (repo_graph_py.kind_names()); only SHIPPED kinds "
+                        f"registry (glia_py.kind_names()); only SHIPPED kinds "
                         f"may be named in the vocabulary"
                     )
                 kinds_seen.add(k)
@@ -379,7 +379,7 @@ def _selftest():
             if c not in known_cats:
                 raise ValueError(
                     f"{m['id']}: edge category {c!r} is not in the locked code-domain "
-                    f"registry (repo_graph_py.category_names())"
+                    f"registry (glia_py.category_names())"
                 )
             cats_seen.add(c)
         roles = m.get("role_cells", [])
@@ -391,7 +391,7 @@ def _selftest():
             if r not in known_kinds:
                 raise ValueError(
                     f"{m['id']}: role_cells entry {r!r} is not a node kind in the "
-                    f"locked code-domain registry (repo_graph_py.kind_names()); ROLE "
+                    f"locked code-domain registry (glia_py.kind_names()); ROLE "
                     f"payloads name kinds"
                 )
             assert any(r in group for group in m["kinds"]), (

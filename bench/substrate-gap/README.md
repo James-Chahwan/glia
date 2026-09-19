@@ -22,17 +22,21 @@ python3 grade.py fixtures/<name> --dump   # + dump ALL emitted nodes/edges (auth
 python3 incremental_check.py      # regrade every fixture through the parse cache; exit 1 if warm != cold
 ```
 
-Requires the `repo_graph_py` wheel importable. **`grade.py` imports the INSTALLED
-wheel, never the working tree** — a Rust change is invisible to grading until you
-rebuild. The working recipe on this machine — there is no venv, so the `develop` flow
-does not apply, and `maturin build` alone can repackage a stale `.so`, which is what
-the `clean` is for:
+Requires the `glia_py` wheel (PyPI `glia-py`, 0.5.0+) importable. **`grade.py`
+imports the INSTALLED wheel, never the working tree** — a Rust change is invisible to
+grading until you rebuild. The working recipe on this machine — `maturin build` alone
+can repackage a stale `.so`, which is what the `clean` is for:
 
 ```bash
 cargo clean -p glia-engine -p glia-py
-maturin build
-pip install --force-reinstall target/wheels/<wheel>
+maturin build -m py/Cargo.toml --release
+pip install --force-reinstall --no-deps target/wheels/glia_py-*.whl
 ```
+
+During the 0.5.0 leap run the `pip` and every script here with
+`~/.venvs/glia-leap/bin/python`, never the user-site `python3`: the user site keeps
+the 0.4.x wheel that the repo-graph MCP server imports
+(`dev-notes/wave-runner/README.md`).
 
 Grading is hermetic (`GLIA_NO_PERSIST=1`, non-incremental).
 

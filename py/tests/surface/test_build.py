@@ -27,7 +27,7 @@ import tempfile
 # with the opt-out UNSET: a write that only GLIA_NO_PERSIST used to hide shows.
 os.environ.pop("GLIA_NO_PERSIST", None)
 
-import repo_graph_py as rg  # noqa: E402
+import glia_py as rg  # noqa: E402
 
 # `helper` / `main` for the answers, plus enough functions that some NodeId
 # sits above 2**63 (the ids are deterministic: the repo dir is always

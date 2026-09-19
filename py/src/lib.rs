@@ -1,8 +1,13 @@
-//! pyo3 bindings for `glia-engine`. The orchestration logic
-//! (file walking, per-language parsing, cross-cutting extraction, resolver
-//! execution, post-passes) lives in the `engine` crate and is shared with
-//! the `glia` CLI. This crate is intentionally thin — only the Python-facing
-//! surface lives here.
+//! pyo3 bindings for `glia-engine`, published to PyPI as `glia-py` and imported
+//! as `glia_py` (the 0.4.x releases used the old repo-graph names; LD.11b).
+//! The `#[pymodule]` fn name below, `[lib] name` in Cargo.toml and
+//! `[tool.maturin] module-name` in pyproject.toml must agree: pyo3 exports
+//! `PyInit_<fn name>` and Python looks up `PyInit_<module name>`.
+//!
+//! The orchestration logic (file walking, per-language parsing, cross-cutting
+//! extraction, resolver execution, post-passes) lives in the `engine` crate
+//! and is shared with the `glia` CLI. This crate is intentionally thin — only
+//! the Python-facing surface lives here.
 //!
 //! **Layout: one module per primitive.** The `PyGraph` class is declared once,
 //! in `graph.rs`; every other module adds its methods in its own
@@ -62,7 +67,7 @@ mod traversal;
 mod why;
 
 #[pymodule]
-fn repo_graph_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn glia_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut fns: Vec<&registry::ModuleFns> =
         inventory::iter::<registry::ModuleFns>.into_iter().collect();
     fns.sort_by_key(|f| f.name);

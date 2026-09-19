@@ -54,7 +54,7 @@ Three angles that map to your background:
 
 Since 0.5.0 every library crate is `glia-*` (Rust paths `glia_*`), matching the repo and the `glia` binary; before it they were `repo-graph-*`. The rename is table-driven and replayable: `python3 dev-notes/rename-0.5.0.py --check` lists anything still on the old names.
 
-Only `py/` publishes to PyPI (as `repo-graph-py`). Everything else is internal workspace.
+Only `py/` publishes to PyPI: dist `glia-py`, module `glia_py` since 0.5.0 (0.4.x shipped under the old repo-graph name). Everything else is internal workspace.
 
 ---
 
@@ -71,7 +71,7 @@ glia/
 ├── activation/            Personalised PageRank, domain-agnostic. ActivationConfig is the API.
 ├── engine/                Orchestration glue. Used by py/ and cli/.
 ├── cli/                   `glia` binary (analyze / impact / merge / build / install-hooks).
-├── py/                    pyo3 bindings. PUBLISHED as repo-graph-py wheel.
+├── py/                    pyo3 bindings. PUBLISHED as the glia-py wheel (import glia_py).
 ├── parsers/code/
 │   ├── python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
 │   ├── c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
@@ -246,7 +246,7 @@ ls ~/Code/<some-repo>/.glia/graph/
 # Python wheel (the published artefact)
 cd py/
 maturin develop --release          # builds the wheel into the active venv
-python -c "import repo_graph; print(repo_graph.__version__)"
+python -c "import glia_py; print(glia_py.version(), glia_py.build_stamp())"
 
 # Tests
 cargo test --workspace             # workspace-wide; the tests/ dir has the fixture smokes
@@ -352,7 +352,7 @@ Standard guardrails, lifted from `CLAUDE.md` + `CODE_RULES.md`. Don't fight thes
 - **`scratch/lens/manifests/holdout.json`** — the 10-instance sacred holdout. Loop-set ∩ holdout = ∅ asserted at cycle start. Adding instances is fine; using them in the loop set is abort-level.
 - **Append-only files.** `cycle_log.md`, `results_history.jsonl`, `marshmallow_log.md`, per-cycle results. Corrections = new entries with `CORRECTED:` markers. Never overwrite.
 - **`scratch/latent/` is excluded from the default workspace** for a reason — pulls candle, multi-GB download. Build it explicitly when needed; don't add it to the default `cargo build`.
-- **Only `py/` publishes to PyPI** (as `repo-graph-py`). Everything else is internal. Library crates are `glia-*`; a new crate takes that prefix.
+- **Only `py/` publishes to PyPI** (as `glia-py`, import `glia_py`). Everything else is internal. Library crates are `glia-*`; a new crate takes that prefix.
 - **No `unwrap()` / `panic!()`** in non-test code. Propagate via `?`.
 - **clap arg names are kebab-case on the CLI** even when the Rust field is snake_case. `repo_canonical` → `--repo-canonical`. Subprocess invocations of synth bins MUST use the kebab form or clap exits with code 2. Burned us in cycle 0.6.
 - **`required-features = ["research"]`** on every `synth_*` `[[bin]]` entry — otherwise the pyo3 wheel build accidentally pulls clap/serde/regex/walkdir.

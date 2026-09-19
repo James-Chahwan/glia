@@ -66,17 +66,18 @@ if fail:
 print("PASS: 1 match (orders/OrderCreated), 1 mismatch (shipments/ShipmentCreated vs ShipmentDispatched)")
 PY
 
-# pyo3 surface. Imports the INSTALLED wheel, never the working tree — after a
-# Rust change, rebuild it first (`cargo clean -p glia-engine -p
+# pyo3 surface. Imports the INSTALLED `glia_py` wheel, never the working tree —
+# after a Rust change, rebuild it first (`cargo clean -p glia-engine -p
 # glia-py` before `maturin build`, or maturin can repackage a stale .so).
 # A missing wheel or a wheel without contracts() FAILS: skipping would be a
-# dead gate.
-GLIA_NO_PERSIST=1 python3 - "$tmp" > "$py" 2>"$pyerr" <<'PY' || { cat "$py"; sed -n '1,20p' "$pyerr"; exit 1; }
+# dead gate. $PYTHON picks the interpreter that has the wheel (the 0.5.0 leap
+# grades in ~/.venvs/glia-leap: PYTHON=~/.venvs/glia-leap/bin/python).
+GLIA_NO_PERSIST=1 "${PYTHON:-python3}" - "$tmp" > "$py" 2>"$pyerr" <<'PY' || { cat "$py"; sed -n '1,20p' "$pyerr"; exit 1; }
 import json, sys
 try:
-    import repo_graph_py as rg
+    import glia_py as rg
 except ImportError as e:
-    print(f"FAIL: repo_graph_py is not importable ({e}); build and install the wheel"); sys.exit(1)
+    print(f"FAIL: glia_py is not importable ({e}); build and install the wheel"); sys.exit(1)
 g = rg.generate_many(["bench/message-contracts/svc", "bench/message-contracts/worker"])
 if not hasattr(g, "contracts"):
     print("FAIL: the installed wheel predates PyGraph.contracts() (A12.3); rebuild it"); sys.exit(1)

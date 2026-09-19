@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""The 0.5.0 crate rename (LD.11a): every library package repo-graph-<x> -> glia-<x>
-and every Rust path repo_graph_<x> -> glia_<x>, driven by the explicit table below.
+"""The 0.5.0 rename, table-driven. Default mode is the crate rename (LD.11a): every library
+package repo-graph-<x> -> glia-<x> and every Rust path repo_graph_<x> -> glia_<x>. `--python`
+is the Python rename (LD.11b): the PyPI dist repo-graph-py -> glia-py and the import name
+repo_graph_py -> glia_py, and nothing else.
 
     python3 dev-notes/rename-0.5.0.py --check            list every would-be change; exit 1 if any
     python3 dev-notes/rename-0.5.0.py --apply            rewrite the files in place
     python3 dev-notes/rename-0.5.0.py --check --root DIR  the same over another checkout
                                                          (neuropil's session replays it there)
+    python3 dev-notes/rename-0.5.0.py --python --check   the Python table (repo-graph's session
+                                                         replays it with --root)
+    python3 dev-notes/rename-0.5.0.py --python --apply PATH...
+                                                         only the named files / directories
 
 Never a blanket regex. A token is renamed only when the WHOLE token is a table row:
 `repo-graph-<x>` (hyphen form: package names, `cargo -p`, prose) or `repo_graph_<x>`
@@ -13,9 +19,9 @@ Never a blanket regex. A token is renamed only when the WHOLE token is a table r
 `render_repo_graph_full` and `repo_graph_roundtrips_through_gmap_file` stay, and a
 hyphen-continued token that is not a row (`repo-graph-core-x`) is left whole and reported.
 
-Never touched here:
+Never touched by the crate table:
   - `repo_graph_py` (py's [lib] name, the #[pymodule] fn, `import repo_graph_py`) and the
-    PyPI dist `repo-graph-py` (pyproject, pip, the wheel CI) - the Python rename is LD.11b.
+    PyPI dist `repo-graph-py` (pyproject, pip, the wheel CI) - that is the `--python` table.
     Only py's CARGO package moves: its `name = "repo-graph-py"` line in a Cargo.toml and a
     `-p repo-graph-py` cargo package spec (a command naming the old package would fail).
   - `repo-graph` alone (the MCP product), `mcp-repo-graph`, `.ai/repo-graph` / `.glia/graph`
@@ -34,6 +40,17 @@ not a table row: a crate added after this table was written must be added to it 
 Prose the table cannot express (onboarding's "the prefix is locked" lines, the
 `repo-graph-{core,..}` brace list, CLAUDE.md's roadmap) was rewritten by hand in the same
 commit; this script is the mechanical part.
+
+The `--python` table (LD.11b) has two rows, `repo-graph-py` and `repo_graph_py`, each renamed
+only as a whole token: never `repo-graph` alone (the MCP product and the wrapper repo) and
+never `mcp-repo-graph` (the wrapper's PyPI dist). Same scope as the crate table, plus these
+kept on purpose, because what they say about the 0.4.x wheel stays true:
+  - PY_SKIP: bench/lens (finished research plans) and tests/fixtures/gmap_pre_leap/README.md
+    (that fixture was built by the 0.4.18 wheel, which is `repo_graph_py`; its recipe must
+    keep naming it).
+  - a token right after "formerly" (README.md's history note).
+pyo3 needs the #[pymodule] fn name, py's [lib] name and maturin's module-name to agree
+(PyInit_<name>); the table renames all three in one pass.
 """
 
 import argparse
@@ -87,6 +104,15 @@ EXTRA_PATHS = [("repo_graph_docs", "glia_doc")]
 
 # py's cargo package: renamed here (LD.11b finds it glia-py); its Python names are LD.11b's.
 PY_PACKAGE = ("repo-graph-py", "glia-py")
+
+# The Python rename (LD.11b, `--python`): dist and import name, nothing else.
+PY_ROWS = [("repo-graph-py", "glia-py"), ("repo_graph_py", "glia_py")]
+PY_TABLE = dict(PY_ROWS)
+PY_SKIP_PREFIXES = ("bench/lens/",)
+PY_SKIP_FILES = {"tests/fixtures/gmap_pre_leap/README.md"}
+PY_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])(repo-graph-py|repo_graph_py)(?![A-Za-z0-9_]|-[A-Za-z])")
+# "formerly repo-graph-py", "formerly `repo-graph-py`": a history note, kept.
+PY_HISTORY = re.compile(r"formerly\s+`?$")
 
 # Kept by design; everything else that still reads repo[-_]graph[-_]<ident> after a rewrite is
 # reported as unknown so a reviewer sees it.
@@ -146,12 +172,19 @@ def files(root):
     return sorted(rels)
 
 
-def in_scope(rel):
+def in_scope(rel, python=False):
     if rel in SKIP_FILES or os.path.basename(rel) == "Cargo.lock":
         return False
     if rel.startswith(SKIP_PREFIXES) and not rel.startswith(KEEP_PREFIXES):
         return False
+    if python and (rel in PY_SKIP_FILES or rel.startswith(PY_SKIP_PREFIXES)):
+        return False
     return True
+
+
+def selected(rel, paths):
+    """No PATH arguments: every file. Otherwise the file is one of them or lies under one."""
+    return not paths or any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in paths)
 
 
 def read_text(path):
@@ -198,6 +231,55 @@ def rewrite(rel, text):
     return "".join(out), hits
 
 
+def rewrite_python(text):
+    """The `--python` rows over one file: new text, one (line, old, new) per rename, and the
+    line of every token kept as a history note."""
+    hits, kept, out, last = [], [], [], 0
+    for m in PY_TOKEN.finditer(text):
+        ln = text.count("\n", 0, m.start()) + 1
+        line_start = text.rfind("\n", 0, m.start()) + 1
+        if PY_HISTORY.search(text[line_start:m.start()]):
+            kept.append((ln, m.group(1)))
+            continue
+        new = PY_TABLE[m.group(1)]
+        out.append(text[last:m.start()])
+        out.append(new)
+        hits.append((ln, m.group(1), new))
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out), hits, kept
+
+
+def main_python(root, a):
+    """`--python`: the dist / import-name table. Exit 1 under --check when anything is left."""
+    changed_files, total, kept_all = 0, 0, []
+    for rel in files(root):
+        if not in_scope(rel, python=True) or not selected(rel, a.paths):
+            continue
+        path = root / rel
+        text = read_text(path)
+        if text is None or ("repo_graph_py" not in text and "repo-graph-py" not in text):
+            continue
+        new, hits, kept = rewrite_python(text)
+        kept_all += [f"{rel}:{ln}: {tok}" for ln, tok in kept]
+        if not hits:
+            continue
+        changed_files += 1
+        total += len(hits)
+        print(f"{rel}: {len(hits)}")
+        if not a.quiet:
+            for ln, old, nw in hits:
+                print(f"    {rel}:{ln}: {old} -> {nw}")
+        if a.apply:
+            path.write_text(new, encoding="utf-8")
+    for k in kept_all:
+        print(f"[rename-0.5.0] python: history note kept: {k}")
+    verb = "rewrote" if a.apply else "would rewrite"
+    print(f"[rename-0.5.0] python: {verb} {total} token(s) in {changed_files} file(s) under {root}"
+          f" ({len(kept_all)} history note(s) kept)")
+    return 1 if (a.check and total) else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group(required=True)
@@ -205,8 +287,16 @@ def main():
     mode.add_argument("--apply", action="store_true")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--quiet", action="store_true", help="print only the per-file counts and the summary")
+    ap.add_argument("--python", action="store_true",
+                    help="the Python table (LD.11b): repo-graph-py -> glia-py, repo_graph_py -> glia_py")
+    ap.add_argument("paths", nargs="*", metavar="PATH",
+                    help="--python only: limit to these files / directories (relative to --root)")
     a = ap.parse_args()
     root = Path(a.root).resolve()
+    if a.python:
+        return main_python(root, a)
+    if a.paths:
+        ap.error("PATH arguments are --python only")
 
     olds = {o for o, _ in PACKAGES} | {PY_PACKAGE[0]}
     unknown_pkgs = []
