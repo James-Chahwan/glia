@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
@@ -68,6 +68,25 @@ pub fn parse_file(
         );
     }
 
+    // LA.37b fired_on marker (GLIA_DART_DEBUG=1): this file declared member
+    // containers beyond a plain class, or member bodies that HEAD credited to
+    // `acc.nodes.last()` (getters / setters, constructors / factories /
+    // operators).
+    let m = &acc.members;
+    if dart_debug_enabled() && m.fired() {
+        eprintln!(
+            "[dart-members] mixins={} extensions={} extension_types={} unnamed_ext_skipped={} \
+             enum_members={} accessors={} ctor_bodies={} file={file_rel_path}",
+            m.mixins,
+            m.extensions,
+            m.extension_types,
+            m.unnamed_ext_skipped,
+            m.enum_members,
+            m.accessors,
+            m.ctor_bodies
+        );
+    }
+
     Ok(FileParse {
         nodes: acc.nodes,
         edges: acc.edges,
@@ -102,6 +121,41 @@ struct Acc {
     /// LA.37a: this file's top-level declarations, for the `[dart-top-level]`
     /// marker.
     top_level: TopLevelStats,
+    /// LA.37b: this file's member containers and member bodies, for the
+    /// `[dart-members]` marker.
+    members: MemberStats,
+}
+
+#[derive(Default)]
+struct MemberStats {
+    /// `mixin M { }` declarations emitted as a CLASS.
+    mixins: usize,
+    /// Named extensions (a CLASS of their own) plus unnamed extensions whose
+    /// members hang on a type this file declares.
+    extensions: usize,
+    /// `extension type T(..) { }` declarations emitted as a CLASS.
+    extension_types: usize,
+    /// Unnamed extensions on a type this file does not declare: no node.
+    unnamed_ext_skipped: usize,
+    /// Enum members that declared a METHOD.
+    enum_members: usize,
+    /// Member getter / setter bodies, each credited to its METHOD.
+    accessors: usize,
+    /// Constructor / factory / operator bodies, credited to the owner type.
+    ctor_bodies: usize,
+}
+
+impl MemberStats {
+    fn fired(&self) -> bool {
+        self.mixins
+            + self.extensions
+            + self.extension_types
+            + self.unnamed_ext_skipped
+            + self.enum_members
+            + self.accessors
+            + self.ctor_bodies
+            > 0
+    }
 }
 
 #[derive(Default)]
@@ -114,10 +168,10 @@ struct TopLevelStats {
     bodyless: usize,
 }
 
-/// `GLIA_DART_DEBUG=1` turns on the `[dart-top-level]` marker, read once. Off
-/// by default: nearly every Dart file declares a top-level function, and
-/// parsers run per file inside a panic-suppressed loop that must stay quiet on
-/// a normal build.
+/// `GLIA_DART_DEBUG=1` turns on the `[dart-top-level]` and `[dart-members]`
+/// markers, read once. Off by default: nearly every Dart file declares a
+/// top-level function or a getter, and parsers run per file inside a
+/// panic-suppressed loop that must stay quiet on a normal build.
 fn dart_debug_enabled() -> bool {
     static DART_DEBUG: OnceLock<bool> = OnceLock::new();
     *DART_DEBUG
@@ -143,6 +197,12 @@ fn visit_top(
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    // LA.37b: the types this file declares and its library-level names, for
+    // an unnamed extension that hangs its members on a same-file type.
+    let file_types = FileTypes {
+        types: declared_types(node, src, parent_qname, repo),
+        library: library_names(node, src),
+    };
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
@@ -152,6 +212,14 @@ fn visit_top(
             }
             "enum_declaration" => {
                 visit_enum(child, src, file_rel, parent_qname, parent_id, repo, acc);
+            }
+            // LA.37b: a mixin and an extension type are CLASS nodes owning
+            // their members, like a class.
+            "mixin_declaration" | "extension_type_declaration" => {
+                visit_container(child, src, file_rel, parent_qname, parent_id, repo, acc);
+            }
+            "extension_declaration" => {
+                visit_extension(child, &file_types, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             // LA.37a: a top-level function / getter / setter's body is the
             // signature's SIBLING under the program root, not its child. The
@@ -200,6 +268,8 @@ fn visit_class(
         confidence: Confidence::Strong,
     });
     acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
+    // LA.37b: a later container of the same name adds no second Node.
+    acc.declared_ids.insert(id);
 
     // G12.5 — heritage: `extends Y` → INHERITS_FROM (superclass);
     // `implements I` and `with M` → IMPLEMENTS (interface/mixin).
@@ -210,18 +280,317 @@ fn visit_class(
         if child.kind() == "class_body" {
             // LA.34: the names this class declares, which an unqualified call
             // in any of its members reaches before library scope.
-            let members = class_member_names(child, src);
-            let mut c2 = child.walk();
-            for member in child.named_children(&mut c2) {
-                if member.kind() == "class_member" {
-                    visit_class_member(member, src, file_rel, &qname, id, &members, repo, acc);
-                }
-            }
+            let members = container_member_names(node, child, src);
+            let owner = Owner {
+                qname: &qname,
+                id,
+                members: &members,
+            };
+            visit_members(child, src, file_rel, &owner, repo, acc);
             // LA.23e: declared / constructor-initialised field types, for
             // A6.2a's receiver-type pass.
             collect_dart_field_types(child, src, id, acc);
         }
     }
+}
+
+// ============================================================================
+// LA.37b: member containers - mixins, extensions, extension types, enums
+// ============================================================================
+//
+// One member walker ([`visit_members`]) serves every body that holds
+// `class_member`s: class_body (class, mixin, extension type), extension_body
+// and enum_body. Each container is the OWNER its member bodies are credited
+// to:
+//
+//   mixin M { }              CLASS <module>::M (it carries implementation, and
+//                            SelfMethod resolution walks to CLASS / STRUCT /
+//                            ENUM only)
+//   extension E on T { }     CLASS <module>::E (the extension's own identity:
+//                            explicit application `E(t).m()` names it, and two
+//                            extensions on one type stay distinct)
+//   extension type X(..) { } CLASS <module>::X
+//   extension on T { }       T's own node when this file declares T (an
+//                            unnamed extension is library-private and its
+//                            members act as T's members here); otherwise the
+//                            members are skipped and counted - no invented node
+//   enum E { ..; m() {} }    the ENUM
+//
+// Mixin heritage (`on` / `implements`) is not emitted here.
+
+/// The type a member body is credited to, and LA.34's names an unqualified
+/// call in that body reaches before library scope.
+struct Owner<'a> {
+    qname: &'a str,
+    id: NodeId,
+    members: &'a HashSet<String>,
+}
+
+/// A type this file declares (class, mixin, enum, extension type), keyed by
+/// name in [`FileTypes::types`].
+struct LocalType<'t> {
+    id: NodeId,
+    qname: String,
+    decl: TsNode<'t>,
+    body: Option<TsNode<'t>>,
+}
+
+/// What an unnamed extension needs from the rest of its file.
+struct FileTypes<'t> {
+    /// [`declared_types`]: the same-file types it can hang its members on.
+    types: HashMap<String, LocalType<'t>>,
+    /// [`library_names`]: this file's library-level names.
+    library: HashSet<String>,
+}
+
+/// Every class / mixin / enum / extension-type declaration under the program
+/// root, by name, with the NodeId its visitor mints. The first declaration of
+/// a name wins. Lookup-only, never iterated into output.
+fn declared_types<'t>(
+    root: TsNode<'t>,
+    src: &[u8],
+    module_qname: &str,
+    repo: RepoId,
+) -> HashMap<String, LocalType<'t>> {
+    let mut out = HashMap::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        let (name, kind) = match child.kind() {
+            // visit_class reads the name as the first identifier child.
+            "class_declaration" => (find_identifier(child, src), node_kind::CLASS),
+            "mixin_declaration" | "extension_type_declaration" => {
+                (decl_name(child, src), node_kind::CLASS)
+            }
+            "enum_declaration" => (decl_name(child, src), node_kind::ENUM),
+            _ => continue,
+        };
+        let Some(name) = name else {
+            continue;
+        };
+        let qname = format!("{module_qname}::{name}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
+        out.entry(name).or_insert(LocalType {
+            id,
+            qname,
+            decl: child,
+            body: child.child_by_field_name("body"),
+        });
+    }
+    out
+}
+
+/// The names this file declares at library level: top-level functions,
+/// getters, setters and variables. Inside an extension, Dart's lexical scope
+/// reaches these BEFORE the on-type's members (which only an implicit `this`
+/// reaches), so an on-type member of the same name is not in the extension's
+/// member scope.
+fn library_names(root: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        match child.kind() {
+            "function_signature" | "getter_signature" | "setter_signature" => {
+                if let Some(n) = child.child_by_field_name("name") {
+                    names.insert(text_of(n, src).to_string());
+                }
+            }
+            "initialized_identifier_list" | "static_final_declaration_list" => {
+                let mut items = child.walk();
+                for item in child.named_children(&mut items) {
+                    if let Some(n) = item.child_by_field_name("name") {
+                        names.insert(text_of(n, src).to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// A mixin / extension / extension-type / enum declaration's name: its `name`
+/// field (an extension type's is an `extension_type_name` wrapping the
+/// identifier), else the first identifier child.
+fn decl_name(node: TsNode, src: &[u8]) -> Option<String> {
+    let Some(name) = node.child_by_field_name("name") else {
+        return find_identifier(node, src);
+    };
+    if name.kind() == "extension_type_name" {
+        return find_identifier(name, src);
+    }
+    Some(text_of(name, src).to_string())
+}
+
+/// LA.34's member set for any container: the names its body's
+/// `class_member`s declare, plus an enum's constants and an extension type's
+/// representation field - every name an unqualified call in one of its
+/// members binds to before library scope.
+fn container_member_names(decl: TsNode, body: TsNode, src: &[u8]) -> HashSet<String> {
+    let mut names = class_member_names(body, src);
+    let mut cursor = body.walk();
+    for constant in body.named_children(&mut cursor) {
+        if constant.kind() == "enum_constant"
+            && let Some(n) = constant.child_by_field_name("name")
+        {
+            names.insert(text_of(n, src).to_string());
+        }
+    }
+    if let Some(rep) = decl.child_by_field_name("representation")
+        && let Some(n) = rep.child_by_field_name("name")
+    {
+        names.insert(text_of(n, src).to_string());
+    }
+    names
+}
+
+/// A mixin, a named extension or an extension type: a CLASS
+/// `<module>::<Name>` + DEFINES + nav, owning the members of its body.
+fn visit_container(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let (Some(name), Some(body)) = (decl_name(node, src), node.child_by_field_name("body")) else {
+        return;
+    };
+    let qname = format!("{parent_qname}::{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &qname);
+    if acc.declared_ids.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&node, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: parent_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+        });
+        acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
+    }
+    match node.kind() {
+        "mixin_declaration" => acc.members.mixins += 1,
+        "extension_declaration" => acc.members.extensions += 1,
+        _ => acc.members.extension_types += 1,
+    }
+    let members = container_member_names(node, body, src);
+    let owner = Owner {
+        qname: &qname,
+        id,
+        members: &members,
+    };
+    visit_members(body, src, file_rel, &owner, repo, acc);
+    // LA.23e: a mixin's or extension type's fields (an extension's static
+    // ones), for A6.2a's receiver-type pass.
+    collect_dart_field_types(body, src, id, acc);
+}
+
+/// An extension declaration. A named one is its own CLASS
+/// ([`visit_container`]). An unnamed one on a type this file declares hangs
+/// its members on that type's node; on any other type (declared elsewhere,
+/// import-prefixed, a core type) its members are skipped and counted.
+#[allow(clippy::too_many_arguments)]
+fn visit_extension(
+    node: TsNode,
+    file_types: &FileTypes,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    if node.child_by_field_name("name").is_some() {
+        visit_container(node, src, file_rel, parent_qname, parent_id, repo, acc);
+        return;
+    }
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+    let Some(ty) = extension_on_type(node, src).and_then(|t| file_types.types.get(t)) else {
+        acc.members.unnamed_ext_skipped += 1;
+        return;
+    };
+    // The extension's own members, then the on-type's that no library-level
+    // name shadows (an implicit `this` reaches those only after library
+    // scope). Imported library names are not known here.
+    let mut members: HashSet<String> = ty
+        .body
+        .map(|b| container_member_names(ty.decl, b, src))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !file_types.library.contains(n))
+        .collect();
+    members.extend(class_member_names(body, src));
+    acc.members.extensions += 1;
+    let owner = Owner {
+        qname: &ty.qname,
+        id: ty.id,
+        members: &members,
+    };
+    visit_members(body, src, file_rel, &owner, repo, acc);
+}
+
+/// The simple name of the type an extension is `on`, when it is a plain type
+/// name, optionally generic or nullable (`on Api`, `on Api<T>`, `on Api?`).
+/// An import-prefixed (`on p.Api`), function or record type -> None.
+fn extension_on_type<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    let parts: Vec<TsNode> = node.children_by_field_name("class", &mut cursor).collect();
+    if parts.iter().any(|p| p.kind() == ".") {
+        return None;
+    }
+    let head = parts.first().filter(|p| p.kind() == "type_identifier")?;
+    let text = text_of(*head, src);
+    Some(text.split('<').next().unwrap_or(text).trim())
+}
+
+/// Walk one body's `class_member`s (class_body, extension_body, enum_body)
+/// under `owner`. Returns how many declared a METHOD.
+fn visit_members(
+    body: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    owner: &Owner,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> usize {
+    let mut declared = 0;
+    let mut cursor = body.walk();
+    for member in body.named_children(&mut cursor) {
+        if member.kind() == "class_member" && visit_class_member(member, src, file_rel, owner, repo, acc)
+        {
+            declared += 1;
+        }
+    }
+    declared
+}
+
+/// The name a `class_member`'s `method_signature` declares, and whether it is
+/// a getter / setter: the `name` of its function / getter / setter signature.
+/// None for a constructor / factory / operator signature - its body belongs
+/// to the owner type.
+fn member_name(sig: TsNode, src: &[u8]) -> Option<(String, bool)> {
+    let mut cursor = sig.walk();
+    for part in sig.named_children(&mut cursor) {
+        let accessor = match part.kind() {
+            "function_signature" => false,
+            "getter_signature" | "setter_signature" => true,
+            _ => continue,
+        };
+        let name = part
+            .child_by_field_name("name")
+            .map(|n| text_of(n, src).to_string())
+            .or_else(|| find_identifier(part, src))?;
+        return Some((name, accessor));
+    }
+    None
 }
 
 /// G12.5: class heritage. The `superclass` field holds `extends <type>` plus an
@@ -293,70 +662,91 @@ fn emit_heritage_ref(
     });
 }
 
-/// `members` is the enclosing class's [`class_member_names`], which LA.34
-/// needs to classify the member body's unqualified calls.
-#[allow(clippy::too_many_arguments)]
+/// One `class_member` of any container (LA.37b). A method / getter / setter
+/// signature declares the METHOD `<owner>::<name>` once per file (LA.37a's
+/// `declared_ids`), so a getter + setter pair - or an unnamed extension member
+/// re-declaring its on-type's - is one Node and one DEFINES edge; its
+/// `function_body` is credited to that METHOD. A constructor / factory /
+/// operator signature declares no node: its body is credited to the owner
+/// type, never to whatever node was pushed last. Every body's unqualified
+/// calls go through LA.34's scope (`owner.members`, then its own locals).
+/// Returns true when the member declared a METHOD.
 fn visit_class_member(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
-    members: &HashSet<String>,
+    owner: &Owner,
     repo: RepoId,
     acc: &mut Acc,
-) {
-    // LA.23e: the METHOD this member declared, if any. Only a body under its
-    // own METHOD emits call sites: a constructor / getter / setter signature
-    // mints no node, and attributing its calls to `acc.nodes.last()` (the
-    // previous member, or an ENDPOINT it pushed) would mint wrong CALLS edges.
-    let mut own_method: Option<NodeId> = None;
+) -> bool {
+    let mut member_id: Option<NodeId> = None;
+    let mut accessor = false;
     // LA.34: the signature that declared it, whose parameters are locals.
-    let mut own_signature: Option<TsNode> = None;
+    let mut signature: Option<TsNode> = None;
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
-        if child.kind() == "method_signature"
-            && let Some(name) = find_method_name(child, src)
-        {
-            own_signature = Some(child);
-            let qname = format!("{parent_qname}::{name}");
-            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
-            acc.nodes.push(Node {
-                id,
-                repo,
-                confidence: Confidence::Strong,
-                cells: entity_cells(&node, src, file_rel),
-            });
-            acc.edges.push(Edge {
-                from: parent_id,
-                to: id,
-                category: edge_category::DEFINES,
-                confidence: Confidence::Strong,
-            });
-            acc.nav
-                .record(id, &name, &qname, node_kind::METHOD, Some(parent_id));
-            own_method = Some(id);
-        }
-        if child.kind() == "function_body" {
-            // A body without its own METHOD keeps the pre-LA.23e source for
-            // Pattern A endpoints (`acc.nodes.last()`), unchanged, and emits
-            // no call sites.
-            match own_method {
-                Some(from) => {
-                    let scope = CallScope {
-                        members,
-                        locals: local_names(own_signature, child, src),
-                    };
-                    collect_calls_in(child, src, from, Some(&scope), repo, file_rel, acc);
+        match child.kind() {
+            "method_signature" => {
+                signature = Some(child);
+                let Some((name, is_accessor)) = member_name(child, src) else {
+                    continue;
+                };
+                accessor = is_accessor;
+                let qname = format!("{}::{name}", owner.qname);
+                let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+                if acc.declared_ids.insert(id) {
+                    acc.nodes.push(Node {
+                        id,
+                        repo,
+                        confidence: Confidence::Strong,
+                        cells: entity_cells(&node, src, file_rel),
+                    });
+                    acc.edges.push(Edge {
+                        from: owner.id,
+                        to: id,
+                        category: edge_category::DEFINES,
+                        confidence: Confidence::Strong,
+                    });
+                    acc.nav
+                        .record(id, &name, &qname, node_kind::METHOD, Some(owner.id));
                 }
-                None => {
-                    if let Some(from) = acc.nodes.last().map(|n| n.id) {
-                        collect_calls_in(child, src, from, None, repo, file_rel, acc);
+                member_id = Some(id);
+            }
+            "function_body" => {
+                let from = match member_id {
+                    Some(id) => {
+                        if accessor {
+                            acc.members.accessors += 1;
+                        }
+                        id
                     }
+                    None => {
+                        acc.members.ctor_bodies += 1;
+                        owner.id
+                    }
+                };
+                let scope = CallScope {
+                    members: owner.members,
+                    locals: local_names(signature, child, src),
+                };
+                let first = acc.calls.len();
+                collect_calls_in(child, src, from, &scope, repo, file_rel, acc);
+                if member_id.is_none() {
+                    // `factory T.fromJson(..) { return T(..); }`: a bare call
+                    // of the owner's own name inside its constructor / factory
+                    // body constructs the owner, a CLASS -> same-CLASS
+                    // self-loop that says nothing. Dropped.
+                    let own = owner.qname.rsplit("::").next().unwrap_or(owner.qname);
+                    let tail = acc.calls.split_off(first);
+                    acc.calls.extend(tail.into_iter().filter(|c| {
+                        !matches!(&c.qualifier, CallQualifier::Bare(n) if n == own)
+                    }));
                 }
             }
+            _ => {}
         }
     }
+    member_id.is_some()
 }
 
 fn visit_enum(
@@ -392,6 +782,20 @@ fn visit_enum(
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
+    acc.declared_ids.insert(id);
+
+    // LA.37b: an enhanced enum's members hang on the ENUM (LA.30a: an ENUM
+    // owns its METHOD children), its constants are members too.
+    if let Some(body) = node.child_by_field_name("body") {
+        let members = container_member_names(node, body, src);
+        let owner = Owner {
+            qname: &qname,
+            id,
+            members: &members,
+        };
+        acc.members.enum_members += visit_members(body, src, file_rel, &owner, repo, acc);
+        collect_dart_field_types(body, src, id, acc);
+    }
 }
 
 /// tree-sitter-dart 0.1.0 puts a top-level function's body BESIDE its
@@ -466,7 +870,7 @@ fn visit_function(
         members: &no_members,
         locals: local_names(Some(node), body, src),
     };
-    collect_calls_in(body, src, id, Some(&scope), repo, file_rel, acc);
+    collect_calls_in(body, src, id, &scope, repo, file_rel, acc);
 }
 
 /// G19: library-level `const`/`final` constants. The list holds one
@@ -616,16 +1020,16 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     });
 }
 
-/// Walk a body for Pattern A endpoints and, when a `scope` is given, the
-/// call sites of every selector chain in it (LA.23e), its unqualified calls
-/// classified by that scope (LA.34). `None` (a body with no METHOD of its
-/// own) emits no call site. Nested closures and local functions are not
-/// entered.
+/// Walk a body for Pattern A endpoints and the call sites of every selector
+/// chain in it (LA.23e), its unqualified calls classified by `scope`
+/// (LA.34), all credited to `from` - the body's own METHOD / FUNCTION, or
+/// the owner type for a constructor / factory / operator body (LA.37b).
+/// Nested closures and local functions are not entered.
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
     from: NodeId,
-    scope: Option<&CallScope>,
+    scope: &CallScope,
     repo: RepoId,
     file_rel: &str,
     acc: &mut Acc,
@@ -635,9 +1039,7 @@ fn collect_calls_in(
         // Pattern A: client HTTP call (`dio.get('/x')`) → ENDPOINT node so the
         // HttpStackResolver can pair it with a server ROUTE.
         try_detect_dart_endpoint(n, src, from, repo, file_rel, acc);
-        if let Some(scope) = scope {
-            push_selector_chain_calls(n, src, from, scope, acc);
-        }
+        push_selector_chain_calls(n, src, from, scope, acc);
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
             if !matches!(
@@ -912,7 +1314,9 @@ fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<S
     let mut names = HashSet::new();
     if let Some(sig) = signature {
         // A class member passes its `method_signature` wrapper; a top-level
-        // function / setter (LA.37a) passes the signature itself.
+        // function / setter (LA.37a) passes the signature itself. LA.37b: a
+        // constructor / factory / operator body is walked too, and its
+        // parameters are locals (`this.x` field formals bind nothing here).
         let parts: Vec<TsNode> = if matches!(sig.kind(), "function_signature" | "setter_signature") {
             vec![sig]
         } else {
@@ -920,7 +1324,14 @@ fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<S
             sig.named_children(&mut c).collect()
         };
         for part in parts {
-            if !matches!(part.kind(), "function_signature" | "setter_signature") {
+            if !matches!(
+                part.kind(),
+                "function_signature"
+                    | "setter_signature"
+                    | "constructor_signature"
+                    | "factory_constructor_signature"
+                    | "operator_signature"
+            ) {
                 continue;
             }
             let mut p = part.walk();
@@ -2107,10 +2518,11 @@ class ApiClient {
         );
     }
 
-    /// A constructor / getter body mints no METHOD, so it emits no call site
-    /// rather than lending its calls to the member before it.
+    /// LA.37b: a constructor body is credited to its class and a getter body
+    /// to the getter's own METHOD - never lent to the member before it
+    /// (LA.23e emitted no call site for either).
     #[test]
-    fn body_without_its_own_method_emits_no_call_site() {
+    fn body_is_credited_to_its_owner_not_the_previous_member() {
         let source = r#"class A {
   void first() {}
   A(this.repo) {
@@ -2120,7 +2532,13 @@ class ApiClient {
 }
 "#;
         let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
-        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+        let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::a::A");
+        let ctor: Vec<&CallQualifier> =
+            fp.calls.iter().filter(|c| c.from == class).map(|c| &c.qualifier).collect();
+        assert_eq!(ctor, vec![&attr("repo", "init")], "{:?}", fp.calls);
+        assert_eq!(calls_from(&fp, "lib::a::A::name"), vec![attr("repo", "name")]);
+        assert_eq!(calls_from(&fp, "lib::a::A::first"), vec![]);
+        assert_eq!(fp.calls.len(), 2, "{:?}", fp.calls);
     }
 
     #[test]
@@ -2750,5 +3168,272 @@ Future<void> loadUsers() async {
 "#;
         let fp = parse_file(source, "calc.dart", "calc", repo()).unwrap();
         assert_eq!(calls_from(&fp, "calc::Calc::total"), vec![self_m("add")]);
+    }
+
+    // ---- LA.37b: member containers and member-body owners ----------------
+
+    fn class_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname)
+    }
+
+    /// The nav parent recorded for `id`.
+    fn parent(fp: &FileParse, id: NodeId) -> Option<NodeId> {
+        fp.nav.parent_of.get(&id).copied()
+    }
+
+    fn defines(fp: &FileParse, from: NodeId, to: NodeId) -> usize {
+        fp.edges
+            .iter()
+            .filter(|e| e.from == from && e.to == to && e.category == edge_category::DEFINES)
+            .count()
+    }
+
+    /// The committed `dart-body-owners` fixture's file.
+    const BODY_OWNERS_FIXTURE: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/dart-body-owners/lib/app.dart");
+
+    fn body_owners() -> FileParse {
+        parse_file(BODY_OWNERS_FIXTURE, "lib/app.dart", "lib::app", repo()).unwrap()
+    }
+
+    #[test]
+    fn mixin_members_are_emitted() {
+        let fp = body_owners();
+        let greets = class_id("lib::app::Greets");
+        assert_eq!(fp.nav.kind_by_id.get(&greets), Some(&node_kind::CLASS));
+        for m in ["lib::app::Greets::greet", "lib::app::Greets::hello"] {
+            assert_eq!(fp.nav.kind_by_id.get(&method_id(m)), Some(&node_kind::METHOD), "{m}");
+            assert_eq!(parent(&fp, method_id(m)), Some(greets), "{m}");
+        }
+        assert_eq!(defines(&fp, greets, method_id("lib::app::Greets::greet")), 1);
+        assert_eq!(calls_from(&fp, "lib::app::Greets::greet"), vec![self_m("hello")]);
+    }
+
+    #[test]
+    fn named_extension_is_a_class() {
+        let fp = body_owners();
+        let shout = class_id("lib::app::Shout");
+        assert_eq!(fp.nav.kind_by_id.get(&shout), Some(&node_kind::CLASS));
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::app");
+        assert_eq!(defines(&fp, module, shout), 1);
+        assert_eq!(parent(&fp, method_id("lib::app::Shout::shout")), Some(shout));
+        assert_eq!(calls_from(&fp, "lib::app::Shout::shout"), vec![self_m("twice")]);
+    }
+
+    #[test]
+    fn unnamed_extension_on_a_same_file_type_hangs_members_on_it() {
+        let fp = body_owners();
+        let api = class_id("lib::app::Api");
+        let doubled = method_id("lib::app::Api::doubled");
+        assert_eq!(fp.nav.kind_by_id.get(&doubled), Some(&node_kind::METHOD));
+        assert_eq!(parent(&fp, doubled), Some(api));
+        assert_eq!(defines(&fp, api, doubled), 1);
+        // Declared before its on-type or after, the extension adds no second
+        // Api node.
+        let source = "extension on Api { int d() => compute(); }\nclass Api { int compute() => 1; }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let api = class_id("lib::m::Api");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == api).count(), 1);
+        assert_eq!(parent(&fp, method_id("lib::m::Api::d")), Some(api));
+        assert_eq!(calls_from(&fp, "lib::m::Api::d"), vec![self_m("compute")]);
+    }
+
+    /// Inside an extension, library scope comes before the on-type's members
+    /// (an implicit `this` reaches those last): a same-file top-level
+    /// `compute` wins over the on-type's `compute`, and the extension's own
+    /// members win over both.
+    #[test]
+    fn unnamed_extension_scope_puts_library_before_the_on_type() {
+        let source = r#"int compute() => 2;
+class Api { int compute() => 1; int area() => 3; }
+extension on Api {
+  int a() => compute();
+  int b() => area();
+  int c() => own();
+  int own() => 4;
+}
+"#;
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::m::Api::a"), vec![bare("compute")]);
+        assert_eq!(calls_from(&fp, "lib::m::Api::b"), vec![self_m("area")]);
+        assert_eq!(calls_from(&fp, "lib::m::Api::c"), vec![self_m("own")]);
+    }
+
+    #[test]
+    fn unnamed_extension_on_a_foreign_type_is_skipped() {
+        let fp = body_owners();
+        for (kind, q) in [
+            (node_kind::CLASS, "lib::app::String"),
+            (node_kind::METHOD, "lib::app::String::whisper"),
+        ] {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, q);
+            assert!(!fp.nodes.iter().any(|n| n.id == id), "{q}");
+        }
+        assert!(!fp.nav.name_by_id.values().any(|n| n == "whisper" || n == "String"));
+        assert!(!fp.calls.iter().any(|c| c.qualifier == bare("toLowerCase")), "{:?}", fp.calls);
+        // An import-prefixed on-type is never this file's, even when this
+        // file declares a type of the same simple name.
+        let source = "class Api {}\nextension on p.Api { void q() {} }\nextension on List<Api> { void r() {} }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert!(!fp.nav.name_by_id.values().any(|n| n == "q" || n == "r"), "{:?}", fp.nav.name_by_id);
+        // A generic / nullable spelling of a same-file type still hangs on it.
+        let source = "class Box<T> {}\nextension on Box<int>? { void s() {} }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(parent(&fp, method_id("lib::m::Box::s")), Some(class_id("lib::m::Box")));
+    }
+
+    #[test]
+    fn extension_type_members() {
+        let fp = body_owners();
+        let meters = class_id("lib::app::Meters");
+        assert_eq!(fp.nav.kind_by_id.get(&meters), Some(&node_kind::CLASS));
+        assert_eq!(fp.nav.name_by_id.get(&meters).map(String::as_str), Some("Meters"));
+        assert_eq!(parent(&fp, method_id("lib::app::Meters::plus")), Some(meters));
+        assert_eq!(
+            calls_from(&fp, "lib::app::Meters::twicePlus"),
+            vec![self_m("plus"), self_m("plus")]
+        );
+        // The representation field is a member: `value()` binds to it, not
+        // to a same-named top-level function.
+        let source = "int value() => 0;\nextension type V(int Function() value) { int f() => value(); }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::m::V::f"), vec![self_m("value")]);
+    }
+
+    #[test]
+    fn enum_members_hang_on_the_enum() {
+        let fp = body_owners();
+        let color = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::app::Color");
+        for m in ["lib::app::Color::label", "lib::app::Color::describe"] {
+            assert_eq!(fp.nav.kind_by_id.get(&method_id(m)), Some(&node_kind::METHOD), "{m}");
+            assert_eq!(parent(&fp, method_id(m)), Some(color), "{m}");
+        }
+        assert_eq!(defines(&fp, color, method_id("lib::app::Color::label")), 1);
+        assert_eq!(calls_from(&fp, "lib::app::Color::label"), vec![self_m("describe")]);
+        // Enum constants are members; a plain enum still has no METHOD.
+        let source = "void red() {}\nenum C { red, blue; void f() => red(); }\nenum S { a, b }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::m::C::f"), vec![self_m("red")]);
+        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 1);
+    }
+
+    #[test]
+    fn getter_is_a_method_and_owns_its_body() {
+        let fp = body_owners();
+        let status = method_id("lib::app::Api::status");
+        assert_eq!(fp.nav.kind_by_id.get(&status), Some(&node_kind::METHOD));
+        assert_eq!(parent(&fp, status), Some(class_id("lib::app::Api")));
+        let ep = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/status");
+        assert!(
+            fp.edges.iter().any(|e| e.from == status && e.to == ep && e.category == edge_category::CALLS),
+            "{:?}",
+            fp.edges
+        );
+        assert_eq!(calls_from(&fp, "lib::app::Api::area"), vec![self_m("compute"), self_m("store")]);
+        assert_eq!(calls_from(&fp, "lib::app::Api::compute"), vec![]);
+    }
+
+    #[test]
+    fn getter_and_setter_share_one_method() {
+        let fp = body_owners();
+        let area = method_id("lib::app::Api::area");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == area).count(), 1);
+        assert_eq!(defines(&fp, class_id("lib::app::Api"), area), 1);
+        // The pair's cells are the first declaration's (the getter's).
+        assert_eq!(cell_text(&fp, area, cell_type::CODE), "int get area => compute();");
+        // The setter parameter is a local of the setter body.
+        let source = "class A {\n  set v(void Function() cb) => cb();\n  void cb() {}\n}\n";
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::a::A::v"), vec![]);
+    }
+
+    #[test]
+    fn constructor_body_is_credited_to_the_type() {
+        let fp = body_owners();
+        let api = class_id("lib::app::Api");
+        let warm = method_id("lib::app::Api::warm");
+        let boot = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/boot");
+        let calls_to_boot: Vec<NodeId> = fp
+            .edges
+            .iter()
+            .filter(|e| e.to == boot && e.category == edge_category::CALLS)
+            .map(|e| e.from)
+            .collect();
+        assert_eq!(calls_to_boot, vec![api]);
+        assert!(!fp.edges.iter().any(|e| e.from == warm), "{:?}", fp.edges);
+        // Factory and operator bodies too; their parameters are locals.
+        let source = r#"void helper() {}
+class Box {
+  void first() {}
+  Box(Function cb) { cb(); helper(); }
+  factory Box.make(void Function() f) { f(); return Box(helper); }
+  Box operator +(Box o) { helper(); return o; }
+}
+"#;
+        let fp = parse_file(source, "lib/b.dart", "lib::b", repo()).unwrap();
+        let box_id = class_id("lib::b::Box");
+        let mut from_box: Vec<CallQualifier> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == box_id)
+            .map(|c| c.qualifier.clone())
+            .collect();
+        from_box.sort_by_key(|q| format!("{q:?}"));
+        // `cb()` / `f()` call parameters; `Box(helper)` passes `helper`, and
+        // the factory constructing its own class would be a Box -> Box
+        // self-loop, so it is dropped.
+        assert_eq!(from_box, vec![bare("helper"), bare("helper")]);
+        assert_eq!(calls_from(&fp, "lib::b::Box::first"), vec![]);
+        // No constructor / factory / operator mints a node.
+        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 1);
+    }
+
+    #[test]
+    fn getter_body_is_never_credited_to_an_endpoint() {
+        let fp = body_owners();
+        let endpoints: HashSet<NodeId> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ENDPOINT)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(endpoints.len(), 2, "{:?}", fp.nav.qname_by_id);
+        assert!(!fp.edges.iter().any(|e| endpoints.contains(&e.from)), "{:?}", fp.edges);
+        assert!(!fp.calls.iter().any(|c| endpoints.contains(&c.from)), "{:?}", fp.calls);
+    }
+
+    /// Every member body in the fixture has an owner: the nine member nodes
+    /// the key expects, and nothing credited to `acc.nodes.last()`.
+    #[test]
+    fn body_owners_fixture_members() {
+        let fp = body_owners();
+        let mut methods: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::METHOD)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        methods.sort();
+        assert_eq!(
+            methods,
+            vec![
+                "lib::app::Api::area",
+                "lib::app::Api::compute",
+                "lib::app::Api::doubled",
+                "lib::app::Api::status",
+                "lib::app::Api::store",
+                "lib::app::Api::warm",
+                "lib::app::Color::describe",
+                "lib::app::Color::label",
+                "lib::app::Greets::greet",
+                "lib::app::Greets::hello",
+                "lib::app::Meters::plus",
+                "lib::app::Meters::twicePlus",
+                "lib::app::Shout::shout",
+                "lib::app::Shout::twice",
+            ]
+        );
     }
 }

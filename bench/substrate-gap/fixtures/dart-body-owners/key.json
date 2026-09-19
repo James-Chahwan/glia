@@ -1,0 +1,48 @@
+{
+  "framework": "dart-body-owners",
+  "language": "dart",
+  "dirs": ["."],
+  "cells": ["dart/calls"],
+  "note": "LA.37b: every Dart member body is credited to its owner. HEAD: visit_top has no arm for mixin_declaration, extension_declaration or extension_type_declaration and visit_enum never reads enum_body, so none of their members is emitted; visit_class_member emits a METHOD only for a function_signature and walks every function_body with `acc.nodes.last()` as the caller, so a getter / setter / constructor body is credited to whatever node was pushed last - the previous method, or an ENDPOINT (HEAD emits CALLS warm -> GET /boot and GET /boot -> GET /status). Named extensions, mixins and extension types are CLASS nodes; an unnamed extension on a type this file declares hangs its members on that type; one on a type declared elsewhere is skipped (counted), never an invented node.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "lib::app::Greets", "note": "mixin -> CLASS"},
+    {"kind": "METHOD", "name": "Greets::greet"},
+    {"kind": "CLASS", "name": "lib::app::Shout", "note": "named extension -> CLASS"},
+    {"kind": "METHOD", "name": "Shout::shout"},
+    {"kind": "METHOD", "name": "Color::label", "note": "enhanced-enum member under the ENUM"},
+    {"kind": "METHOD", "name": "Api::status", "note": "getter -> METHOD"},
+    {"kind": "METHOD", "name": "Api::doubled", "note": "unnamed extension on a same-file type"},
+    {"kind": "CLASS", "name": "lib::app::Meters", "note": "extension type -> CLASS"},
+    {"kind": "METHOD", "name": "Meters::plus"}
+  ],
+  "expect_edges": [
+    {"from": "Api::status", "to": "endpoint:GET:/status", "category": "CALLS",
+     "note": "a getter body is credited to the getter"},
+    {"from": "lib::app::Api", "to": "endpoint:GET:/boot", "category": "CALLS",
+     "note": "a constructor has no node of its own: its body is credited to the enclosing type (the forbid below pins that it is not the previous method)"},
+    {"from": "Greets::greet", "to": "Greets::hello", "category": "CALLS",
+     "note": "mixin self-call (LA.34 member scope)"},
+    {"from": "Shout::shout", "to": "Shout::twice", "category": "CALLS",
+     "note": "extension self-call (LA.34 member scope)"},
+    {"from": "Color::label", "to": "Color::describe", "category": "CALLS",
+     "note": "enum self-call (LA.34 member scope; LA.30a: an ENUM owns its methods)"},
+    {"from": "Api::area", "to": "Api::compute", "category": "CALLS",
+     "note": "getter self-call"},
+    {"from": "Api::area", "to": "Api::store", "category": "CALLS",
+     "note": "the setter shares the getter's METHOD node; its body is credited to it"},
+    {"from": "Meters::twicePlus", "to": "Meters::plus", "category": "CALLS",
+     "note": "extension-type self-call"}
+  ],
+  "forbid": [
+    {"from": "lib::app::Api::warm", "to": "endpoint:GET:/boot", "category": "CALLS",
+     "note": "PRECISION: the constructor body is not the previous method's (HEAD credits it to warm via acc.nodes.last())"},
+    {"from": "endpoint:GET:/boot", "to": "endpoint:GET:/status", "category": "CALLS",
+     "note": "PRECISION: a getter body is never credited to an ENDPOINT node (HEAD does)"},
+    {"from": "lib::app::Api::compute", "to": "lib::app::Api::compute", "category": "CALLS",
+     "note": "PRECISION: the getter area's body is not credited to the previous method compute"},
+    {"kind": "CLASS", "name": "lib::app::String",
+     "note": "PRECISION: an unnamed extension on a type this file does not declare mints no phantom type"},
+    {"kind": "METHOD", "name": "lib::app::String::whisper",
+     "note": "PRECISION: its members are skipped (counted in the marker), not hung on an invented node"}
+  ]
+}
