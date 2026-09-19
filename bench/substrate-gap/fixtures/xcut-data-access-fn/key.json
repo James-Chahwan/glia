@@ -1,0 +1,15 @@
+{
+  "framework": "xcut-data-access-fn",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "LE.4a: raw-SQL data access re-homed from the module to the innermost enclosing FUNCTION/METHOD; a module-scope statement keeps the module edge. The ACCESS_MODE edge cell (read/write/read_write) is gated by a Rust test (engine/tests/access_mode.rs), not here: key.json has no edge-cell vocabulary.",
+  "expect_edges": [
+    {"from": "saveOrder", "to": "data_entity:sql:orders", "category": "ACCESSES_DATA", "note": "INSERT INTO orders inside saveOrder"},
+    {"from": "loadOrder", "to": "data_entity:sql:orders", "category": "ACCESSES_DATA", "note": "SELECT ... FROM orders inside loadOrder"},
+    {"from": "archiveOrder", "to": "data_entity:sql:orders", "category": "ACCESSES_DATA", "note": "SELECT then DELETE FROM orders inside archiveOrder"},
+    {"from": "svc::orders", "to": "data_entity:sql:audit_log", "category": "ACCESSES_DATA", "note": "module-scope const AUDIT_SQL keeps the module edge"}
+  ],
+  "forbid": [
+    {"from": "svc::orders", "to": "data_entity:sql:orders", "category": "ACCESSES_DATA", "note": "every orders site lies inside a function, so the module edge is re-homed"}
+  ]
+}

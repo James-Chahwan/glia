@@ -28,7 +28,8 @@ use crate::route::ModuleQnames;
 /// endpoint fold, the LA.6d Next.js page graft, the LA.4 queue-topic const
 /// fold, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
-/// census, the LB.4a / LB.8 owner segment, then the A16.4 IMPORTS-cell
+/// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
+/// segment, then the A16.4 IMPORTS-cell
 /// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
 /// project roots (A8.4); `rust_crates` their Cargo packages, whose names the
 /// IMPORTS filter treats as intra-repo (LA.1b).
@@ -117,6 +118,15 @@ pub(super) fn apply_post_cache(
         anchored.add(anchor::census(fp));
     }
     anchor::report(anchored, repo_label);
+    // LE.4a fired_on marker, once per repo that holds a data-access edge:
+    //   `[data-access] rehomed fn={F} module_kept={M} modes read={R} write={W} read_write={X} unknown={U} repo=<label>`
+    // Counted off the finished parses (the re-home runs in the per-file
+    // extractors and is cached with the parse), so cache hits count too.
+    let mut access = anchor::AccessStats::default();
+    for fp in parses_by_lang.values().flatten() {
+        access.add(anchor::access_census(fp));
+    }
+    anchor::report_access(access, repo_label);
 
     // LB.4a / LB.8: qualify every owned node under a nested project root with
     // ` @<project path>` (see the ordering rule above). After the endpoint

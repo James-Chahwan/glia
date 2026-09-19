@@ -47,9 +47,19 @@
 //! consumer registered inside a setup function is HANDLED_BY that function,
 //! not the callback it passes (`consumer.run({ eachMessage })`): binding the
 //! callback needs reference extraction.
+//!
+//! LE.4a: the same owner index re-homes EDGES, not only markers.
+//! [`rehome_to_owner`] takes a module-anchored edge category (the data
+//! entities' ACCESSES_DATA; LE.4b's READS_CONFIG) plus the statement [`Site`]s
+//! behind it, and moves each `module -> target` edge to the innermost
+//! METHOD / FUNCTION holding its sites, with an ACCESS_MODE edge cell folded
+//! from the sites' verbs. A target with a site at module scope, or one a
+//! declaration names, keeps its module edge. [`access_census`] and
+//! [`report_access`] give the build-level `[data-access]` marker.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{CodeNav, FileParse, cell_type, edge_category, node_kind};
 use repo_graph_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId,
@@ -420,6 +430,261 @@ pub fn report_line(stats: AnchorStats, repo_label: &str) -> Option<String> {
 /// Print [`report_line`], once per repo that holds a marker node.
 pub fn report(stats: AnchorStats, repo_label: &str) {
     if let Some(line) = report_line(stats, repo_label) {
+        eprintln!("{line}");
+    }
+}
+
+/// LE.4a: one statement site of a `module -> target` edge: the 0-indexed
+/// line that names `target`, and the single-site mode (`"read"` /
+/// `"write"`, `None` when the statement does not say).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Site {
+    pub target: NodeId,
+    pub line: u32,
+    pub mode: Option<&'static str>,
+}
+
+/// LE.4a: how the data-access edges of one file (or one repo) ended up.
+/// Returned by [`rehome_to_owner`] for the edges it touched, and recounted
+/// from a finished parse by [`access_census`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AccessStats {
+    /// Function / method edges with an access site (re-homed, or a parser's
+    /// own edge that took a mode).
+    pub to_fn: usize,
+    /// Module edges kept: a site at module scope, or a declaration.
+    pub module_kept: usize,
+    /// ... of `to_fn`, by ACCESS_MODE.
+    pub read: usize,
+    pub write: usize,
+    pub read_write: usize,
+    /// ... of `to_fn`, with no ACCESS_MODE (every site's verb unknown).
+    pub unknown: usize,
+}
+
+impl AccessStats {
+    pub fn add(&mut self, other: AccessStats) {
+        self.to_fn += other.to_fn;
+        self.module_kept += other.module_kept;
+        self.read += other.read;
+        self.write += other.write;
+        self.read_write += other.read_write;
+        self.unknown += other.unknown;
+    }
+
+    /// One function edge whose ACCESS_MODE is `mode`.
+    fn count_fn(&mut self, mode: Option<&str>) {
+        self.to_fn += 1;
+        match mode {
+            Some("read") => self.read += 1,
+            Some("write") => self.write += 1,
+            Some("read_write") => self.read_write += 1,
+            _ => self.unknown += 1,
+        }
+    }
+}
+
+/// Fold two ACCESS_MODE values: equal stays, read + write is `read_write`,
+/// `None` (unknown) adds nothing.
+fn fold_mode(a: Option<&'static str>, b: Option<&'static str>) -> Option<&'static str> {
+    match (a, b) {
+        (None, m) | (m, None) => m,
+        (Some(x), Some(y)) if x == y => Some(x),
+        _ => Some("read_write"),
+    }
+}
+
+/// The ACCESS_MODE text an edge carries, as its `'static` spelling.
+fn mode_of(e: &Edge) -> Option<&'static str> {
+    let cell = e.cell(cell_type::ACCESS_MODE)?;
+    let (CellPayload::Text(t) | CellPayload::Json(t)) = &cell.payload else {
+        return None;
+    };
+    ["read", "write", "read_write"]
+        .into_iter()
+        .find(|m| *m == t.as_str())
+}
+
+/// Put `mode` on `e` as its one ACCESS_MODE cell, folded with the one it
+/// already carries (a second call on one parse never downgrades it).
+fn set_mode(e: &mut Edge, mode: &'static str) {
+    let folded = fold_mode(mode_of(e), Some(mode)).unwrap_or(mode);
+    let cell = Cell {
+        kind: cell_type::ACCESS_MODE,
+        payload: CellPayload::Text(folded.to_string()),
+    };
+    match e
+        .cells
+        .iter()
+        .position(|c| c.kind == cell_type::ACCESS_MODE)
+    {
+        Some(i) => e.cells[i] = cell,
+        None => e.cells.push(cell),
+    }
+}
+
+/// LE.4a: re-home the `module_id -> target` edges of `category` to the code
+/// that holds their statement sites.
+///
+/// Per target (sites grouped by target id, so output never depends on site
+/// order): every site is mapped to the innermost METHOD / FUNCTION whose
+/// POSITION span holds its line ([`owner_of_line`]). When EVERY site has an
+/// owner and `target` is not in `keep_module` (a declaration named it), the
+/// module edge is removed; otherwise it stays, untouched. Each owner gets one
+/// edge `owner -> target` whose ACCESS_MODE folds its sites' modes (`read` +
+/// `write` = `read_write`; only unknown sites give no cell). When the parse
+/// already holds that edge (a language parser's own function-level edge:
+/// Go GORM, Python SQLAlchemy, Ruby ActiveRecord), the mode cell goes on it
+/// and it keeps its parser evidence; otherwise a new edge is appended with
+/// EVIDENCE `emitter` at `path` and the owner's first site line (basis
+/// `site`). New edges are appended sorted by `(from, to)`.
+///
+/// The site lines come from the same file as the spans, so the result is a
+/// function of the file's content and is safe to cache with the parse.
+/// Generic over the category on purpose: LE.4b re-homes READS_CONFIG here.
+pub fn rehome_to_owner(
+    fp: &mut FileParse,
+    path: &str,
+    module_id: NodeId,
+    category: EdgeCategoryId,
+    sites: &[Site],
+    keep_module: &[NodeId],
+    emitter: &str,
+) -> AccessStats {
+    let mut stats = AccessStats::default();
+    if sites.is_empty() {
+        return stats;
+    }
+    let idx = build_owner_index(&fp.nodes, &fp.nav);
+    // First edge of `category` per (from, to): lookups only, never iterated,
+    // so one pass over the edges serves every site. Indices stay valid: new
+    // edges wait in `fresh` and the module edges are dropped last.
+    let mut at: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    for (i, e) in fp.edges.iter().enumerate() {
+        if e.category == category {
+            at.entry((e.from, e.to)).or_insert(i);
+        }
+    }
+    let mut by_target: BTreeMap<u64, (NodeId, Vec<&Site>)> = BTreeMap::new();
+    for site in sites {
+        by_target
+            .entry(site.target.0)
+            .or_insert_with(|| (site.target, Vec::new()))
+            .1
+            .push(site);
+    }
+
+    let mut drop_module: HashSet<NodeId> = HashSet::new();
+    let mut fresh: Vec<Edge> = Vec::new();
+    for (target, group) in by_target.into_values() {
+        // owner id -> (owner, folded mode, first site line)
+        let mut owners: BTreeMap<u64, (NodeId, Option<&'static str>, u32)> = BTreeMap::new();
+        let mut at_module = false;
+        for site in &group {
+            match owner_of_line(&idx, site.line).filter(|o| *o != target) {
+                Some(owner) => {
+                    let slot = owners
+                        .entry(owner.0)
+                        .or_insert((owner, site.mode, site.line));
+                    slot.1 = fold_mode(slot.1, site.mode);
+                    slot.2 = slot.2.min(site.line);
+                }
+                None => at_module = true,
+            }
+        }
+        if at.contains_key(&(module_id, target)) {
+            if at_module || owners.is_empty() || keep_module.contains(&target) {
+                stats.module_kept += 1;
+            } else {
+                drop_module.insert(target);
+            }
+        }
+        for (owner, mode, line) in owners.into_values() {
+            match at.get(&(owner, target)).and_then(|&i| fp.edges.get_mut(i)) {
+                Some(e) => {
+                    if let Some(m) = mode {
+                        set_mode(e, m);
+                    }
+                    stats.count_fn(mode_of(e));
+                }
+                None => {
+                    let mut e = Edge::new(owner, target, category, Confidence::Medium);
+                    if let Some(m) = mode {
+                        set_mode(&mut e, m);
+                    }
+                    evidence::attach(&mut e, Evidence::emitter(emitter).at(path, line));
+                    stats.count_fn(mode);
+                    fresh.push(e);
+                }
+            }
+        }
+    }
+    if !drop_module.is_empty() {
+        fp.edges.retain(|e| {
+            !(e.from == module_id && e.category == category && drop_module.contains(&e.to))
+        });
+    }
+    fresh.sort_by_key(|e| (e.from.0, e.to.0));
+    fp.edges.extend(fresh);
+    stats
+}
+
+/// The emitter an edge's EVIDENCE names, if any.
+fn emitter_of(e: &Edge) -> Option<String> {
+    Evidence::of(e).map(|ev| ev.emitter)
+}
+
+/// LE.4a: recount the data-access edges of a finished parse, so a
+/// cache-served `FileParse` counts exactly like a fresh one (the
+/// [`census`] pattern). Counted: ACCESSES_DATA edges into a DATA_ENTITY
+/// that the `extractor:data_entities` stage emitted, plus parser edges that
+/// took an ACCESS_MODE. A FUNCTION / METHOD source is `to_fn` (by its mode),
+/// a MODULE source `module_kept`. Provider buckets (`data_source:*`) are not
+/// DATA_ENTITY nodes and never count.
+pub fn access_census(fp: &FileParse) -> AccessStats {
+    let mut stats = AccessStats::default();
+    for e in &fp.edges {
+        if e.category != edge_category::ACCESSES_DATA
+            || fp.nav.kind_by_id.get(&e.to) != Some(&node_kind::DATA_ENTITY)
+        {
+            continue;
+        }
+        let mode = mode_of(e);
+        if mode.is_none() && emitter_of(e).as_deref() != Some(DATA_ENTITIES_EMITTER) {
+            continue;
+        }
+        match fp.nav.kind_by_id.get(&e.from) {
+            Some(k) if *k == node_kind::FUNCTION || *k == node_kind::METHOD => {
+                stats.count_fn(mode);
+            }
+            Some(k) if *k == node_kind::MODULE => stats.module_kept += 1,
+            _ => {}
+        }
+    }
+    stats
+}
+
+/// The evidence emitter of the data-entities extractor's edges: its module
+/// edges (stamped by the engine's `run_with_edges!`) and the edges
+/// [`rehome_to_owner`] adds for it.
+pub const DATA_ENTITIES_EMITTER: &str = "extractor:data_entities";
+
+/// The LE.4a fired_on marker line for `stats`, or `None` when the repo holds
+/// no counted data-access edge:
+///   `[data-access] rehomed fn={F} module_kept={M} modes read={R} write={W} read_write={X} unknown={U} repo=<label>`
+pub fn report_access_line(stats: AccessStats, repo_label: &str) -> Option<String> {
+    if stats.to_fn + stats.module_kept == 0 {
+        return None;
+    }
+    Some(format!(
+        "[data-access] rehomed fn={} module_kept={} modes read={} write={} read_write={} unknown={} repo={repo_label}",
+        stats.to_fn, stats.module_kept, stats.read, stats.write, stats.read_write, stats.unknown
+    ))
+}
+
+/// Print [`report_access_line`], once per repo that holds a data-access edge.
+pub fn report_access(stats: AccessStats, repo_label: &str) {
+    if let Some(line) = report_access_line(stats, repo_label) {
         eprintln!("{line}");
     }
 }
@@ -1018,5 +1283,285 @@ mod tests {
             )
         );
         assert_eq!(report_line(AnchorStats::default(), "r"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // LE.4a: rehome_to_owner / access_census
+    // ------------------------------------------------------------------
+
+    /// A parse with a MODULE `a`, the given functions / methods, the
+    /// DATA_ENTITY `orders` and `audit`, and the extractor's module edges to
+    /// both (stamped like the engine stamps them).
+    fn access_parse(owners: &[Entry<'_>]) -> (FileParse, NodeId, NodeId, NodeId) {
+        let (mut fp, module) = parse_with(owners);
+        let orders = id(node_kind::DATA_ENTITY, "data_entity:sql:orders");
+        let audit = id(node_kind::DATA_ENTITY, "data_entity:sql:audit");
+        for (t, q) in [(orders, "orders"), (audit, "audit")] {
+            fp.nodes.push(node(t, vec![]));
+            fp.nav.record(t, q, q, node_kind::DATA_ENTITY, Some(module));
+            let mut e = Edge::new(module, t, edge_category::ACCESSES_DATA, Confidence::Medium);
+            evidence::attach(&mut e, Evidence::emitter(DATA_ENTITIES_EMITTER));
+            fp.edges.push(e);
+        }
+        (fp, module, orders, audit)
+    }
+
+    fn site(target: NodeId, line: u32, mode: Option<&'static str>) -> Site {
+        Site { target, line, mode }
+    }
+
+    fn access_edges(fp: &FileParse, to: NodeId) -> Vec<(NodeId, Option<&'static str>)> {
+        fp.edges
+            .iter()
+            .filter(|e| e.to == to && e.category == edge_category::ACCESSES_DATA)
+            .map(|e| (e.from, mode_of(e)))
+            .collect()
+    }
+
+    fn rehome(fp: &mut FileParse, module: NodeId, sites: &[Site], keep: &[NodeId]) -> AccessStats {
+        rehome_to_owner(
+            fp,
+            "a.ts",
+            module,
+            edge_category::ACCESSES_DATA,
+            sites,
+            keep,
+            DATA_ENTITIES_EMITTER,
+        )
+    }
+
+    #[test]
+    fn rehome_moves_module_edge_to_innermost_fn() {
+        let (mut fp, module, orders, _) =
+            access_parse(&[(node_kind::FUNCTION, "save", Some((3, 6)))]);
+        let save = id(node_kind::FUNCTION, "save");
+        let stats = rehome(&mut fp, module, &[site(orders, 4, Some("write"))], &[]);
+        assert_eq!(access_edges(&fp, orders), vec![(save, Some("write"))]);
+        let e = fp
+            .edges
+            .iter()
+            .find(|e| e.from == save && e.to == orders)
+            .unwrap();
+        let ev = Evidence::of(e).unwrap();
+        assert_eq!(ev.emitter, DATA_ENTITIES_EMITTER);
+        assert_eq!((ev.file.as_deref(), ev.line), (Some("a.ts"), Some(4)));
+        assert_eq!(ev.basis, evidence::Basis::Site);
+        assert_eq!(
+            stats,
+            AccessStats {
+                to_fn: 1,
+                write: 1,
+                ..AccessStats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn module_scope_site_keeps_module_edge() {
+        let (mut fp, module, orders, audit) =
+            access_parse(&[(node_kind::FUNCTION, "load", Some((5, 8)))]);
+        let load = id(node_kind::FUNCTION, "load");
+        let stats = rehome(
+            &mut fp,
+            module,
+            &[
+                // audit: only a module-scope site (line 1).
+                site(audit, 1, Some("read")),
+                // orders: one site in `load`, one at module scope.
+                site(orders, 6, Some("read")),
+                site(orders, 2, Some("read")),
+            ],
+            &[],
+        );
+        assert_eq!(
+            access_edges(&fp, audit),
+            vec![(module, None)],
+            "no mode on a module edge"
+        );
+        let mut got = access_edges(&fp, orders);
+        got.sort_by_key(|(f, _)| f.0);
+        let mut want = vec![(module, None), (load, Some("read"))];
+        want.sort_by_key(|(f, _)| f.0);
+        assert_eq!(
+            got, want,
+            "the function edge is added, the module edge stays"
+        );
+        assert_eq!((stats.to_fn, stats.module_kept), (1, 2));
+    }
+
+    #[test]
+    fn declared_target_keeps_module_edge() {
+        let (mut fp, module, orders, _) =
+            access_parse(&[(node_kind::FUNCTION, "save", Some((3, 6)))]);
+        let save = id(node_kind::FUNCTION, "save");
+        rehome(
+            &mut fp,
+            module,
+            &[site(orders, 4, Some("write"))],
+            &[orders],
+        );
+        let mut got = access_edges(&fp, orders);
+        got.sort_by_key(|(f, _)| f.0);
+        let mut want = vec![(module, None), (save, Some("write"))];
+        want.sort_by_key(|(f, _)| f.0);
+        assert_eq!(
+            got, want,
+            "a declaration's module edge stays beside the function's"
+        );
+    }
+
+    #[test]
+    fn nested_fn_wins() {
+        let (mut fp, module, orders, _) = access_parse(&[
+            (node_kind::FUNCTION, "outer", Some((2, 20))),
+            (node_kind::FUNCTION, "inner", Some((5, 9))),
+        ]);
+        rehome(&mut fp, module, &[site(orders, 7, Some("read"))], &[]);
+        assert_eq!(
+            access_edges(&fp, orders),
+            vec![(id(node_kind::FUNCTION, "inner"), Some("read"))]
+        );
+    }
+
+    #[test]
+    fn modes_fold_to_read_write() {
+        let (mut fp, module, orders, _) =
+            access_parse(&[(node_kind::METHOD, "archive", Some((3, 9)))]);
+        let stats = rehome(
+            &mut fp,
+            module,
+            &[
+                site(orders, 4, Some("read")),
+                site(orders, 5, None),
+                site(orders, 6, Some("write")),
+            ],
+            &[],
+        );
+        assert_eq!(
+            access_edges(&fp, orders),
+            vec![(id(node_kind::METHOD, "archive"), Some("read_write"))]
+        );
+        assert_eq!(stats.read_write, 1);
+        assert_eq!(fold_mode(Some("read"), Some("read")), Some("read"));
+        assert_eq!(fold_mode(None, Some("write")), Some("write"));
+        assert_eq!(
+            fold_mode(Some("read_write"), Some("read")),
+            Some("read_write")
+        );
+    }
+
+    #[test]
+    fn unknown_mode_attaches_no_cell() {
+        let (mut fp, module, orders, _) =
+            access_parse(&[(node_kind::FUNCTION, "open", Some((3, 6)))]);
+        let open = id(node_kind::FUNCTION, "open");
+        let stats = rehome(&mut fp, module, &[site(orders, 4, None)], &[]);
+        let e = fp
+            .edges
+            .iter()
+            .find(|e| e.from == open && e.to == orders)
+            .unwrap();
+        assert!(e.cell(cell_type::ACCESS_MODE).is_none());
+        assert!(Evidence::of(e).is_some(), "still stamped");
+        assert_eq!((stats.to_fn, stats.unknown), (1, 1));
+    }
+
+    #[test]
+    fn existing_parser_edge_gets_mode_not_duplicate() {
+        let (mut fp, module, orders, _) =
+            access_parse(&[(node_kind::FUNCTION, "get_users", Some((3, 6)))]);
+        let get = id(node_kind::FUNCTION, "get_users");
+        let mut parser_edge = Edge::new(
+            get,
+            orders,
+            edge_category::ACCESSES_DATA,
+            Confidence::Medium,
+        );
+        evidence::attach(&mut parser_edge, Evidence::emitter("parser:go").line(4));
+        fp.edges.push(parser_edge);
+        let stats = rehome(&mut fp, module, &[site(orders, 5, Some("write"))], &[]);
+        assert_eq!(
+            access_edges(&fp, orders),
+            vec![(get, Some("write"))],
+            "one edge, no module edge"
+        );
+        let e = fp
+            .edges
+            .iter()
+            .find(|e| e.from == get && e.to == orders)
+            .unwrap();
+        assert_eq!(
+            Evidence::of(e).unwrap().emitter,
+            "parser:go",
+            "the parser keeps its evidence"
+        );
+        assert_eq!(stats.to_fn, 1);
+        // A second pass folds, never duplicates or downgrades.
+        rehome(&mut fp, module, &[site(orders, 5, Some("read"))], &[]);
+        assert_eq!(access_edges(&fp, orders), vec![(get, Some("read_write"))]);
+    }
+
+    #[test]
+    fn output_order_is_sorted() {
+        let entries = [
+            (node_kind::FUNCTION, "f1", Some((1, 3))),
+            (node_kind::FUNCTION, "f2", Some((5, 7))),
+            (node_kind::FUNCTION, "f3", Some((9, 11))),
+        ];
+        let (fp0, module, orders, audit) = access_parse(&entries);
+        let sites = [
+            site(audit, 10, Some("read")),
+            site(orders, 2, Some("write")),
+            site(orders, 6, Some("read")),
+            site(audit, 2, None),
+            site(orders, 10, Some("read")),
+        ];
+        let mut a = fp0.clone();
+        rehome(&mut a, module, &sites, &[]);
+        let mut reversed = sites;
+        reversed.reverse();
+        let mut b = fp0;
+        rehome(&mut b, module, &reversed, &[]);
+        assert_eq!(a.edges, b.edges, "site order must not reach the output");
+        let added: Vec<(u64, u64)> = a
+            .edges
+            .iter()
+            .filter(|e| e.from != module)
+            .map(|e| (e.from.0, e.to.0))
+            .collect();
+        let mut sorted = added.clone();
+        sorted.sort_unstable();
+        assert_eq!(added, sorted);
+        assert_eq!(added.len(), 5);
+    }
+
+    #[test]
+    fn access_census_recounts_a_finished_parse() {
+        let (mut fp, module, orders, audit) = access_parse(&[
+            (node_kind::FUNCTION, "save", Some((3, 6))),
+            (node_kind::FUNCTION, "load", Some((8, 9))),
+        ]);
+        let returned = rehome(
+            &mut fp,
+            module,
+            &[
+                site(orders, 4, Some("write")),
+                site(orders, 8, Some("read")),
+                site(audit, 1, Some("read")),
+            ],
+            &[],
+        );
+        let counted = access_census(&fp);
+        assert_eq!(
+            counted, returned,
+            "a cache-served parse counts like a fresh one"
+        );
+        assert_eq!(
+            report_access_line(counted, "r").as_deref(),
+            Some(
+                "[data-access] rehomed fn=2 module_kept=1 modes read=1 write=1 read_write=0 unknown=0 repo=r"
+            )
+        );
+        assert_eq!(report_access_line(AccessStats::default(), "r"), None);
     }
 }

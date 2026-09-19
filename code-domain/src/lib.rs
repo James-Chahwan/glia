@@ -326,7 +326,12 @@ pub mod edge_category {
     pub const SHARES_SCHEMA: EdgeCategoryId = EdgeCategoryId(16);
     pub const CLI_INVOKES: EdgeCategoryId = EdgeCategoryId(17);
 
-    // v0.4.11a — module → data-source access (D1)
+    // v0.4.11a — data access (D1). LE.4a: from the innermost FUNCTION /
+    // METHOD whose body holds the statement (the MODULE when the statement is
+    // at module scope, or for a declaration: ORM table, DDL, migration DSL,
+    // and the data_sources provider buckets) to the data node. Extractor
+    // re-homed edges carry an ACCESS_MODE edge cell (`read` / `write` /
+    // `read_write`).
     pub const ACCESSES_DATA: EdgeCategoryId = EdgeCategoryId(18);
 
     // v0.4.x — DB resolver cross-service join. Emitted by `DbResolver` when
@@ -584,9 +589,10 @@ pub mod cell_type {
     /// this cell carries the ones a user declared.
     pub const ENTRYPOINT: CellTypeId = CellTypeId(24);
 
-    /// RESERVED (LE.4a) — an EDGE cell on `ACCESSES_DATA`, `CellPayload::Text`
-    /// `read | write | read_write`, taken from the SQL / collection-call /
-    /// Cypher verb. Emitter LE.4a; readers LE.4d, LE.7a.
+    /// An EDGE cell on `ACCESSES_DATA`, `CellPayload::Text` `read | write |
+    /// read_write`, taken from the SQL / collection-call / Cypher verb and
+    /// folded over one function's statements; absent when no statement says.
+    /// Emitter LE.4a (`anchor::rehome_to_owner`); readers LE.4d, LE.7a.
     pub const ACCESS_MODE: CellTypeId = CellTypeId(25);
 
     /// Canonical id→name for every cell type. Backs the pyo3 `cell_type_names`

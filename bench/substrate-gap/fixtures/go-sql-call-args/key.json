@@ -1,0 +1,28 @@
+{
+  "framework": "go-sql-call-args",
+  "language": "go",
+  "dirs": ["."],
+  "note": "LE.4a scope addition (from LG.3b). Every statement is a call argument inside a function, the shape the Go parser's own per-call-argument SQL scan read with none of LG.3b's rejects: quokka-stack's fmt.Errorf(\"delete from spaces key=%q: %w\") minted sql:spaces, lapse's CTE aliases (opp_ids / task_counts / chosen_brief / tc / cb / response_outcomes / pursuit_outcomes) and DO UPDATE SET's SET became tables, and Kina's SQL comment `... interleave into a downgrade` minted sql:a. LE.4a deletes that scanner: the data-entities extractor reads every SQL literal and the engine re-homes its edge to the enclosing function, so the function-level edges below come from the extractor and the module keeps none. No cells binding: a precision guard.",
+  "expect_edges": [
+    {"from": "Upsert", "to": "data_entity:sql:prefs", "category": "ACCESSES_DATA", "note": "INSERT INTO prefs ... DO UPDATE SET"},
+    {"from": "RaiseStatus", "to": "data_entity:sql:user_regimes", "category": "ACCESSES_DATA", "note": "upsert with a SQL comment inside"},
+    {"from": "List", "to": "data_entity:sql:briefs", "category": "ACCESSES_DATA", "note": "inside the opp_ids / chosen_brief CTE bodies"},
+    {"from": "List", "to": "data_entity:sql:pursuit_task", "category": "ACCESSES_DATA", "note": "inside the opp_ids / task_counts CTE bodies"},
+    {"from": "List", "to": "data_entity:sql:opportunities", "category": "ACCESSES_DATA", "note": "the main SELECT's JOIN"},
+    {"from": "Get", "to": "data_entity:sql:opportunities", "category": "ACCESSES_DATA", "note": "FROM opportunities o"},
+    {"from": "Outcomes", "to": "data_entity:sql:outcomes", "category": "ACCESSES_DATA", "note": "inside the response_outcomes CTE"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:spaces", "note": "fmt.Errorf message with %q / %w"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:SET", "note": "ON CONFLICT ... DO UPDATE SET"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:a", "note": "SQL comment `interleave into a downgrade`"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:opp_ids", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:task_counts", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:chosen_brief", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:tc", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:cb", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:response_outcomes", "note": "CTE name"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:pursuit_outcomes", "note": "CTE name"},
+    {"from": "store", "to": "data_entity:sql:prefs", "category": "ACCESSES_DATA", "note": "every prefs statement is inside Upsert, so the module edge is re-homed"}
+  ]
+}

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use repo_graph_code_domain::{CodeNav, FileParse, evidence};
+use repo_graph_code_domain::{CodeNav, FileParse, edge_category, evidence};
 use repo_graph_core::{NodeId, RepoId};
 
 // ----------------------------------------------------------------------------
@@ -311,10 +311,11 @@ pub(crate) fn apply_cross_cutting_extractors(
         "data_sources",
         data_sources::extract_data_source_nodes(source, module_id, repo)
     );
-    run_with_edges!(
-        "data_entities",
-        data_entities::extract_data_entity_nodes(source, module_id, repo)
-    );
+    // LE.4a: the extractor's statement sites (0-indexed lines here) and the
+    // entities a declaration named, kept for the re-home below.
+    let (entities, access) = data_entities::extract_data_entity_access(source, module_id, repo);
+    let access_sites = access_sites(source, &access.sites);
+    run_with_edges!("data_entities", entities);
     // LA.19a: not `run_with_edges!` — code-sourced jobs (Quartz, Hangfire,
     // robfig / gocron, APScheduler, Spring `@Scheduled`) also carry
     // `CRON_JOB --HANDLED_BY--> handler` refs, bound by the graph builder's
@@ -464,6 +465,21 @@ pub(crate) fn apply_cross_cutting_extractors(
     anchor::attach(fp, path, module_id, &mut anchors);
     evidence::stamp_missing(&mut fp.edges[before..], "extractor:anchor");
 
+    // LE.4a: every data-access statement's module edge moves to the
+    // innermost function / method holding it, with its ACCESS_MODE; a
+    // module-scope statement or a declaration keeps the module edge. Same
+    // owner index as the marker pass, same cache rule: a function of this file
+    // alone. The build-level `[data-access]` marker counts it post-cache.
+    anchor::rehome_to_owner(
+        fp,
+        path,
+        module_id,
+        edge_category::ACCESSES_DATA,
+        &access_sites,
+        &access.declared,
+        anchor::DATA_ENTITIES_EMITTER,
+    );
+
     // LA.33: a consumer is HANDLED_BY the callback it passes, on top of the
     // subscribing function above: `this.x` / a method value bound in-file
     // (stamped `extractor:queue_callbacks`), a name or member as a HANDLED_BY
@@ -485,6 +501,34 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.edges.extend(svc.edges);
         merge_nav(&mut fp.nav, svc.nav);
     }
+}
+
+/// LE.4a: the data-entity extractor's sites as `anchor::Site`s, each offset
+/// turned into its 0-indexed line (`anchor::line_of`'s count) through one
+/// newline index, so a file with many statements is not rescanned per site.
+fn access_sites(
+    source: &str,
+    sites: &[repo_graph_code_extractors::data_entities::AccessSite],
+) -> Vec<repo_graph_code_extractors::anchor::Site> {
+    if sites.is_empty() {
+        return Vec::new();
+    }
+    let newlines: Vec<usize> = source
+        .bytes()
+        .enumerate()
+        .filter_map(|(i, b)| (b == b'\n').then_some(i))
+        .collect();
+    sites
+        .iter()
+        .map(|s| {
+            let line = newlines.partition_point(|&nl| nl < s.offset.min(source.len()));
+            repo_graph_code_extractors::anchor::Site {
+                target: s.entity,
+                line: u32::try_from(line).unwrap_or(u32::MAX),
+                mode: s.verb.mode(),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn merge_nav(dst: &mut CodeNav, src: CodeNav) {

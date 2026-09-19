@@ -40,6 +40,20 @@
 //! ([`leading_literal`] / [`inline_literal`], LA.42), never by a later string,
 //! and every scanner's name must be [`entity_shaped`] at the emit funnel.
 //!
+//! LE.4a — access sites. Every statement-shaped hit (a SQL FROM / JOIN / INTO /
+//! UPDATE table, a driver collection call, a Cypher node label) is also
+//! reported as an [`AccessSite`]: the entity, the byte offset in the source
+//! where the statement names it, and its [`AccessVerb`] (read / write /
+//! unknown). The engine re-homes the module's ACCESSES_DATA edge to the
+//! innermost function or method holding those offsets
+//! (`anchor::rehome_to_owner`) and stamps the ACCESS_MODE edge cell from the
+//! verbs. A declaration (ORM table, Mongoose, DynamoDB, Beanie, SQL DDL, a
+//! migration DSL call) names a schema, not a statement: it is listed in
+//! [`DataAccess::declared`] and its module edge always stays. The edges
+//! this function returns are unchanged by LE.4a: the re-home is the engine's.
+//! Precision: a statement built in one function and executed in another is
+//! attributed to the function whose body holds the literal.
+//!
 //! Debug markers, one line per file that produced or rejected anything:
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='` (LG.3b)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] cypher '` (LA.28)
@@ -55,6 +69,56 @@ pub struct DataEntityNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+}
+
+/// LE.4a: where one file's statements touch the entities
+/// [`extract_data_entity_access`] minted. Kept apart from [`DataEntityNodes`]
+/// (which `prisma.rs` builds by struct literal) so every other producer of
+/// entity nodes is untouched.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DataAccess {
+    /// Every statement site, in scan order (a table named twice is two
+    /// sites). Each site's entity is one of the minted nodes.
+    pub sites: Vec<AccessSite>,
+    /// The entities a declaration named (ORM table, Mongoose, DynamoDB,
+    /// Beanie, SQL DDL, migration DSL), first-seen order, no repeats. Their
+    /// module edge stays wherever their sites lie.
+    pub declared: Vec<NodeId>,
+}
+
+/// LE.4a: how a statement touches the entity it names. The ACCESS_MODE edge
+/// cell folds the verbs of one function's sites ([`AccessVerb::mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessVerb {
+    Read,
+    Write,
+    /// The statement shape does not say (a collection handle stored in a
+    /// variable, a Firestore `.doc(..)` chain, a Cypher pattern outside
+    /// MATCH / MERGE / CREATE).
+    Unknown,
+}
+
+impl AccessVerb {
+    /// The ACCESS_MODE spelling of one verb: `read` / `write`, none for
+    /// [`AccessVerb::Unknown`].
+    pub fn mode(self) -> Option<&'static str> {
+        match self {
+            Self::Read => Some("read"),
+            Self::Write => Some("write"),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// LE.4a: one place a statement names a data entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessSite {
+    /// The DATA_ENTITY node the statement names.
+    pub entity: NodeId,
+    /// Byte offset in the source of the name (SQL table, collection call,
+    /// Cypher label); always a char boundary.
+    pub offset: usize,
+    pub verb: AccessVerb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +150,8 @@ pub(crate) struct EntitySink {
     nav: CodeNav,
     // Membership only, never iterated: output order is the push order.
     seen: std::collections::HashSet<(DataEntityFlavor, String)>,
+    sites: Vec<AccessSite>,
+    declared: Vec<NodeId>,
 }
 
 impl EntitySink {
@@ -97,22 +163,27 @@ impl EntitySink {
             edges: Vec::new(),
             nav: CodeNav::default(),
             seen: std::collections::HashSet::new(),
+            sites: Vec::new(),
+            declared: Vec::new(),
         }
     }
 
-    pub(crate) fn emit(&mut self, flavor: DataEntityFlavor, name: &str) {
+    /// Mint `(flavor, name)` once, with its module ACCESSES_DATA edge, and
+    /// return its id; `None` when the noise gate drops the name. A repeat
+    /// returns the id without minting again.
+    pub(crate) fn emit(&mut self, flavor: DataEntityFlavor, name: &str) -> Option<NodeId> {
         // Flavor-agnostic noise gate: numerics and English/JS keywords are never
         // real table/collection/label names, regardless of how they were
         // captured (raw SQL, `.collection('callback')`, etc.). (glia-v2 G7)
         if is_noise_entity_name(name) {
-            return;
-        }
-        if !self.seen.insert((flavor, name.to_string())) {
-            return;
+            return None;
         }
         let repo = self.repo;
         let qname = format!("data_entity:{}:{}", flavor.as_str(), name);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
+        if !self.seen.insert((flavor, name.to_string())) {
+            return Some(id);
+        }
         self.nodes.push(Node {
             id,
             repo,
@@ -133,18 +204,63 @@ impl EntitySink {
             confidence: Confidence::Medium,
             cells: Vec::new(),
         });
+        Some(id)
+    }
+
+    /// [`EntitySink::emit`] for a statement hit at source `offset` (LE.4a).
+    fn emit_site(&mut self, flavor: DataEntityFlavor, name: &str, offset: usize, verb: AccessVerb) {
+        if let Some(entity) = self.emit(flavor, name) {
+            self.sites.push(AccessSite {
+                entity,
+                offset,
+                verb,
+            });
+        }
+    }
+
+    /// [`EntitySink::emit`] for a declaration: its module edge stays (LE.4a).
+    fn emit_declared(&mut self, flavor: DataEntityFlavor, name: &str) {
+        if let Some(id) = self.emit(flavor, name)
+            && !self.declared.contains(&id)
+        {
+            self.declared.push(id);
+        }
     }
 
     pub(crate) fn finish(self) -> DataEntityNodes {
-        DataEntityNodes {
-            nodes: self.nodes,
-            edges: self.edges,
-            nav: self.nav,
-        }
+        self.finish_with_access().0
+    }
+
+    /// [`EntitySink::finish`] plus the sites and declarations (LE.4a).
+    fn finish_with_access(self) -> (DataEntityNodes, DataAccess) {
+        (
+            DataEntityNodes {
+                nodes: self.nodes,
+                edges: self.edges,
+                nav: self.nav,
+            },
+            DataAccess {
+                sites: self.sites,
+                declared: self.declared,
+            },
+        )
     }
 }
 
+/// Every data entity `source` names, each hung off `module_id` by
+/// ACCESSES_DATA. [`extract_data_entity_access`] without the sites.
 pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) -> DataEntityNodes {
+    extract_data_entity_access(source, module_id, repo).0
+}
+
+/// [`extract_data_entity_nodes`] plus where each statement names its entity
+/// and which entities a declaration named (LE.4a). The nodes and edges are
+/// identical to [`extract_data_entity_nodes`]'s.
+pub fn extract_data_entity_access(
+    source: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> (DataEntityNodes, DataAccess) {
     let mut sink = EntitySink::new(module_id, repo);
 
     // LG.3b: raw SQL is read only from string literals that ARE a SQL
@@ -163,19 +279,23 @@ pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) 
         stats.ctes += scan.ctes;
         stats.rejected_fn += scan.rejected_fn;
         for (name, pos) in scan.tables {
-            stats.note_table(&name, stmt.to_source(pos));
-            sink.emit(DataEntityFlavor::Sql, &name);
+            let at = stmt.to_source(pos);
+            stats.note_table(&name, at);
+            // LE.4a: the clause keyword before the name gives the verb.
+            let verb = sql_clause_verb(&stmt.scan, pos);
+            sink.emit_site(DataEntityFlavor::Sql, &name, at, verb);
         }
     }
     // A13.9: the DDL phrase names its table. After the FROM scan, so a
-    // statement the DDL scan adds nothing to keeps its node order.
+    // statement the DDL scan adds nothing to keeps its node order. LE.4a:
+    // DDL declares a schema, so it is no access site.
     for stmt in &lit.statements {
         for (_, name) in scan_sql_ddl(&stmt.scan) {
             // The DDL scan reports no offset; the name's first occurrence in
             // the statement is close enough for the marker's line.
             let pos = stmt.scan.find(name.as_str()).unwrap_or(0);
             stats.note_table(&name, stmt.to_source(pos));
-            sink.emit(DataEntityFlavor::Sql, &name);
+            sink.emit_declared(DataEntityFlavor::Sql, &name);
         }
     }
     // LA.42: the declaration scanners name an entity only from the literal
@@ -183,45 +303,45 @@ pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) 
     let mut decl = DeclStats::default();
     for name in scan_orm_table_decls(source, &mut decl) {
         decl.funnel(&name);
-        sink.emit(DataEntityFlavor::Sql, &name);
+        sink.emit_declared(DataEntityFlavor::Sql, &name);
     }
     // A13.9: a migration DSL call (`op.create_table("users")`, Rails
     // `create_table :users`) names the table it creates or alters, wherever it
     // appears. The scanner has no path, so the marker says which DSL fired.
     let dsl = crate::migrations::scan_migration_dsl(source);
     for hit in &dsl {
-        sink.emit(DataEntityFlavor::Sql, &hit.table);
+        sink.emit_declared(DataEntityFlavor::Sql, &hit.table);
     }
     for line in crate::migrations::dsl_markers(&dsl) {
         eprintln!("{line}");
     }
     for name in scan_mongoose_models(source, &mut decl) {
         decl.funnel(&name);
-        sink.emit(DataEntityFlavor::Nosql, &name);
+        sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_dynamodb_tables(source, &mut decl) {
         decl.funnel(&name);
-        sink.emit(DataEntityFlavor::Nosql, &name);
+        sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
-    for name in scan_collection_calls(source) {
-        stats.note_collection(&name);
-        sink.emit(DataEntityFlavor::Nosql, &name);
+    for hit in collection_calls(source) {
+        stats.note_collection(&hit.name);
+        sink.emit_site(DataEntityFlavor::Nosql, &hit.name, hit.pos, hit.verb);
     }
     for name in scan_beanie_documents(source, &mut decl) {
         decl.funnel(&name);
-        sink.emit(DataEntityFlavor::Nosql, &name);
+        sink.emit_declared(DataEntityFlavor::Nosql, &name);
     }
     if debug_enabled() && decl.needles > 0 {
         eprintln!("{}", decl.marker());
     }
-    for name in scan_cypher_labels(source) {
-        sink.emit(DataEntityFlavor::Graph, &name);
+    for (label, at, verb) in cypher_label_sites(source) {
+        sink.emit_site(DataEntityFlavor::Graph, &label, at, verb);
     }
 
     if debug_enabled() && stats.fired() {
         eprintln!("{}", stats.marker(source));
     }
-    sink.finish()
+    sink.finish_with_access()
 }
 
 /// True when `GLIA_DATA_DEBUG` is set (read once): the `[data-entity]` line
@@ -711,16 +831,22 @@ impl SqlStmt {
     /// result is a char boundary whenever `text_pos` is. LE.4a re-homes each
     /// ACCESSES_DATA site to its enclosing function by this offset.
     pub(crate) fn to_source(&self, text_pos: usize) -> usize {
-        let piece = self
-            .pieces
-            .iter()
-            .rev()
-            .find(|(_, t, _)| *t <= text_pos)
-            .or(self.pieces.first());
-        match piece {
-            Some(&(s, t, _)) => s + text_pos.saturating_sub(t),
-            None => text_pos,
-        }
+        piece_source(&self.pieces, text_pos)
+    }
+}
+
+/// The source offset of `text_pos` in a joined run built from `pieces`
+/// ([`join_group`]): the last piece starting at or before it, else the first.
+/// Shared by [`SqlStmt::to_source`] and the Cypher sites (LE.4a).
+fn piece_source(pieces: &[Piece], text_pos: usize) -> usize {
+    let piece = pieces
+        .iter()
+        .rev()
+        .find(|(_, t, _)| *t <= text_pos)
+        .or(pieces.first());
+    match piece {
+        Some(&(s, t, _)) => s + text_pos.saturating_sub(t),
+        None => text_pos,
     }
 }
 
@@ -1462,6 +1588,56 @@ fn clause_table(
     Some((name, pos))
 }
 
+/// LE.4a: the verb of the FROM / JOIN / INTO / UPDATE clause whose table name
+/// starts at `name_pos` in `sql` (the blanked statement text
+/// [`scan_sql_tables`] read it from). Read backwards from the name, past its
+/// qualifier (`public.`, `"db".`, `[dbo].`) and an `ONLY` / `LATERAL`
+/// modifier, to the keyword: `FROM` reads, unless `DELETE` precedes it;
+/// `JOIN` reads; `INTO` (INSERT / MERGE / REPLACE / SELECT INTO) and `UPDATE`
+/// write. ASCII-only look-behind: every step is on a byte that is ASCII, so no
+/// slice is taken inside a multibyte char.
+pub(crate) fn sql_clause_verb(sql: &str, name_pos: usize) -> AccessVerb {
+    let b = sql.as_bytes();
+    let mut k = name_pos.min(b.len());
+    while k > 0
+        && (is_word_byte(b[k - 1])
+            || matches!(b[k - 1], b'.' | b'"' | b'`' | b'[' | b']' | b'\\' | b'$'))
+    {
+        k -= 1;
+    }
+    let mut kw = word_before(b, k);
+    if word_is(b, kw, "ONLY") || word_is(b, kw, "LATERAL") {
+        kw = word_before(b, kw.0);
+    }
+    if word_is(b, kw, "FROM") {
+        if word_is(b, word_before(b, kw.0), "DELETE") {
+            AccessVerb::Write
+        } else {
+            AccessVerb::Read
+        }
+    } else if word_is(b, kw, "JOIN") {
+        AccessVerb::Read
+    } else if word_is(b, kw, "INTO") || word_is(b, kw, "UPDATE") {
+        AccessVerb::Write
+    } else {
+        AccessVerb::Unknown
+    }
+}
+
+/// The word-byte run that ends at the last non-whitespace byte before `end`,
+/// as `(start, end)`; empty when that byte is not a word byte.
+fn word_before(b: &[u8], end: usize) -> (usize, usize) {
+    let mut e = end.min(b.len());
+    while e > 0 && b[e - 1].is_ascii_whitespace() {
+        e -= 1;
+    }
+    let mut s = e;
+    while s > 0 && is_word_byte(b[s - 1]) {
+        s -= 1;
+    }
+    (s, e)
+}
+
 // ----------------------------------------------------------------------------
 // SQL DDL (A13.9): the table a `CREATE / ALTER / DROP / TRUNCATE` statement
 // names. Anchored on the whole phrase: `find_keyword_ci` only needs whitespace
@@ -2127,9 +2303,30 @@ const COLLECTION_NEEDLES: &[&str] = &[
     ".GetCollection<",
 ];
 
+/// The collection names of every driver collection call, in source order
+/// ([`collection_calls`] without the offsets and verbs; the tests' reader).
+#[cfg(test)]
 fn scan_collection_calls(source: &str) -> Vec<String> {
+    collection_calls(source)
+        .into_iter()
+        .map(|hit| hit.name)
+        .collect()
+}
+
+/// One driver collection call (LE.4a): the needle's offset, the name its
+/// first argument spells, and the verb of the method chained onto it.
+struct CollectionHit {
+    pos: usize,
+    name: String,
+    verb: AccessVerb,
+}
+
+/// Every driver collection call ([`COLLECTION_NEEDLES`]) whose first argument
+/// names a collection ([`collection_arg`]), in source order, with the verb of
+/// the call chained onto it ([`collection_verb`]).
+fn collection_calls(source: &str) -> Vec<CollectionHit> {
     let bytes = source.as_bytes();
-    let mut hits: Vec<(usize, String)> = Vec::new();
+    let mut hits: Vec<CollectionHit> = Vec::new();
     for needle in COLLECTION_NEEDLES {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
@@ -2158,14 +2355,87 @@ fn scan_collection_calls(source: &str) -> Vec<String> {
                 }
                 open = k + 1;
             }
-            if let Some(name) = collection_arg(source, open) {
-                hits.push((pos, name));
+            if let Some((name, delim)) = collection_arg(source, open) {
+                let verb = collection_verb(bytes, delim);
+                hits.push(CollectionHit { pos, name, verb });
             }
         }
     }
     // Source order across needles.
-    hits.sort_by_key(|(pos, _)| *pos);
-    hits.into_iter().map(|(_, name)| name).collect()
+    hits.sort_by_key(|hit| hit.pos);
+    hits
+}
+
+/// LE.4a: the verb of the driver method chained onto a collection call whose
+/// first argument ends at the `,` / `)` at `delim`: the call's closing `)`
+/// (within 256 bytes), then, within 64 bytes, `.method(` (whitespace and
+/// newlines allowed around the `.`). ASCII case-insensitive on the method,
+/// so Node (`find`), Go (`InsertOne`), Java (`countDocuments`) and C#
+/// (`DeleteManyAsync`) read alike: `find*` / `aggregate` / `count*` /
+/// `distinct` / `estimatedDocumentCount` read; `insert*` / `update*` /
+/// `delete*` / `replace*` / `bulkWrite` / `findOneAndUpdate` /
+/// `findOneAndDelete` / `findOneAndReplace` write. Anything else — no chained
+/// call (the handle is stored), a Firestore `.doc(..)`, `.where(..)` — is
+/// [`AccessVerb::Unknown`]. Bytes only, cut at ASCII delimiters.
+fn collection_verb(b: &[u8], delim: usize) -> AccessVerb {
+    let mut close = delim;
+    let mut depth = 0usize;
+    while close < b.len() && close - delim < 256 {
+        match b[close] {
+            b'(' => depth += 1,
+            b')' if depth == 0 => break,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        close += 1;
+    }
+    if b.get(close) != Some(&b')') {
+        return AccessVerb::Unknown;
+    }
+    let limit = (close + 1 + 64).min(b.len());
+    let mut j = close + 1;
+    while j < limit && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'.') {
+        return AccessVerb::Unknown;
+    }
+    j += 1;
+    while j < limit && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    let s = j;
+    while j < limit && is_word_byte(b[j]) {
+        j += 1;
+    }
+    if j == s || b.get(j) != Some(&b'(') {
+        return AccessVerb::Unknown;
+    }
+    let method = b[s..j].to_ascii_lowercase();
+    const WRITE: &[&[u8]] = &[
+        b"findoneandupdate",
+        b"findoneanddelete",
+        b"findoneandreplace",
+        b"insert",
+        b"update",
+        b"delete",
+        b"replace",
+        b"bulkwrite",
+    ];
+    const READ: &[&[u8]] = &[
+        b"find",
+        b"aggregate",
+        b"count",
+        b"distinct",
+        b"estimateddocumentcount",
+    ];
+    if WRITE.iter().any(|w| method.starts_with(w)) {
+        AccessVerb::Write
+    } else if READ.iter().any(|r| method.starts_with(r)) {
+        AccessVerb::Read
+    } else {
+        AccessVerb::Unknown
+    }
 }
 
 /// Offset just past the `>` closing the type-argument list whose `<` ends
@@ -2195,8 +2465,9 @@ fn skip_type_args(b: &[u8], i: usize) -> Option<usize> {
 /// ([`leading_literal`]'s rule, LA.42), or C# `nameof(Ident)` (the name is
 /// the last segment of `Ident`). Anything else — a variable, an interpolated
 /// `$"…"` / `` `${x}` ``, a literal that does not close on its line — names
-/// nothing.
-fn collection_arg(source: &str, i: usize) -> Option<String> {
+/// nothing. With the name, the offset of the `,` / `)` ending the argument
+/// (LE.4a reads the chained call after it).
+fn collection_arg(source: &str, i: usize) -> Option<(String, usize)> {
     let b = source.as_bytes();
     let mut k = i;
     while k < b.len() && b[k].is_ascii_whitespace() {
@@ -2231,7 +2502,7 @@ fn collection_arg(source: &str, i: usize) -> Option<String> {
     if name.is_empty() || name.len() >= 128 || name.contains("${") || name.contains("#{") {
         return None;
     }
-    Some(name.to_string())
+    Some((name.to_string(), j))
 }
 
 // ----------------------------------------------------------------------------
@@ -2303,21 +2574,34 @@ fn blank_prefix_len(s: &str) -> usize {
 // Label-only: relationships, properties and return clauses are not read.
 // ----------------------------------------------------------------------------
 
-/// The node labels of every Cypher statement in `source`, in statement order
-/// then label order. Under `GLIA_DATA_DEBUG` prints the file's
-/// `[data-entity] cypher …` line ([`cypher_marker`]).
+/// The labels of [`cypher_label_sites`], names only (the tests' reader).
+#[cfg(test)]
 fn scan_cypher_labels(source: &str) -> Vec<String> {
+    cypher_label_sites(source)
+        .into_iter()
+        .map(|(label, _, _)| label)
+        .collect()
+}
+
+/// The node labels of every Cypher statement in `source`, in statement order
+/// then label order, each with its source offset and the verb of the clause
+/// its pattern sits in (LE.4a, [`node_label_hits`]). Under `GLIA_DATA_DEBUG`
+/// prints the file's `[data-entity] cypher …` line ([`cypher_marker`]).
+fn cypher_label_sites(source: &str) -> Vec<(String, usize, AccessVerb)> {
     let stmts = cypher_statements(source);
-    let labels: Vec<String> = stmts
-        .iter()
-        .flat_map(|stmt| extract_node_labels(&stmt.text))
-        .collect();
-    if debug_enabled()
-        && let Some(line) = cypher_marker(source, &stmts, &labels)
-    {
-        eprintln!("{line}");
+    let mut sites = Vec::new();
+    for stmt in &stmts {
+        for (label, pos, verb) in node_label_hits(&stmt.text) {
+            sites.push((label, piece_source(&stmt.pieces, pos), verb));
+        }
     }
-    labels
+    if debug_enabled() {
+        let labels: Vec<String> = sites.iter().map(|(l, _, _)| l.clone()).collect();
+        if let Some(line) = cypher_marker(source, &stmts, &labels) {
+            eprintln!("{line}");
+        }
+    }
+    sites
 }
 
 /// One Cypher statement: a joined literal run that [`is_cypher_statement`].
@@ -2328,6 +2612,9 @@ struct CypherStmt {
     /// Source span from the first literal's opening delimiter to the last
     /// one's closing delimiter.
     span: Range<usize>,
+    /// Where each literal body sits in `text` ([`join_group`]), so a label's
+    /// offset maps back to the source ([`piece_source`], LE.4a).
+    pieces: Vec<Piece>,
 }
 
 /// Words a Cypher statement can open with ([`is_cypher_statement`] checks the
@@ -2352,12 +2639,13 @@ fn cypher_statements(source: &str) -> Vec<CypherStmt> {
         let (Some(first), Some(last)) = (group.first(), group.last()) else {
             continue;
         };
-        let (text, _) = join_group(source, group, joints);
+        let (text, pieces) = join_group(source, group, joints);
         let text = blank_escapes(&text);
         if is_cypher_statement(&text) {
             out.push(CypherStmt {
                 text,
                 span: first.outer.start..last.outer.end,
+                pieces,
             });
         }
     }
@@ -2463,6 +2751,15 @@ fn holds_pattern_clause(b: &[u8], from: usize) -> bool {
     })
 }
 
+/// The labels of [`node_label_hits`], names only (the tests' reader).
+#[cfg(test)]
+fn extract_node_labels(text: &str) -> Vec<String> {
+    node_label_hits(text)
+        .into_iter()
+        .map(|(label, _, _)| label)
+        .collect()
+}
+
 /// The `:Label`s of the node patterns in a Cypher statement: `(p:Person)`,
 /// `(:Person)`, `(p:Person:Admin)`. Inside a `( … )` labels are read only
 /// before the property map `{` (`{active:true}` holds values, not labels,
@@ -2470,12 +2767,37 @@ fn holds_pattern_clause(b: &[u8], from: usize) -> bool {
 /// Cypher type predicate) is skipped whole; relationship types in `[ … ]`
 /// sit outside every `( … )` and are never read. A label opens with a letter
 /// or `_`. Bytes only: every slice is cut at an ASCII delimiter.
-fn extract_node_labels(text: &str) -> Vec<String> {
+///
+/// Each label comes with its offset in `text` and the verb of
+/// the clause whose pattern holds it (LE.4a): the last `MATCH` (read) or
+/// `MERGE` / `CREATE` (write) word seen outside every `( … )` before it, so
+/// `MATCH (a:User) MERGE (a)-[:T]->(t:Tag)` reads User and writes Tag. A
+/// word after `:` or `.`, or followed by `:` (a type, a property, a map key),
+/// is no clause; before any clause the verb is unknown. Approximation: a
+/// `MATCH (n:User) DETACH DELETE n` reads as a read of User (binding the
+/// variable to the DELETE is query parsing).
+fn node_label_hits(text: &str) -> Vec<(String, usize, AccessVerb)> {
     let mut out = Vec::new();
     let b = text.as_bytes();
+    let mut verb = AccessVerb::Unknown;
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'(' {
+            if is_word_byte(b[i]) {
+                let s = i;
+                while i < b.len() && is_word_byte(b[i]) {
+                    i += 1;
+                }
+                let qualified = s > 0 && matches!(b[s - 1], b':' | b'.' | b'$');
+                if !qualified && b.get(i) != Some(&b':') {
+                    if word_is(b, (s, i), "MATCH") {
+                        verb = AccessVerb::Read;
+                    } else if word_is(b, (s, i), "MERGE") || word_is(b, (s, i), "CREATE") {
+                        verb = AccessVerb::Write;
+                    }
+                }
+                continue;
+            }
             i += 1;
             continue;
         }
@@ -2499,7 +2821,7 @@ fn extract_node_labels(text: &str) -> Vec<String> {
                         k += 1;
                     }
                     if k > s && k - s < 128 && !b[s].is_ascii_digit() {
-                        out.push(text[s..k].to_string());
+                        out.push((text[s..k].to_string(), s, verb));
                     }
                     j = k.max(s);
                 }
@@ -2579,6 +2901,162 @@ mod tests {
 
     fn entity_qnames(out: &DataEntityNodes) -> Vec<String> {
         out.nav.qname_by_id.values().cloned().collect()
+    }
+
+    /// LE.4a: `(entity name, source text at the site, verb)` per site.
+    fn sites_of(src: &str) -> Vec<(String, String, AccessVerb)> {
+        let repo = RepoId(1);
+        let (out, access) = extract_data_entity_access(src, module_id(repo), repo);
+        access
+            .sites
+            .iter()
+            .map(|site| {
+                let name = out
+                    .nav
+                    .name_by_id
+                    .get(&site.entity)
+                    .cloned()
+                    .unwrap_or_default();
+                let at = &src[site.offset..(site.offset + name.len()).min(src.len())];
+                (name, at.to_string(), site.verb)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sql_verbs_classify() {
+        use AccessVerb::{Read, Write};
+        let src = r#"
+const a = "INSERT INTO orders (id) VALUES ($1)";
+const b = "UPDATE public.carts SET qty = $1 WHERE id = $2";
+const c = "DELETE FROM sessions WHERE id = $1";
+const d = "SELECT o.id FROM orders o JOIN users u ON u.id = o.uid";
+const e = "INSERT INTO audit SELECT * FROM staging";
+const f = "DELETE /* purge */ FROM ONLY logs";
+"#;
+        let got: Vec<(String, AccessVerb)> =
+            sites_of(src).into_iter().map(|(n, _, v)| (n, v)).collect();
+        let want: Vec<(String, AccessVerb)> = [
+            ("orders", Write),
+            ("carts", Write),
+            ("sessions", Write),
+            ("orders", Read),
+            ("users", Read),
+            ("audit", Write),
+            ("staging", Read),
+            ("logs", Write),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.to_string(), v))
+        .collect();
+        assert_eq!(got, want);
+        // Every site's offset is the name in the source.
+        for (name, at, _) in sites_of(src) {
+            assert_eq!(name, at);
+        }
+        // A quoted / schema-qualified / escaped name reads the same keyword.
+        assert_eq!(
+            sql_clause_verb("UPDATE \"app\".\"users\" SET x = 1", 14),
+            AccessVerb::Write
+        );
+        assert_eq!(
+            sql_clause_verb("SELECT 1 FROM [dbo].[Users]", 20),
+            AccessVerb::Read
+        );
+        assert_eq!(sql_clause_verb("users", 0), AccessVerb::Unknown);
+    }
+
+    #[test]
+    fn concatenated_statement_sites_map_to_their_literal() {
+        let src =
+            "q := \"SELECT o.id \" +\n\t\"FROM orders o \" +\n\t\"JOIN items i ON i.oid = o.id\"\n";
+        let got = sites_of(src);
+        assert_eq!(
+            got,
+            vec![
+                ("orders".to_string(), "orders".to_string(), AccessVerb::Read),
+                ("items".to_string(), "items".to_string(), AccessVerb::Read),
+            ]
+        );
+    }
+
+    #[test]
+    fn collection_call_verbs() {
+        use AccessVerb::{Read, Unknown, Write};
+        let src = r#"
+await db.collection('orders').find({ open: true }).toArray();
+await db.collection("orders")
+    .insertOne(order);
+_, err := client.Database("shop").Collection("events").InsertOne(ctx, ev)
+n, _ := client.Database("shop").Collection("events").CountDocuments(ctx, f)
+await db.GetCollection<Order>("carts").DeleteManyAsync(f);
+await db.collection('users').findOneAndUpdate({ id }, { $set: u });
+const handle = db.collection('audit');
+await fs.collection('rooms').doc(id).get();
+"#;
+        let got: Vec<(String, AccessVerb)> =
+            sites_of(src).into_iter().map(|(n, _, v)| (n, v)).collect();
+        let want: Vec<(String, AccessVerb)> = [
+            ("orders", Read),
+            ("orders", Write),
+            ("events", Write),
+            ("events", Read),
+            ("carts", Write),
+            ("users", Write),
+            ("audit", Unknown),
+            ("rooms", Unknown),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.to_string(), v))
+        .collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn cypher_label_verbs() {
+        use AccessVerb::{Read, Write};
+        let src = "q = \"MATCH (a:User) MERGE (a)-[:TAGGED]->(t:Tag {name: $n}) RETURN t\"\n\
+                   w = \"CREATE (o:Order {id: $id})\"\n";
+        let got: Vec<(String, AccessVerb)> =
+            sites_of(src).into_iter().map(|(n, _, v)| (n, v)).collect();
+        let want: Vec<(String, AccessVerb)> = [("User", Read), ("Tag", Write), ("Order", Write)]
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), v))
+            .collect();
+        assert_eq!(got, want);
+        for (name, at, _) in sites_of(src) {
+            assert_eq!(name, at, "the label's offset maps back through the pieces");
+        }
+    }
+
+    #[test]
+    fn declarations_are_declared_not_sites() {
+        let repo = RepoId(1);
+        let src = r#"
+from alembic import op
+
+class Order(Base):
+    __tablename__ = "orders"
+
+User = mongoose.model("User", userSchema)
+
+def upgrade():
+    op.create_table("invoices")
+
+def load(session):
+    return session.execute("SELECT * FROM orders")
+"#;
+        let (out, access) = extract_data_entity_access(src, module_id(repo), repo);
+        let name = |id: &NodeId| out.nav.name_by_id.get(id).cloned().unwrap_or_default();
+        let mut declared: Vec<String> = access.declared.iter().map(name).collect();
+        declared.sort();
+        assert_eq!(declared, ["User", "invoices", "orders"]);
+        let sites: Vec<String> = access.sites.iter().map(|s| name(&s.entity)).collect();
+        assert_eq!(sites, ["orders"]);
+        // The nodes and edges are extract_data_entity_nodes' own.
+        let plain = extract_data_entity_nodes(src, module_id(repo), repo);
+        assert_eq!(plain.edges, out.edges);
+        assert_eq!(plain.nodes.len(), out.nodes.len());
     }
 
     #[test]

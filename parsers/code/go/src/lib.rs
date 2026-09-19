@@ -216,8 +216,9 @@ struct Acc {
     /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
     /// (method, path) even if the same endpoint is called twice in a file.
     endpoint_seen: std::collections::HashSet<NodeId>,
-    /// Dedup for ACCESSES_DATA edges — one edge per (enclosing fn, DATA_ENTITY)
-    /// even if the same table is queried repeatedly inside the same function.
+    /// Dedup for GORM ACCESSES_DATA edges — one edge per (enclosing fn,
+    /// DATA_ENTITY) even if the same model is queried repeatedly inside the
+    /// same function.
     data_access_seen: std::collections::HashSet<(NodeId, NodeId)>,
     /// This file's MODULE id, so the DI detector can stamp `from_module`
     /// without threading it through `collect_calls_in` (the TypeScript
@@ -1073,12 +1074,10 @@ fn collect_calls_in(
             // Pattern A: outbound client HTTP call (`http.Get('http://…/x')`) →
             // ENDPOINT node so HttpStackResolver can pair it with a server ROUTE.
             try_detect_go_endpoint(child, src, from, repo, file_rel, acc);
-            // Data access: `db.Query("SELECT … FROM users")` → DATA_ENTITY node +
-            // ACCESSES_DATA edge anchored to the *enclosing* fn (`from`), not the
-            // module. The module-anchored edge is still emitted by the
-            // cross-cutting data-entities extractor; this adds the fine-grained
-            // fn→table attribution the DbResolver / call-site queries want.
-            try_detect_go_data_access(child, src, from, repo, acc);
+            // Raw SQL (`db.Query("SELECT … FROM users")`) is not read here:
+            // the cross-cutting data-entities extractor reads every SQL
+            // literal with LG.3b's rejects and the engine re-homes its edge
+            // to this function (LE.4a, `anchor::rehome_to_owner`).
             // GORM: `db.Model(&User{})` → the model-keyed entity,
             // `db.Table("x")` → the table-keyed one, from the same `from` (A13.12).
             try_detect_gorm_access(child, src, from, repo, acc);
@@ -1482,50 +1481,24 @@ fn emit_go_endpoint(
 }
 
 // ============================================================================
-// Data access (ACCESSES_DATA) — raw-SQL queries issued from a function body.
+// Data access (ACCESSES_DATA) — the GORM query sites below.
 // ============================================================================
 //
-// The cross-cutting `data_entities` extractor already scans the whole file and
-// mints one `DATA_ENTITY` node per table, anchoring an ACCESSES_DATA edge to the
-// *module*. That loses which function issued the query. Here we walk each fn/
-// method body (where the enclosing node id is known) and, for every string-
-// literal call argument that carries a SQL statement, emit an ACCESSES_DATA edge
-// from the enclosing fn to the table's DATA_ENTITY node.
+// Raw SQL has no scanner here (LE.4a). The cross-cutting `data_entities`
+// extractor reads every SQL-shaped string literal of the file (LG.3b: joined
+// across `+`, CTE names, SQL keywords, function FROMs and Go fmt messages
+// rejected) and the engine re-homes each ACCESSES_DATA edge from the module to
+// the innermost FUNCTION / METHOD whose span holds the statement, with the
+// ACCESS_MODE edge cell (`anchor::rehome_to_owner`). This parser's earlier
+// per-call-argument scan duplicated that without the rejects and minted
+// `sql:spaces` from `fmt.Errorf("delete from spaces key=%q: %w")`, CTE aliases
+// and `SET` from `DO UPDATE SET`.
 //
 // The DATA_ENTITY NodeId is built with the exact same qname shape the extractor
 // uses (`data_entity:sql:<table>`) so the two collapse onto one node at graph
-// build; only the edge anchor differs (fn vs module).
-//
-// Recognised shape: any call whose arguments contain a string literal with a
-// SQL statement signature — `db.Query("SELECT … FROM users")`,
-// `tx.ExecContext(ctx, "INSERT INTO orders …")`, `sqlx.Get(&u, `SELECT … `)`.
-// Table names come from `FROM` / `JOIN` / `INTO` / `UPDATE` clauses.
-
-/// Detect raw-SQL query calls and emit fn→table ACCESSES_DATA edges. No-op for
-/// calls whose arguments hold no SQL-shaped string literal.
-fn try_detect_go_data_access(
-    call: TsNode,
-    src: &[u8],
-    from: NodeId,
-    repo: RepoId,
-    acc: &mut Acc,
-) {
-    let Some(args) = call.child_by_field_name("arguments") else {
-        return;
-    };
-    let mut cursor = args.walk();
-    for arg in args.named_children(&mut cursor) {
-        let Some(sql) = string_literal_text(arg, src) else {
-            continue;
-        };
-        if !sql_has_context(&sql) {
-            continue;
-        }
-        for table in scan_sql_tables(&sql) {
-            emit_data_access(&table, from, repo, acc);
-        }
-    }
-}
+// build. When a function holds both a GORM site and a raw statement on one
+// table, the engine puts the mode on this parser's edge rather than adding a
+// second one.
 
 /// Emit (once per enclosing-fn × table) a DATA_ENTITY node + ACCESSES_DATA edge.
 /// The node mirrors the data-entities extractor so ids collapse at graph build.
@@ -1769,73 +1742,6 @@ fn has_gorm_tag(node: TsNode, src: &[u8]) -> bool {
     }
     let mut cursor = node.walk();
     node.named_children(&mut cursor).any(|c| has_gorm_tag(c, src))
-}
-
-/// True when `s` contains an unambiguous SQL statement signature. Mirrors the
-/// data-entities extractor's gate so a plain string that merely uses the word
-/// `from`/`update` isn't mistaken for SQL.
-fn sql_has_context(s: &str) -> bool {
-    let lower = s.to_ascii_lowercase();
-    const SIG: &[&str] = &[
-        "select ",
-        "insert into",
-        "delete from",
-        "create table",
-        "alter table",
-        "truncate table",
-        "merge into",
-    ];
-    if SIG.iter().any(|sig| lower.contains(sig)) {
-        return true;
-    }
-    lower.contains("update ") && lower.contains(" set ")
-}
-
-/// Pull table names from `FROM`/`JOIN`/`INTO`/`UPDATE` clauses in a SQL string.
-/// Case-insensitive on the keyword, identifier-shaped on the name; strips a
-/// schema prefix (`public.users` → `users`) and rejects SQL keywords.
-fn scan_sql_tables(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut out = Vec::new();
-    for keyword in ["FROM", "JOIN", "INTO", "UPDATE"] {
-        let kw = keyword.as_bytes();
-        let mut i = 0;
-        while i + kw.len() <= bytes.len() {
-            let matches_kw = (0..kw.len()).all(|j| bytes[i + j].eq_ignore_ascii_case(&kw[j]));
-            if !matches_kw {
-                i += 1;
-                continue;
-            }
-            let prev_ok = i == 0 || !is_sql_word_byte(bytes[i - 1]);
-            let after = i + kw.len();
-            let next_ok = after < bytes.len()
-                && matches!(bytes[after], b' ' | b'\t' | b'\n' | b'\r');
-            if !(prev_ok && next_ok) {
-                i += 1;
-                continue;
-            }
-            // Skip whitespace to the identifier.
-            let mut k = after;
-            while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
-                k += 1;
-            }
-            let start = k;
-            while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_' || bytes[k] == b'.') {
-                k += 1;
-            }
-            if k > start {
-                if let Some(name) = canonical_sql_table(&sql[start..k]) {
-                    out.push(name);
-                }
-            }
-            i = after;
-        }
-    }
-    out
-}
-
-fn is_sql_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 /// Normalise a captured SQL identifier: drop the schema prefix, require an
@@ -2960,83 +2866,29 @@ var Registry = newRegistry()
     }
 
     // ========================================================================
-    // Data access (ACCESSES_DATA) — fn → DATA_ENTITY attribution
+    // Data access (ACCESSES_DATA) — raw SQL belongs to the extractor (LE.4a)
     // ========================================================================
 
-    const DB_QUERY: &str = r#"package main
+    #[test]
+    fn raw_sql_is_left_to_the_data_entities_extractor() {
+        // LE.4a: the parser no longer scans call-argument SQL. The
+        // cross-cutting extractor reads it (with LG.3b's rejects) and the
+        // engine re-homes its edge to getUsers; engine/tests/access_mode.rs
+        // covers the whole path.
+        const SRC: &str = r#"package main
 
-import "database/sql"
+import (
+    "database/sql"
+    "fmt"
+)
 
 func getUsers(db *sql.DB) error {
     rows, err := db.Query("SELECT id, name FROM users WHERE active = true")
     if err != nil {
-        return err
+        return fmt.Errorf("delete from spaces key=%q: %w", "k", err)
     }
     defer rows.Close()
     return nil
-}
-"#;
-
-    #[test]
-    fn accesses_data_edge_anchored_to_enclosing_function() {
-        let parse = parse_file(DB_QUERY, "main.go", "main", "", repo()).unwrap();
-
-        let get_users =
-            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "main::getUsers");
-        let users = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::DATA_ENTITY,
-            "data_entity:sql:users",
-        );
-
-        // DATA_ENTITY node minted with the extractor-compatible qname.
-        assert!(parse.nodes.iter().any(|n| n.id == users));
-
-        // ACCESSES_DATA edge is anchored to getUsers, NOT the module.
-        assert!(has_edge(&parse, get_users, users, edge_category::ACCESSES_DATA));
-
-        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "main");
-        assert!(
-            !has_edge(&parse, module_id, users, edge_category::ACCESSES_DATA),
-            "parser must not anchor ACCESSES_DATA to the module"
-        );
-    }
-
-    #[test]
-    fn accesses_data_dedupes_repeated_table_in_same_fn() {
-        const SRC: &str = r#"package main
-
-func touch(db *DB) {
-    db.Query("SELECT * FROM users")
-    db.Exec("INSERT INTO users (name) VALUES (?)")
-}
-"#;
-        let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
-        let touch = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "main::touch");
-        let users = NodeId::from_parts(
-            GRAPH_TYPE,
-            repo(),
-            node_kind::DATA_ENTITY,
-            "data_entity:sql:users",
-        );
-        let edges = parse
-            .edges
-            .iter()
-            .filter(|e| {
-                e.from == touch && e.to == users && e.category == edge_category::ACCESSES_DATA
-            })
-            .count();
-        assert_eq!(edges, 1, "one edge per (fn, table) despite two queries");
-    }
-
-    #[test]
-    fn non_sql_string_arg_does_not_emit_data_access() {
-        // A string that merely contains the word `from` is not SQL.
-        const SRC: &str = r#"package main
-
-func log(l *Logger) {
-    l.Info("received request from client")
 }
 "#;
         let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
@@ -3045,7 +2897,15 @@ func log(l *Logger) {
                 .edges
                 .iter()
                 .any(|e| e.category == edge_category::ACCESSES_DATA),
-            "non-SQL string must not mint ACCESSES_DATA"
+            "raw SQL mints no parser-level ACCESSES_DATA"
+        );
+        assert!(
+            !parse
+                .nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::DATA_ENTITY),
+            "raw SQL mints no parser-level DATA_ENTITY"
         );
     }
 
