@@ -2,4 +2,5 @@
 cmd glia inspect
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg path pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=PATH global=false hidden=false

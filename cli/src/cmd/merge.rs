@@ -6,14 +6,18 @@
 //! (LC.10b, which prints the `[merge] members=...` marker) without their
 //! sources checked out; `--layout DIR` writes the merged graph as a layout.
 //! Positional REPOS alone keep the source merge exactly as before.
+//!
+//! `glia --no-overlay merge` (LF.2b) builds the source merge without the
+//! overlay; a layout merge refuses it (exit 2): its members were built with
+//! their overlay, and no filter over a loaded layout can undo one.
 
 use std::path::{Path, PathBuf};
 
 use repo_graph_engine::merge::{MergeMember, merge_layouts, persist_merge, read_workspace};
 use repo_graph_engine::persist::persist_result;
-use repo_graph_engine::{GenerateResult, generate_many, generate_many_incremental};
+use repo_graph_engine::{GenerateResult, generate_many_opts};
 
-use crate::common::{print_json, print_summary_table, write_json_to};
+use crate::common::{build_options, print_json, print_summary_table, write_json_to};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -61,6 +65,13 @@ pub(crate) fn run(args: Args) -> i32 {
         );
         return 1;
     }
+    if !build_options().overlay {
+        eprintln!(
+            "error: --no-overlay applies to a source merge only; a layout merge (--gmap / \
+             --workspace) reads layouts built with their overlay"
+        );
+        return 2;
+    }
     run_layouts(&args)
 }
 
@@ -73,11 +84,7 @@ fn run_sources(args: &Args) -> i32 {
         eprintln!("error: at least one repo path required");
         return 1;
     }
-    let built = if args.incremental {
-        generate_many_incremental(repos)
-    } else {
-        generate_many(repos)
-    };
+    let built = generate_many_opts(repos, args.incremental, &build_options());
     let result = match built {
         Ok(r) => r,
         Err(e) => {

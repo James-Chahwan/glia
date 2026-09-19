@@ -1,0 +1,15 @@
+version = 1
+
+# The URL is assembled in buildUrl(), so no extractor pairs this fetch with
+# its handler: declare the edge.
+[[edge]]
+from = "src::report::loadReport"
+to = "report::build_report"
+category = "CALLS"
+note = "URL built in buildUrl()"
+
+# Structural categories are not declarable: the loader drops this stanza.
+[[edge]]
+from = "src::report::loadReport"
+to = "report::helper"
+category = "DEFINES"

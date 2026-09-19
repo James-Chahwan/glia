@@ -7,7 +7,9 @@
 //! layout writer `persist_graph` (LC.9), so a saved-then-loaded graph carries
 //! the same labels, roots, parse errors and properties as the fresh one. These
 //! two methods are the only way Python writes a layout: `generate` /
-//! `generate_many` only build (LD.2).
+//! `generate_many` only build (LD.2). A graph built with `overlay=False`
+//! (LF.2b) is extraction-only: `save_to_default` refuses it, so the repo's
+//! default layout dir only ever holds the overlay-applied graph.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -36,18 +38,41 @@ pub(crate) struct PyGraph {
     /// against the layout dir on a load (LC.7). Recorded relative to the
     /// layout dir by `save_to` / `save_to_default`.
     pub(crate) repo_roots: BTreeMap<u64, String>,
+    /// Whether the `.glia/overlay.toml` overlay sections applied (LF.2b):
+    /// false only for a `generate(overlay=False)` build. A loaded layout is
+    /// taken as overlay-applied: the writers keep an extraction-only graph out
+    /// of the default dir.
+    pub(crate) overlay_applied: bool,
+}
+
+/// Why `save_to_default` refuses a graph, or `None` when it may write it: an
+/// extraction-only graph (`overlay_applied == false`) never goes to the
+/// default layout dir, whose graph the MCP warm path serves without
+/// rebuilding. pyo3-free so a unit test covers it.
+pub(crate) fn default_dir_refusal(overlay_applied: bool) -> Option<&'static str> {
+    (!overlay_applied).then_some(
+        "this graph was built with overlay=False; the default gmap dir holds the \
+         overlay-applied graph (use save_to(dir) for an extraction-only graph)",
+    )
 }
 
 impl PyGraph {
     /// The one constructor: every field from an engine result, fresh or
-    /// loaded (`repo_graph_engine::persist::load_layout`).
+    /// loaded (`repo_graph_engine::persist::load_layout`), overlay applied.
     pub(crate) fn from_result(r: GenerateResult) -> Self {
         Self {
             merged: r.merged,
             parse_errors: r.parse_errors,
             repo_labels: r.repo_labels,
             repo_roots: r.repo_roots,
+            overlay_applied: true,
         }
+    }
+
+    /// `self` marked with whether its build applied the overlay.
+    pub(crate) fn with_overlay_applied(mut self, applied: bool) -> Self {
+        self.overlay_applied = applied;
+        self
     }
 
     /// Persist this graph with its labels, roots and parse errors to an
@@ -69,6 +94,14 @@ impl PyGraph {
     #[getter]
     fn parse_errors(&self) -> Vec<String> {
         self.parse_errors.clone()
+    }
+
+    /// False for a graph built with `generate(..., overlay=False)` /
+    /// `generate_many(..., overlay=False)`: the extraction-only graph, which
+    /// `save_to_default` refuses. True otherwise, a loaded layout included.
+    #[getter]
+    fn overlay_applied(&self) -> bool {
+        self.overlay_applied
     }
 
     fn node_count(&self) -> usize {
@@ -126,9 +159,13 @@ impl PyGraph {
     /// hooks: the dir's self-ignoring `.gitignore`, orphan-shard cleanup and
     /// the legacy `.ai/repo-graph` notice included. `load_from_gmap` finds it
     /// there. `generate` writes no layout (LD.2), so a caller that wants the
-    /// next session to load instead of rebuild calls this after it.
+    /// next session to load instead of rebuild calls this after it. Raises
+    /// ValueError on a graph built with `overlay=False` (LF.2b).
     fn save_to_default(&self, repo_path: &str) -> PyResult<()> {
         let dir = default_layout_dir(Path::new(repo_path));
+        if let Some(why) = default_dir_refusal(self.overlay_applied) {
+            return Err(PyValueError::new_err(format!("save_to_default({}): {why}", dir.display())));
+        }
         persist_graph(
             &self.merged,
             &self.repo_labels,
@@ -138,5 +175,19 @@ impl PyGraph {
             "py",
         )
         .map_err(|e| PyValueError::new_err(format!("save_to_default({}): {e}", dir.display())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_dir_refusal;
+
+    /// LF.2b persist guard: only an overlay-applied graph may go to the
+    /// default layout dir.
+    #[test]
+    fn default_dir_takes_only_overlay_applied_graphs() {
+        assert_eq!(default_dir_refusal(true), None);
+        let why = default_dir_refusal(false).expect("an overlay=False graph is refused");
+        assert!(why.contains("overlay=False") && why.contains("save_to(dir)"), "{why}");
     }
 }

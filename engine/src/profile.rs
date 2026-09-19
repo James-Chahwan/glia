@@ -9,14 +9,17 @@
 //! assembled [`MergedGraph`], in run order: the cross-graph resolvers
 //! (`Resolve`), the post-passes of [`crate::passes`] (`Post`), then the
 //! evidence fill and the determinism sort (`Finalize`). Every build tail —
-//! `generate_one*`, `generate_many*` and a layout merge ([`crate::merge`]) —
-//! is one [`run_code_passes`] call. A new resolver or build pass is one
+//! `generate_one*` and `generate_many*` ([`run_code_passes_with`], given the
+//! build's [`CodeBuildCtx`]) and a layout merge ([`crate::merge`],
+//! [`run_code_passes`]) — is one call. A new resolver or build pass is one
 //! [`PassSpec`] here, never a new call in `build/`.
 //!
-//! The build context is `()`: no pass takes an argument beyond the graph yet.
-//! The first stage that does (LF.1a's external cells, LF.2b's external edges,
-//! LF.2d's mounts) turns it into a `CodeBuildCtx` struct carrying exactly its
-//! arguments.
+//! The build context is [`CodeBuildCtx`] (LF.2b): every repo's external
+//! inputs (`.glia/overlay.toml`, loaded once per repo right after its walk)
+//! and the build's `overlay` switch. Its first reader is the `external_edges`
+//! pass, the first `Post` spec: the overlay `[[edge]]` stanzas land after the
+//! resolvers and before every post-pass. A later stage that needs another
+//! argument (LF.2d's mounts) adds a field.
 //!
 //! LD.14a: [`CODE_PROFILE`] is the code domain's whole
 //! [`DomainProfile`]: the data tables (`code_domain::profile::CODE_TABLES` —
@@ -44,7 +47,31 @@ use repo_graph_graph::{
     SharedSchemaResolver, WebSocketStackResolver,
 };
 
+use crate::build::BuildOptions;
+use crate::external::{RepoInputs, apply_external_edges};
 use crate::passes;
+
+/// What every code pass receives besides the graph (LF.2b): each built repo's
+/// external inputs, in argument order, and whether the overlay applies
+/// ([`BuildOptions::overlay`]). Made by the build only: its fields are
+/// crate-private. A layout merge ([`crate::merge`]) runs with no inputs: the
+/// overlay edges its members were built with are carried as member edges.
+pub struct CodeBuildCtx {
+    pub(crate) inputs: Vec<RepoInputs>,
+    pub(crate) overlay: bool,
+}
+
+impl CodeBuildCtx {
+    /// A build's context: its repos' inputs and options.
+    pub(crate) fn new(inputs: Vec<RepoInputs>, opts: &BuildOptions) -> Self {
+        Self { inputs, overlay: opts.overlay }
+    }
+
+    /// No external inputs: every external stage is a no-op.
+    pub(crate) fn empty() -> Self {
+        Self { inputs: Vec::new(), overlay: true }
+    }
+}
 
 /// Run one cross-graph resolver. Resolvers only append to `cross_edges`, so
 /// the range it appended is stamped with `emitter` (`resolver:<pass name>`,
@@ -74,7 +101,7 @@ macro_rules! resolver {
 
 /// Every build pass of the code domain. Resolvers run in the order their
 /// cross edges land in (before the Finalize sort fixes the stored order).
-pub(crate) const CODE_PASSES: PassRegistry<MergedGraph> = PassRegistry::new(&[
+pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegistry::new(&[
     resolver!("http", HttpStackResolver),
     resolver!("grpc", GrpcStackResolver),
     resolver!("rpc", RpcStackResolver),
@@ -91,6 +118,17 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph> = PassRegistry::new(&[
     resolver!("config", ConfigResolver),
     resolver!("iac", IacResolver),
     resolver!("package", PackageResolver),
+    // LF.2b: the external edges (`.glia/overlay.toml` `[[edge]]` stanzas),
+    // first of the post-passes so every one of them sees them. They carry
+    // their own EVIDENCE (emitter `overlay:edge`), which the Finalize fill
+    // leaves alone and the sort orders.
+    PassSpec {
+        name: "external_edges",
+        stage: Stage::Post,
+        after: &[],
+        populates: &[],
+        run: |m, ctx| apply_external_edges(m, &ctx.inputs, ctx.overlay),
+    },
     PassSpec {
         name: "downgrade_test_paths",
         stage: Stage::Post,
@@ -103,7 +141,7 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph> = PassRegistry::new(&[
     PassSpec {
         name: "demote_unmatched_http_nodes",
         stage: Stage::Post,
-        after: &["http", "downgrade_test_paths"],
+        after: &["http", "external_edges", "downgrade_test_paths"],
         populates: &[],
         run: |m, _| passes::demote_unmatched_http_nodes(m),
     },
@@ -165,13 +203,14 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph> = PassRegistry::new(&[
 /// The code domain's profile: [`CODE_TABLES`](repo_graph_code_domain::profile::CODE_TABLES)
 /// plus [`CODE_PASSES`]. A `static` (a `const` would copy it at every use);
 /// its initializer reads only consts.
-pub static CODE_PROFILE: DomainProfile<MergedGraph> = DomainProfile {
+pub static CODE_PROFILE: DomainProfile<MergedGraph, CodeBuildCtx> = DomainProfile {
     tables: repo_graph_code_domain::profile::CODE_TABLES,
     passes: CODE_PASSES,
 };
 
 /// Run [`CODE_PASSES`] over an assembled graph, through [`CODE_PROFILE`]: the
-/// whole build tail.
+/// whole build tail, given the build's context (its repos' external inputs
+/// and options).
 ///
 /// Markers, once per call: LD.13's fired_on line, printed by
 /// `DomainProfile::run_passes` with `domain=` read from the tables'
@@ -179,9 +218,15 @@ pub static CODE_PROFILE: DomainProfile<MergedGraph> = DomainProfile {
 ///   `[passes] domain=code resolve=<r> post=<p> finalize=<f>`
 /// (grep token `[passes] domain=code`), then LC.2's
 /// `[edge-cells] intra=<n> cross=<c> with_cells=<k>`.
-pub(crate) fn run_code_passes(merged: &mut MergedGraph) {
-    CODE_PROFILE.run_passes(merged, &());
+pub(crate) fn run_code_passes_with(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
+    CODE_PROFILE.run_passes(merged, ctx);
     passes::edge_cells_marker(merged);
+}
+
+/// [`run_code_passes_with`] and no external inputs: the tail of a layout
+/// merge, whose members' external edges are already in their layouts.
+pub(crate) fn run_code_passes(merged: &mut MergedGraph) {
+    run_code_passes_with(merged, &CodeBuildCtx::empty());
 }
 
 #[cfg(test)]
@@ -193,7 +238,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 23] = [
+    const HEAD_ORDER: [&str; 24] = [
         "http",
         "grpc",
         "rpc",
@@ -209,6 +254,7 @@ mod tests {
         "config",
         "iac",
         "package",
+        "external_edges",
         "downgrade_test_paths",
         "demote_unmatched_http_nodes",
         "emit_tests_edges",
@@ -221,7 +267,8 @@ mod tests {
 
     /// The registry reproduces the pre-LD.13 hardcoded tail exactly:
     /// `run_all_resolvers` (15), `post_passes` (6), then fill-then-sort as
-    /// the last two steps (LC.3a).
+    /// the last two steps (LC.3a); LF.2b's external edges are the first
+    /// post-pass.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -231,7 +278,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (15, 6, 2)
+            (15, 7, 2)
         );
     }
 
@@ -473,7 +520,7 @@ mod tests {
                 .merged;
             for spec in CODE_PASSES.order() {
                 let before = node_cells(&merged);
-                (spec.run)(&mut merged, &());
+                (spec.run)(&mut merged, &CodeBuildCtx::empty());
                 let after = node_cells(&merged);
                 let mut types = BTreeSet::new();
                 for (gi, g) in after.iter().enumerate() {

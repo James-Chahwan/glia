@@ -1,4 +1,5 @@
 # CLI surface of `glia` global options. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
 cmd glia subcommand_required
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg version pos=- long=version short=V required=false num_args=0 action=Version default=- value_names=- global=false hidden=false

@@ -3,11 +3,18 @@
 //! the engine's single writer `persist::persist_result` (LC.9): the directory
 //! pyo3's `default_gmap_dir`, `load_from_gmap` and the MCP read, refreshed by
 //! the `install-hooks` hooks (`glia build .`).
+//!
+//! `glia --no-overlay build` (LF.2b) needs `--out` and exits 2 without it:
+//! the default layout dir always holds the overlay-applied graph, which the
+//! MCP warm path loads without rebuilding, so an extraction-only graph written
+//! there would be served silently.
 
 use std::path::PathBuf;
 
+use repo_graph_engine::generate_one_opts;
 use repo_graph_engine::persist::{default_layout_dir, persist_result};
-use repo_graph_engine::{generate_one, generate_one_incremental};
+
+use crate::common::build_options;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -24,16 +31,19 @@ pub(crate) struct Args {
 
 pub(crate) fn run(args: Args) -> i32 {
     let repo = args.repo.as_str();
-    let built = if args.no_incremental {
+    let opts = build_options();
+    if !opts.overlay && args.out.is_none() {
+        eprintln!("error: --no-overlay needs --out; the default gmap dir holds the overlay-applied graph");
+        return 2;
+    }
+    if args.no_incremental {
         // An explicit clean build also discards the sidecar — otherwise the
         // next default-on build would reuse the cache the user was escaping.
         if let Err(e) = repo_graph_engine::ParseCache::purge(repo) {
             eprintln!("warning: could not remove parse cache: {e}");
         }
-        generate_one(repo)
-    } else {
-        generate_one_incremental(repo)
-    };
+    }
+    let built = generate_one_opts(repo, !args.no_incremental, &opts);
     let result = match built {
         Ok(r) => r,
         Err(e) => {

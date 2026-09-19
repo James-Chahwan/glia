@@ -1,0 +1,12 @@
+{
+  "framework": "xcut-overlay-edges",
+  "language": "typescript",
+  "dirs": ["web", "api"],
+  "note": "LF.2b: an [[edge]] stanza in the client repo's .glia/overlay.toml pairs a fetch whose URL is built in a helper to its server handler across repos (a Weak CALLS edge, ORIGIN overlay:llm, evidence .glia/overlay.toml:<stanza line>); a DEFINES stanza is rejected by the loader (structural categories are not overlay-able). Baseline 2026-09-19 (HEAD 1e82ac3): [[edge]] stanzas are loaded but never applied, so the declared CALLS edge is missing.",
+  "expect_edges": [
+    {"from": "src::report::loadReport", "to": "report::build_report", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"from": "src::report::loadReport", "to": "report::helper", "category": "DEFINES"}
+  ]
+}

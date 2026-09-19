@@ -1,14 +1,15 @@
-//! Helpers shared by more than one command: graph generation for the
-//! `--with` commands, the summary table and JSON dumps (`analyze`, `merge`),
-//! node lookups and pretty names, and `ImpactDirection` (`impact`,
-//! `blast-radius`).
+//! Helpers shared by more than one command: the build options of the
+//! global flags, graph generation for the `--with` commands, the summary
+//! table and JSON dumps (`analyze`, `merge`), node lookups and pretty names,
+//! and `ImpactDirection` (`impact`, `blast-radius`).
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use clap::ValueEnum;
 use repo_graph_code_domain::{edge_category, node_kind};
 use repo_graph_core::{NodeId, NodeKindId};
-use repo_graph_engine::{GenerateResult, generate_many, generate_one};
+use repo_graph_engine::{BuildOptions, GenerateResult, generate_many_opts, generate_one_opts};
 use repo_graph_graph::MergedGraph;
 use repo_graph_graph::roles::roles_in;
 
@@ -22,15 +23,34 @@ pub(crate) enum ImpactDirection {
     Both,
 }
 
+/// The build options the global flags ask for (`--no-overlay`), set once by
+/// `main` before any command runs. A process of the CLI is one invocation, so
+/// a set-once value is the flag as parsed; every build of a command reads it
+/// through [`build_options`].
+static BUILD_OPTIONS: OnceLock<BuildOptions> = OnceLock::new();
+
+/// Record the global build options (`main`, once, before dispatch).
+pub(crate) fn set_build_options(opts: BuildOptions) {
+    let _ = BUILD_OPTIONS.set(opts);
+}
+
+/// The build options of this invocation; the defaults (overlay applied) when
+/// `main` set none (a unit test).
+pub(crate) fn build_options() -> BuildOptions {
+    BUILD_OPTIONS.get().cloned().unwrap_or_default()
+}
+
 /// Build a graph from one repo, or merge several (`--with`) so cross-service
-/// resolvers fire across the boundary — shared by the P2/P3 commands.
+/// resolvers fire across the boundary — shared by the P2/P3 commands. A
+/// clean build (no parse cache) with this invocation's [`build_options`].
 pub(crate) fn generate_for(repo: &str, with: &[String]) -> Result<GenerateResult, String> {
+    let opts = build_options();
     if with.is_empty() {
-        generate_one(repo)
+        generate_one_opts(repo, false, &opts)
     } else {
         let mut repos = vec![repo.to_string()];
         repos.extend(with.iter().cloned());
-        generate_many(&repos)
+        generate_many_opts(&repos, false, &opts)
     }
 }
 

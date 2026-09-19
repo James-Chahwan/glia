@@ -4,5 +4,6 @@ cmd glia arch
   arg include_shared pos=- long=include-shared short=- required=false num_args=0 action=SetTrue default=false value_names=INCLUDE_SHARED global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
   arg mermaid pos=- long=mermaid short=- required=false num_args=0 action=SetTrue default=false value_names=MERMAID global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg with pos=- long=with short=- required=false num_args=1 action=Append default=- value_names=WITH global=false hidden=false

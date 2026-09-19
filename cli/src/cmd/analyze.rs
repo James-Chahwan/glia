@@ -2,10 +2,10 @@
 //! cross-graph edges, the service-graph Mermaid, or the full JSON dump.
 
 use clap::ValueEnum;
-use repo_graph_engine::generate_one;
+use repo_graph_engine::generate_one_opts;
 
 use crate::cmd::arch::{drop_non_flow_links, print_service_mermaid};
-use crate::common::{print_json, print_summary_table};
+use crate::common::{build_options, print_json, print_summary_table};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -29,7 +29,7 @@ pub(crate) enum AnalyzeFormat {
 pub(crate) fn run(args: Args) -> i32 {
     let repo = args.repo.as_str();
     let format = args.format;
-    let result = match generate_one(repo) {
+    let result = match generate_one_opts(repo, false, &build_options()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");

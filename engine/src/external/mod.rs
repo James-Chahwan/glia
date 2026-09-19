@@ -9,8 +9,11 @@
 //! directory. Crate-private: cross-module items are `pub(crate)`.
 //!
 //! Per repo, a build makes one [`RepoInputs`] right after the walk (before
-//! any graph is built, so the build stages can read the overlay) and, once
-//! the code passes ran, hands every repo's inputs to [`apply_external_cells`].
+//! any graph is built, so the build stages can read the overlay). The code
+//! passes receive every repo's inputs in the build context
+//! (`profile::CodeBuildCtx`): their first `Post` pass is
+//! [`apply_external_edges`] (LF.2b). Once the passes ran, the build hands the
+//! same inputs to [`apply_external_cells`].
 //! `.glia/overlay.toml` is loaded ONCE here, through LF.2a's loader; the walk
 //! and the store's stale scan read only its `[walk]` / `[[project]]`
 //! sections, through `code_domain::walk_gating` (LF.3a).
@@ -19,9 +22,13 @@
 //! - `[overlay] loaded .glia/overlay.toml repo=<label> version=<v> (walk=<n> project=<n> ... note=<n>) errors=<e>`
 //!   plus one `[overlay] error: <loader error>` line per error;
 //! - `[cells] sidecar repo=<label> rows=<r> bound=<b> rekeyed=<k> ambiguous=<a> orphaned=<o> rejected=<x> (CONSTRAINT=<n> DECISION=<n> CONV=<n> VECTOR=<n>)`
-//!   (see [`cells`]).
+//!   (see [`cells`]);
+//! - `[overlay] edges repo=<label> declared=<d> applied=<a> redundant=<r> orphaned=<o> rejected=<x> (llm=<l> human=<h>)`
+//!   (see [`overlay`]), or, on a build without the overlay,
+//!   `[overlay] disabled (--no-overlay) repo=<label>`.
 
 mod cells;
+mod overlay;
 
 use std::path::PathBuf;
 
@@ -70,6 +77,34 @@ pub(crate) fn repo_inputs(repo: RepoId, root: PathBuf, label: String) -> RepoInp
     let inputs = RepoInputs { repo, root, label, config };
     inputs.report_overlay();
     inputs
+}
+
+/// Apply every repo's external EDGES: the first `Post` pass of
+/// `profile::CODE_PASSES`, so they land after the cross-graph resolvers and
+/// before every post-pass (the HTTP demotion sees an overlay HTTP_CALLS edge
+/// as a pairing), and the Finalize fill-then-sort locates and orders them.
+///
+/// Per input in argument order and, within a repo, the stages in a FIXED
+/// order: the overlay `[[edge]]` stanzas (LF.2b) first; LF.5b's CO_CHANGES
+/// stage appends after it. Only the OVERLAY stage is switched by `overlay`
+/// (`BuildOptions::overlay`, the CLI's `--no-overlay`, pyo3's
+/// `overlay=False`): without it, a repo whose file has an overlay section
+/// prints `[overlay] disabled (--no-overlay) repo=<label>` and that stage is
+/// skipped, while fact inputs (history) still run. User-config and declared
+/// sections are never read here, so the switch cannot touch them.
+pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInputs], overlay: bool) {
+    let mut stage = overlay::EdgeStage::default();
+    for input in inputs {
+        match &input.config {
+            Some(cfg) if overlay => {
+                overlay::apply_overlay_edges(merged, input, cfg, &mut stage);
+            }
+            Some(cfg) if !cfg.is_overlay_empty() => {
+                eprintln!("[overlay] disabled (--no-overlay) repo={}", input.label);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Apply every repo's external node cells, per input in argument order and,

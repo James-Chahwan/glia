@@ -2,6 +2,7 @@
 cmd glia install-hooks
   arg command pos=- long=command short=- required=false num_args=1 action=Set default=- value_names=COMMAND global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg pair pos=- long=pair short=- required=false num_args=1 action=Set default=- value_names=PAIR global=false hidden=false
   arg repo pos=1 long=- short=- required=false num_args=1 action=Set default=. value_names=REPO global=false hidden=false
   arg uninstall pos=- long=uninstall short=- required=false num_args=0 action=SetTrue default=false value_names=UNINSTALL global=false hidden=false

@@ -4,6 +4,7 @@ cmd glia merge
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg incremental pos=- long=incremental short=- required=false num_args=0 action=SetTrue default=false value_names=INCREMENTAL global=false hidden=false
   arg layout pos=- long=layout short=- required=false num_args=1 action=Set default=- value_names=DIR global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg out pos=- long=out short=- required=false num_args=1 action=Set default=- value_names=OUT global=false hidden=false
   arg repos pos=1 long=- short=- required=false num_args=1.. action=Append default=- value_names=REPOS global=false hidden=false
   arg workspace pos=- long=workspace short=- required=false num_args=1 action=Set default=- value_names=FILE global=false hidden=false

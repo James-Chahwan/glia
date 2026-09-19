@@ -2,10 +2,10 @@
 //! get hit by, over every edge category, as depth-tagged tables.
 
 use repo_graph_core::NodeId;
-use repo_graph_engine::generate_one;
+use repo_graph_engine::generate_one_opts;
 use repo_graph_graph::MergedGraph;
 
-use crate::common::{ImpactDirection, all_edges, edge_category_name, lookup_node_info};
+use crate::common::{ImpactDirection, all_edges, build_options, edge_category_name, lookup_node_info};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -25,7 +25,7 @@ pub(crate) fn run(args: Args) -> i32 {
     let repo = args.repo.as_str();
     let qname = args.qname.as_str();
     let (direction, depth) = (args.direction, args.depth);
-    let result = match generate_one(repo) {
+    let result = match generate_one_opts(repo, false, &build_options()) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");

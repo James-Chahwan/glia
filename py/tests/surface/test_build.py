@@ -111,10 +111,11 @@ class Checks:
 
 def main() -> int:
     c = Checks("build")
-    c.check("generate signature", rg.generate.__text_signature__ == "(repo_path, incremental=False)",
+    c.check("generate signature",
+            rg.generate.__text_signature__ == "(repo_path, incremental=False, overlay=True)",
             rg.generate.__text_signature__)
     c.check("generate_many signature",
-            rg.generate_many.__text_signature__ == "(repo_paths, incremental=False)",
+            rg.generate_many.__text_signature__ == "(repo_paths, incremental=False, overlay=True)",
             rg.generate_many.__text_signature__)
     c.check("purge_parse_cache exists", hasattr(rg, "purge_parse_cache"))
 
@@ -144,6 +145,27 @@ def main() -> int:
         c.check("purge_parse_cache deletes it", not cache.exists())
         rg.purge_parse_cache(repo)  # a missing cache is not an error
         c.check("purge twice is fine", not cache.exists())
+
+        # LF.2b: overlay=False is the extraction-only build. It is marked,
+        # save_to_default refuses it and save_to(dir) takes it; the default
+        # build is overlay-applied and may go to the default dir.
+        c.check("default build is overlay-applied", g.overlay_applied is True, g.overlay_applied)
+        bare, err = stderr_of(lambda: rg.generate(repo, overlay=False))
+        c.check("overlay=False marker",
+                "[overlay] disabled (overlay=False): not persisting to the default gmap dir" in err,
+                err[-400:])
+        c.check("overlay=False graph is marked", bare.overlay_applied is False, bare.overlay_applied)
+        c.check("overlay=False builds the same graph without an overlay file",
+                bare.node_count() == g.node_count(), (bare.node_count(), g.node_count()))
+        c.raises("save_to_default refuses an overlay=False graph", ValueError,
+                 lambda: bare.save_to_default(repo), "overlay=False")
+        c.check("the refusal wrote nothing", not os.path.exists(rg.default_gmap_dir(repo)))
+        out = os.path.join(tmp, "bare-layout")
+        bare.save_to(out)
+        c.check("save_to(dir) takes an overlay=False graph",
+                os.path.exists(os.path.join(out, "manifest.json")))
+        c.check("generate_many(overlay=False) is marked",
+                rg.generate_many([repo], overlay=False).overlay_applied is False)
 
         c.raises("generate on a missing dir", ValueError,
                  lambda: rg.generate(os.path.join(tmp, "missing")))

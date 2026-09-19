@@ -11,12 +11,19 @@
 //!   client / server needle passes.
 //! - [`lang_build`] — the deterministic per-language `build_*` dispatch.
 //!
-//! The build tail (cross-graph resolvers, post-passes, evidence fill, the
-//! determinism sort) is the code domain's pass registry,
+//! The build tail (cross-graph resolvers, the external edges, post-passes,
+//! evidence fill, the determinism sort) is the code domain's pass registry,
 //! [`crate::profile::CODE_PASSES`], run by one
-//! [`crate::profile::run_code_passes`] call (LD.13). After it, the external
-//! node-cell stage ([`crate::external::apply_external_cells`], LF.1a) applies
-//! each repo's `.glia` inputs, loaded once per repo right after its walk.
+//! [`crate::profile::run_code_passes_with`] call (LD.13) given the build's
+//! [`CodeBuildCtx`]: each repo's `.glia` inputs, loaded once per repo right
+//! after its walk, and the [`BuildOptions`]. After it, the external node-cell
+//! stage ([`crate::external::apply_external_cells`], LF.1a) applies the same
+//! inputs.
+//!
+//! [`BuildOptions`] is how a caller switches a build (LF.2b): today only
+//! `overlay`, whether the `.glia/overlay.toml` overlay sections apply. It is a
+//! build option, not an env var, because pyo3 `generate()` may run on several
+//! Python threads at once.
 
 mod assemble;
 mod grafts;
@@ -32,7 +39,7 @@ use repo_graph_graph::MergedGraph;
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
 use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
-use crate::profile::run_code_passes;
+use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
 use assemble::build_graphs_for_repo;
@@ -74,6 +81,39 @@ pub struct GenerateResult {
     pub repo_roots: std::collections::BTreeMap<u64, String>,
 }
 
+/// How one build runs (LF.2b). `#[non_exhaustive]`: outside this crate it is
+/// made by [`BuildOptions::default`] and its `with_*` setters, so a new option
+/// is not a break.
+///
+/// - `overlay` (default `true`): apply the overlay (inference) sections of each
+///   repo's `.glia/overlay.toml` — today its `[[edge]]` stanzas. `false` is the
+///   extraction-only build (`glia --no-overlay`, pyo3 `overlay=False`): the
+///   only consistent "without the overlay" view, because overlay sections
+///   that re-key nodes cannot be undone by a query-time filter. User-config
+///   (`[walk]`, `[[project]]`, `[entrypoints]`) and declared-knowledge
+///   sections are not affected. A graph built without the overlay must never
+///   be written to a repo's default layout dir, which holds the
+///   overlay-applied graph: the CLI and pyo3 refuse it.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildOptions {
+    pub overlay: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self { overlay: true }
+    }
+}
+
+impl BuildOptions {
+    /// `self` with the overlay switched on or off.
+    pub fn with_overlay(mut self, on: bool) -> Self {
+        self.overlay = on;
+        self
+    }
+}
+
 /// Generate a `MergedGraph` from a single repo path. The repo gets one RepoId,
 /// an xxhash of its path-independent identity key ([`repo_identity`]):
 /// `git:<normalised origin url>[/<path within the checkout>]` for a git
@@ -82,7 +122,25 @@ pub struct GenerateResult {
 /// path, a second clone, a linked worktree and a moved checkout. Cross-graph
 /// resolvers run but only emit edges within this single repo (rare in practice).
 pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
-    generate_one_inner(repo_path, None)
+    generate_one_inner(repo_path, None, &BuildOptions::default())
+}
+
+/// [`generate_one`] (`incremental = false`) or [`generate_one_incremental`]
+/// (`true`), built with `opts`.
+pub fn generate_one_opts(
+    repo_path: &str,
+    incremental: bool,
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
+    if !incremental {
+        return generate_one_inner(repo_path, None, opts);
+    }
+    let mut cache = ParseCache::load(repo_path);
+    let result = generate_one_inner(repo_path, Some(&mut cache), opts)?;
+    if let Err(e) = cache.save(repo_path) {
+        eprintln!("[incremental] {repo_path}: warning: failed to save parse cache: {e}");
+    }
+    Ok(result)
 }
 
 /// Incremental build using an in-memory [`ParseCache`] (WP-D): unchanged files
@@ -93,7 +151,7 @@ pub fn generate_one_with_cache(
     repo_path: &str,
     cache: &mut ParseCache,
 ) -> Result<GenerateResult, String> {
-    generate_one_inner(repo_path, Some(cache))
+    generate_one_inner(repo_path, Some(cache), &BuildOptions::default())
 }
 
 /// Disk-backed incremental build: load the parse cache from
@@ -101,17 +159,13 @@ pub fn generate_one_with_cache(
 /// persist it. Cache save failures are logged, not fatal. Backs pyo3
 /// `generate(incremental=True)` and `glia build`.
 pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, String> {
-    let mut cache = ParseCache::load(repo_path);
-    let result = generate_one_inner(repo_path, Some(&mut cache))?;
-    if let Err(e) = cache.save(repo_path) {
-        eprintln!("[incremental] {repo_path}: warning: failed to save parse cache: {e}");
-    }
-    Ok(result)
+    generate_one_opts(repo_path, true, &BuildOptions::default())
 }
 
 fn generate_one_inner(
     repo_path: &str,
     mut cache: Option<&mut ParseCache>,
+    opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let root = PathBuf::from(repo_path);
     if !root.is_dir() {
@@ -127,7 +181,7 @@ fn generate_one_inner(
     let (files, regions, md, roots) = walk_source_files(&root);
     // External inputs (LF.1a): `.glia/overlay.toml` loaded once, before any
     // graph is built.
-    let inputs = [repo_inputs(repo, root.clone(), repo_path.to_string())];
+    let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string())];
     let go_prefix = read_go_module_prefix(&root);
     // Cached parses are only valid under the exact repo identity + go.mod
     // module they were built with — neither is visible to per-file hashes.
@@ -152,8 +206,9 @@ fn generate_one_inner(
         graphs.push(docs);
     }
     let mut merged = MergedGraph::new(graphs);
-    run_code_passes(&mut merged);
-    apply_external_cells(&mut merged, &inputs);
+    let ctx = CodeBuildCtx::new(inputs, opts);
+    run_code_passes_with(&mut merged, &ctx);
+    apply_external_cells(&mut merged, &ctx.inputs);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
@@ -173,7 +228,17 @@ fn generate_one_inner(
 /// substrate-eval entry). Always a cold build that writes nothing into the
 /// repos: `bench/substrate-gap` grades every multi-dir fixture through here.
 pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
-    generate_many_inner(repo_paths, false)
+    generate_many_inner(repo_paths, false, &BuildOptions::default())
+}
+
+/// [`generate_many`] (`incremental = false`) or [`generate_many_incremental`]
+/// (`true`), built with `opts`.
+pub fn generate_many_opts(
+    repo_paths: &[String],
+    incremental: bool,
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
+    generate_many_inner(repo_paths, incremental, opts)
 }
 
 /// Disk-backed incremental multi-repo build: each path gets its OWN
@@ -184,18 +249,23 @@ pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
 /// fatal. Backs pyo3 `generate_many(incremental=True)` and
 /// `glia merge --incremental`.
 pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult, String> {
-    generate_many_inner(repo_paths, true)
+    generate_many_inner(repo_paths, true, &BuildOptions::default())
 }
 
 /// One walked input of a multi-repo build: the path as given, its root, its
 /// walk, and its identity (disambiguated before phase 2 mints any RepoId).
 type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity);
 
-fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<GenerateResult, String> {
+fn generate_many_inner(
+    repo_paths: &[String],
+    incremental: bool,
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
     let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
         assemble_many(repo_paths, incremental)?;
-    run_code_passes(&mut merged);
-    apply_external_cells(&mut merged, &inputs);
+    let ctx = CodeBuildCtx::new(inputs, opts);
+    run_code_passes_with(&mut merged, &ctx);
+    apply_external_cells(&mut merged, &ctx.inputs);
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();

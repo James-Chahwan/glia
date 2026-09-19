@@ -4,6 +4,7 @@ method PyGraph.cross_edge_count() -> usize
 method PyGraph.edge_count() -> usize
 method PyGraph.node_cells(node_id: u64) -> Vec<(u32, String)>
 method PyGraph.node_count() -> usize
+getter PyGraph.overlay_applied -> bool
 getter PyGraph.parse_errors -> Vec<String>
 method PyGraph.save_to(dir: &str) -> PyResult<()>
 method PyGraph.save_to_default(repo_path: &str) -> PyResult<()>

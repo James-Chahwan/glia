@@ -31,6 +31,13 @@ const VERSION: &str = repo_graph_engine::VERSION_LINE;
     about = "glia — cross-service code-graph engine"
 )]
 struct Cli {
+    /// Build without the `.glia/overlay.toml` overlay sections (its
+    /// `[[edge]]` stanzas): the extraction-only graph, to compare an answer
+    /// with and without the overlay. User-config (`[walk]`, `[[project]]`,
+    /// `[entrypoints]`) and declared sections still apply. `build` then needs
+    /// `--out`: the default layout dir holds the overlay-applied graph.
+    #[arg(long, global = true)]
+    no_overlay: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -108,6 +115,11 @@ enum Cmd {
 
 fn main() {
     let cli = Cli::parse();
+    // The global options reach the commands through `common`, set once here
+    // before any command runs (the only place that sees `Cli`).
+    common::set_build_options(
+        repo_graph_engine::BuildOptions::default().with_overlay(!cli.no_overlay),
+    );
     let exit = match cli.cmd {
         Cmd::Analyze(a) => cmd::analyze::run(a),
         Cmd::Arch(a) => cmd::arch::run(a),

@@ -9,13 +9,21 @@
 //! `save_to_default` are its only writers from Python (LC.9's single
 //! writer) — and `incremental=False` reads, writes and purges nothing, so a
 //! default build leaves the repo exactly as it found it.
+//!
+//! **`overlay` (LF.2b).** Both take `overlay=True`: apply the overlay sections
+//! of each repo's `.glia/overlay.toml` (its `[[edge]]` stanzas).
+//! `overlay=False` is the extraction-only build, passed to the engine as a
+//! build option (never process-global state: builds may run on several
+//! Python threads). Such a graph is marked, and `PyGraph.save_to_default`
+//! refuses it: the default layout dir holds the overlay-applied graph, which
+//! the MCP warm path loads without rebuilding. `save_to(dir)` is allowed.
 
 use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 
 use repo_graph_code_domain::node_kind;
 use repo_graph_core::{Confidence, RepoId};
-use repo_graph_engine::{GenerateResult, ParseCache, parse_one};
+use repo_graph_engine::{BuildOptions, GenerateResult, ParseCache, parse_one};
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
@@ -48,14 +56,21 @@ impl Inputs<'_> {
 /// identical either way. Err when the build fails, or when it produced no node
 /// at all while files failed to parse (the parse errors say why). Prints
 /// `[build] surface=pyo3 repos=<n> incremental=<bool>` (the fired_on marker)
-/// and, when any file failed, `[parse] <n> file(s) failed to parse`.
-fn build_result(inputs: Inputs<'_>, incremental: bool) -> Result<GenerateResult, String> {
+/// and, when any file failed, `[parse] <n> file(s) failed to parse`. Built
+/// with `opts`; without the overlay it also prints
+/// `[overlay] disabled (overlay=False): not persisting to the default gmap dir`.
+fn build_result(
+    inputs: Inputs<'_>,
+    incremental: bool,
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
     eprintln!("[build] surface=pyo3 repos={} incremental={incremental}", inputs.repos());
-    let result = match (inputs, incremental) {
-        (Inputs::One(path), true) => repo_graph_engine::generate_one_incremental(path),
-        (Inputs::One(path), false) => repo_graph_engine::generate_one(path),
-        (Inputs::Many(paths), true) => repo_graph_engine::generate_many_incremental(paths),
-        (Inputs::Many(paths), false) => repo_graph_engine::generate_many(paths),
+    if !opts.overlay {
+        eprintln!("[overlay] disabled (overlay=False): not persisting to the default gmap dir");
+    }
+    let result = match inputs {
+        Inputs::One(path) => repo_graph_engine::generate_one_opts(path, incremental, opts),
+        Inputs::Many(paths) => repo_graph_engine::generate_many_opts(paths, incremental, opts),
     }?;
     checked(result)
 }
@@ -80,11 +95,12 @@ fn checked(result: GenerateResult) -> Result<GenerateResult, String> {
     Ok(result)
 }
 
-/// [`build_result`] as the `PyGraph` both entry points return; its error is a
-/// `ValueError`.
-fn build_graph(inputs: Inputs<'_>, incremental: bool) -> PyResult<PyGraph> {
-    build_result(inputs, incremental)
-        .map(PyGraph::from_result)
+/// [`build_result`] as the `PyGraph` both entry points return, marked with
+/// whether the overlay applied; its error is a `ValueError`.
+fn build_graph(inputs: Inputs<'_>, incremental: bool, overlay: bool) -> PyResult<PyGraph> {
+    let opts = BuildOptions::default().with_overlay(overlay);
+    build_result(inputs, incremental, &opts)
+        .map(|r| PyGraph::from_result(r).with_overlay_applied(overlay))
         .map_err(PyValueError::new_err)
 }
 
@@ -100,13 +116,17 @@ fn build_graph(inputs: Inputs<'_>, incremental: bool) -> PyResult<PyGraph> {
 /// Nothing here writes the `.gmap` layout: call `save_to_default(repo_path)`
 /// (or `save_to(dir)`) to persist it for `load_from_gmap`.
 ///
+/// `overlay=True` (the default) applies the overlay sections of the repo's
+/// `.glia/overlay.toml` (its `[[edge]]` stanzas); `overlay=False` builds the
+/// extraction-only graph, which `save_to_default` refuses (use `save_to`).
+///
 /// Raises ValueError when the path is not a directory, or when no node was
 /// produced and files failed to parse. Otherwise parse failures are listed in
 /// `PyGraph.parse_errors` and counted on stderr.
 #[pyfunction]
-#[pyo3(signature = (repo_path, incremental=false))]
-fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
-    build_graph(Inputs::One(repo_path), incremental)
+#[pyo3(signature = (repo_path, incremental=false, overlay=true))]
+fn generate(repo_path: &str, incremental: bool, overlay: bool) -> PyResult<PyGraph> {
+    build_graph(Inputs::One(repo_path), incremental, overlay)
 }
 
 /// Build ONE graph from several repos. Each path becomes its own RepoId, so
@@ -116,13 +136,14 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
 /// Same contract as `generate`: `incremental=False` (the default) reads,
 /// writes and deletes nothing; `incremental=True` gives each path its own
 /// parse cache `<repo>/.glia/graph/parse_cache.bin`; nothing writes the
-/// `.gmap` layout; ValueError when no node was produced and files failed to
-/// parse. The substrate-gap eval grades every multi-dir fixture through the
-/// default, which keeps it hermetic.
+/// `.gmap` layout; `overlay=False` skips every repo's overlay sections;
+/// ValueError when no node was produced and files failed to parse. The
+/// substrate-gap eval grades every multi-dir fixture through the default,
+/// which keeps it hermetic.
 #[pyfunction]
-#[pyo3(signature = (repo_paths, incremental=false))]
-fn generate_many(repo_paths: Vec<String>, incremental: bool) -> PyResult<PyGraph> {
-    build_graph(Inputs::Many(&repo_paths), incremental)
+#[pyo3(signature = (repo_paths, incremental=false, overlay=true))]
+fn generate_many(repo_paths: Vec<String>, incremental: bool, overlay: bool) -> PyResult<PyGraph> {
+    build_graph(Inputs::Many(&repo_paths), incremental, overlay)
 }
 
 /// Delete the repo's parse cache `<repo>/.glia/graph/parse_cache.bin`, so the
@@ -226,16 +247,16 @@ mod tests {
         let path = root.to_str().expect("utf-8 temp path").to_string();
         let before = tree(&root);
 
-        let one = build_result(Inputs::One(&path), false).expect("build");
-        let again = build_result(Inputs::One(&path), false).expect("build");
-        let many = build_result(Inputs::Many(std::slice::from_ref(&path)), false).expect("build");
+        let one = build_result(Inputs::One(&path), false, &BuildOptions::default()).expect("build");
+        let again = build_result(Inputs::One(&path), false, &BuildOptions::default()).expect("build");
+        let many = build_result(Inputs::Many(std::slice::from_ref(&path)), false, &BuildOptions::default()).expect("build");
         assert_eq!(tree(&root), before, "a pure build wrote into the repo");
         assert!(one.total_nodes > 0 && one.total_nodes == again.total_nodes);
         assert_eq!(one.total_nodes, many.total_nodes);
 
         // Control: the incremental build does write, so the check above can
         // see a write; it writes the parse cache only, never the layout.
-        build_result(Inputs::One(&path), true).expect("build");
+        build_result(Inputs::One(&path), true, &BuildOptions::default()).expect("build");
         let added: Vec<PathBuf> = tree(&root).difference(&before).cloned().collect();
         let cache = Path::new(".glia").join("graph").join("parse_cache.bin");
         assert!(added.contains(&cache), "incremental build wrote {added:?}");
@@ -278,7 +299,7 @@ mod tests {
 
         let missing = std::env::temp_dir().join(format!("glia-ld2-missing-{}", std::process::id()));
         let missing = missing.to_str().expect("utf-8 temp path").to_string();
-        assert!(build_result(Inputs::One(&missing), false).is_err());
-        assert!(build_result(Inputs::Many(std::slice::from_ref(&missing)), false).is_err());
+        assert!(build_result(Inputs::One(&missing), false, &BuildOptions::default()).is_err());
+        assert!(build_result(Inputs::Many(std::slice::from_ref(&missing)), false, &BuildOptions::default()).is_err());
     }
 }
