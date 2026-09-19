@@ -3,6 +3,7 @@
 
     python3 closeout.py <wave> <workflow-run-id>      e.g.  closeout.py 8 wf_63d9b695-7a3
     python3 closeout.py --leap <wave> <run-id>        the 0.5.0 leap (waves W0..)
+    python3 closeout.py --leap <wave> <run1>,<run2>   a packet re-run merged over its wave (later wins)
     python3 closeout.py --leap <wave> --plan-only     print the wave's packets and exit
 
 --leap schedules through leap_schedule.py, records the wave's 5-hour usage
@@ -105,15 +106,20 @@ def main():
         print(f"wave {wave}: {' '.join(ids)}")
         print(f"remaining waves: {len(remaining)}")
         return
-    run = args[1]
+    # One run id, or several comma-separated: a packet re-run on its own (e.g. after a
+    # permission fix) is merged over the wave's run, the later run winning per packet.
+    runs = args[1].split(",")
     base = json.loads((HERE / "baseline.json").read_text())
     gates, lines = [], []
     say = lambda s: (print(s), lines.append(s))
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
     py = LEAP_PY if leap else "python3"   # every command that imports the wheel (glia_py)
 
-    res = journal_results(run)
-    got = {r["packet"].split("—")[0].strip(): r for r in res}
+    got = {}
+    for run in runs:
+        for r in journal_results(run):
+            got[r["packet"].split("—")[0].strip()] = r
+    res = list(got.values())
     say(f"== wave {wave}: {len(res)}/{len(ids)} returned")
     for i in ids:
         r = got.get(i)
