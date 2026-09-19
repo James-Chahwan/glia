@@ -122,7 +122,7 @@ impl BuildOptions {
 /// path, a second clone, a linked worktree and a moved checkout. Cross-graph
 /// resolvers run but only emit edges within this single repo (rare in practice).
 pub fn generate_one(repo_path: &str) -> Result<GenerateResult, String> {
-    generate_one_inner(repo_path, None, &BuildOptions::default())
+    generate_one_inner(repo_path, repo_path, None, &BuildOptions::default())
 }
 
 /// [`generate_one`] (`incremental = false`) or [`generate_one_incremental`]
@@ -133,10 +133,10 @@ pub fn generate_one_opts(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     if !incremental {
-        return generate_one_inner(repo_path, None, opts);
+        return generate_one_inner(repo_path, repo_path, None, opts);
     }
     let mut cache = ParseCache::load(repo_path);
-    let result = generate_one_inner(repo_path, Some(&mut cache), opts)?;
+    let result = generate_one_inner(repo_path, repo_path, Some(&mut cache), opts)?;
     if let Err(e) = cache.save(repo_path) {
         eprintln!("[incremental] {repo_path}: warning: failed to save parse cache: {e}");
     }
@@ -151,7 +151,7 @@ pub fn generate_one_with_cache(
     repo_path: &str,
     cache: &mut ParseCache,
 ) -> Result<GenerateResult, String> {
-    generate_one_inner(repo_path, Some(cache), &BuildOptions::default())
+    generate_one_inner(repo_path, repo_path, Some(cache), &BuildOptions::default())
 }
 
 /// Disk-backed incremental build: load the parse cache from
@@ -162,8 +162,25 @@ pub fn generate_one_incremental(repo_path: &str) -> Result<GenerateResult, Strin
     generate_one_opts(repo_path, true, &BuildOptions::default())
 }
 
+/// A single-repo build of the tree at `root` under the identity of
+/// `identity_root` (LE.1b): the files are walked, parsed and read (the
+/// `.glia` inputs included) under `root`, while the RepoId, the repo label and
+/// root, and the parse cache's context check come from `identity_root`. So a
+/// materialised git rev (a temp dir with no `.git`, which would otherwise get
+/// a `dir:` key) builds with the working tree's NodeIds and reuses its cached
+/// parses. `root == identity_root` is exactly [`generate_one_with_cache`] /
+/// [`generate_one`].
+pub(crate) fn generate_one_as(
+    root: &str,
+    identity_root: &str,
+    cache: Option<&mut ParseCache>,
+) -> Result<GenerateResult, String> {
+    generate_one_inner(root, identity_root, cache, &BuildOptions::default())
+}
+
 fn generate_one_inner(
     repo_path: &str,
+    identity_root: &str,
     mut cache: Option<&mut ParseCache>,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
@@ -171,11 +188,13 @@ fn generate_one_inner(
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
     }
-    let ident = repo_identity(&root);
+    // Every public entry passes `repo_path` twice; only `generate_one_as`
+    // (the LE.1b delta's rev side) walks one tree under another's identity.
+    let ident = repo_identity(Path::new(identity_root));
     let repo = RepoId::from_canonical(&ident.key);
-    repo_id_marker(&ident, repo_path);
-    let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
-    let repo_roots = std::collections::BTreeMap::from([(repo.0, repo_path.to_string())]);
+    repo_id_marker(&ident, identity_root);
+    let repo_labels = crate::arch::repo_label_map(&[(repo.0, identity_root.to_string())]);
+    let repo_roots = std::collections::BTreeMap::from([(repo.0, identity_root.to_string())]);
     // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
     // prefixes are A8.7.
     let (files, regions, md, roots) = walk_source_files(&root);
