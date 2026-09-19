@@ -1,0 +1,17 @@
+[package]
+name = "glia-snapshots"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "External-input snapshot writers (git history; test reports later). The only glia code that spawns a process: it runs the local git and writes <repo>/.glia/*-snapshot/, which the deterministic build reads through repo-graph-code-domain::snapshots."
+
+# Reads git by running the user's `git` binary (std::process::Command): no
+# libgit2 C build in the wheel matrix, no gix dependency tree, and nothing runs
+# unless a sync is called. The build never depends on this crate.
+
+[dependencies]
+repo-graph-code-domain = { path = "../code-domain" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

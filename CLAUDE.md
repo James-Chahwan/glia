@@ -21,6 +21,9 @@ engine/             Orchestration: walk → parse → extract → build → merg
                     Owns every parser dependency. src/ is MODULES; lib.rs is a facade
 cli/                The `glia` binary
 doc-sources/        Tier-4 doc ingestion (Confluence REST + local snapshot)
+snapshots/          External-input snapshot writers (git history, test reports) - the only
+                    crates that shell out; the build reads their output through
+                    code-domain::snapshots
 store/              .gmap binary format — rkyv + mmap, sharded layout
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights

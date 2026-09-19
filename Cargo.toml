@@ -54,6 +54,9 @@ members = [
     # Leaf crate, zero deps: carries RELEASE + PARSER_STAMP (a content hash of
     # every graph-shaping source). Sits upstream of `store` and `engine`.
     "stamp",
+    # External-input snapshot writers (git history): the only crate that spawns
+    # a process. The build never depends on it; it writes .glia/*-snapshot/.
+    "snapshots",
 ]
 
 # Single release version for the crates that must move in lockstep: the wheel
