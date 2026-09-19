@@ -6,11 +6,13 @@
 use std::path::{Path, PathBuf};
 
 use repo_graph_code_domain::walk_gating;
-use repo_graph_core::{Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId};
+use repo_graph_core::{CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId};
 use repo_graph_graph::RepoGraph;
 
+use crate::code_section::{decode_repo_graph, encode_repo_graph_counted};
 use crate::container::{
-    Container, MmapContainer, encode_file, hex_xxhash64, read_to_owned, write_atomic,
+    Container, FORMAT_VERSION, MmapContainer, encode_file, hex_xxhash64, read_to_owned, set_cell,
+    write_atomic,
 };
 use crate::error::StoreError;
 
@@ -110,7 +112,11 @@ pub struct ShardEntry {
 
 /// Write a sharded `.gmap` layout: one `<name>.gmap` per input graph plus a
 /// `cross_stack.gmap` if `cross_edges` is non-empty, plus a `manifest.json`.
-/// Returns the manifest that was written so callers can inspect hashes.
+/// Returns the manifest that was written so callers can inspect hashes. Each
+/// per-graph shard is `encode_repo_graph` (core + `"code"` section);
+/// `cross_stack.gmap` is a core with no section. Prints one un-gated
+/// `[gmap] layout <dir>: shards=<n> format=<v> sections=code:<k>` line per
+/// write, `k` = shards carrying a code section.
 ///
 /// Shard names must be unique and non-empty — duplicates produce a manifest
 /// whose loader will reject it.
@@ -138,11 +144,12 @@ pub fn write_sharded(
 
     let mut entries = Vec::with_capacity(shards.len());
     let mut shards_skipped = 0usize;
+    let mut code_sections = 0usize;
     for (name, g) in shards {
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
-        let container = Container::from_repo_graph(g);
-        let bytes = encode_file(&container)?;
+        let (bytes, has_code) = encode_repo_graph_counted(g)?;
+        code_sections += usize::from(has_code);
         let content_hash = hex_xxhash64(&bytes);
 
         // Skip-when-unchanged: write only if the prior manifest didn't
@@ -169,8 +176,8 @@ pub fn write_sharded(
         None
     } else {
         let shard_path = dir.join(CROSS_STACK_NAME);
-        let container = Container::for_cross_edges(cross_edges.to_vec());
-        let bytes = encode_file(&container)?;
+        let mut container = Container::for_cross_edges(cross_edges.to_vec());
+        let bytes = encode_file(&mut container, &[])?;
         let content_hash = hex_xxhash64(&bytes);
         let unchanged = prior_manifest.as_ref()
             .and_then(|m| m.cross.as_ref())
@@ -188,6 +195,7 @@ pub fn write_sharded(
         })
     };
 
+    let shard_files = entries.len() + usize::from(cross.is_some());
     let manifest = Manifest {
         schema_version: MANIFEST_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -206,6 +214,12 @@ pub fn write_sharded(
     if !manifest_unchanged {
         write_atomic(&manifest_path, &manifest_bytes)?;
     }
+    // LC.5b marker, un-gated: one line per layout write naming how many files
+    // carry the code domain's section (cross_stack.gmap never does).
+    eprintln!(
+        "[gmap] layout {}: shards={shard_files} format={FORMAT_VERSION} sections=code:{code_sections}",
+        dir.display()
+    );
     // Diagnostic: emit how many shards were skipped (env-gated to keep
     // hot-path output clean by default; opt in via GLIA_STORE_VERBOSE=1).
     if std::env::var("GLIA_STORE_VERBOSE").as_deref() == Ok("1") {
@@ -351,10 +365,7 @@ fn read_merged_sharded_inner(
     let sharded = ShardedMmap::open(dir)?;
     let mut graphs = Vec::with_capacity(sharded.shards.len());
     for (_name, mmap) in &sharded.shards {
-        let archived = mmap.archived()?;
-        let owned: Container =
-            rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
-        graphs.push(owned.to_repo_graph());
+        graphs.push(decode_repo_graph(mmap)?);
     }
     let cross_edges = if let Some(cross_mmap) = &sharded.cross {
         let archived = cross_mmap.archived()?;
@@ -547,7 +558,8 @@ fn scan_for_newer(
 
 /// Upsert a cell in a sharded layout. Scans each shard for the target node,
 /// deserializes only the matching shard, mutates, and re-writes that shard
-/// plus the manifest (updated content hash). Other shards stay untouched.
+/// (its sections copied verbatim) plus the manifest (updated content hash).
+/// Other shards stay untouched.
 pub fn upsert_cell_sharded(
     dir: &Path,
     node_id: NodeId,
@@ -569,23 +581,9 @@ pub fn upsert_cell_sharded(
 
         if found {
             drop(mmap);
-            let mut container = read_to_owned(&shard_path)?;
-            let node = container
-                .nodes
-                .iter_mut()
-                .find(|n| n.id == node_id)
-                .ok_or(StoreError::NodeNotFound(node_id))?;
-
-            if let Some(cell) = node.cells.iter_mut().find(|c| c.kind == cell_type) {
-                cell.payload = payload;
-            } else {
-                node.cells.push(Cell {
-                    kind: cell_type,
-                    payload,
-                });
-            }
-
-            let bytes = encode_file(&container)?;
+            let mut file = read_to_owned(&shard_path)?;
+            set_cell(&mut file.core, node_id, cell_type, payload)?;
+            let bytes = encode_file(&mut file.core, &file.sections)?;
             entry.content_hash = hex_xxhash64(&bytes);
             write_atomic(&shard_path, &bytes)?;
 
@@ -670,6 +668,69 @@ mod tests {
             serde_json::from_slice(&std::fs::read(shard_dir.join(MANIFEST_NAME)).unwrap())
                 .unwrap();
         assert_eq!(m.build_stamp, repo_graph_stamp::BUILD_STAMP);
+    }
+
+    /// LC.5b: every graph shard with nav carries a `"code"` section,
+    /// `cross_stack.gmap` carries none, the loader rebuilds nav from section +
+    /// core, and a sharded cell upsert leaves the code section byte-identical.
+    #[test]
+    fn shards_carry_the_code_section_and_upserts_keep_it() {
+        use crate::code_section::{CODE_SECTION, code_section_of};
+        use repo_graph_code_domain::node_kind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("layout");
+        let repo = RepoId::from_canonical("test://lc5b-layout");
+        let mut nav = CodeNav::default();
+        nav.record(NodeId(100), "m", "pkg::m", node_kind::MODULE, None);
+        nav.record(NodeId(101), "f", "pkg::m::f", node_kind::FUNCTION, Some(NodeId(100)));
+        let node = |id: u64| Node {
+            id: NodeId(id),
+            repo,
+            confidence: repo_graph_core::Confidence::Strong,
+            cells: vec![],
+        };
+        let g = RepoGraph {
+            repo,
+            nodes: vec![node(100), node(101)],
+            edges: vec![],
+            nav,
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let cross = vec![Edge {
+            from: NodeId(101),
+            to: NodeId(9),
+            category: repo_graph_code_domain::edge_category::HTTP_CALLS,
+            confidence: repo_graph_core::Confidence::Strong,
+        }];
+        write_sharded(&[("a", &g)], &cross, &dir).unwrap();
+
+        let opened = ShardedMmap::open(&dir).unwrap();
+        let shard = &opened.shards[0].1;
+        let code_before = shard.section_bytes(CODE_SECTION).unwrap().unwrap().to_vec();
+        assert_eq!(
+            code_section_of(shard).unwrap().unwrap().qname(NodeId(101)),
+            Some("pkg::m::f")
+        );
+        let cross_file = opened.cross.as_ref().unwrap();
+        assert!(cross_file.section_names().unwrap().is_empty(), "cross_stack has no section");
+        drop(opened);
+
+        let loaded = read_merged_sharded(&dir).unwrap();
+        assert_eq!(loaded.graphs[0].nav.qname_by_id, g.nav.qname_by_id);
+        assert_eq!(loaded.graphs[0].nav.kind_by_id, g.nav.kind_by_id);
+        assert_eq!(loaded.graphs[0].nav.parent_of, g.nav.parent_of);
+        assert_eq!(loaded.cross_edges, cross);
+
+        upsert_cell_sharded(&dir, NodeId(101), CellTypeId(8), CellPayload::Text("x".into()))
+            .unwrap();
+        let reopened = ShardedMmap::open(&dir).unwrap();
+        let shard = &reopened.shards[0].1;
+        assert_eq!(shard.section_bytes(CODE_SECTION).unwrap().unwrap(), code_before.as_slice());
+        assert_eq!(shard.archived().unwrap().kind(NodeId(101)), Some(node_kind::FUNCTION));
     }
 
     #[test]

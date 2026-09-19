@@ -12,7 +12,10 @@ use repo_graph_code_domain::node_kind;
 use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::build_go;
 use repo_graph_parser_go::parse_file;
-use repo_graph_store::{FORMAT_VERSION, MmapContainer, StoreError, write_repo_graph};
+use repo_graph_store::{
+    CODE_SECTION, FORMAT_VERSION, MmapContainer, StoreError, code_section_of, qname_of,
+    write_repo_graph,
+};
 
 const MODULE_PREFIX: &str = "example.com/backend";
 
@@ -76,13 +79,20 @@ fn repo_graph_roundtrips_through_gmap_file() {
 
     // Nav index count matches (pre/post-flatten sizes are identical: one pair
     // per key with no dedup since the source is already a HashMap with unique
-    // keys).
-    assert_eq!(archived.code_nav.qname_by_id.len(), expected_nav_size);
+    // keys). LC.5b: the nav maps live in the "code" section, the kinds in the
+    // core.
+    let code = code_section_of(&container)
+        .unwrap()
+        .expect("a built graph writes a code section");
+    assert_eq!(code.nav.qname_by_id.len(), expected_nav_size);
+    assert_eq!(archived.node_kinds.len(), g.nav.kind_by_id.len());
+    assert!(container.section_bytes(CODE_SECTION).unwrap().is_some());
 
     // Point lookup via binary search: one known node from the fixture is the
     // `/health` route — v0.4.4a tests assert its presence.
     // Find a Route node id by its KIND in the owned graph (LB.11a: the check
-    // names no qname shape), then look up the same id via the archived nav.
+    // names no qname shape), then look up the same id via the code section
+    // (qname) and the core (kind).
     let route_id = g
         .nav
         .qname_by_id
@@ -91,12 +101,14 @@ fn repo_graph_roundtrips_through_gmap_file() {
         .copied()
         .expect("backend fixture has at least one Route");
     let qn_owned = g.nav.qname_by_id.get(&route_id).unwrap();
-    let qn_archived = archived.qname(route_id).expect("archived qname lookup");
+    let qn_archived = code.qname(route_id).expect("archived qname lookup");
     assert_eq!(qn_archived, qn_owned);
+    assert_eq!(qname_of(&container, route_id).unwrap().as_ref(), Some(qn_owned));
     assert_eq!(archived.kind(route_id), Some(node_kind::ROUTE));
 
     // Unknown id returns None (binary search miss, no panic).
-    assert_eq!(archived.qname(NodeId(0xDEAD_BEEF)), None);
+    assert_eq!(code.qname(NodeId(0xDEAD_BEEF)), None);
+    assert_eq!(qname_of(&container, NodeId(0xDEAD_BEEF)).unwrap(), None);
     assert_eq!(archived.kind(NodeId(0xDEAD_BEEF)), None);
 
     // Edge iterator yields the same (from, to, category) triples.

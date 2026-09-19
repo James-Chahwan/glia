@@ -1,22 +1,79 @@
-//! The code-domain section of a container: the sorted-`Vec` mirrors of
-//! `CodeNav` and `SymbolTable` (`CodeNavStore`, `SymbolTableStore`), the
-//! code-domain constructors on `Container` / `Header`, and `write_repo_graph`.
+//! The code domain's section of a container (LC.5b): `CodeSection` - the
+//! sorted-`Vec` mirrors of `CodeNav` and `SymbolTable` (`CodeNavStore`,
+//! `SymbolTableStore`) plus the unresolved calls / refs - written as the named
+//! section `"code"` beside the domain-free core, and the `RepoGraph` codec over
+//! core + section (`encode_repo_graph` / `decode_repo_graph`,
+//! `write_repo_graph`).
+//!
+//! Node kinds are not here: they are core state (`Container::node_kinds`), so
+//! `CodeNavStore` carries no `kind_by_id` and `CodeNavStore::to_owned` rebuilds
+//! `CodeNav::kind_by_id` from the core index.
 
+use std::collections::HashSet;
 use std::path::Path;
 
-use repo_graph_code_domain::CodeNav;
+use repo_graph_code_domain::{CallSite, CodeNav, UnresolvedRef};
 use repo_graph_core::{Edge, NodeId, NodeKindId, RepoId};
 use repo_graph_graph::{RepoGraph, SymbolTable};
 
-use crate::container::{Container, FORMAT_VERSION, Header, MAGIC, encode_file, write_atomic};
+use crate::container::{
+    Container, EncodedSection, Header, MmapContainer, encode_file, encode_section, write_atomic,
+};
 use crate::error::StoreError;
+
+/// Name of the code domain's section in a `.gmap`.
+pub const CODE_SECTION: &str = "code";
+
+/// Everything the code domain persists beyond the core: navigation maps, the
+/// symbol table, and the references resolution left unbound.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct CodeSection {
+    pub nav: CodeNavStore,
+    pub symbols: SymbolTableStore,
+    pub unresolved_calls: Vec<CallSite>,
+    pub unresolved_refs: Vec<UnresolvedRef>,
+}
+
+impl CodeSection {
+    /// The code section of `g`: its nav maps and symbol table flattened to
+    /// sorted `Vec`s, and its unresolved calls / refs.
+    pub fn from_repo_graph(g: &RepoGraph) -> Self {
+        Self {
+            nav: CodeNavStore::from_owned(&g.nav),
+            symbols: SymbolTableStore::from_owned(&g.symbols),
+            unresolved_calls: g.unresolved_calls.clone(),
+            unresolved_refs: g.unresolved_refs.clone(),
+        }
+    }
+
+    /// True when the section would carry nothing. Such a section is not
+    /// written (a nav-less graph's file is its core alone), and a file without
+    /// one decodes to exactly this.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl ArchivedCodeSection {
+    /// Look up a node id's qname via binary search on the sorted nav vec.
+    pub fn qname(&self, id: NodeId) -> Option<&str> {
+        let pairs = &self.nav.qname_by_id;
+        let i = pairs
+            .binary_search_by(|entry| entry.0.0.to_native().cmp(&id.0))
+            .ok()?;
+        Some(pairs[i].1.as_str())
+    }
+}
 
 // ============================================================================
 // CodeNav / SymbolTable — serialised mirrors using sorted Vecs
 // ============================================================================
 
-/// Serialised mirror of `CodeNav`. Each field is the source HashMap flattened
-/// into a Vec of pairs, **sorted by key**. Sorting makes the on-disk bytes
+/// Serialised mirror of `CodeNav` (less `kind_by_id`, which is the core's
+/// `node_kinds`). Each field is the source HashMap flattened into a Vec of
+/// pairs, **sorted by key**. Sorting makes the on-disk bytes
 /// deterministic (so two builds of the same graph produce byte-identical files,
 /// useful for content-hash-based shard manifests at v0.4.5c) and lets future
 /// readers binary-search the archived form for point lookups.
@@ -26,7 +83,6 @@ use crate::error::StoreError;
 pub struct CodeNavStore {
     pub name_by_id: Vec<(NodeId, String)>,
     pub qname_by_id: Vec<(NodeId, String)>,
-    pub kind_by_id: Vec<(NodeId, NodeKindId)>,
     pub parent_of: Vec<(NodeId, NodeId)>,
     pub children_of: Vec<(NodeId, Vec<NodeId>)>,
 }
@@ -57,10 +113,6 @@ impl CodeNavStore {
             .collect();
         qname_by_id.sort_by_key(|(k, _)| k.0);
 
-        let mut kind_by_id: Vec<_> =
-            nav.kind_by_id.iter().map(|(k, v)| (*k, *v)).collect();
-        kind_by_id.sort_by_key(|(k, _)| k.0);
-
         let mut parent_of: Vec<_> =
             nav.parent_of.iter().map(|(k, v)| (*k, *v)).collect();
         parent_of.sort_by_key(|(k, _)| k.0);
@@ -75,7 +127,6 @@ impl CodeNavStore {
         Self {
             name_by_id,
             qname_by_id,
-            kind_by_id,
             parent_of,
             children_of,
         }
@@ -83,10 +134,11 @@ impl CodeNavStore {
 }
 
 impl CodeNavStore {
-    /// Inverse of `from_owned` — rehydrate a `CodeNav` from this on-disk shape.
-    /// Used by the cache-load path so a `RepoGraph` produced from disk has the
-    /// same nav structure a freshly-parsed one does.
-    pub fn to_owned(&self) -> CodeNav {
+    /// Inverse of `from_owned` — rehydrate a `CodeNav` from this on-disk shape
+    /// and the core's `node_kinds` (which carries `kind_by_id`). Used by the
+    /// cache-load path so a `RepoGraph` produced from disk has the same nav
+    /// structure a freshly-parsed one does.
+    pub fn to_owned(&self, node_kinds: &[(NodeId, NodeKindId)]) -> CodeNav {
         let mut nav = CodeNav::default();
         for (k, v) in &self.name_by_id {
             nav.name_by_id.insert(*k, v.clone());
@@ -94,7 +146,7 @@ impl CodeNavStore {
         for (k, v) in &self.qname_by_id {
             nav.qname_by_id.insert(*k, v.clone());
         }
-        for (k, v) in &self.kind_by_id {
+        for (k, v) in node_kinds {
             nav.kind_by_id.insert(*k, *v);
         }
         for (k, v) in &self.parent_of {
@@ -173,57 +225,34 @@ impl SymbolTableStore {
     }
 }
 
+/// The domain-free core of `g`: a code header, its nodes and edges, and
+/// `node_kinds` from `g.nav.kind_by_id` (sorted by the writer).
+fn code_core(g: &RepoGraph) -> Container {
+    Container {
+        header: Header::for_code(),
+        repo: g.repo,
+        nodes: g.nodes.clone(),
+        edges: g.edges.clone(),
+        node_kinds: g.nav.kind_by_id.iter().map(|(k, v)| (*k, *v)).collect(),
+        sections: Vec::new(),
+    }
+}
+
 impl Container {
-    /// Build a `Container` from an owned `RepoGraph`. Cheap conversion: clones
-    /// nodes/edges and flattens the maps. Caller drops the source graph after
-    /// writing.
-    pub fn from_repo_graph(g: &RepoGraph) -> Self {
-        Self {
-            header: Header::for_code(),
-            repo: g.repo,
-            nodes: g.nodes.clone(),
-            edges: g.edges.clone(),
-            code_nav: CodeNavStore::from_owned(&g.nav),
-            symbols: SymbolTableStore::from_owned(&g.symbols),
-            unresolved_calls: g.unresolved_calls.clone(),
-            unresolved_refs: g.unresolved_refs.clone(),
-        }
-    }
-
-    /// Inverse of `from_repo_graph` — rebuild a `RepoGraph` from this container.
-    /// `properties` is set to empty: it's parse-time state on `RepoGraph` and
-    /// isn't currently part of the on-disk schema. Cache-load consumers don't
-    /// need it (only parse-time composition does), so this is a deliberate
-    /// information loss bounded by the format version.
-    pub fn to_repo_graph(&self) -> RepoGraph {
-        use std::collections::HashSet;
-        RepoGraph {
-            repo: self.repo,
-            nodes: self.nodes.clone(),
-            edges: self.edges.clone(),
-            nav: self.code_nav.to_owned(),
-            symbols: self.symbols.to_owned_table(),
-            unresolved_calls: self.unresolved_calls.clone(),
-            unresolved_refs: self.unresolved_refs.clone(),
-            properties: HashSet::new(),
-        }
-    }
-
     /// Build a `Container` carrying only cross-repo edges. Used by the sharded
-    /// layout to write `cross_stack.gmap` — nodes/nav/symbols are empty because
-    /// every cross-edge's endpoints live in some other shard. The synthetic
-    /// `repo` comes from `RepoId::from_canonical("cross_stack")` so the file
-    /// is self-identifying without needing a new container variant.
+    /// layout to write `cross_stack.gmap` — nodes and kinds are empty and no
+    /// code section is written, because every cross-edge's endpoints live in
+    /// some other shard. The synthetic `repo` comes from
+    /// `RepoId::from_canonical("cross_stack")` so the file is self-identifying
+    /// without needing a new container variant.
     pub fn for_cross_edges(edges: Vec<Edge>) -> Self {
         Self {
             header: Header::for_code(),
             repo: RepoId::from_canonical("cross_stack"),
             nodes: Vec::new(),
             edges,
-            code_nav: CodeNavStore::default(),
-            symbols: SymbolTableStore::default(),
-            unresolved_calls: Vec::new(),
-            unresolved_refs: Vec::new(),
+            node_kinds: Vec::new(),
+            sections: Vec::new(),
         }
     }
 }
@@ -233,29 +262,83 @@ impl Header {
     /// empty — they're diagnostic surfaces and the per-domain crates haven't
     /// exposed a registration API yet (lands at v0.4.10).
     pub fn for_code() -> Self {
-        Self {
-            magic: MAGIC,
-            version: FORMAT_VERSION,
-            graph_type: "code".to_string(),
-            cell_registry: Vec::new(),
-            edge_category_registry: Vec::new(),
-            node_kind_registry: Vec::new(),
-        }
+        Self::new("code")
     }
 }
 
 // ============================================================================
-// Write — atomic via .tmp + rename
+// RepoGraph codec — core + "code" section
 // ============================================================================
 
-/// Serialise a `RepoGraph` to a `.gmap` file (preamble + rkyv core, see
-/// `FORMAT_VERSION`). Writes to `<path>.tmp` first, then atomically renames
-/// over `<path>` so a crash mid-write never leaves a half-written file in
-/// place. Existing readers' mmaps stay valid against the old inode until they
-/// re-open.
+/// Encode `g` as the bytes of one `.gmap`, and say whether a code section was
+/// written (the `[gmap] layout` marker counts them).
+pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<(Vec<u8>, bool), StoreError> {
+    let mut core = code_core(g);
+    let code = CodeSection::from_repo_graph(g);
+    let sections: Vec<EncodedSection> = if code.is_empty() {
+        Vec::new()
+    } else {
+        vec![encode_section(CODE_SECTION, &code)?]
+    };
+    let has_code = !sections.is_empty();
+    Ok((encode_file(&mut core, &sections)?, has_code))
+}
+
+/// Encode a `RepoGraph` as the bytes of one `.gmap`: the domain-free core
+/// (code header, nodes, edges, `node_kinds` from `g.nav.kind_by_id`) plus the
+/// `"code"` section (nav maps, symbols, unresolved calls / refs). A graph with
+/// nothing for the section (no nav, symbols or unresolved refs) is written as
+/// its core alone. Deterministic: every map is flattened sorted by key.
+pub fn encode_repo_graph(g: &RepoGraph) -> Result<Vec<u8>, StoreError> {
+    Ok(encode_repo_graph_counted(g)?.0)
+}
+
+/// The inverse of `encode_repo_graph`: the core's nodes, edges and kinds plus
+/// the `"code"` section. A file without a code section (a nav-less graph, or
+/// `cross_stack.gmap`) decodes with empty nav / symbols / unresolved refs.
+/// `properties` is empty: it is parse-time state on `RepoGraph` and not part of
+/// the on-disk schema - cache-load consumers don't need it (only parse-time
+/// composition does), so this is a deliberate information loss bounded by the
+/// format version.
+pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
+    let core: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(m.archived()?)?;
+    let code: CodeSection = match code_section_of(m)? {
+        Some(archived) => rkyv::deserialize::<CodeSection, rkyv::rancor::Error>(archived)?,
+        None => CodeSection::default(),
+    };
+    Ok(RepoGraph {
+        repo: core.repo,
+        nodes: core.nodes,
+        edges: core.edges,
+        nav: code.nav.to_owned(&core.node_kinds),
+        symbols: code.symbols.to_owned_table(),
+        unresolved_calls: code.unresolved_calls,
+        unresolved_refs: code.unresolved_refs,
+        properties: HashSet::new(),
+    })
+}
+
+/// The file's code section, validated and borrowed zero-copy; `None` when it
+/// has none.
+pub fn code_section_of(m: &MmapContainer) -> Result<Option<&ArchivedCodeSection>, StoreError> {
+    m.section::<ArchivedCodeSection>(CODE_SECTION)
+}
+
+/// A node id's qname, read from the file's code section. `None` when the file
+/// has no code section or the section has no qname for `id`. Validates the
+/// section on every call: for many lookups, take `code_section_of` once and
+/// call `ArchivedCodeSection::qname`.
+pub fn qname_of(m: &MmapContainer, id: NodeId) -> Result<Option<String>, StoreError> {
+    Ok(code_section_of(m)?.and_then(|s| s.qname(id)).map(str::to_string))
+}
+
+/// Serialise a `RepoGraph` to a `.gmap` file (preamble + code section + rkyv
+/// core, see `FORMAT_VERSION`). Writes to `<path>.tmp` first, then atomically
+/// renames over `<path>` so a crash mid-write never leaves a half-written file
+/// in place. Existing readers' mmaps stay valid against the old inode until
+/// they re-open.
 pub fn write_repo_graph(g: &RepoGraph, path: &Path) -> Result<(), StoreError> {
-    let container = Container::from_repo_graph(g);
-    let bytes = encode_file(&container)?;
+    let bytes = encode_repo_graph(g)?;
     write_atomic(path, &bytes)
 }
 
