@@ -1,0 +1,16 @@
+{
+  "framework": "java-jpa-table",
+  "language": "java",
+  "dirs": ["."],
+  "note": "The legacy-schema shape: the class and the table differ. The DATA_ENTITY stays keyed on the MODEL (A13.1 identity rule) so the repository in the other file still joins it; the declared table rides a CODE table cell for DbResolver.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "User", "note": "@Entity, keyed on the model name"},
+    {"kind": "INTERFACE", "name": "UserRepository", "note": "Spring Data repository, a different file"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "User", "cell": "CODE", "contains": "table\":\"app_users", "note": "@Table(name = \"app_users\") -> data_entity::table_cell(\"app_users\", \"jpa\")"}
+  ],
+  "expect_edges": [
+    {"from": "UserRepository", "to": "User", "category": "ACCESSES_DATA", "note": "cross-file repository -> the model-keyed entity"}
+  ]
+}

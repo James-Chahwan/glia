@@ -10,6 +10,7 @@ pub use repo_graph_code_domain::{
 use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
+use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::jvm;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 
@@ -81,6 +82,16 @@ pub fn parse_file(
         eprintln!(
             "[java-enums] enums={} constants={} methods={} const_bodies={} member_uses={member_uses} member_refs={member_refs} file={file_rel_path}",
             e.enums, e.constants, e.methods, e.const_bodies
+        );
+    }
+
+    // A13.10 fired_on: `glia analyze <repo> 2>&1 | grep '\[orm-jpa\]'` — per
+    // file that declares an `@Entity` / `@Document` class.
+    if acc.orm_jpa.entities > 0 {
+        let j = acc.orm_jpa;
+        eprintln!(
+            "[orm-jpa] entities={} table_cells={} file={file_rel_path}",
+            j.entities, j.table_cells
         );
     }
 
@@ -186,6 +197,8 @@ struct Acc {
     member_ref_seen: HashSet<(NodeId, Option<String>, String)>,
     /// LA.30b: per-file tallies for the `[java-enums]` marker.
     enums: EnumCounts,
+    /// A13.10: per-file tallies for the `[orm-jpa]` marker.
+    orm_jpa: JpaCounts,
 }
 
 /// LA.30b: a reference to a (possibly) enum constant, recorded while a method
@@ -333,6 +346,16 @@ struct DeclarativeCounts {
     /// Mappings `check_route_annotations` would have minted as server ROUTEs
     /// on these interfaces (and now does not).
     routes_suppressed: usize,
+}
+
+/// A13.10: per-file tallies for the `[orm-jpa]` marker.
+#[derive(Default, Clone, Copy)]
+struct JpaCounts {
+    /// `@Entity` / `@Document` classes projected to a DATA_ENTITY (the marker
+    /// prints when this is non-zero).
+    entities: usize,
+    /// Those whose declared table / collection rode a table cell.
+    table_cells: usize,
 }
 
 impl DeclarativeCounts {
@@ -755,7 +778,8 @@ fn visit_type_decl(
     // entity type name, possibly cross-file) and the entity emitter agree on the
     // same target node.
     if let Some(flavor) = data_entity_flavor(&node, src) {
-        emit_data_entity(flavor, name, id, repo, acc);
+        let table = declared_table(node, flavor, src);
+        emit_data_entity(flavor, name, table.as_deref(), id, repo, acc);
     }
     emit_repository_access(&node, src, id, repo, acc);
 
@@ -1165,20 +1189,64 @@ fn data_entity_id(flavor: &str, simple_name: &str, repo: RepoId) -> NodeId {
     )
 }
 
+/// The table / collection an entity class DECLARES, read off the annotation
+/// that made it a DATA_ENTITY of `flavor`: `@Table(name = "…")` for a JPA
+/// `@Entity` (`sql`), `@Document(collection = "…")` / `@Document(value = "…")`
+/// for a Spring Data Mongo `@Document` (`nosql`), each with the bare
+/// positional form (`@Table("…")`, `@Document("…")`) as the fallback. `None`
+/// when the annotation is absent, names no table, or names it through a
+/// non-literal (a constant): the model name is then the table, and no cell is
+/// written. The keyed read is [`ann_path`]'s AST walk (the caller's keys, then
+/// the bare positional string, no text-scan fallback), so an unrelated element
+/// (`@Table(schema = "s")`) is never taken for the table.
+fn declared_table(class: TsNode, flavor: &str, src: &[u8]) -> Option<String> {
+    let (annotation, keys): (&str, &[&str]) = if flavor == jvm::NOSQL_FLAVOR {
+        ("Document", &["collection", "value"])
+    } else {
+        ("Table", &["name"])
+    };
+    own_annotation_nodes(class, src)
+        .into_iter()
+        .filter(|(n, _)| n == annotation)
+        .find_map(|(_, ann)| ann_path(ann, keys, src))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
 /// Emit the DATA_ENTITY node projected from an `@Entity` / `@Document` class,
 /// plus a DEFINES edge class→entity so the model is reachable from its declaring
 /// type. The node's name is the class's simple name; its qname carries the flavor.
-fn emit_data_entity(flavor: &str, name: &str, class_id: NodeId, repo: RepoId, acc: &mut Acc) {
+///
+/// A13.10: the id stays keyed on the MODEL (`data_entity:<flavor>:<Model>`,
+/// the A13.1 identity rule), so a repository in another file that names only
+/// the bare type still reaches it. A declared `table` rides a CODE table cell
+/// (`data_entity::table_cell`), written here at the declaration site only;
+/// DbResolver reads it back through `table_of` to join the table other
+/// services name directly.
+fn emit_data_entity(
+    flavor: &str,
+    name: &str,
+    table: Option<&str>,
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     let entity_id = data_entity_id(flavor, name, repo);
     let qname = data_entity_qname(flavor, name);
+    let mut cells = vec![Cell {
+        kind: cell_type::CODE,
+        payload: CellPayload::Text(name.to_string()),
+    }];
+    acc.orm_jpa.entities += 1;
+    if let Some(table) = table {
+        cells.push(data_entity::table_cell(table, data_entity::orm::JPA));
+        acc.orm_jpa.table_cells += 1;
+    }
     acc.nodes.push(Node {
         id: entity_id,
         repo,
         confidence: Confidence::Strong,
-        cells: vec![Cell {
-            kind: cell_type::CODE,
-            payload: CellPayload::Text(name.to_string()),
-        }],
+        cells,
     });
     acc.edges.push(Edge {
         from: class_id,
@@ -3307,6 +3375,136 @@ class Audit {
             fp.nodes.iter().any(|n| n.id == audit_id),
             "@Entity + @Document must mint the nosql id"
         );
+    }
+
+    /// The table the DATA_ENTITY `qname` carries in its table cell, read the
+    /// way DbResolver reads it (`data_entity::table_of`).
+    fn entity_table(fp: &FileParse, qname: &str) -> Option<String> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, qname);
+        let node = fp.nodes.iter().find(|n| n.id == id)?;
+        data_entity::table_of(&node.cells)
+    }
+
+    #[test]
+    fn jpa_table_annotation_becomes_table_cell() {
+        // A13.10: `@Table(name = "app_users")` on `class User` — the legacy
+        // schema shape. The id stays MODEL-keyed (`data_entity:sql:User`, the
+        // A13.1 rule) so a repository in any file still joins it; the table
+        // rides a CODE table cell for DbResolver.
+        let entity = r#"
+package com.example;
+
+import javax.persistence.*;
+
+@Entity
+@Table(schema = "legacy", name = "app_users")
+public class User {
+    @Id
+    private Long id;
+}
+"#;
+        let fp = parse_file(entity, "User.java", "com::example::User", repo()).unwrap();
+        let entity_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::DATA_ENTITY, "data_entity:sql:User");
+        assert_eq!(qnames_of(&fp, node_kind::DATA_ENTITY), vec!["data_entity:sql:User"]);
+        assert_eq!(fp.nav.name_by_id.get(&entity_id).map(String::as_str), Some("User"));
+        assert_eq!(
+            entity_table(&fp, "data_entity:sql:User").as_deref(),
+            Some("app_users"),
+            "`name =` wins over `schema =`: {:?}",
+            fp.nodes.iter().find(|n| n.id == entity_id)
+        );
+        let node = fp.nodes.iter().find(|n| n.id == entity_id).unwrap();
+        assert!(
+            node.cells.iter().any(|c| matches!(&c.payload,
+                CellPayload::Json(j) if j.contains(r#""orm":"jpa""#))),
+            "the table cell is tagged orm=jpa: {:?}",
+            node.cells
+        );
+
+        // The repository in ANOTHER file names only the bare type, and still
+        // targets the SAME id — the cross-file join the table-keyed id broke.
+        let repository = r#"
+package com.example;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    User findByEmail(String e);
+}
+"#;
+        let rp = parse_file(repository, "UserRepository.java", "com::example::UserRepository", repo())
+            .unwrap();
+        assert!(
+            rp.edges
+                .iter()
+                .any(|e| e.to == entity_id && e.category == edge_category::ACCESSES_DATA),
+            "repository -> data_entity:sql:User: {:?}",
+            rp.edges
+        );
+
+        // The bare positional form (Spring Data JDBC / R2DBC `@Table("x")`).
+        let bare = "package p;\n@Entity\n@Table(\"orders\")\nclass Order {}\n";
+        let bp = parse_file(bare, "Order.java", "p::Order", repo()).unwrap();
+        assert_eq!(entity_table(&bp, "data_entity:sql:Order").as_deref(), Some("orders"));
+    }
+
+    #[test]
+    fn document_collection_becomes_table_cell() {
+        // A13.10: `@Document(collection = …)`, its `value =` alias and the bare
+        // positional form all name the Mongo collection; the id stays
+        // `data_entity:nosql:<Model>`.
+        for (annotation, want) in [
+            (r#"@Document(collection = "audit_events")"#, "audit_events"),
+            (r#"@Document(value = "audit_events")"#, "audit_events"),
+            (r#"@Document("audit_events")"#, "audit_events"),
+        ] {
+            let source = format!("package p;\n{annotation}\nclass AuditEvent {{ private String id; }}\n");
+            let fp = parse_file(&source, "AuditEvent.java", "p::AuditEvent", repo()).unwrap();
+            assert_eq!(
+                qnames_of(&fp, node_kind::DATA_ENTITY),
+                vec!["data_entity:nosql:AuditEvent"],
+                "{annotation}"
+            );
+            assert_eq!(
+                entity_table(&fp, "data_entity:nosql:AuditEvent").as_deref(),
+                Some(want),
+                "{annotation}"
+            );
+        }
+        // An Elasticsearch-style `@Document(indexName = …)` names no
+        // collection: the model name stands, no cell.
+        let es = "package p;\n@Document(indexName = \"idx\")\nclass Doc {}\n";
+        let fp = parse_file(es, "Doc.java", "p::Doc", repo()).unwrap();
+        assert_eq!(entity_table(&fp, "data_entity:nosql:Doc"), None);
+        // A `@Table` on a `@Document` class is not the collection.
+        let mixed = "package p;\n@Document\n@Table(name = \"t\")\nclass Mixed {}\n";
+        let fp = parse_file(mixed, "Mixed.java", "p::Mixed", repo()).unwrap();
+        assert_eq!(entity_table(&fp, "data_entity:nosql:Mixed"), None);
+    }
+
+    #[test]
+    fn jpa_entity_without_table_has_no_table_cell() {
+        // The java-spring-accessdata shape: no `@Table`, so the model name is
+        // the table and no table cell is written. A non-literal `name =` and an
+        // unrelated element (`schema =`) write none either.
+        for header in [
+            "@Entity",
+            "@Entity\n@Table(schema = \"legacy\")",
+            "@Entity\n@Table(name = Names.USERS)",
+        ] {
+            let source = format!("package p;\n{header}\nclass User {{ @Id private Long id; }}\n");
+            let fp = parse_file(&source, "User.java", "p::User", repo()).unwrap();
+            assert_eq!(qnames_of(&fp, node_kind::DATA_ENTITY), vec!["data_entity:sql:User"], "{header}");
+            assert_eq!(entity_table(&fp, "data_entity:sql:User"), None, "{header}");
+            assert!(
+                fp.nodes
+                    .iter()
+                    .flat_map(|n| &n.cells)
+                    .all(|c| !matches!(&c.payload, CellPayload::Json(j) if j.contains("\"table\""))),
+                "{header}: no table cell anywhere"
+            );
+        }
     }
 
     #[test]
