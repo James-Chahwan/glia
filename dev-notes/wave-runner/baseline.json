@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "64e55f6",
-  "after_wave": 20,
+  "measured_at_head": "3193854",
+  "after_wave": 21,
   "cargo_test_workspace": {
-    "passed": 2548,
+    "passed": 2579,
     "failed": 0
   },
   "history_passed": [
@@ -47,10 +47,11 @@
     2466,
     2490,
     2509,
-    2548
+    2548,
+    2579
   ],
   "run_py": {
-    "fixtures": 268,
+    "fixtures": 270,
     "blind_spots": 1,
     "blind_spot_detail": "blind: ['kotlin-ktor: CALLS']; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
     "partial": 0,

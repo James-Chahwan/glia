@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 268,
+  "fixtures": 270,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -180,6 +180,13 @@
     },
     "cpp-namespace-qnames": {
       "framework": "cpp-namespace-qnames",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "cpp-out-of-line-members": {
+      "framework": "cpp-out-of-line-members",
       "language": "c_cpp",
       "per_category": {
         "CALLS": 1.0
@@ -448,6 +455,11 @@
         "HANDLED_BY": 1.0,
         "USES": 1.0
       }
+    },
+    "external-cells-sidecar": {
+      "framework": "external-cells-sidecar",
+      "language": "python",
+      "per_category": {}
     },
     "go-accesses-data": {
       "framework": "go-accesses-data",
