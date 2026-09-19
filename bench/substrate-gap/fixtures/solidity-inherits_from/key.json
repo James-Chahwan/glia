@@ -8,6 +8,6 @@
     {"kind": "CLASS", "name": "Ownable", "note": "base contract"}
   ],
   "expect_edges": [
-    {"from": "Token", "to": "Ownable", "category": "INHERITS_FROM", "note": "Token is Ownable"}
+    {"from": "Token", "to": "Ownable", "category": "INHERITS_FROM", "note": "Token is Ownable, same file; heritage emitted as UnresolvedRef(Bare) and bound by resolve_refs through the module's own symbols (the same-file regression guard for solidity-heritage-xfile)"}
   ]
 }

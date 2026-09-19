@@ -1,0 +1,14 @@
+{
+  "framework": "solidity-heritage-xfile",
+  "language": "solidity",
+  "dirs": ["."],
+  "cells": ["solidity/impl"],
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "Token", "note": "derived contract, Token.sol"},
+    {"kind": "CLASS", "name": "Ownable", "note": "base contract, Ownable.sol"}
+  ],
+  "expect_edges": [
+    {"from": "Token", "to": "Ownable", "category": "IMPORTS", "note": "import \"./Ownable.sol\" - the positive control"},
+    {"from": "Token/Token", "to": "Ownable/Ownable", "category": "INHERITS_FROM", "note": "contract Token is Ownable across files; heritage emitted as UnresolvedRef(Bare) and bound by resolve_refs' unique-type fallback (Solidity imports bind no names)"}
+  ]
+}

@@ -83,13 +83,16 @@ struct Acc {
     natspec: NatspecStats,
 }
 
+/// Visit the file root's declarations. `module_qname` / `module_id` are the
+/// file MODULE: every top-level declaration is DEFINED by it, and heritage refs
+/// resolve against its import bindings.
 #[allow(clippy::too_many_arguments)]
 fn visit_top(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    parent_qname: &str,
-    parent_id: NodeId,
+    module_qname: &str,
+    module_id: NodeId,
     repo: RepoId,
     local_interfaces: &HashSet<String>,
     acc: &mut Acc,
@@ -97,21 +100,21 @@ fn visit_top(
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
-            "import_directive" => collect_import(child, src, parent_qname, acc),
+            "import_directive" => collect_import(child, src, module_qname, acc),
             "contract_declaration" => {
-                visit_contract(child, src, file_rel, parent_qname, parent_id, repo, node_kind::CLASS, local_interfaces, acc);
+                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::CLASS, local_interfaces, acc);
             }
             "interface_declaration" => {
-                visit_contract(child, src, file_rel, parent_qname, parent_id, repo, node_kind::INTERFACE, local_interfaces, acc);
+                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::INTERFACE, local_interfaces, acc);
             }
             "library_declaration" => {
-                visit_contract(child, src, file_rel, parent_qname, parent_id, repo, node_kind::PACKAGE, local_interfaces, acc);
+                visit_contract(child, src, file_rel, module_qname, module_id, module_id, repo, node_kind::PACKAGE, local_interfaces, acc);
             }
             "enum_declaration" => {
-                visit_enum(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_enum(child, src, file_rel, module_qname, module_id, repo, acc);
             }
             "struct_declaration" => {
-                visit_struct_decl(child, src, file_rel, parent_qname, parent_id, repo, acc);
+                visit_struct_decl(child, src, file_rel, module_qname, module_id, repo, acc);
             }
             _ => {}
         }
@@ -125,6 +128,7 @@ fn visit_contract(
     file_rel: &str,
     parent_qname: &str,
     parent_id: NodeId,
+    module_id: NodeId,
     repo: RepoId,
     kind: repo_graph_core::NodeKindId,
     local_interfaces: &HashSet<String>,
@@ -154,7 +158,7 @@ fn visit_contract(
     // `contract X is A, B`: each base is either an interface (→ IMPLEMENTS) or a
     // base contract (→ INHERITS_FROM). The `_class_heritage` rule is hidden, so
     // its `inheritance_specifier` children appear directly under the contract.
-    collect_heritage(node, src, parent_qname, id, repo, local_interfaces, acc);
+    collect_heritage(node, src, id, module_id, local_interfaces, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         let mut c = body.walk();
@@ -444,12 +448,19 @@ fn collect_local_interfaces(root: TsNode, src: &[u8]) -> HashSet<String> {
 /// Parse a contract/interface `is A, B` heritage list. The hidden
 /// `_class_heritage` rule splices its `inheritance_specifier` children directly
 /// under the declaration node; each carries an `ancestor` `user_defined_type`.
+///
+/// Each base becomes an `UnresolvedRef` (A6.4): the parser names the base, the
+/// graph crate's `resolve_refs` binds it to the real declaration (same file via
+/// the module's symbols, cross-file via the unique-type fallback, since a
+/// Solidity `import "./X.sol"` binds no names). An external base (`is IERC20`
+/// from an OpenZeppelin import) stays unresolved instead of dangling.
+/// `module_id` is the file MODULE the ref resolves from, never the enclosing
+/// declaration.
 fn collect_heritage(
     node: TsNode,
     src: &[u8],
-    parent_qname: &str,
     from_id: NodeId,
-    repo: RepoId,
+    module_id: NodeId,
     local_interfaces: &HashSet<String>,
     acc: &mut Acc,
 ) {
@@ -465,20 +476,16 @@ fn collect_heritage(
             continue;
         };
 
-        let (kind, category) = if is_interface_base(base, local_interfaces) {
-            (node_kind::INTERFACE, edge_category::IMPLEMENTS)
+        let category = if is_interface_base(base, local_interfaces) {
+            edge_category::IMPLEMENTS
         } else {
-            (node_kind::CLASS, edge_category::INHERITS_FROM)
+            edge_category::INHERITS_FROM
         };
-        // Best-effort same-scope target NodeId; the graph crate's cross-file
-        // resolver reconciles it against the real declaration.
-        let to_qname = format!("{parent_qname}::{base}");
-        let to_id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &to_qname);
-        acc.edges.push(Edge {
+        acc.refs.push(UnresolvedRef {
             from: from_id,
-            to: to_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(base.to_string()),
             category,
-            confidence: Confidence::Weak,
         });
     }
 }
@@ -852,17 +859,32 @@ contract X is IFoo {
             "STATE_VAR should carry a DOC cell"
         );
 
-        // `contract X is IFoo` → IMPLEMENTS (IFoo matches `I`+capital and is a
-        // locally-declared interface), not INHERITS_FROM.
+        // `contract X is IFoo` → an IMPLEMENTS ref (IFoo matches `I`+capital and
+        // is a locally-declared interface), not INHERITS_FROM. The parser emits
+        // no heritage edge of its own: resolve_refs binds the ref.
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::IMPLEMENTS).count(),
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::IMPLEMENTS
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "IFoo"))
+                .count(),
             1,
-            "expected one IMPLEMENTS edge for `is IFoo`"
+            "expected one IMPLEMENTS ref for `is IFoo`, got {:?}",
+            fp.refs
         );
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::INHERITS_FROM).count(),
+            fp.refs.iter().filter(|r| r.category == edge_category::INHERITS_FROM).count(),
             0,
         );
+        assert!(
+            !fp.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS
+                || e.category == edge_category::INHERITS_FROM),
+            "heritage must not be a parser-fabricated edge"
+        );
+        // The ref resolves from the file MODULE, out of the contract `X`.
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "contracts::X");
+        let x_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::X::X");
+        assert!(fp.refs.iter().any(|r| r.from == x_id && r.from_module == module_id));
     }
 
     #[test]
@@ -888,13 +910,17 @@ contract Y is Base {
         // `treasury` (documented, uninitialized) is the must-keep case.
         assert!(state_vars.contains(&"treasury"));
 
-        // `Base` is not interface-like → INHERITS_FROM, no IMPLEMENTS.
+        // `Base` is not interface-like → an INHERITS_FROM ref, no IMPLEMENTS.
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::INHERITS_FROM).count(),
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INHERITS_FROM
+                    && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "Base"))
+                .count(),
             1,
         );
         assert_eq!(
-            fp.edges.iter().filter(|e| e.category == edge_category::IMPLEMENTS).count(),
+            fp.refs.iter().filter(|r| r.category == edge_category::IMPLEMENTS).count(),
             0,
         );
     }
