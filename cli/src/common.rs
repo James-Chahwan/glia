@@ -166,14 +166,6 @@ pub(crate) fn write_json_to(merged: &MergedGraph, out: &mut Vec<u8>) {
     let _ = writeln!(out, "{}", serde_json::to_string(&json).unwrap_or_default());
 }
 
-pub(crate) fn all_edges(merged: &MergedGraph) -> impl Iterator<Item = &repo_graph_core::Edge> {
-    merged
-        .graphs
-        .iter()
-        .flat_map(|g| g.edges.iter())
-        .chain(merged.cross_edges.iter())
-}
-
 pub(crate) struct NodeInfo {
     pub(crate) name: String,
     pub(crate) qname: String,

@@ -5,9 +5,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use repo_graph_code_domain::{cell_type, edge_category, endpoint, node_kind};
 use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Cell, CellPayload, Edge, Node, NodeId};
+use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId};
 use repo_graph_graph::{MergedGraph, Reach, RepoGraph};
 
 use crate::absence::{self, Answer};
@@ -126,23 +127,53 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
     w.live
 }
 
-/// The walk behind [`entrypoint_reachable`]. Every iteration is over a `Vec`
-/// (`merged.graphs`, `g.nodes`, the collected edges); the maps are only looked
-/// up, never iterated, so the counts are deterministic.
-fn live_walk(merged: &MergedGraph) -> LiveWalk {
-    use std::collections::{HashSet, VecDeque};
+/// What the liveness walk follows (LD.15b): the carry edges, plus the two
+/// A7.8 steps as walk-local hops the walk takes like edges — never stored,
+/// never returned. `hops` holds every owner hop (METHOD -> its owning type,
+/// tagged DEFINES), then every implementer hop (interface -> implementer, an
+/// IMPLEMENTS edge reversed, in edge order), and the carry edges follow them.
+/// The index keeps each node's outgoing list in that global order, so a node
+/// popped by the walk takes its owner hop, then its implementer hops, then its
+/// carry edges — the order the per-node queue loop this replaced applied them.
+struct LiveSource<'a> {
+    merged: &'a MergedGraph,
+    hops: Vec<Edge>,
+    carry: CategorySet,
+}
 
-    let t = &CODE_PROFILE.tables;
-    let carry: HashSet<repo_graph_core::EdgeCategoryId> = t.carry_edges.iter().copied().collect();
-    let edges: Vec<&Edge> = merged.all_edges().collect();
-    // Reverse IMPLEMENTS: interface (or interface method) -> its implementers.
-    let mut implementers_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-    for e in &edges {
-        if e.category == edge_category::IMPLEMENTS {
-            implementers_of.entry(e.to).or_default().push(e.from);
-        }
+impl GraphSource for LiveSource<'_> {
+    fn node_ids(&self) -> Vec<NodeId> {
+        GraphSource::node_ids(self.merged)
     }
 
+    fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        Box::new(
+            self.hops
+                .iter()
+                .chain(self.merged.all_edges().filter(|e| self.carry.contains(e.category))),
+        )
+    }
+}
+
+/// A walk-local hop of [`LiveSource`].
+fn live_hop(from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> Edge {
+    Edge { from, to, category, confidence: Confidence::Strong, cells: Vec::new() }
+}
+
+/// The walk behind [`entrypoint_reachable`]: one `algo::reach::bfs` from the
+/// entrypoints over a [`LiveSource`] index, built once per call in O(V + E)
+/// (LD.15b) instead of scanning every edge for every live node. Which step
+/// made a node live is read off the hop that reached it: a node reached from
+/// `p` is `p`'s owner when `p`'s owner hop names it (that hop is first in
+/// `p`'s list, so it always wins), else an implementer when an implementer
+/// hop `p -> it` exists (those precede every carry edge), else a carry edge.
+/// Every iteration is over a `Vec` (`merged.graphs`, `g.nodes`, the edges);
+/// the maps are only looked up, never iterated, so the counts are
+/// deterministic.
+fn live_walk(merged: &MergedGraph) -> LiveWalk {
+    use std::collections::HashSet;
+
+    let t = &CODE_PROFILE.tables;
     let mut w = LiveWalk {
         live: HashSet::new(),
         by_kind: 0,
@@ -152,7 +183,9 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
         total: 0,
     };
     let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
-    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    // Methods with an owner, in node order, once each.
+    let mut owned: Vec<NodeId> = Vec::new();
+    let mut seeds: Vec<NodeId> = Vec::new();
     for g in &merged.graphs {
         w.total += g.nodes.len();
         for n in &g.nodes {
@@ -160,8 +193,9 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             if kind == Some(node_kind::METHOD)
                 && let Some(&p) = g.nav.parent_of.get(&n.id)
                 && g.nav.kind_by_id.get(&p).is_some_and(|k| OWNER_KINDS.contains(k))
+                && owner_of.insert(n.id, p).is_none()
             {
-                owner_of.insert(n.id, p);
+                owned.push(n.id);
             }
             let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
             let seeded = if t.entry.is_entry(kind, name, &[]) {
@@ -174,27 +208,31 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             };
             if w.live.insert(n.id) {
                 *seeded += 1;
-                queue.push_back(n.id);
+                seeds.push(n.id);
             }
         }
     }
-    while let Some(node) = queue.pop_front() {
-        if let Some(&owner) = owner_of.get(&node)
-            && w.live.insert(owner)
-        {
+
+    let mut hops: Vec<Edge> = owned
+        .iter()
+        .filter_map(|m| owner_of.get(m).map(|&p| live_hop(*m, p, edge_category::DEFINES)))
+        .collect();
+    // Reverse IMPLEMENTS: interface (or interface method) -> its implementers.
+    let mut implementer_hops: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for e in merged.all_edges() {
+        if e.category == edge_category::IMPLEMENTS {
+            implementer_hops.insert((e.to, e.from));
+            hops.push(live_hop(e.to, e.from, edge_category::IMPLEMENTS));
+        }
+    }
+    let src = LiveSource { merged, hops, carry: CategorySet::of(t.carry_edges) };
+    let adj = Adjacency::build(&src, &CategorySet::all());
+    for r in reach::bfs(&adj, &seeds, Walk::Forward, usize::MAX).reached {
+        w.live.insert(r.id);
+        if owner_of.get(&r.parent) == Some(&r.id) {
             w.owners += 1;
-            queue.push_back(owner);
-        }
-        for &imp in implementers_of.get(&node).map(Vec::as_slice).unwrap_or(&[]) {
-            if w.live.insert(imp) {
-                w.implementers += 1;
-                queue.push_back(imp);
-            }
-        }
-        for e in &edges {
-            if e.from == node && carry.contains(&e.category) && w.live.insert(e.to) {
-                queue.push_back(e.to);
-            }
+        } else if implementer_hops.contains(&(r.parent, r.id)) {
+            w.implementers += 1;
         }
     }
     w
@@ -335,7 +373,6 @@ pub fn cross_stack_trace(
     feature: &str,
     max_depth: usize,
 ) -> Result<Vec<TraceHop>, String> {
-    use std::collections::{HashMap, HashSet, VecDeque};
     let seed = merged
         .node_id_by_qname(feature)
         .or_else(|| merged.resolve_name(feature))
@@ -347,40 +384,29 @@ pub fn cross_stack_trace(
             repo_of.insert(n.id, g.repo.0);
         }
     }
-    let carry: HashSet<repo_graph_core::EdgeCategoryId> =
-        CODE_PROFILE.tables.carry_edges.iter().copied().collect();
-    let edges: Vec<&Edge> = merged.all_edges().collect();
     let loc = Locator::new(merged);
 
-    let mut hops = Vec::new();
-    let mut visited: HashSet<NodeId> = HashSet::from([seed]);
-    let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(seed, 0)]);
-    while let Some((node, depth)) = queue.pop_front() {
-        if depth >= max_depth {
-            continue;
-        }
-        for e in &edges {
-            if e.from != node || !carry.contains(&e.category) {
-                continue;
+    // One forward BFS over the carry edges' index (LD.15b): each reached node
+    // is one hop, in discovery order, from the node that first reached it.
+    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
+    let hops = reach::bfs(&adj, &[seed], Walk::Forward, max_depth)
+        .reached
+        .iter()
+        .map(|r| {
+            let from = loc.locate(r.parent);
+            let to = loc.locate(r.id);
+            TraceHop {
+                depth: r.depth,
+                mechanism: edge_category::name(r.via),
+                cross_service: repo_of.get(&r.parent) != repo_of.get(&r.id),
+                from_qname: from.qname,
+                to_qname: to.qname,
+                to_kind: to.kind,
+                to_file: to.file,
+                to_line: to.line,
             }
-            if visited.insert(e.to) {
-                let from = loc.locate(e.from);
-                let to = loc.locate(e.to);
-                let cross_service = repo_of.get(&e.from) != repo_of.get(&e.to);
-                hops.push(TraceHop {
-                    depth: depth + 1,
-                    mechanism: edge_category::name(e.category),
-                    cross_service,
-                    from_qname: from.qname,
-                    to_qname: to.qname,
-                    to_kind: to.kind,
-                    to_file: to.file,
-                    to_line: to.line,
-                });
-                queue.push_back((e.to, depth + 1));
-            }
-        }
-    }
+        })
+        .collect();
     Ok(hops)
 }
 

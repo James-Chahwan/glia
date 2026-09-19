@@ -1,7 +1,10 @@
 //! `blast_radius` — the P3 answer-shaped primitive (handoff v6).
 
+use std::sync::OnceLock;
+
+use repo_graph_activation::algo::{self, Adjacency, Walk};
 use repo_graph_activation::profile::DomainTables;
-use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
+use repo_graph_core::{EdgeCategoryId, NodeId};
 
 use crate::merged::MergedGraph;
 
@@ -68,45 +71,35 @@ impl MergedGraph {
         tables: &DomainTables,
     ) -> Vec<BlastHit> {
         use repo_graph_activation::Direction;
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::HashMap;
 
-        let allow: HashSet<EdgeCategoryId> = tables.carry_edges.iter().copied().collect();
-        let edges: Vec<&Edge> = self.all_edges().collect();
-
-        let fwd = reach != Reach::Backward;
-        let bwd = reach != Reach::Forward;
-
-        // First-reach (depth, reason) per node — BFS so depth is the shortest
-        // carry-path and `reason` is the edge that first put the node in scope.
-        let mut first: HashMap<NodeId, (usize, EdgeCategoryId)> = HashMap::new();
-        let mut visited: HashSet<NodeId> = HashSet::from([seed]);
-        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(seed, 0)]);
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-            for e in &edges {
-                if !allow.contains(&e.category) {
-                    continue;
-                }
-                let next = if fwd && e.from == node {
-                    Some(e.to)
-                } else if bwd && e.to == node {
-                    Some(e.from)
-                } else {
-                    None
-                };
-                if let Some(next) = next {
-                    if visited.insert(next) {
-                        first.insert(next, (depth + 1, e.category));
-                        queue.push_back((next, depth + 1));
-                    }
-                }
-            }
+        // First-reach (depth, reason) per node: a BFS over the carry edges'
+        // CSR index (LD.15b), so depth is the shortest carry-path and `reason`
+        // the category of the edge that first put the node in scope - exactly
+        // what the per-node edge scan it replaced returned.
+        let walk = match reach {
+            Reach::Forward => Walk::Forward,
+            Reach::Backward => Walk::Backward,
+            Reach::Both => Walk::Both,
+        };
+        let adj = Adjacency::carry(self, tables);
+        let b = algo::reach::bfs(&adj, &[seed], walk, max_depth);
+        if reach_debug() {
+            // fired_on marker (LD.15b), a cost diagnostic: `scanned` is the
+            // incidences the walk examined, at most two per kept edge.
+            eprintln!(
+                "[reach] blast walk={walk:?} depth<={max_depth} reached={} scanned={} index_nodes={} kept={}",
+                b.reached.len(),
+                b.scanned,
+                adj.len(),
+                adj.kept_edges()
+            );
         }
-        if first.is_empty() {
+        if b.reached.is_empty() {
             return Vec::new();
         }
+        let first: HashMap<NodeId, (usize, EdgeCategoryId)> =
+            b.reached.iter().map(|r| (r.id, (r.depth, r.via))).collect();
 
         // Rank the closure by PPR seeded at the target.
         let mut config = tables.activation_config(None);
@@ -138,6 +131,14 @@ impl MergedGraph {
     }
 }
 
+/// `GLIA_ALGO_DEBUG=1` turns on the `[reach] blast` line, read once - the
+/// variable that turns on `repo_graph_activation::algo`'s `[algo] adjacency`
+/// line, whose reader is private to that crate.
+fn reach_debug() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GLIA_ALGO_DEBUG").is_ok_and(|v| v == "1"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +147,7 @@ mod tests {
     use crate::types::{RepoGraph, SymbolTable};
     use repo_graph_code_domain::profile::CODE_TABLES;
     use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
-    use repo_graph_core::{Confidence, Node};
+    use repo_graph_core::{Confidence, Edge, Node};
 
     #[test]
     fn blast_radius_follows_semantic_edges_not_imports() {

@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 repo-graph-engine = { path = "../engine" }
 repo-graph-graph = { path = "../graph" }
+# algo::reach for `glia impact`'s walk (LD.15b).
+repo-graph-activation = { path = "../activation" }
 repo-graph-store = { path = "../store" }
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }

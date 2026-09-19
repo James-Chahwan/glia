@@ -1,11 +1,12 @@
 //! `glia impact` — reachability walk: which entities does <qname> depend on /
 //! get hit by, over every edge category, as depth-tagged tables.
 
+use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
 use repo_graph_core::NodeId;
 use repo_graph_engine::generate_one_opts;
 use repo_graph_graph::MergedGraph;
 
-use crate::common::{ImpactDirection, all_edges, build_options, edge_category_name, lookup_node_info};
+use crate::common::{ImpactDirection, build_options, edge_category_name, lookup_node_info};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -70,31 +71,18 @@ pub(crate) fn run(args: Args) -> i32 {
     0
 }
 
+/// One breadth-first walk from `start` over every edge category (`impact`
+/// never filtered by category), on a CSR index built once per walk (LD.15b):
+/// each reached node with its depth and the category that first reached it,
+/// in discovery order.
 fn walk_and_print(merged: &MergedGraph, start: NodeId, max_depth: usize, forward: bool) {
-    use std::collections::{HashSet, VecDeque};
-    let mut visited: HashSet<NodeId> = HashSet::new();
-    let mut frontier: VecDeque<(NodeId, usize)> = VecDeque::new();
-    frontier.push_back((start, 0));
-    visited.insert(start);
-    let mut hits: Vec<(NodeId, usize, &'static str)> = Vec::new();
-    while let Some((node, d)) = frontier.pop_front() {
-        if d >= max_depth {
-            continue;
-        }
-        for e in all_edges(merged) {
-            let (next, cat) = if forward && e.from == node {
-                (e.to, edge_category_name(e.category))
-            } else if !forward && e.to == node {
-                (e.from, edge_category_name(e.category))
-            } else {
-                continue;
-            };
-            if visited.insert(next) {
-                hits.push((next, d + 1, cat));
-                frontier.push_back((next, d + 1));
-            }
-        }
-    }
+    let adj = Adjacency::build(merged, &CategorySet::all());
+    let walk = if forward { Walk::Forward } else { Walk::Backward };
+    let hits: Vec<(NodeId, usize, &'static str)> = reach::bfs(&adj, &[start], walk, max_depth)
+        .reached
+        .iter()
+        .map(|r| (r.id, r.depth, edge_category_name(r.via)))
+        .collect();
     if hits.is_empty() {
         println!("_(none)_");
         return;
