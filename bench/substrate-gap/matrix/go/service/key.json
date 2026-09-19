@@ -28,7 +28,7 @@
   "expect_edges": [
     {
       "from": "endpoint:GET:/users",
-      "to": "route:/users",
+      "to": "GET /users",
       "category": "HTTP_CALLS",
       "note": "the cross-service link the column rolls up"
     }

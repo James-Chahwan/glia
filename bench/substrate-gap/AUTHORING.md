@@ -142,7 +142,7 @@ committed fixtures:
 
 | framework | node name | qname |
 |---|---|---|
-| Go / chi | `/users` | `route:/users` — **no method at all** |
+| Go / chi | `GET /users` | same — one node per method since LB.11a (was `route:/users`, no method) |
 | Spring | `GET /users/{id}` | same |
 | Rails | `GET /users/:id` | same |
 | ASP.NET | `ANY api/users` | same — method present, **no leading slash** |

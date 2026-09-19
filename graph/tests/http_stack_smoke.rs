@@ -70,12 +70,13 @@ fn parse_frontend() -> repo_graph_graph::RepoGraph {
     build_typescript(frontend_repo(), vec![parse], |_, _| None).unwrap()
 }
 
-fn route_id(path: &str) -> NodeId {
+/// LB.11a: a Go ROUTE is one node per (method, path), `<METHOD> <path>`.
+fn route_id(method: &str, path: &str) -> NodeId {
     NodeId::from_parts(
         repo_graph_parser_go::GRAPH_TYPE,
         backend_repo(),
         node_kind::ROUTE,
-        &format!("route:{path}"),
+        &format!("{method} {path}"),
     )
 }
 
@@ -115,21 +116,29 @@ fn frontend_endpoints_link_to_backend_routes_via_http_calls_edges() {
     let backend = parse_backend();
     let frontend = parse_frontend();
 
-    // --- Backend sanity: three routes exist with the expected methods.
-    let users_route = route_id("/api/users");
-    let user_by_id_route = route_id("/api/users/:id");
+    // --- Backend sanity: three routes exist, one node per (method, path),
+    //     each carrying exactly its own method (LB.11a).
+    let users_route = route_id("GET", "/api/users");
+    let create_user_route = route_id("POST", "/api/users");
+    let user_by_id_route = route_id("GET", "/api/users/:id");
 
     assert!(
         backend.nodes.iter().any(|n| n.id == users_route),
-        "backend /api/users Route node present"
+        "backend GET /api/users Route node present"
+    );
+    assert!(
+        backend.nodes.iter().any(|n| n.id == create_user_route),
+        "backend POST /api/users Route node present"
     );
     assert!(
         backend.nodes.iter().any(|n| n.id == user_by_id_route),
-        "backend /api/users/:id Route node present"
+        "backend GET /api/users/:id Route node present"
     );
-    let users_methods = route_method_cells(&backend, users_route);
-    assert!(users_methods.contains(&"GET".to_string()));
-    assert!(users_methods.contains(&"POST".to_string()));
+    assert_eq!(route_method_cells(&backend, users_route), vec!["GET".to_string()]);
+    assert_eq!(
+        route_method_cells(&backend, create_user_route),
+        vec!["POST".to_string()]
+    );
     let by_id_methods = route_method_cells(&backend, user_by_id_route);
     assert_eq!(by_id_methods, vec!["GET".to_string()]);
 
@@ -173,12 +182,20 @@ fn frontend_endpoints_link_to_backend_routes_via_http_calls_edges() {
         .expect("GET endpoint → /api/users route edge");
     assert_eq!(e1.confidence, Confidence::Strong);
 
-    // --- POST /api/users endpoint → same /api/users route, distinct edge.
+    // --- POST /api/users endpoint → the POST /api/users route, never the GET.
     let e2 = cross
         .iter()
-        .find(|e| e.from == ep_post_users && e.to == users_route)
-        .expect("POST endpoint → /api/users route edge");
+        .find(|e| e.from == ep_post_users && e.to == create_user_route)
+        .expect("POST endpoint → POST /api/users route edge");
     assert_eq!(e2.confidence, Confidence::Strong);
+    assert!(
+        !cross.iter().any(|e| e.from == ep_post_users && e.to == users_route),
+        "a POST call never pairs with the GET route"
+    );
+    assert!(
+        !cross.iter().any(|e| e.from == ep_get_users && e.to == create_user_route),
+        "a GET call never pairs with the POST route"
+    );
 
     // --- GET /api/users/${…} endpoint → /api/users/:id route via path
     //     normalisation. Edge confidence weakens to Medium because the

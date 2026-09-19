@@ -24,8 +24,8 @@
     {"kind": "ROUTE", "node": "/items/{id}", "cell": "ROUTE_METHOD", "contains": "\"method\":\"get\""}
   ],
   "forbid": [
-    {"kind": "ROUTE", "name": "route:/PATCH", "note": "Handle's method string is never read as a path (the qname a misread would mint: canonical_http_path adds the leading /)"},
-    {"kind": "ROUTE", "name": "route:/GET /items/{id}", "note": "a Go 1.22 pattern is split into method and path, never kept verbatim (the qname a verbatim read would mint)"},
-    {"from": "/users", "to": "patchUser", "category": "HANDLED_BY", "note": "the PATCH handler belongs to /users/:id"}
+    {"kind": "ROUTE", "name": "ANY /PATCH", "note": "Handle's method string is never read as a path (the qname a misread through Handle's ANY arm would mint: canonical_http_path adds the leading /; `route:/PATCH` before LB.11a)"},
+    {"kind": "ROUTE", "name": "ANY /GET /items/{id}", "note": "a Go 1.22 pattern is split into method and path, never kept verbatim (the qname a verbatim read through HandleFunc's ANY arm would mint; `route:/GET /items/{id}` before LB.11a)"},
+    {"from": "GET /users", "to": "patchUser", "category": "HANDLED_BY", "note": "the PATCH handler belongs to /users/:id (LB.11a: the /users route is `GET /users`)"}
   ]
 }

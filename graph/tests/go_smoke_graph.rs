@@ -58,12 +58,13 @@ fn func_id(qname: &str) -> NodeId {
 fn method_id(qname: &str) -> NodeId {
     NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname)
 }
-fn route_id(path: &str) -> NodeId {
+/// LB.11a: a Go ROUTE is one node per (method, path), `<METHOD> <path>`.
+fn route_id(method: &str, path: &str) -> NodeId {
     NodeId::from_parts(
         GRAPH_TYPE,
         repo(),
         node_kind::ROUTE,
-        &format!("route:{path}"),
+        &format!("{method} {path}"),
     )
 }
 
@@ -161,9 +162,9 @@ fn routes_emit_handled_by_edges_via_unresolved_ref_resolution() {
     let tuples: Vec<(NodeId, NodeId, EdgeCategoryId)> =
         g.edges.iter().map(|e| (e.from, e.to, e.category)).collect();
 
-    let health = route_id("/health");
-    let login = route_id("/login");
-    let api_users = route_id("/api/users");
+    let health = route_id("GET", "/health");
+    let login = route_id("POST", "/login");
+    let api_users = route_id("GET", "/api/users");
 
     let do_login = func_id("auth::DoLogin");
     let users_list = func_id("users::List");

@@ -7,7 +7,7 @@
     {"kind": "DOC_SECTION", "name": "contract::users::GET:/users/{id}", "note": "@Router path + method"}
   ],
   "expect_edges": [
-    {"from": "contract::users::GET:/users/{id}", "to": "route:/users/:id", "category": "DOCUMENTS", "note": "placeholder-folded pairing through the contract-link matcher"}
+    {"from": "contract::users::GET:/users/{id}", "to": "GET /users/:id", "category": "DOCUMENTS", "note": "placeholder-folded pairing through the contract-link matcher"}
   ],
   "expect_cells": [
     {"kind": "DOC_SECTION", "node": "contract::users::GET:/users/{id}", "cell": "ORIGIN", "contains": "\"source\":\"swaggo\"", "note": "framework discriminator"},

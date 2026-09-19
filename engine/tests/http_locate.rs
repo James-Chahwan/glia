@@ -101,9 +101,9 @@ fn http_nodes_are_located_by_cell_or_handler() {
     );
 
     // (2) Go ROUTE via its JSON ROUTE_METHOD cell: `r.Get(...)` is 1-indexed
-    // line 15.
+    // line 15. One node per (method, path), `GET /users` (LB.11a).
     assert_eq!(
-        locate(&m, "route:/users"),
+        locate(&m, "GET /users"),
         ("ROUTE", Some("main.go".to_string()), Some(15)),
     );
 
@@ -143,7 +143,7 @@ fn trace_hops_into_http_nodes_carry_a_location() {
         "{located:?}"
     );
     assert!(
-        located.contains(&("route:/users", Some("main.go"), Some(15))),
+        located.contains(&("GET /users", Some("main.go"), Some(15))),
         "{located:?}"
     );
 }

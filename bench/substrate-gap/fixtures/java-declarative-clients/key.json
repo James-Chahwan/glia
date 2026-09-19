@@ -25,17 +25,17 @@
   "expect_edges": [
     {
       "from": "endpoint:GET:/feign/users",
-      "to": "route:/feign/users/{id}",
+      "to": "GET /feign/users/{id}",
       "category": "HTTP_CALLS"
     },
     {
       "from": "endpoint:GET:/exchange/users",
-      "to": "route:/exchange/users/{id}",
+      "to": "GET /exchange/users/{id}",
       "category": "HTTP_CALLS"
     },
     {
       "from": "endpoint:POST:/repos",
-      "to": "route:/repos",
+      "to": "POST /repos",
       "category": "HTTP_CALLS"
     }
   ],
@@ -43,8 +43,8 @@
     {
       "kind": "ROUTE",
       "name": "GET /feign/users/{id}",
-      "max_nodes": 0,
-      "note": "THE BUG: a Feign client method is not a server route"
+      "max_nodes": 1,
+      "note": "THE BUG: a Feign client method is not a server route. LB.11a: the Go chi server's own route carries this exact name, so 1 is that route; a phantom ROUTE minted from the Feign interface would be a second"
     },
     {
       "kind": "ROUTE",

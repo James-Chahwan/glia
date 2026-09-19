@@ -5,11 +5,11 @@
   "mechanism": "http_server",
   "note": "LA.18d. A stdlib route whose handler is a func literal is HANDLED_BY the in-repo functions the literal's body calls; the named-handler route is the control. Baseline 2026-09-18 (HEAD 7a4883b): route:/health has no HANDLED_BY at all (emit_route_from_call reads only identifier / selector handler args), so writeHealth reads as dead; route:/users -> main::listUsers exists.",
   "expect_edges": [
-    {"from": "route:/health", "to": "main::writeHealth", "category": "HANDLED_BY", "note": "callee of the func-literal handler"},
-    {"from": "route:/users", "to": "main::listUsers", "category": "HANDLED_BY", "note": "CONTROL: named handler, unchanged"}
+    {"from": "ANY /health", "to": "main::writeHealth", "category": "HANDLED_BY", "note": "callee of the func-literal handler"},
+    {"from": "ANY /users", "to": "main::listUsers", "category": "HANDLED_BY", "note": "CONTROL: named handler, unchanged"}
   ],
   "forbid": [
-    {"from": "route:/health", "to": "main::main", "category": "HANDLED_BY", "note": "PRECISION: the enclosing function is not the handler"},
-    {"from": "route:/health", "to": "main::listUsers", "category": "HANDLED_BY", "note": "only the literal's own callees"}
+    {"from": "ANY /health", "to": "main::main", "category": "HANDLED_BY", "note": "PRECISION: the enclosing function is not the handler"},
+    {"from": "ANY /health", "to": "main::listUsers", "category": "HANDLED_BY", "note": "only the literal's own callees"}
   ]
 }

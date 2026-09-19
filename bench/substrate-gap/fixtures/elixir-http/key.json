@@ -72,8 +72,8 @@
     },
     {
       "kind": "ROUTE",
-      "max_nodes": 3,
-      "note": "exactly the 3 Go chi routes \u2014 scan_phoenix_routes must mint NO phantom ROUTE from the qualified client calls"
+      "max_nodes": 4,
+      "note": "exactly the 4 Go chi routes (LB.11a: GET and DELETE of /api/users/{id} are two nodes) \u2014 scan_phoenix_routes must mint NO phantom ROUTE from the qualified client calls"
     }
   ],
   "mechanism": "http_client",

@@ -30,22 +30,22 @@
   "expect_edges": [
     {
       "from": "endpoint:GET:/users",
-      "to": "route:/users",
+      "to": "GET /users",
       "category": "HTTP_CALLS"
     },
     {
       "from": "endpoint:POST:/orders",
-      "to": "route:/orders",
+      "to": "POST /orders",
       "category": "HTTP_CALLS"
     },
     {
       "from": "endpoint:GET:/accounts",
-      "to": "route:/accounts",
+      "to": "GET /accounts",
       "category": "HTTP_CALLS"
     },
     {
       "from": "endpoint:DELETE:/invoices",
-      "to": "route:/invoices",
+      "to": "DELETE /invoices",
       "category": "HTTP_CALLS"
     }
   ],

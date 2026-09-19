@@ -9,11 +9,11 @@
     {"kind": "ROUTE", "name": "/users", "note": "Go chi route in api/"}
   ],
   "expect_edges": [
-    {"from": "endpoint:GET:/users", "to": "route:/users", "category": "HTTP_CALLS", "note": "CONTROL (not a blind spot): single-repo monorepo pairing - the substrate `glia arch` keys on"},
-    {"from": "endpoint:POST:/users", "to": "route:/users", "category": "HTTP_CALLS", "note": "CONTROL: second method on the same route"}
+    {"from": "endpoint:GET:/users", "to": "GET /users", "category": "HTTP_CALLS", "note": "CONTROL (not a blind spot): single-repo monorepo pairing - the substrate `glia arch` keys on"},
+    {"from": "endpoint:POST:/users", "to": "POST /users", "category": "HTTP_CALLS", "note": "CONTROL: second method on the same path (its own ROUTE node since LB.11a)"}
   ],
   "expect_cells": [
     {"kind": "ENDPOINT", "node": "endpoint:GET:/users", "cell": "ENDPOINT_HIT", "contains": "\"file\":\"web/api.ts\"", "note": "CONTROL: node_file tier 2 places the endpoint in service web"},
-    {"kind": "ROUTE", "node": "route:/users", "cell": "ROUTE_METHOD", "contains": "\"file\":\"api/main.go\"", "note": "CONTROL: node_file tier 2 places the Go route in service api"}
+    {"kind": "ROUTE", "node": "GET /users", "cell": "ROUTE_METHOD", "contains": "\"file\":\"api/main.go\"", "note": "CONTROL: node_file tier 2 places the Go route in service api"}
   ]
 }

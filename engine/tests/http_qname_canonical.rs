@@ -207,7 +207,8 @@ fn cases() -> Vec<(
     Vec<&'static str>,
 )> {
     vec![
-        ("go gin + echo", GO, vec!["route:/items", "route:/parts"]),
+        // LB.11a: a Go ROUTE is `<METHOD> <path>`, one node per method.
+        ("go gin + echo", GO, vec!["GET /items", "GET /parts"]),
         (
             "rust axum + ts fetch",
             RUST_TS,

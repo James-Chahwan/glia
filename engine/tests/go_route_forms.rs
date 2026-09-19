@@ -13,6 +13,10 @@
 //! copied into a tempdir so the build never writes next to the fixture. The
 //! POSITION is read off the node's cells, never through `locate_node`, whose
 //! line base is its own contract.
+//!
+//! LB.11a: a Go ROUTE is one node per (method, path), qname `<METHOD> <path>`,
+//! so the lookups below name the method (`PATCH /users/:id`, `ANY /ping`, one
+//! node each for `GET /orders` and `POST /orders`).
 
 use repo_graph_code_domain::{cell_type, edge_category};
 use repo_graph_core::{CellPayload, NodeId};
@@ -85,28 +89,36 @@ fn handlers(m: &MergedGraph, id: NodeId) -> Vec<String> {
 fn method_bearing_forms_emit_routes_with_methods_and_handlers() {
     let (_td, m) = build();
 
-    let patch = route(&m, "route:/users/:id");
+    let patch = route(&m, "PATCH /users/:id");
     assert_eq!(methods(&m, patch), vec!["PATCH".to_string()]);
     assert_eq!(handlers(&m, patch), vec!["patchUser".to_string()]);
 
-    let ping = route(&m, "route:/ping");
+    let ping = route(&m, "ANY /ping");
     assert_eq!(methods(&m, ping), vec!["ANY".to_string()]);
     assert_eq!(handlers(&m, ping), vec!["anyPing".to_string()]);
 
-    let orders = route(&m, "route:/orders");
-    assert_eq!(methods(&m, orders), vec!["GET".to_string(), "POST".to_string()]);
-    assert_eq!(handlers(&m, orders), vec!["matchOrders".to_string()]);
+    // `Match` lists two verbs: one node per verb, each HANDLED_BY the handler.
+    for verb in ["GET", "POST"] {
+        let orders = route(&m, &format!("{verb} /orders"));
+        assert_eq!(methods(&m, orders), vec![verb.to_string()]);
+        assert_eq!(handlers(&m, orders), vec!["matchOrders".to_string()]);
+    }
 
-    let item = route(&m, "route:/items/{id}");
+    let item = route(&m, "GET /items/{id}");
     assert_eq!(methods(&m, item), vec!["GET".to_string()]);
     assert_eq!(handlers(&m, item), vec!["getItem".to_string()]);
 
     // Precision: the method string is never a path, a Go 1.22 pattern is never
-    // kept verbatim, and the PATCH handler stays on its own path.
-    assert!(m.node_id_by_qname("route:/PATCH").is_none());
-    assert!(m.node_id_by_qname("route:/GET /items/{id}").is_none());
-    let users = route(&m, "route:/users");
-    assert_eq!(handlers(&m, users), vec!["createUser".to_string(), "listUsers".to_string()]);
+    // kept verbatim (the shapes such a misread mints through HandleFunc /
+    // Handle's ANY arm, in either qname generation), and the PATCH handler
+    // stays on its own path.
+    for q in ["ANY /PATCH", "ANY /GET /items/{id}", "route:/PATCH", "route:/GET /items/{id}"] {
+        assert!(m.node_id_by_qname(q).is_none(), "{q} exists");
+    }
+    // GET and POST of /users are two nodes, each HANDLED_BY its own handler.
+    assert_eq!(handlers(&m, route(&m, "GET /users")), vec!["listUsers".to_string()]);
+    assert_eq!(handlers(&m, route(&m, "POST /users")), vec!["createUser".to_string()]);
+    assert!(m.node_id_by_qname("route:/users").is_none(), "path-only node is gone");
 }
 
 #[test]
@@ -114,25 +126,28 @@ fn every_go_route_is_positioned_at_its_registration() {
     let (_td, m) = build();
 
     // Verb form: `r.GET("/users", ..)` on 0-based row 17, then its POST twin
-    // on row 18 — first POSITION wins, and it is the first registration.
-    let users = route(&m, "route:/users");
-    let pos = cells_of(&m, users, cell_type::POSITION);
+    // on row 18 — each its own node (LB.11a) with the one POSITION of its
+    // own registration.
+    let get_users = route(&m, "GET /users");
     assert_eq!(
-        pos.first().map(String::as_str),
-        Some(r#"{"file":"main.go","start_line":17,"end_line":17}"#),
-        "{pos:?}"
+        cells_of(&m, get_users, cell_type::POSITION),
+        vec![r#"{"file":"main.go","start_line":17,"end_line":17}"#.to_string()],
     );
-    assert_eq!(pos.len(), 2, "one POSITION per registration: {pos:?}");
+    let post_users = route(&m, "POST /users");
+    assert_eq!(
+        cells_of(&m, post_users, cell_type::POSITION),
+        vec![r#"{"file":"main.go","start_line":18,"end_line":18}"#.to_string()],
+    );
 
     // Go 1.22 pattern: `mux.HandleFunc("GET /items/{id}", ..)` on row 23.
-    let item = route(&m, "route:/items/{id}");
+    let item = route(&m, "GET /items/{id}");
     assert_eq!(
         cells_of(&m, item, cell_type::POSITION).first().map(String::as_str),
         Some(r#"{"file":"main.go","start_line":23,"end_line":23}"#),
     );
 
     // Every ROUTE in the graph carries at least one POSITION.
-    for q in ["route:/users/:id", "route:/ping", "route:/orders"] {
+    for q in ["PATCH /users/:id", "ANY /ping", "GET /orders", "POST /orders"] {
         let id = route(&m, q);
         assert!(
             !cells_of(&m, id, cell_type::POSITION).is_empty(),

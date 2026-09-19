@@ -874,12 +874,13 @@ mod tests {
             .node_id_by_qname("endpoint:GET:/users")
             .expect("folded endpoint");
         assert!(m.node_id_by_qname("endpoint:GET:${…}/users").is_none());
-        let route = m.node_id_by_qname("route:/users").expect("go route");
+        // LB.11a: the Go route is one node per (method, path).
+        let route = m.node_id_by_qname("GET /users").expect("go route");
         assert!(
             m.cross_edges.iter().any(|e| e.from == ep
                 && e.to == route
                 && e.category == repo_graph_code_domain::edge_category::HTTP_CALLS),
-            "HTTP_CALLS endpoint:GET:/users -> route:/users"
+            "HTTP_CALLS endpoint:GET:/users -> GET /users"
         );
         let payloads: Vec<&str> = m
             .graphs

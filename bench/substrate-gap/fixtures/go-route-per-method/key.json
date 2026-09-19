@@ -1,0 +1,94 @@
+{
+  "framework": "go-route-per-method",
+  "language": "go",
+  "dirs": [
+    "web",
+    "api"
+  ],
+  "note": "LB.11a: a Go ROUTE is one node per (method, path), qname `<METHOD> <path>` like every other server parser, so each node is HANDLED_BY only its own handler and an endpoint's HTTP_CALLS reaches only the route of its method. HEAD (ee4a84a, installed wheel): `route:/users` is one node HANDLED_BY listUsers AND createUser and `route:/users/:id` is HANDLED_BY getUser AND deleteUser, so a DELETE call traces into the GET handler. The four edge forbids can only fire once method-shaped nodes exist; HEAD's violation is the path-only node.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /users"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /users"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "DELETE /users/:id"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "ANY /health",
+      "note": "stdlib HandleFunc without a method"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /users",
+      "to": "listUsers",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /users",
+      "to": "createUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "DELETE /users/:id",
+      "to": "deleteUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "ANY /health",
+      "to": "health",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "endpoint:GET:/users",
+      "to": "GET /users",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:POST:/users",
+      "to": "POST /users",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:DELETE:/users/",
+      "to": "DELETE /users/:id",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "route:/users",
+      "note": "the path-only node that stacked GET and POST is gone"
+    },
+    {
+      "from": "GET /users",
+      "to": "main::createUser",
+      "category": "HANDLED_BY",
+      "note": "PRECISION: a GET route is never handled by the POST handler"
+    },
+    {
+      "from": "GET /users/:id",
+      "to": "main::deleteUser",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "endpoint:GET:/users",
+      "to": "POST /users",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:DELETE:/users/${…}",
+      "to": "GET /users/:id",
+      "category": "HTTP_CALLS",
+      "note": "the quokka-stack defect: a DELETE call never reaches the GET route"
+    }
+  ]
+}

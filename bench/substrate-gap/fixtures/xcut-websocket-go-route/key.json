@@ -21,7 +21,7 @@
   ],
   "expect_edges": [
     {
-      "from": "route:/ws",
+      "from": "ANY /ws",
       "to": "client::serveWs",
       "category": "HANDLED_BY",
       "note": "LA.18d: a func-literal handler is HANDLED_BY the function its body calls"

@@ -11,13 +11,13 @@
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/users", "note": "template-literal base URL -> normalises to /{}/users"},
     {"kind": "ENDPOINT", "name": "endpoint:GET:/orders", "note": "client is unaware of the server's /api mount"},
-    {"kind": "ROUTE", "name": "route:/users", "note": "chi r.Get"},
-    {"kind": "ROUTE", "name": "route:/api/orders", "note": "chi r.Get under the api prefix"}
+    {"kind": "ROUTE", "name": "GET /users", "note": "chi r.Get"},
+    {"kind": "ROUTE", "name": "GET /api/orders", "note": "chi r.Get under the api prefix"}
   ],
   "expect_edges": [
-    {"from": "endpoint:GET:${…}/users", "to": "route:/users", "category": "HTTP_CALLS",
+    {"from": "endpoint:GET:${…}/users", "to": "GET /users", "category": "HTTP_CALLS",
      "note": "BaseFold tier: a leading interpolated segment is a base URL, not a resource"},
-    {"from": "endpoint:GET:/orders", "to": "route:/api/orders", "category": "HTTP_CALLS",
+    {"from": "endpoint:GET:/orders", "to": "GET /api/orders", "category": "HTTP_CALLS",
      "note": "RoutePrefix tier: the strip must work route-side too, not only endpoint-side"}
   ]
 }

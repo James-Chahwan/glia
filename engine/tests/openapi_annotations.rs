@@ -157,7 +157,8 @@ fn path_declaring_annotations_document_routes() {
         node_kind::DOC_SECTION,
         "contract::users::GET:/users/{id}",
     );
-    let route = node(&m, node_kind::ROUTE, "route:/users/:id");
+    // LB.11a: the gin route is one node per (method, path).
+    let route = node(&m, node_kind::ROUTE, "GET /users/:id");
     assert_eq!(documents(&m, op), vec![route]);
     let origin = cell(&m, op, cell_type::ORIGIN);
     for want in [

@@ -2,23 +2,23 @@
   "framework": "xstack-host-pairing",
   "language": "typescript+go",
   "dirs": ["web", "users", "orders"],
-  "note": "A11.4 host narrowing. One Angular client, two Go services that BOTH serve GET /users and GET /users/:id. The client's base URL resolves (A11.2) to http://users-service:8080, and the users dir carries its own docker-compose declaring `users-service` (a per-service compose, so the alias lands on the users RepoId). Before A11.4 each folded endpoint paired with BOTH services (4 HTTP_CALLS); after, only with users (2). Recall alone cannot see this, so the precision gate is the forbid row. It is written on the `/users/{id}` pair because chi (`{id}`) and gin (`:id`) give the two routes DISTINCT qnames; the two `/users` list routes share the qname `route:/users` across repos, so exact-match forbid cannot tell them apart (the Rust unit tests in graph/src/resolvers/http.rs count that case instead). Deliberately not bound to a matrix cell: typescript/http_client and go/http_server are already scored elsewhere.",
+  "note": "A11.4 host narrowing. One Angular client, two Go services that BOTH serve GET /users and GET /users/:id. The client's base URL resolves (A11.2) to http://users-service:8080, and the users dir carries its own docker-compose declaring `users-service` (a per-service compose, so the alias lands on the users RepoId). Before A11.4 each folded endpoint paired with BOTH services (4 HTTP_CALLS); after, only with users (2). Recall alone cannot see this, so the precision gate is the forbid row. It is written on the `/users/{id}` pair because chi (`{id}`) and gin (`:id`) give the two routes DISTINCT qnames; the two `/users` list routes share the qname `GET /users` across repos (`route:/users` before LB.11a), so exact-match forbid cannot tell them apart (the Rust unit tests in graph/src/resolvers/http.rs count that case instead). Deliberately not bound to a matrix cell: typescript/http_client and go/http_server are already scored elsewhere.",
   "expect_nodes": [
     {"kind": "ENDPOINT", "name": "GET /users", "note": "folded by A11.2; host users-service:8080 recorded on ENDPOINT_HIT"},
     {"kind": "ENDPOINT", "name": "endpoint:GET:/users/${…}", "note": "folded base, the `${id}` parameter stays a placeholder"},
     {"kind": "INFRA_RESOURCE", "name": "infra:service:users-service", "note": "compose service inside the users repo = the alias that owns it"},
-    {"kind": "ROUTE", "name": "route:/users/{id}", "note": "chi route in users, the RIGHT target"},
-    {"kind": "ROUTE", "name": "route:/users/:id", "note": "gin route in orders, the decoy; present so the forbid row below is not vacuous"}
+    {"kind": "ROUTE", "name": "GET /users/{id}", "note": "chi route in users, the RIGHT target"},
+    {"kind": "ROUTE", "name": "GET /users/:id", "note": "gin route in orders, the decoy; present so the forbid row below is not vacuous"}
   ],
   "expect_edges": [
-    {"from": "GET /users", "to": "route:/users", "category": "HTTP_CALLS", "note": "the headline pairing; either /users route satisfies this recall row"},
-    {"from": "endpoint:GET:/users/${…}", "to": "route:/users/{id}", "category": "HTTP_CALLS", "note": "narrowing keeps the users-service target"},
-    {"from": "route:/users/:id", "to": "getOrderUser", "category": "HANDLED_BY", "note": "the decoy is a real served route in orders"}
+    {"from": "GET /users", "to": "GET /users", "category": "HTTP_CALLS", "note": "the headline pairing; either /users route satisfies this recall row"},
+    {"from": "endpoint:GET:/users/${…}", "to": "GET /users/{id}", "category": "HTTP_CALLS", "note": "narrowing keeps the users-service target"},
+    {"from": "GET /users/:id", "to": "getOrderUser", "category": "HANDLED_BY", "note": "the decoy is a real served route in orders"}
   ],
   "expect_cells": [
     {"kind": "ENDPOINT", "node": "endpoint:GET:/users/${…}", "cell": "ENDPOINT_HIT", "contains": "\"host\":\"users-service:8080\"", "note": "the evidence narrowing reads"}
   ],
   "forbid": [
-    {"from": "endpoint:GET:/users/${…}", "to": "route:/users/:id", "category": "HTTP_CALLS", "note": "the client names users-service; the orders route must not receive the edge (matched=1 before A11.4)"}
+    {"from": "endpoint:GET:/users/${…}", "to": "GET /users/:id", "category": "HTTP_CALLS", "note": "the client names users-service; the orders route must not receive the edge (matched=1 before A11.4)"}
   ]
 }

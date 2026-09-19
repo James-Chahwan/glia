@@ -22,8 +22,8 @@
     },
     {
       "kind": "ROUTE",
-      "name": "route:/users",
-      "note": "positive control: the Go chi server (GET and POST /users collapse into route:/users). Measured present, so a missing ENDPOINT is a client gap, not a broken fixture"
+      "name": "GET /users",
+      "note": "positive control: the Go chi server (GET and POST /users are two ROUTEs since LB.11a; before it they collapsed into route:/users). Measured present, so a missing ENDPOINT is a client gap, not a broken fixture"
     }
   ],
   "expect_edges": [
@@ -41,13 +41,13 @@
     },
     {
       "from": "GET /users",
-      "to": "route:/users",
+      "to": "GET /users",
       "category": "HTTP_CALLS",
       "note": "routing proof: HttpStackResolver pairs the libcurl GET to chi r.Get(\"/users\")"
     },
     {
       "from": "POST /users",
-      "to": "route:/users",
+      "to": "POST /users",
       "category": "HTTP_CALLS",
       "note": "routing proof: the libcurl POST pairs to chi r.Post(\"/users\")"
     }

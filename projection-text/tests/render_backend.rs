@@ -55,20 +55,21 @@ fn backend_renders_with_legend_topology_and_node_blocks() {
         .and_then(|s| s.split("\n[").next())
         .unwrap_or("");
     assert!(
-        topology_section.contains("route:") && topology_section.contains(" * > "),
+        topology_section.contains("GET /api/users") && topology_section.contains(" * > "),
         "expected at least one starred route line in topology:\n{topology_section}"
     );
 
-    // Per-node block headers exist for the Route paths the parser extracted.
+    // Per-node block headers exist for the Routes the parser extracted, one
+    // per (method, path) (LB.11a).
     assert!(
-        out.contains("[route:/api/users]"),
-        "missing /api/users route block:\n{out}"
+        out.contains("[GET /api/users]"),
+        "missing GET /api/users route block:\n{out}"
     );
     // Route qnames preserve the original path syntax (`:id`); normalisation
     // only happens inside `HttpStackResolver` for cross-repo matching.
     assert!(
-        out.contains("[route:/api/users/:id]"),
-        "missing /api/users/:id route block:\n{out}"
+        out.contains("[GET /api/users/:id]"),
+        "missing GET /api/users/:id route block:\n{out}"
     );
 
     // The handler functions appear too — modules-as-Go-packages plus their
@@ -80,7 +81,7 @@ fn backend_renders_with_legend_topology_and_node_blocks() {
 
     // HANDLED_BY edges from Routes to handler funcs land in topology.
     assert!(
-        out.contains("route:/api/users * > users::List"),
+        out.contains("GET /api/users * > users::List"),
         "missing route → handler topology line:\n{out}"
     );
 

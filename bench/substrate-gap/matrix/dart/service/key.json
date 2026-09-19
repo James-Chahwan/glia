@@ -28,7 +28,7 @@
   "expect_edges": [
     {
       "from": "endpoint:POST:/login",
-      "to": "route:/login",
+      "to": "POST /login",
       "category": "HTTP_CALLS",
       "note": "the cross-service link the column rolls up"
     }

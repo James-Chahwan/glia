@@ -92,8 +92,9 @@ fn route_and_endpoint_are_located_via_cell_tier() {
     let map = service_map(&r.merged, &r.repo_labels);
     assert_eq!(map.unlocated_nodes, 0, "every node placed");
     let (api, web) = (service(&map, "api"), service(&map, "web"));
-    // chi's GET and POST on /users are ONE route node with two method cells.
-    assert_eq!((api.routes, api.endpoints), (1, 0));
+    // chi's GET and POST on /users are TWO route nodes, one per (method,
+    // path) (LB.11a); before it they were one node with two method cells.
+    assert_eq!((api.routes, api.endpoints), (2, 0));
     assert_eq!((web.routes, web.endpoints), (0, 2));
 }
 

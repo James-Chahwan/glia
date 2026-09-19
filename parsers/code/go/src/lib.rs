@@ -28,7 +28,7 @@ use repo_graph_code_domain::data_entity;
 use repo_graph_code_domain::di_stats::{self, DiShape};
 use repo_graph_code_domain::endpoint::{
     ClientEndpoint, HitExtras, canonical_http_path, client_url_split, join_path,
-    push_client_endpoint_with, route_path_qname,
+    push_client_endpoint_with, route_qname,
 };
 
 // ============================================================================
@@ -164,13 +164,15 @@ pub fn parse_file(
     let forms = &acc.route_forms;
     if forms.registrations > 0 {
         eprintln!(
-            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={}) in {file_rel_path}",
+            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={}) in {file_rel_path} nodes={} paths={}",
             forms.registrations,
             forms.positioned,
             forms.handle,
             forms.any,
             forms.matched,
-            forms.pattern
+            forms.pattern,
+            acc.route_qnames.len(),
+            acc.route_paths.len()
         );
     }
     let gorm = &acc.gorm;
@@ -206,10 +208,11 @@ struct Acc {
     calls: Vec<CallSite>,
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
-    /// Route NodeId → set of methods already recorded on that node within this
-    /// file. Prevents stacking duplicate ROUTE_METHOD cells when a body walks
-    /// past the same registration twice (shouldn't happen, defensive).
-    route_methods_seen: HashMap<NodeId, HashMap<String, ()>>,
+    /// LB.11a: route ids already recorded in `nav` in this file. A route id is
+    /// one (method, path), so a second registration of the same pair (two
+    /// routers mounting one path, a repeated `.Methods` verb) records nav once;
+    /// its node copy still stacks its POSITION / ROUTE_METHOD cells.
+    route_nav_seen: std::collections::HashSet<NodeId>,
     /// Dedup for client-HTTP ENDPOINT nodes (Pattern A) — one node per
     /// (method, path) even if the same endpoint is called twice in a file.
     endpoint_seen: std::collections::HashSet<NodeId>,
@@ -234,17 +237,26 @@ struct Acc {
     /// uniquely named repo `Println`. Filled with `di_containers`, so it is
     /// complete before any route is visited. Only looked up, never iterated.
     external_pkgs: std::collections::HashSet<String>,
-    /// LA.18d: start byte of every func-literal route handler already expanded
-    /// in this file. A Gorilla `.Methods("GET", "POST")` chain re-enters
-    /// `emit_route_from_call` once per verb with the same literal; its callee
-    /// refs are pushed once. `len()` is the marker's handler count.
+    /// LA.18d: start byte of every func-literal route handler seen in this
+    /// file. `len()` is the marker's handler count.
     func_literal_handlers: std::collections::HashSet<usize>,
+    /// LA.18d / LB.11a: (literal start byte, route id) pairs already expanded.
+    /// A Gorilla `.Methods("GET", "POST")` chain re-enters
+    /// `emit_route_from_call` once per verb with the same literal; each verb is
+    /// its own route node (LB.11a), so each gets the literal's callee refs,
+    /// and a repeat of one (literal, route) pair pushes nothing.
+    func_literal_expanded: std::collections::HashSet<(usize, NodeId)>,
     /// LA.18d: HANDLED_BY refs pushed from func-literal handlers in this file.
     func_literal_refs: usize,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
     route_forms: RouteFormCounts,
+    /// LB.11a: the distinct `<METHOD> <path>` route qnames and the distinct
+    /// paths among them emitted in this file — the marker's `nodes=` /
+    /// `paths=`. Only counted, never iterated into output.
+    route_qnames: std::collections::BTreeSet<String>,
+    route_paths: std::collections::BTreeSet<String>,
     /// A13.12: this file's GORM evidence and the `[orm-gorm]` marker counters.
     gorm: GormFile,
 }
@@ -2217,7 +2229,10 @@ fn emit_route_from_call(
     // relative; the qname builder adds the one canonical leading `/`.
     let full_path = canonical_http_path(&join_path(&prefix, &path_literal)).into_owned();
 
-    let qname = route_path_qname(&full_path);
+    // LB.11a: one node per (method, path), the `<METHOD> <path>` shape every
+    // other server parser emits, so a route is HANDLED_BY only its own
+    // handler and a client call pairs only with the route of its method.
+    let qname = route_qname(method, &full_path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &qname);
 
     // The handler argument. Identifier → Bare; selector `pkg.Name` → Attribute.
@@ -2271,13 +2286,14 @@ fn emit_route_from_call(
     });
 
     // Only record nav once per route id per file, else children_of would
-    // duplicate entries.
-    let seen = acc.route_methods_seen.entry(route_id).or_default();
-    if seen.is_empty() {
+    // duplicate entries. The display name is the qname, as the legacy-shape
+    // parsers record it.
+    if acc.route_nav_seen.insert(route_id) {
         acc.nav
-            .record(route_id, &full_path, &qname, node_kind::ROUTE, None);
+            .record(route_id, &qname, &qname, node_kind::ROUTE, None);
     }
-    seen.insert(method.to_string(), ());
+    acc.route_paths.insert(full_path);
+    acc.route_qnames.insert(qname);
 
     if let Some(q) = handler_qualifier {
         acc.refs.push(UnresolvedRef {
@@ -2292,10 +2308,14 @@ fn emit_route_from_call(
     // serveWs(hub, w, r) })`) names no single target, so it has no display
     // name; what runs for the route is the literal's own direct in-repo
     // callees. Not the enclosing function (it registers every route), not the
-    // module (it carries no CALLS). Expanded once per literal per file.
-    if let Some(h) = handler_arg
-        && h.kind() == "func_literal"
-        && acc.func_literal_handlers.insert(h.start_byte())
+    // module (it carries no CALLS). Expanded once per (literal, route node)
+    // per file: every verb of a `.Methods(..)` chain is its own node.
+    let literal = handler_arg.filter(|h| h.kind() == "func_literal");
+    if let Some(h) = literal {
+        acc.func_literal_handlers.insert(h.start_byte());
+    }
+    if let Some(h) = literal
+        && acc.func_literal_expanded.insert((h.start_byte(), route_id))
     {
         for qualifier in func_literal_callees(h, src, &acc.external_pkgs) {
             acc.refs.push(UnresolvedRef {
@@ -2999,12 +3019,13 @@ func Render(t *Template) {
     // Route extraction (v0.4.4)
     // ========================================================================
 
-    fn route_id(repo: RepoId, path: &str) -> NodeId {
+    /// LB.11a: a Go ROUTE is one node per (method, path), `<METHOD> <path>`.
+    fn route_id(repo: RepoId, method: &str, path: &str) -> NodeId {
         NodeId::from_parts(
             GRAPH_TYPE,
             repo,
             node_kind::ROUTE,
-            &format!("route:{path}"),
+            &format!("{method} {path}"),
         )
     }
 
@@ -3032,7 +3053,7 @@ func setupRoutes(r *gin.Engine) {
 "#;
 
     #[test]
-    fn emits_route_node_per_path_with_method_cells() {
+    fn emits_route_node_per_method_and_path_with_method_cells() {
         let parse = parse_file(
             GIN_SIMPLE,
             "server/server.go",
@@ -3042,10 +3063,10 @@ func setupRoutes(r *gin.Engine) {
         )
         .unwrap();
 
-        let health = route_id(repo(), "/health");
-        let login = route_id(repo(), "/login");
+        let health = route_id(repo(), "GET", "/health");
+        let login = route_id(repo(), "POST", "/login");
 
-        // Route nodes exist, one per path.
+        // Route nodes exist, one per (method, path).
         assert!(parse.nodes.iter().any(|n| n.id == health));
         assert!(parse.nodes.iter().any(|n| n.id == login));
 
@@ -3056,7 +3077,7 @@ func setupRoutes(r *gin.Engine) {
 
     /// LB.5 — an unprefixed relative literal gets the one canonical leading
     /// `/`: `r.GET("items", h)` and `e.GET("/parts", h)` alike are
-    /// `route:/<path>`, the nav name is the canonical path, and the handler
+    /// `GET /<path>` (LB.11a), the nav name is that qname, and the handler
     /// ref hangs off that same node. A relative group prefix is canonical too.
     #[test]
     fn relative_route_literal_gets_one_leading_slash() {
@@ -3077,14 +3098,14 @@ func setup(r *gin.Engine) {
             .filter(|(_, k)| **k == node_kind::ROUTE)
             .filter_map(|(id, _)| parse.nav.qname_by_id.get(id).map(String::as_str))
             .collect();
-        for q in ["route:/items", "route:/parts", "route:/api/users"] {
+        for q in ["GET /items", "GET /parts", "GET /api/users"] {
             assert!(qnames.contains(&q), "missing {q}: {qnames:?}");
         }
-        assert!(!qnames.contains(&"route:items"), "{qnames:?}");
-        let items = route_id(repo(), "/items");
+        assert!(!qnames.contains(&"GET items"), "{qnames:?}");
+        let items = route_id(repo(), "GET", "/items");
         assert_eq!(
             parse.nav.name_by_id.get(&items).map(String::as_str),
-            Some("/items")
+            Some("GET /items")
         );
         assert!(parse.refs.iter().any(|r| r.from == items
             && matches!(&r.qualifier, CallQualifier::Bare(n) if n == "listItems")));
@@ -3101,8 +3122,8 @@ func setup(r *gin.Engine) {
         )
         .unwrap();
 
-        let health = route_id(repo(), "/health");
-        let login = route_id(repo(), "/login");
+        let health = route_id(repo(), "GET", "/health");
+        let login = route_id(repo(), "POST", "/login");
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server");
 
         // Identifier handler → Bare
@@ -3144,8 +3165,8 @@ func setupRoutes(r *gin.Engine) {
         )
         .unwrap();
 
-        let health = route_id(repo(), "/api/health");
-        let login = route_id(repo(), "/api/protected/login");
+        let health = route_id(repo(), "GET", "/api/health");
+        let login = route_id(repo(), "POST", "/api/protected/login");
 
         assert!(
             parse.nodes.iter().any(|n| n.id == health),
@@ -3165,8 +3186,11 @@ func setupRoutes(r *gin.Engine) {
 }
 "#;
 
+    /// LB.11a: GET and POST of one path are two ROUTE nodes, each with one
+    /// ROUTE_METHOD cell and a HANDLED_BY ref to its own handler only — never
+    /// one path node handled by both.
     #[test]
-    fn same_path_two_methods_stack_cells_on_one_route_node() {
+    fn same_path_two_methods_are_two_route_nodes() {
         let parse = parse_file(
             GIN_SAME_PATH_TWO_METHODS,
             "server/server.go",
@@ -3176,16 +3200,44 @@ func setupRoutes(r *gin.Engine) {
         )
         .unwrap();
 
-        let users = route_id(repo(), "/users");
-        let occurrences = parse.nodes.iter().filter(|n| n.id == users).count();
+        let get = route_id(repo(), "GET", "/users");
+        let post = route_id(repo(), "POST", "/users");
+        assert_ne!(get, post);
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == get).count(), 1);
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == post).count(), 1);
+        assert_eq!(route_methods(&parse, get), vec!["GET".to_string()]);
+        assert_eq!(route_methods(&parse, post), vec!["POST".to_string()]);
+        assert_eq!(handled_by(&parse, get), vec![bare("List")]);
+        assert_eq!(handled_by(&parse, post), vec![bare("Create")]);
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /users".to_string(), "POST /users".to_string()]
+        );
+        assert!(
+            !parse.nodes.iter().any(|n| n.id
+                == NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "route:/users")),
+            "the path-only node is gone"
+        );
+    }
 
-        // Parser emits two Node structs with the same id (graph-build merges them).
-        // Both should carry exactly one ROUTE_METHOD cell, for GET and POST.
-        assert_eq!(occurrences, 2);
-        let methods = route_methods(&parse, users);
-        assert!(methods.contains(&"GET".to_string()));
-        assert!(methods.contains(&"POST".to_string()));
-        assert_eq!(methods.len(), 2);
+    /// LB.11a: the nav name of a Go ROUTE is its qname, `GET /users`, as the
+    /// legacy-shape parsers (java, python, rust, ...) record it.
+    #[test]
+    fn route_name_is_the_qname() {
+        let parse = parse_file(
+            GIN_SAME_PATH_TWO_METHODS,
+            "server/server.go",
+            "server",
+            "github.com/foo/bar",
+            repo(),
+        )
+        .unwrap();
+        for (method, q) in [("GET", "GET /users"), ("POST", "POST /users")] {
+            let id = route_id(repo(), method, "/users");
+            assert_eq!(parse.nav.qname_by_id.get(&id).map(String::as_str), Some(q));
+            assert_eq!(parse.nav.name_by_id.get(&id).map(String::as_str), Some(q));
+            assert_eq!(parse.nav.kind_by_id.get(&id), Some(&node_kind::ROUTE));
+        }
     }
 
     const GIN_TEMPLATED_PATH: &str = r#"package server
@@ -3208,7 +3260,7 @@ func setupRoutes(r *gin.Engine) {
 
         // Normalisation happens in HttpStackResolver, not in the parser — the
         // parser stores the literal as written.
-        let show = route_id(repo(), "/users/:id");
+        let show = route_id(repo(), "GET", "/users/:id");
         assert!(parse.nodes.iter().any(|n| n.id == show));
     }
 
@@ -3237,15 +3289,15 @@ func setupRoutes(r *chi.Mux) {
         .unwrap();
 
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/health")),
+            route_methods(&parse, route_id(repo(), "GET", "/health")),
             vec!["GET".to_string()],
         );
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/login")),
+            route_methods(&parse, route_id(repo(), "POST", "/login")),
             vec!["POST".to_string()],
         );
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/users/:id")),
+            route_methods(&parse, route_id(repo(), "DELETE", "/users/:id")),
             vec!["DELETE".to_string()],
         );
     }
@@ -3273,7 +3325,7 @@ func setupRoutes(app *fiber.App) {
         .unwrap();
 
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/wildcard")),
+            route_methods(&parse, route_id(repo(), "ANY", "/wildcard")),
             vec!["ANY".to_string()],
         );
     }
@@ -3301,8 +3353,8 @@ func main() {
         )
         .unwrap();
 
-        let health = route_id(repo(), "/health");
-        let users = route_id(repo(), "/users");
+        let health = route_id(repo(), "ANY", "/health");
+        let users = route_id(repo(), "ANY", "/users");
         let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "server");
 
         assert_eq!(route_methods(&parse, health), vec!["ANY".to_string()]);
@@ -3326,7 +3378,7 @@ func main() {
 
     // ------------------------------------------------------------------------
     // Gorilla Mux: `r.HandleFunc("/u", h).Methods("GET", "POST")` — one route
-    // per method, both stacking cells onto the shared path NodeId. The inner
+    // per method, each its own `<METHOD> <path>` node (LB.11a). The inner
     // HandleFunc must NOT also emit an "ANY" route.
     // ------------------------------------------------------------------------
 
@@ -3348,12 +3400,17 @@ func setupRoutes(r *mux.Router) {
         )
         .unwrap();
 
-        let users = route_id(repo(), "/users");
-        let methods = route_methods(&parse, users);
-
-        assert!(methods.contains(&"GET".to_string()));
-        assert!(methods.contains(&"POST".to_string()));
-        assert_eq!(methods.len(), 2, "expected exactly 2 methods, no ANY leak");
+        let get = route_id(repo(), "GET", "/users");
+        let post = route_id(repo(), "POST", "/users");
+        assert_eq!(route_methods(&parse, get), vec!["GET".to_string()]);
+        assert_eq!(route_methods(&parse, post), vec!["POST".to_string()]);
+        assert_eq!(handled_by(&parse, get), vec![bare("UsersHandler")]);
+        assert_eq!(handled_by(&parse, post), vec![bare("UsersHandler")]);
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /users".to_string(), "POST /users".to_string()],
+            "expected exactly 2 method routes, no ANY leak"
+        );
     }
 
     // ------------------------------------------------------------------------
@@ -3651,7 +3708,7 @@ func hit(client *http.Client) {
         .unwrap();
 
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/legacy")),
+            route_methods(&parse, route_id(repo(), "ANY", "/legacy")),
             vec!["ANY".to_string()],
         );
     }
@@ -3697,8 +3754,8 @@ func setup(r *gin.Engine) {
 }
 "#;
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
-        let route = route_id(repo(), "/users/:id");
-        assert_eq!(route_qnames(&parse), vec!["route:/users/:id".to_string()]);
+        let route = route_id(repo(), "PATCH", "/users/:id");
+        assert_eq!(route_qnames(&parse), vec!["PATCH /users/:id".to_string()]);
         assert_eq!(route_methods(&parse, route), vec!["PATCH".to_string()]);
         assert_eq!(handled_by(&parse, route), vec![bare("patchUser")]);
     }
@@ -3717,18 +3774,18 @@ func setup(e *echo.Echo, r chi.Router) {
         assert_eq!(
             route_qnames(&parse),
             vec![
-                "route:/health".to_string(),
-                "route:/items/:id".to_string(),
-                "route:/items/{id}".to_string(),
+                "DELETE /items/:id".to_string(),
+                "GET /health".to_string(),
+                "PUT /items/{id}".to_string(),
             ]
         );
-        let del = route_id(repo(), "/items/:id");
+        let del = route_id(repo(), "DELETE", "/items/:id");
         assert_eq!(route_methods(&parse, del), vec!["DELETE".to_string()]);
         assert_eq!(handled_by(&parse, del), vec![bare("deleteItem")]);
-        let put = route_id(repo(), "/items/{id}");
+        let put = route_id(repo(), "PUT", "/items/{id}");
         assert_eq!(route_methods(&parse, put), vec!["PUT".to_string()]);
         assert_eq!(handled_by(&parse, put), vec![attr("handlers", "PutItem")]);
-        let health = route_id(repo(), "/health");
+        let health = route_id(repo(), "GET", "/health");
         assert_eq!(route_methods(&parse, health), vec!["GET".to_string()]);
         assert_eq!(handled_by(&parse, health), vec![bare("health")]);
     }
@@ -3744,14 +3801,14 @@ func setup(r *gin.Engine) {
 }
 "#;
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
-        let ping = route_id(repo(), "/ping");
-        assert_eq!(route_qnames(&parse), vec!["route:/ping".to_string()]);
+        let ping = route_id(repo(), "ANY", "/ping");
+        assert_eq!(route_qnames(&parse), vec!["ANY /ping".to_string()]);
         assert_eq!(route_methods(&parse, ping), vec!["ANY".to_string()]);
         assert_eq!(handled_by(&parse, ping), vec![bare("anyPing")]);
     }
 
     #[test]
-    fn match_emits_one_cell_per_listed_method() {
+    fn match_emits_one_route_per_listed_method() {
         const SRC: &str = r#"package server
 
 func setup(r *gin.Engine, verbs []string) {
@@ -3765,16 +3822,15 @@ func setup(r *gin.Engine, verbs []string) {
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
         // A variable method list and a list with a non-verb are skipped, not
         // guessed at; a two-argument `Match` is never a registration.
-        assert_eq!(route_qnames(&parse), vec!["route:/orders".to_string()]);
-        let orders = route_id(repo(), "/orders");
         assert_eq!(
-            route_methods(&parse, orders),
-            vec!["GET".to_string(), "POST".to_string()]
+            route_qnames(&parse),
+            vec!["GET /orders".to_string(), "POST /orders".to_string()]
         );
-        assert_eq!(
-            handled_by(&parse, orders),
-            vec![bare("matchOrders"), bare("matchOrders")]
-        );
+        for method in ["GET", "POST"] {
+            let orders = route_id(repo(), method, "/orders");
+            assert_eq!(route_methods(&parse, orders), vec![method.to_string()]);
+            assert_eq!(handled_by(&parse, orders), vec![bare("matchOrders")]);
+        }
     }
 
     #[test]
@@ -3792,12 +3848,12 @@ func main() {
         let parse = parse_file(SRC, "main.go", "main", "", repo()).unwrap();
         assert_eq!(
             route_qnames(&parse),
-            vec!["route:/items".to_string(), "route:/items/{id}".to_string()]
+            vec!["GET /items/{id}".to_string(), "POST /items".to_string()]
         );
-        let item = route_id(repo(), "/items/{id}");
+        let item = route_id(repo(), "GET", "/items/{id}");
         assert_eq!(route_methods(&parse, item), vec!["GET".to_string()]);
         assert_eq!(handled_by(&parse, item), vec![bare("getItem")]);
-        let items = route_id(repo(), "/items");
+        let items = route_id(repo(), "POST", "/items");
         assert_eq!(route_methods(&parse, items), vec!["POST".to_string()]);
         assert_eq!(handled_by(&parse, items), vec![bare("createItem")]);
     }
@@ -3830,7 +3886,58 @@ func setup(r *gin.Engine) {
 }
 "#;
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
-        let users = route_id(repo(), "/users");
+        // LB.11a: GET and POST of one path are two nodes with one POSITION
+        // each, at their own registration.
+        let get_users = route_id(repo(), "GET", "/users");
+        let post_users = route_id(repo(), "POST", "/users");
+        assert_eq!(
+            route_positions(&parse, get_users),
+            vec![r#"{"file":"server.go","start_line":3,"end_line":3}"#.to_string()]
+        );
+        assert_eq!(
+            route_positions(&parse, post_users),
+            vec![r#"{"file":"server.go","start_line":4,"end_line":4}"#.to_string()]
+        );
+        // The Gorilla chain places both of its registrations at the inner
+        // `HandleFunc` call, one per verb node.
+        let get_legacy = route_id(repo(), "GET", "/legacy");
+        let put_legacy = route_id(repo(), "PUT", "/legacy");
+        for legacy in [get_legacy, put_legacy] {
+            assert_eq!(
+                route_positions(&parse, legacy),
+                vec![r#"{"file":"server.go","start_line":5,"end_line":5}"#.to_string()]
+            );
+        }
+        // Each emitted copy is exactly [POSITION, ROUTE_METHOD]: POSITION
+        // first, so a first-POSITION reader sees the registration.
+        let ids = [get_users, post_users, get_legacy, put_legacy];
+        for n in parse.nodes.iter().filter(|n| ids.contains(&n.id)) {
+            let kinds: Vec<_> = n.cells.iter().map(|c| c.kind).collect();
+            assert_eq!(kinds, vec![cell_type::POSITION, cell_type::ROUTE_METHOD]);
+        }
+        // The ROUTE_METHOD payload keeps its 1-based line.
+        let first = parse.nodes.iter().find(|n| n.id == get_users).unwrap();
+        match &first.cells[1].payload {
+            CellPayload::Json(j) => assert!(j.contains(r#""line":4,"#), "{j}"),
+            other => panic!("ROUTE_METHOD is not JSON: {other:?}"),
+        }
+    }
+
+    /// LB.11a: two registrations of one (method, path) — two routers mounting
+    /// the same path — stay one node carrying both POSITION cells, and nav
+    /// records it once.
+    #[test]
+    fn same_method_and_path_twice_is_one_node_with_two_positions() {
+        const SRC: &str = r#"package server
+
+func setup(r *gin.Engine, admin *gin.Engine) {
+    r.GET("/users", List)
+    admin.GET("/users", ListAll)
+}
+"#;
+        let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
+        let users = route_id(repo(), "GET", "/users");
+        assert_eq!(route_qnames(&parse), vec!["GET /users".to_string()]);
         assert_eq!(
             route_positions(&parse, users),
             vec![
@@ -3838,25 +3945,7 @@ func setup(r *gin.Engine) {
                 r#"{"file":"server.go","start_line":4,"end_line":4}"#.to_string(),
             ]
         );
-        // The Gorilla chain places both of its registrations at the inner
-        // `HandleFunc` call.
-        let legacy = route_id(repo(), "/legacy");
-        assert_eq!(
-            route_positions(&parse, legacy),
-            vec![r#"{"file":"server.go","start_line":5,"end_line":5}"#.to_string(); 2]
-        );
-        // Each emitted copy is exactly [POSITION, ROUTE_METHOD]: POSITION
-        // first, so a first-POSITION reader sees the registration.
-        for n in parse.nodes.iter().filter(|n| n.id == users || n.id == legacy) {
-            let kinds: Vec<_> = n.cells.iter().map(|c| c.kind).collect();
-            assert_eq!(kinds, vec![cell_type::POSITION, cell_type::ROUTE_METHOD]);
-        }
-        // The ROUTE_METHOD payload keeps its 1-based line.
-        let first = parse.nodes.iter().find(|n| n.id == users).unwrap();
-        match &first.cells[1].payload {
-            CellPayload::Json(j) => assert!(j.contains(r#""line":4,"#), "{j}"),
-            other => panic!("ROUTE_METHOD is not JSON: {other:?}"),
-        }
+        assert_eq!(handled_by(&parse, users), vec![bare("List"), bare("ListAll")]);
     }
 
     #[test]
@@ -3871,14 +3960,14 @@ func setup(r *mux.Router) {
         let parse = parse_file(SRC, "server.go", "server", "", repo()).unwrap();
         assert_eq!(
             route_qnames(&parse),
-            vec!["route:/metrics".to_string(), "route:/static".to_string()]
+            vec!["ANY /metrics".to_string(), "ANY /static".to_string()]
         );
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/static")),
+            route_methods(&parse, route_id(repo(), "ANY", "/static")),
             vec!["ANY".to_string()]
         );
         assert_eq!(
-            route_methods(&parse, route_id(repo(), "/metrics")),
+            route_methods(&parse, route_id(repo(), "ANY", "/metrics")),
             vec!["ANY".to_string()]
         );
     }
@@ -4042,7 +4131,7 @@ func main() {
 }
 "#;
         let parse = parse_file(source, "main.go", "main", "example.com/chat", repo()).unwrap();
-        let ws = route_id(repo(), "/ws");
+        let ws = route_id(repo(), "ANY", "/ws");
         assert_eq!(route_methods(&parse, ws), vec!["ANY".to_string()]);
         assert_eq!(handled_by(&parse, ws), vec![bare("serveWs")]);
         // Same module stamp as the identifier arm.
@@ -4064,7 +4153,10 @@ func setup(r *gin.Engine) {
 "#;
         let parse = parse_file(source, "server/server.go", "server", "example.com/app", repo())
             .unwrap();
-        assert_eq!(handled_by(&parse, route_id(repo(), "/x")), vec![bare("build")]);
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/x")),
+            vec![bare("build")]
+        );
     }
 
     #[test]
@@ -4088,7 +4180,7 @@ func main() {
 "#;
         let parse = parse_file(source, "main.go", "main", "example.com/health", repo()).unwrap();
         assert_eq!(
-            handled_by(&parse, route_id(repo(), "/health")),
+            handled_by(&parse, route_id(repo(), "ANY", "/health")),
             vec![bare("writeHealth")]
         );
     }
@@ -4117,7 +4209,7 @@ func main() {
 "#;
         let parse = parse_file(source, "main.go", "main", "example.com/shop", repo()).unwrap();
         assert_eq!(
-            handled_by(&parse, route_id(repo(), "/items/{id}")),
+            handled_by(&parse, route_id(repo(), "GET", "/items/{id}")),
             vec![bare("showItem")]
         );
     }
@@ -4142,7 +4234,7 @@ func setup(r *gin.Engine, h *Hub) {
             .unwrap();
         // A repo-local package and a captured variable both stay.
         assert_eq!(
-            handled_by(&parse, route_id(repo(), "/users")),
+            handled_by(&parse, route_id(repo(), "GET", "/users")),
             vec![attr("handlers", "ListUsers"), attr("h", "ServeWS")]
         );
     }
@@ -4163,11 +4255,16 @@ func main() {
 }
 "#;
         let parse = parse_file(source, "main.go", "main", "example.com/app", repo()).unwrap();
-        assert_eq!(handled_by(&parse, route_id(repo(), "/n")), vec![bare("serve")]);
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "ANY", "/n")),
+            vec![bare("serve")]
+        );
     }
 
+    /// LA.18d + LB.11a: a `.Methods("GET", "POST")` chain over one literal is
+    /// two route nodes; each carries the literal's capped callee refs once.
     #[test]
-    fn func_literal_callees_are_capped_and_expanded_once_per_methods_chain() {
+    fn func_literal_callees_are_capped_and_expanded_once_per_method_route() {
         let source = r#"package main
 
 import "github.com/gorilla/mux"
@@ -4180,13 +4277,12 @@ func main() {
 }
 "#;
         let parse = parse_file(source, "main.go", "main", "example.com/app", repo()).unwrap();
-        let many = route_id(repo(), "/many");
-        assert_eq!(
-            route_methods(&parse, many),
-            vec!["GET".to_string(), "POST".to_string()]
-        );
         let expected: Vec<CallQualifier> = (1..=8).map(|i| bare(&format!("a{i}"))).collect();
-        assert_eq!(handled_by(&parse, many), expected);
+        for method in ["GET", "POST"] {
+            let many = route_id(repo(), method, "/many");
+            assert_eq!(route_methods(&parse, many), vec![method.to_string()]);
+            assert_eq!(handled_by(&parse, many), expected);
+        }
     }
 
     #[test]

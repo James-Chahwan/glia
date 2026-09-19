@@ -109,16 +109,17 @@ MECH_STUBS = {"tests": (("lib", "the unit under test"),
 # Secondary literals that do NOT live in the node identity, so they need a cell
 # gate rather than an expect_nodes name. MEASURED 2026-09-16 (grade.py --dump on
 # the committed fixtures): the ROUTE identity shape is NOT portable across
-# languages -- Go/chi emits name "/users" qname "route:/users" with no method at
-# all, Spring emits "GET /users/{id}", ASP.NET emits "ANY api/users" with the
-# method present but NO leading slash. So a portable key asserts the PATH against
-# name|qname via expect_nodes, and the METHOD separately via this cell, which was
-# verified satisfiable against fixtures/java-spring-http.
+# languages -- Spring and (since LB.11a) Go/chi emit "GET /users/{id}", ts_routes
+# (Express / Nest / Next ...) still emits qname "route:/users" with the method
+# only on its ROUTE_METHOD cells, ASP.NET emitted "ANY api/users" before LB.5's
+# canonical slash. So a portable key asserts the PATH against name|qname via
+# expect_nodes, and the METHOD separately via this cell, which was verified
+# satisfiable against fixtures/java-spring-http.
 EXTRA_CELLS = {
     "http_server": {"kind": "ROUTE", "cell": "ROUTE_METHOD",
                     "note": "the HTTP method, which the ROUTE name shape does not "
-                            "carry portably across languages (go/chi omits it "
-                            "entirely) - assert the PATH via expect_nodes"},
+                            "carry portably across languages (ts_routes' route: "
+                            "qnames omit it) - assert the PATH via expect_nodes"},
 }
 
 # A ROLE mechanism (matrix_vocab `role_cells`) is asserted in LB.3's folded

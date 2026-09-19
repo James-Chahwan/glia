@@ -94,8 +94,10 @@ fn build_synthetic_frontend() -> (RepoGraph, NodeId) {
     (g, endpoint_id)
 }
 
+/// LB.11a: a Go ROUTE is one node per (method, path), `<METHOD> <path>`; the
+/// http_stack_smoke backend registers `api.GET("/users", ..)`.
 fn backend_route_id(g: &RepoGraph, path: &str) -> NodeId {
-    let needle = format!("route:{path}");
+    let needle = format!("GET {path}");
     *g.nav
         .qname_by_id
         .iter()

@@ -81,14 +81,14 @@ fn repo_graph_roundtrips_through_gmap_file() {
 
     // Point lookup via binary search: one known node from the fixture is the
     // `/health` route — v0.4.4a tests assert its presence.
-    // Find the Route node id by its qname in the owned graph, then look up
-    // the same id via the archived nav.
+    // Find a Route node id by its KIND in the owned graph (LB.11a: the check
+    // names no qname shape), then look up the same id via the archived nav.
     let route_id = g
         .nav
         .qname_by_id
-        .iter()
-        .find(|(_, qn)| qn.starts_with("route:"))
-        .map(|(id, _)| *id)
+        .keys()
+        .find(|id| g.nav.kind_by_id.get(id) == Some(&node_kind::ROUTE))
+        .copied()
         .expect("backend fixture has at least one Route");
     let qn_owned = g.nav.qname_by_id.get(&route_id).unwrap();
     let qn_archived = archived.qname(route_id).expect("archived qname lookup");
