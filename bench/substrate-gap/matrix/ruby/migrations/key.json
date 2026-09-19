@@ -6,16 +6,16 @@
   "cells": ["ruby/migrations"],
   "expect_nodes": [
     {"kind": "DATA_ENTITY", "name": "users",
-     "note": "INTENDED: `create_table :users` in a db/migrate revision declares the table. EXPECTED to miss — no migration routing exists."}
+     "note": "`create_table :users` (Ruby symbol form) in a db/migrate revision declares the table: A13.9's migration-DSL scan (`[migrations] dsl framework=rails`)."}
   ],
   "expect_edges": [
     {"from": "20240101000000_create_users", "to": "users", "category": "ACCESSES_DATA",
-     "note": "INTENDED: the migration touches the table it creates. MEASURED: the only ACCESSES_DATA edge goes to the DATABASE node `data_source:activerecord` — the ORM, not the table."}
+     "note": "the migration touches the table it creates (A13.9). Before A13.9 the only ACCESSES_DATA edge went to the DATABASE node `data_source:activerecord`, the ORM, not the table."}
   ],
   "expect_cells": [],
   "forbid": [
     {"kind": "DATA_ENTITY", "name": "activerecord", "max_nodes": 0,
      "note": "precision: the ORM name must never be minted as a table entity."}
   ],
-  "note": "ZERO-EVERYWHERE PROBE (A15.11). Baseline 2026-09-16 on the installed 0.4.18 wheel: 4 nodes / 3 edges, DATA_ENTITY 0."
+  "note": "A15.11 zero-everywhere probe, flipped by A13.9 (Rails create_table / add_column / change_table ... needles, symbol or string argument). Baseline 2026-09-16 on the installed 0.4.18 wheel: 4 nodes / 3 edges, DATA_ENTITY 0."
 }

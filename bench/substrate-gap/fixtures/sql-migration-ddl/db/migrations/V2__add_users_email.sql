@@ -1,0 +1,1 @@
+ALTER TABLE ONLY users ADD COLUMN verified BOOLEAN DEFAULT false;

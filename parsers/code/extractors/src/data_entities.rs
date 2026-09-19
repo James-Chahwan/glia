@@ -12,6 +12,12 @@
 //!
 //! Recognised shapes (intentionally narrow for v1 — long tail in v0.5+):
 //!   - Raw SQL (any language with a string literal): `FROM/JOIN/INTO/UPDATE`
+//!   - SQL DDL (A13.9): `CREATE [TEMP] TABLE`, `ALTER TABLE`, `DROP TABLE`,
+//!     `TRUNCATE [TABLE]`, anchored on the whole phrase, never a bare `TABLE`
+//!   - Migration DSLs (A13.9, `migrations::scan_migration_dsl`): Alembic
+//!     `op.create_table`, Django `migrations.CreateModel`, Rails
+//!     `create_table :t`, knex / Sequelize `createTable`, Laravel
+//!     `Schema::create`, EF Core `migrationBuilder.CreateTable`
 //!   - SQLAlchemy / Django: `__tablename__ = '...'` / `db_table = '...'`
 //!   - Mongoose: `mongoose.model('<Name>', ...)`
 //!   - Cypher: `MATCH (x:<Label>)` / `MERGE (x:<Label>)` (label-only; query
@@ -43,75 +49,132 @@ impl DataEntityFlavor {
     }
 }
 
-pub fn extract_data_entity_nodes(
-    source: &str,
+/// The one emission funnel: every scanner's captures become DATA_ENTITY nodes
+/// hung off `module_id` by ACCESSES_DATA, deduped per (flavor, name) in
+/// first-seen order. Shared with `migrations::extract_sql_migration` (A13.9),
+/// so a migration `.sql` and a code file mint identical entities.
+pub(crate) struct EntitySink {
     module_id: NodeId,
     repo: RepoId,
-) -> DataEntityNodes {
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
-    let mut nav = CodeNav::default();
-    let mut seen: std::collections::HashSet<(DataEntityFlavor, String)> =
-        std::collections::HashSet::new();
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    nav: CodeNav,
+    // Membership only, never iterated: output order is the push order.
+    seen: std::collections::HashSet<(DataEntityFlavor, String)>,
+}
 
-    let mut emit = |flavor: DataEntityFlavor, name: &str| {
+impl EntitySink {
+    pub(crate) fn new(module_id: NodeId, repo: RepoId) -> Self {
+        Self {
+            module_id,
+            repo,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: CodeNav::default(),
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    pub(crate) fn emit(&mut self, flavor: DataEntityFlavor, name: &str) {
         // Flavor-agnostic noise gate: numerics and English/JS keywords are never
         // real table/collection/label names, regardless of how they were
         // captured (raw SQL, `.collection('callback')`, etc.). (glia-v2 G7)
         if is_noise_entity_name(name) {
             return;
         }
-        let key = (flavor, name.to_string());
-        if !seen.insert(key.clone()) {
+        if !self.seen.insert((flavor, name.to_string())) {
             return;
         }
+        let repo = self.repo;
         let qname = format!("data_entity:{}:{}", flavor.as_str(), name);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DATA_ENTITY, &qname);
-        nodes.push(Node {
+        self.nodes.push(Node {
             id,
             repo,
             confidence: Confidence::Medium,
             cells: vec![],
         });
-        nav.record(id, name, &qname, node_kind::DATA_ENTITY, Some(module_id));
-        edges.push(Edge {
-            from: module_id,
+        self.nav.record(
+            id,
+            name,
+            &qname,
+            node_kind::DATA_ENTITY,
+            Some(self.module_id),
+        );
+        self.edges.push(Edge {
+            from: self.module_id,
             to: id,
             category: edge_category::ACCESSES_DATA,
             confidence: Confidence::Medium,
         });
-    };
+    }
+
+    pub(crate) fn finish(self) -> DataEntityNodes {
+        DataEntityNodes {
+            nodes: self.nodes,
+            edges: self.edges,
+            nav: self.nav,
+        }
+    }
+}
+
+pub fn extract_data_entity_nodes(
+    source: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> DataEntityNodes {
+    let mut sink = EntitySink::new(module_id, repo);
 
     // Only scan for raw-SQL table refs when the source actually contains a SQL
     // statement. Without this gate the `FROM`/`JOIN`/`INTO`/`UPDATE` scan fires
     // on ordinary English/JS ("copied from this", `Array.from(callback)`,
     // `Intl.DateTimeFormat`), minting bogus `data_entity:sql:*` nodes on repos
     // with zero SQL. (glia-v2 G7)
-    if has_sql_context(source) {
+    let lower = source.to_ascii_lowercase();
+    let sql_context = has_sql_context(&lower);
+    if sql_context {
         for name in scan_sql_tables(source) {
-            emit(DataEntityFlavor::Sql, &name);
+            sink.emit(DataEntityFlavor::Sql, &name);
+        }
+    }
+    // A13.9: the DDL phrase names its table. After the FROM scan, so a source
+    // the new scan adds nothing to keeps its node order. A `DROP TABLE` is its
+    // own signature; it opens only this scan, never the FROM scan above.
+    if sql_context || lower.contains("drop table") {
+        for (_, name) in scan_sql_ddl(source) {
+            sink.emit(DataEntityFlavor::Sql, &name);
         }
     }
     for name in scan_orm_table_decls(source) {
-        emit(DataEntityFlavor::Sql, &name);
+        sink.emit(DataEntityFlavor::Sql, &name);
+    }
+    // A13.9: a migration DSL call (`op.create_table("users")`, Rails
+    // `create_table :users`) names the table it creates or alters, wherever it
+    // appears. The scanner has no path, so the marker says which DSL fired.
+    let dsl = crate::migrations::scan_migration_dsl(source);
+    for hit in &dsl {
+        sink.emit(DataEntityFlavor::Sql, &hit.table);
+    }
+    for line in crate::migrations::dsl_markers(&dsl) {
+        eprintln!("{line}");
     }
     for name in scan_mongoose_models(source) {
-        emit(DataEntityFlavor::Nosql, &name);
+        sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_dynamodb_tables(source) {
-        emit(DataEntityFlavor::Nosql, &name);
+        sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_collection_calls(source) {
-        emit(DataEntityFlavor::Nosql, &name);
+        sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_beanie_documents(source) {
-        emit(DataEntityFlavor::Nosql, &name);
+        sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_cypher_labels(source) {
-        emit(DataEntityFlavor::Graph, &name);
+        sink.emit(DataEntityFlavor::Graph, &name);
     }
 
-    DataEntityNodes { nodes, edges, nav }
+    sink.finish()
 }
 
 // ----------------------------------------------------------------------------
@@ -123,8 +186,8 @@ pub fn extract_data_entity_nodes(
 /// True when `source` contains an unambiguous SQL statement signature. Gates
 /// the raw-SQL table scan so plain prose/JS that happens to use the words
 /// `from`/`join`/`into`/`update` doesn't get mistaken for SQL. (glia-v2 G7)
-fn has_sql_context(source: &str) -> bool {
-    let lower = source.to_ascii_lowercase();
+/// `lower` is the source already ASCII-lowercased by the caller.
+fn has_sql_context(lower: &str) -> bool {
     const SIG: &[&str] = &[
         "select ",
         "insert into",
@@ -141,7 +204,7 @@ fn has_sql_context(source: &str) -> bool {
     lower.contains("update ") && lower.contains(" set ")
 }
 
-fn scan_sql_tables(source: &str) -> Vec<String> {
+pub(crate) fn scan_sql_tables(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     for keyword in ["FROM", "JOIN", "INTO", "UPDATE"] {
         let mut search_from = 0;
@@ -193,6 +256,292 @@ fn scan_sql_tables(source: &str) -> Vec<String> {
         }
     }
     out
+}
+
+// ----------------------------------------------------------------------------
+// SQL DDL (A13.9): the table a `CREATE / ALTER / DROP / TRUNCATE` statement
+// names. Anchored on the whole phrase: `find_keyword_ci` only needs whitespace
+// on both sides and `has_sql_context` passes any file holding `select `, so a
+// bare `TABLE` keyword would read the prose `the users table maps …` as a
+// table `maps`.
+// ----------------------------------------------------------------------------
+
+/// `(verb, table)` for every DDL statement in `source`, verb in the marker's
+/// spelling (`create` / `alter` / `drop` / `truncate` / `index`). Shapes:
+/// `CREATE [OR REPLACE] [GLOBAL|LOCAL] [TEMP|TEMPORARY|UNLOGGED|VIRTUAL] TABLE`,
+/// `ALTER TABLE`, `DROP TABLE`, `TRUNCATE [TABLE]`, each then skipping
+/// `IF [NOT] EXISTS` and Postgres `ONLY`. `DROP` and `TRUNCATE` take a comma
+/// list. A bare `TRUNCATE x` (no `TABLE`) counts only when `x` ends the
+/// statement, so the prose `truncate long names` names nothing. And
+/// `CREATE [UNIQUE] INDEX … ON <table> (` (see [`index_table`]).
+pub(crate) fn scan_sql_ddl(source: &str) -> Vec<(&'static str, String)> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (keyword, verb) in [
+        ("CREATE", "create"),
+        ("ALTER", "alter"),
+        ("DROP", "drop"),
+        ("TRUNCATE", "truncate"),
+    ] {
+        let kw_lower = keyword.to_ascii_lowercase();
+        let mut search_from = 0;
+        while search_from < source.len() {
+            let Some(rel) = find_keyword_ci(&source[search_from..], keyword, &kw_lower) else {
+                break;
+            };
+            let after_kw = search_from + rel + keyword.len();
+            search_from = after_kw;
+            let mut w = next_word(b, after_kw);
+            if verb == "create" {
+                if word_is(b, w, "OR") {
+                    let replace = next_word(b, w.1);
+                    if !word_is(b, replace, "REPLACE") {
+                        continue;
+                    }
+                    w = next_word(b, replace.1);
+                }
+                // `CREATE [UNIQUE] INDEX … ON <table>` indexes a table it
+                // does not name first; its own reader, then the next match.
+                let mut index = w;
+                while ["UNIQUE", "CLUSTERED", "NONCLUSTERED", "FULLTEXT", "SPATIAL"]
+                    .iter()
+                    .any(|m| word_is(b, index, m))
+                {
+                    index = next_word(b, index.1);
+                }
+                if word_is(b, index, "INDEX") {
+                    if let Some(table) = index_table(source, index.1) {
+                        out.push(("index", table));
+                    }
+                    continue;
+                }
+                if word_is(b, w, "GLOBAL") || word_is(b, w, "LOCAL") {
+                    w = next_word(b, w.1);
+                }
+                if ["TEMP", "TEMPORARY", "UNLOGGED", "VIRTUAL"]
+                    .iter()
+                    .any(|m| word_is(b, w, m))
+                {
+                    w = next_word(b, w.1);
+                }
+            }
+            let has_table = word_is(b, w, "TABLE");
+            if !has_table && verb != "truncate" {
+                continue;
+            }
+            let bare_truncate = !has_table;
+            // Tailwind's `class="truncate block"` is a lowercase bare TRUNCATE
+            // ending at a quote; SQL in a host string is written `TRUNCATE`.
+            let upper_kw = &b[after_kw - keyword.len()..after_kw] == keyword.as_bytes();
+            let mut i = if has_table { w.1 } else { after_kw };
+            let guard = next_word(b, i);
+            if word_is(b, guard, "IF") {
+                let mut exists = next_word(b, guard.1);
+                if word_is(b, exists, "NOT") {
+                    exists = next_word(b, exists.1);
+                }
+                if !word_is(b, exists, "EXISTS") {
+                    continue;
+                }
+                i = exists.1;
+            }
+            let only = next_word(b, i);
+            if word_is(b, only, "ONLY") {
+                i = only.1;
+            }
+            let list = matches!(verb, "drop" | "truncate");
+            while let Some((raw, end)) = read_sql_ident(source, i) {
+                if bare_truncate && !ends_statement(b, end, upper_kw) {
+                    break;
+                }
+                if verb == "create" && !opens_table_body(b, end) {
+                    break;
+                }
+                if let Some(name) = canonical_sql_name(raw) {
+                    out.push((verb, name));
+                }
+                let mut j = end;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if !(list && b.get(j) == Some(&b',')) {
+                    break;
+                }
+                i = j + 1;
+            }
+        }
+    }
+    out
+}
+
+/// The table a `CREATE … INDEX` names, reading from just past `INDEX`:
+/// `[CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] <table>`, then the column
+/// list `(` or a `USING <method>` must follow, so the prose `create index
+/// files on startup` names nothing.
+fn index_table(source: &str, i: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let mut p = i;
+    let concurrently = next_word(b, p);
+    if word_is(b, concurrently, "CONCURRENTLY") {
+        p = concurrently.1;
+    }
+    let guard = next_word(b, p);
+    if word_is(b, guard, "IF") {
+        let not = next_word(b, guard.1);
+        let exists = next_word(b, not.1);
+        if !(word_is(b, not, "NOT") && word_is(b, exists, "EXISTS")) {
+            return None;
+        }
+        p = exists.1;
+    }
+    let mut on = next_word(b, p);
+    if !word_is(b, on, "ON") {
+        let (_, name_end) = read_sql_ident(source, p)?;
+        on = next_word(b, name_end);
+        if !word_is(b, on, "ON") {
+            return None;
+        }
+    }
+    p = on.1;
+    let only = next_word(b, p);
+    if word_is(b, only, "ONLY") {
+        p = only.1;
+    }
+    let (raw, end) = read_sql_ident(source, p)?;
+    let mut j = end;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    let body = b.get(j) == Some(&b'(') || word_is(b, next_word(b, j), "USING");
+    if !body {
+        return None;
+    }
+    canonical_sql_name(raw)
+}
+
+/// The identifier-shaped word at the first non-whitespace byte at or after
+/// `i`, as `(start, end)`; empty (`start == end`) when that byte starts none.
+fn next_word(b: &[u8], i: usize) -> (usize, usize) {
+    let mut s = i;
+    while s < b.len() && b[s].is_ascii_whitespace() {
+        s += 1;
+    }
+    let mut e = s;
+    while e < b.len() && (b[e].is_ascii_alphanumeric() || b[e] == b'_') {
+        e += 1;
+    }
+    (s, e)
+}
+
+fn word_is(b: &[u8], (s, e): (usize, usize), word: &str) -> bool {
+    b[s..e].eq_ignore_ascii_case(word.as_bytes())
+}
+
+/// The last part of the (possibly schema-qualified) SQL identifier at the first
+/// non-whitespace byte at or after `i`, and the offset just past the whole
+/// name: `users`, `public.users`, `"users"`, `` `db`.`users` ``,
+/// `[dbo].[Users]`, and `\"users\"` escaped inside a host-language string.
+/// `None` when no identifier starts there or a quote does not close within
+/// 128 bytes. The raw part still goes through [`canonical_sql_name`].
+fn read_sql_ident(source: &str, i: usize) -> Option<(&str, usize)> {
+    let b = source.as_bytes();
+    let mut k = i;
+    while k < b.len() && b[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    let mut last = None;
+    loop {
+        if b.get(k) == Some(&b'\\') && matches!(b.get(k + 1), Some(b'"' | b'`')) {
+            k += 1;
+        }
+        let Some(&c) = b.get(k) else { break };
+        let (start, end, next) = if matches!(c, b'"' | b'`' | b'[') {
+            let close = if c == b'[' { b']' } else { c };
+            let s = k + 1;
+            let mut e = s;
+            while e < b.len() && b[e] != close && e - s <= 128 {
+                e += 1;
+            }
+            if b.get(e) != Some(&close) {
+                return None;
+            }
+            // `\"users\"`: the escape before the closing quote is not a name byte.
+            let name_end = if e > s && b[e - 1] == b'\\' { e - 1 } else { e };
+            (s, name_end, e + 1)
+        } else {
+            let mut e = k;
+            while e < b.len() && (b[e].is_ascii_alphanumeric() || b[e] == b'_' || b[e] == b'$') {
+                e += 1;
+            }
+            if e == k {
+                break;
+            }
+            (k, e, e)
+        };
+        last = Some((&source[start..end], next));
+        k = next;
+        if b.get(k) != Some(&b'.') {
+            break;
+        }
+        k += 1;
+    }
+    last
+}
+
+/// True when what follows a `CREATE TABLE` name is a table body: the column
+/// list `(`, a `CREATE TABLE … AS / LIKE / PARTITION OF / CLONE / USING /
+/// WITH / SELECT` form, or the end of the host string or source. The prose
+/// `create table rows lazily` names nothing.
+fn opens_table_body(b: &[u8], end: usize) -> bool {
+    let mut j = end;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    match b.get(j) {
+        None | Some(b'(' | b';' | b'"' | b'\'' | b'`' | b')' | b'\\' | b',') => true,
+        Some(_) => {
+            let w = next_word(b, j);
+            const FORMS: &[&str] = &[
+                "AS",
+                "LIKE",
+                "PARTITION",
+                "OF",
+                "CLONE",
+                "COPY",
+                "USING",
+                "WITH",
+                "SELECT",
+            ];
+            FORMS.iter().any(|form| word_is(b, w, form))
+        }
+    }
+}
+
+/// True when the identifier ending at `end` also ends its statement. Gates the
+/// bare `TRUNCATE x` form only. A `;` always ends it. The softer ends (a list
+/// comma, a closing quote / paren of the host string, the end of the source,
+/// a `TRUNCATE` option word) count only after an uppercase `TRUNCATE`, so
+/// `class="truncate block"` and `truncate long names` name nothing.
+fn ends_statement(b: &[u8], end: usize, upper_kw: bool) -> bool {
+    let mut j = end;
+    while j < b.len() && (b[j] == b' ' || b[j] == b'\t') {
+        j += 1;
+    }
+    if b.get(j) == Some(&b';') {
+        return true;
+    }
+    if !upper_kw {
+        return false;
+    }
+    match b.get(j) {
+        None | Some(b',' | b'"' | b'\'' | b'`' | b')' | b'\\') => true,
+        Some(_) => {
+            let w = next_word(b, j);
+            ["CASCADE", "RESTRICT", "RESTART", "CONTINUE"]
+                .iter()
+                .any(|opt| word_is(b, w, opt))
+        }
+    }
 }
 
 /// Find next case-insensitive occurrence of `kw_upper` (ASCII), preceded by a
@@ -279,7 +628,7 @@ fn is_noise_entity_name(name: &str) -> bool {
 
 /// Strip schema prefix and noise; reject SQL keywords / placeholders that
 /// would otherwise leak through (`SELECT`, `?`, `:param`).
-fn canonical_sql_name(raw: &str) -> Option<String> {
+pub(crate) fn canonical_sql_name(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if raw.is_empty() || raw.len() > 128 {
         return None;
@@ -670,6 +1019,108 @@ db.collection('users');
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:users".to_string()));
         assert!(qnames.contains(&"data_entity:sql:events".to_string()));
+    }
+
+    #[test]
+    fn create_table_if_not_exists_captured() {
+        let repo = RepoId(1);
+        let src = r#"
+db.exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY)");
+db.exec("create temporary table if not exists `tmp`.`sessions` (id int)");
+db.exec("CREATE OR REPLACE TABLE [dbo].[Invoices] (id INT)");
+db.exec("CREATE TABLE \"audit_log\" (id INT)");
+"#;
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let mut qnames = entity_qnames(&out);
+        qnames.sort();
+        assert_eq!(
+            qnames,
+            [
+                "data_entity:sql:Invoices",
+                "data_entity:sql:audit_log",
+                "data_entity:sql:sessions",
+                "data_entity:sql:users",
+            ]
+        );
+    }
+
+    #[test]
+    fn alter_table_only_captured() {
+        let repo = RepoId(1);
+        let src = r#"
+ALTER TABLE ONLY users ADD COLUMN verified BOOLEAN DEFAULT false;
+ALTER TABLE IF EXISTS ONLY public.orders DROP COLUMN note;
+DROP TABLE IF EXISTS tmp_a, tmp_b CASCADE;
+TRUNCATE TABLE events;
+TRUNCATE carts;
+"#;
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let mut qnames = entity_qnames(&out);
+        qnames.sort();
+        assert_eq!(
+            qnames,
+            [
+                "data_entity:sql:carts",
+                "data_entity:sql:events",
+                "data_entity:sql:orders",
+                "data_entity:sql:tmp_a",
+                "data_entity:sql:tmp_b",
+                "data_entity:sql:users",
+            ]
+        );
+        let ddl: Vec<&str> = scan_sql_ddl(src)
+            .into_iter()
+            .map(|(verb, _)| verb)
+            .collect();
+        assert_eq!(
+            ddl,
+            ["alter", "alter", "drop", "drop", "truncate", "truncate"]
+        );
+    }
+
+    #[test]
+    fn create_index_names_its_table() {
+        let src = r#"
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON users (email);
+CREATE INDEX ON ONLY public.orders USING gin (tags);
+create index "ix_events" on events(created_at);
+-- we create index files on startup.
+"#;
+        let got = scan_sql_ddl(src);
+        assert_eq!(
+            got,
+            [
+                ("index", "users".to_string()),
+                ("index", "orders".to_string()),
+                ("index", "events".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_in_prose_is_not_an_entity() {
+        // `select ` opens the SQL gate for the whole file, so prose around a
+        // real query must not read as DDL: no bare `TABLE` keyword, and a bare
+        // `TRUNCATE x` needs `x` to end the statement.
+        let repo = RepoId(1);
+        let src = r#"
+// the users table maps onto the Account model; truncate long names first.
+// We create table rows lazily and drop table-like caches on exit.
+const q = "SELECT id FROM users";
+const tpl = `<select class="truncate block"></select>`;
+"#;
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        assert_eq!(entity_qnames(&out), ["data_entity:sql:users"]);
+    }
+
+    #[test]
+    fn drop_table_alone_opens_only_the_ddl_scan() {
+        // `DROP TABLE` is not a `has_sql_context` signature; it opens the DDL
+        // scan without letting the prose `from this` reach the FROM scan.
+        let repo = RepoId(1);
+        let src = "// adapted from somewhere\nconn.execute(\"DROP TABLE legacy_users\")\n";
+        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        assert_eq!(entity_qnames(&out), ["data_entity:sql:legacy_users"]);
     }
 
     #[test]

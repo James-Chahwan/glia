@@ -1,0 +1,19 @@
+{
+  "framework": "sql-migration-ddl",
+  "language": "sql",
+  "dirs": ["."],
+  "mechanism": "migrations",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "users", "note": "CREATE TABLE IF NOT EXISTS users, in a Flyway V1__ file the walk never read before A13.9"}
+  ],
+  "expect_edges": [
+    {"from": "V1__create_users", "to": "users", "category": "ACCESSES_DATA", "note": "migration module -> table it creates (IF NOT EXISTS skipped)"},
+    {"from": "V2__add_users_email", "to": "users", "category": "ACCESSES_DATA", "note": "ALTER TABLE ONLY users (Postgres ONLY skipped)"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "IF", "max_nodes": 0, "note": "precision: the IF NOT EXISTS guard is never a table"},
+    {"kind": "DATA_ENTITY", "name": "ONLY", "max_nodes": 0, "note": "precision: ALTER TABLE ONLY is never a table"},
+    {"kind": "DATA_ENTITY", "name": "V1__create_users", "max_nodes": 0, "note": "precision: the migration file is a MODULE, never a table"}
+  ],
+  "note": "A13.9: Flyway-named .sql under db/migrations is admitted by the walk (is_migration_path) and routed to the DDL scan; an arbitrary .sql elsewhere stays unread."
+}

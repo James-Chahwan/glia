@@ -1,7 +1,8 @@
 //! Per-file routing: which extractor or language parser sees which file.
 //! Holds the non-source branches (yaml / Dockerfile / package manifest /
-//! dotenv / contract and JSON Schema `.json` / `.proto` / `.graphql`), the
-//! WP-D incremental parse-cache lookup, and the per-file panic isolation.
+//! dotenv / migration `.sql` / contract and JSON Schema `.json` / `.proto` /
+//! `.graphql`), the WP-D incremental parse-cache lookup, and the per-file
+//! panic isolation.
 //! Split out of `build_graphs_for_repo`.
 
 use std::any::Any;
@@ -228,6 +229,38 @@ pub(crate) fn parse_repo_files(
                     vec![cfg_out.nodes],
                     vec![cfg_out.edges],
                     vec![cfg_out.nav],
+                    vec![],
+                    &mut parses_by_lang,
+                );
+            }
+            continue;
+        }
+
+        // A13.9: a migration `.sql` (the walk admits one only through
+        // `is_migration_path`). Its DDL names the tables it creates, alters or
+        // drops, each an ACCESSES_DATA target of the file's MODULE. Before
+        // detect_language, which has no sql arm on purpose: the const-table
+        // scan would bind `UPDATE t SET name = 'x'` as a constant.
+        if repo_graph_code_extractors::migrations::is_migration_path(path) {
+            let module_id = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo,
+                node_kind::MODULE,
+                &path_to_qname(path),
+            );
+            let out = repo_graph_code_extractors::migrations::extract_sql_migration(
+                source, path, module_id, repo,
+            );
+            eprintln!("{}", out.marker(path));
+            if !out.entities.nodes.is_empty() {
+                stash_synthetic_parse(
+                    "migration",
+                    path,
+                    module_id,
+                    repo,
+                    vec![out.entities.nodes],
+                    vec![out.entities.edges],
+                    vec![out.entities.nav],
                     vec![],
                     &mut parses_by_lang,
                 );
@@ -755,6 +788,40 @@ mod tests {
         let (parses, errors) = parse_repo_files(&files, RepoId(1), "", None, "test");
         assert!(errors.is_empty(), "{errors:?}");
         parses
+    }
+
+    /// A13.9: a migration `.sql` becomes a MODULE whose ACCESSES_DATA edges
+    /// name the tables its DDL touches; detect_language never sees it.
+    #[test]
+    fn migration_sql_routes_to_the_ddl_scan() {
+        assert_eq!(detect_language("db/migrations/V1__create_users.sql"), None);
+        let sql = "-- users\nCREATE TABLE IF NOT EXISTS users (id INT);\n\
+                   ALTER TABLE ONLY users ADD COLUMN email TEXT;\n";
+        let parses = route("db/migrations/V1__create_users.sql", sql);
+        let fps = &parses["migration"];
+        assert_eq!(fps.len(), 1);
+        let fp = &fps[0];
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "db::migrations::V1__create_users",
+        );
+        let users = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::DATA_ENTITY,
+            "data_entity:sql:users",
+        );
+        assert_eq!(fp.nodes[0].id, module_id, "the migration file is a MODULE");
+        assert_eq!(fp.nodes.len(), 2, "MODULE + one DATA_ENTITY: {:?}", fp.nav.qname_by_id);
+        assert_eq!(fp.edges.len(), 1);
+        assert_eq!((fp.edges[0].from, fp.edges[0].to), (module_id, users));
+        assert_eq!(fp.edges[0].category, edge_category::ACCESSES_DATA);
+
+        // Admitted but table-less: no stash, no empty MODULE.
+        let parses = route("db/migrations/V2__noop.sql", "-- nothing yet\n");
+        assert!(!parses.contains_key("migration"));
     }
 
     #[test]

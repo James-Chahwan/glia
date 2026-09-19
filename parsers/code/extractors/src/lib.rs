@@ -8,6 +8,7 @@ pub mod cron;
 pub mod data_entities;
 pub mod data_sources;
 pub mod iac;
+pub mod migrations;
 pub mod nav_links;
 pub mod nav_routes;
 pub mod next_pages;

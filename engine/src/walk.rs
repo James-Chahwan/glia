@@ -52,6 +52,12 @@ fn is_self_output(root: &Path, parent: &Path, name: &str) -> bool {
 /// in the coverage caveats, so the skip is visible rather than silent.
 const JSON_CONTRACT_CAP: u64 = 512_000;
 
+/// Largest migration `.sql` the walk reads (A13.9). A schema dump
+/// (`db/structure.sql`) is well under it; a multi-megabyte data load under
+/// `migrations/` is skipped with a `[migrations] skipped` line rather than
+/// held in memory for a table scan.
+const MIGRATION_SQL_CAP: u64 = 4 * 1024 * 1024;
+
 /// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
 /// `.json` the walk reached, `admitted` is the ones queued as contracts or
 /// (LA.16) as JSON Schemas, and `over_cap` is the ones never read because
@@ -224,6 +230,14 @@ fn walk_dir(
                 }
                 continue;
             }
+            // A13.9: `is_bypass_path` admits a migration `.sql`; one over the
+            // cap is skipped, and says so.
+            if repo_graph_code_extractors::migrations::is_migration_path(&rel_str)
+                && std::fs::metadata(&path).is_ok_and(|m| m.len() > MIGRATION_SQL_CAP)
+            {
+                eprintln!("[migrations] skipped file={rel_str} over_cap={MIGRATION_SQL_CAP}");
+                continue;
+            }
             let matches_lang = detect_language(&rel_str).is_some();
             let matches_bypass = is_bypass_path(&rel_str);
             if (matches_lang || matches_bypass)
@@ -345,6 +359,9 @@ fn is_bypass_path(path: &str) -> bool {
         || is_dotenv_path(path)
         || is_angular_template_path(path)
         || repo_graph_code_extractors::packages::is_manifest_path(path)
+        // A13.9: a migration `.sql` (Flyway name, `.up.sql`, `db/migrate/`,
+        // `migrations/`). Any other `.sql` stays unread.
+        || repo_graph_code_extractors::migrations::is_migration_path(path)
 }
 
 /// LA.6c: an Angular CLI component template (`home.component.html`). Read only
@@ -560,6 +577,70 @@ mod walk_tests {
         assert!(files.iter().any(|(p, _)| p == "app/main.py"), "{files:?}");
         let r = regions.iter().find(|r| r.rel_path == "libs/sdk").unwrap();
         assert_eq!(r.provenance, Collapse::Submodule);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A13.9: a migration `.sql` is read and a query fixture `.sql` is not;
+    /// the admitted file's DDL becomes a DATA_ENTITY under its own MODULE, and
+    /// one over the cap is never read.
+    #[test]
+    fn walk_admits_migration_sql_only() {
+        let root = walk_tmp("migrations");
+        for d in ["db/migrations", "db/migrate", "tests/data", "big/migrations"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let files_in = [
+            ("db/migrations/V1__create_users.sql", "CREATE TABLE users (id INT);\n"),
+            ("db/migrate/002_orders.sql", "ALTER TABLE orders ADD COLUMN note TEXT;\n"),
+            ("tests/data/q.sql", "SELECT * FROM fixtures_only;\n"),
+            ("report.sql", "CREATE TABLE not_a_migration (id INT);\n"),
+        ];
+        for (rel, body) in files_in {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let pad = "-- pad\n".repeat(MIGRATION_SQL_CAP as usize / 7 + 1);
+        std::fs::write(
+            root.join("big/migrations/001_load.sql"),
+            format!("CREATE TABLE huge (id INT);\n{pad}"),
+        )
+        .unwrap();
+
+        let (files, ..) = walk_source_files(&root);
+        let mut sql: Vec<&str> = files
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .filter(|p| p.ends_with(".sql"))
+            .collect();
+        sql.sort_unstable();
+        assert_eq!(
+            sql,
+            ["db/migrate/002_orders.sql", "db/migrations/V1__create_users.sql"],
+            "{files:?}"
+        );
+
+        let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        let mut accessed: Vec<(String, String)> = Vec::new();
+        for g in &r.merged.graphs {
+            for e in &g.edges {
+                if e.category != repo_graph_code_domain::edge_category::ACCESSES_DATA {
+                    continue;
+                }
+                let from = g.nav.qname_by_id.get(&e.from).cloned().unwrap_or_default();
+                let to = g.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default();
+                accessed.push((from, to));
+            }
+        }
+        accessed.sort();
+        assert_eq!(
+            accessed,
+            [
+                ("db::migrate::002_orders".to_string(), "data_entity:sql:orders".to_string()),
+                (
+                    "db::migrations::V1__create_users".to_string(),
+                    "data_entity:sql:users".to_string()
+                ),
+            ]
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -166,8 +166,9 @@ MECHANISMS = [
      "kinds": [["DATA_ENTITY"]], "via_labels": ["db"],
      "literal": "the migrated table name in the DATA_ENTITY qname",
      "categories": ["ACCESSES_DATA"], "cross_repo": False,
-     "note": "no dedicated kind exists; review rank 15 proposes migration routing -- "
-             "a fixture here is EXPECTED to read none"},
+     "note": "no dedicated kind: A13.9 routes migration .sql (Flyway / golang-migrate / "
+             "Liquibase / migrations dirs) and reads migration DSLs (Alembic, Django, Rails, "
+             "knex / Sequelize, Laravel, EF Core); the file's MODULE ACCESSES_DATA each table"},
 
     {"id": "config", "label": "config", "family": "config",
      "kinds": [["CONFIG_KEY"]], "via_labels": ["config"],
