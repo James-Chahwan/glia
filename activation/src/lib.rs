@@ -28,6 +28,11 @@ pub mod profile;
 
 pub use profile::{ActivationPreset, DomainProfile, DomainTables, EntryRule, NamedEntry, Registries};
 
+/// Domain-agnostic graph algorithms (LD.15a), reached by module path
+/// (`repo_graph_activation::algo::reach::bfs`): [`algo::GraphSource`], the
+/// CSR [`algo::Adjacency`] index, and reachability in [`algo::reach`].
+pub mod algo;
+
 // ============================================================================
 // Config
 // ============================================================================

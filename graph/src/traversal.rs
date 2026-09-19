@@ -1,8 +1,11 @@
 //! Traversal primitives over `RepoGraph` and `MergedGraph`: neighbours, BFS,
 //! reverse BFS, parent chains, and spreading activation.
+//!
+//! Both graphs are [`GraphSource`]s, so the domain-agnostic algorithms in
+//! `repo_graph_activation::algo` run over them; the BFS walks here are thin
+//! calls into `algo::reach` over a per-call CSR `Adjacency` (LD.15a).
 
-use std::collections::{HashSet, VecDeque};
-
+use repo_graph_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use repo_graph_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::merged::MergedGraph;
@@ -30,25 +33,8 @@ impl RepoGraph {
         follow: &[EdgeCategoryId],
         max_depth: usize,
     ) -> Vec<NodeId> {
-        let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
-        let mut visited: HashSet<NodeId> = HashSet::from([start]);
-        let mut out = Vec::new();
-        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(start, 0)]);
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-            for e in self.edges.iter().filter(|e| e.from == node) {
-                if !allow.contains(&e.category) {
-                    continue;
-                }
-                if visited.insert(e.to) {
-                    out.push(e.to);
-                    queue.push_back((e.to, depth + 1));
-                }
-            }
-        }
-        out
+        let adj = Adjacency::build(self, &CategorySet::of(follow));
+        reach_ids(reach::bfs(&adj, &[start], Walk::Forward, max_depth))
     }
 
     /// Backward BFS — node ids that can reach `sink` by following edges in
@@ -60,35 +46,18 @@ impl RepoGraph {
     /// materialising the full predecessor frontier when only a small set is
     /// of interest.
     ///
-    /// Cost is O(E * depth) per call (linear scan over edges per visited
-    /// node). For repeated queries against the same graph, build a reverse
-    /// adjacency index out-of-band; this primitive is intentionally
-    /// index-free so it composes with `MergedGraph::all_edges`.
+    /// Cost is O(V + E) per call: it builds a CSR `Adjacency` over this
+    /// graph's edges of the `follow` categories, then walks it. A caller
+    /// issuing many walks over one graph builds the `Adjacency` once and
+    /// calls `repo_graph_activation::algo::reach` directly.
     pub fn predecessors(
         &self,
         sink: NodeId,
         follow: &[EdgeCategoryId],
         max_depth: usize,
     ) -> Vec<NodeId> {
-        let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
-        let mut visited: HashSet<NodeId> = HashSet::from([sink]);
-        let mut out = Vec::new();
-        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(sink, 0)]);
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= max_depth {
-                continue;
-            }
-            for e in self.edges.iter().filter(|e| e.to == node) {
-                if !allow.contains(&e.category) {
-                    continue;
-                }
-                if visited.insert(e.from) {
-                    out.push(e.from);
-                    queue.push_back((e.from, depth + 1));
-                }
-            }
-        }
-        out
+        let adj = Adjacency::build(self, &CategorySet::of(follow));
+        reach_ids(reach::bfs(&adj, &[sink], Walk::Backward, max_depth))
     }
 
     /// Joern-style `reachableBy` — the subset of `sources` that can reach
@@ -109,31 +78,8 @@ impl RepoGraph {
         if sources.is_empty() {
             return Vec::new();
         }
-        let allow: HashSet<EdgeCategoryId> = follow.iter().copied().collect();
-        let target_set: HashSet<NodeId> = sources.iter().copied().collect();
-        let mut visited: HashSet<NodeId> = HashSet::from([sink]);
-        let mut hit: HashSet<NodeId> = HashSet::new();
-        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::from([(sink, 0)]);
-        while let Some((node, depth)) = queue.pop_front() {
-            if depth >= max_depth || hit.len() == target_set.len() {
-                if hit.len() == target_set.len() {
-                    break;
-                }
-                continue;
-            }
-            for e in self.edges.iter().filter(|e| e.to == node) {
-                if !allow.contains(&e.category) {
-                    continue;
-                }
-                if visited.insert(e.from) {
-                    if target_set.contains(&e.from) {
-                        hit.insert(e.from);
-                    }
-                    queue.push_back((e.from, depth + 1));
-                }
-            }
-        }
-        sources.iter().copied().filter(|s| hit.contains(s)).collect()
+        let adj = Adjacency::build(self, &CategorySet::of(follow));
+        reach::reachable_by(&adj, sink, sources, max_depth)
     }
 
     /// Walk `parent_of` from `id` to the top. Excludes `id` itself.
@@ -167,6 +113,37 @@ impl RepoGraph {
     }
 }
 
+/// A walk's reached ids, in discovery order.
+fn reach_ids(walk: reach::Bfs) -> Vec<NodeId> {
+    walk.reached.into_iter().map(|r| r.id).collect()
+}
+
+/// Nodes in `nodes` order, edges in `edges` order.
+impl GraphSource for RepoGraph {
+    fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.iter().map(|n| n.id).collect()
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        Box::new(self.edges.iter())
+    }
+}
+
+/// Each graph's nodes in graph order (the order [`MergedGraph::activate`]
+/// hands PPR), edges in [`MergedGraph::all_edges`] order.
+impl GraphSource for MergedGraph {
+    fn node_ids(&self) -> Vec<NodeId> {
+        self.graphs
+            .iter()
+            .flat_map(|g| g.nodes.iter().map(|n| n.id))
+            .collect()
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        Box::new(self.all_edges())
+    }
+}
+
 impl MergedGraph {
     /// Spreading activation over the full merged graph (all repos + cross edges).
     pub fn activate(
@@ -186,6 +163,8 @@ impl MergedGraph {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::test_support::{flow_graph, repo};
     use repo_graph_code_domain::{GRAPH_TYPE, edge_category, node_kind};
@@ -235,5 +214,36 @@ mod tests {
 
         // Empty sources short-circuits.
         assert!(g.reachable_by(c, &[], &[edge_category::CALLS], 5).is_empty());
+    }
+
+    #[test]
+    fn graph_sources_keep_node_and_edge_order_and_dangling_targets() {
+        let mut g = flow_graph();
+        let a = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::a");
+        let c = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m::c");
+        // An edge to an id that is no node is still walked.
+        let ghost = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "m::Ghost");
+        let to_ghost = Edge {
+            from: c,
+            to: ghost,
+            category: edge_category::CALLS,
+            confidence: repo_graph_core::Confidence::Strong,
+            cells: Vec::new(),
+        };
+        g.edges.push(to_ghost.clone());
+        assert_eq!(g.bfs(a, &[edge_category::CALLS], 5).last(), Some(&ghost));
+
+        let nodes: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(GraphSource::node_ids(&g), nodes);
+        let intra = g.edges.len();
+        let mut merged = MergedGraph::new(vec![g, flow_graph()]);
+        let cross = Edge { from: ghost, to: a, ..to_ghost };
+        merged.cross_edges.push(cross.clone());
+        let merged_nodes = GraphSource::node_ids(&merged);
+        assert_eq!(merged_nodes.len(), 8);
+        assert_eq!(merged_nodes[..4], nodes[..]);
+        let edges: Vec<&Edge> = GraphSource::edges(&merged).collect();
+        assert_eq!(edges.len(), intra + 3 + 1);
+        assert_eq!(edges.last().map(|e| (e.from, e.to)), Some((cross.from, cross.to)));
     }
 }

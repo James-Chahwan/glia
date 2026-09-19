@@ -29,7 +29,9 @@ store/              .gmap binary format — rkyv + mmap, sharded layout
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights;
                     also the domain-free build-pass registry (`passes`: Stage, PassSpec,
-                    PassRegistry) — build-time, so PARSER_STAMP hashes it
+                    PassRegistry) — build-time, so PARSER_STAMP hashes it — and `algo`:
+                    GraphSource, CategorySet, the CSR Adjacency index and `algo::reach`
+                    (bfs / reachable / reachable_by), O(V+E) per walk
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
@@ -261,6 +263,7 @@ WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
 - **Tree-sitter, not regex.** 0.4.x moved to AST extraction; 0.2.0 regex is not a ceiling.
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
+- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability now (LD.15a), graph delta (LE.1) and SCC / cycles (LE.6) next; a graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node.
 - **Publish gate.** Only `rust/py/` publishes to PyPI (as `repo-graph-py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
