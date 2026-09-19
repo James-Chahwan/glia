@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 276,
+  "fixtures": 278,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -963,6 +963,11 @@
       "language": "yaml+json",
       "per_category": {}
     },
+    "overlay-declared-cells": {
+      "framework": "overlay-declared-cells",
+      "language": "python",
+      "per_category": {}
+    },
     "php-braced-use": {
       "framework": "php-braced-use",
       "language": "php",
@@ -1692,6 +1697,13 @@
       "language": "proto+go",
       "per_category": {
         "GRPC_CALLS": 1.0
+      }
+    },
+    "xcut-overlay-const-mount": {
+      "framework": "xcut-overlay-const-mount",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "xcut-overlay-edges": {
