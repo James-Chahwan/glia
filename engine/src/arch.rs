@@ -463,9 +463,13 @@ pub fn repo_label_map(entries: &[(u64, String)]) -> BTreeMap<u64, String> {
 /// `from` to `to`. Everything else `cross_links` returns (the six `SHARES_*`)
 /// is a co-ownership signal, still emitted but flagged by `mechanism` so a
 /// renderer can hide it by default.
+///
+/// LA.17: RPC_CALLS (tRPC, Connect and Twirp call -> procedure) is a flow too,
+/// so `glia arch` shows those links without `--include-shared`.
 pub const FLOW_MECHANISMS: &[EdgeCategoryId] = &[
     edge_category::HTTP_CALLS,
     edge_category::GRPC_CALLS,
+    edge_category::RPC_CALLS,
     edge_category::QUEUE_FLOWS,
     edge_category::GRAPHQL_CALLS,
     edge_category::WS_CONNECTS,
@@ -918,5 +922,18 @@ mod tests {
         let one = repo_label_map(&[(7, "/tmp/x/api".into())]);
         assert_eq!(one.get(&7).map(String::as_str), Some("api"));
         assert_eq!(repo_label_for("/tmp/x/api/"), "api");
+    }
+
+    /// LA.17: an RPC link (tRPC, Connect, Twirp call -> procedure) is a call
+    /// flow, so the default `glia arch` view keeps it.
+    #[test]
+    fn rpc_calls_is_a_flow_mechanism() {
+        assert!(FLOW_MECHANISMS.contains(&edge_category::RPC_CALLS));
+        assert!(
+            FLOW_MECHANISMS
+                .iter()
+                .all(|c| !edge_category::name(*c).starts_with("SHARES_")),
+            "co-ownership signals stay out of the flow table"
+        );
     }
 }

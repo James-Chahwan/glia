@@ -1301,6 +1301,636 @@ pub fn extract_grpc_server_nodes(
     out
 }
 
+// ---- LA.17 (A10.13): Connect / Twirp, proto-service RPC over HTTP ----------
+
+/// The proto-over-HTTP stacks [`extract_proto_rpc_nodes`] reads. Both key on
+/// the build's `.proto` services like the gRPC passes, but mint method-level
+/// RPC_PROCEDURE / RPC_CALL nodes that `RpcStackResolver` pairs on the exact
+/// `<proto package>.<Service>.<Method>` path, never the service-level gRPC
+/// family: Twirp is not gRPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtoRpcFamily {
+    Connect,
+    Twirp,
+}
+
+/// Imports that mark a Go file as a Connect (connect-go) file.
+const CONNECT_GO_IMPORTS: &[&str] = &["connectrpc.com/connect", "github.com/bufbuild/connect-go"];
+/// Imports that mark a TS / JS file as a connect-es file.
+const CONNECT_ES_IMPORTS: &[&str] = &["@connectrpc/connect", "@bufbuild/connect"];
+/// Twirp's generated constructors. Looked for only in a Twirp repo: a Twirp
+/// client file imports nothing but its generated package, so the gate is the
+/// repo's go.mod, not the file.
+const TWIRP_TOKENS: &[&str] = &["ProtobufClient(", "JSONClient(", "Server("];
+/// Parser tags of the TS family, where connect-es clients live.
+const TS_FAMILY: &[&str] = &["typescript", "angular", "vue"];
+
+/// Go `<pkg>.New<Service><suffix>(`: `(suffix, family, is server)`. Longest
+/// suffix first, so `NewHatProtobufClient(` is Twirp's before it is Connect's
+/// `Client` with the unknown service `HatProtobuf`.
+const GO_CONSTRUCTORS: &[(&str, ProtoRpcFamily, bool)] = &[
+    ("ProtobufClient", ProtoRpcFamily::Twirp, false),
+    ("JSONClient", ProtoRpcFamily::Twirp, false),
+    ("Handler", ProtoRpcFamily::Connect, true),
+    ("Client", ProtoRpcFamily::Connect, false),
+    ("Server", ProtoRpcFamily::Twirp, true),
+];
+
+/// connect-es client factories, each taking the service descriptor first.
+const CONNECT_ES_FACTORIES: &[&str] = &[
+    "createClient(",
+    "createPromiseClient(",
+    "createCallbackClient(",
+];
+
+/// Per-file tallies of [`extract_proto_rpc_nodes`]; the engine sums them into
+/// its `[proto-rpc]` marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ProtoRpcCounts {
+    pub connect_procedures: usize,
+    pub connect_calls: usize,
+    pub twirp_procedures: usize,
+    pub twirp_calls: usize,
+    /// Needle hits on a service name two known services in different proto
+    /// packages share: skipped, never guessed.
+    pub ambiguous: usize,
+    /// Procedures no method of the registered type implements (an rpc served
+    /// by the `Unimplemented…` embed): contained by the module, never
+    /// HANDLED_BY the function that registers the service.
+    pub unowned: usize,
+}
+
+impl ProtoRpcCounts {
+    pub fn add(&mut self, other: ProtoRpcCounts) {
+        self.connect_procedures += other.connect_procedures;
+        self.connect_calls += other.connect_calls;
+        self.twirp_procedures += other.twirp_procedures;
+        self.twirp_calls += other.twirp_calls;
+        self.ambiguous += other.ambiguous;
+        self.unowned += other.unowned;
+    }
+
+    /// True when the pass saw anything worth a marker line.
+    pub fn any(&self) -> bool {
+        self.connect_procedures
+            + self.connect_calls
+            + self.twirp_procedures
+            + self.twirp_calls
+            + self.ambiguous
+            > 0
+    }
+}
+
+/// What [`extract_proto_rpc_nodes`] adds to one file's parse. The nodes arrive
+/// finished — POSITION cell and owner edge (HANDLED_BY / USES) or the module
+/// CONTAINS fallback — so the engine grafts them without an anchor pass.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ProtoRpcNodes {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub nav: CodeNav,
+    pub counts: ProtoRpcCounts,
+}
+
+/// Cheap pre-check for [`extract_proto_rpc_nodes`]: false only when `source`
+/// can hold no Connect or Twirp needle, so the engine may skip its parse lookup.
+pub fn may_hold_proto_rpc(source: &str, twirp_repo: bool) -> bool {
+    CONNECT_GO_IMPORTS
+        .iter()
+        .chain(CONNECT_ES_IMPORTS)
+        .any(|t| source.contains(t))
+        || (twirp_repo && TWIRP_TOKENS.iter().any(|t| source.contains(t)))
+}
+
+/// One constructor / factory call that names a known service.
+struct ProtoRpcHit {
+    family: ProtoRpcFamily,
+    server: bool,
+    service: String,
+    /// Byte offset of the needle: the Go package qualifier, or the factory name.
+    at: usize,
+    /// Byte offset of the call's `(`.
+    open: usize,
+}
+
+/// A known service's proto package and rpc names (declaration order).
+struct RpcService<'a> {
+    package: Option<&'a str>,
+    rpcs: Vec<&'a str>,
+}
+
+impl RpcService<'_> {
+    /// `<package>.<Service>.<rpc>`, or `<Service>.<rpc>` for a package-less proto.
+    fn path(&self, service: &str, rpc: &str) -> String {
+        match self.package {
+            Some(p) => format!("{p}.{service}.{rpc}"),
+            None => format!("{service}.{rpc}"),
+        }
+    }
+}
+
+/// Service name -> its package and rpcs; `None` marks a name two known services
+/// in different packages share. Same-package duplicates (one `.proto` copied
+/// into two repos) union their rpcs.
+fn proto_rpc_services(known: &[ProtoServiceRef]) -> BTreeMap<&str, Option<RpcService<'_>>> {
+    let mut out: BTreeMap<&str, Option<RpcService<'_>>> = BTreeMap::new();
+    for svc in known {
+        if svc.name.is_empty() || !svc.name.bytes().all(is_ident_byte) {
+            continue;
+        }
+        let rpcs = svc
+            .rpcs
+            .iter()
+            .map(String::as_str)
+            .filter(|r| !r.is_empty() && r.bytes().all(is_ident_byte));
+        match out.get_mut(svc.name.as_str()) {
+            None => {
+                out.insert(
+                    svc.name.as_str(),
+                    Some(RpcService {
+                        package: svc.package.as_deref(),
+                        rpcs: rpcs.collect(),
+                    }),
+                );
+            }
+            Some(Some(s)) if s.package == svc.package.as_deref() => {
+                for r in rpcs {
+                    if !s.rpcs.contains(&r) {
+                        s.rpcs.push(r);
+                    }
+                }
+            }
+            Some(slot) => *slot = None,
+        }
+    }
+    out
+}
+
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// End of the identifier that starts at `i` (`i` itself when there is none).
+fn ident_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && is_ident_byte(bytes[i]) {
+        i += 1;
+    }
+    i
+}
+
+/// End of a dotted identifier path (`pb.Hat`, `gen.eliza.ElizaService`) at `i`.
+fn path_end(bytes: &[u8], mut i: usize) -> usize {
+    while i < bytes.len() && (is_ident_byte(bytes[i]) || bytes[i] == b'.') {
+        i += 1;
+    }
+    i
+}
+
+/// Byte offset of the `)` closing the `(` at `open`, skipping quoted literals.
+fn matching_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(_) if b == b'\\' => i += 1,
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'"' | b'\'' | b'`' => quote = Some(b),
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Go `<pkg>.New<Service><suffix>(` for every enabled family, package-qualified
+/// only: a hand-written `NewGreeterServer()` constructor is never a hit.
+fn go_constructor_hits(
+    source: &str,
+    connect: bool,
+    twirp: bool,
+    services: &BTreeMap<&str, Option<RpcService<'_>>>,
+) -> Vec<ProtoRpcHit> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(".New") {
+        let dot = from + rel;
+        from = dot + ".New".len();
+        let at = ident_start(bytes, dot);
+        let run_end = ident_end(bytes, from);
+        if at == dot || bytes.get(run_end) != Some(&b'(') {
+            continue;
+        }
+        let run = &source[from..run_end];
+        for &(suffix, family, server) in GO_CONSTRUCTORS {
+            let enabled = match family {
+                ProtoRpcFamily::Connect => connect,
+                ProtoRpcFamily::Twirp => twirp,
+            };
+            let Some(service) = run.strip_suffix(suffix) else {
+                continue;
+            };
+            if enabled && !service.is_empty() && services.contains_key(service) {
+                out.push(ProtoRpcHit {
+                    family,
+                    server,
+                    service: service.to_string(),
+                    at,
+                    open: run_end,
+                });
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// connect-es `createClient(<Service>, transport)` and its two siblings; the
+/// descriptor may be namespaced (`eliza.ElizaService`).
+fn connect_es_hits(
+    source: &str,
+    services: &BTreeMap<&str, Option<RpcService<'_>>>,
+) -> Vec<ProtoRpcHit> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    for factory in CONNECT_ES_FACTORIES {
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(factory) {
+            let at = from + rel;
+            from = at + factory.len();
+            if at > 0 && is_ident_byte(bytes[at - 1]) {
+                continue;
+            }
+            let arg_start = skip_ws(bytes, from);
+            let arg_end = path_end(bytes, arg_start);
+            let service = source[arg_start..arg_end].rsplit('.').next().unwrap_or("");
+            let closed = matches!(bytes.get(skip_ws(bytes, arg_end)), Some(b',' | b')'));
+            if closed && !service.is_empty() && services.contains_key(service) {
+                out.push(ProtoRpcHit {
+                    family: ProtoRpcFamily::Connect,
+                    server: false,
+                    service: service.to_string(),
+                    at,
+                    open: from - 1,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// `&T{` / `T{` / `&pkg.T{` at `i` -> `T`.
+fn struct_literal_type(source: &str, i: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let mut i = i;
+    if bytes.get(i) == Some(&b'&') {
+        i = skip_ws(bytes, i + 1);
+    }
+    let end = path_end(bytes, i);
+    let ty = source[i..end].rsplit('.').next().unwrap_or("");
+    (!ty.is_empty() && bytes.get(skip_ws(bytes, end)) == Some(&b'{')).then_some(ty)
+}
+
+/// The struct a Go constructor's first argument builds: `&T{}` / `T{}` in
+/// place, or an identifier the same file binds to one (`srv := &T{}`).
+fn go_impl_type(source: &str, open: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let arg = skip_ws(bytes, open + 1);
+    if let Some(ty) = struct_literal_type(source, arg) {
+        return Some(ty);
+    }
+    let var_end = ident_end(bytes, arg);
+    if var_end == arg || !matches!(bytes.get(skip_ws(bytes, var_end)), Some(b',' | b')')) {
+        return None;
+    }
+    let var = &source[arg..var_end];
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(var) {
+        let pos = from + rel;
+        from = pos + var.len();
+        if (pos > 0 && is_ident_byte(bytes[pos - 1]))
+            || bytes.get(from).is_some_and(|b| is_ident_byte(*b))
+        {
+            continue;
+        }
+        let op = skip_ws(bytes, from);
+        let rest = &source[op..];
+        let value = if rest.starts_with(":=") {
+            op + 2
+        } else if rest.starts_with('=') && !rest.starts_with("==") {
+            op + 1
+        } else {
+            continue;
+        };
+        if let Some(ty) = struct_literal_type(source, skip_ws(bytes, value)) {
+            return Some(ty);
+        }
+    }
+    None
+}
+
+/// The identifier the call at `at` is bound to on its own line: `client :=`,
+/// `client =`, `const client =`, `const client: T =`, `s.client =`, or an
+/// object / struct literal key `client:` -> `client`.
+fn bound_identifier(source: &str, at: usize) -> Option<&str> {
+    let head = source[line_start(source, at)..at].trim_end();
+    let lhs = if let Some(l) = head.strip_suffix(":=") {
+        l
+    } else if let Some(l) = head.strip_suffix('=') {
+        if l.ends_with(['=', '!', '<', '>']) {
+            return None;
+        }
+        // A TS annotation (`const client: PromiseClient<…> =`) ends the binding.
+        l.split(':').next().unwrap_or(l)
+    } else {
+        head.strip_suffix(':')?
+    };
+    let lhs = lhs.trim_end();
+    let name = &lhs[ident_start(lhs.as_bytes(), lhs.len())..];
+    (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit())).then_some(name)
+}
+
+/// Every `<binding>.<method>(` in `source` with an identifier boundary before
+/// the binding (`s.client.Say(` counts, `myclient.Say(` does not), as
+/// `(byte offset, method)`.
+fn member_calls<'s>(source: &'s str, binding: &str) -> Vec<(usize, &'s str)> {
+    let bytes = source.as_bytes();
+    let needle = format!("{binding}.");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find(&needle) {
+        let pos = from + rel;
+        from = pos + needle.len();
+        let m_end = ident_end(bytes, from);
+        if (pos > 0 && is_ident_byte(bytes[pos - 1]))
+            || m_end == from
+            || bytes.get(m_end) != Some(&b'(')
+        {
+            continue;
+        }
+        out.push((pos, &source[from..m_end]));
+    }
+    out
+}
+
+/// LA.17 (A10.13): Connect and Twirp. One RPC_PROCEDURE per proto rpc of every
+/// known service this file registers, one RPC_CALL per rpc it calls, keyed
+/// `rpc:<proto package>.<Service>.<Method>` / `rpc_call:…` so the unchanged
+/// `RpcStackResolver` pairs them on the exact path Connect itself routes on
+/// (`/<package>.<Service>/<Method>`).
+///
+/// Needles, each gated so a gRPC or plain HTTP file never hits:
+/// - Go Connect (the file imports connect-go): server
+///   `<pkg>.New<Svc>Handler(&T{})`, client `<pkg>.New<Svc>Client(…)`;
+/// - Go Twirp (`twirp_repo`: the repo requires twitchtv/twirp): server
+///   `<pkg>.New<Svc>Server(&T{})`, client `<pkg>.New<Svc>ProtobufClient(…)` /
+///   `<pkg>.New<Svc>JSONClient(…)`;
+/// - TS connect-es (the file imports it): `createClient(<Svc>, …)`,
+///   `createPromiseClient(`, `createCallbackClient(`.
+///
+/// A procedure whose rpc a method of `T` implements (the file's own parse:
+/// METHOD, nav parent a STRUCT / CLASS named `T`) is HANDLED_BY that method and
+/// located at its span; any other procedure is located at the registration and
+/// contained by the module, never HANDLED_BY the registering function.
+///
+/// A call is `<binding>.<rpc>(` on the identifier the constructor is bound to
+/// (TS `say` folds to `Say`), or a method chained onto the constructor call;
+/// other methods (`client.Close()`) mint nothing. Each call is located at its
+/// first site; every site's innermost METHOD / FUNCTION USES it, a site no
+/// function holds gives the module CONTAINS edge.
+///
+/// A service name two known services in different packages share is skipped
+/// and counted `ambiguous`. Generated code ([`is_generated_source`]) and
+/// needles after a declaration keyword (`func NewElizaServiceClient(`) never
+/// hit.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_proto_rpc_nodes(
+    source: &str,
+    path: &str,
+    lang: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    known: &[ProtoServiceRef],
+    nodes: &[Node],
+    nav: &CodeNav,
+    twirp_repo: bool,
+) -> ProtoRpcNodes {
+    let mut out = ProtoRpcNodes::default();
+    if known.is_empty() || is_generated_source(source) {
+        return out;
+    }
+    let is_go = lang == "go";
+    let imports_any = |needles: &[&str]| needles.iter().any(|n| source.contains(n));
+    let connect = if is_go {
+        imports_any(CONNECT_GO_IMPORTS)
+    } else {
+        TS_FAMILY.contains(&lang) && imports_any(CONNECT_ES_IMPORTS)
+    };
+    let twirp = is_go && twirp_repo;
+    if !connect && !twirp {
+        return out;
+    }
+    let services = proto_rpc_services(known);
+    let mut hits = if is_go {
+        go_constructor_hits(source, connect, twirp, &services)
+    } else {
+        connect_es_hits(source, &services)
+    };
+    hits.retain(|h| !in_comment_line(source, h.at) && !follows_decl_keyword(source, h.at));
+    hits.sort_by_key(|h| h.at);
+
+    let mut servers: BTreeMap<&str, Vec<&ProtoRpcHit>> = BTreeMap::new();
+    let mut clients: BTreeMap<&str, Vec<&ProtoRpcHit>> = BTreeMap::new();
+    for h in &hits {
+        if !matches!(services.get(h.service.as_str()), Some(Some(_))) {
+            out.counts.ambiguous += 1;
+            continue;
+        }
+        let side = if h.server { &mut servers } else { &mut clients };
+        side.entry(h.service.as_str()).or_default().push(h);
+    }
+
+    let kind_of = |id: &NodeId| nav.kind_by_id.get(id).copied();
+    let edge = |from: NodeId, to: NodeId, category| Edge {
+        from,
+        to,
+        category,
+        confidence: Confidence::Medium,
+    };
+    for (name, group) in servers {
+        let (Some(Some(svc)), Some(first)) = (services.get(name), group.first()) else {
+            continue;
+        };
+        let impl_types: BTreeSet<&str> = group
+            .iter()
+            .filter_map(|h| go_impl_type(source, h.open))
+            .collect();
+        let type_ids: Vec<NodeId> = nodes
+            .iter()
+            .map(|n| n.id)
+            .filter(|id| {
+                matches!(kind_of(id), Some(k) if k == node_kind::STRUCT || k == node_kind::CLASS)
+                    && nav
+                        .name_by_id
+                        .get(id)
+                        .is_some_and(|n| impl_types.contains(n.as_str()))
+            })
+            .collect();
+        let registration = line_of(source, first.at);
+        for rpc in &svc.rpcs {
+            let rpc_path = svc.path(name, rpc);
+            let qname = format!("rpc:{rpc_path}");
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_PROCEDURE, &qname);
+            let method = nodes.iter().find(|n| {
+                kind_of(&n.id) == Some(node_kind::METHOD)
+                    && nav
+                        .parent_of
+                        .get(&n.id)
+                        .is_some_and(|p| type_ids.contains(p))
+                    && nav
+                        .name_by_id
+                        .get(&n.id)
+                        .is_some_and(|m| fold_rpc_name(m) == fold_rpc_name(rpc))
+            });
+            let span = method.and_then(|m| {
+                m.cells
+                    .iter()
+                    .find(|c| c.kind == repo_graph_code_domain::cell_type::POSITION)
+            });
+            let position = span
+                .cloned()
+                .unwrap_or_else(|| anchor::position_cell(path, registration));
+            match method {
+                Some(m) => out.edges.push(edge(
+                    id,
+                    m.id,
+                    repo_graph_code_domain::edge_category::HANDLED_BY,
+                )),
+                None => {
+                    out.edges.push(edge(
+                        module_id,
+                        id,
+                        repo_graph_code_domain::edge_category::CONTAINS,
+                    ));
+                    out.counts.unowned += 1;
+                }
+            }
+            out.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: vec![position],
+            });
+            out.nav.record(
+                id,
+                &format!("{name}.{rpc}"),
+                &qname,
+                node_kind::RPC_PROCEDURE,
+                Some(module_id),
+            );
+            match first.family {
+                ProtoRpcFamily::Connect => out.counts.connect_procedures += 1,
+                ProtoRpcFamily::Twirp => out.counts.twirp_procedures += 1,
+            }
+        }
+    }
+
+    let bytes = source.as_bytes();
+    let owners = anchor::build_owner_index(nodes, nav);
+    for (name, group) in clients {
+        let (Some(Some(svc)), Some(first)) = (services.get(name), group.first()) else {
+            continue;
+        };
+        let folded: Vec<String> = svc.rpcs.iter().map(|r| fold_rpc_name(r)).collect();
+        let mut sites: Vec<Vec<usize>> = vec![Vec::new(); svc.rpcs.len()];
+        let mut add_site = |at: usize, method: &str| {
+            let key = fold_rpc_name(method);
+            if let Some(ix) = folded.iter().position(|f| *f == key)
+                && !in_comment_line(source, at)
+            {
+                sites[ix].push(at);
+            }
+        };
+        for h in &group {
+            if let Some(binding) = bound_identifier(source, h.at) {
+                for (at, method) in member_calls(source, binding) {
+                    add_site(at, method);
+                }
+            }
+            // `pb.NewHatProtobufClient(…).MakeHat(…)`: a call chained onto the constructor.
+            if let Some(close) = matching_paren(bytes, h.open)
+                && bytes.get(close + 1) == Some(&b'.')
+            {
+                let m_end = ident_end(bytes, close + 2);
+                if m_end > close + 2 && bytes.get(m_end) == Some(&b'(') {
+                    add_site(close + 1, &source[close + 2..m_end]);
+                }
+            }
+        }
+        for (rpc, mut at) in svc.rpcs.iter().zip(sites) {
+            at.sort_unstable();
+            at.dedup();
+            let Some(&first_site) = at.first() else {
+                continue;
+            };
+            let qname = format!("rpc_call:{}", svc.path(name, rpc));
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_CALL, &qname);
+            let mut linked: Vec<NodeId> = Vec::new();
+            for site in at {
+                let owner =
+                    anchor::owner_of_line(&owners, line_of(source, site)).unwrap_or(module_id);
+                if !linked.contains(&owner) {
+                    linked.push(owner);
+                    out.edges.push(if owner == module_id {
+                        edge(
+                            module_id,
+                            id,
+                            repo_graph_code_domain::edge_category::CONTAINS,
+                        )
+                    } else {
+                        edge(owner, id, repo_graph_code_domain::edge_category::USES)
+                    });
+                }
+            }
+            out.nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: vec![anchor::position_cell(path, line_of(source, first_site))],
+            });
+            out.nav.record(
+                id,
+                &format!("{name}.{rpc}"),
+                &qname,
+                node_kind::RPC_CALL,
+                Some(module_id),
+            );
+            match first.family {
+                ProtoRpcFamily::Connect => out.counts.connect_calls += 1,
+                ProtoRpcFamily::Twirp => out.counts.twirp_calls += 1,
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1976,5 +2606,490 @@ let db = makeDbClient(uri);
         assert_eq!(decoded.java_package, None);
         assert!(decoded.imports.is_empty());
         assert_eq!(RpcPackageCell::parse("not json"), None);
+    }
+
+    // ---- LA.17: Connect / Twirp ------------------------------------------
+
+    fn eliza() -> ProtoServiceRef {
+        let mut s = svc("ElizaService");
+        s.package = Some("connectrpc.eliza.v1".to_string());
+        s.rpcs = vec!["Say".to_string(), "Introduce".to_string()];
+        s
+    }
+
+    fn haberdasher() -> ProtoServiceRef {
+        let mut s = svc("Haberdasher");
+        s.package = Some("example.haberdasher".to_string());
+        s.rpcs = vec!["MakeHat".to_string()];
+        s
+    }
+
+    const CONNECT_SERVER: &str = "package main\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\t\"connectrpc.com/connect\"\n\telizav1 \"example.com/eliza/gen/eliza/v1\"\n\t\"example.com/eliza/gen/eliza/v1/elizav1connect\"\n)\n\ntype elizaServer struct {\n\telizav1connect.UnimplementedElizaServiceHandler\n}\n\nfunc (s *elizaServer) Say(ctx context.Context, req *connect.Request[elizav1.SayRequest]) (*connect.Response[elizav1.SayResponse], error) {\n\treturn connect.NewResponse(&elizav1.SayResponse{}), nil\n}\n\nfunc main() {\n\tmux := http.NewServeMux()\n\tpath, handler := elizav1connect.NewElizaServiceHandler(&elizaServer{})\n\tmux.Handle(path, handler)\n}\n";
+
+    /// The parse of [`CONNECT_SERVER`]: STRUCT elizaServer, its METHOD Say and
+    /// FUNCTION main, spans as the Go parser reports them.
+    fn connect_server_parse() -> (Vec<Node>, CodeNav, NodeId) {
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let ty = parse_node(
+            &mut nav,
+            node_kind::STRUCT,
+            "elizaServer",
+            "cmd::main::elizaServer",
+            (11, 13),
+            m,
+        );
+        let say = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "Say",
+            "cmd::main::elizaServer::Say",
+            (15, 17),
+            ty.id,
+        );
+        let main = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "main",
+            "cmd::main::main",
+            (19, 23),
+            m,
+        );
+        let say_id = say.id;
+        (vec![ty, say, main], nav, say_id)
+    }
+
+    fn proto_rpc(
+        source: &str,
+        lang: &str,
+        known: &[ProtoServiceRef],
+        nodes: &[Node],
+        nav: &CodeNav,
+        twirp: bool,
+    ) -> ProtoRpcNodes {
+        extract_proto_rpc_nodes(
+            source,
+            "main.go",
+            lang,
+            module_id(),
+            repo(),
+            known,
+            nodes,
+            nav,
+            twirp,
+        )
+    }
+
+    fn rpc_qnames(out: &ProtoRpcNodes, kind: repo_graph_core::NodeKindId) -> Vec<String> {
+        out.nodes
+            .iter()
+            .filter(|n| out.nav.kind_by_id[&n.id] == kind)
+            .map(|n| out.nav.qname_by_id[&n.id].clone())
+            .collect()
+    }
+
+    fn rpc_id(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn edges_of(
+        out: &ProtoRpcNodes,
+        cat: repo_graph_core::EdgeCategoryId,
+    ) -> Vec<(NodeId, NodeId)> {
+        out.edges
+            .iter()
+            .filter(|e| e.category == cat)
+            .map(|e| (e.from, e.to))
+            .collect()
+    }
+
+    fn position_of(out: &ProtoRpcNodes, id: NodeId) -> Option<String> {
+        out.nodes
+            .iter()
+            .find(|n| n.id == id)?
+            .cells
+            .iter()
+            .find_map(|c| match &c.payload {
+                CellPayload::Json(j) if c.kind == repo_graph_code_domain::cell_type::POSITION => {
+                    Some(j.clone())
+                }
+                _ => None,
+            })
+    }
+
+    use repo_graph_code_domain::edge_category as ec;
+
+    #[test]
+    fn connect_handler_emits_one_procedure_per_rpc_owned_by_impl_method() {
+        let (nodes, nav, say_method) = connect_server_parse();
+        let out = proto_rpc(CONNECT_SERVER, "go", &[eliza()], &nodes, &nav, false);
+        assert_eq!(
+            rpc_qnames(&out, node_kind::RPC_PROCEDURE),
+            vec![
+                "rpc:connectrpc.eliza.v1.ElizaService.Say".to_string(),
+                "rpc:connectrpc.eliza.v1.ElizaService.Introduce".to_string(),
+            ],
+            "one procedure per proto rpc, in declaration order, package-qualified"
+        );
+        assert!(rpc_qnames(&out, node_kind::RPC_CALL).is_empty());
+        let say = rpc_id(
+            node_kind::RPC_PROCEDURE,
+            "rpc:connectrpc.eliza.v1.ElizaService.Say",
+        );
+        assert_eq!(edges_of(&out, ec::HANDLED_BY), vec![(say, say_method)]);
+        // Located at the implementing method's span, not the registration line.
+        assert_eq!(
+            position_of(&out, say).as_deref(),
+            Some(r#"{"file":"svc.cs","start_line":15,"end_line":17}"#)
+        );
+        assert_eq!(out.nav.name_by_id[&say], "ElizaService.Say");
+        assert_eq!(out.nav.parent_of[&say], module_id());
+        let c = out.counts;
+        assert_eq!(
+            (
+                c.connect_procedures,
+                c.connect_calls,
+                c.twirp_procedures,
+                c.unowned
+            ),
+            (2, 0, 0, 1)
+        );
+
+        // The impl bound to a variable first (`srv := &elizaServer{}`) is the same type.
+        let via_var = CONNECT_SERVER.replace(
+            "\tpath, handler := elizav1connect.NewElizaServiceHandler(&elizaServer{})",
+            "\tsrv := &elizaServer{}\n\tpath, handler := elizav1connect.NewElizaServiceHandler(srv)",
+        );
+        let out = proto_rpc(&via_var, "go", &[eliza()], &nodes, &nav, false);
+        assert_eq!(edges_of(&out, ec::HANDLED_BY), vec![(say, say_method)]);
+    }
+
+    #[test]
+    fn unimplemented_rpc_is_contained_not_handled() {
+        let (nodes, nav, _) = connect_server_parse();
+        let out = proto_rpc(CONNECT_SERVER, "go", &[eliza()], &nodes, &nav, false);
+        let intro = rpc_id(
+            node_kind::RPC_PROCEDURE,
+            "rpc:connectrpc.eliza.v1.ElizaService.Introduce",
+        );
+        assert!(
+            !out.edges
+                .iter()
+                .any(|e| e.from == intro && e.category == ec::HANDLED_BY),
+            "an rpc served by the Unimplemented embed is never HANDLED_BY main"
+        );
+        assert_eq!(edges_of(&out, ec::CONTAINS), vec![(module_id(), intro)]);
+        // Located at the registration line (0-indexed 21).
+        assert_eq!(
+            position_of(&out, intro).as_deref(),
+            Some(r#"{"file":"main.go","start_line":21,"end_line":21}"#)
+        );
+        // A registration whose impl type has no method in this file owns nothing.
+        let out = proto_rpc(
+            CONNECT_SERVER,
+            "go",
+            &[eliza()],
+            &[],
+            &CodeNav::default(),
+            false,
+        );
+        assert!(edges_of(&out, ec::HANDLED_BY).is_empty());
+        assert_eq!(out.counts.unowned, 2);
+    }
+
+    #[test]
+    fn connect_client_calls_only_rpc_methods() {
+        let source = "package main\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\t\"connectrpc.com/connect\"\n\t\"example.com/eliza/gen/eliza/v1/elizav1connect\"\n)\n\nfunc main() {\n\tclient := elizav1connect.NewElizaServiceClient(http.DefaultClient, \"http://localhost:8080\")\n\tres, _ := client.Say(context.Background(), connect.NewRequest(nil))\n\tclient.Ping()\n\tmyclient.Introduce(nil)\n\t_ = res\n}\n\nfunc once() {\n\telizav1connect.NewElizaServiceClient(http.DefaultClient, \"u\").Introduce(context.Background(), nil)\n}\n";
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let main = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "main",
+            "main::main",
+            (10, 16),
+            m,
+        );
+        let once = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "once",
+            "main::once",
+            (18, 20),
+            m,
+        );
+        let (main_id, once_id) = (main.id, once.id);
+        let out = proto_rpc(source, "go", &[eliza()], &[main, once], &nav, false);
+        assert_eq!(
+            rpc_qnames(&out, node_kind::RPC_CALL),
+            vec![
+                "rpc_call:connectrpc.eliza.v1.ElizaService.Say".to_string(),
+                "rpc_call:connectrpc.eliza.v1.ElizaService.Introduce".to_string(),
+            ],
+            "Say on the binding, Introduce chained on the constructor; not Ping, not myclient"
+        );
+        assert!(
+            rpc_qnames(&out, node_kind::RPC_PROCEDURE).is_empty(),
+            "a client is no server"
+        );
+        let say = rpc_id(
+            node_kind::RPC_CALL,
+            "rpc_call:connectrpc.eliza.v1.ElizaService.Say",
+        );
+        let intro = rpc_id(
+            node_kind::RPC_CALL,
+            "rpc_call:connectrpc.eliza.v1.ElizaService.Introduce",
+        );
+        assert_eq!(
+            edges_of(&out, ec::USES),
+            vec![(main_id, say), (once_id, intro)]
+        );
+        assert_eq!(
+            position_of(&out, say).as_deref(),
+            Some(r#"{"file":"main.go","start_line":12,"end_line":12}"#)
+        );
+        assert_eq!(out.counts.connect_calls, 2);
+
+        // The same client in a plain gRPC file (no connect import) is not Connect.
+        let grpc = source.replace("\"connectrpc.com/connect\"", "\"google.golang.org/grpc\"");
+        assert!(
+            proto_rpc(&grpc, "go", &[eliza()], &[], &CodeNav::default(), false)
+                .nodes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn connect_es_lower_camel_calls_map_to_rpc_names() {
+        let source = "import { createClient } from \"@connectrpc/connect\";\nimport { createConnectTransport } from \"@connectrpc/connect-web\";\nimport { ElizaService } from \"./gen/eliza_pb\";\n\nconst transport = createConnectTransport({ baseUrl: \"http://localhost:8080\" });\nconst client = createClient(ElizaService, transport);\n\nexport async function talk(sentence: string) {\n  const res = await client.say({ sentence });\n  client.close();\n  return res.sentence;\n}\n\nclient.introduce({ name: \"boot\" });\n";
+        let mut nav = CodeNav::default();
+        let talk = parse_node(
+            &mut nav,
+            node_kind::FUNCTION,
+            "talk",
+            "src::eliza::talk",
+            (7, 11),
+            module_id(),
+        );
+        let talk_id = talk.id;
+        let out = extract_proto_rpc_nodes(
+            source,
+            "src/eliza.ts",
+            "typescript",
+            module_id(),
+            repo(),
+            &[eliza()],
+            &[talk],
+            &nav,
+            false,
+        );
+        let say = rpc_id(
+            node_kind::RPC_CALL,
+            "rpc_call:connectrpc.eliza.v1.ElizaService.Say",
+        );
+        let intro = rpc_id(
+            node_kind::RPC_CALL,
+            "rpc_call:connectrpc.eliza.v1.ElizaService.Introduce",
+        );
+        assert_eq!(
+            out.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![say, intro]
+        );
+        assert_eq!(edges_of(&out, ec::USES), vec![(talk_id, say)]);
+        // A module-level call has no enclosing function: the module holds it.
+        assert_eq!(edges_of(&out, ec::CONTAINS), vec![(module_id(), intro)]);
+        assert_eq!(
+            position_of(&out, say).as_deref(),
+            Some(r#"{"file":"src/eliza.ts","start_line":8,"end_line":8}"#)
+        );
+        // Annotated and promise-client bindings read the same way.
+        let annotated = source.replace(
+            "const client = createClient(ElizaService, transport);",
+            "const client: PromiseClient<typeof ElizaService> = createPromiseClient(eliza.ElizaService, transport);",
+        );
+        let out = extract_proto_rpc_nodes(
+            &annotated,
+            "src/eliza.ts",
+            "typescript",
+            module_id(),
+            repo(),
+            &[eliza()],
+            &[],
+            &CodeNav::default(),
+            false,
+        );
+        assert_eq!(out.nodes.len(), 2);
+        // Without the connect-es import the factory is somebody else's.
+        let plain = source.replace("@connectrpc/connect", "./my-connect");
+        let out = extract_proto_rpc_nodes(
+            &plain,
+            "src/eliza.ts",
+            "typescript",
+            module_id(),
+            repo(),
+            &[eliza()],
+            &[],
+            &CodeNav::default(),
+            false,
+        );
+        assert!(out.nodes.is_empty());
+    }
+
+    const TWIRP_CLIENT: &str = "package main\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\tpb \"example.com/twirp/rpc/haberdasher\"\n)\n\nfunc main() {\n\tclient := pb.NewHaberdasherProtobufClient(\"http://localhost:8080\", &http.Client{})\n\that, _ := client.MakeHat(context.Background(), &pb.Size{Inches: 12})\n\t_ = hat\n}\n";
+
+    #[test]
+    fn twirp_needs_the_repo_gate() {
+        assert!(!may_hold_proto_rpc(TWIRP_CLIENT, false));
+        assert!(may_hold_proto_rpc(TWIRP_CLIENT, true));
+        let out = proto_rpc(
+            TWIRP_CLIENT,
+            "go",
+            &[haberdasher()],
+            &[],
+            &CodeNav::default(),
+            false,
+        );
+        assert!(
+            out.nodes.is_empty(),
+            "no twitchtv/twirp in the repo: not Twirp"
+        );
+        let out = proto_rpc(
+            TWIRP_CLIENT,
+            "go",
+            &[haberdasher()],
+            &[],
+            &CodeNav::default(),
+            true,
+        );
+        assert_eq!(
+            rpc_qnames(&out, node_kind::RPC_CALL),
+            vec!["rpc_call:example.haberdasher.Haberdasher.MakeHat".to_string()]
+        );
+        // The gate is Go's: a TS file in a Twirp repo reads nothing.
+        let out = extract_proto_rpc_nodes(
+            TWIRP_CLIENT,
+            "a.ts",
+            "typescript",
+            module_id(),
+            repo(),
+            &[haberdasher()],
+            &[],
+            &CodeNav::default(),
+            true,
+        );
+        assert!(out.nodes.is_empty());
+    }
+
+    #[test]
+    fn twirp_server_and_client() {
+        let server = "package main\n\nimport (\n\t\"context\"\n\t\"net/http\"\n\n\tpb \"example.com/twirp/rpc/haberdasher\"\n)\n\ntype HaberdasherServer struct{}\n\nfunc (s *HaberdasherServer) MakeHat(ctx context.Context, size *pb.Size) (*pb.Hat, error) {\n\treturn &pb.Hat{}, nil\n}\n\nfunc NewGreeterServer() *HaberdasherServer { return nil }\n\nfunc main() {\n\ttwirpHandler := pb.NewHaberdasherServer(&HaberdasherServer{})\n\thttp.ListenAndServe(\":8080\", twirpHandler)\n}\n";
+        let mut nav = CodeNav::default();
+        let m = module_id();
+        let ty = parse_node(
+            &mut nav,
+            node_kind::STRUCT,
+            "HaberdasherServer",
+            "cmd::server::main::HaberdasherServer",
+            (9, 9),
+            m,
+        );
+        let make = parse_node(
+            &mut nav,
+            node_kind::METHOD,
+            "MakeHat",
+            "cmd::server::main::HaberdasherServer::MakeHat",
+            (11, 13),
+            ty.id,
+        );
+        let make_id = make.id;
+        let mut greeter = svc("Greeter");
+        greeter.rpcs = vec!["SayHello".to_string()];
+        let out = proto_rpc(
+            server,
+            "go",
+            &[greeter, haberdasher()],
+            &[ty, make],
+            &nav,
+            true,
+        );
+        let proc_id = rpc_id(
+            node_kind::RPC_PROCEDURE,
+            "rpc:example.haberdasher.Haberdasher.MakeHat",
+        );
+        assert_eq!(
+            out.nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![proc_id],
+            "unqualified NewGreeterServer() is no hit"
+        );
+        assert_eq!(edges_of(&out, ec::HANDLED_BY), vec![(proc_id, make_id)]);
+        let c = out.counts;
+        assert_eq!(
+            (
+                c.twirp_procedures,
+                c.twirp_calls,
+                c.connect_procedures,
+                c.unowned
+            ),
+            (1, 0, 0, 0)
+        );
+
+        let out = proto_rpc(
+            TWIRP_CLIENT,
+            "go",
+            &[haberdasher()],
+            &[],
+            &CodeNav::default(),
+            true,
+        );
+        assert_eq!(
+            (out.counts.twirp_calls, out.counts.twirp_procedures),
+            (1, 0)
+        );
+        // A JSON client and a chained call read the same way.
+        let json = "package main\n\nfunc main() {\n\tpb.NewHaberdasherJSONClient(\"u\", &http.Client{}).MakeHat(ctx, &pb.Size{})\n}\n";
+        let out = proto_rpc(json, "go", &[haberdasher()], &[], &CodeNav::default(), true);
+        assert_eq!(
+            rpc_qnames(&out, node_kind::RPC_CALL),
+            vec!["rpc_call:example.haberdasher.Haberdasher.MakeHat".to_string()]
+        );
+    }
+
+    #[test]
+    fn ambiguous_service_name_is_skipped() {
+        let mut other = eliza();
+        other.package = Some("legacy.eliza".to_string());
+        let (nodes, nav, _) = connect_server_parse();
+        let out = proto_rpc(CONNECT_SERVER, "go", &[eliza(), other], &nodes, &nav, false);
+        assert!(
+            out.nodes.is_empty() && out.edges.is_empty(),
+            "never guess the package"
+        );
+        assert_eq!(out.counts.ambiguous, 1);
+        assert!(out.counts.any());
+        // The same service declared twice in ONE package (a copied .proto) is not ambiguous.
+        let mut copy = eliza();
+        copy.go_package = Some("example.com/copy".to_string());
+        let out = proto_rpc(CONNECT_SERVER, "go", &[eliza(), copy], &nodes, &nav, false);
+        assert_eq!(
+            (out.counts.connect_procedures, out.counts.ambiguous),
+            (2, 0)
+        );
+    }
+
+    #[test]
+    fn generated_connect_file_is_ignored() {
+        let generated = "// Code generated by protoc-gen-connect-go. DO NOT EDIT.\n\npackage elizav1connect\n\nimport (\n\tconnect \"connectrpc.com/connect\"\n)\n\nfunc NewElizaServiceClient(httpClient connect.HTTPClient, baseURL string) ElizaServiceClient {\n\treturn &elizaServiceClient{say: connect.NewClient[SayRequest, SayResponse](httpClient, baseURL)}\n}\n\nfunc NewElizaServiceHandler(svc ElizaServiceHandler) (string, http.Handler) {\n\treturn \"/connectrpc.eliza.v1.ElizaService/\", nil\n}\n";
+        assert!(
+            proto_rpc(generated, "go", &[eliza()], &[], &CodeNav::default(), false)
+                .nodes
+                .is_empty()
+        );
+        // Without the banner, a declaration keyword before the needle still rejects it.
+        let decl = "import \"connectrpc.com/connect\"\n\nfunc elizav1connect.NewElizaServiceHandler(svc ElizaServiceHandler) {}\n";
+        assert!(
+            proto_rpc(decl, "go", &[eliza()], &[], &CodeNav::default(), false)
+                .nodes
+                .is_empty()
+        );
     }
 }

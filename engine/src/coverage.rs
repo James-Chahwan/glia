@@ -88,6 +88,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired",
         verify: "grep the upgrade call and the route registration",
     },
+    // LA.17: Connect / Twirp procedures come from the build's .proto set and
+    // calls from the bound client variable, both read per file.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "RPC_CALLS",
+        note: "Connect/Twirp procedures and calls are read only when the service's .proto is in the build; a client stored in one file and called from another, and connect-node / non-Go Twirp code, are not extracted; a procedure whose implementing type lives in another file than its registration is contained by the module, not HANDLED_BY the method",
+        verify: "grep New<Service>Client / createClient(<Service> and the method name",
+    },
     CoverageCaveat {
         language: "python",
         edge_category: "HTTP_CALLS",
@@ -347,6 +355,26 @@ mod tests {
         assert_eq!(
             edge_category::name(edge_category::WS_CONNECTS),
             "WS_CONNECTS",
+            "edges_found is keyed by this spelling"
+        );
+    }
+
+    #[test]
+    fn rpc_calls_caveat_is_universal() {
+        // LA.17: Connect / Twirp read only the build's .proto services and the
+        // file-local client binding; the row says so for every repo.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let rpc: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "RPC_CALLS")
+            .collect();
+        assert_eq!(rpc.len(), 1);
+        assert_eq!((rpc[0].language, rpc[0].edges_found), ("*", 0));
+        assert!(rpc[0].note.contains(".proto is in the build"));
+        assert!(rpc[0].note.contains("called from another"));
+        assert_eq!(
+            edge_category::name(edge_category::RPC_CALLS),
+            "RPC_CALLS",
             "edges_found is keyed by this spelling"
         );
     }

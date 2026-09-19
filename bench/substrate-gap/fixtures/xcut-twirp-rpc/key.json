@@ -1,0 +1,17 @@
+{
+  "framework": "xcut-twirp-rpc",
+  "language": "go",
+  "dirs": ["server", "client"],
+  "note": "LA.17 (programme A10.13). Twirp: the server wraps its impl with the generated `pb.NewHaberdasherServer(&HaberdasherServer{})`; the client builds `pb.NewHaberdasherProtobufClient(...)` and calls `client.MakeHat(...)`. Both go.mods require github.com/twitchtv/twirp (the repo-level Twirp gate). Baseline 2026-09-18 (HEAD 7a4883b): only the proto GRPC_SERVICE; nothing on either code side. Re-measured 2026-09-19 at f92d557 before LA.17 (grade.py, installed wheel): 2 nodes XX, HANDLED_BY 0/1, RPC_CALLS 0/1, 0 forbid violations.",
+  "expect_nodes": [
+    {"kind": "RPC_PROCEDURE", "name": "rpc:example.haberdasher.Haberdasher.MakeHat", "note": "proto rpc of the wrapped service"},
+    {"kind": "RPC_CALL", "name": "rpc_call:example.haberdasher.Haberdasher.MakeHat", "note": "client.MakeHat on a NewHaberdasherProtobufClient"}
+  ],
+  "expect_edges": [
+    {"from": "rpc_call:example.haberdasher.Haberdasher.MakeHat", "to": "rpc:example.haberdasher.Haberdasher.MakeHat", "category": "RPC_CALLS", "note": "exact procedure path"},
+    {"from": "rpc:example.haberdasher.Haberdasher.MakeHat", "to": "cmd::server::main::HaberdasherServer::MakeHat", "category": "HANDLED_BY", "note": "impl method of the wrapped type"}
+  ],
+  "forbid": [
+    {"kind": "GRPC_SERVER", "name": "grpc_server:Haberdasher", "note": "Twirp is not gRPC; the server shape must not leak into the gRPC family"}
+  ]
+}

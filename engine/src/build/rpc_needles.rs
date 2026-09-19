@@ -1,6 +1,7 @@
-//! The build-wide proto service set (A5.2) and the post-cache gRPC needle
-//! passes: data-driven clients (A5.2) and server markers (A5.3), anchored as
-//! they are grafted (A5.8). `grafts::apply_post_cache` runs them.
+//! The build-wide proto service set (A5.2) and the post-cache needle passes
+//! keyed on it: gRPC data-driven clients (A5.2) and server markers (A5.3),
+//! anchored as they are grafted (A5.8), and the Connect / Twirp procedures and
+//! calls (LA.17). `grafts::apply_post_cache` runs them.
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -52,6 +53,13 @@ impl RpcContext {
 /// (the build's proto services and their rpc names) is not a function of the
 /// file. It mints GRPC_SERVER markers the gRPC resolver pairs to their service
 /// by HANDLED_BY, anchored `marker --HANDLED_BY--> rpc method`.
+///
+/// LA.17 (A10.13): the Connect / Twirp pass runs here too, for the same
+/// reason. It mints method-level RPC_PROCEDURE / RPC_CALL nodes
+/// (`rpc:<proto package>.<Service>.<Method>`) that `RpcStackResolver` pairs.
+/// Twirp is gated per repo (`twirp_repo`: a go.mod requiring
+/// github.com/twitchtv/twirp, or a generated `.twirp.go`), because a Twirp
+/// client file imports nothing but its generated package.
 pub(super) fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -63,11 +71,14 @@ pub(super) fn apply_rpc_needles(
     if rpc.services.is_empty() {
         return added;
     }
+    let twirp_repo = is_twirp_repo(files);
     for (path, source) in files {
         let client_side = grpc::file_has_grpc_context(source);
-        // Superset of `client_side`; the cheap text check keeps the parse
+        // Superset of `client_side`; the cheap text checks keep the parse
         // lookup below off files that can hold neither half.
-        if !grpc::may_hold_grpc_server(source) {
+        let grpc_side = grpc::may_hold_grpc_server(source);
+        let proto_rpc_side = grpc::may_hold_proto_rpc(source, twirp_repo);
+        if !grpc_side && !proto_rpc_side {
             continue;
         }
         let Some(lang) = detect_language(path) else { continue };
@@ -84,22 +95,55 @@ pub(super) fn apply_rpc_needles(
         else {
             continue;
         };
-        if client_side {
+        if grpc_side {
+            if client_side {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
+                })) {
+                    Ok(out) => added.clients += graft_rpc_markers(fp, out, path, module_id, lang),
+                    Err(_) => parse_errors.push(format!("{path}: PANIC (grpc client needles)")),
+                }
+            }
             match catch_unwind(AssertUnwindSafe(|| {
-                grpc::extract_known_grpc_client_nodes(source, module_id, repo, &rpc.services)
+                grpc::extract_grpc_server_nodes(source, module_id, repo, &rpc.services, &fp.nodes, &fp.nav)
             })) {
-                Ok(out) => added.clients += graft_rpc_markers(fp, out, path, module_id, lang),
-                Err(_) => parse_errors.push(format!("{path}: PANIC (grpc client needles)")),
+                Ok(out) => added.servers += graft_rpc_markers(fp, out, path, module_id, lang),
+                Err(_) => parse_errors.push(format!("{path}: PANIC (grpc server needles)")),
             }
         }
-        match catch_unwind(AssertUnwindSafe(|| {
-            grpc::extract_grpc_server_nodes(source, module_id, repo, &rpc.services, &fp.nodes, &fp.nav)
-        })) {
-            Ok(out) => added.servers += graft_rpc_markers(fp, out, path, module_id, lang),
-            Err(_) => parse_errors.push(format!("{path}: PANIC (grpc server needles)")),
+        if proto_rpc_side {
+            match catch_unwind(AssertUnwindSafe(|| {
+                grpc::extract_proto_rpc_nodes(
+                    source,
+                    path,
+                    lang,
+                    module_id,
+                    repo,
+                    &rpc.services,
+                    &fp.nodes,
+                    &fp.nav,
+                    twirp_repo,
+                )
+            })) {
+                Ok(out) => {
+                    added.proto_rpc.add(out.counts);
+                    graft_proto_rpc(fp, out, lang);
+                }
+                Err(_) => parse_errors.push(format!("{path}: PANIC (proto rpc needles)")),
+            }
         }
     }
     added
+}
+
+/// LA.17: does this repo speak Twirp? Its go.mod requires the runtime, or it
+/// holds a generated `.twirp.go`. Read off the walk's `files` (go.mod is a
+/// manifest the walk keeps), so it is the same for cached and fresh parses.
+fn is_twirp_repo(files: &[(String, String)]) -> bool {
+    files.iter().any(|(p, s)| {
+        (p.rsplit('/').next() == Some("go.mod") && s.contains("github.com/twitchtv/twirp"))
+            || p.ends_with(".twirp.go")
+    })
 }
 
 /// Markers the post-cache RPC pass added to one repo's parses.
@@ -107,6 +151,8 @@ pub(super) fn apply_rpc_needles(
 pub(super) struct RpcNeedleCounts {
     pub(super) clients: usize,
     pub(super) servers: usize,
+    /// LA.17: the Connect / Twirp pass's tallies, summed over the repo.
+    pub(super) proto_rpc: grpc::ProtoRpcCounts,
 }
 
 /// Graft one post-cache marker batch onto its file's parse: the nodes, their
@@ -145,6 +191,29 @@ fn graft_rpc_markers(
     let added = extra.nodes.len();
     fp.nodes.extend(extra.nodes);
     added
+}
+
+/// LA.17: graft one Connect / Twirp batch onto its file's parse. The nodes
+/// arrive finished (POSITION, and HANDLED_BY / USES / module CONTAINS), so no
+/// anchor pass runs; like [`graft_rpc_markers`] they then take the router's raw
+/// G15 IMPORTS cell, which `filter_imports_cells` rewrites with the rest of the
+/// file's.
+fn graft_proto_rpc(fp: &mut FileParse, out: grpc::ProtoRpcNodes, lang: &str) {
+    let grpc::ProtoRpcNodes {
+        nodes, edges, nav, ..
+    } = out;
+    if nodes.is_empty() {
+        return;
+    }
+    let mut extra = FileParse {
+        nodes,
+        imports: fp.imports.clone(),
+        ..Default::default()
+    };
+    attach_imports_cell(&mut extra, lang);
+    fp.nodes.extend(extra.nodes);
+    fp.edges.extend(edges);
+    merge_nav(&mut fp.nav, nav);
 }
 
 #[cfg(test)]

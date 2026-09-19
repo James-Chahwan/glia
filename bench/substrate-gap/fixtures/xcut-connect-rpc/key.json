@@ -1,0 +1,24 @@
+{
+  "framework": "xcut-connect-rpc",
+  "language": "go",
+  "dirs": ["server", "client", "web"],
+  "note": "LA.17 (programme A10.13). Connect: the server registers `elizav1connect.NewElizaServiceHandler(&elizaServer{})` and implements Say; a Go client (`elizav1connect.NewElizaServiceClient(...)` then `client.Say(...)`) and a connect-es browser client (`createClient(ElizaService, transport)` then `client.say(...)`) call it. Procedures come from the build's .proto (ElizaService: Say, Introduce), keyed rpc:<proto package>.<Service>.<Method>, and pair through RpcStackResolver. Baseline 2026-09-18 (HEAD 7a4883b): no RPC_PROCEDURE / RPC_CALL at all; the Go client only surfaces as the service-level GRPC_CLIENT grpc_client:ElizaService (legacy `ServiceClient(` suffix), the TS client as nothing. Re-measured 2026-09-19 at f92d557 before LA.17 (grade.py, installed wheel): 3 nodes XX, HANDLED_BY 0/1, RPC_CALLS 0/1, USES 0/2, POSITION 0/1, 0 forbid violations.",
+  "expect_nodes": [
+    {"kind": "RPC_PROCEDURE", "name": "rpc:connectrpc.eliza.v1.ElizaService.Say", "note": "implemented by elizaServer.Say"},
+    {"kind": "RPC_PROCEDURE", "name": "rpc:connectrpc.eliza.v1.ElizaService.Introduce", "note": "declared in the proto, served by the Unimplemented embed"},
+    {"kind": "RPC_CALL", "name": "rpc_call:connectrpc.eliza.v1.ElizaService.Say", "note": "Go client.Say and TS client.say, one node per repo"}
+  ],
+  "expect_edges": [
+    {"from": "rpc_call:connectrpc.eliza.v1.ElizaService.Say", "to": "rpc:connectrpc.eliza.v1.ElizaService.Say", "category": "RPC_CALLS", "note": "exact procedure path"},
+    {"from": "rpc:connectrpc.eliza.v1.ElizaService.Say", "to": "cmd::main::elizaServer::Say", "category": "HANDLED_BY", "note": "procedure -> the impl method of the registered type"},
+    {"from": "main::main", "to": "rpc_call:connectrpc.eliza.v1.ElizaService.Say", "category": "USES", "note": "Go caller USES the call"},
+    {"from": "src::eliza::talk", "to": "rpc_call:connectrpc.eliza.v1.ElizaService.Say", "category": "USES", "note": "TS caller USES the call"}
+  ],
+  "expect_cells": [
+    {"kind": "RPC_CALL", "node": "rpc_call:connectrpc.eliza.v1.ElizaService.Say", "cell": "POSITION", "contains": "\"file\":\"main.go\"", "note": "located at the call site"}
+  ],
+  "forbid": [
+    {"kind": "RPC_CALL", "name": "rpc_call:connectrpc.eliza.v1.ElizaService.Introduce", "note": "PRECISION: no client calls Introduce"},
+    {"from": "rpc:connectrpc.eliza.v1.ElizaService.Introduce", "to": "cmd::main::main", "category": "HANDLED_BY", "note": "an unimplemented procedure is never HANDLED_BY the function that registers the service"}
+  ]
+}

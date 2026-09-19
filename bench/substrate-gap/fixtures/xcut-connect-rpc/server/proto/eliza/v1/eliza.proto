@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package connectrpc.eliza.v1;
+
+option go_package = "example.com/eliza/gen/eliza/v1;elizav1";
+
+service ElizaService {
+  rpc Say(SayRequest) returns (SayResponse) {}
+  rpc Introduce(IntroduceRequest) returns (stream IntroduceResponse) {}
+}
+
+message SayRequest {
+  string sentence = 1;
+}
+
+message SayResponse {
+  string sentence = 1;
+}
+
+message IntroduceRequest {
+  string name = 1;
+}
+
+message IntroduceResponse {
+  string sentence = 1;
+}

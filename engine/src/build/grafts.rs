@@ -22,10 +22,10 @@ use crate::http_owner;
 
 /// Run every post-cache graft over one repo's parses, in order: the A11.2
 /// endpoint fold, the LB.4a HTTP owner segment, the LA.4 queue-topic const
-/// fold, the A5.2 / A5.3 RPC needles with their `[grpc-client]` /
-/// `[grpc-server-impl]` markers, the A5.8 `[marker-anchor]` census, then the
-/// A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1 table; `roots`
-/// are the walk's project roots (A8.4).
+/// fold, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
+/// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
+/// census, then the A16.4 IMPORTS-cell filter. `const_table` is the repo's
+/// A11.1 table; `roots` are the walk's project roots (A8.4).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_post_cache(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
@@ -77,6 +77,20 @@ pub(super) fn apply_post_cache(
             "[grpc-server-impl] {} server markers from {} known services repo={repo_label}",
             rpc_added.servers,
             rpc.services.len()
+        );
+    }
+    // LA.17 fired_on marker, once per repo where the Connect / Twirp pass read
+    // a registration or a client; `[trpc-link]` then reports the pairing.
+    let p = rpc_added.proto_rpc;
+    if p.any() {
+        eprintln!(
+            "[proto-rpc] connect procedures={} calls={} twirp procedures={} calls={} (ambiguous={} unowned={}) repo={repo_label}",
+            p.connect_procedures,
+            p.connect_calls,
+            p.twirp_procedures,
+            p.twirp_calls,
+            p.ambiguous,
+            p.unowned
         );
     }
     // A5.8 fired_on marker, once per repo that holds an RPC-family marker node:

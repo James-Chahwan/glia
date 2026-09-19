@@ -1,10 +1,17 @@
 //! RPC stack resolver — RPC call sites → the procedures they name (A10.10).
 //!
-//! `RPC_CALL` (`rpc_call:<router>.<procedure>`) pairs to `RPC_PROCEDURE`
-//! (`rpc:<router>.<procedure>`) on an EXACT procedure path. tRPC is the only
-//! emitter today (`repo_graph_code_extractors::trpc`); Connect / Twirp reuse the
-//! category once their extraction lands, keeping the `rpc:<service>.<method>`
-//! qname convention.
+//! `RPC_CALL` (`rpc_call:<path>`) pairs to `RPC_PROCEDURE` (`rpc:<path>`) on an
+//! EXACT path. Three stacks emit the pair:
+//!
+//! - tRPC (`repo_graph_code_extractors::trpc`): `rpc:<router>.<procedure>`;
+//! - Connect and Twirp (LA.17, `grpc::extract_proto_rpc_nodes` in
+//!   `repo_graph_code_extractors`): `rpc:<proto package>.<Service>.<Method>`,
+//!   the package omitted when the `.proto` declares none — Connect's own route
+//!   is `/<package>.<Service>/<Method>`, so the package keeps two same-named
+//!   services apart.
+//!
+//! All three pair here, on the exact path, and the `[trpc-link]` marker counts
+//! every family's calls and procedures, not only tRPC's.
 //!
 //! Deliberately NOT the bidirectional substring rule `GraphQLStackResolver`
 //! uses (which pairs `usequery` to `query`), and no suffix or router-prefix
