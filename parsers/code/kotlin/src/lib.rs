@@ -3,7 +3,9 @@
 //! Extracts the declarations of one `.kt` file — its MODULE, every class /
 //! interface / enum / object (nested ones included), member and top-level
 //! functions, the properties worth a node, and its imports — plus the
-//! pure-text route scans ported from the Java parser ([`routes`]) and the
+//! non-annotation routes ([`routes`]: Ktor DSL routes off the AST, each bound
+//! HANDLED_BY to its enclosing function, and the WebFlux / Javalin text scans
+//! ported from the Java parser) and the
 //! Spring / Micronaut / JAX-RS / JPA annotation needles ([`spring`]: routes
 //! with HANDLED_BY, stereotype and `@Inject` constructor / property INJECTS,
 //! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA). Parsers
@@ -55,7 +57,7 @@
 mod routes;
 mod spring;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::UnresolvedRef;
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
@@ -74,20 +76,24 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
-    let (fp, spring_counts) = parse_counting(source, file_rel_path, module_qname, repo)?;
-    // A14.4: what the Spring detectors did, for the `[kotlin/spring]` line.
+    let (fp, spring_counts, ktor_counts) =
+        parse_counting(source, file_rel_path, module_qname, repo)?;
+    // A14.4 / A14.5: what the Spring and Ktor passes did, for the
+    // `[kotlin/spring]` and `[kotlin/ktor]` lines.
     spring::publish(spring_counts);
+    routes::publish(ktor_counts);
     Ok(fp)
 }
 
-/// [`parse_file`] plus the file's [`spring::SpringCounts`], unpublished — so
-/// tests read one file's counts without the process-global bank.
+/// [`parse_file`] plus the file's [`spring::SpringCounts`] and
+/// [`routes::KtorCounts`], unpublished — so tests read one file's counts
+/// without the process-global banks.
 fn parse_counting(
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> Result<(FileParse, spring::SpringCounts), ParseError> {
+) -> Result<(FileParse, spring::SpringCounts, routes::KtorCounts), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     parser
@@ -124,9 +130,11 @@ fn parse_counting(
         is_bean: false,
     };
     walk_members(root, &file, top, &mut acc);
-    // After the walk: an annotation route already in `routes_seen` is not
-    // re-emitted by a text scan that matches the same `METHOD path`.
-    routes::scan_routes(source, repo, &mut acc);
+    // After the walk: `fn_ids` names every declared function a Ktor route can
+    // bind, and an annotation route already in `routes_seen` is not re-emitted
+    // by a Ktor or text-scan route with the same `METHOD path`.
+    routes::scan_ktor(root, source, &file, &mut acc);
+    routes::scan_text_routes(source, repo, &mut acc);
 
     let fp = FileParse {
         nodes: acc.nodes,
@@ -137,7 +145,7 @@ fn parse_counting(
         nav: acc.nav,
         properties: acc.properties,
     };
-    Ok((fp, acc.spring))
+    Ok((fp, acc.spring, acc.ktor))
 }
 
 /// A14.2 fired_on, once per repo that holds Kotlin, counted off the parses so
@@ -150,6 +158,11 @@ fn parse_counting(
 /// since the last repo's line (a cache-served file ran none — see [`spring`]):
 ///   `[kotlin/spring] stereotypes=S routes=R composed=C injects=J entities=E repos=P repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/spring\]'`.
+///
+/// A14.5 adds the Ktor line, from the same kind of process-global bank:
+///   `[kotlin/ktor] ast routes=R handled_by=H (text_scan_would_find=N) repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '\[kotlin/ktor\]'` — `N` is the retired
+/// Ktor text scan's count over the same files (see [`routes`]).
 pub fn trace(parses: &[FileParse], repo_label: &str) {
     let (mut types, mut fns, mut props, mut routes) = (0usize, 0usize, 0usize, 0usize);
     for fp in parses {
@@ -171,6 +184,7 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
         parses.len()
     );
     eprintln!("{}", spring::marker(spring::take(), repo_label));
+    eprintln!("{}", routes::marker(routes::take(), repo_label));
 }
 
 #[derive(Default)]
@@ -184,12 +198,17 @@ struct Acc {
     /// Declarations emitted so far: an overload reuses its first node.
     declared: HashSet<NodeId>,
     /// `METHOD path` keys of the ROUTEs emitted so far — the annotation
-    /// routes ([`spring`]) first, then the text scans.
+    /// routes ([`spring`]) first, then the Ktor AST scan, then the text scans.
     routes_seen: HashSet<String>,
+    /// Every declared FUNCTION / METHOD, keyed on its `function_declaration`'s
+    /// tree-sitter node id: the handler a Ktor route inside it binds ([`routes`]).
+    fn_ids: HashMap<usize, NodeId>,
     /// INJECTS refs ([`spring`]); `resolve_refs` binds each `Bare(TypeName)`.
     refs: Vec<UnresolvedRef>,
     /// What the [`spring`] detectors did in this file.
     spring: spring::SpringCounts,
+    /// What the Ktor pass ([`routes`]) did in this file.
+    ktor: routes::KtorCounts,
 }
 
 /// Per-file constants every visitor needs.
@@ -287,6 +306,7 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     };
     let qname = format!("{}::{name}", owner.qname);
     let id = declare(node, name, &qname, kind, owner.id, file, acc);
+    acc.fn_ids.insert(node.id(), id);
     if owner.in_type {
         spring::on_method(node, id, owner.route_prefix, file, acc);
     }
@@ -777,43 +797,6 @@ import com.acme.util.slugify
     }
 
     #[test]
-    fn ktor_routes_ported() {
-        // The Java parser's `ktor_routes` source, through the Kotlin parser.
-        let source = r#"
-fun Application.module() {
-    routing {
-        get("/users") {
-            call.respond(listOf<String>())
-        }
-        post("/users") {
-            call.respond("ok")
-        }
-        route("/admin") {
-            delete("/users/{id}") { call.respond("ok") }
-        }
-    }
-}
-"#;
-        let fp = parse_file(source, "Application.kt", "com::example::Application", repo()).unwrap();
-        assert_eq!(
-            route_names(&fp),
-            vec!["DELETE /users/{id}", "GET /users", "POST /users"]
-        );
-        assert_eq!(
-            qnames_of(&fp, node_kind::FUNCTION),
-            vec!["com::example::Application::module"]
-        );
-        // Same NodeId, confidence and cell as the Java scan emitted.
-        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users");
-        let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
-        assert_eq!(node.confidence, Confidence::Medium);
-        assert!(matches!(
-            node.cells.as_slice(),
-            [Cell { kind, payload: CellPayload::Text(m) }] if *kind == cell_type::ROUTE_METHOD && m == "GET"
-        ));
-    }
-
-    #[test]
     fn javalin_and_webflux_routes_ported() {
         let source = r#"
 fun main() {
@@ -868,6 +851,13 @@ fun Application.itemRoutes() {
         );
         assert_eq!(qnames_of(&fp, node_kind::FUNCTION), vec!["broken::itemRoutes"]);
         assert_eq!(route_names(&fp), vec!["GET /api/items"]);
+        // The AST route scan survives the recovered tree: bound to its fun.
+        let route = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /api/items");
+        let handler =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "broken::itemRoutes");
+        assert!(fp.edges.iter().any(|e| e.category == edge_category::HANDLED_BY
+            && e.from == route
+            && e.to == handler));
     }
 
     #[test]

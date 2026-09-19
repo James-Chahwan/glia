@@ -2,17 +2,20 @@
   "framework": "kotlin-ktor",
   "language": "kotlin",
   "dirs": ["."],
-  "note": "A14.1 baseline: Ktor DSL routes. ROUTE nodes are already found by the Java parser's text scanner on Kotlin source — the Kotlin flip must not lose them.",
+  "note": "A14.1 baseline: Ktor DSL routes. A14.5: the routes come off the Kotlin AST (no text scan), each bound HANDLED_BY to the enclosing declared function and carrying a POSITION cell at its `get(...)` call.",
   "expect_nodes": [
-    {"kind": "ROUTE",    "name": "GET /api/items", "note": "ALREADY FOUND via the text scanner — regression guard"},
+    {"kind": "ROUTE",    "name": "GET /api/items", "note": "regression guard — the AST scan keeps the text scanner's `{METHOD} {path}` name and NodeId"},
     {"kind": "FUNCTION", "name": "itemRoutes",     "note": "extension fun — the HANDLED_BY target"},
     {"kind": "CLASS",    "name": "ItemStore",      "note": "ALREADY FOUND (plain `class X {` is java-parseable)"},
     {"kind": "METHOD",   "name": "all",            "note": "expression-body method"}
   ],
   "expect_edges": [
-    {"from": "GET /api/items",  "to": "itemRoutes", "category": "HANDLED_BY", "note": "route -> enclosing declared function (Ktor handlers are anonymous lambdas)"},
-    {"from": "POST /api/items", "to": "itemRoutes", "category": "HANDLED_BY", "note": "same enclosing function"},
-    {"from": "itemRoutes",      "to": "all",        "category": "CALLS",      "note": "store.all() inside the lambda"},
+    {"from": "GET /api/items",  "to": "itemRoutes", "category": "HANDLED_BY", "note": "A14.5: route -> enclosing declared function (Ktor handlers are anonymous lambdas)"},
+    {"from": "POST /api/items", "to": "itemRoutes", "category": "HANDLED_BY", "note": "A14.5: same enclosing function"},
+    {"from": "itemRoutes",      "to": "all",        "category": "CALLS",      "note": "store.all() inside the lambda (A14.3)"},
     {"from": "app",             "to": "ItemStore",  "category": "IMPORTS",    "note": "import com.acme.store.ItemStore"}
+  ],
+  "expect_cells": [
+    {"kind": "ROUTE", "node": "GET /api/items", "cell": "POSITION", "contains": "app.kt", "note": "A14.5: tier-1 locate — the exact `get(...)` call, not the HANDLED_BY fallback"}
   ]
 }
