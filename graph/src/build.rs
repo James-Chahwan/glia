@@ -4,7 +4,8 @@
 use std::collections::{HashMap, HashSet};
 
 use repo_graph_code_domain::{
-    CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, edge_category,
+    node_kind,
 };
 use repo_graph_core::{Cell, NodeId, RepoId};
 
@@ -30,15 +31,27 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     Ok(g)
 }
 
-/// Build a per-repo Go graph. Go packages span multiple files — modules with
-/// the same qname produce the same NodeId and their cells stack on one node.
+/// Build a per-repo Go graph. The engine gives every Go file its own MODULE
+/// (the qname is the file path); a package is the set of files in one
+/// directory.
+///
+/// LA.23d: a method declared in a different file from its receiver struct is
+/// re-parented under that struct first ([`bind_split_go_receivers`]), so
+/// `class_methods` holds it (SelfMethod and field-typed calls resolve) and
+/// its file's `module_symbols` no longer lists it as a top-level function.
+/// Its Bare / Attribute calls still resolve in its own file's scope
+/// ([`resolve_go_calls`]).
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
     resolve_imports_go(&mut g, &all_imports);
-    resolve_calls(&mut g, &all_calls, |_, _| None);
+    resolve_go_calls(&mut g, &all_calls, &split);
     resolve_refs(&mut g, &all_refs);
     emit_method_level_implements(&mut g);
+    if let Some(line) = split.marker() {
+        eprintln!("{line}");
+    }
     Ok(g)
 }
 
@@ -277,6 +290,175 @@ fn build_symbol_table(g: &mut RepoGraph) {
             }
         }
     }
+}
+
+// ============================================================================
+// Go split-file receivers (LA.23d)
+// ============================================================================
+
+/// What [`bind_split_go_receivers`] did to one Go graph.
+#[derive(Debug, Default)]
+struct SplitStats {
+    /// Re-parented methods in `g.nodes` order: `(method, its file MODULE,
+    /// its STRUCT)`.
+    bound: Vec<(NodeId, NodeId, NodeId)>,
+    /// Receiver name declared by two or more types in the method's directory
+    /// (a broken tree, or a package and its `_test` twin sharing a name).
+    ambiguous: usize,
+    /// Receiver name no STRUCT in the method's directory declares: a named
+    /// non-struct type (`type Status int`, which the parser emits no node
+    /// for), a lone INTERFACE, or a type outside the parsed tree.
+    unmatched: usize,
+}
+
+impl SplitStats {
+    /// `[go-recv] split-file methods bound: B (ambiguous=A unmatched=U)`, once
+    /// per Go graph with any candidate method.
+    fn marker(&self) -> Option<String> {
+        (self.bound.len() + self.ambiguous + self.unmatched > 0).then(|| {
+            format!(
+                "[go-recv] split-file methods bound: {} (ambiguous={} unmatched={})",
+                self.bound.len(),
+                self.ambiguous,
+                self.unmatched
+            )
+        })
+    }
+}
+
+/// The receiver segment of a `visit_method` qname under its file MODULE:
+/// `service::UserService::Get` under `service` -> `UserService`. Any other
+/// shape -> `None`.
+fn go_receiver_of<'a>(method_qname: &'a str, module_qname: &str) -> Option<&'a str> {
+    let rest = method_qname.strip_prefix(module_qname)?.strip_prefix("::")?;
+    let (recv, name) = rest.split_once("::")?;
+    (!recv.is_empty() && !name.is_empty() && !name.contains("::")).then_some(recv)
+}
+
+/// Re-parent every Go METHOD the parser left under its file MODULE under its
+/// receiver STRUCT. `visit_method` only sees the types of its own file, so a
+/// method whose struct is declared in another file of the package falls back
+/// to the MODULE.
+///
+/// A Go package is a directory and a MODULE qname is the file path, so a
+/// node's package is its MODULE's qname minus the last `::` segment
+/// (`svc::users::store` -> `svc::users`). A candidate's receiver is the
+/// second-to-last segment of its qname ([`go_receiver_of`]). Exactly one
+/// STRUCT / INTERFACE of that name in the directory, and that one a STRUCT,
+/// binds: nav `parent_of` / `children_of` move to the struct (appended in
+/// `g.nodes` order) and a struct -> method DEFINES edge is added, the
+/// same-file shape. The file's module -> method DEFINES edge stays, since the
+/// file still defines the method. Two same-named types in one directory bind
+/// nothing: a tree that does not compile, or a package and its `_test` twin
+/// (same directory) that both declare the name, as grpc-go's per-package
+/// `type s struct` test suites do. The package clause is not in the parse,
+/// so the directory cannot tell the two apart.
+///
+/// Runs before [`build_symbol_table`], which then indexes the method in
+/// `class_methods[struct]` and leaves it out of its file's `module_symbols`.
+/// Deterministic: candidates are visited in `g.nodes` order; the index is a
+/// lookup table only.
+fn bind_split_go_receivers(g: &mut RepoGraph) -> SplitStats {
+    fn package_dir(module_qname: &str) -> &str {
+        module_qname.rsplit_once("::").map_or("", |(dir, _)| dir)
+    }
+    let mut stats = SplitStats::default();
+    let mut binds: Vec<(NodeId, NodeId, NodeId)> = Vec::new();
+    {
+        let nav = &g.nav;
+        let module_of = |id: &NodeId| -> Option<(NodeId, &str)> {
+            let parent = *nav.parent_of.get(id)?;
+            if nav.kind_by_id.get(&parent) != Some(&node_kind::MODULE) {
+                return None;
+            }
+            Some((parent, nav.qname_by_id.get(&parent)?.as_str()))
+        };
+        let mut types: HashMap<(&str, &str), Vec<NodeId>> = HashMap::new();
+        let mut candidates: Vec<(NodeId, NodeId, &str, &str)> = Vec::new();
+        for n in &g.nodes {
+            let Some(&kind) = nav.kind_by_id.get(&n.id) else { continue };
+            let Some((module, module_qname)) = module_of(&n.id) else { continue };
+            if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
+                if let Some(name) = nav.name_by_id.get(&n.id) {
+                    let ids = types.entry((package_dir(module_qname), name.as_str())).or_default();
+                    if !ids.contains(&n.id) {
+                        ids.push(n.id);
+                    }
+                }
+            } else if kind == node_kind::METHOD
+                && let Some(recv) = nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .and_then(|q| go_receiver_of(q, module_qname))
+            {
+                candidates.push((n.id, module, package_dir(module_qname), recv));
+            }
+        }
+        for (method, module, dir, recv) in candidates {
+            match types.get(&(dir, recv)).map(Vec::as_slice) {
+                Some(&[only]) if nav.kind_by_id.get(&only) == Some(&node_kind::STRUCT) => {
+                    binds.push((method, module, only));
+                }
+                Some([_, _, ..]) => stats.ambiguous += 1,
+                _ => stats.unmatched += 1,
+            }
+        }
+    }
+    for &(method, module, strukt) in &binds {
+        g.nav.parent_of.insert(method, strukt);
+        if let Some(kids) = g.nav.children_of.get_mut(&module) {
+            kids.retain(|k| *k != method);
+        }
+        g.nav.children_of.entry(strukt).or_default().push(method);
+        push_edge(g, strukt, method, edge_category::DEFINES);
+    }
+    stats.bound = binds;
+    stats
+}
+
+/// Go call resolution around [`bind_split_go_receivers`]. A bound method's
+/// SelfMethod and receiver-field calls need its struct as their owner, which
+/// the re-parented nav gives them. Its Bare and Attribute calls name the
+/// package-level functions and imports of its OWN file (Go imports are per
+/// file), and `resolve_calls` scopes them by walking to the nearest MODULE,
+/// which through the struct is the struct's file. So those sites resolve in a
+/// second pass with every bound method pointed back at its file MODULE; the
+/// struct parents are restored after it. With no bound method this is one
+/// `resolve_calls` over every site, as before LA.23d.
+fn resolve_go_calls(g: &mut RepoGraph, calls: &[CallSite], split: &SplitStats) {
+    if split.bound.is_empty() {
+        resolve_calls(g, calls, |_, _| None);
+        return;
+    }
+    let bound: HashSet<NodeId> = split.bound.iter().map(|&(m, _, _)| m).collect();
+    let (file_scoped, rest): (Vec<CallSite>, Vec<CallSite>) =
+        calls.iter().cloned().partition(|s| {
+            matches!(s.qualifier, CallQualifier::Bare(_) | CallQualifier::Attribute { .. })
+                && under_bound_method(&g.nav, &bound, s.from)
+        });
+    resolve_calls(g, &rest, |_, _| None);
+    for &(method, module, _) in &split.bound {
+        g.nav.parent_of.insert(method, module);
+    }
+    resolve_calls(g, &file_scoped, |_, _| None);
+    for &(method, _, strukt) in &split.bound {
+        g.nav.parent_of.insert(method, strukt);
+    }
+}
+
+/// True when `id` is in `bound` or sits under a node that is. The walk is
+/// bounded by the nav's size, so a malformed parent cycle ends in `false`.
+fn under_bound_method(nav: &CodeNav, bound: &HashSet<NodeId>, mut id: NodeId) -> bool {
+    for _ in 0..=nav.parent_of.len() {
+        if bound.contains(&id) {
+            return true;
+        }
+        match nav.parent_of.get(&id) {
+            Some(&parent) => id = parent,
+            None => return false,
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -565,5 +747,242 @@ mod tests {
             .map(|e| (e.from, e.to))
             .collect();
         assert_eq!(handled, vec![(route, cls_get)]);
+    }
+
+    // ---- LA.23d: Go split-file receivers ------------------------------------
+
+    fn gid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    /// One Go file shaped the way the Go parser emits it: MODULE `module` plus
+    /// `(kind, qname, parent qname)` items, where a `None` parent is the
+    /// MODULE (a METHOD there is one whose receiver type this file does not
+    /// declare) and `Some(q)` names an earlier item of the same file. Every
+    /// item gets its parent -> item DEFINES edge.
+    fn go_file(
+        module: &str,
+        items: &[(repo_graph_core::NodeKindId, &str, Option<&str>)],
+    ) -> FileParse {
+        let r = repo();
+        let m = gid(node_kind::MODULE, module);
+        let mut nav = CodeNav::default();
+        nav.record(m, module.rsplit("::").next().unwrap_or(module), module, node_kind::MODULE, None);
+        let mut ids: HashMap<&str, NodeId> = HashMap::new();
+        let mut nodes = vec![Node { id: m, repo: r, confidence: Confidence::Strong, cells: vec![] }];
+        let mut edges = vec![];
+        for &(kind, qname, parent) in items {
+            let id = gid(kind, qname);
+            let parent_id = parent.map_or(m, |p| ids[p]);
+            let name = qname.rsplit("::").next().unwrap_or(qname);
+            nav.record(id, name, qname, kind, Some(parent_id));
+            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] });
+            edges.push(repo_graph_core::Edge {
+                from: parent_id,
+                to: id,
+                category: edge_category::DEFINES,
+                confidence: Confidence::Strong,
+            });
+            ids.insert(qname, id);
+        }
+        FileParse {
+            nodes,
+            edges,
+            imports: vec![],
+            calls: vec![],
+            refs: vec![],
+            nav,
+            properties: HashSet::new(),
+        }
+    }
+
+    fn has_edge(g: &RepoGraph, from: NodeId, to: NodeId, category: repo_graph_core::EdgeCategoryId) -> bool {
+        g.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
+    }
+
+    /// The fixtures/go-split-receiver shape: `types.go` declares `UserRepo`
+    /// (with `Find`) and `UserService { repo *UserRepo }`; `service.go`
+    /// declares `(s *UserService) Get` calling `s.audit(id)` and
+    /// `s.repo.Find(id)`, and `audit`.
+    fn fixture_shape() -> Vec<FileParse> {
+        let mut types = go_file(
+            "types",
+            &[
+                (node_kind::STRUCT, "types::UserRepo", None),
+                (node_kind::METHOD, "types::UserRepo::Find", Some("types::UserRepo")),
+                (node_kind::STRUCT, "types::UserService", None),
+            ],
+        );
+        types.nav.record_field_type(gid(node_kind::STRUCT, "types::UserService"), "repo", "UserRepo");
+        let mut service = go_file(
+            "service",
+            &[
+                (node_kind::METHOD, "service::UserService::Get", None),
+                (node_kind::METHOD, "service::UserService::audit", None),
+            ],
+        );
+        let get = gid(node_kind::METHOD, "service::UserService::Get");
+        service.calls = vec![
+            CallSite { from: get, qualifier: CallQualifier::SelfMethod("audit".to_string()) },
+            CallSite {
+                from: get,
+                qualifier: CallQualifier::ComplexReceiver {
+                    receiver: "self.repo".to_string(),
+                    name: "Find".to_string(),
+                },
+            },
+        ];
+        vec![types, service]
+    }
+
+    /// A method whose struct lives in another file of the package moves under
+    /// the struct: nav parent / children, a struct -> method DEFINES next to
+    /// the kept module -> method one, `class_methods` instead of
+    /// `module_symbols`, and its self-call and field-typed call both bind.
+    #[test]
+    fn split_method_rebinds_under_its_struct_and_resolves_calls() {
+        let (svc_struct, find) =
+            (gid(node_kind::STRUCT, "types::UserService"), gid(node_kind::METHOD, "types::UserRepo::Find"));
+        let (service, get, audit) = (
+            gid(node_kind::MODULE, "service"),
+            gid(node_kind::METHOD, "service::UserService::Get"),
+            gid(node_kind::METHOD, "service::UserService::audit"),
+        );
+
+        let (mut g, _, _, _) = merge_parses(repo(), fixture_shape());
+        let stats = bind_split_go_receivers(&mut g);
+        assert_eq!(stats.bound, vec![(get, service, svc_struct), (audit, service, svc_struct)]);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[go-recv] split-file methods bound: 2 (ambiguous=0 unmatched=0)")
+        );
+
+        let g = build_go(repo(), fixture_shape()).unwrap();
+        assert_eq!(g.nav.parent_of[&get], svc_struct);
+        assert_eq!(g.nav.parent_of[&audit], svc_struct);
+        assert_eq!(g.nav.children_of[&svc_struct], vec![get, audit]);
+        assert!(!g.nav.children_of[&service].contains(&get));
+        for m in [get, audit] {
+            assert!(has_edge(&g, svc_struct, m, edge_category::DEFINES), "struct -> method DEFINES");
+            assert!(has_edge(&g, service, m, edge_category::DEFINES), "the file still defines it");
+        }
+        assert_eq!(g.symbols.class_methods[&svc_struct].get("Get").copied(), Some(get));
+        assert!(g.symbols.module_symbols.get(&service).is_none_or(|s| !s.contains_key("Get")));
+        assert!(has_edge(&g, get, audit, edge_category::CALLS), "SelfMethod across files");
+        assert!(has_edge(&g, get, find, edge_category::CALLS), "field-typed call across files");
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// Package identity is the directory: a receiver `T` binds the `T` of its
+    /// own directory, never a same-named `T` of another package, and a
+    /// directory with no `T` binds nothing.
+    #[test]
+    fn same_named_struct_in_another_package_is_not_bound() {
+        let parses = vec![
+            go_file("a::types", &[(node_kind::STRUCT, "a::types::T", None)]),
+            go_file("b::types", &[(node_kind::STRUCT, "b::types::T", None)]),
+            go_file("b::svc", &[(node_kind::METHOD, "b::svc::T::M", None)]),
+            go_file("c::svc", &[(node_kind::METHOD, "c::svc::T::M", None)]),
+        ];
+        let (mut g, _, _, _) = merge_parses(repo(), parses);
+        let stats = bind_split_go_receivers(&mut g);
+        let (b_m, c_m) = (gid(node_kind::METHOD, "b::svc::T::M"), gid(node_kind::METHOD, "c::svc::T::M"));
+        assert_eq!(stats.bound, vec![(b_m, gid(node_kind::MODULE, "b::svc"), gid(node_kind::STRUCT, "b::types::T"))]);
+        assert_eq!((stats.ambiguous, stats.unmatched), (0, 1));
+        assert_eq!(g.nav.parent_of[&c_m], gid(node_kind::MODULE, "c::svc"));
+        assert!(g.nav.children_of.get(&gid(node_kind::STRUCT, "a::types::T")).is_none_or(|k| k.is_empty()));
+    }
+
+    /// Two files of one directory each declaring `type T struct` (a tree that
+    /// does not compile) leave a third file's `T` method where it was.
+    #[test]
+    fn ambiguous_receiver_type_binds_nothing() {
+        let parses = vec![
+            go_file("x::one", &[(node_kind::STRUCT, "x::one::T", None)]),
+            go_file("x::two", &[(node_kind::STRUCT, "x::two::T", None)]),
+            go_file("x::three", &[(node_kind::METHOD, "x::three::T::M", None)]),
+        ];
+        let (mut g, _, _, _) = merge_parses(repo(), parses);
+        let before = g.edges.len();
+        let stats = bind_split_go_receivers(&mut g);
+        assert!(stats.bound.is_empty());
+        assert_eq!((stats.ambiguous, stats.unmatched), (1, 0));
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[go-recv] split-file methods bound: 0 (ambiguous=1 unmatched=0)")
+        );
+        assert_eq!(g.edges.len(), before);
+        assert_eq!(g.nav.parent_of[&gid(node_kind::METHOD, "x::three::T::M")], gid(node_kind::MODULE, "x::three"));
+    }
+
+    /// A method declared beside its struct is already under it: not a
+    /// candidate, no edge added, no marker.
+    #[test]
+    fn same_file_method_is_untouched() {
+        let parses = vec![go_file(
+            "s",
+            &[(node_kind::STRUCT, "s::T", None), (node_kind::METHOD, "s::T::M", Some("s::T"))],
+        )];
+        let (mut g, _, _, _) = merge_parses(repo(), parses);
+        let (edges, parent) = (g.edges.len(), g.nav.parent_of.clone());
+        let stats = bind_split_go_receivers(&mut g);
+        assert!(stats.bound.is_empty());
+        assert_eq!(stats.marker(), None);
+        assert_eq!(g.edges.len(), edges);
+        assert_eq!(g.nav.parent_of, parent);
+    }
+
+    /// Go imports and package-level functions are per file, so a bound
+    /// method's Bare / Attribute calls keep resolving in its OWN file
+    /// (`handlers.go`), not the struct's (`server.go`, which imports nothing),
+    /// while its self-call binds through the struct. A bare `Handle()` from a
+    /// function of that file no longer lands on the method.
+    #[test]
+    fn split_method_bare_and_import_calls_keep_their_file_scope() {
+        let mut handlers = go_file(
+            "app::handlers",
+            &[
+                (node_kind::METHOD, "app::handlers::Server::Handle", None),
+                (node_kind::METHOD, "app::handlers::Server::helper", None),
+                (node_kind::FUNCTION, "app::handlers::writeJSON", None),
+                (node_kind::FUNCTION, "app::handlers::run", None),
+            ],
+        );
+        handlers.imports = vec![ImportStmt {
+            from_module: "app::handlers".to_string(),
+            target: ImportTarget::Module { path: "store".to_string(), alias: None },
+        }];
+        let (handle, helper, write_json, run) = (
+            gid(node_kind::METHOD, "app::handlers::Server::Handle"),
+            gid(node_kind::METHOD, "app::handlers::Server::helper"),
+            gid(node_kind::FUNCTION, "app::handlers::writeJSON"),
+            gid(node_kind::FUNCTION, "app::handlers::run"),
+        );
+        let site = |from, qualifier| CallSite { from, qualifier };
+        handlers.calls = vec![
+            site(handle, CallQualifier::Bare("writeJSON".to_string())),
+            site(
+                handle,
+                CallQualifier::Attribute { base: "store".to_string(), name: "Validate".to_string() },
+            ),
+            site(handle, CallQualifier::SelfMethod("helper".to_string())),
+            site(run, CallQualifier::Bare("Handle".to_string())),
+        ];
+        let parses = vec![
+            go_file("store::store", &[(node_kind::FUNCTION, "store::store::Validate", None)]),
+            go_file("app::server", &[(node_kind::STRUCT, "app::server::Server", None)]),
+            handlers,
+        ];
+        let g = build_go(repo(), parses).unwrap();
+        let server = gid(node_kind::STRUCT, "app::server::Server");
+        assert_eq!(g.nav.parent_of[&handle], server, "struct parent restored after the file pass");
+        assert!(has_edge(&g, handle, write_json, edge_category::CALLS), "same-file bare call");
+        assert!(
+            has_edge(&g, handle, gid(node_kind::FUNCTION, "store::store::Validate"), edge_category::CALLS),
+            "import of the method's own file"
+        );
+        assert!(has_edge(&g, handle, helper, edge_category::CALLS), "self-call through the struct");
+        assert!(!g.edges.iter().any(|e| e.from == run && e.category == edge_category::CALLS));
+        assert_eq!(g.unresolved_calls.len(), 1, "only the bare `Handle()` stays unresolved");
     }
 }

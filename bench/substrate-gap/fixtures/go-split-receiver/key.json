@@ -1,0 +1,28 @@
+{
+  "framework": "go-split-receiver",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "expect_edges": [
+    {
+      "from": "UserService::Get",
+      "to": "UserService::audit",
+      "category": "CALLS",
+      "note": "self-call in service.go, struct declared in types.go"
+    },
+    {
+      "from": "UserService::Get",
+      "to": "UserRepo::Find",
+      "category": "CALLS",
+      "note": "field call across files (LA.23c field types + this binding)"
+    },
+    {
+      "from": "types::UserService",
+      "to": "UserService::Get",
+      "category": "DEFINES",
+      "note": "the split-file method is re-parented under its struct"
+    }
+  ],
+  "note": "LA.23d. Methods declared in a different file from their struct (the usual Go layout). Baseline HEAD: ZERO CALLS; the methods are parented to their file MODULE (`DEFINES service -> service::UserService::Get`)."
+}
