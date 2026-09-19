@@ -822,6 +822,12 @@ pub struct RouteMatch {
     /// `(METHOD, path)` hit the index outright: no prefix strip on either side
     /// and no method-agnostic `ANY` fallback.
     pub exact: bool,
+    /// The ladder tier that matched, by its snake_case name — the same string
+    /// an HTTP_CALLS edge's evidence names (LC.3c's `MatchTier::rule`):
+    /// `exact` | `endpoint_prefix` | `any` | `route_prefix`. (`base_fold` and
+    /// `suffix` are client-only tiers this matcher never offers.) LD.8b: lets
+    /// an answer say "served, but only through the `ANY` fallback".
+    pub tier: &'static str,
 }
 
 impl HttpRouteMatcher {
@@ -853,6 +859,7 @@ impl HttpRouteMatcher {
                 route: t.route_id,
                 confidence: weakest(t.confidence, tier.ceiling()),
                 exact: tier == MatchTier::Exact,
+                tier: tier.rule(),
             })
             .collect()
     }
@@ -1967,19 +1974,63 @@ mod tests {
         let (g, [users, orders, health, _]) = matcher_graph();
         let m = HttpRouteMatcher::new(std::slice::from_ref(&g));
         assert!(!m.is_empty());
-        let hit = |route, confidence, exact| vec![RouteMatch { route, confidence, exact }];
+        let hit = |route, confidence, exact, tier| {
+            vec![RouteMatch { route, confidence, exact, tier }]
+        };
 
         // Tier 1, legacy `<METHOD> <path>` shape. Method is case-folded.
-        assert_eq!(m.lookup("get", "/users"), hit(users, Confidence::Strong, true));
+        assert_eq!(m.lookup("get", "/users"), hit(users, Confidence::Strong, true, "exact"));
         // Tier 1, `route:` shape; any param spelling normalises the same way.
-        assert_eq!(m.lookup("POST", "/api/orders/{id}"), hit(orders, Confidence::Strong, true));
+        assert_eq!(
+            m.lookup("POST", "/api/orders/{id}"),
+            hit(orders, Confidence::Strong, true, "exact")
+        );
         // Tier 2: an OpenAPI `servers: /api/v1` base is a caller-side prefix.
-        assert_eq!(m.lookup("GET", "/api/v1/users"), hit(users, Confidence::Strong, false));
+        assert_eq!(
+            m.lookup("GET", "/api/v1/users"),
+            hit(users, Confidence::Strong, false, "endpoint_prefix")
+        );
         // Tier 4: route mounted under /api, caller declares the bare path.
-        assert_eq!(m.lookup("POST", "/orders/{oid}"), hit(orders, Confidence::Medium, false));
+        assert_eq!(
+            m.lookup("POST", "/orders/{oid}"),
+            hit(orders, Confidence::Medium, false, "route_prefix")
+        );
         // Tier 3: an ANY route serves every verb, but is not an exact hit, and
         // the route's own Medium confidence is kept.
-        assert_eq!(m.lookup("DELETE", "/health"), hit(health, Confidence::Medium, false));
+        assert_eq!(m.lookup("DELETE", "/health"), hit(health, Confidence::Medium, false, "any"));
+    }
+
+    /// LD.8b — `RouteMatch::tier` names the tier, so `serves` can say a route
+    /// answered only through the method-agnostic fallback: a typed `GET
+    /// /users` is `exact`, an `ANY /posts` reached by GET is `any`.
+    #[test]
+    fn route_match_names_its_tier() {
+        use repo_graph_code_domain::{CodeNav, GRAPH_TYPE};
+        use repo_graph_core::Node;
+
+        let r = crate::test_support::repo();
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        for (qname, verb) in [("GET /users", "GET"), ("ANY /posts", "ANY")] {
+            let id = NodeId::from_parts(GRAPH_TYPE, r, node_kind::ROUTE, qname);
+            nav.record(id, qname, qname, node_kind::ROUTE, None);
+            let cell = Cell { kind: cell_type::ROUTE_METHOD, payload: CellPayload::Text(verb.into()) };
+            nodes.push(Node { id, repo: r, confidence: Confidence::Strong, cells: vec![cell] });
+        }
+        let g = RepoGraph {
+            repo: r,
+            nodes,
+            edges: vec![],
+            symbols: Default::default(),
+            nav,
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        };
+        let m = HttpRouteMatcher::new(std::slice::from_ref(&g));
+        let tier = |method, path| m.lookup(method, path).first().map(|h| (h.tier, h.exact));
+        assert_eq!(tier("GET", "/users"), Some(("exact", true)));
+        assert_eq!(tier("GET", "/posts"), Some(("any", false)));
     }
 
     #[test]

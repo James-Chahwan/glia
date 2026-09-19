@@ -10,6 +10,7 @@ use clap::Subcommand;
 
 mod find;
 mod pages;
+mod serves;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueryCmd {
@@ -23,11 +24,18 @@ pub(crate) enum QueryCmd {
     /// route serves, with the catch-all that absorbs it) and pages no in-repo
     /// link reaches. A report: exits 0 whatever it finds.
     Pages(pages::Args),
+    /// Serves (LD.8b): who serves a channel — an HTTP `METHOD /path` (a bare
+    /// `/path` means every verb) through the HTTP resolver's route matcher, or
+    /// a queue topic. Each server is located, names the matcher tier that
+    /// reached it and its handlers; nothing serving it is a FACT with the
+    /// mechanism's caveats and near misses. An answer either way: exits 0.
+    Serves(serves::Args),
 }
 
 pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Pages(a) => pages::run(a),
+        QueryCmd::Serves(a) => serves::run(a),
     }
 }

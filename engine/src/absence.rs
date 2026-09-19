@@ -16,7 +16,8 @@
 //! `find::find_nodes`. The primitives that restructure later (LD.4a trace,
 //! LD.5 blast radius, LD.7c implementors, LD.8b serves, LE.*) build their own
 //! `Option<Absence>` with the crate-private builders here (`unknown_symbol`,
-//! `empty`, `scope_emptied`) and the `mechanisms_for_kind` table.
+//! `empty`, `scope_emptied`, and `unserved_channel` for LD.8b's channel
+//! lookup) and the `mechanisms_for_kind` table.
 //!
 //! Module slot declared by L0.2 so its owner edits only this file. Its API is
 //! reached as `repo_graph_engine::absence::<item>`, never flattened into the
@@ -124,6 +125,24 @@ pub(crate) fn empty(
     seed_file: Option<&str>,
 ) -> Absence {
     let a = build(merged, query, reason, note, mechanisms, seed_file);
+    log(&a, primitive);
+    a
+}
+
+/// Nothing serves the channel `query` names (LD.8b `serves`): reason
+/// `unserved_channel`, caveats for every language in the graph (a channel has
+/// no file to narrow them by). Unlike [`empty`], the near misses are part of
+/// the build, so the marker's `suggestions=` count is the answer's.
+pub(crate) fn unserved_channel(
+    merged: &MergedGraph,
+    primitive: &'static str,
+    query: &str,
+    note: String,
+    mechanisms: &[&'static str],
+    suggestions: Vec<String>,
+) -> Absence {
+    let mut a = build(merged, query, "unserved_channel", note, mechanisms, None);
+    a.suggestions = suggestions;
     log(&a, primitive);
     a
 }
