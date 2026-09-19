@@ -4429,6 +4429,7 @@
     "fixtures/contract-openapi-json",
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
+    "fixtures/cpp-header-impl-files",
     "fixtures/csharp-aspnet-composed",
     "fixtures/csharp-block-using",
     "fixtures/csharp-efcore",
