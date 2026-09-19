@@ -132,19 +132,20 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // A14.1 / A14.2 — the Kotlin rows. `.kt` has its own parser since A14.2
     // (`parsers/code/kotlin`, one JVM graph with Java), so these describe the
     // residual that parser leaves, measured on bench/substrate-gap/fixtures/
-    // kotlin-{entities,spring,ktor,retrofit,flip-guard}. The Kotlin packets
-    // after A14.2 (calls + heritage, Spring / JPA annotations, Ktor handlers,
-    // HTTP clients) each rewrite the row they close.
+    // kotlin-{entities,spring,ktor,retrofit,flip-guard}. A14.6 rewrote them
+    // once the Kotlin chain (calls + heritage A14.3, Spring / JPA A14.4, Ktor
+    // A14.5, HTTP clients + Android A14.6) had landed: each row names only
+    // what that chain still does not extract.
     CoverageCaveat {
         language: "kotlin",
         edge_category: "*",
-        note: "Kotlin declarations are extracted by a dedicated parser: classes, interfaces, enums, objects (companion members attach to their class), member and top-level / extension functions, non-trivial properties and imports. Framework needles are the gap: Spring stereotype and mapping annotations, constructor / field INJECTS, JPA `@Entity` DATA_ENTITY and repository ACCESSES_DATA are not read from Kotlin. `.kts` scripts (Gradle KTS) are never parsed.",
-        verify: "grep the annotation (@RestController, @GetMapping, @Entity, @Autowired) across *.kt",
+        note: "Kotlin is extracted by a dedicated parser: declarations and imports, calls and supertypes, Spring / Micronaut / JAX-RS annotation routes with HANDLED_BY, stereotype / @Inject constructor and field INJECTS, JPA @Entity DATA_ENTITY and repository ACCESSES_DATA, Ktor routes, Retrofit / RestTemplate / WebClient client ENDPOINTs, and Android components (a class extending an Android framework type in a file importing android / androidx, or carrying @AndroidEntryPoint / @HiltViewModel / @HiltAndroidApp, is an entrypoint). Not read: `.kts` scripts (Gradle KTS) are never parsed; a class extending the app's own base (`: BaseActivity()`), WorkManager workers and @Composable functions are not classified as entrypoints.",
+        verify: "grep the symbol across *.kt; for an unclassified Android screen, grep its superclass chain",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "CALLS",
-        note: "no CALLS are extracted from Kotlin yet: its functions and methods are nodes, but no call site inside them is recorded, so a Kotlin caller never appears in a blast radius or trace",
+        note: "Kotlin calls are extracted from declared function bodies, but a call on a variable binds only when the variable is a property with a declared type: a parameter-typed receiver (`fun f(store: ItemStore) { store.all() }`) stays unresolved, as do bare calls in an INTERFACE default method, inherited methods called bare, calls inside a lambda with receiver (`with(x) { m() }`, `apply { }`), calls outside a function body (init blocks, secondary-constructor bodies, property initializers / accessors, default argument values) and a same-package call into another file with no import",
         verify: "grep the callee name across *.kt",
     },
     CoverageCaveat {
@@ -156,20 +157,20 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "kotlin",
         edge_category: "INHERITS_FROM",
-        note: "Kotlin `: Base()` / `: Iface` supertype lists are not extracted yet — no INHERITS_FROM or IMPLEMENTS edge exists for any Kotlin type",
+        note: "Kotlin supertypes (`: Base()` INHERITS_FROM, `: Iface` IMPLEMENTS) are extracted by simple name and bind through an import, the same file, or a repo-unique type name: a supertype whose simple name is declared twice without an import stays unbound, and a library supertype (AppCompatActivity, JpaRepository) has no node to bind",
         verify: "grep the supertype name across *.kt",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "HANDLED_BY",
-        note: "Ktor `get(\"/path\") { }`, Javalin `app.get(\"/path\", h)` and WebFlux `.GET(\"/path\", h)` ROUTE nodes are emitted by a text scan with no handler and no HANDLED_BY edge; Spring `@RequestMapping` / `@GetMapping` ROUTEs are not extracted from Kotlin at all",
-        verify: "grep for routing { / @GetMapping / .get(\" in *.kt",
+        note: "Javalin `app.get(\"/path\", h)` and WebFlux `.GET(\"/path\", h)` ROUTEs come from a text scan with no HANDLED_BY; a Ktor route is HANDLED_BY the declared function its lambda sits in (not the lambda), and a `fun Route.x()` installed under `route(\"/api\")` elsewhere is named without that prefix",
+        verify: "grep for routing { / route(\" / .get(\" in *.kt",
     },
     CoverageCaveat {
         language: "kotlin",
         edge_category: "HTTP_CALLS",
-        note: "Kotlin HTTP clients (RestTemplate, WebClient, Retrofit interfaces) emit no ENDPOINT, so a Kotlin caller never pairs to the route it calls",
-        verify: "grep getForObject / .uri( / @GET( across *.kt",
+        note: "Kotlin client ENDPOINTs come from Retrofit interface methods and Spring RestTemplate / WebClient / RestClient calls with a literal or templated URL. OkHttp, Ktor-client (`HttpClient().get(...)`), java.net.http and Fuel calls emit no ENDPOINT; a URL held in a variable is not read; the Retrofit builder's `baseUrl(...)` is not read, so a Retrofit path is taken as root-relative and a base URL carrying a path prefix (`baseUrl(\"https://x/api/\")`) pairs only through the resolver's route-prefix fallback (Medium), or not at all for a prefix outside its API-prefix list",
+        verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( across *.kt",
     },
 ];
 
@@ -195,7 +196,7 @@ pub struct CoverageNote {
 pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     let langs = languages_present(merged);
     if langs.contains("kotlin") {
-        eprintln!("[coverage] kotlin: parser is new — calls/heritage/framework needles may be partial");
+        eprintln!("[coverage] kotlin: residual rows declared for calls/heritage/imports/routes/http clients");
     }
     notes(merged, |c| c.language == "*" || langs.contains(c.language))
 }
@@ -445,9 +446,9 @@ mod tests {
 
     #[test]
     fn kotlin_reports_as_blind_spot() {
-        // A14.1 / A14.2: Kotlin has a parser now, but its calls, heritage and
-        // framework needles are still missing, so a Kotlin repo must SAY which
-        // dimensions to grep rather than answer an empty blast radius.
+        // A14.1 / A14.2 / A14.6: a Kotlin repo must SAY which dimensions to
+        // grep rather than answer an empty blast radius. Since A14.6 each row
+        // names the residual the full Kotlin chain leaves, not a missing pass.
         let report = coverage_report(&graph_with_file("src/Sample.kt"));
         let kotlin: Vec<_> = report.iter().filter(|n| n.language == "kotlin").collect();
         let mut cats: Vec<_> = kotlin.iter().map(|n| n.edge_category).collect();
@@ -462,6 +463,23 @@ mod tests {
             star.is_some_and(|n| !n.contains("no Kotlin parser") && !n.contains("ungraphed")),
             "the parser landed: the `*` row describes its residual, not a missing parser"
         );
+        let note = |cat: &str| {
+            kotlin
+                .iter()
+                .find(|n| n.edge_category == cat)
+                .map(|n| n.note)
+                .unwrap_or_default()
+        };
+        // The rows describe residuals, never the pre-A14.3..A14.6 absences.
+        assert!(!note("CALLS").contains("no CALLS are extracted"));
+        assert!(!note("INHERITS_FROM").contains("not extracted yet"));
+        assert!(!note("HTTP_CALLS").contains("emit no ENDPOINT, so"));
+        // The residuals the correction names.
+        assert!(note("CALLS").contains("parameter-typed receiver"));
+        assert!(note("CALLS").contains("INTERFACE default method"));
+        assert!(note("HTTP_CALLS").contains("Retrofit") && note("HTTP_CALLS").contains("OkHttp"));
+        assert!(note("HTTP_CALLS").contains("Ktor-client"));
+        assert!(note("*").contains("`.kts` scripts"));
         assert!(kotlin.iter().all(|n| n.edges_found == 0));
         // Every non-`*` row names a category that exists, so edges_found can count it.
         for n in kotlin.iter().filter(|n| n.edge_category != "*") {

@@ -2270,7 +2270,7 @@ fn try_detect_java_endpoint(
             return;
         };
         v
-    } else if let Some(v) = rest_template_verb(name) {
+    } else if let Some(v) = endpoint::rest_template_verb(name) {
         v.to_string()
     } else {
         return;
@@ -2515,46 +2515,18 @@ fn literal_verb_arg(args: Option<TsNode>, src: &[u8]) -> Option<String> {
     HTTP_VERBS.contains(&up.as_str()).then_some(up)
 }
 
-/// Map a RestTemplate convenience-method name to its HTTP verb. `put`/`delete`
-/// are guarded downstream by the `url_to_path` path filter (so `map.put("k", …)`
-/// never survives), the `*For*` families are self-describing.
-fn rest_template_verb(name: &str) -> Option<&'static str> {
-    if name.starts_with("getFor") {
-        Some("GET")
-    } else if name.starts_with("postFor") {
-        Some("POST")
-    } else if name.starts_with("patchFor") {
-        Some("PATCH")
-    } else if name.starts_with("headFor") {
-        Some("HEAD")
-    } else if name.starts_with("optionsFor") {
-        Some("OPTIONS")
-    } else if name == "put" {
-        Some("PUT")
-    } else if name == "delete" {
-        Some("DELETE")
-    } else {
-        None
-    }
-}
-
 /// Verb from a `HttpMethod.<VERB>` argument (used by `.exchange`/`.execute` and
-/// WebClient's `.method(HttpMethod.GET)`).
+/// WebClient's `.method(HttpMethod.GET)`): the first argument whose text names
+/// one ([`endpoint::http_method_ref_verb`], shared with Kotlin since A14.6).
+/// The RestTemplate method-name table is [`endpoint::rest_template_verb`];
+/// `put`/`delete` there are guarded here by the `url_to_path` path filter (so
+/// `map.put("k", …)` never survives).
 fn http_method_arg_verb(args: Option<TsNode>, src: &[u8]) -> Option<String> {
     let a = args?;
     let mut c = a.walk();
-    for arg in a.named_children(&mut c) {
-        let t = text_of(arg, src);
-        if let Some(idx) = t.find("HttpMethod.") {
-            let after = &t[idx + "HttpMethod.".len()..];
-            let verb: String = after.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-            let up = verb.to_ascii_uppercase();
-            if HTTP_VERBS.contains(&up.as_str()) {
-                return Some(up);
-            }
-        }
-    }
-    None
+    a.named_children(&mut c)
+        .find_map(|arg| endpoint::http_method_ref_verb(text_of(arg, src)))
+        .map(str::to_string)
 }
 
 /// Walk a WebClient fluent chain (the object a `.uri(…)` hangs off) down to the

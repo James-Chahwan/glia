@@ -11,7 +11,10 @@
 //! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA), and the
 //! call sites, supertypes and field types of [`calls`] (A14.3: every call in
 //! a declared function's body, `: Base()` INHERITS_FROM / `: Iface`
-//! IMPLEMENTS refs, primary-constructor and typed properties as field types).
+//! IMPLEMENTS refs, primary-constructor and typed properties as field types),
+//! and the client ENDPOINTs and Android components of [`android`] (A14.6:
+//! Retrofit interface methods and Spring RestTemplate / WebClient calls as
+//! ENDPOINT + CALLS, Android framework classes as a ROLE COMPONENT cell).
 //! Parsers extract, the graph crate resolves: imports leave as
 //! [`ImportStmt`]s for `build_dotted`'s dotted resolver, which the engine runs
 //! over the Java and Kotlin parses of a repo as ONE graph (the JVM family), so
@@ -57,6 +60,7 @@
 //!   keeps the surrounding tree, and an `ERROR` node is walked through as a
 //!   transparent container so the declarations inside it still count.
 
+mod android;
 mod calls;
 mod routes;
 mod spring;
@@ -80,24 +84,43 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
-    let (fp, spring_counts, ktor_counts) =
-        parse_counting(source, file_rel_path, module_qname, repo)?;
-    // A14.4 / A14.5: what the Spring and Ktor passes did, for the
-    // `[kotlin/spring]` and `[kotlin/ktor]` lines.
-    spring::publish(spring_counts);
-    routes::publish(ktor_counts);
-    Ok(fp)
+    let parsed = parse_all(source, file_rel_path, module_qname, repo)?;
+    // A14.4 / A14.5 / A14.6: what the Spring, Ktor and client passes did, for
+    // the `[kotlin/spring]`, `[kotlin/ktor]` and `[kotlin/retrofit]` lines.
+    spring::publish(parsed.spring);
+    routes::publish(parsed.ktor);
+    android::publish(parsed.clients);
+    Ok(parsed.fp)
+}
+
+/// One file's parse and the per-pass counts its markers publish.
+struct Parsed {
+    fp: FileParse,
+    spring: spring::SpringCounts,
+    ktor: routes::KtorCounts,
+    clients: android::ClientCounts,
 }
 
 /// [`parse_file`] plus the file's [`spring::SpringCounts`] and
 /// [`routes::KtorCounts`], unpublished — so tests read one file's counts
 /// without the process-global banks.
+#[cfg(test)]
 fn parse_counting(
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
 ) -> Result<(FileParse, spring::SpringCounts, routes::KtorCounts), ParseError> {
+    parse_all(source, file_rel_path, module_qname, repo).map(|p| (p.fp, p.spring, p.ktor))
+}
+
+/// The parse behind [`parse_file`], every count unpublished.
+fn parse_all(
+    source: &str,
+    file_rel_path: &str,
+    module_qname: &str,
+    repo: RepoId,
+) -> Result<Parsed, ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_kotlin_ng::LANGUAGE.into();
     parser
@@ -131,6 +154,7 @@ fn parse_counting(
         id: module_id,
         qname: module_qname,
         in_type: false,
+        is_interface: false,
         route_prefix: "",
         is_bean: false,
         members: &no_members,
@@ -151,7 +175,12 @@ fn parse_counting(
         nav: acc.nav,
         properties: acc.properties,
     };
-    Ok((fp, acc.spring, acc.ktor))
+    Ok(Parsed {
+        fp,
+        spring: acc.spring,
+        ktor: acc.ktor,
+        clients: acc.clients,
+    })
 }
 
 /// A14.2 fired_on, once per repo that holds Kotlin, counted off the parses so
@@ -176,6 +205,12 @@ fn parse_counting(
 ///   `[kotlin/ktor] ast routes=R handled_by=H (text_scan_would_find=N) repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/ktor\]'` — `N` is the retired
 /// Ktor text scan's count over the same files (see [`routes`]).
+///
+/// A14.6 adds the client line, from the same kind of process-global bank:
+///   `[kotlin/retrofit] endpoints=E components=C spring_clients=K repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '\[kotlin/retrofit\]'` — `E` Retrofit
+/// ENDPOINTs, `C` Android component classes, `K` Spring RestTemplate /
+/// WebClient ENDPOINTs (see [`android`]).
 pub fn trace(parses: &[FileParse], repo_label: &str) {
     let (mut types, mut fns, mut props, mut routes) = (0usize, 0usize, 0usize, 0usize);
     for fp in parses {
@@ -199,6 +234,7 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
     eprintln!("{}", calls::marker(parses, repo_label));
     eprintln!("{}", spring::marker(spring::take(), repo_label));
     eprintln!("{}", routes::marker(routes::take(), repo_label));
+    eprintln!("{}", android::marker(android::take(), repo_label));
 }
 
 #[derive(Default)]
@@ -226,6 +262,10 @@ struct Acc {
     spring: spring::SpringCounts,
     /// What the Ktor pass ([`routes`]) did in this file.
     ktor: routes::KtorCounts,
+    /// Dedups client ENDPOINT nodes across the file ([`android`]).
+    seen_endpoints: HashSet<NodeId>,
+    /// What the client / component detectors ([`android`]) did in this file.
+    clients: android::ClientCounts,
 }
 
 /// Per-file constants every visitor needs.
@@ -245,6 +285,9 @@ struct Owner<'a> {
     id: NodeId,
     qname: &'a str,
     in_type: bool,
+    /// The type is an INTERFACE: its body-less methods may be Retrofit
+    /// mappings (A14.6).
+    is_interface: bool,
     /// The type's route prefix its action methods compose onto (A14.4).
     route_prefix: &'a str,
     /// The type is a Spring stereotype: its constructors inject (A14.4).
@@ -302,6 +345,7 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
         scoped(type_scope(file.module_qname), name)
     };
     let id = declare(node, name, &qname, kind, owner.id, file, acc);
+    android::on_type(node, kind, id, file, acc);
     let spring = spring::on_type(node, name, id, file, acc);
     calls::heritage(node, id, kind == node_kind::INTERFACE, file, acc);
     calls::record_ctor_field_types(node, id, file, acc);
@@ -311,6 +355,7 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
             id,
             qname: &qname,
             in_type: true,
+            is_interface: kind == node_kind::INTERFACE,
             route_prefix: &spring.prefix,
             is_bean: spring.is_bean,
             members: &members,
@@ -332,7 +377,10 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     let qname = format!("{}::{name}", owner.qname);
     let id = declare(node, name, &qname, kind, owner.id, file, acc);
     acc.fn_ids.insert(node.id(), id);
-    if owner.in_type {
+    // A Retrofit interface method maps a request it SENDS: ENDPOINTs, and
+    // never the ROUTE its `@GET` would read as under JAX-RS.
+    let client_mapping = owner.is_interface && android::on_interface_fn(node, id, file, acc);
+    if owner.in_type && !client_mapping {
         spring::on_method(node, id, owner.route_prefix, file, acc);
     }
     let scope = calls::CallScope {

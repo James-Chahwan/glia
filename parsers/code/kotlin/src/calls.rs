@@ -97,11 +97,11 @@
 
 use std::collections::HashSet;
 
-use repo_graph_code_domain::{CallQualifier, CallSite, UnresolvedRef, jvm};
+use repo_graph_code_domain::{CallQualifier, CallSite, UnresolvedRef, endpoint, jvm};
 use repo_graph_core::{EdgeCategoryId, NodeId};
 use tree_sitter::Node as TsNode;
 
-use crate::{Acc, File, edge_category, named_child_of_kind, routes, text_of};
+use crate::{Acc, File, android, edge_category, named_child_of_kind, routes, text_of};
 
 /// The declaration a function belongs to, as its body's receiver-less calls
 /// see it.
@@ -204,6 +204,128 @@ pub(crate) fn visit_call(call: TsNode, ctx: &Body, file: &File, acc: &mut Acc) {
             qualifier,
         });
     }
+    spring_client(call, ctx.from, file, acc);
+}
+
+/// A14.6: a Spring HTTP client call → a client ENDPOINT + CALLS from the
+/// enclosing function `from` (the Java parser's `try_detect_java_endpoint`
+/// Spring arms, over the Kotlin chain):
+///
+/// - RestTemplate: `rest.getForObject(url, C::class.java)`,
+///   `.postForEntity(url, body, C)` … — the verb from the method name
+///   (`endpoint::rest_template_verb`); `.exchange(url, HttpMethod.GET, …)` /
+///   `.execute(…)` from the `HttpMethod.<VERB>` argument. Bare `put` / `delete`
+///   also name a Map's or a Javalin router's method (`app.delete("/x", h)` is
+///   a SERVER route), so they count only on a receiver named like a
+///   RestTemplate (`restTemplate`, `rest`, `template`, `restOperations`).
+/// - WebClient / RestClient: `webClient.post().uri(url)…` fires on the
+///   `.uri(url)` call, its verb walked down the fluent chain (`.get()` /
+///   `.post()` / `.method(HttpMethod.PUT)`).
+///
+/// The URL is the first argument: a literal (Strong), a template or `+`
+/// concatenation (Medium, interpolations as `${…}`); its path must start
+/// with `/` after the authority is split off (`endpoint::client_url_split`,
+/// the Java rule), so `map.put("k", v)` never emits.
+fn spring_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) {
+    let src = file.src;
+    let Some(head) = call.named_child(0).filter(|h| h.kind() == "navigation_expression") else {
+        return;
+    };
+    let Some((base, name)) = nav_parts(head, src) else {
+        return;
+    };
+    let args = named_child_of_kind(call, &["value_arguments"]);
+    let verb = match name {
+        "uri" => webclient_verb(base, src),
+        "exchange" | "execute" => args.and_then(|a| http_method_arg_verb(a, src)),
+        "put" | "delete" if !is_rest_template_receiver(base, src) => None,
+        other => endpoint::rest_template_verb(other),
+    };
+    let Some(verb) = verb else {
+        return;
+    };
+    let Some((raw, strong)) = args
+        .and_then(first_arg_value)
+        .and_then(|arg| android::client_url(arg, src))
+    else {
+        return;
+    };
+    let (host, path) = endpoint::client_url_split(&raw);
+    let Some(path) = path else {
+        return;
+    };
+    android::emit_client_endpoint(call, verb, path, host.as_deref(), strong, from, file, acc);
+    acc.clients.spring_clients += 1;
+}
+
+/// `(receiver, method name)` of a `navigation_expression` call head: `a.b.m`
+/// is `(a.b, "m")`. `None` when the member is not an identifier.
+fn nav_parts<'a>(head: TsNode<'a>, src: &'a [u8]) -> Option<(TsNode<'a>, &'a str)> {
+    let base = head.named_child(0)?;
+    let last_ix = u32::try_from(head.named_child_count().checked_sub(1)?).ok()?;
+    let last = head.named_child(last_ix)?;
+    (last.kind() == "identifier" && last.id() != base.id()).then(|| (base, text_of(last, src)))
+}
+
+/// The verb of a WebClient / RestClient fluent chain, walked down from the
+/// receiver of its `.uri(…)`: the first `.get()` / `.post()` / … call (any
+/// case, the Java arm's rule) or `.method(HttpMethod.X)`. `None` when the
+/// chain reaches its root without one (`HttpRequest.newBuilder().uri(…)`).
+fn webclient_verb(receiver: TsNode, src: &[u8]) -> Option<&'static str> {
+    let mut cur = receiver;
+    while cur.kind() == "call_expression" {
+        let head = cur.named_child(0)?;
+        let (next, name) = match head.kind() {
+            "navigation_expression" => {
+                let (base, name) = nav_parts(head, src)?;
+                (Some(base), name)
+            }
+            "identifier" => (None, text_of(head, src)),
+            _ => return None,
+        };
+        if let Some(verb) = endpoint::jaxrs_verb(&name.to_ascii_uppercase()) {
+            return Some(verb);
+        }
+        if name == "method"
+            && let Some(verb) =
+                named_child_of_kind(cur, &["value_arguments"]).and_then(|a| http_method_arg_verb(a, src))
+        {
+            return Some(verb);
+        }
+        cur = next?;
+    }
+    None
+}
+
+/// The verb of the first `HttpMethod.<VERB>` argument
+/// (`endpoint::http_method_ref_verb`, shared with the Java arm).
+fn http_method_arg_verb(args: TsNode, src: &[u8]) -> Option<&'static str> {
+    let mut cursor = args.walk();
+    args.named_children(&mut cursor)
+        .filter(|a| a.kind() == "value_argument")
+        .find_map(|a| endpoint::http_method_ref_verb(text_of(a, src)))
+}
+
+/// The expression of a call's first positional argument.
+fn first_arg_value(args: TsNode) -> Option<TsNode> {
+    let mut cursor = args.walk();
+    let first = args
+        .named_children(&mut cursor)
+        .find(|a| a.kind() == "value_argument")?;
+    let mut ac = first.walk();
+    let has_key = first.children(&mut ac).any(|c| !c.is_named() && c.kind() == "=");
+    if has_key {
+        return None;
+    }
+    first.named_child(0)
+}
+
+/// A receiver named like a RestTemplate / RestOperations — its last `.`
+/// segment, case-folded, contains `rest` or `template`.
+fn is_rest_template_receiver(receiver: TsNode, src: &[u8]) -> bool {
+    let text = text_of(receiver, src);
+    let last = text.rsplit('.').next().unwrap_or(text).to_ascii_lowercase();
+    last.contains("rest") || last.contains("template")
 }
 
 /// The qualifier of one `call_expression`, or `None` when it names no callee
@@ -862,6 +984,116 @@ class Q(private val repo: UserRepo, val cache: Cache?, var names: List<String>, 
             ]
         );
         assert_eq!(fp.nav.field_types.len(), 1, "only Q owns fields");
+    }
+
+    /// `(endpoint qname, caller qname)` of every CALLS edge into an ENDPOINT,
+    /// in emission order.
+    fn endpoint_calls(fp: &FileParse) -> Vec<(String, String)> {
+        fp.edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS)
+            .filter(|e| fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT))
+            .map(|e| {
+                (
+                    fp.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default(),
+                    fp.nav.qname_by_id.get(&e.from).cloned().unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spring_rest_template_and_webclient_emit_endpoints() {
+        // A14.6: kotlin-flip-guard's client.kt — the ENDPOINTs the Java
+        // grammar found on .kt before A14.2's flip, now off the Kotlin chain —
+        // plus the exchange / method / template / concatenation forms.
+        let fp = parse(
+            r#"
+class UserClient {
+    private val restTemplate = RestTemplate()
+
+    fun fetch(): String {
+        return restTemplate.getForObject("/api/users", String::class.java)
+    }
+
+    fun post(): String {
+        val r = webClient.post().uri("/api/orders").retrieve()
+        return "x"
+    }
+
+    fun more(id: Long) {
+        restTemplate.exchange("/api/users/" + id, HttpMethod.PUT, null, String::class.java)
+        webClient.method(HttpMethod.PATCH).uri("/api/items/$id").retrieve()
+        this.restTemplate.delete("http://users.svc:8080/api/users/${id}")
+        restClient.get().uri("/api/health").retrieve()
+    }
+}
+"#,
+        );
+        assert_eq!(
+            endpoint_calls(&fp),
+            vec![
+                ("endpoint:GET:/api/users".to_string(), "UserClient::fetch".to_string()),
+                ("endpoint:POST:/api/orders".to_string(), "UserClient::post".to_string()),
+                ("endpoint:PUT:/api/users/${…}".to_string(), "UserClient::more".to_string()),
+                ("endpoint:PATCH:/api/items/${…}".to_string(), "UserClient::more".to_string()),
+                ("endpoint:DELETE:/api/users/${…}".to_string(), "UserClient::more".to_string()),
+                ("endpoint:GET:/api/health".to_string(), "UserClient::more".to_string()),
+            ]
+        );
+        // The ordinary CallSites are still there beside the ENDPOINT edge.
+        assert!(calls_of(&fp, id(node_kind::METHOD, "UserClient::fetch"))
+            .contains(&attr("restTemplate", "getForObject")));
+        // Literal: Strong; the absolute URL's authority rides as `host`.
+        let hit = |q: &str| {
+            let n = fp
+                .nodes
+                .iter()
+                .find(|n| n.id == id(node_kind::ENDPOINT, q))
+                .expect("endpoint");
+            match &n.cells[0].payload {
+                repo_graph_core::CellPayload::Json(s) => {
+                    serde_json::from_str::<serde_json::Value>(s).unwrap()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(hit("endpoint:GET:/api/users")["confidence"], "strong");
+        assert_eq!(hit("endpoint:GET:/api/users")["line"], 6, "1-based");
+        assert_eq!(hit("endpoint:PUT:/api/users/${…}")["confidence"], "medium");
+        assert_eq!(hit("endpoint:DELETE:/api/users/${…}")["host"], "users.svc:8080");
+        let counts = crate::parse_all(
+            "fun f() {\n    rest.getForEntity(\"/a\", A::class.java)\n}\n",
+            "f.kt",
+            "f",
+            RepoId(1),
+        )
+        .unwrap()
+        .clients;
+        assert_eq!(counts.spring_clients, 1);
+    }
+
+    #[test]
+    fn server_routes_and_map_calls_are_not_spring_clients() {
+        // Javalin's `app.delete("/x", h)` registers a SERVER route; a Map's
+        // `put`, a relative key, a JDK builder's `.uri(…)` and a Ktor DSL
+        // `delete("/x") { }` are no client calls either.
+        let fp = parse(
+            r#"
+fun main() {
+    val app = Javalin.create()
+    app.delete("/users/{id}", UserHandler::delete)
+    app.put("/users", UserHandler::update)
+    cache.put("/key", value)
+    restTemplate.getForObject("users", String::class.java)
+    val req = HttpRequest.newBuilder().uri(URI.create("http://x/y")).GET().build()
+    routing {
+        delete("/items/{id}") { call.respond("ok") }
+    }
+}
+"#,
+        );
+        assert!(endpoint_calls(&fp).is_empty(), "{:?}", endpoint_calls(&fp));
     }
 
     #[test]

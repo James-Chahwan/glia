@@ -1408,6 +1408,49 @@ pub mod endpoint {
         })
     }
 
+    /// A Spring `RestTemplate` convenience method's HTTP verb:
+    /// `getForObject` / `getForEntity` → GET, `postForObject` / `postForLocation`
+    /// → POST, `patchForObject`, `headForHeaders`, `optionsForAllow`, and bare
+    /// `put` / `delete`. Hoisted from the Java parser by A14.6 so Java and Kotlin
+    /// read one table (LA.22's client breadth extends it here).
+    ///
+    /// The `*For*` families are self-describing; bare `put` / `delete` are not
+    /// (`map.put("/k", v)`, Javalin's `app.delete("/x", h)`), so each caller
+    /// gates them further: Java on the URL path filter, Kotlin on the receiver.
+    pub fn rest_template_verb(name: &str) -> Option<&'static str> {
+        if name.starts_with("getFor") {
+            Some("GET")
+        } else if name.starts_with("postFor") {
+            Some("POST")
+        } else if name.starts_with("patchFor") {
+            Some("PATCH")
+        } else if name.starts_with("headFor") {
+            Some("HEAD")
+        } else if name.starts_with("optionsFor") {
+            Some("OPTIONS")
+        } else if name == "put" {
+            Some("PUT")
+        } else if name == "delete" {
+            Some("DELETE")
+        } else {
+            None
+        }
+    }
+
+    /// The verb of the first `HttpMethod.<VERB>` reference in `text` (one
+    /// argument of RestTemplate's `.exchange(url, HttpMethod.GET, …)` /
+    /// `.execute(…)`, or of WebClient's `.method(HttpMethod.GET)`), case-folded
+    /// and checked against the HTTP verb set ([`jaxrs_verb`]'s). Pure text, so
+    /// the Java and Kotlin client arms share it (A14.6).
+    pub fn http_method_ref_verb(text: &str) -> Option<&'static str> {
+        let idx = text.find("HttpMethod.")?;
+        let verb: String = text[idx + "HttpMethod.".len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        jaxrs_verb(&verb.to_ascii_uppercase())
+    }
+
     /// Compose a class-level prefix with an action template. Spring,
     /// Micronaut and JAX-RS all CONCATENATE — a leading `/` on the method
     /// template does not make it absolute — so `@RequestMapping("/api/v1/users")`
@@ -2961,6 +3004,24 @@ mod tests {
         assert!(!jvm::is_non_injectable_type("Int"), "Java list stays Java's");
         assert!(jvm::is_kotlin_value_type("Int"));
         assert!(!jvm::is_kotlin_value_type("UserService"));
+    }
+
+    #[test]
+    fn jvm_client_verb_tables_are_shared_by_both_parsers() {
+        // A14.6: the RestTemplate / HttpMethod tables the Java and Kotlin
+        // client arms both read.
+        use endpoint::{http_method_ref_verb, rest_template_verb};
+        assert_eq!(rest_template_verb("getForObject"), Some("GET"));
+        assert_eq!(rest_template_verb("postForLocation"), Some("POST"));
+        assert_eq!(rest_template_verb("headForHeaders"), Some("HEAD"));
+        assert_eq!(rest_template_verb("put"), Some("PUT"));
+        assert_eq!(rest_template_verb("delete"), Some("DELETE"));
+        assert_eq!(rest_template_verb("get"), None, "WebClient's verb, not RestTemplate's");
+        assert_eq!(rest_template_verb("exchange"), None);
+        assert_eq!(http_method_ref_verb("HttpMethod.GET"), Some("GET"));
+        assert_eq!(http_method_ref_verb("org.springframework.http.HttpMethod.patch"), Some("PATCH"));
+        assert_eq!(http_method_ref_verb("HttpMethod.valueOf(m)"), None);
+        assert_eq!(http_method_ref_verb("\"/users\""), None);
     }
 
     #[test]

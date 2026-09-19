@@ -86,8 +86,11 @@ use crate::{
     Acc, File, GRAPH_TYPE, cell_type, edge_category, named_child_of_kind, node_kind, text_of,
 };
 
-/// Spring stereotypes that make a type a DI-managed bean, as simple names —
-/// the Java parser's `SPRING_STEREOTYPES`.
+/// Stereotypes that make a type a DI-managed bean, as simple names — the Java
+/// parser's `SPRING_STEREOTYPES`, plus Hilt's two class-level entry markers
+/// (A14.6): a `@HiltViewModel` / `@AndroidEntryPoint` class is built by the
+/// Hilt graph, so its constructor parameters are injected even without an
+/// explicit `@Inject constructor`.
 const SPRING_STEREOTYPES: &[&str] = &[
     "Service",
     "Component",
@@ -95,6 +98,8 @@ const SPRING_STEREOTYPES: &[&str] = &[
     "Controller",
     "Repository",
     "Configuration",
+    "HiltViewModel",
+    "AndroidEntryPoint",
 ];
 
 /// Constructor / property annotations that request injection — the Java
@@ -344,6 +349,27 @@ fn simple_type_name(user_type: TsNode, src: &[u8]) -> String {
 /// `endpoint::jvm_annotation_routes` reads, and the Java parser's
 /// `own_annotations` produces.
 pub(crate) fn own_annotations(node: TsNode, src: &[u8]) -> Vec<(String, Option<String>)> {
+    own_annotation_parts(node, src)
+        .into_iter()
+        .map(|p| (p.name, p.args.and_then(|args| annotation_path_arg(args, src))))
+        .collect()
+}
+
+/// One annotation part attached to a declaration: `@GET("/x")` is name `GET`
+/// with its `value_arguments`, `@Service` is name `Service` with none.
+pub(crate) struct AnnotationPart<'a> {
+    /// The annotation's simple name (`retrofit2.http.GET` is `GET`).
+    pub(crate) name: String,
+    /// Its `value_arguments`, when it has any.
+    pub(crate) args: Option<TsNode<'a>>,
+    /// The `annotation` node it belongs to (its source position).
+    pub(crate) node: TsNode<'a>,
+}
+
+/// The annotation parts of THIS declaration's `modifiers` child, in source
+/// order: the nodes [`own_annotations`] reads, for a caller that needs a named
+/// argument or a position (A14.6's Retrofit mappings).
+pub(crate) fn own_annotation_parts<'a>(node: TsNode<'a>, src: &[u8]) -> Vec<AnnotationPart<'a>> {
     let mut out = Vec::new();
     let Some(mods) = named_child_of_kind(node, &["modifiers"]) else {
         return out;
@@ -357,14 +383,20 @@ pub(crate) fn own_annotations(node: TsNode, src: &[u8]) -> Vec<(String, Option<S
         let mut parts = ann.walk();
         for part in ann.named_children(&mut parts) {
             match part.kind() {
-                "user_type" => out.push((simple_type_name(part, src), None)),
+                "user_type" => out.push(AnnotationPart {
+                    name: simple_type_name(part, src),
+                    args: None,
+                    node: ann,
+                }),
                 "constructor_invocation" => {
                     let Some(ty) = named_child_of_kind(part, &["user_type"]) else {
                         continue;
                     };
-                    let arg = named_child_of_kind(part, &["value_arguments"])
-                        .and_then(|args| annotation_path_arg(args, src));
-                    out.push((simple_type_name(ty, src), arg));
+                    out.push(AnnotationPart {
+                        name: simple_type_name(ty, src),
+                        args: named_child_of_kind(part, &["value_arguments"]),
+                        node: ann,
+                    });
                 }
                 _ => {}
             }
@@ -373,11 +405,37 @@ pub(crate) fn own_annotations(node: TsNode, src: &[u8]) -> Vec<(String, Option<S
     out
 }
 
+/// The string value of the named argument `key` of an annotation's argument
+/// list (`method` of `@HTTP(method = "DELETE", path = "x")`), read like a path
+/// argument ([`annotation_path_arg`]'s literal / array / template rules).
+pub(crate) fn named_string_arg(args: TsNode, key: &str, src: &[u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if arg.kind() != "value_argument" {
+            continue;
+        }
+        let mut ac = arg.walk();
+        let named: Vec<TsNode> = arg.named_children(&mut ac).collect();
+        let has_key = {
+            let mut kc = arg.walk();
+            arg.children(&mut kc).any(|c| !c.is_named() && c.kind() == "=")
+        };
+        if has_key
+            && named.len() >= 2
+            && named.first().is_some_and(|k| text_of(*k, src) == key)
+            && let Some(value) = named.last()
+        {
+            return string_value(*value, src);
+        }
+    }
+    None
+}
+
 /// The path of an annotation's argument list: a `value` / `path` / `uri` /
 /// `uris` named argument first, else the first positional one. Any other
 /// named argument (`produces = [..]`, `method = [..]`) is never read, so a
 /// media type cannot become a route prefix.
-fn annotation_path_arg(args: TsNode, src: &[u8]) -> Option<String> {
+pub(crate) fn annotation_path_arg(args: TsNode, src: &[u8]) -> Option<String> {
     let mut positional = None;
     let mut cursor = args.walk();
     for arg in args.named_children(&mut cursor) {
@@ -427,7 +485,7 @@ fn string_value(value: TsNode, src: &[u8]) -> Option<String> {
 }
 
 /// The text between a string literal's quotes.
-fn literal_content(lit: TsNode, src: &[u8]) -> String {
+pub(crate) fn literal_content(lit: TsNode, src: &[u8]) -> String {
     let t = text_of(lit, src);
     let inner = t
         .strip_prefix("\"\"\"")
