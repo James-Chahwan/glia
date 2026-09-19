@@ -1,0 +1,15 @@
+{
+  "framework": "csharp-mongo-collection",
+  "language": "csharp",
+  "dirs": ["."],
+  "cells": ["csharp/db"],
+  "note": "LG.3b. At HEAD scan_collection_calls only knows `.collection(` (lower-case), so the MongoDB.Driver GetCollection<T>(\"x\") / GetCollection<T>(nameof(T)) forms mint nothing; a non-literal name (auditName) must stay unminted.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:audit_log", "note": "GetCollection<BsonDocument>(\"audit_log\")"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:OrderReadModel", "note": "GetCollection<T>(nameof(OrderReadModel))"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "auditName", "note": "a variable argument names no collection"},
+    {"kind": "DATA_ENTITY", "name": "BsonDocument", "note": "the type argument is not the collection"}
+  ]
+}

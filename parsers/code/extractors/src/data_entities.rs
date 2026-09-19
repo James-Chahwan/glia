@@ -11,7 +11,11 @@
 //!   `data_entity:graph:<label>`      — graph node labels
 //!
 //! Recognised shapes (intentionally narrow for v1 — long tail in v0.5+):
-//!   - Raw SQL (any language with a string literal): `FROM/JOIN/INTO/UPDATE`
+//!   - Raw SQL (any language with a string literal): `FROM/JOIN/INTO/UPDATE`,
+//!     read only from SQL-shaped string literals (LG.3b, [`sql_statements`]):
+//!     adjacent literals joined across one concatenation token, the joined
+//!     text must open with a statement verb, CTE names, SQL keywords and
+//!     function calls are never tables. Comments and prose are never scanned.
 //!   - SQL DDL (A13.9): `CREATE [TEMP] TABLE`, `ALTER TABLE`, `DROP TABLE`,
 //!     `TRUNCATE [TABLE]`, anchored on the whole phrase, never a bare `TABLE`
 //!   - Migration DSLs (A13.9, `migrations::scan_migration_dsl`): Alembic
@@ -20,8 +24,17 @@
 //!     `Schema::create`, EF Core `migrationBuilder.CreateTable`
 //!   - SQLAlchemy / Django: `__tablename__ = '...'` / `db_table = '...'`
 //!   - Mongoose: `mongoose.model('<Name>', ...)`
+//!   - Driver collection calls: `.collection('x')` (Node / Firestore),
+//!     `.Collection("x")` (Go mongo-driver / Firestore), `.getCollection("x")`
+//!     (Java), `.GetCollection<T>("x" | nameof(T))` (C# MongoDB.Driver)
 //!   - Cypher: `MATCH (x:<Label>)` / `MERGE (x:<Label>)` (label-only; query
 //!     parsing punted)
+//!
+//! Debug marker (LG.3b), one line per file that produced or rejected anything:
+//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='`
+
+use std::ops::Range;
+use std::sync::OnceLock;
 
 use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use repo_graph_core::{Confidence, Edge, Node, NodeId, RepoId};
@@ -118,30 +131,37 @@ impl EntitySink {
     }
 }
 
-pub fn extract_data_entity_nodes(
-    source: &str,
-    module_id: NodeId,
-    repo: RepoId,
-) -> DataEntityNodes {
+pub fn extract_data_entity_nodes(source: &str, module_id: NodeId, repo: RepoId) -> DataEntityNodes {
     let mut sink = EntitySink::new(module_id, repo);
 
-    // Only scan for raw-SQL table refs when the source actually contains a SQL
-    // statement. Without this gate the `FROM`/`JOIN`/`INTO`/`UPDATE` scan fires
-    // on ordinary English/JS ("copied from this", `Array.from(callback)`,
-    // `Intl.DateTimeFormat`), minting bogus `data_entity:sql:*` nodes on repos
-    // with zero SQL. (glia-v2 G7)
-    let lower = source.to_ascii_lowercase();
-    let sql_context = has_sql_context(&lower);
-    if sql_context {
-        for name in scan_sql_tables(source) {
+    // LG.3b: raw SQL is read only from string literals that ARE a SQL
+    // statement, never from the whole file. A file-wide scan behind a
+    // file-wide `select ` gate read comments, prose strings and Go's
+    // `select {` statement as SQL (`copied from the pool` -> table `the`).
+    let lit = sql_statements(source);
+    let mut stats = ScanStats {
+        literals: lit.literals,
+        sql: lit.statements.len(),
+        rejected_fmt: lit.rejected_fmt,
+        ..ScanStats::default()
+    };
+    for stmt in &lit.statements {
+        let scan = statement_tables(&stmt.scan);
+        stats.ctes += scan.ctes;
+        stats.rejected_fn += scan.rejected_fn;
+        for (name, pos) in scan.tables {
+            stats.note_table(&name, stmt.to_source(pos));
             sink.emit(DataEntityFlavor::Sql, &name);
         }
     }
-    // A13.9: the DDL phrase names its table. After the FROM scan, so a source
-    // the new scan adds nothing to keeps its node order. A `DROP TABLE` is its
-    // own signature; it opens only this scan, never the FROM scan above.
-    if sql_context || lower.contains("drop table") {
-        for (_, name) in scan_sql_ddl(source) {
+    // A13.9: the DDL phrase names its table. After the FROM scan, so a
+    // statement the DDL scan adds nothing to keeps its node order.
+    for stmt in &lit.statements {
+        for (_, name) in scan_sql_ddl(&stmt.scan) {
+            // The DDL scan reports no offset; the name's first occurrence in
+            // the statement is close enough for the marker's line.
+            let pos = stmt.scan.find(name.as_str()).unwrap_or(0);
+            stats.note_table(&name, stmt.to_source(pos));
             sink.emit(DataEntityFlavor::Sql, &name);
         }
     }
@@ -165,6 +185,7 @@ pub fn extract_data_entity_nodes(
         sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_collection_calls(source) {
+        stats.note_collection(&name);
         sink.emit(DataEntityFlavor::Nosql, &name);
     }
     for name in scan_beanie_documents(source) {
@@ -174,88 +195,1214 @@ pub fn extract_data_entity_nodes(
         sink.emit(DataEntityFlavor::Graph, &name);
     }
 
+    if debug_enabled() && stats.fired() {
+        eprintln!("{}", stats.marker(source));
+    }
     sink.finish()
+}
+
+/// True when `GLIA_DATA_DEBUG` is set (read once): the `[data-entity]` line
+/// is printed per file. The extractor has no path, so the line names no file
+/// and is never always-on; run it on one file or fixture to attribute it.
+fn debug_enabled() -> bool {
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    *DEBUG.get_or_init(|| std::env::var("GLIA_DATA_DEBUG").is_ok_and(|v| !v.is_empty() && v != "0"))
+}
+
+/// What one file's scan saw, for the debug marker.
+#[derive(Default)]
+struct ScanStats {
+    literals: usize,
+    sql: usize,
+    /// `(table, 1-based source line of its first hit)`, first-seen order.
+    tables: Vec<(String, usize)>,
+    ctes: usize,
+    collections: Vec<String>,
+    rejected_fn: usize,
+    rejected_fmt: usize,
+    /// Source offsets of the table hits, turned into lines only when the
+    /// marker prints (a newline count per hit is not free).
+    table_offsets: Vec<usize>,
+}
+
+impl ScanStats {
+    fn note_table(&mut self, name: &str, source_offset: usize) {
+        if !self.tables.iter().any(|(t, _)| t == name) {
+            self.tables.push((name.to_string(), 0));
+            self.table_offsets.push(source_offset);
+        }
+    }
+
+    fn note_collection(&mut self, name: &str) {
+        if !self.collections.iter().any(|c| c == name) {
+            self.collections.push(name.to_string());
+        }
+    }
+
+    fn fired(&self) -> bool {
+        self.sql > 0
+            || !self.collections.is_empty()
+            || self.rejected_fn > 0
+            || self.rejected_fmt > 0
+    }
+
+    /// `[data-entity] literals=N sql=N tables=a@L,b@L ctes=N collections=x,y
+    /// rejected_fn=N rejected_fmt=N` (`-` for an empty list; `@L` is the
+    /// 1-based source line of the table's first hit).
+    fn marker(&mut self, source: &str) -> String {
+        let b = source.as_bytes();
+        for (slot, &off) in self.tables.iter_mut().zip(&self.table_offsets) {
+            let end = off.min(b.len());
+            slot.1 = 1 + b[..end].iter().filter(|&&c| c == b'\n').count();
+        }
+        let tables = if self.tables.is_empty() {
+            "-".to_string()
+        } else {
+            self.tables
+                .iter()
+                .map(|(t, line)| format!("{t}@{line}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let collections = if self.collections.is_empty() {
+            "-".to_string()
+        } else {
+            self.collections.join(",")
+        };
+        format!(
+            "[data-entity] literals={} sql={} tables={tables} ctes={} collections={collections} rejected_fn={} rejected_fmt={}",
+            self.literals, self.sql, self.ctes, self.rejected_fn, self.rejected_fmt
+        )
+    }
+}
+
+// ----------------------------------------------------------------------------
+// String literals (LG.3b). The extractor has no language parameter, so one
+// quote-aware rule set that is safe across every host language: comments are
+// skipped, every literal form a host writes SQL in is read, and a literal is
+// only ever cut at an ASCII delimiter, so every range is on a char boundary.
+// ----------------------------------------------------------------------------
+
+/// One string literal: `outer` spans its delimiters (prefixes such as `r#`,
+/// `@`, `<<~ID` included), `body` the text between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Lit {
+    pub(crate) outer: Range<usize>,
+    pub(crate) body: Range<usize>,
+}
+
+/// Every string literal in `source`, in source order. Recognised: `"…"` and
+/// `'…'` with backslash escapes (a `'…'` must close on its own line, else it
+/// is an apostrophe and is dropped; a `'` inside a word opens nothing unless
+/// the word is a string prefix such as `f` / `rb`), backticks (Go raw, JS
+/// templates with `${…}` kept as text), triple quotes (Python, Kotlin, Scala,
+/// Swift, Java text blocks, C# raw), C# verbatim `@"…"` (`""` escape), Rust
+/// raw `r"…"` / `r#"…"#`, and Ruby / PHP heredocs (`<<~ID`, `<<-ID`, `<<ID`,
+/// `<<<ID`, `<<<'ID'`, `<<<"ID"`) up to the line that is `ID` (PHP: `ID;`).
+/// Skipped as comments: `//` to end of line, `/* … */`, and `# ` to end of
+/// line when the `#` starts the line or follows whitespace (Python / Ruby /
+/// shell; `#[attr]`, `#include`, `#region`, `this.#x` are untouched). JS /
+/// Ruby regex literals are skipped too ([`regex_literal_end`]).
+///
+/// Linear: a double-quote, backtick or triple-quote form that never closes
+/// marks its delimiter as closed-for-good, so a file of unbalanced quotes is
+/// not rescanned from every opener; heredoc search is bounded.
+pub(crate) fn string_literals(source: &str) -> Vec<Lit> {
+    let b = source.as_bytes();
+    let n = b.len();
+    let mut out = Vec::new();
+    // Delimiters (`"`, `` ` ``, triple `"` / `'`) known to have no closer
+    // anywhere after the position where a scan for one ran out.
+    let mut exhausted = Exhausted::default();
+    let mut i = 0;
+    while i < n {
+        let c = b[i];
+        let prev = if i > 0 { b[i - 1] } else { b'\n' };
+        let found = match c {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = line_end(b, i);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = find_bytes(b, i + 2, b"*/").map_or(n, |j| j + 2);
+                continue;
+            }
+            b'/' => {
+                // A JS / Ruby regex literal (`replace(/'/g, "''")`) holds
+                // quotes that would flip the parity of every later literal.
+                i = regex_literal_end(b, i).unwrap_or(i + 1);
+                continue;
+            }
+            b'#' if prev.is_ascii_whitespace() && matches!(b.get(i + 1), Some(b' ' | b'\t')) => {
+                i = line_end(b, i);
+                continue;
+            }
+            b'<' if b.get(i + 1) == Some(&b'<') => heredoc(b, i),
+            b'r' if !is_word_byte(prev) || (prev == b'b' && (i < 2 || !is_word_byte(b[i - 2]))) => {
+                rust_raw(b, i)
+            }
+            b'@' | b'$' => csharp_verbatim(b, i),
+            b'"' | b'\'' | b'`' => quoted(b, i, &mut exhausted),
+            _ => None,
+        };
+        match found {
+            Some(lit) => {
+                i = lit.outer.end.max(i + 1);
+                out.push(lit);
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+#[derive(Default)]
+struct Exhausted {
+    double: bool,
+    backtick: bool,
+    triple_double: bool,
+    triple_single: bool,
+}
+
+fn is_word_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Offset of the `\n` ending the line `i` is on, or the source length.
+fn line_end(b: &[u8], i: usize) -> usize {
+    b[i..]
+        .iter()
+        .position(|&c| c == b'\n')
+        .map_or(b.len(), |p| i + p)
+}
+
+fn find_bytes(b: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    if from >= b.len() {
+        return None;
+    }
+    b[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| from + p)
+}
+
+/// The offset just past a regex literal opening at `i` (a `/` that is not a
+/// comment), or `None` when the `/` is a division. A regex can only start
+/// where an operand starts: the previous non-blank byte is one of
+/// `( , = : [ ! & | ? { ;` or the start of the source, so `a / b`, `(x) / 2`
+/// and `</div>` stay divisions and tags. It must close on its own line, past
+/// escapes and `[…]` classes; the flags after it are skipped.
+fn regex_literal_end(b: &[u8], i: usize) -> Option<usize> {
+    let before = b[..i].iter().rev().find(|c| !matches!(c, b' ' | b'\t'));
+    if !matches!(
+        before,
+        None | Some(
+            b'(' | b','
+                | b'='
+                | b':'
+                | b'['
+                | b'!'
+                | b'&'
+                | b'|'
+                | b'?'
+                | b'{'
+                | b';'
+                | b'\n'
+                | b'\r'
+        )
+    ) {
+        return None;
+    }
+    let mut j = i + 1;
+    let mut class = false;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 1,
+            b'\n' => return None,
+            b'[' => class = true,
+            b']' => class = false,
+            b'/' if !class => {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                return Some(j);
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// A `'` inside a word (`don't`, Haskell `foldl'`) opens nothing, unless the
+/// word before it is a 1-2 letter string prefix (`f'…'`, `rb'…'`, `u'…'`).
+fn apostrophe_opens(b: &[u8], i: usize) -> bool {
+    let mut s = i;
+    while s > 0 && is_word_byte(b[s - 1]) {
+        s -= 1;
+    }
+    let word = &b[s..i];
+    word.is_empty() || (word.len() <= 2 && word.iter().all(|c| b"rRbBuUfF".contains(c)))
+}
+
+/// A `"…"`, `'…'`, `` `…` `` or triple-quoted literal opening at `i`.
+fn quoted(b: &[u8], i: usize, exhausted: &mut Exhausted) -> Option<Lit> {
+    let q = b[i];
+    if q == b'\'' && !apostrophe_opens(b, i) {
+        return None;
+    }
+    let run = b[i..].iter().take(3).take_while(|&&c| c == q).count();
+    if run == 3 && q != b'`' {
+        let flag = if q == b'"' {
+            &mut exhausted.triple_double
+        } else {
+            &mut exhausted.triple_single
+        };
+        if *flag {
+            return None;
+        }
+        let start = i + 3;
+        let mut j = start;
+        while j + 2 < b.len() {
+            if b[j] == b'\\' {
+                j += 2;
+                continue;
+            }
+            if b[j] == q && b[j + 1] == q && b[j + 2] == q {
+                return Some(Lit {
+                    outer: i..j + 3,
+                    body: start..j,
+                });
+            }
+            j += 1;
+        }
+        *flag = true;
+        return None;
+    }
+    if run == 2 {
+        // `""`, `''`, ``` `` ```: the empty literal.
+        return Some(Lit {
+            outer: i..i + 2,
+            body: i + 1..i + 1,
+        });
+    }
+    let flag = match q {
+        b'"' => Some(&mut exhausted.double),
+        b'`' => Some(&mut exhausted.backtick),
+        _ => None,
+    };
+    if flag.as_ref().is_some_and(|f| **f) {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            c if c == q => {
+                return Some(Lit {
+                    outer: i..j + 1,
+                    body: i + 1..j,
+                });
+            }
+            // A single-quoted literal never spans lines: this was an
+            // apostrophe (prose, `'a` lifetime, `# don't` comment).
+            b'\n' if q == b'\'' => return None,
+            _ => j += 1,
+        }
+    }
+    if let Some(f) = flag {
+        *f = true;
+    }
+    None
+}
+
+/// Rust raw `r"…"` / `r#"…"#` (also after `b`) at `i` (the `r`): no escapes,
+/// closed by `"` plus as many `#` as opened.
+fn rust_raw(b: &[u8], i: usize) -> Option<Lit> {
+    let mut j = i + 1;
+    let mut hashes = 0;
+    while b.get(j) == Some(&b'#') && hashes < 16 {
+        hashes += 1;
+        j += 1;
+    }
+    if b.get(j) != Some(&b'"') {
+        return None;
+    }
+    let start = j + 1;
+    let mut k = start;
+    while k < b.len() {
+        if b[k] == b'"'
+            && b.len() >= k + 1 + hashes
+            && b[k + 1..k + 1 + hashes].iter().all(|&c| c == b'#')
+        {
+            return Some(Lit {
+                outer: i..k + 1 + hashes,
+                body: start..k,
+            });
+        }
+        k += 1;
+    }
+    None
+}
+
+/// C# verbatim `@"…"`, `$@"…"`, `@$"…"` at `i`: `""` is an escaped quote.
+fn csharp_verbatim(b: &[u8], i: usize) -> Option<Lit> {
+    let open = match (b[i], b.get(i + 1), b.get(i + 2)) {
+        (b'@', Some(b'"'), _) => i + 1,
+        (b'@', Some(b'$'), Some(b'"')) | (b'$', Some(b'@'), Some(b'"')) => i + 2,
+        _ => return None,
+    };
+    let start = open + 1;
+    let mut j = start;
+    while j < b.len() {
+        if b[j] == b'"' {
+            if b.get(j + 1) == Some(&b'"') {
+                j += 2;
+                continue;
+            }
+            return Some(Lit {
+                outer: i..j + 1,
+                body: start..j,
+            });
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Lines searched for a heredoc terminator before the opener is taken for a
+/// shift operator (`1<<SHIFT`).
+const HEREDOC_MAX_LINES: usize = 4000;
+
+/// A Ruby / PHP heredoc opening at `i` (the first `<`). The body is every line
+/// after the opener's line up to the terminator line; the literal ends at the
+/// end of the terminator line, and the rest of the opener's line is not read.
+fn heredoc(b: &[u8], i: usize) -> Option<Lit> {
+    let mut j = i + 2;
+    let php = b.get(j) == Some(&b'<');
+    let mut flexible = false;
+    if php {
+        j += 1;
+        while matches!(b.get(j), Some(b' ' | b'\t')) {
+            j += 1;
+        }
+    } else if matches!(b.get(j), Some(b'~' | b'-')) {
+        flexible = true;
+        j += 1;
+    }
+    let quote = match b.get(j) {
+        Some(&q @ (b'\'' | b'"')) => {
+            j += 1;
+            Some(q)
+        }
+        _ => None,
+    };
+    let id_start = j;
+    if !b
+        .get(j)
+        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
+        return None;
+    }
+    while j < b.len() && is_word_byte(b[j]) {
+        j += 1;
+    }
+    let id = &b[id_start..j];
+    if quote.is_some_and(|q| b.get(j) != Some(&q)) {
+        return None;
+    }
+    // A bare `<<ID` is a shift (`1<<SHIFT`, `Vec<<T as X>::Y>`) unless the id
+    // is an upper-case word of two or more bytes and a terminator follows.
+    let bare = !php && !flexible && quote.is_none();
+    if bare
+        && (id.len() < 2
+            || !id
+                .iter()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_'))
+    {
+        return None;
+    }
+    let body_start = line_end(b, j) + 1;
+    if body_start > b.len() {
+        return None;
+    }
+    let mut line_start = body_start;
+    for _ in 0..HEREDOC_MAX_LINES {
+        if line_start >= b.len() {
+            return None;
+        }
+        let end = line_end(b, line_start);
+        let line = &b[line_start..end];
+        let trimmed_start = line
+            .iter()
+            .position(|c| !c.is_ascii_whitespace())
+            .unwrap_or(line.len());
+        let t = &line[trimmed_start..];
+        let t = &t[..t.len()
+            - t.iter()
+                .rev()
+                .take_while(|c| c.is_ascii_whitespace())
+                .count()];
+        let is_terminator = if php {
+            t.starts_with(id) && t.get(id.len()).is_none_or(|c| !is_word_byte(*c))
+        } else {
+            t == id
+        };
+        if is_terminator {
+            return Some(Lit {
+                outer: i..end,
+                body: body_start..line_start,
+            });
+        }
+        line_start = end + 1;
+    }
+    None
+}
+
+// ----------------------------------------------------------------------------
+// SQL statements: adjacent literals joined across concatenation, kept when the
+// joined text is a SQL statement.
+// ----------------------------------------------------------------------------
+
+/// One piece of a joined statement: `(source_start, text_start, len)` — the
+/// literal body at `source_start` is `text[text_start..text_start + len]`.
+pub(crate) type Piece = (usize, usize, usize);
+
+/// A SQL statement built from one or more adjacent string literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SqlStmt {
+    /// The literal bodies, concatenated (a builder step adds a `\n` between).
+    pub(crate) text: String,
+    /// `text` with `\n`-style escapes, SQL comments and single-quoted values
+    /// blanked ([`blank_escapes`], [`blank_sql_noise`]), and for a builder
+    /// fragment everything outside its subqueries ([`keep_subqueries`]):
+    /// same length, same offsets. Every scan reads it.
+    pub(crate) scan: String,
+    pub(crate) pieces: Vec<Piece>,
+}
+
+impl SqlStmt {
+    /// The byte offset in the original source of `text_pos` (an offset into
+    /// `text` / `scan`). Pieces start and end at ASCII delimiters, so the
+    /// result is a char boundary whenever `text_pos` is. LE.4a re-homes each
+    /// ACCESSES_DATA site to its enclosing function by this offset.
+    pub(crate) fn to_source(&self, text_pos: usize) -> usize {
+        let piece = self
+            .pieces
+            .iter()
+            .rev()
+            .find(|(_, t, _)| *t <= text_pos)
+            .or(self.pieces.first());
+        match piece {
+            Some(&(s, t, _)) => s + text_pos.saturating_sub(t),
+            None => text_pos,
+        }
+    }
+}
+
+/// The SQL statements of a source file, plus what the marker reports.
+pub(crate) struct LiteralSql {
+    /// String literals seen (before joining).
+    pub(crate) literals: usize,
+    pub(crate) statements: Vec<SqlStmt>,
+    /// Joined literals that opened with a SQL verb but carry a Go fmt verb no
+    /// SQL driver uses (`delete from spaces key=%q: %w`).
+    pub(crate) rejected_fmt: usize,
+}
+
+/// Join adjacent literals whose gap holds only whitespace and at most one
+/// concatenation token (`+` Go / Java / JS / C#, `.` PHP, `\` a line
+/// continuation, nothing at all for Python / C implicit concatenation), so
+/// `"SELECT o.id " +\n "FROM orders o"` is one statement, and the lines of a
+/// string builder (see [`Joint::Builder`]); keep a joined literal iff it opens
+/// a SQL statement ([`opens_sql_statement`]) or is a builder fragment holding
+/// a subquery ([`has_subquery`]), and is not a Go fmt message
+/// ([`has_go_fmt_verb`]).
+pub(crate) fn sql_statements(source: &str) -> LiteralSql {
+    let lits = string_literals(source);
+    let b = source.as_bytes();
+    let mut out = LiteralSql {
+        literals: lits.len(),
+        statements: Vec::new(),
+        rejected_fmt: 0,
+    };
+    // `joints[k]`: how literal k attaches to literal k - 1.
+    let joints: Vec<Joint> = (0..lits.len())
+        .map(|k| {
+            if k == 0 {
+                Joint::Apart
+            } else {
+                joint(b, &lits[k - 1], &lits[k])
+            }
+        })
+        .collect();
+    let mut start = 0;
+    for k in 1..=lits.len() {
+        if k < lits.len() && joints[k] != Joint::Apart {
+            continue;
+        }
+        let group = &lits[start..k];
+        let group_joints = &joints[start..k];
+        start = k;
+        // Cheap first: no allocation unless the first word is a SQL verb or
+        // a piece holds a parenthesised subquery.
+        let verb = group_opens_with_verb(source, group);
+        if !verb && !group.iter().any(|lit| has_subquery(&b[lit.body.clone()])) {
+            continue;
+        }
+        let mut text = String::new();
+        let mut pieces = Vec::with_capacity(group.len());
+        for (lit, j) in group.iter().zip(group_joints) {
+            // A builder append (`AppendLine`, `WriteString`, `+=`) is one
+            // line of the statement: keep its tokens apart.
+            if *j == Joint::Builder {
+                text.push('\n');
+            }
+            pieces.push((lit.body.start, text.len(), lit.body.len()));
+            text.push_str(&source[lit.body.clone()]);
+        }
+        let mut scan = blank_sql_noise(&blank_escapes(&text));
+        let is_sql = if verb {
+            opens_sql_statement(&scan)
+        } else if has_subquery(scan.as_bytes()) && !ends_like_prose(&scan) {
+            // A query-builder fragment: `" AND EXISTS (SELECT 1 FROM t …)"`.
+            // Only the subqueries are SQL; the rest of the literal is not read.
+            scan = keep_subqueries(&scan);
+            true
+        } else {
+            false
+        };
+        if !is_sql {
+            continue;
+        }
+        if has_go_fmt_verb(&scan) {
+            out.rejected_fmt += 1;
+            continue;
+        }
+        out.statements.push(SqlStmt { text, scan, pieces });
+    }
+    out
+}
+
+/// How a literal attaches to the one before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Joint {
+    /// Not part of the same statement.
+    Apart,
+    /// Concatenated: the runtime value is the two bodies back to back.
+    Concat,
+    /// The next line of a string builder (`sb.AppendLine("…")`,
+    /// `.append("…")`, `sb.WriteString("…")`, `parts.push("…")`,
+    /// `q += "…"`, `$sql .= "…"`).
+    Builder,
+}
+
+/// Builder methods whose calls append their argument to one statement.
+const BUILDER_METHODS: &[&str] = &[
+    "Append",
+    "AppendLine",
+    "append",
+    "WriteString",
+    "write",
+    "push",
+    "concat",
+];
+
+/// Longest gap between two literals that can still join them.
+const MAX_JOINT_GAP: usize = 160;
+
+fn joint(b: &[u8], a: &Lit, next: &Lit) -> Joint {
+    if next.outer.start < a.outer.end || next.outer.start - a.outer.end > MAX_JOINT_GAP {
+        return Joint::Apart;
+    }
+    let gap = &b[a.outer.end..next.outer.start];
+    let mut tokens = 0;
+    let concat = gap.iter().all(|&c| {
+        if c.is_ascii_whitespace() {
+            return true;
+        }
+        if matches!(c, b'+' | b'.' | b'\\') && tokens == 0 {
+            tokens += 1;
+            return true;
+        }
+        false
+    });
+    if concat {
+        Joint::Concat
+    } else if builder_gap(gap) {
+        Joint::Builder
+    } else {
+        Joint::Apart
+    }
+}
+
+/// True when `gap` (the code between two literals) is one builder step:
+/// `)[;] [recv](.|->)Method(` with Method a [`BUILDER_METHODS`] entry, or
+/// `[;] recv += ` / `[;] recv .= `. The receiver is a plain path.
+fn builder_gap(gap: &[u8]) -> bool {
+    let first = gap.iter().find(|c| !c.is_ascii_whitespace());
+    let last = gap.iter().rev().find(|c| !c.is_ascii_whitespace());
+    if !matches!(first, Some(b')' | b';')) && last != Some(&b'=') {
+        return false;
+    }
+    let g: Vec<u8> = gap
+        .iter()
+        .copied()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let path = |r: &[u8]| {
+        r.iter()
+            .all(|&c| is_word_byte(c) || matches!(c, b'.' | b'$' | b'-' | b'>'))
+    };
+    let body = g.strip_prefix(b";").unwrap_or(&g);
+    for op in [b"+=".as_slice(), b".=".as_slice()] {
+        if let Some(recv) = body.strip_suffix(op) {
+            return !recv.is_empty() && path(recv);
+        }
+    }
+    let Some(rest) = g.strip_prefix(b")") else {
+        return false;
+    };
+    let rest = rest.strip_prefix(b";").unwrap_or(rest);
+    let Some(call) = rest.strip_suffix(b"(") else {
+        return false;
+    };
+    let Some(split) = call.iter().rposition(|&c| c == b'.' || c == b'>') else {
+        return false;
+    };
+    let (recv, method) = (&call[..split], &call[split + 1..]);
+    path(recv) && BUILDER_METHODS.iter().any(|m| m.as_bytes() == method)
+}
+
+/// `text` with every `\n`, `\t` and `\r` escape (a literal body is read raw)
+/// replaced by two spaces, so `"SELECT a\nFROM users"` keeps `FROM` a word.
+/// Same length, so offsets carry over.
+fn blank_escapes(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = b.to_vec();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b'\\' {
+            if matches!(b[i + 1], b'n' | b't' | b'r') {
+                out[i] = b' ';
+                out[i + 1] = b' ';
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    // Only ASCII bytes were replaced, by ASCII.
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
+}
+
+/// Statement verbs a joined literal may open with (the full shape is checked
+/// by [`opens_sql_statement`] once the text is joined).
+const SQL_VERBS: &[&str] = &[
+    "SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "ALTER", "DROP", "TRUNCATE", "MERGE",
+    "REPLACE",
+];
+
+/// Offset of the first byte of `b` at or after `i` that is not whitespace, an
+/// opening paren, a `\n` / `\t` / `\r` escape, or a SQL comment.
+fn skip_sql_lead(b: &[u8], mut i: usize) -> usize {
+    loop {
+        while i < b.len() && (b[i].is_ascii_whitespace() || b[i] == b'(') {
+            i += 1;
+        }
+        if b[i..].starts_with(b"\\") && matches!(b.get(i + 1), Some(b'n' | b't' | b'r')) {
+            // A raw body's `\n` escape.
+            i += 2;
+        } else if b[i..].starts_with(b"--") {
+            i = line_end(b, i);
+        } else if b[i..].starts_with(b"/*") {
+            i = find_bytes(b, i + 2, b"*/").map_or(b.len(), |j| j + 2);
+        } else {
+            return i;
+        }
+    }
+}
+
+fn group_opens_with_verb(source: &str, group: &[Lit]) -> bool {
+    let b = source.as_bytes();
+    for lit in group {
+        let body = &b[lit.body.clone()];
+        let s = skip_sql_lead(body, 0);
+        if s == body.len() {
+            continue; // an all-blank piece: the verb is in the next one
+        }
+        let w = next_word(body, s);
+        return w.0 == s && SQL_VERBS.iter().any(|v| word_is(body, w, v));
+    }
+    false
+}
+
+/// True when a joined literal opens (after whitespace, `(`, escapes and SQL
+/// comments) with a statement verb in a statement shape: `SELECT … FROM`, `INSERT [IGNORE |
+/// OR <x>] INTO`, `UPDATE … SET`, `DELETE FROM`, `WITH [RECURSIVE] x AS (`,
+/// `CREATE [OR REPLACE] [TEMP …] TABLE | [UNIQUE] INDEX | [MATERIALIZED] VIEW`,
+/// `ALTER TABLE`, `DROP TABLE`, `TRUNCATE TABLE` (or an upper-case bare
+/// `TRUNCATE`), `MERGE INTO`, `REPLACE INTO`. Prose that happens to start with
+/// a verb (`Select from the list.`) ends like prose ([`ends_like_prose`]).
+/// `scan` is the joined text with escapes and SQL noise blanked
+/// ([`blank_escapes`], [`blank_sql_noise`]). A literal that opens with no
+/// verb is SQL only when it holds a subquery ([`has_subquery`]).
+fn opens_sql_statement(scan: &str) -> bool {
+    let b = scan.as_bytes();
+    let s = skip_sql_lead(b, 0);
+    let first = next_word(b, s);
+    if first.0 != s || first.0 == first.1 {
+        return false;
+    }
+    let second = next_word(b, first.1);
+    let shaped = if word_is(b, first, "SELECT") {
+        has_word_ci(b, first.1, "FROM")
+    } else if word_is(b, first, "INSERT") {
+        let third = next_word(b, second.1);
+        word_is(b, second, "INTO")
+            || (word_is(b, second, "IGNORE") && word_is(b, third, "INTO"))
+            || (word_is(b, second, "OR") && word_is(b, next_word(b, third.1), "INTO"))
+    } else if word_is(b, first, "UPDATE") {
+        has_word_ci(b, first.1, "SET")
+    } else if word_is(b, first, "DELETE") {
+        word_is(b, second, "FROM")
+    } else if word_is(b, first, "WITH") {
+        cte_at(b, first.1).is_some()
+    } else if word_is(b, first, "CREATE") {
+        create_ddl_shape(b, first.1)
+    } else if word_is(b, first, "ALTER") || word_is(b, first, "DROP") {
+        word_is(b, second, "TABLE")
+    } else if word_is(b, first, "TRUNCATE") {
+        word_is(b, second, "TABLE") || (&b[first.0..first.1] == b"TRUNCATE" && second.0 < second.1)
+    } else if word_is(b, first, "MERGE") || word_is(b, first, "REPLACE") {
+        word_is(b, second, "INTO")
+    } else {
+        false
+    };
+    shaped && !ends_like_prose(scan)
+}
+
+/// Prose that happens to hold SQL words ends in `.` or `!`; SQL never does.
+fn ends_like_prose(scan: &str) -> bool {
+    let tail = scan.trim_end();
+    tail.ends_with('.') || tail.ends_with('!')
+}
+
+/// `scan` with everything outside its parenthesised subqueries (`(SELECT …)`,
+/// to the matching `)` or the end) blanked to spaces, newlines kept. Same
+/// length, so offsets carry over.
+fn keep_subqueries(scan: &str) -> String {
+    let b = scan.as_bytes();
+    let mut keep = vec![false; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'(' && word_is(b, next_word(b, i + 1), "SELECT") {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < b.len() {
+                match b[j] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = (j + 1).min(b.len());
+            keep[i..end].iter_mut().for_each(|k| *k = true);
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    let out: Vec<u8> = b
+        .iter()
+        .zip(&keep)
+        .map(|(&c, &k)| if k || c == b'\n' { c } else { b' ' })
+        .collect();
+    // Kept spans start at `(` and end after `)`: ASCII, so char boundaries.
+    String::from_utf8(out).unwrap_or_else(|_| scan.to_string())
+}
+
+/// True when `b` holds a parenthesised subquery: `(` then `SELECT`, with a
+/// `FROM` after it (a query-builder fragment such as `" AND EXISTS (SELECT 1
+/// FROM entity_records er …)"`, which opens with no verb of its own).
+fn has_subquery(b: &[u8]) -> bool {
+    b.iter().enumerate().any(|(i, &c)| {
+        if c != b'(' {
+            return false;
+        }
+        let w = next_word(b, i + 1);
+        word_is(b, w, "SELECT") && has_word_ci(b, w.1, "FROM")
+    })
+}
+
+/// `CREATE` is followed by a table, index or view: `[OR REPLACE] [GLOBAL |
+/// LOCAL] [TEMP | TEMPORARY | UNLOGGED | VIRTUAL] TABLE`, `[UNIQUE |
+/// CLUSTERED | NONCLUSTERED | FULLTEXT | SPATIAL] INDEX`, `[MATERIALIZED]
+/// VIEW`.
+fn create_ddl_shape(b: &[u8], i: usize) -> bool {
+    const MODIFIERS: &[&str] = &[
+        "OR",
+        "REPLACE",
+        "GLOBAL",
+        "LOCAL",
+        "TEMP",
+        "TEMPORARY",
+        "UNLOGGED",
+        "VIRTUAL",
+        "UNIQUE",
+        "CLUSTERED",
+        "NONCLUSTERED",
+        "FULLTEXT",
+        "SPATIAL",
+        "MATERIALIZED",
+    ];
+    let mut w = next_word(b, i);
+    for _ in 0..4 {
+        if !MODIFIERS.iter().any(|m| word_is(b, w, m)) {
+            break;
+        }
+        w = next_word(b, w.1);
+    }
+    ["TABLE", "INDEX", "VIEW"].iter().any(|k| word_is(b, w, k))
+}
+
+/// True when `word` occurs as a whole word (ASCII case-insensitive) at or
+/// after `from`.
+fn has_word_ci(b: &[u8], from: usize, word: &str) -> bool {
+    let w = word.as_bytes();
+    let mut i = from;
+    while i + w.len() <= b.len() {
+        if b[i..i + w.len()].eq_ignore_ascii_case(w)
+            && (i == 0 || !is_word_byte(b[i - 1]))
+            && b.get(i + w.len()).is_none_or(|c| !is_word_byte(*c))
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// A Go fmt verb no SQL driver uses as a placeholder: `%v`, `%q`, `%w` (with
+/// an optional `+` / `#` flag). SQL placeholders are `?`, `$n`, `:name`,
+/// `@p`, `%s` and `%(name)s`. `scan` is the blanked text, so a `LIKE '%water%'`
+/// value never counts.
+fn has_go_fmt_verb(scan: &str) -> bool {
+    let b = scan.as_bytes();
+    b.iter().enumerate().any(|(i, &c)| {
+        if c != b'%' {
+            return false;
+        }
+        let mut j = i + 1;
+        if matches!(b.get(j), Some(b'+' | b'#')) {
+            j += 1;
+        }
+        matches!(b.get(j), Some(b'v' | b'q' | b'w'))
+    })
+}
+
+/// The span of the CTE name a `WITH` (or a `,` in a WITH list) introduces at
+/// `i`: `[RECURSIVE] <ident> [(cols)] AS [NOT] [MATERIALIZED] (`.
+fn cte_at(b: &[u8], i: usize) -> Option<(usize, usize)> {
+    let mut name = next_word(b, i);
+    if word_is(b, name, "RECURSIVE") {
+        name = next_word(b, name.1);
+    }
+    if name.0 == name.1 || (!b[name.0].is_ascii_alphabetic() && b[name.0] != b'_') {
+        return None;
+    }
+    let mut j = name.1;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if b.get(j) == Some(&b'(') {
+        // A column list is flat: the first `)` closes it.
+        let close = b[j..].iter().take(512).position(|&c| c == b')')?;
+        j += close + 1;
+    }
+    let as_kw = next_word(b, j);
+    if !word_is(b, as_kw, "AS") {
+        return None;
+    }
+    let mut k = as_kw.1;
+    let not = next_word(b, k);
+    if word_is(b, not, "NOT") {
+        k = not.1;
+    }
+    let mat = next_word(b, k);
+    if word_is(b, mat, "MATERIALIZED") {
+        k = mat.1;
+    }
+    while k < b.len() && b[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    (b.get(k) == Some(&b'(')).then_some(name)
+}
+
+/// Lower-cased CTE names `sql` defines: `WITH x AS (` and every `, y AS (`.
+fn cte_names(sql: &str) -> Vec<String> {
+    let b = sql.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let at = if b[i] == b',' {
+            i += 1;
+            cte_at(b, i)
+        } else if is_word_byte(b[i]) {
+            let w = next_word(b, i);
+            i = w.1.max(i + 1);
+            if word_is(b, w, "WITH") {
+                cte_at(b, w.1)
+            } else {
+                None
+            }
+        } else {
+            i += 1;
+            None
+        };
+        if let Some((s, e)) = at {
+            let name = sql[s..e].to_ascii_lowercase();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// One statement's tables, minus its CTE names.
+#[derive(Default)]
+pub(crate) struct SqlScan {
+    /// `(table, offset of the name in the scanned text)`.
+    pub(crate) tables: Vec<(String, usize)>,
+    pub(crate) ctes: usize,
+    pub(crate) rejected_fn: usize,
+}
+
+/// The tables one statement's text names ([`scan_sql_tables`]), minus the
+/// names the statement's own `WITH` defines. `sql` is blanked text.
+pub(crate) fn statement_tables(sql: &str) -> SqlScan {
+    let ctes = cte_names(sql);
+    let mut rejected_fn = 0;
+    let tables = scan_sql_tables(sql, &mut rejected_fn)
+        .into_iter()
+        .filter(|(name, _)| !ctes.contains(&name.to_ascii_lowercase()))
+        .collect();
+    SqlScan {
+        tables,
+        ctes: ctes.len(),
+        rejected_fn,
+    }
+}
+
+/// Whole-file SQL mode (a migration `.sql`, already blanked by
+/// [`blank_sql_noise`]): every statement is SQL, so the table scan runs over
+/// the file, one `;`-separated statement at a time so a CTE name is dropped
+/// only from the statement that defines it. Offsets are file offsets.
+pub(crate) fn sql_file_tables(sql: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (k, c) in sql
+        .bytes()
+        .enumerate()
+        .chain(std::iter::once((sql.len(), b';')))
+    {
+        if c != b';' {
+            continue;
+        }
+        // `;` is ASCII, so both cuts are char boundaries.
+        let scan = statement_tables(&sql[start..k]);
+        out.extend(scan.tables.into_iter().map(|(t, p)| (t, start + p)));
+        start = (k + 1).min(sql.len());
+    }
+    out
+}
+
+/// `source` with every `-- line` / `/* block */` comment and every
+/// single-quoted string value (`'text'`, `E'it\'s'`) replaced by spaces,
+/// newlines kept. In SQL a single quote delimits a value, never a name, so no
+/// table is lost; double-quoted, backticked and bracketed identifiers are
+/// left alone. Only ASCII bytes delimit what is blanked and every blanked byte
+/// becomes an ASCII space, so the result is valid UTF-8 whenever `source` is,
+/// and it has `source`'s length, so offsets carry over. (A13.9, shared by the
+/// literal scan since LG.3b.)
+pub(crate) fn blank_sql_noise(source: &str) -> String {
+    let b = source.as_bytes();
+    let mut out = b.to_vec();
+    let blank = |from: usize, to: usize, out: &mut Vec<u8>| {
+        for (k, byte) in out.iter_mut().enumerate().take(to).skip(from) {
+            if b[k] != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\'' => {
+                // `E'…'` takes backslash escapes; a standard string doubles its
+                // quote (`'it''s'`), which reads as two adjacent strings here.
+                let escapes = i > 0
+                    && matches!(b[i - 1], b'E' | b'e')
+                    && (i < 2 || !(b[i - 2].is_ascii_alphanumeric() || b[i - 2] == b'_'));
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'\'' {
+                    j += if escapes && b[j] == b'\\' { 2 } else { 1 };
+                }
+                let end = (j + 1).min(b.len());
+                blank(i, end, &mut out);
+                i = end;
+            }
+            q @ (b'"' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                let mut j = i;
+                while j < b.len() && b[j] != b'\n' {
+                    j += 1;
+                }
+                blank(i, j, &mut out);
+                i = j;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let mut j = i + 2;
+                while j < b.len() && !(b[j] == b'*' && b.get(j + 1) == Some(&b'/')) {
+                    j += 1;
+                }
+                let end = (j + 2).min(b.len());
+                blank(i, end, &mut out);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
 // ----------------------------------------------------------------------------
 // Raw SQL: pull table names from `FROM <name>`, `JOIN <name>`, `INTO <name>`,
-// `UPDATE <name>` clauses inside string literals. Case-insensitive on the
-// keyword, identifier-shaped on the name.
+// `UPDATE <name>` clauses. Case-insensitive on the keyword, identifier-shaped
+// on the name. Callers hand it SQL text only: one literal statement, or a
+// migration file.
 // ----------------------------------------------------------------------------
 
-/// True when `source` contains an unambiguous SQL statement signature. Gates
-/// the raw-SQL table scan so plain prose/JS that happens to use the words
-/// `from`/`join`/`into`/`update` doesn't get mistaken for SQL. (glia-v2 G7)
-/// `lower` is the source already ASCII-lowercased by the caller.
-fn has_sql_context(lower: &str) -> bool {
-    const SIG: &[&str] = &[
-        "select ",
-        "insert into",
-        "delete from",
-        "create table",
-        "alter table",
-        "truncate table",
-        "merge into",
-    ];
-    if SIG.iter().any(|s| lower.contains(s)) {
-        return true;
-    }
-    // `UPDATE <table> SET ...` — the verb alone is too common, pair it with SET.
-    lower.contains("update ") && lower.contains(" set ")
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clause {
+    From,
+    Join,
+    Into,
+    Update,
 }
 
-pub(crate) fn scan_sql_tables(source: &str) -> Vec<String> {
+/// `(table, offset of the name in sql)` for every FROM / JOIN / INTO / UPDATE
+/// clause, in text order. One forward pass. What is never a table: a function (`FROM unnest(`,
+/// `JOIN LATERAL jsonb_array_elements(`), a FROM that is a function argument
+/// (`EXTRACT(YEAR FROM ts)`, `SUBSTRING(x FROM 2)`: inside a paren that holds
+/// no SELECT / DELETE / UPDATE; `IS DISTINCT FROM x`), the `ONLY` / `LATERAL`
+/// modifiers (the name after them is read instead), and the SQL keywords
+/// [`canonical_sql_name`] rejects. Each function-shaped reject adds one to
+/// `rejected_fn`.
+pub(crate) fn scan_sql_tables(sql: &str, rejected_fn: &mut usize) -> Vec<(String, usize)> {
+    let b = sql.as_bytes();
     let mut out = Vec::new();
-    for keyword in ["FROM", "JOIN", "INTO", "UPDATE"] {
-        let mut search_from = 0;
-        let bytes = source.as_bytes();
-        let kw_lower = keyword.to_ascii_lowercase();
-        while search_from < source.len() {
-            let Some(rel) = find_keyword_ci(&source[search_from..], keyword, &kw_lower) else {
-                break;
-            };
-            let pos = search_from + rel;
-            let after_kw = pos + keyword.len();
-            // Require at least one whitespace before the identifier.
-            let mut k = after_kw;
-            while k < bytes.len() && (bytes[k] == b' ' || bytes[k] == b'\t' || bytes[k] == b'\n') {
-                k += 1;
+    // One frame per open paren: true once it holds a query verb, so a FROM in
+    // it reads a subquery's table, not a function argument.
+    let mut frames: Vec<bool> = Vec::new();
+    let mut prev_word = (0, 0);
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'(' => {
+                frames.push(false);
+                i += 1;
+                continue;
             }
-            // Optional quoting: "users", `users`, [users] (SQL Server). Strip and
-            // capture the identifier inside.
-            let (start, end) = if k < bytes.len() && (bytes[k] == b'"' || bytes[k] == b'`') {
-                let delim = bytes[k];
-                let s = k + 1;
-                let mut j = s;
-                while j < bytes.len() && bytes[j] != delim {
-                    j += 1;
-                }
-                (s, j)
-            } else if k < bytes.len() && bytes[k] == b'[' {
-                let s = k + 1;
-                let mut j = s;
-                while j < bytes.len() && bytes[j] != b']' {
-                    j += 1;
-                }
-                (s, j)
-            } else {
-                let s = k;
-                let mut j = s;
-                while j < bytes.len() && is_sql_ident_char(bytes[j]) {
-                    j += 1;
-                }
-                (s, j)
-            };
-            if end > start {
-                let raw = &source[start..end];
-                if let Some(cleaned) = canonical_sql_name(raw) {
-                    out.push(cleaned);
-                }
+            b')' => {
+                frames.pop();
+                i += 1;
+                continue;
             }
-            search_from = after_kw + 1;
+            c if !is_word_byte(c) => {
+                i += 1;
+                continue;
+            }
+            _ => {}
         }
+        let s = i;
+        while i < b.len() && is_word_byte(b[i]) {
+            i += 1;
+        }
+        let w = (s, i);
+        if ["SELECT", "DELETE", "UPDATE"]
+            .iter()
+            .any(|v| word_is(b, w, v))
+            && let Some(top) = frames.last_mut()
+        {
+            *top = true;
+        }
+        let clause = if word_is(b, w, "FROM") {
+            Some(Clause::From)
+        } else if word_is(b, w, "JOIN") {
+            Some(Clause::Join)
+        } else if word_is(b, w, "INTO") {
+            Some(Clause::Into)
+        } else if word_is(b, w, "UPDATE") {
+            Some(Clause::Update)
+        } else {
+            None
+        };
+        let spaced = matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b'\r'));
+        if let (Some(clause), true) = (clause, spaced) {
+            let fn_arg = clause == Clause::From
+                && (frames.last() == Some(&false) || word_is(b, prev_word, "DISTINCT"));
+            if fn_arg {
+                *rejected_fn += 1;
+            } else if let Some(hit) = clause_table(sql, i, clause, rejected_fn) {
+                out.push(hit);
+            }
+        }
+        prev_word = w;
     }
     out
+}
+
+/// The table a clause keyword ending at `after_kw` names.
+fn clause_table(
+    sql: &str,
+    after_kw: usize,
+    clause: Clause,
+    rejected_fn: &mut usize,
+) -> Option<(String, usize)> {
+    let b = sql.as_bytes();
+    let (mut raw, mut end) = read_sql_ident(sql, after_kw)?;
+    if raw.eq_ignore_ascii_case("ONLY") || raw.eq_ignore_ascii_case("LATERAL") {
+        (raw, end) = read_sql_ident(sql, end)?;
+    }
+    if matches!(clause, Clause::From | Clause::Join) {
+        let mut j = end;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if b.get(j) == Some(&b'(') {
+            *rejected_fn += 1;
+            return None;
+        }
+    }
+    let name = canonical_sql_name(raw)?;
+    // `raw` is a subslice of `sql`.
+    let pos = raw.as_ptr() as usize - sql.as_ptr() as usize;
+    Some((name, pos))
 }
 
 // ----------------------------------------------------------------------------
@@ -580,10 +1727,6 @@ fn find_keyword_ci(hay: &str, kw_upper: &str, kw_lower: &str) -> Option<usize> {
     None
 }
 
-fn is_sql_ident_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_' || c == b'.'
-}
-
 /// True for captured "names" that are never real data entities, whatever the
 /// flavor: pure numerics (`FROM 2`) and English/JS keywords that follow
 /// `from`/`into` in prose or get passed to `.collection(...)`. Applied at the
@@ -623,6 +1766,25 @@ fn is_noise_entity_name(name: &str) -> bool {
             | "export"
             | "undefined"
             | "null"
+            // LG.3b: English determiners a prose `… from the list` or
+            // `… from all emails` puts where a table name goes.
+            | "the"
+            | "a"
+            | "an"
+            | "all"
+            | "each"
+            | "every"
+            | "any"
+            | "some"
+            | "both"
+            | "another"
+            | "its"
+            | "my"
+            | "your"
+            | "our"
+            | "their"
+            | "his"
+            | "her"
     )
 }
 
@@ -643,16 +1805,27 @@ pub(crate) fn canonical_sql_name(raw: &str) -> Option<String> {
     if last.is_empty() {
         return None;
     }
-    let upper = last.to_ascii_uppercase();
-    // Reject SQL keywords that can appear right after FROM/JOIN/etc.
-    if matches!(
-        upper.as_str(),
-        "SELECT" | "WHERE" | "AND" | "OR" | "IF" | "EXISTS" | "NULL" | "TRUE" | "FALSE"
-    ) {
+    // Reject SQL keywords that can appear right after FROM / JOIN / INTO /
+    // UPDATE: `DO UPDATE SET`, `ON UPDATE CASCADE`, `FOR UPDATE SKIP LOCKED`,
+    // `UPDATE OF col`, `BEFORE UPDATE ON t`, `JOIN LATERAL`, `FROM DUAL`, and
+    // `TABLE`, which the A13.9 DDL scan reads past and must never capture.
+    if SQL_NAME_KEYWORDS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(last))
+    {
         return None;
     }
     Some(last.to_string())
 }
+
+/// Words [`canonical_sql_name`] never takes for a table name.
+const SQL_NAME_KEYWORDS: &[&str] = &[
+    "SELECT", "WHERE", "AND", "OR", "IF", "EXISTS", "NULL", "TRUE", "FALSE", "FROM", "JOIN",
+    "INTO", "LATERAL", "SET", "ONLY", "VALUES", "UNNEST", "DUAL", "TABLE", "ALL", "ANY", "AS",
+    "CASCADE", "CASE", "CROSS", "DEFAULT", "DISTINCT", "EACH", "FOR", "FULL", "INNER", "LEFT",
+    "NATURAL", "NO", "NOT", "NOWAIT", "OF", "ON", "OUTER", "RESTRICT", "RIGHT", "ROW", "SKIP",
+    "STRICT", "USING", "WITH",
+];
 
 // ----------------------------------------------------------------------------
 // ORM table declarations: `__tablename__ = 'users'` (SQLAlchemy) and
@@ -780,43 +1953,135 @@ fn scan_dynamodb_tables(source: &str) -> Vec<String> {
 }
 
 // ----------------------------------------------------------------------------
-// `.collection('<name>')` — covers both Firestore (`db.collection('users')`)
-// and the native MongoDB driver (`db.collection('users')`). Both targets land
-// in the NoSQL flavor namespace, which is exactly what the resolver wants —
-// the join semantic doesn't care which client wrote the data.
+// Driver collection calls: `.collection('<name>')` (Firestore and the Node
+// MongoDB driver), `.Collection("<name>")` (Go mongo-driver, Go Firestore),
+// `.getCollection("<name>")` (Java MongoDB driver), `.GetCollection<T>("<name>")`
+// / `.GetCollection<T>(nameof(T))` (C# MongoDB.Driver). All land in the NoSQL
+// flavor namespace, which is exactly what the resolver wants — the join
+// semantic doesn't care which client wrote the data.
 // ----------------------------------------------------------------------------
 
+/// Collection-call needles; a needle ending in `<` is followed by a balanced
+/// type-argument list and then `(`.
+const COLLECTION_NEEDLES: &[&str] = &[
+    ".collection(",
+    ".Collection(",
+    ".getCollection(",
+    ".GetCollection(",
+    ".GetCollection<",
+];
+
 fn scan_collection_calls(source: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let needle = ".collection(";
     let bytes = source.as_bytes();
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find(needle) {
-        let pos = search_from + rel;
-        // Require something before the `.` — protects against weird leading
-        // contexts but doesn't gate on receiver name (Firestore + Mongo both
-        // legitimate).
-        if pos == 0 {
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for needle in COLLECTION_NEEDLES {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let pos = search_from + rel;
             search_from = pos + needle.len();
-            continue;
-        }
-        // Word-boundary on what precedes the `.` so `someother.collection(`
-        // matches but `_collection(` (no `.`) doesn't.
-        let prev = bytes[pos - 1];
-        if !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']')
-        {
-            search_from = pos + needle.len();
-            continue;
-        }
-        let after = &source[pos + needle.len()..];
-        if let Some(name) = first_quoted_string(after) {
-            if !name.is_empty() && name.len() < 128 {
-                out.push(name);
+            // Word-boundary on what precedes the `.` so `someother.collection(`
+            // matches but a bare `collection(` (no receiver) doesn't; the
+            // receiver name is not gated (Firestore and Mongo both legitimate).
+            let Some(&prev) = pos.checked_sub(1).and_then(|p| bytes.get(p)) else {
+                continue;
+            };
+            if !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b')' || prev == b']') {
+                continue;
+            }
+            let mut open = pos + needle.len();
+            if needle.ends_with('<') {
+                let Some(close) = skip_type_args(bytes, open) else {
+                    continue;
+                };
+                let mut k = close;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if bytes.get(k) != Some(&b'(') {
+                    continue;
+                }
+                open = k + 1;
+            }
+            if let Some(name) = collection_arg(source, open) {
+                hits.push((pos, name));
             }
         }
-        search_from = pos + needle.len();
     }
-    out
+    // Source order across needles.
+    hits.sort_by_key(|(pos, _)| *pos);
+    hits.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Offset just past the `>` closing the type-argument list whose `<` ends
+/// just before `i`; `None` when it does not close within one line of text.
+fn skip_type_args(b: &[u8], i: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut j = i;
+    while j < b.len() && j - i < 256 {
+        match b[j] {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j + 1);
+                }
+            }
+            b'\n' | b'(' | b')' | b';' => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// The collection name a call's FIRST argument (starting at `i`, just past
+/// the `(`) spells: a string literal, or C# `nameof(Ident)` (the name is the
+/// last segment of `Ident`). Anything else — a variable, an interpolated
+/// `$"…"` / `` `${x}` `` — names nothing.
+fn collection_arg(source: &str, i: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let mut k = i;
+    while k < b.len() && b[k].is_ascii_whitespace() {
+        k += 1;
+    }
+    let (name, end) = match b.get(k)? {
+        &q @ (b'\'' | b'"' | b'`') => {
+            let start = k + 1;
+            let mut j = start;
+            while j < b.len() && b[j] != q && b[j] != b'\n' {
+                j += if b[j] == b'\\' { 2 } else { 1 };
+            }
+            if b.get(j) != Some(&q) {
+                return None;
+            }
+            (&source[start..j], j + 1)
+        }
+        _ if b[k..].starts_with(b"nameof(") => {
+            let start = k + "nameof(".len();
+            let close = start + b[start..].iter().take(256).position(|&c| c == b')')?;
+            let inner = source[start..close].trim();
+            if inner.is_empty()
+                || !inner
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.')
+            {
+                return None;
+            }
+            (inner.rsplit('.').next().unwrap_or(inner), close + 1)
+        }
+        _ => return None,
+    };
+    let mut j = end;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    if !matches!(b.get(j), Some(b',' | b')')) {
+        return None;
+    }
+    if name.is_empty() || name.len() >= 128 || name.contains("${") || name.contains("#{") {
+        return None;
+    }
+    Some(name.to_string())
 }
 
 // ----------------------------------------------------------------------------
@@ -920,8 +2185,7 @@ fn extract_cypher_labels_in_window(win: &str) -> Vec<String> {
                 if bytes[j] == b':' {
                     let s = j + 1;
                     let mut k = s;
-                    while k < bytes.len()
-                        && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_')
+                    while k < bytes.len() && (bytes[k].is_ascii_alphanumeric() || bytes[k] == b'_')
                     {
                         k += 1;
                     }
@@ -1014,7 +2278,8 @@ db.collection('users');
     #[test]
     fn sql_strips_schema_prefix() {
         let repo = RepoId(1);
-        let src = "const q = \"SELECT * FROM public.users JOIN reporting.events e ON e.uid = users.id\";";
+        let src =
+            "const q = \"SELECT * FROM public.users JOIN reporting.events e ON e.uid = users.id\";";
         let out = extract_data_entity_nodes(src, module_id(repo), repo);
         let qnames = entity_qnames(&out);
         assert!(qnames.contains(&"data_entity:sql:users".to_string()));
@@ -1046,6 +2311,9 @@ db.exec("CREATE TABLE \"audit_log\" (id INT)");
 
     #[test]
     fn alter_table_only_captured() {
+        // Raw SQL outside any string literal is a `.sql` file's shape, read by
+        // the whole-file mode (`migrations::extract_sql_migration`); a code
+        // file's scan reads SQL only from literals (LG.3b).
         let repo = RepoId(1);
         let src = r#"
 ALTER TABLE ONLY users ADD COLUMN verified BOOLEAN DEFAULT false;
@@ -1054,7 +2322,19 @@ DROP TABLE IF EXISTS tmp_a, tmp_b CASCADE;
 TRUNCATE TABLE events;
 TRUNCATE carts;
 "#;
-        let out = extract_data_entity_nodes(src, module_id(repo), repo);
+        let code = extract_data_entity_nodes(src, module_id(repo), repo);
+        assert!(
+            entity_qnames(&code).is_empty(),
+            "{:?}",
+            entity_qnames(&code)
+        );
+        let out = crate::migrations::extract_sql_migration(
+            src,
+            "db/migrations/V1__init.sql",
+            module_id(repo),
+            repo,
+        )
+        .entities;
         let mut qnames = entity_qnames(&out);
         qnames.sort();
         assert_eq!(
@@ -1129,7 +2409,10 @@ const tpl = `<select class="truncate block"></select>`;
         let repo = RepoId(1);
         let src = "const word = \"FROMUSERS is a column name\";";
         let out = extract_data_entity_nodes(src, module_id(repo), repo);
-        assert!(out.nodes.is_empty(), "FROMUSERS must not match `FROM users`");
+        assert!(
+            out.nodes.is_empty(),
+            "FROMUSERS must not match `FROM users`"
+        );
     }
 
     #[test]
@@ -1239,7 +2522,10 @@ client.put_item(TableName='audit_log', Item={})
 const config = { MyTableName: 'something', LegacyTableName: 'else' };
 "#;
         let out = extract_data_entity_nodes(src, module_id(repo), repo);
-        assert!(out.nodes.is_empty(), "suffix keys must not match TableName:");
+        assert!(
+            out.nodes.is_empty(),
+            "suffix keys must not match TableName:"
+        );
     }
 
     #[test]
@@ -1378,6 +2664,395 @@ const q2 = "INSERT INTO users (name) VALUES (?)";
         assert!(
             qnames.contains(&"data_entity:graph:Person".to_string()),
             "{qnames:?}"
+        );
+    }
+
+    // ---- LG.3b: literal-scoped raw SQL, driver collection calls ----------
+
+    fn sorted_qnames(src: &str) -> Vec<String> {
+        let repo = RepoId(1);
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        q.sort();
+        q
+    }
+
+    fn sql(names: &[&str]) -> Vec<String> {
+        let mut v: Vec<String> = names
+            .iter()
+            .map(|n| format!("data_entity:sql:{n}"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn go_select_statement_is_not_sql() {
+        // Go's `select {` channel statement and prose in comments / error
+        // strings used to open the file-wide scan (quokka helper.go).
+        let src = r#"package chat
+// drain the backlog from each room before closing
+func Fanout(done <-chan struct{}, in <-chan int) {
+	for {
+		select {
+		case v := <-in:
+			log.Printf("message from the stream: %d", v)
+		case <-done:
+			return
+		}
+	}
+}
+"#;
+        assert!(sorted_qnames(src).is_empty(), "{:?}", sorted_qnames(src));
+    }
+
+    #[test]
+    fn prose_after_a_real_query_is_not_scanned() {
+        let src = r#"
+// results are copied from the pool before they are returned
+rows, err := db.Query("SELECT id, name FROM users WHERE active = true")
+c.JSON(401, gin.H{"error": "Failed to extract email from token"})
+c.String(200, "You've been unsubscribed from all emails.")
+msg := "Select from the list below."
+"#;
+        assert_eq!(sorted_qnames(src), sql(&["users"]));
+    }
+
+    #[test]
+    fn concatenated_literals_join() {
+        let src = r#"
+q := "SELECT o.id, i.sku " +
+	"FROM orders o JOIN order_items i ON i.order_id = o.id " +
+	"WHERE o.created_at > $1"
+$sql = 'SELECT * ' . 'FROM invoices WHERE id = ?';
+cur.execute("SELECT id "
+            "FROM py_users")
+"#;
+        assert_eq!(
+            sorted_qnames(src),
+            sql(&["invoices", "order_items", "orders", "py_users"])
+        );
+        // A variable between the pieces breaks the join: the second piece is
+        // not a statement on its own.
+        let broken = r#"q := "SELECT id " + cols + "FROM hidden""#;
+        assert!(
+            sorted_qnames(broken).is_empty(),
+            "{:?}",
+            sorted_qnames(broken)
+        );
+    }
+
+    #[test]
+    fn cte_names_are_not_tables() {
+        let src = r#"
+const q = `WITH RECURSIVE task_counts(pid, n) AS (SELECT pursuit_id, count(*) FROM pursuit_task GROUP BY 1),
+opp_ids AS MATERIALIZED (SELECT id FROM opportunities)
+SELECT * FROM task_counts tc JOIN opp_ids o ON o.id = tc.pid JOIN briefs b ON b.id = o.id`
+"#;
+        assert_eq!(
+            sorted_qnames(src),
+            sql(&["briefs", "opportunities", "pursuit_task"])
+        );
+    }
+
+    #[test]
+    fn lateral_set_and_functions_are_not_tables() {
+        let src = r#"
+const scores = `SELECT r.id, EXTRACT(YEAR FROM COALESCE(r.start, now()))::int, SUBSTRING(r.code FROM 1 FOR 2)
+FROM ONLY records r
+LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payments p WHERE p.rid = r.id) s ON true
+CROSS JOIN LATERAL jsonb_array_elements(r.tags) t
+WHERE r.a IS DISTINCT FROM r.b`
+const upsert = `INSERT INTO prefs (user_id, theme) VALUES ($1, $2)
+ON CONFLICT (user_id) DO UPDATE SET theme = EXCLUDED.theme`
+const series = "SELECT g FROM generate_series(1, 10) g FOR UPDATE SKIP LOCKED"
+"#;
+        assert_eq!(sorted_qnames(src), sql(&["payments", "prefs", "records"]));
+        let mut rejected_fn = 0;
+        let got: Vec<String> = scan_sql_tables(
+            "SELECT EXTRACT(EPOCH FROM ts) FROM unnest($1) u JOIN users x ON true",
+            &mut rejected_fn,
+        )
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
+        assert_eq!(got, ["users"]);
+        assert_eq!(rejected_fn, 2);
+    }
+
+    #[test]
+    fn fmt_error_messages_are_not_sql() {
+        let src = r#"
+return fmt.Errorf("delete from spaces key=%q: %w", key, err)
+return fmt.Errorf("update from queue set failed: %v", err)
+rows, _ := db.Query("SELECT id FROM users WHERE name LIKE '%water%'")
+"#;
+        assert_eq!(sorted_qnames(src), sql(&["users"]));
+        assert_eq!(sql_statements(src).rejected_fmt, 2);
+    }
+
+    #[test]
+    fn python_triple_quote_sql() {
+        let src = "# the users table is read from the replica\n\
+                   QUERY = \"\"\"\n    SELECT u.id\n    FROM users u\n    JOIN teams t ON t.id = u.team_id\n\"\"\"\n\
+                   other = '''INSERT INTO audit (msg) VALUES (%s)'''\n";
+        assert_eq!(sorted_qnames(src), sql(&["audit", "teams", "users"]));
+    }
+
+    #[test]
+    fn ruby_heredoc_sql() {
+        let src = r#"
+class Report
+  # pull everything from the warehouse
+  def rows
+    connection.select_all(<<~SQL.squish)
+      SELECT * FROM line_items li
+      JOIN carts c ON c.id = li.cart_id
+    SQL
+  end
+
+  def php_like
+    $q = <<<'EOT'
+    DELETE FROM sessions WHERE expires_at < now()
+    EOT;
+  end
+end
+"#;
+        assert_eq!(
+            sorted_qnames(src),
+            sql(&["carts", "line_items", "sessions"])
+        );
+        // A shift is not a heredoc.
+        assert!(string_literals("let x = 1<<SHIFT;\nlet y = 2;\n").is_empty());
+    }
+
+    #[test]
+    fn rust_raw_string_sql() {
+        let src = "fn q<'a>(db: &'a Db) {\n    \
+                   sqlx::query(r#\"SELECT \"id\" FROM accounts WHERE note = 'a \"quoted\" word'\"#);\n    \
+                   sqlx::query(r\"UPDATE ledgers SET x = 1\");\n}\n";
+        assert_eq!(sorted_qnames(src), sql(&["accounts", "ledgers"]));
+    }
+
+    #[test]
+    fn csharp_verbatim_and_multibyte_literals() {
+        let src = "var q = @\"SELECT \"\"Id\"\" FROM [dbo].[Customers] WHERE Name = N'Zoë ✓'\";\n\
+                   var label = \"Zoë ✓ picks from the café\";\n";
+        assert_eq!(sorted_qnames(src), sql(&["Customers"]));
+        for lit in string_literals(src) {
+            assert!(src.is_char_boundary(lit.body.start) && src.is_char_boundary(lit.body.end));
+        }
+    }
+
+    #[test]
+    fn go_collection_capital_c() {
+        let src = r#"
+_, err := client.Database("shop").Collection("events").InsertOne(ctx, ev)
+coll := fs.Collection(name)
+MongoCollection<Document> c = database.getCollection("ledger");
+"#;
+        let repo = RepoId(1);
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        q.sort();
+        assert_eq!(q, ["data_entity:nosql:events", "data_entity:nosql:ledger"]);
+    }
+
+    #[test]
+    fn csharp_get_collection_literal_and_nameof() {
+        let src = r#"
+_orders = db.GetCollection<OrderReadModel>(nameof(OrderReadModel));
+_audit = db.GetCollection<BsonDocument>("audit_log");
+_nested = db.GetCollection<Dictionary<string, List<int>>>(nameof(Models.Snapshot));
+_plain = db.GetCollection("plain_c");
+"#;
+        let repo = RepoId(1);
+        let mut q = entity_qnames(&extract_data_entity_nodes(src, module_id(repo), repo));
+        q.sort();
+        assert_eq!(
+            q,
+            [
+                "data_entity:nosql:OrderReadModel",
+                "data_entity:nosql:Snapshot",
+                "data_entity:nosql:audit_log",
+                "data_entity:nosql:plain_c",
+            ]
+        );
+    }
+
+    #[test]
+    fn csharp_get_collection_variable_mints_nothing() {
+        let src = r#"
+var dynamic = db.GetCollection<BsonDocument>(auditName);
+var interp = db.GetCollection<BsonDocument>($"audit_{tenant}");
+const late = db.collection(name); const other = "not_a_collection";
+const tpl = db.collection(`${prefix}_users`);
+"#;
+        assert!(
+            scan_collection_calls(src).is_empty(),
+            "{:?}",
+            scan_collection_calls(src)
+        );
+    }
+
+    #[test]
+    fn apostrophe_in_comment_does_not_open_a_literal() {
+        // `don't` inside a comment and `'a` lifetimes must not swallow the
+        // literal that follows.
+        let src = "x = compute()  # don't touch\n\
+                   q = \"SELECT id FROM widgets\"\n\
+                   fn f<'a>(s: &'a str) -> &'a str { s }\n\
+                   <p>It's from the menu</p>\n";
+        assert_eq!(sorted_qnames(src), sql(&["widgets"]));
+    }
+
+    #[test]
+    fn string_builder_appends_join_into_one_statement() {
+        // webplatform ProductAdminService: the SELECT and each FROM / JOIN
+        // line are separate AppendLine calls, and the first starts with `\n`.
+        let src = r#"
+var sqlQry = new StringBuilder(500);
+sqlQry.AppendLine(
+    "\nSELECT pv.MSRP, p.Sku, coalesce(nullif(pa.StrDefaultValue, ''), 'x') as AttDefault");
+sqlQry.AppendLine("FROM Product p");
+sqlQry.AppendLine("INNER JOIN ProductVariant pv ON p.ProductId = pv.ProductID");
+sqlQry.AppendLine("LEFT JOIN Attribute pa on pa.attributeid = p.attributeid");
+sqlQry.Append("WHERE Sku IN (");
+StringBuilder sb = new StringBuilder();
+sb.append("SELECT id ").append("FROM accounts a ").append("JOIN owners o ON o.id = a.owner_id");
+var b strings.Builder
+b.WriteString("UPDATE go_items ")
+b.WriteString("SET done = true")
+"#;
+        assert_eq!(
+            sorted_qnames(src),
+            sql(&[
+                "Attribute",
+                "Product",
+                "ProductVariant",
+                "accounts",
+                "go_items",
+                "owners"
+            ])
+        );
+        let py = "q = \"SELECT id \"\nq += \"FROM py_orders o \"\nq += \"JOIN py_lines l ON l.oid = o.id\"\n\
+                  $sql = 'SELECT * ';\n$sql .= 'FROM php_rows';\n";
+        assert_eq!(
+            sorted_qnames(py),
+            sql(&["php_rows", "py_lines", "py_orders"])
+        );
+        // A builder line alone is no statement: nothing to join it to.
+        let lone = "sb.Append(\"total: \");\nsb.Append(\"FROM the list\");\n";
+        assert!(sorted_qnames(lone).is_empty(), "{:?}", sorted_qnames(lone));
+    }
+
+    #[test]
+    fn escaped_newlines_keep_keywords_words() {
+        let src = "const q = \"SELECT a,\\n  b\\nFROM escaped_t\\n\\tJOIN other_t ON true\";\n";
+        assert_eq!(sorted_qnames(src), sql(&["escaped_t", "other_t"]));
+    }
+
+    #[test]
+    fn subquery_builder_fragment_is_sql() {
+        // lapse opportunity_filters.go: a WHERE fragment appended to a builder.
+        let src = r#"
+sb.WriteString(" AND EXISTS (SELECT 1 FROM entity_records er WHERE er.record_id = o.record_id)")
+sb.WriteString(" AND o.status = 'open' FROM the builder")
+label := "(select from the menu)"
+doc := "Loads rows from cache (SELECT id FROM docs_t) when warm"
+"#;
+        assert_eq!(sorted_qnames(src), sql(&["docs_t", "entity_records"]));
+    }
+
+    #[test]
+    fn js_regex_quotes_do_not_flip_literals() {
+        // Kina contracts/scripts: `replace(/'/g, "''")` before the SQL it prints.
+        let src = r#"
+const sqlAddr = w.address.replace(/'/g, "''");
+const half = total / 2, ratio = (a) / b;
+console.log(`UPDATE wallets SET addr = '${sqlAddr}' WHERE id = 1;`);
+console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY email;");
+"#;
+        assert_eq!(sorted_qnames(src), sql(&["users", "wallets"]));
+    }
+
+    #[test]
+    fn unterminated_quotes_stay_linear() {
+        // Every `"` after the first is escaped, so each opener would rescan
+        // to the end without the exhausted flag; the scan must still find the
+        // closed literal before them.
+        let mut src = String::from("q = \"SELECT id FROM gadgets\"\n");
+        for _ in 0..20_000 {
+            src.push_str("k = \\\"; ");
+        }
+        assert!(src.ends_with("k = \\\"; "));
+        let lits = string_literals(&src);
+        assert_eq!(&src[lits[0].body.clone()], "SELECT id FROM gadgets");
+        assert_eq!(sorted_qnames(&src), sql(&["gadgets"]));
+    }
+
+    #[test]
+    fn sql_file_mode_scans_raw_ddl() {
+        let src = "CREATE TABLE IF NOT EXISTS users (\n  id SERIAL PRIMARY KEY\n);\n\
+                   ALTER TABLE ONLY orders ADD COLUMN note TEXT;\n\
+                   WITH stale AS (SELECT id FROM orders) DELETE FROM carts WHERE id IN (SELECT id FROM stale);\n\
+                   INSERT INTO stale_log SELECT * FROM carts;\n";
+        let repo = RepoId(1);
+        let out = crate::migrations::extract_sql_migration(
+            src,
+            "db/migrations/V1__init.sql",
+            module_id(repo),
+            repo,
+        );
+        let mut q = entity_qnames(&out.entities);
+        q.sort();
+        assert_eq!(q, sql(&["carts", "orders", "stale_log", "users"]));
+        let tables: Vec<String> = sql_file_tables(&blank_sql_noise(src))
+            .into_iter()
+            .map(|(t, _)| t)
+            .collect();
+        assert!(!tables.contains(&"stale".to_string()), "{tables:?}");
+    }
+
+    #[test]
+    fn literal_hit_offsets_map_to_source() {
+        let src = "q := \"SELECT o.id \" +\n\t\"FROM orders o\"\n";
+        let lit = sql_statements(src);
+        assert_eq!(lit.literals, 2);
+        let stmt = &lit.statements[0];
+        assert_eq!(stmt.text, "SELECT o.id FROM orders o");
+        let scan = statement_tables(&stmt.scan);
+        let (name, pos) = &scan.tables[0];
+        assert_eq!(name, "orders");
+        let at = stmt.to_source(*pos);
+        assert_eq!(&src[at..at + "orders".len()], "orders");
+    }
+
+    #[test]
+    fn marker_reports_the_scan() {
+        let src = "q := `WITH recent AS (SELECT id FROM orders) SELECT * FROM recent r JOIN payments p ON true`\n\
+                   e := fmt.Errorf(\"delete from spaces key=%q: %w\", k, err)\n\
+                   c := client.Database(\"shop\").Collection(\"events\")\n";
+        let lit = sql_statements(src);
+        let mut stats = ScanStats {
+            literals: lit.literals,
+            sql: lit.statements.len(),
+            rejected_fmt: lit.rejected_fmt,
+            ..ScanStats::default()
+        };
+        for stmt in &lit.statements {
+            let scan = statement_tables(&stmt.scan);
+            stats.ctes += scan.ctes;
+            stats.rejected_fn += scan.rejected_fn;
+            for (name, pos) in scan.tables {
+                stats.note_table(&name, stmt.to_source(pos));
+            }
+        }
+        for name in scan_collection_calls(src) {
+            stats.note_collection(&name);
+        }
+        assert!(stats.fired());
+        assert_eq!(
+            stats.marker(src),
+            "[data-entity] literals=4 sql=1 tables=orders@1,payments@1 ctes=1 collections=events rejected_fn=0 rejected_fmt=1"
         );
     }
 }

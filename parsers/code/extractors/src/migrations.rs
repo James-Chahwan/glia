@@ -24,8 +24,8 @@
 use repo_graph_core::{NodeId, RepoId};
 
 use crate::data_entities::{
-    DataEntityFlavor, DataEntityNodes, EntitySink, canonical_sql_name, scan_sql_ddl,
-    scan_sql_tables,
+    DataEntityFlavor, DataEntityNodes, EntitySink, blank_sql_noise, canonical_sql_name,
+    scan_sql_ddl, sql_file_tables,
 };
 
 /// True when the walk should read `path` as a SQL migration. See
@@ -130,8 +130,11 @@ impl SqlMigration {
 }
 
 /// The tables a migration `.sql` names: its DDL (`CREATE TABLE users`) and the
-/// DML a data migration runs (`INSERT INTO users`). The whole file is SQL, so
-/// no `has_sql_context` gate, and only the SQL scanners run: a Postgres cast
+/// DML a data migration runs (`INSERT INTO users`). This is the whole-file SQL
+/// mode: every statement is SQL, so the table scan reads the file itself, not
+/// only string literals as a code file's scan does (LG.3b), one `;` statement
+/// at a time so a CTE name is dropped from its own statement
+/// ([`sql_file_tables`]). Only the SQL scanners run: a Postgres cast
 /// (`'a'::text`) is not a Cypher label. Two precision steps a code file does
 /// not need, both measured on real migration dirs: comments and string values
 /// are blanked first (`-- copied from the old schema`, a seed row's
@@ -153,7 +156,7 @@ pub fn extract_sql_migration(
         }
         sink.emit(DataEntityFlavor::Sql, &table);
     }
-    for table in scan_sql_tables(&sql) {
+    for (table, _) in sql_file_tables(&sql) {
         if !is_keyword_or_catalog(&table) {
             sink.emit(DataEntityFlavor::Sql, &table);
         }
@@ -163,69 +166,6 @@ pub fn extract_sql_migration(
         framework: migration_framework(path).unwrap_or("raw"),
         ddl,
     }
-}
-
-/// `source` with every `-- line` / `/* block */` comment and every
-/// single-quoted string value (`'text'`, `E'it\'s'`) replaced by spaces,
-/// newlines kept. In SQL a single quote delimits a value, never a name, so no
-/// table is lost; double-quoted, backticked and bracketed identifiers are
-/// left alone. Only ASCII bytes delimit what is blanked and every blanked byte
-/// becomes an ASCII space, so the result is valid UTF-8 whenever `source` is.
-fn blank_sql_noise(source: &str) -> String {
-    let b = source.as_bytes();
-    let mut out = b.to_vec();
-    let blank = |from: usize, to: usize, out: &mut Vec<u8>| {
-        for (k, byte) in out.iter_mut().enumerate().take(to).skip(from) {
-            if b[k] != b'\n' {
-                *byte = b' ';
-            }
-        }
-    };
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'\'' => {
-                // `E'…'` takes backslash escapes; a standard string doubles its
-                // quote (`'it''s'`), which reads as two adjacent strings here.
-                let escapes = i > 0
-                    && matches!(b[i - 1], b'E' | b'e')
-                    && (i < 2 || !(b[i - 2].is_ascii_alphanumeric() || b[i - 2] == b'_'));
-                let mut j = i + 1;
-                while j < b.len() && b[j] != b'\'' {
-                    j += if escapes && b[j] == b'\\' { 2 } else { 1 };
-                }
-                let end = (j + 1).min(b.len());
-                blank(i, end, &mut out);
-                i = end;
-            }
-            q @ (b'"' | b'`') => {
-                i += 1;
-                while i < b.len() && b[i] != q {
-                    i += 1;
-                }
-                i += 1;
-            }
-            b'-' if b.get(i + 1) == Some(&b'-') => {
-                let mut j = i;
-                while j < b.len() && b[j] != b'\n' {
-                    j += 1;
-                }
-                blank(i, j, &mut out);
-                i = j;
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                let mut j = i + 2;
-                while j < b.len() && !(b[j] == b'*' && b.get(j + 1) == Some(&b'/')) {
-                    j += 1;
-                }
-                let end = (j + 2).min(b.len());
-                blank(i, end, &mut out);
-                i = end;
-            }
-            _ => i += 1,
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
 }
 
 /// A `FROM` / `JOIN` / `INTO` / `UPDATE` capture that is not a user table: a

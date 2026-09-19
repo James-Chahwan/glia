@@ -1,0 +1,30 @@
+{
+  "framework": "go-data-entity-precision",
+  "language": "go",
+  "dirs": ["."],
+  "cells": ["go/db"],
+  "note": "LG.3b. At HEAD the raw-SQL scan runs over the WHOLE file once any SQL signature appears (Go's `select {` statement counts), so prose and comments mint tables; CTE names, LATERAL / SET and function calls (COALESCE after EXTRACT's FROM, jsonb_array_elements) are captured as tables; a Go fmt message `delete from spaces key=%q: %w` reads as SQL; Go mongo-driver .Collection(\"events\") (capital C) is never matched. The statements are package consts on purpose: the Go parser's own per-call-argument SQL scan (parsers/code/go) is a separate scanner, not this fixture's subject.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:users", "note": "single literal, direct db.Query argument"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:orders", "note": "CTE body and a literal joined across `+`"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:order_items", "note": "JOIN in the second piece of a concatenated statement"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:payments", "note": "FROM inside a LATERAL subquery"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:sql:prefs", "note": "INSERT INTO of an upsert"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:events", "note": "mongo-driver .Collection(\"events\")"}
+  ],
+  "expect_edges": [
+    {"from": "ListUsers", "to": "data_entity:sql:users", "category": "ACCESSES_DATA", "note": "Go parser, fn-level"},
+    {"from": "handlers", "to": "data_entity:nosql:events", "category": "ACCESSES_DATA", "note": "module-level, cross-cutting extractor"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "token", "note": "prose literal `...email from token`"},
+    {"kind": "DATA_ENTITY", "name": "all", "note": "prose literal `...unsubscribed from all emails`"},
+    {"kind": "DATA_ENTITY", "name": "the", "note": "comment `copied from the pool`"},
+    {"kind": "DATA_ENTITY", "name": "spaces", "note": "fmt message with %q / %w"},
+    {"kind": "DATA_ENTITY", "name": "recent", "note": "CTE alias"},
+    {"kind": "DATA_ENTITY", "name": "LATERAL", "note": "JOIN LATERAL keyword"},
+    {"kind": "DATA_ENTITY", "name": "COALESCE", "note": "function after EXTRACT's FROM"},
+    {"kind": "DATA_ENTITY", "name": "SET", "note": "ON CONFLICT DO UPDATE SET"},
+    {"kind": "DATA_ENTITY", "name": "jsonb_array_elements", "note": "set-returning function after FROM"}
+  ]
+}
