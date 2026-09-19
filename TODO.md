@@ -12,7 +12,7 @@ the plan records the evidence for each (`git log -- TODO.md`). The open items th
 
 These stay here so each packet can find its line. The packet ticks or removes the box when it lands.
 
-- [ ] **Synth bins gating.** The four synth bins sit behind the `driver` feature. The hook-trait refactor (`SynthHook` / `FilterPredicate` / `RankingSignal`, one `ActivatedView`) and the rename `driver` → `research` are LD.12a–e. LD.12b marks this box done.
+- [ ] **Synth bins gating.** The synth bins sit behind the `research` feature (renamed from `driver` by LD.12b). The hook traits and one `ActivatedView` landed in LD.12a; composition and callsite-argflow run as `SynthHook`s since LD.12b. Folding `synth_key_symbols` and `synth_derived_notes` into hooks is LD.12d–e. Tick this box when LD.12e lands.
 - [ ] **`glia impact` from a file or diff.** `impact` takes a qname. Seeding it with changed files or a pasted diff is LE.2 (diff_impact).
 - [ ] **Effect classification.** Reshaped as effects(A): data, config and queue sites anchored to their functions (LE.4a–c), then the effect sinks downstream of a node (LE.4d).
 - [ ] **DB: ORM breadth and migrations.** JPA/Hibernate, EF Core, GORM, ActiveRecord, Eloquent, TypeORM, Prisma and Django implicit tables are A13.10–A13.17. Migration files and DDL are A13.9 (Batch C).

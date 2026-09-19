@@ -133,7 +133,7 @@ Top-level rule: parsers extract, graph crate resolves. Parsers emit raw `Extract
 | **Cycle** | One end-to-end SWE-bench loop pass. Driven by `scratch/lens/cycle/run_cycle_loop.sh <tag>`. Append-only result files; corrections land as new entries with `CORRECTED:` markers, never overwrites. |
 | **Sacred holdout** | `scratch/lens/manifests/holdout.json`. 10 SWE-bench instances NEVER touched until v1.0 validation. Every cycle driver asserts loop-set ∩ holdout = ∅ at start. Violation = abort. |
 | **Sentinel** | A SWE-bench instance the pipeline has solved before — kept in the loop to detect regressions. marshmallow-1359 is the canonical one. |
-| **driver feature** | A Cargo feature gating clap/serde/regex/walkdir/parser-python so the library stays slim for the pyo3 wheel. Every `synth_*` bin sets `required-features = ["driver"]`. |
+| **research feature** | A Cargo feature gating clap/serde/regex/walkdir/parser-python so the library stays slim for the pyo3 wheel. Every `synth_*` bin sets `required-features = ["research"]`. Named `driver` before 0.5.0. |
 
 ---
 
@@ -355,7 +355,7 @@ Standard guardrails, lifted from `CLAUDE.md` + `CODE_RULES.md`. Don't fight thes
 - **Only `py/` publishes to PyPI** (as `repo-graph-py`). Everything else is internal. Don't touch the `repo-graph-*` crate name prefix — that's the brand and it's locked.
 - **No `unwrap()` / `panic!()`** in non-test code. Propagate via `?`.
 - **clap arg names are kebab-case on the CLI** even when the Rust field is snake_case. `repo_canonical` → `--repo-canonical`. Subprocess invocations of synth bins MUST use the kebab form or clap exits with code 2. Burned us in cycle 0.6.
-- **`required-features = ["driver"]`** on every `synth_*` `[[bin]]` entry — otherwise the pyo3 wheel build accidentally pulls clap/serde/regex/walkdir.
+- **`required-features = ["research"]`** on every `synth_*` `[[bin]]` entry — otherwise the pyo3 wheel build accidentally pulls clap/serde/regex/walkdir.
 
 ---
 

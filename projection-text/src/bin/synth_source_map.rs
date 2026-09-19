@@ -216,22 +216,16 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let graph = build_repo_graph(&args.src, &args.repo_canonical)?;
     let seeds: SeedsFile = read_json(&args.seeds)?;
-    let (source_cell_qnames, source_cell_rank): (HashSet<String>, HashMap<String, usize>) =
-        match &args.source_cells {
-            Some(p) => {
-                let cells: Vec<SourceCell> = read_json(p)?;
-                eprintln!("[srcmap] source_cells.json: {} qnames", cells.len());
-                let qnames: HashSet<String> =
-                    cells.iter().map(|c| c.qname.clone()).collect();
-                let rank: HashMap<String, usize> = cells
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| (c.qname.clone(), i))
-                    .collect();
-                (qnames, rank)
-            }
-            None => (HashSet::new(), HashMap::new()),
-        };
+    // Membership only: rows are ordered by source line (see "2026-05-02
+    // RESHAPED" below), so the source_cells rank is deliberately not read.
+    let source_cell_qnames: HashSet<String> = match &args.source_cells {
+        Some(p) => {
+            let cells: Vec<SourceCell> = read_json(p)?;
+            eprintln!("[srcmap] source_cells.json: {} qnames", cells.len());
+            cells.iter().map(|c| c.qname.clone()).collect()
+        }
+        None => HashSet::new(),
+    };
 
     let activated_set: std::collections::HashSet<&str> =
         seeds.activated.iter().map(|(q, _)| q.as_str()).collect();

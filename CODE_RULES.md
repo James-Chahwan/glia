@@ -23,7 +23,7 @@ Every directive / content extractor under `projection-text/src/bin/synth_*.rs` f
 
 **Canonical reference**: `projection-text/src/bin/synth_traceback_target.rs` (the longest), `projection-text/src/bin/synth_test_expectation.rs` (the simplest).
 
-**Cargo.toml**: every `[[bin]]` entry MUST set `required-features = ["driver"]`. The `driver` feature gates clap/serde/regex/walkdir/parser-python so the library stays slim for the pyo3 layer.
+**Cargo.toml**: every `[[bin]]` entry MUST set `required-features = ["research"]`. The `research` feature (named `driver` before 0.5.0) gates clap/serde/regex/walkdir/parser-python so the library stays slim for the pyo3 layer. A synth pass that other code runs in-process is also a `SynthHook` in `projection-text/src/hooks.rs`, and its bin runs that hook through `ActivationPlan::synthesize`.
 
 ## 2. clap kebab-case gotcha
 
@@ -183,7 +183,7 @@ This file is **operational conventions**. CLAUDE.md is **architecture** (workspa
 
 ## 16. Bin invocation conventions
 
-Workspace-local binaries live at `target/release/<name>` after `cargo build --release -p <crate> --features driver --bin <name>`. Tests, harness scripts, and the orchestrator (`run_instance.py`) reference these by absolute path with a `<bin>.exists()` check before invocation — never assume `$PATH` includes target/release.
+Workspace-local binaries live at `target/release/<name>` after `cargo build --release -p <crate> --features research --bin <name>`. Tests, harness scripts, and the orchestrator (`run_instance.py`) reference these by absolute path with a `<bin>.exists()` check before invocation — never assume `$PATH` includes target/release.
 
 Output paths: `/tmp/<descriptive>.md` for one-off smoke tests; `<workdir>/<channel>.md` for per-instance pipeline output (cleaned up by run_instance.py if it owns the workdir).
 

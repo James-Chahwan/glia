@@ -98,9 +98,9 @@ ls /home/ivy/Code/glia/ | head -10
 
 # 7. Cargo build — projection-text bins (synth_*) + glia-lens with CUDA real backend.
 echo
-echo "=== cargo build glia bins (release, --features driver) ==="
+echo "=== cargo build glia bins (release, --features research) ==="
 cd /home/ivy/Code/glia
-cargo build --release -p repo-graph-projection-text --features driver 2>&1 | tail -3
+cargo build --release -p repo-graph-projection-text --features research 2>&1 | tail -3
 
 echo
 echo "=== cargo build glia-lens with CUDA backend (release, --features cuda) ==="

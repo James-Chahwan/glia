@@ -28,7 +28,7 @@ This file travels with the repo through the v0.5.0 `git filter-repo` split, same
 
 ### Work (the discipline)
 
-- **Follow `CODE_RULES.md`.** Extract-vs-resolve split is locked (parsers extract, graph resolves); mirror the `synth_*` bin pattern; kebab-case clap args across subprocess boundaries; no `unwrap()`/`panic!()` in non-test code; `required-features = ["driver"]` on every synth `[[bin]]`.
+- **Follow `CODE_RULES.md`.** Extract-vs-resolve split is locked (parsers extract, graph resolves); mirror the `synth_*` bin pattern; kebab-case clap args across subprocess boundaries; no `unwrap()`/`panic!()` in non-test code; `required-features = ["research"]` on every synth `[[bin]]`.
 - **Verify-driven, every time.** Ship a grep-able **`fired_on` marker** with every feature/lever/flag. If you can't grep the logs for proof it ran, assume it's silent dead code. No bare `try/except … pass` wrapping a whole feature — it hides the corpse.
 - **Scope in LOC / tokens / GPU-mem — never in time.** Group options by capability family, mechanism, or expected uplift. No `~1h`, no `~2 days`, no week-by-week.
 - **Honest-failure framing.** Report exact counts: `pass=1 / fail=6 / error=0 / wall=1328s`, never "mostly working." No BREAKTHROUGH claims before PASS ≥ 5/7 on the working set **and** the regression suite confirms.

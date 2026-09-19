@@ -1,10 +1,13 @@
 //! synth_composition — A+ access-path cell synthesizer driver.
 //!
 //! Walks a Python source tree, builds an in-memory `RepoGraph`, resolves an
-//! activated qname set from a seeds JSON to NodeIds, runs `synth_paths` +
-//! `render_cells` from the `composition` module, and appends the resulting
-//! cells to an existing summaries-hybrid JSON (shape: `[{id, qname, score,
-//! summary}, ...]`) used downstream by the Path B latent-injection harness.
+//! activated qname set from a seeds JSON to NodeIds, runs the
+//! `hooks::AccessPathSynth` hook (`composition::synth_paths` +
+//! `render_cells`) through one `ActivationPlan::synthesize` over the seeds'
+//! ranked view, and appends the resulting cells to an existing
+//! summaries-hybrid JSON (shape: `[{id, qname, score, summary}, ...]`) used
+//! downstream by the Path B latent-injection harness. Prints
+//! `[synth] plan hooks=[access_path] cells=N` after the plan runs.
 //!
 //! Domain-general: no marshmallow-specific logic. Works on any Python repo
 //! whose seeds JSON stores `activated: [[qname, score], ...]`.
@@ -15,10 +18,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use repo_graph_activation::ActivationConfig;
+use repo_graph_activation::plan::{ActivatedView, ActivationPlan};
 use repo_graph_core::{NodeId, RepoId};
 use repo_graph_graph::{RepoGraph, build_python};
 use repo_graph_parser_python::{FileParse, parse_file};
-use repo_graph_projection_text::composition::{render_cells, synth_paths};
+use repo_graph_projection_text::hooks::AccessPathSynth;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -85,12 +90,11 @@ fn main() -> Result<()> {
     eprintln!("[seeds] {} activated qnames", seeds.activated.len());
 
     let qname_to_id = reverse_qname_index(&graph);
-    let mut activated: Vec<NodeId> = Vec::new();
+    // (id, seed score) in seeds order: the ranked view the hook reads.
     let mut scores: Vec<(NodeId, f64)> = Vec::new();
     let mut missed: Vec<&str> = Vec::new();
     for (qname, score) in &seeds.activated {
         if let Some(&id) = qname_to_id.get(qname.as_str()) {
-            activated.push(id);
             scores.push((id, *score));
         } else {
             missed.push(qname.as_str());
@@ -98,7 +102,7 @@ fn main() -> Result<()> {
     }
     eprintln!(
         "[resolve] {}/{} qnames matched ({} missed)",
-        activated.len(),
+        scores.len(),
         seeds.activated.len(),
         missed.len()
     );
@@ -107,40 +111,16 @@ fn main() -> Result<()> {
         eprintln!("[resolve] first unmatched: {show}");
     }
 
-    {
-        use repo_graph_code_domain::node_kind;
-        let total_attrs = graph
-            .nav
-            .kind_by_id
-            .iter()
-            .filter(|(_, k)| **k == node_kind::ATTRIBUTE)
-            .count();
-        let activated_set: std::collections::HashSet<NodeId> = activated.iter().copied().collect();
-        let activated_attrs = graph
-            .nav
-            .kind_by_id
-            .iter()
-            .filter(|(id, k)| **k == node_kind::ATTRIBUTE && activated_set.contains(id))
-            .count();
-        eprintln!("[diag] ATTRIBUTE nodes: {} total, {} activated", total_attrs, activated_attrs);
-        let opts_matches: Vec<&String> = graph
-            .nav
-            .qname_by_id
-            .iter()
-            .filter(|(id, q)| {
-                graph.nav.kind_by_id.get(id).copied() == Some(node_kind::ATTRIBUTE)
-                    && q.ends_with("::opts")
-            })
-            .map(|(_, q)| q)
-            .collect();
-        eprintln!("[diag] ATTRIBUTE qnames ending in ::opts: {opts_matches:?}");
-    }
-
-    let paths = synth_paths(&activated, &scores, &graph, args.max_hops);
-    eprintln!("[synth] {} AccessPaths", paths.len());
-
-    let cells = render_cells(&paths);
-    eprintln!("[render] {} CompositionCells", cells.len());
+    let hook = AccessPathSynth { max_hops: args.max_hops };
+    let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
+    let mut view = ActivatedView::from_ranked(scores);
+    plan.synthesize(&graph, &mut view);
+    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), view.synth.len());
+    let cells: Vec<SummaryEntry> = view
+        .synth
+        .into_iter()
+        .map(|c| SummaryEntry { id: c.id, qname: c.key, score: c.score, summary: c.text })
+        .collect();
 
     let existing: Vec<SummaryEntry> = serde_json::from_slice(
         &fs::read(&args.summaries)
@@ -150,12 +130,7 @@ fn main() -> Result<()> {
     eprintln!("[append] {} existing + {} new = {}", existing.len(), cells.len(), existing.len() + cells.len());
 
     let mut out: Vec<SummaryEntry> = existing;
-    out.extend(cells.into_iter().map(|c| SummaryEntry {
-        id: c.id,
-        qname: c.qname,
-        score: c.score,
-        summary: c.summary,
-    }));
+    out.extend(cells);
 
     fs::write(&args.out, serde_json::to_vec_pretty(&out)?)
         .with_context(|| format!("write {}", args.out.display()))?;

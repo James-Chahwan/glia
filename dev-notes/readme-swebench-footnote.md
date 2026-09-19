@@ -17,7 +17,7 @@ Two engineering wins came out of it that ship in v0.4.x core:
 
 1. The graph substrate hardened to the point of feeding cross-language
    reachability into ranked composition cells (glia's `synth_*` bins still
-   live in `projection-text/`, feature-gated behind `--features driver`).
+   live in `projection-text/`, feature-gated behind `--features research`).
 2. The bench inference path moved from candle to **llama.cpp**
    (`bench/latent/out/run_llama_pathB.py`) — ~7× faster on CPU and
    GBNF-grammar-constrained decoding kills the format-prior failure class

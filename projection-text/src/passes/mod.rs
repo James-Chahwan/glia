@@ -5,10 +5,16 @@
 //! declared input/output artifact keys, and they share state through
 //! `PassContext` instead of round-tripping JSON to disk.
 //!
-//! Status: scaffolding + one exemplar (`NodeSummariesPass`). The 9 standalone
-//! `bin/synth_*.rs` driver binaries remain the live pipeline; passes are
-//! ported one at a time. No changes to existing bins until each port has
-//! parity tests.
+//! Status: scaffolding + one exemplar (`NodeSummariesPass`); no bin uses it.
+//! The standalone `bin/synth_*.rs` bins are research drivers behind the
+//! `research` feature and remain the live pipeline. For synth composition
+//! this scaffold is superseded: since LD.12b the access-path and
+//! callsite-argflow passes run as `activation::plan::SynthHook`s in one
+//! `ActivationPlan` over one `ActivatedView` (`crate::hooks`:
+//! `AccessPathSynth`, `CallsiteArgflowSynth`), with bin parity pinned by
+//! `tests/synth_hooks.rs`. `Pipeline` / `Pass` / `PassContext` are left as
+//! they are, for James to keep (as the artifact-keyed file pipeline) or
+//! delete.
 
 pub mod context;
 pub mod node_summaries;

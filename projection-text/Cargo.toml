@@ -8,9 +8,10 @@ publish = false
 repo-graph-core = { path = "../core" }
 repo-graph-code-domain = { path = "../code-domain" }
 repo-graph-graph = { path = "../graph" }
+# Plain dependency: `hooks` (ungated) implements activation::plan::SynthHook.
+repo-graph-activation = { path = "../activation" }
 
 repo-graph-parser-python = { path = "../parsers/code/python", optional = true }
-repo-graph-activation = { path = "../activation", optional = true }
 walkdir = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -19,9 +20,10 @@ anyhow = { version = "1", optional = true }
 regex = { version = "1", optional = true }
 
 [features]
-driver = [
+# Research drivers: every `[[bin]]` (the synth_* bins, seeds, node_summaries)
+# and the library modules only they use. Renamed from `driver` in 0.5.0.
+research = [
     "dep:repo-graph-parser-python",
-    "dep:repo-graph-activation",
     "dep:walkdir",
     "dep:clap",
     "dep:serde",
@@ -32,80 +34,81 @@ driver = [
 
 [[bin]]
 name = "synth_composition"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "seeds"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "node_summaries"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_key_symbols"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_callsite_argflow"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_derived_notes"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_call_chain"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_constant_decl"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_source_map"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_reachable_paths"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_traceback_target"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_test_expectation"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_test_assertion"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_runtime_type"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_pr_hint"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_check"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_prose_mention"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_directive"
-required-features = ["driver"]
+required-features = ["research"]
 
 [[bin]]
 name = "synth_validator"
-required-features = ["driver"]
+required-features = ["research"]
 
 [dev-dependencies]
 repo-graph-parser-go = { path = "../parsers/code/go" }
 repo-graph-parser-python = { path = "../parsers/code/python" }
+serde_json = "1"

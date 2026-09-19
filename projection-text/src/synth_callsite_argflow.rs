@@ -7,7 +7,7 @@
 //! See `bin/synth_callsite_argflow.rs` for the bin wrapper that handles
 //! CLI args + summaries-hybrid append.
 
-#![cfg(feature = "driver")]
+#![cfg(feature = "research")]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -152,7 +152,10 @@ pub fn run(
             continue;
         }
 
-        let peers = simple_to_all_methods.get(&simple_name).unwrap();
+        // `per_name` holds only polymorphic names, all keys of this map.
+        let Some(peers) = simple_to_all_methods.get(&simple_name) else {
+            continue;
+        };
         let peer_qnames: Vec<String> = peers
             .iter()
             .filter_map(|id| graph.nav.qname_by_id.get(id).cloned())

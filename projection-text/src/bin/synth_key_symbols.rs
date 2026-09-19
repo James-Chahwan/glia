@@ -227,7 +227,7 @@ fn main() -> Result<()> {
     let mut promoted_to_parent: HashMap<String, String> = HashMap::new();
     for (qname, score) in &seeds.activated {
         let mut effective_qname = qname.clone();
-        let mut effective_score = *score;
+        let effective_score = *score;
         let Some(mut node) = qname_to_node.get(qname.as_str()).copied() else {
             continue;
         };

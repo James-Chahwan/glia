@@ -1,0 +1,22 @@
+{
+  "activated": [
+    ["m::Inner::__init__", 0.95],
+    ["m::Inner::value", 0.9],
+    ["m::Outer::__init__", 0.85],
+    ["m::Outer::inner", 0.8],
+    ["m::Outer::get_inner", 0.75],
+    ["m::Outer::use", 0.7],
+    ["m::Target::__init__", 0.65],
+    ["m::Target::opts", 0.6],
+    ["m::Source::__init__", 0.55],
+    ["m::Source::_t", 0.5],
+    ["m::Source::resolve", 0.45],
+    ["m::Source::use", 0.4],
+    ["m::ListField::bind", 0.35],
+    ["m::ListField::schema", 0.3],
+    ["m::TupleField::bind", 0.25],
+    ["m::TupleField::schema", 0.2],
+    ["m::Schema::attach", 0.15],
+    ["m::Nested::attach", 0.1]
+  ]
+}

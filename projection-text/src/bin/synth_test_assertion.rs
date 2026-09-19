@@ -101,6 +101,9 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&args.text_out, directive.as_bytes())?;
+    for tf in per_fn.values() {
+        eprintln!("[synth_test_assertion] test {}: {} assertion(s)", tf.name, tf.asserts.len());
+    }
     let n_asserts: usize = per_fn.values().map(|tf| tf.asserts.len()).sum();
     eprintln!(
         "[synth_test_assertion] wrote directive: {} ({} test fn(s), {} assertions)",

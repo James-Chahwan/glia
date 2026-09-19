@@ -16,15 +16,22 @@
 //! This bin re-walks the AST for the activated methods' bodies to recover the
 //! facts as auto-synthesised prose — candidate for closing the B2.2 oracle
 //! bullet automatically.
+//!
+//! The pass runs as the `hooks::CallsiteArgflowSynth` hook through one
+//! `ActivationPlan::synthesize` over the seeds' ranked view; prints
+//! `[synth] plan hooks=[callsite_argflow] cells=N` after the plan runs.
 
 use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use repo_graph_activation::ActivationConfig;
+use repo_graph_activation::plan::{ActivatedView, ActivationPlan};
 use repo_graph_core::NodeId;
+use repo_graph_graph::RepoGraph;
 use repo_graph_projection_text::driver_utils::{build_repo_graph, reverse_qname_index};
-use repo_graph_projection_text::synth_callsite_argflow::run as run_callsite_argflow;
+use repo_graph_projection_text::hooks::CallsiteArgflowSynth;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser, Debug)]
@@ -80,28 +87,29 @@ fn main() -> Result<()> {
     eprintln!("[seeds] {} activated qnames", seeds.activated.len());
 
     let qname_to_id = reverse_qname_index(&graph);
-    let mut activated: Vec<NodeId> = Vec::new();
-    for (qname, _) in &seeds.activated {
+    // (id, seed score) in seeds order: the ranked view the hook reads.
+    let mut activated: Vec<(NodeId, f64)> = Vec::new();
+    for (qname, score) in &seeds.activated {
         if let Some(&id) = qname_to_id.get(qname.as_str()) {
-            activated.push(id);
+            activated.push((id, *score));
         }
     }
     eprintln!("[resolve] {} activated qnames matched", activated.len());
 
-    // All graph-walking + cell synthesis logic now lives in
-    // `synth_callsite_argflow::run` so glia-3d's Inject scene calls the
-    // same code in-process. Bin handles only the disk I/O.
-    let cells = run_callsite_argflow(&graph, &activated, args.id_start);
-    let emitted: Vec<SummaryEntry> = cells
+    // All graph-walking + cell synthesis logic lives in
+    // `synth_callsite_argflow::run`, run here as a SynthHook so glia-3d's
+    // Inject scene can put the same hook in its own plan. Bin handles only
+    // the disk I/O.
+    let hook = CallsiteArgflowSynth { id_start: args.id_start };
+    let plan = ActivationPlan::<RepoGraph>::new(ActivationConfig::default()).synth(&hook);
+    let mut view = ActivatedView::from_ranked(activated);
+    plan.synthesize(&graph, &mut view);
+    eprintln!("[synth] plan hooks=[{}] cells={}", view.applied.join(","), view.synth.len());
+    let emitted: Vec<SummaryEntry> = view
+        .synth
         .into_iter()
-        .map(|c| SummaryEntry {
-            id: c.id,
-            qname: c.qname,
-            score: c.score,
-            summary: c.summary,
-        })
+        .map(|c| SummaryEntry { id: c.id, qname: c.key, score: c.score, summary: c.text })
         .collect();
-    eprintln!("[synth] {} callsite-argflow cells emitted", emitted.len());
 
     let existing: Vec<SummaryEntry> = serde_json::from_slice(
         &fs::read(&args.summaries)

@@ -8,15 +8,19 @@
 
 pub mod composition;
 
-#[cfg(feature = "driver")]
+/// The synth passes as `activation::plan::SynthHook`s (LD.12b): the access-path
+/// hook is ungated, the research-only ones sit behind `research`.
+pub mod hooks;
+
+#[cfg(feature = "research")]
 pub mod driver_utils;
 
-#[cfg(feature = "driver")]
+#[cfg(feature = "research")]
 pub mod passes;
 
 /// Refactored synth pass entry points (called both by the bins and
 /// in-process by glia-3d's Inject scene).
-#[cfg(feature = "driver")]
+#[cfg(feature = "research")]
 pub mod synth_callsite_argflow;
 
 use std::collections::{HashMap, HashSet};

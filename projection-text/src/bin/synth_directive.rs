@@ -271,11 +271,12 @@ fn main() -> Result<()> {
 
     for c in &channels {
         eprintln!(
-            "[synth_directive] channel {} score={} targets={} bytes={}",
+            "[synth_directive] channel {} score={} targets={} bytes={} path={}",
             c.label,
             c.score,
             c.resolved_targets,
-            c.text.len()
+            c.text.len(),
+            c.path.display()
         );
     }
 

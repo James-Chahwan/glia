@@ -236,7 +236,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
 **v0.4.14 (perf + cleanup):**
 - **Per-graph-area incremental rebuild.** Re-walk and re-resolve only the regions that changed. `glia build` rewalks everything every invocation today; on a 100k-LOC monorepo the post-commit hook is the bottleneck. Want per-file content hashing, dirty-set propagation, partial `.gmap` patching instead of full rewrite.
 - **Iterator parallelisation.** Per-language parser pipeline, cross-cutting extractor pass, and per-resolver index builds are embarrassingly parallel today and run sequentially. Rayon over walk + parse + extract; sharded resolver index construction.
-- **Cleanup.** Single `--features research` toggle (replaces `driver`); "non-tree-sitter source dispatcher" trait consolidating the 5 bypass branches in `engine/src/lib.rs`; promote `looks_like_url_path` and the framework-presence-signals helper into a shared extractor-utils module (currently duplicated across queues/ts_routes/react); pull `engine`'s repeated language-dispatch arms into a small registry table.
+- **Cleanup.** Single `--features research` toggle (replaces `driver`; done in 0.5.0); "non-tree-sitter source dispatcher" trait consolidating the 5 bypass branches in `engine/src/lib.rs`; promote `looks_like_url_path` and the framework-presence-signals helper into a shared extractor-utils module (currently duplicated across queues/ts_routes/react); pull `engine`'s repeated language-dispatch arms into a small registry table.
 
 **v0.5.0:** domain registries for non-code (video, chemistry, policy, climate). Code becomes one of N domains. The activation crate is already domain-agnostic; the parser+extractor layer is what abstracts.
 
