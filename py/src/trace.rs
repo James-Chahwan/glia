@@ -1,9 +1,10 @@
 //! **cross_stack_trace** (P3, LD.4a): the ranked cross-service paths of a
-//! feature, or between two nodes.
+//! feature, or between two nodes; **entry_flows** (LD.4b): every entry
+//! point's forward flow.
 
 use pyo3::prelude::*;
 
-use repo_graph_engine::trace::{TraceOptions, cross_stack_trace_with_live};
+use repo_graph_engine::trace::{TraceOptions, cross_stack_trace_with_live, entry_flows_with_live};
 
 use crate::convert::to_py;
 use crate::graph::PyGraph;
@@ -25,7 +26,10 @@ impl PyGraph {
     ///   repo (the service `glia arch` draws); `cross_repo` is the repo one.
     /// - `to`: two-node mode — the directed paths from `feature` to `to`, or
     ///   the shortest path over any edge walked either way (`directed` False).
-    /// - `resolved_by`: `qname`, `name`, `find` or `none`.
+    /// - `resolved_by`: `qname`, `name`, `find`, `entry_flow` or `none`.
+    ///   `entry_flow` (LD.4b): the feature named a dead end (no carry edge
+    ///   leaves it) or nothing, and the entry flow whose key matches the word
+    ///   (see `entry_flows`) seeds the trace instead.
     /// - `truncated`: the path search hit its step budget.
     /// - `absence`: set exactly when `paths` is empty (an unknown feature or
     ///   target, a dead end, an unreachable target). Never raises for those.
@@ -44,5 +48,29 @@ impl PyGraph {
         opts.max_paths = max_paths;
         let answer = cross_stack_trace_with_live(&self.merged, self.live(), feature, &opts);
         to_py(py, serde_json::to_string(&answer))
+    }
+
+    /// **entry_flows** (LD.4b): every entry point's forward flow over the
+    /// carry edges (calls, HTTP, queues, ...; never DEFINES / CONTAINS) within
+    /// `depth` hops. Returns a list of dicts `{key, entry, reach,
+    /// cross_service, mechanisms, services, hops}`, sorted by (key, entry
+    /// qname, entry id):
+    ///
+    /// - `key`: the entry's name lower-cased, spaces and hyphens as `_`
+    ///   (`post_/orders`), the feature word `cross_stack_trace` resolves to
+    ///   this entry when the word names a dead end. Not unique: every row is
+    ///   kept.
+    /// - `entry`: the located entry `{id, name, qname, kind, file, line}`.
+    /// - `reach`: nodes reached (`len(hops)`, at least 1).
+    /// - `services`: the repos (or, in a manifest-rooted monorepo, the `glia
+    ///   arch` services) the flow touches, the entry's first;
+    ///   `cross_service` is `len(services) > 1`.
+    /// - `mechanisms`: distinct hop edge categories, in first-seen order.
+    /// - `hops`: the forward BFS tree, the hop dicts `cross_stack_trace`
+    ///   returns.
+    #[pyo3(signature = (depth=6))]
+    fn entry_flows(&self, py: Python<'_>, depth: usize) -> PyResult<Py<PyAny>> {
+        let flows = entry_flows_with_live(&self.merged, self.live(), &self.repo_labels, depth);
+        to_py(py, serde_json::to_string(&flows))
     }
 }

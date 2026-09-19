@@ -3,8 +3,8 @@
 //! labelled with its mechanism and whether it crossed a service, plus a
 //! two-node mode (`to`) for "how does A reach B".
 //!
-//! Moved here from `answers` by LD.4a; LD.4b extends it with entry flows.
-//! Module slot declared by L0.2, reached as
+//! Moved here from `answers` by LD.4a; LD.4b extends it with entry flows
+//! ([`entry_flows`], below). Module slot declared by L0.2, reached as
 //! `repo_graph_engine::trace::<item>`, never flattened into the crate root.
 //!
 //! # The answer
@@ -59,7 +59,41 @@
 //! tier). Otherwise the answer is an `unknown_symbol` absence with find's
 //! nearest qnames as suggestions (`"none"`).
 //!
-//! fired_on marker, one line per call:
+//! The entry-flow tier (LD.4b, one-node mode only): when the feature resolves
+//! to a node no carry edge leaves (a dead end — `orders` naming the
+//! QUEUE_PRODUCER a handler sends on), or resolves to nothing, and an entry
+//! flow's key matches the feature's slug, the seed is that entry instead
+//! (`"entry_flow"`). A key matches when it equals the slug, else when either
+//! contains the other; among matches, an equal key beats a containing one,
+//! then the larger reach within `depth`, then key, qname and id ascending.
+//! Only entries reaching at least one node count. Keys come from names alone,
+//! so only the matching entries are walked. A hit a carry edge leaves is never
+//! replaced; with no matching key the LD.4a answer stands. This is the
+//! repo-graph wrapper's `nodes_for_feature` fallback, now explainable.
+//!
+//! # Entry flows
+//!
+//! [`entry_flows`] (LD.4b, the wrapper's `_build_flows`): one [`EntryFlow`]
+//! per entry point (`CODE_PROFILE.tables.entry`, roles included — the set
+//! liveness seeds from) that reaches anything: its forward BFS tree over the
+//! carry edges within `depth`, as the same located [`TraceHop`]s `hops` holds,
+//! the services it touches and the mechanisms it uses. One carry index and one
+//! [`Locator`] per call serve every entry. Structural edges (DEFINES,
+//! CONTAINS, IMPORTS) are not flow, so no flow pulls in a whole module.
+//!
+//! `services`: each node's service in first-seen order, the entry's first —
+//! the repo's label, or in a manifest-rooted monorepo (`ProjectRoots`) the
+//! `glia arch` service its file sits in. `TopLevelDir` keying counts the repo
+//! as one service, for the reason `cross_service` above never uses it.
+//! `cross_service` is `services.len() > 1`.
+//!
+//! fired_on marker, one line per [`entry_flows`] call:
+//! `[flows] entries=<n> flows=<kept> cross_service=<n> depth<=<d>` — grep
+//! `[flows] entries=`. It follows LD.6's `[live] annotate surface=flows` line.
+//!
+//! # Trace marker
+//!
+//! fired_on marker, one line per [`cross_stack_trace`] call:
 //! `[trace] seed=<query> resolved_by=<r> paths=<n> expanded=<n> truncated=<bool>`
 //! (two-node mode appends `to=<query> directed=<true|false|->`, `-` when no
 //! path was found) — grep `[trace] seed=`.
@@ -70,6 +104,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use repo_graph_activation::algo::{Adjacency, CategorySet, Walk, reach};
 use repo_graph_code_domain::{edge_category, endpoint};
 use repo_graph_core::{EdgeCategoryId, NodeId, NodeKindId};
+use repo_graph_graph::roles::roles_in;
 use repo_graph_graph::{MergedGraph, Reach};
 
 use crate::absence::{self, Absence};
@@ -167,7 +202,9 @@ pub struct TraceAnswer {
     pub seed: Option<Located>,
     /// Two-node mode: the node `to` resolved to.
     pub target: Option<Located>,
-    /// How the seed resolved: `qname`, `name`, `find` or `none`.
+    /// How the seed resolved: `qname`, `name`, `find`, `entry_flow` (a dead
+    /// end or an unresolved word yielded to the entry flow its key names,
+    /// LD.4b) or `none`.
     pub resolved_by: &'static str,
     /// The seed's forward BFS tree over the carry edges, in discovery order.
     pub hops: Vec<TraceHop>,
@@ -177,6 +214,32 @@ pub struct TraceAnswer {
     /// paths found before it stopped.
     pub truncated: bool,
     pub absence: Option<Absence>,
+}
+
+/// One entry point's forward flow (LD.4b): what it reaches over the carry
+/// edges within the walk's depth — see the module doc's "Entry flows".
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct EntryFlow {
+    /// The flow's feature word: the entry's name lower-cased, with spaces and
+    /// hyphens as `_` (`POST /orders` -> `post_/orders`), the repo-graph
+    /// wrapper's spelling. Not unique: two repos serving `GET /x` give two
+    /// rows with one key.
+    pub key: String,
+    /// The entry point, located.
+    pub entry: Located,
+    /// Nodes the flow reaches (`hops.len()`), at least 1.
+    pub reach: usize,
+    /// `services` names more than one service.
+    pub cross_service: bool,
+    /// Distinct hop mechanisms (edge categories), in first-seen order.
+    pub mechanisms: Vec<&'static str>,
+    /// The services the flow touches, the entry's first, then in first-seen
+    /// order along `hops`.
+    pub services: Vec<String>,
+    /// The entry's forward BFS tree, in discovery order: the hops a
+    /// [`TraceAnswer::hops`] seeded at the entry would hold.
+    pub hops: Vec<TraceHop>,
 }
 
 /// **cross_stack_trace** (P3): the ranked paths a feature takes across the
@@ -202,7 +265,21 @@ pub fn cross_stack_trace_with_live(
     feature: &str,
     opts: &TraceOptions,
 ) -> TraceAnswer {
-    let seed = resolve(merged, feature);
+    let mut seed = resolve(merged, feature);
+    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
+    let succ = Successors::carry(merged);
+    // The entry-flow tier (LD.4b, module doc): one-node mode, a dead end or
+    // nothing resolved, and an entry key naming the feature.
+    if opts.to.is_none()
+        && !seed.id.is_some_and(|id| leaves(&succ, id))
+        && let Some(entry) = entry_seed(merged, &adj, feature, opts.depth)
+    {
+        seed = Resolved {
+            id: Some(entry),
+            by: "entry_flow",
+            near: Vec::new(),
+        };
+    }
     let Some(seed_id) = seed.id else {
         live_marker("trace", 0, 0);
         let absence = absence::unknown_symbol(merged, "trace", feature, &[], &seed.near);
@@ -220,7 +297,6 @@ pub fn cross_stack_trace_with_live(
 
     let loc = Locator::new(merged);
     let mut sides = Sides::new(merged, &loc);
-    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
 
     // The BFS tree (LD.15b), unchanged: each reached node is one hop, in
     // discovery order, from the node that first reached it.
@@ -236,7 +312,6 @@ pub fn cross_stack_trace_with_live(
     );
 
     let seed_at = loc.locate(seed_id);
-    let succ = Successors::carry(merged);
 
     let Some(to_query) = opts.to.as_deref() else {
         let walk = enumerate(&succ, &mut sides, seed_id, None, opts);
@@ -367,6 +442,192 @@ pub fn cross_stack_trace_with_live(
         truncated,
         absence,
     }
+}
+
+/// **entry_flows** (LD.4b): every entry point's forward flow — see the module
+/// doc's "Entry flows". `repo_labels` is the build's
+/// (`GenerateResult::repo_labels`); `services` names repos by it. Rows are
+/// ordered by (key, entry qname, entry id) and every one is kept, so two
+/// entries with one key are two rows. Entries reaching nothing within `depth`
+/// have no row (`depth = 0` keeps none).
+///
+/// Each hop's `to_live` is read off one [`entrypoint_reachable`] walk, run
+/// once per call; [`entry_flows_with_live`] takes the set instead.
+pub fn entry_flows(
+    merged: &MergedGraph,
+    repo_labels: &BTreeMap<u64, String>,
+    depth: usize,
+) -> Vec<EntryFlow> {
+    entry_flows_with_live(merged, &entrypoint_reachable(merged), repo_labels, depth)
+}
+
+/// [`entry_flows`] over a live set the caller already holds (pyo3's `PyGraph`
+/// computes it once per graph): `live` must be [`entrypoint_reachable`] of
+/// `merged`.
+pub fn entry_flows_with_live(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    repo_labels: &BTreeMap<u64, String>,
+    depth: usize,
+) -> Vec<EntryFlow> {
+    let entries = entries(merged);
+    let loc = Locator::new(merged);
+    let mut sides = Sides::new(merged, &loc);
+    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
+    let mut flows: Vec<EntryFlow> = Vec::new();
+    for e in &entries {
+        let reached = reach::bfs(&adj, &[e.id], Walk::Forward, depth).reached;
+        if reached.is_empty() {
+            continue;
+        }
+        let hops: Vec<TraceHop> = reached
+            .iter()
+            .map(|r| sides.hop(live, r.depth, r.parent, r.id, r.via))
+            .collect();
+        let mut mechanisms: Vec<&'static str> = Vec::new();
+        for h in &hops {
+            if !mechanisms.contains(&h.mechanism) {
+                mechanisms.push(h.mechanism);
+            }
+        }
+        let mut services: Vec<String> = Vec::new();
+        for id in std::iter::once(e.id).chain(reached.iter().map(|r| r.id)) {
+            if let Some(s) = sides.service_label(id, repo_labels)
+                && !services.contains(&s)
+            {
+                services.push(s);
+            }
+        }
+        flows.push(EntryFlow {
+            key: slug(e.name),
+            entry: loc.locate(e.id),
+            reach: hops.len(),
+            cross_service: services.len() > 1,
+            mechanisms,
+            services,
+            hops,
+        });
+    }
+    flows.sort_by(|a, b| {
+        a.key
+            .cmp(&b.key)
+            .then_with(|| a.entry.qname.cmp(&b.entry.qname))
+            .then_with(|| a.entry.id.cmp(&b.entry.id))
+    });
+    let (rows, live_rows) = flows.iter().fold((0, 0), |(n, l), f| {
+        (
+            n + f.hops.len(),
+            l + f.hops.iter().filter(|h| h.to_live).count(),
+        )
+    });
+    live_marker("flows", rows, live_rows);
+    eprintln!(
+        "[flows] entries={} flows={} cross_service={} depth<={depth}",
+        entries.len(),
+        flows.len(),
+        flows.iter().filter(|f| f.cross_service).count()
+    );
+    flows
+}
+
+/// An entry key or a feature word as a slug: lower-cased, spaces and hyphens
+/// as `_` (the repo-graph wrapper's spelling).
+fn slug(s: &str) -> String {
+    s.to_lowercase().replace([' ', '-'], "_")
+}
+
+/// One entry point: the node, its name and qname.
+struct Entry<'a> {
+    id: NodeId,
+    name: &'a str,
+    qname: &'a str,
+}
+
+/// Every entry point of `merged` — `CODE_PROFILE.tables.entry` over kind,
+/// name and roles, the rule liveness seeds from — in graph then node order,
+/// each id once.
+fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
+    let rule = &CODE_PROFILE.tables.entry;
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut out: Vec<Entry<'_>> = Vec::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let kind = g.nav.kind_by_id.get(&n.id).copied();
+            let name = g
+                .nav
+                .name_by_id
+                .get(&n.id)
+                .map(String::as_str)
+                .unwrap_or("");
+            let entry = rule.is_entry(kind, name, &[])
+                || rule.is_entry(kind, name, &roles_in(kind, &n.cells));
+            if entry && seen.insert(n.id) {
+                let qname = g
+                    .nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                out.push(Entry {
+                    id: n.id,
+                    name,
+                    qname,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The entry-flow tier's pick for `feature` (module doc): the entry whose key
+/// matches the feature's slug — equal before containing, then the larger reach
+/// within `depth`, then key, qname and id ascending — among the entries that
+/// reach at least one node. Only the matching entries are walked.
+fn entry_seed(
+    merged: &MergedGraph,
+    adj: &Adjacency,
+    feature: &str,
+    depth: usize,
+) -> Option<NodeId> {
+    let word = slug(feature.trim());
+    if word.is_empty() {
+        return None;
+    }
+    // (tier, reach, key, qname, id): tier 0 = equal key, 1 = containment.
+    let mut best: Option<(u8, usize, String, &str, NodeId)> = None;
+    for e in entries(merged) {
+        let key = slug(e.name);
+        if key.is_empty() {
+            continue;
+        }
+        let tier = if key == word {
+            0
+        } else if key.contains(&word) || word.contains(&key) {
+            1
+        } else {
+            continue;
+        };
+        let reach = reach::bfs(adj, &[e.id], Walk::Forward, depth).reached.len();
+        if reach == 0 {
+            continue;
+        }
+        let better = match &best {
+            None => true,
+            Some((t, r, k, q, id)) => {
+                (
+                    tier,
+                    std::cmp::Reverse(reach),
+                    key.as_str(),
+                    e.qname,
+                    e.id.0,
+                ) < (*t, std::cmp::Reverse(*r), k.as_str(), *q, id.0)
+            }
+        };
+        if better {
+            best = Some((tier, reach, key, e.qname, e.id));
+        }
+    }
+    best.map(|(.., id)| id)
 }
 
 /// The LD.4a fired_on line.
@@ -519,6 +780,20 @@ impl<'a> Sides<'a> {
         let key = file.map(|f| service_of(&f, repo, &self.keying, &self.no_labels));
         self.service.insert(id, key.clone());
         key
+    }
+
+    /// The service `id` counts toward in an entry flow's `services`: under
+    /// `ProjectRoots` keying the `glia arch` service of [`Self::service_key`]
+    /// (one repo, so `service_of` never prefixes it with a label), else its
+    /// repo's label from `labels` (`service_of`'s `repo<id>` when the build
+    /// has none). `None` for a node no graph holds, or one `service_key`
+    /// cannot place.
+    fn service_label(&mut self, id: NodeId, labels: &BTreeMap<u64, String>) -> Option<String> {
+        let repo = *self.repo_of.get(&id)?;
+        if matches!(self.keying, ServiceKeying::ProjectRoots(_)) {
+            return self.service_key(id);
+        }
+        Some(service_of("", repo, &ServiceKeying::PerRepo, labels))
     }
 
     /// One located hop.

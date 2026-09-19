@@ -9,6 +9,7 @@
 use clap::Subcommand;
 
 mod find;
+mod flows;
 mod pages;
 mod serves;
 
@@ -19,6 +20,12 @@ pub(crate) enum QueryCmd {
     /// exact_ci, qname_suffix, name_prefix, name_word, name_substring,
     /// qname_substring, subsequence — ranked by tier, then by degree.
     Find(find::Args),
+    /// Flows (LD.4b): every entry point's forward flow over the carry edges
+    /// (calls, HTTP, queues, ...; never DEFINES / CONTAINS), one row each:
+    /// its key (the feature word `glia trace` resolves to it), how many nodes
+    /// it reaches, whether it crosses a service, the mechanisms it uses and
+    /// where the entry is. Rows sharing a key are all kept. Exits 0.
+    Flows(flows::Args),
     /// Pages (LA.6e): the frontend's client-router pages with their handlers,
     /// the navigation links between them, dead deep links (a router link no
     /// route serves, with the catch-all that absorbs it) and pages no in-repo
@@ -35,6 +42,7 @@ pub(crate) enum QueryCmd {
 pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Find(a) => find::run(a),
+        QueryCmd::Flows(a) => flows::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
     }

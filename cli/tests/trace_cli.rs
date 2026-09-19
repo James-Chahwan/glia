@@ -7,6 +7,10 @@
 //! here makes it a tested contract, and relaying it lets
 //! `cargo test -p glia-cli --test trace_cli -- --nocapture 2>&1 | grep '^\[trace\] seed='`
 //! show it.
+//!
+//! LD.4b: `glia flows` over the same build (its `[flows] entries=` marker is
+//! relayed the same way), and the entry-flow tier that seeds `glia trace`
+//! with a route when the feature word names a dead end.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -141,10 +145,94 @@ fn an_unknown_feature_is_an_absence_with_exit_0() {
     assert!(text.contains("> FACT: no node has the qname or name `no::such::thing`"), "{text}");
     assert_eq!(markers, ["[trace] seed=no::such::thing resolved_by=none paths=0 expanded=0 truncated=false"]);
 
-    // A dead end resolves and says why it is empty.
-    let (out, _) = glia(&["trace", &api, "orders", "--json"]);
+    // A dead end no entry key names resolves and says why it is empty.
+    let (out, _) = glia(&["trace", &api, "queue_producer:orders", "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
-    assert_eq!(v["resolved_by"], "name");
+    assert_eq!(v["resolved_by"], "qname");
     assert_eq!(v["seed"]["kind"], "QUEUE_PRODUCER");
     assert_eq!(v["absence"]["reason"], "no_edges", "{v}");
+}
+
+#[test]
+fn a_dead_end_feature_word_traces_its_entry_flow() {
+    let fx = Fixture::new("entry");
+    let api = fx.repo("api");
+    // LD.4b: `orders` names the QUEUE_PRODUCER no carry edge leaves (through
+    // LD.4a: `_(no outward flow)_`); the entry flow keyed `post_/orders`
+    // contains the word, so the route seeds the trace.
+    let (out, markers) = glia(&["trace", &api, "orders"]);
+    assert_eq!(markers, ["[trace] seed=orders resolved_by=entry_flow paths=3 expanded=8 truncated=false"]);
+    let text = stdout(&out);
+    assert!(!text.contains("_(no outward flow)_"), "{text}");
+    assert!(text.contains("| 1 | HANDLED_BY |  | `POST /orders` | `app::create_order` (FUNCTION) |"), "{text}");
+    let (out, _) = glia(&["trace", &api, "orders", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    assert_eq!(v["resolved_by"], "entry_flow");
+    assert_eq!(v["seed"]["kind"], "ROUTE");
+    assert_eq!(v["seed"]["qname"], "POST /orders");
+    assert!(v["absence"].is_null(), "{v}");
+}
+
+/// Run `glia flows <args>` like [`glia`], relaying the `[flows]` marker.
+fn flows(args: &[&str]) -> (Output, Vec<String>) {
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .arg("flows")
+        .args(args)
+        .env("GLIA_NO_PERSIST", "1")
+        .output()
+        .expect("glia runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "glia flows {args:?} exited {:?}\n{stderr}", out.status);
+    let markers: Vec<String> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[flows] entries="))
+        .map(str::to_string)
+        .collect();
+    for m in &markers {
+        eprintln!("{m}");
+    }
+    (out, markers)
+}
+
+#[test]
+fn flows_json_rows_equal_the_engine_answer() {
+    let fx = Fixture::new("flows-json");
+    let (api, billing) = (fx.repo("api"), fx.repo("billing"));
+    let (out, markers) = flows(&[&api, "--with", &billing, "--json"]);
+    assert_eq!(markers, ["[flows] entries=2 flows=2 cross_service=1 depth<=6"]);
+    let cli: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+
+    let r = repo_graph_engine::generate_many(&[api.clone(), billing.clone()]).expect("generate_many");
+    let engine = repo_graph_engine::trace::entry_flows(&r.merged, &r.repo_labels, 6);
+    let engine = serde_json::to_value(&engine).expect("flows serialise");
+    assert_eq!(cli, engine);
+
+    let rows = cli.as_array().expect("a list of flows");
+    let keys: Vec<&str> = rows.iter().filter_map(|f| f["key"].as_str()).collect();
+    assert_eq!(keys, ["post_/charge", "post_/orders"]);
+    assert_eq!(rows[1]["services"], serde_json::json!(["api", "billing"]));
+    assert_eq!(rows[1]["cross_service"], true);
+}
+
+#[test]
+fn flows_table_prints_one_row_per_flow() {
+    let fx = Fixture::new("flows-table");
+    let (api, billing) = (fx.repo("api"), fx.repo("billing"));
+    let (out, _) = flows(&[&api, "--with", &billing]);
+    let text = stdout(&out);
+    assert!(text.contains(&format!("# glia flows `{api}` (depth ≤ 6)")), "{text}");
+    assert!(text.contains("| key | kind | entry | reach | xsvc | mechanisms | location |"), "{text}");
+    assert!(
+        text.contains("| `post_/charge` | ROUTE | `POST /charge` | 1 |  | HANDLED_BY | app.py:"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| `post_/orders` | ROUTE | `POST /orders` | 9 | ✔ | HANDLED_BY, CALLS, USES, HTTP_CALLS | app.py:"),
+        "{text}"
+    );
+
+    // Nothing reached within 0 hops: no rows, still exit 0.
+    let (out, markers) = flows(&[&api, "--depth", "0"]);
+    assert!(stdout(&out).contains("_(no entry point reaches anything within 0 hops)_"));
+    assert_eq!(markers, ["[flows] entries=1 flows=0 cross_service=0 depth<=0"]);
 }

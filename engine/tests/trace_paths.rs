@@ -356,22 +356,53 @@ fn a_manifest_rooted_monorepo_crosses_services_where_glia_arch_does() {
 }
 
 #[test]
-fn a_dead_end_seed_is_an_absence_not_an_error() {
+fn a_dead_end_seed_yields_to_its_entry_flow_else_is_an_absence() {
     let td = tempfile::tempdir().expect("tempdir");
     write(td.path(), "api/app.py", API_PY);
     let m = generate_one(&dir(td.path(), "api"))
         .expect("generate_one")
         .merged;
 
+    // LD.4b: `orders` names the QUEUE_PRODUCER, which no carry edge leaves;
+    // the entry flow keyed `post_/orders` contains the word, so the route
+    // seeds the trace. (Through LD.4a: resolved_by `name`, the producer as the
+    // seed, and a `no_edges` absence.)
     let a = cross_stack_trace(&m, "orders", &TraceOptions::default());
-    assert_eq!(a.resolved_by, "name");
+    assert_eq!(a.resolved_by, "entry_flow");
     let seed = a.seed.as_ref().expect("orders resolves");
+    assert_eq!((seed.kind, seed.qname.as_str()), ("ROUTE", "POST /orders"));
+    assert!(a.absence.is_none(), "{:?}", a.absence);
+    assert_eq!(
+        a.hops.first().map(|h| (h.mechanism, h.to_qname.as_str())),
+        Some(("HANDLED_BY", "app::create_order"))
+    );
+    let ends: Vec<&str> = (0..a.paths.len()).map(|i| last_qname(&a, i)).collect();
+    assert_eq!(
+        ends,
+        [
+            "queue_producer:orders",
+            "endpoint:POST:/charge",
+            "app::audit"
+        ],
+        "{:#?}",
+        a.paths
+    );
+    assert!(
+        a.paths
+            .iter()
+            .all(|p| p.hops.first().map(|h| h.from_qname.as_str()) == Some("POST /orders"))
+    );
+
+    // A dead end no entry key names is still an absence, never an error.
+    let b = cross_stack_trace(&m, "queue_producer:orders", &TraceOptions::default());
+    assert_eq!(b.resolved_by, "qname");
+    let seed = b.seed.as_ref().expect("the producer resolves");
     assert_eq!(
         (seed.kind, seed.qname.as_str()),
         ("QUEUE_PRODUCER", "queue_producer:orders")
     );
-    assert!(a.hops.is_empty() && a.paths.is_empty());
-    let why = a.absence.expect("a dead end is an absence");
+    assert!(b.hops.is_empty() && b.paths.is_empty());
+    let why = b.absence.expect("a dead end is an absence");
     assert_eq!(why.reason, "no_edges");
     assert!(why.note.contains("queue_producer:orders"), "{}", why.note);
     assert_eq!(why.mechanisms, ["QUEUE_FLOWS"]);
