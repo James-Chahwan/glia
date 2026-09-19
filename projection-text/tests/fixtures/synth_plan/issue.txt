@@ -1,0 +1,3 @@
+Calling `Outer.use` hands back a stale value: `outer.get_inner.value` still
+returns the old Inner after a swap. The same happens through `Source.resolve`
+when its Target changes: `source.resolve.opts` stays None.

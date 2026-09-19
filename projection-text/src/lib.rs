@@ -23,6 +23,11 @@ pub mod passes;
 #[cfg(feature = "research")]
 pub mod synth_callsite_argflow;
 
+/// Research synth passes as `SynthHook`s whose inputs (issue text, test
+/// patch, seeds file) a research driver fills in: key symbols (LD.12d).
+#[cfg(feature = "research")]
+pub mod research;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
