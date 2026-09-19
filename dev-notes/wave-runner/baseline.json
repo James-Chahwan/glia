@@ -1,6 +1,6 @@
 {
-  "measured_at_head": "0166445",
-  "after_wave": 36,
+  "measured_at_head": "0d10739",
+  "after_wave": 37,
   "cargo_test_workspace": {
     "passed": 3182,
     "failed": 0
@@ -58,6 +58,7 @@
     3121,
     3160,
     3174,
+    3182,
     3182,
     3182,
     3182,
