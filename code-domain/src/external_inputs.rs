@@ -1,6 +1,7 @@
 //! Externally supplied node cells: the `.glia/cells.jsonl` and
-//! `.glia/vectors.jsonl` sidecars, their row shapes, and the entry rules every
-//! writer shares. (LF.1a; LF.4a extends it.)
+//! `.glia/vectors.jsonl` sidecars, their row shapes, the entry rules every
+//! writer shares (LF.1a), and the typed reader of CONSTRAINT entries (LF.4a:
+//! [`ConstraintRule`], [`parse_constraints`]).
 //!
 //! LAYOUT. `.glia/` is glia's control dir: the walk never enters it (LF.1d)
 //! and readers open their files directly.
@@ -32,6 +33,16 @@
 //! `CellPayload::Bytes`. The one resolver and apply function live in the graph
 //! crate (`repo_graph_graph::cells`), so the build, a live in-memory write and
 //! a persisted write-through bind a row to the same node.
+//!
+//! CONSTRAINT ENTRIES (the rule schema `glia check`, LE.8, reads through
+//! [`parse_constraints`] and nowhere else). The overlay's `[[constraint]]`
+//! stanzas (LF.4a) are stored as
+//! `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"origin":"human|llm","decl":".glia/overlay.toml:<line>"}`:
+//! `from` / `to` / `scope` hold the scope RESOLVED to a repo-relative path
+//! (`.` = the repo root) and the `*_raw` keys what the stanza said (a project
+//! label, a qname or a path), so a reader never re-resolves a label. An entry
+//! written through the cell API (`source` `api`) carries the scope strings as
+//! its writer gave them.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
@@ -420,6 +431,86 @@ fn entries_payload(mut entries: Vec<Value>) -> CellPayload {
     CellPayload::Json(serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into()))
 }
 
+/// What a declared rule forbids. `#[non_exhaustive]`: a reader outside this
+/// crate keeps a `_` arm, which is where a kind it cannot evaluate goes
+/// (listed as unchecked, never dropped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConstraintKind {
+    /// No edge from a node in scope `from` to a node in scope `to`.
+    ForbidEdge { from: String, to: String },
+    /// No cycle among the nodes in `scope` (`None` = the whole graph).
+    NoCycle { scope: Option<String> },
+    /// A statement no graph query checks.
+    Invariant { text: String },
+}
+
+impl ConstraintKind {
+    /// The stored `kind` name, one of `glia_config::CONSTRAINT_KINDS`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            ConstraintKind::ForbidEdge { .. } => "forbid_edge",
+            ConstraintKind::NoCycle { .. } => "no_cycle",
+            ConstraintKind::Invariant { .. } => "invariant",
+        }
+    }
+}
+
+/// One CONSTRAINT entry, typed: the rule a checker evaluates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ConstraintRule {
+    pub id: String,
+    pub kind: ConstraintKind,
+    /// Edge category NAMES the rule is restricted to, as stored (empty = the
+    /// checker's default set). A name no longer registered is kept, so the
+    /// checker can report it instead of the rule vanishing.
+    pub categories: Vec<String>,
+    /// Who wrote it: one of [`ENTRY_SOURCES`].
+    pub source: String,
+    /// `.glia/overlay.toml:<line>` for a declared rule; `None` for an API write.
+    pub decl: Option<String>,
+}
+
+/// Every well-formed rule in a CONSTRAINT payload, in stored order (sorted by
+/// `(source, id)`). An entry that is not an object, lacks a string `source` /
+/// `id`, names an unknown `kind`, lacks its kind's required field
+/// (forbid_edge `from` + `to`, invariant `text`) or has a non-string where a
+/// string belongs is skipped; a payload that is not a JSON array yields
+/// nothing. Never panics.
+pub fn parse_constraints(payload: &CellPayload) -> Vec<ConstraintRule> {
+    entry_array(payload).unwrap_or_default().iter().filter_map(constraint_rule).collect()
+}
+
+fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
+    let obj = v.as_object()?;
+    // `Err` (a non-string) is malformed; `Ok(None)` is absent.
+    let field = |key: &str| string_field(obj, key).ok();
+    let required = |key: &str| {
+        field(key).flatten().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
+    };
+    let kind = match field("kind")?? {
+        "forbid_edge" => ConstraintKind::ForbidEdge { from: required("from")?, to: required("to")? },
+        "no_cycle" => ConstraintKind::NoCycle { scope: field("scope")?.map(String::from) },
+        "invariant" => ConstraintKind::Invariant { text: required("text")? },
+        _ => return None,
+    };
+    let categories = match obj.get("categories") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(names)) => {
+            names.iter().map(|n| n.as_str().map(String::from)).collect::<Option<Vec<_>>>()?
+        }
+        Some(_) => return None,
+    };
+    Some(ConstraintRule {
+        id: required("id")?,
+        kind,
+        categories,
+        source: required("source")?,
+        decl: field("decl")?.map(String::from),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +584,54 @@ mod tests {
         assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "other"})));
         assert!(!ok(cell_type::VECTOR, json!({"source": "api", "id": "v"})));
         assert!(!ok(cell_type::CODE, json!({"source": "api", "id": "v"})));
+    }
+
+    #[test]
+    fn parse_constraints_reads_every_kind_and_skips_malformed() {
+        let entries = [
+            json!({"source": "overlay", "id": "a", "kind": "forbid_edge", "from": "web", "to": "services/api",
+                   "from_raw": "@shop/web", "categories": ["CALLS", "RENAMED_SINCE"], "decl": ".glia/overlay.toml:3"}),
+            json!({"source": "overlay", "id": "b", "kind": "no_cycle", "scope": "services/api"}),
+            json!({"source": "api", "id": "c", "kind": "no_cycle"}),
+            json!({"source": "api", "id": "d", "kind": "invariant", "text": "charges are idempotent"}),
+            // Malformed: each is skipped, never a panic.
+            json!({"source": "api", "id": "e", "kind": "forbid_edge", "from": "web"}),
+            json!({"source": "api", "id": "f", "kind": "invariant", "text": "  "}),
+            json!({"source": "api", "id": "g", "kind": "other"}),
+            json!({"source": "api", "kind": "no_cycle"}),
+            json!({"id": "h", "kind": "no_cycle"}),
+            json!({"source": "api", "id": "i", "kind": "no_cycle", "scope": 7}),
+            json!({"source": "api", "id": "j", "kind": "no_cycle", "categories": ["CALLS", 1]}),
+            json!({"source": "api", "id": "k", "kind": "no_cycle", "categories": "CALLS"}),
+            json!(["not", "an", "object"]),
+        ];
+        let payload = CellPayload::Json(serde_json::to_string(&entries).unwrap());
+        let rules = parse_constraints(&payload);
+        let got: Vec<(&str, &str, Option<&str>)> =
+            rules.iter().map(|r| (r.id.as_str(), r.kind.name(), r.decl.as_deref())).collect();
+        assert_eq!(
+            got,
+            [
+                ("a", "forbid_edge", Some(".glia/overlay.toml:3")),
+                ("b", "no_cycle", None),
+                ("c", "no_cycle", None),
+                ("d", "invariant", None),
+            ]
+        );
+        assert_eq!(rules[0].kind, ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into() });
+        assert_eq!(rules[0].categories, ["CALLS", "RENAMED_SINCE"], "an unregistered name is kept for the checker");
+        assert_eq!(rules[0].source, "overlay");
+        assert_eq!(rules[1].kind, ConstraintKind::NoCycle { scope: Some("services/api".into()) });
+        assert_eq!(rules[2].kind, ConstraintKind::NoCycle { scope: None });
+        assert_eq!(rules[3].kind, ConstraintKind::Invariant { text: "charges are idempotent".into() });
+
+        // Round trip through the writer's merge: what merge_entry stores parses back.
+        let stored = merge_entry(None, &entries[0]).unwrap();
+        assert_eq!(parse_constraints(&stored), rules[..1]);
+        // A payload that is not an entry array yields nothing.
+        assert!(parse_constraints(&CellPayload::Json("{}".into())).is_empty());
+        assert!(parse_constraints(&CellPayload::Text("not json".into())).is_empty());
+        assert!(parse_constraints(&CellPayload::Bytes(vec![1, 2])).is_empty());
     }
 
     #[test]

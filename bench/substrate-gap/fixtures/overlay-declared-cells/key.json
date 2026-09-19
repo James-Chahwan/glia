@@ -1,0 +1,11 @@
+{
+  "framework": "overlay-declared-cells",
+  "language": "python",
+  "dirs": ["."],
+  "note": "LF.4a - .glia/overlay.toml declared knowledge: a [[constraint]] forbid_edge anchors on its `from` project's PROJECT node as a CONSTRAINT entry (from/to stored resolved to paths), a [[decision]] and a [[note]] anchor on a function by qname as DECISION / CONV entries. Baseline 2026-09-19 (HEAD a128c48, installed wheel = W23 code): CONSTRAINT, DECISION and CONV have no overlay emitter, so all three cells are missing.",
+  "expect_cells": [
+    {"kind": "PROJECT",  "node": "project:web",                "cell": "CONSTRAINT", "contains": "forbid_edge"},
+    {"kind": "FUNCTION", "node": "services::api::app::charge", "cell": "DECISION",   "contains": "idempotent"},
+    {"kind": "FUNCTION", "node": "services::api::app::charge", "cell": "CONV",       "contains": "retries are safe"}
+  ]
+}

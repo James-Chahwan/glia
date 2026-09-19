@@ -1,0 +1,20 @@
+version = 1
+
+[[constraint]]
+id = "web-no-api-internals"
+kind = "forbid_edge"
+from = "web"
+to = "services/api"
+categories = ["CALLS"]
+text = "web goes through HTTP"
+origin = "human"
+
+[[decision]]
+id = "charge-idempotent"
+anchor = "services::api::app::charge"
+title = "charge() is idempotent on order id"
+status = "accepted"
+
+[[note]]
+anchor = "services::api::app::charge"
+text = "retries are safe"

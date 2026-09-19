@@ -27,9 +27,14 @@
 //!   (see [`overlay`]), or, on a build without the overlay,
 //!   `[overlay] disabled (--no-overlay) repo=<label>`;
 //! - `[history] ingest repo=<label> head=<12 hex> commits=<n> modules=<m> unmapped=<u> attn=<a> blame_symbols=<b> cochange_pairs=<p> (support>=3 ratio>=300 max_files=30)`
-//!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]).
+//!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]);
+//! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
+//!   once per repo whose overlay declares a `[[constraint]]` / `[[decision]]`
+//!   / `[[note]]`, and `[declared] rules=<r> (forbid_edge=<f> no_cycle=<c> invariant=<i>)`
+//!   once per build whose graph then holds a CONSTRAINT rule (see [`declared`]).
 
 mod cells;
+mod declared;
 mod history;
 mod overlay;
 
@@ -116,24 +121,30 @@ pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInput
 /// Apply every repo's external node cells, per input in argument order and,
 /// within a repo, the stages in a FIXED order: the cell sidecars (LF.1a),
 /// then the git-history ATTN cells (LF.5b, [`history::history_cells`]), then
-/// the stages LF.4a, LF.3b and LF.6b append, in the order their packets
-/// document.
+/// the overlay's declared knowledge (LF.4a,
+/// [`declared::apply_declared_cells`]: never gated by `--no-overlay`), then
+/// the stages LF.3b and LF.6b append, in the order their packets document.
 ///
 /// Runs after the code passes. When any stage changed the graph, the evidence
 /// fill and the cross-edge sort run again (LC.3a: fill-then-sort is the last
 /// step of every build), so a stage that adds an edge still leaves it located
-/// and in canonical order. The sidecar stage writes only CONSTRAINT /
-/// DECISION / CONV / VECTOR node cells and the history stage only ATTN node
-/// cells, which neither the fill (it reads POSITION) nor the sort (edges
-/// only) reads. A repo with no external inputs takes no branch that writes
-/// anything.
+/// and in canonical order. The sidecar and declared stages write only
+/// CONSTRAINT / DECISION / CONV / VECTOR node cells and the history stage
+/// only ATTN node cells, which neither the fill (it reads POSITION) nor the
+/// sort (edges only) reads. A repo with no external inputs takes no branch
+/// that writes anything. After a stage wrote, the build reports the CONSTRAINT
+/// rules `glia check` will read ([`declared::report_rules`]).
 pub(crate) fn apply_external_cells(merged: &mut MergedGraph, inputs: &[RepoInputs]) {
     let mut changed = false;
     for input in inputs {
         changed |= cells::apply_sidecar(merged, input);
         changed |= history::history_cells(merged, input);
+        if let Some(cfg) = &input.config {
+            changed |= declared::apply_declared_cells(merged, input, cfg);
+        }
     }
     if changed {
+        declared::report_rules(merged);
         // The first fill's `[evidence]` marker already reported the build.
         passes::fill_evidence_sites(merged);
         merged.sort_cross_edges();
