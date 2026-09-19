@@ -19,7 +19,7 @@ schedule --verify, render the next wave, commit.
 Prints a DELTA against the previous baseline so an unexpected blind spot,
 partial, forbid violation or missing cell is visible instead of buried.
 """
-import glob, json, os, re, subprocess, sys
+import glob, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -122,7 +122,16 @@ def main():
     if dirty:
         gates.append(f"uncommitted paths: {dirty[:6]}")
 
+    # /tmp is a RAM disk: agents' leftover isolated builds filled it once and the workspace
+    # tests failed to link (W18). Say so up front instead of reporting a phantom compile error.
+    free_gb = shutil.disk_usage("/tmp").free / 2**30
+    if free_gb < 8:
+        big, _ = sh("du -xsh /tmp/claude-1000/*/*/scratchpad/* 2>/dev/null | sort -h | tail -5")
+        say(f"!! /tmp has only {free_gb:.1f}G free — largest scratch dirs:\n{big.rstrip()}")
+        gates.append(f"/tmp free {free_gb:.1f}G < 8G")
     out, _ = sh("cargo test --workspace --quiet 2>&1", timeout=2400)
+    # Keep the full output: a one-line count cannot say which test or crate failed.
+    (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{'leap-' if leap else ''}w{wave}.log").write_text(out)
     passed = sum(int(m) for m in re.findall(r"test result: ok\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
     comp = len(re.findall(r"^error(\[E\d+\])?:", out, re.M))

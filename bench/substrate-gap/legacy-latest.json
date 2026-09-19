@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 262,
+  "fixtures": 263,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -821,6 +821,15 @@
         "HANDLED_BY": 1.0,
         "IMPORTS": 1.0,
         "INJECTS": 1.0
+      }
+    },
+    "module-cross-language": {
+      "framework": "module-cross-language",
+      "language": "python+typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0,
+        "TESTS": 1.0
       }
     },
     "module-synthetic-filename": {
