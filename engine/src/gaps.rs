@@ -20,6 +20,7 @@
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not ORIGIN `test_fixture` | heuristic | `entrypoints` |
+//! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
 //! | `redundant_rule` | an `[[edge]]` equal to an edge whose ORIGIN is not the overlay (the extractor caught up) | fact | `remove` |
 //! | `orphaned_cell` | a `.glia/cells.jsonl` / `.glia/vectors.jsonl` row whose qname + hint bind nothing | fact | `glia cell ls --check --rekey` |
@@ -54,6 +55,10 @@
 //! - `[gaps] rows=R (unpaired_endpoint=N ... orphaned_cell=N) surface=<cli|py|engine>`
 //!   once per report; `R` is the rows returned, each `N` a category's total
 //!   (`skipped` for a category not computed);
+//! - `[cochange] pairs=P linked=L gaps=G (direct=D bridged=B) surface=<coverage|gaps>`
+//!   once per co-change audit: per [`cochange_gaps`] call (`coverage`, the
+//!   `glia coverage` section) and per report that computes
+//!   `cochange_no_edge` (`gaps`);
 //! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>` once per
 //!   [`overlay_delta`], the review's accept-loop line.
 
@@ -68,7 +73,7 @@ use repo_graph_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE,
 use repo_graph_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
 use repo_graph_code_domain::{cell_type, edge_category, node_kind};
 use repo_graph_code_extractors::queues::is_framework_tag;
-use repo_graph_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
+use repo_graph_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use repo_graph_graph::MergedGraph;
 use repo_graph_graph::cells::{CellTarget, QnameIndex};
 use repo_graph_graph::nav::{is_nav_route, nav_route_path};
@@ -85,12 +90,13 @@ pub const WRAPPED_SINK: &str = "wrapped_sink";
 pub const UNPAIRED_ROUTE: &str = "unpaired_route";
 pub const TAG_ONLY_QUEUE: &str = "tag_only_queue";
 pub const DEAD_SYMBOL: &str = "dead_symbol";
+pub const COCHANGE_NO_EDGE: &str = "cochange_no_edge";
 pub const ORPHANED_RULE: &str = "orphaned_rule";
 pub const REDUNDANT_RULE: &str = "redundant_rule";
 pub const ORPHANED_CELL: &str = "orphaned_cell";
 
 /// Every category, in report order.
-pub const CATEGORIES: [&str; 10] = [
+pub const CATEGORIES: [&str; 11] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
@@ -98,6 +104,7 @@ pub const CATEGORIES: [&str; 10] = [
     UNPAIRED_ROUTE,
     TAG_ONLY_QUEUE,
     DEAD_SYMBOL,
+    COCHANGE_NO_EDGE,
     ORPHANED_RULE,
     REDUNDANT_RULE,
     ORPHANED_CELL,
@@ -800,6 +807,22 @@ fn collect_rows(
         }
     }
 
+    if want(COCHANGE_NO_EDGE) {
+        for p in cochange_audit(merged, "gaps") {
+            let at = loc.locate(p.module_a);
+            rows.push(GapRow {
+                category: COCHANGE_NO_EDGE,
+                qname: at.qname,
+                kind: at.kind,
+                line: at.line,
+                detail: cochange_detail(&p.gap, view.qname(p.module_b)),
+                file: Some(p.gap.file_a),
+                suggest: "edge",
+                tier: HEURISTIC,
+            });
+        }
+    }
+
     if want(ORPHANED_RULE) || want(REDUNDANT_RULE) || want(ORPHANED_CELL) {
         let mut ctx = RootCtx {
             merged,
@@ -817,6 +840,345 @@ fn collect_rows(
         }
     }
     rows
+}
+
+// ---------------------------------------------------------------------------
+// The co-change audit (LF.5c): history's pairs the static graph cannot explain.
+// ---------------------------------------------------------------------------
+
+/// Hops a static link may take between the two files of a co-change pair: a
+/// direct edge is one, a bridge through one or two file-less nodes two or
+/// three.
+const MAX_LINK_HOPS: usize = 3;
+
+/// Edge categories that never link a co-change pair: CO_CHANGES is the claim
+/// under audit; DEFINES / CONTAINS are structure (a module holds its symbols,
+/// a project its files), which would join every pair of one package.
+const NOT_A_LINK: [EdgeCategoryId; 3] = [
+    edge_category::CO_CHANGES,
+    edge_category::DEFINES,
+    edge_category::CONTAINS,
+];
+
+/// One co-changing file pair with no static link (LF.5c): what
+/// [`cochange_gaps`] returns and the `cochange_no_edge` rows of
+/// [`gaps_report`] carry. HEURISTIC by construction: co-change is history,
+/// not proof of coupling, and a pair can be coupled through something no
+/// extractor sees (a shared config key read by name, a convention). Never a
+/// FACT-tier input.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CochangeGap {
+    /// Repo-relative; `file_a < file_b`.
+    pub file_a: String,
+    pub file_b: String,
+    /// Commits of the snapshot window that touched both files (the
+    /// CO_CHANGES edge's ATTN `cochanges`).
+    pub cochanges: u32,
+    /// `cochanges` per mille of the commits of the file that changes less
+    /// often (the edge's ATTN `ratio_permille`).
+    pub ratio_permille: u32,
+    /// The coverage-table language of each file; `None` for an extension that
+    /// table does not name.
+    pub language_a: Option<&'static str>,
+    pub language_b: Option<&'static str>,
+    /// The two languages differ (by extension when either is `None`).
+    pub cross_language: bool,
+    /// Always [`HEURISTIC`].
+    pub tier: &'static str,
+}
+
+/// One audited gap and the MODULEs its CO_CHANGES edge joins (`module_a` is
+/// the one in `file_a`).
+struct PairGap {
+    gap: CochangeGap,
+    module_a: NodeId,
+    module_b: NodeId,
+}
+
+/// **cochange_gaps** (LF.5c): the file pairs that change together in git
+/// history (CO_CHANGES edges, LF.5b) but share no static link — places where
+/// THIS repo's graph is likely blind, which the static caveat table of
+/// `coverage_report` cannot point at.
+///
+/// A pair is linked when some path of at most three edges joins a node of
+/// one file to a node of the other, either way round, over edges of any
+/// category but CO_CHANGES / DEFINES / CONTAINS, where every intermediate
+/// node is file-less (no POSITION: ENDPOINT, ROUTE, queue / event nodes,
+/// PACKAGE_DEP, ...). A node belongs to every file its POSITION cells name,
+/// so one node placed in both files links them too. Cross-service coupling is
+/// a static link: a client function -> ENDPOINT -> ROUTE -> handler bridges
+/// the client's file to the server's. A path through a third FILE is not a
+/// link (that is transitive coupling, not the pair's own).
+///
+/// Unlinked pairs are sorted by (cochanges desc, file_a, file_b) and cut to
+/// `top_k`. Read-only; empty for a graph with no CO_CHANGES edge. Prints the
+/// `[cochange] ... surface=coverage` marker.
+pub fn cochange_gaps(merged: &MergedGraph, top_k: Option<usize>) -> Vec<CochangeGap> {
+    let mut out: Vec<CochangeGap> = cochange_audit(merged, "coverage")
+        .into_iter()
+        .map(|p| p.gap)
+        .collect();
+    if let Some(k) = top_k {
+        out.truncate(k);
+    }
+    out
+}
+
+/// A `cochange_no_edge` row's `detail`:
+/// `with=<file_b> (<qname>); cochanges=N; ratio_permille=R; languages=<a>,<b>`,
+/// plus `; cross_language` when the languages differ (`?`: unknown).
+fn cochange_detail(g: &CochangeGap, other: &str) -> String {
+    let mut s = format!(
+        "with={} ({other}); cochanges={}; ratio_permille={}; languages={},{}",
+        g.file_b,
+        g.cochanges,
+        g.ratio_permille,
+        g.language_a.unwrap_or("?"),
+        g.language_b.unwrap_or("?")
+    );
+    if g.cross_language {
+        s.push_str("; cross_language");
+    }
+    s
+}
+
+/// Where each node sits: the files its POSITION cells name, and the nodes
+/// each file holds. Lookup only (no map is iterated), so HashMap order never
+/// reaches an answer.
+struct FileIndex {
+    /// Node id -> (its graph's repo, its files in cell order, deduped); the
+    /// first instance of an id (graphs, then nodes, in `Vec` order) wins.
+    files_of: HashMap<u64, (u64, Vec<String>)>,
+    /// (repo, file) -> the nodes placed in it.
+    in_file: HashMap<(u64, String), Vec<u64>>,
+}
+
+impl FileIndex {
+    fn build(merged: &MergedGraph) -> Self {
+        let mut ix = FileIndex {
+            files_of: HashMap::new(),
+            in_file: HashMap::new(),
+        };
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if ix.files_of.contains_key(&n.id.0) {
+                    continue;
+                }
+                let mut files: Vec<String> = Vec::new();
+                for f in n.cells.iter().filter_map(position_file) {
+                    if !files.contains(&f) {
+                        files.push(f);
+                    }
+                }
+                for f in &files {
+                    ix.in_file
+                        .entry((g.repo.0, f.clone()))
+                        .or_default()
+                        .push(n.id.0);
+                }
+                ix.files_of.insert(n.id.0, (g.repo.0, files));
+            }
+        }
+        ix
+    }
+
+    /// `(repo, first file)` of a node that has one.
+    fn first_file(&self, id: NodeId) -> Option<(u64, &str)> {
+        let (repo, files) = self.files_of.get(&id.0)?;
+        Some((*repo, files.first()?.as_str()))
+    }
+
+    /// No POSITION names a file for it (an id no graph holds included).
+    fn file_less(&self, id: u64) -> bool {
+        self.files_of.get(&id).is_none_or(|(_, f)| f.is_empty())
+    }
+
+    fn nodes_in(&self, repo: u64, file: &str) -> &[u64] {
+        self.in_file
+            .get(&(repo, file.to_string()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+/// The non-empty `file` of a POSITION cell.
+fn position_file(c: &Cell) -> Option<String> {
+    if c.kind != cell_type::POSITION {
+        return None;
+    }
+    let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+        return None;
+    };
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()?
+        .get("file")?
+        .as_str()
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+}
+
+/// `(cochanges, ratio_permille)` from a CO_CHANGES edge's ATTN cell (LF.5b's
+/// `{"cochanges":n,"ratio_permille":r,"window_commits":w}`); 0 when absent.
+fn pair_counts(cells: &[Cell]) -> (u32, u32) {
+    let v = cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ATTN)
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => {
+                serde_json::from_str::<serde_json::Value>(s).ok()
+            }
+            _ => None,
+        });
+    let int = |k: &str| {
+        v.as_ref()
+            .and_then(|v| v.get(k))
+            .and_then(serde_json::Value::as_u64)
+            .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+    };
+    (int("cochanges"), int("ratio_permille"))
+}
+
+/// How a pair's two files are joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    /// One edge (or one node placed in both files).
+    Direct,
+    /// Two or three edges through file-less nodes.
+    Bridged,
+    None,
+}
+
+/// Bounded BFS from `a` (one file's nodes) to `b` (the other's) over the
+/// undirected link adjacency, expanding only through file-less nodes.
+fn link_between(adj: &HashMap<u64, Vec<u64>>, ix: &FileIndex, a: &[u64], b: &HashSet<u64>) -> Link {
+    if a.iter().any(|n| b.contains(n)) {
+        return Link::Direct;
+    }
+    let mut seen: HashSet<u64> = a.iter().copied().collect();
+    let mut frontier: Vec<u64> = a.to_vec();
+    for hop in 1..=MAX_LINK_HOPS {
+        let mut next = Vec::new();
+        for u in &frontier {
+            for v in adj.get(u).into_iter().flatten() {
+                if b.contains(v) {
+                    return if hop == 1 {
+                        Link::Direct
+                    } else {
+                        Link::Bridged
+                    };
+                }
+                if hop < MAX_LINK_HOPS && ix.file_less(*v) && seen.insert(*v) {
+                    next.push(*v);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    Link::None
+}
+
+/// A co-change pair: (repo, file_a, file_b), `file_a < file_b`.
+type PairKey = (u64, String, String);
+
+/// A pair's `(cochanges, ratio_permille, MODULE in file_a, MODULE in file_b)`.
+type PairCounts = (u32, u32, NodeId, NodeId);
+
+/// Audit every CO_CHANGES pair of `merged`: the unlinked ones, sorted by
+/// (cochanges desc, file_a, file_b). Prints the `[cochange]` marker with
+/// `surface`.
+fn cochange_audit(merged: &MergedGraph, surface: &str) -> Vec<PairGap> {
+    let edges: Vec<_> = merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::CO_CHANGES)
+        .collect();
+    let (mut direct, mut bridged) = (0usize, 0usize);
+    let mut gaps: Vec<PairGap> = Vec::new();
+    let mut pairs = 0usize;
+    if !edges.is_empty() {
+        let ix = FileIndex::build(merged);
+        // One pair per (repo, file_a, file_b): the edge with the most
+        // co-changes (first seen on a tie).
+        let mut by_pair: BTreeMap<PairKey, PairCounts> = BTreeMap::new();
+        for e in &edges {
+            let (Some((repo, fa)), Some((_, fb))) = (ix.first_file(e.from), ix.first_file(e.to))
+            else {
+                continue;
+            };
+            if fa == fb {
+                continue;
+            }
+            let (cochanges, ratio) = pair_counts(&e.cells);
+            let (fa, fb, ma, mb) = if fa < fb {
+                (fa, fb, e.from, e.to)
+            } else {
+                (fb, fa, e.to, e.from)
+            };
+            let slot = by_pair
+                .entry((repo, fa.to_string(), fb.to_string()))
+                .or_insert((cochanges, ratio, ma, mb));
+            if cochanges > slot.0 {
+                *slot = (cochanges, ratio, ma, mb);
+            }
+        }
+        pairs = by_pair.len();
+
+        let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
+        for e in merged.all_edges() {
+            if e.from == e.to || NOT_A_LINK.contains(&e.category) {
+                continue;
+            }
+            adj.entry(e.from.0).or_default().push(e.to.0);
+            adj.entry(e.to.0).or_default().push(e.from.0);
+        }
+
+        for ((repo, fa, fb), (cochanges, ratio_permille, ma, mb)) in by_pair {
+            let b: HashSet<u64> = ix.nodes_in(repo, &fb).iter().copied().collect();
+            match link_between(&adj, &ix, ix.nodes_in(repo, &fa), &b) {
+                Link::Direct => direct += 1,
+                Link::Bridged => bridged += 1,
+                Link::None => {
+                    let language_a = crate::coverage::ext_to_language(&fa);
+                    let language_b = crate::coverage::ext_to_language(&fb);
+                    let cross_language = match (language_a, language_b) {
+                        (Some(x), Some(y)) => x != y,
+                        _ => Path::new(&fa).extension() != Path::new(&fb).extension(),
+                    };
+                    gaps.push(PairGap {
+                        gap: CochangeGap {
+                            file_a: fa,
+                            file_b: fb,
+                            cochanges,
+                            ratio_permille,
+                            language_a,
+                            language_b,
+                            cross_language,
+                            tier: HEURISTIC,
+                        },
+                        module_a: ma,
+                        module_b: mb,
+                    });
+                }
+            }
+        }
+        // Stable: pairs already in (repo, file_a, file_b) order.
+        gaps.sort_by(|x, y| {
+            y.gap
+                .cochanges
+                .cmp(&x.gap.cochanges)
+                .then_with(|| x.gap.file_a.cmp(&y.gap.file_a))
+                .then_with(|| x.gap.file_b.cmp(&y.gap.file_b))
+        });
+    }
+    eprintln!(
+        "[cochange] pairs={pairs} linked={} gaps={} (direct={direct} bridged={bridged}) surface={surface}",
+        direct + bridged,
+        gaps.len()
+    );
+    gaps
 }
 
 // ---------------------------------------------------------------------------

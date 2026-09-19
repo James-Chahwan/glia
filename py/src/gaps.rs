@@ -46,7 +46,9 @@ impl PyGraph {
     /// order: `unpaired_endpoint`, `ambiguous_endpoint`,
     /// `unresolved_endpoint`, `wrapped_sink` (an `<unresolved>` sink owned by
     /// a declared `[[wrapper]]`: informational), `unpaired_route`,
-    /// `tag_only_queue`, `dead_symbol`, then the overlay's own rot —
+    /// `tag_only_queue`, `dead_symbol`, `cochange_no_edge` (LF.5c: a file
+    /// pair git history says changes together with no static link; heuristic),
+    /// then the overlay's own rot —
     /// `orphaned_rule`, `redundant_rule`, `orphaned_cell`. `wrapped_sink` and
     /// the last three read each repo's files through `repo_roots` (listed in
     /// `skipped` for a graph that has none).
@@ -114,7 +116,7 @@ mod tests {
             gaps_of(&MergedGraph::new(Vec::new()), &BTreeMap::new(), None, None).expect("report");
         assert_eq!(
             serde_json::to_string(&empty).expect("json"),
-            r#"{"counts":{"ambiguous_endpoint":0,"dead_symbol":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
+            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
         );
         assert!(
             gaps_of(

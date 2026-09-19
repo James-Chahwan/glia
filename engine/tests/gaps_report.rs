@@ -8,9 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use repo_graph_engine::gaps::{
-    AMBIGUOUS_ENDPOINT, CATEGORIES, DEAD_SYMBOL, FACT, GapRow, GapsOptions, GapsReport, HEURISTIC,
-    ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT,
-    UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report, overlay_delta,
+    AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, FACT, GapRow, GapsOptions,
+    GapsReport, HEURISTIC, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE,
+    UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
+    overlay_delta,
 };
 use repo_graph_engine::{GenerateResult, generate_many, generate_one};
 
@@ -96,6 +97,7 @@ fn reports_the_probe_r1_shapes() {
             (UNPAIRED_ROUTE, 2),
             (TAG_ONLY_QUEUE, 0),
             (DEAD_SYMBOL, 1),
+            (COCHANGE_NO_EDGE, 0),
             (ORPHANED_RULE, 0),
             (REDUNDANT_RULE, 0),
             (ORPHANED_CELL, 0),
