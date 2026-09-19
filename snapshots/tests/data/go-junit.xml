@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="4" failures="3">
+	<testsuite name="github.com/acme/api/users" tests="4" failures="3" errors="0" id="0" hostname="ci" time="0.002" timestamp="2026-09-19T06:00:00Z">
+		<properties>
+			<property name="go.version" value="go1.22.5 linux/amd64"></property>
+		</properties>
+		<testcase name="TestGetUser" classname="github.com/acme/api/users" time="0.000">
+			<failure message="Failed"><![CDATA[    users_test.go:6: expected 200, got 500
+    users_test.go:7: see logs]]></failure>
+		</testcase>
+		<testcase name="TestList" classname="github.com/acme/api/users" time="0.000">
+			<failure message="Failed"></failure>
+		</testcase>
+		<testcase name="TestList/empty" classname="github.com/acme/api/users" time="0.000">
+			<failure message="Failed"><![CDATA[        users_test.go:12: list was nil]]></failure>
+		</testcase>
+		<testcase name="TestOK" classname="github.com/acme/api/users" time="0.000"></testcase>
+	</testsuite>
+</testsuites>

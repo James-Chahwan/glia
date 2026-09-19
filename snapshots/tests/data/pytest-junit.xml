@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="3" time="0.022" timestamp="2026-09-19T16:25:56.372046+10:00" hostname="ci"><testcase classname="tests.test_app" name="test_boom" file="tests/test_app.py" line="3" time="0.000"><failure message="ValueError: boom">def test_boom():
+&gt;       raise ValueError("boom")
+E       ValueError: boom
+
+tests/test_app.py:5: ValueError</failure></testcase><testcase classname="tests.test_app" name="test_ok" file="tests/test_app.py" line="7" time="0.000" /><testcase classname="tests.test_app" name="test_add" file="tests/test_app.py" line="10" time="0.000" /></testsuite></testsuites>

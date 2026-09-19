@@ -1,0 +1,105 @@
+##[group]pytest
+============================= test session starts ==============================
+collected 4 items
+
+tests/test_app.py F.sF                                                    [100%]
+
+=========================== short test summary info ============================
+FAILED tests/test_app.py::test_boom - ValueError: boom
+FAILED tests/test_app.py::TestUser::test_name - AssertionError: assert 'a' ==...
+==================== 2 failed, 1 passed, 1 skipped in 0.38s ====================
+##[endgroup]
+##[group]go test ./...
+--- FAIL: TestCreate (0.00s)
+    orders_test.go:6: bad total
+FAIL
+FAIL	github.com/acme/api/orders	0.002s
+--- FAIL: TestGetUser (0.00s)
+    users_test.go:6: expected 200, got 500
+    users_test.go:7: see logs
+--- FAIL: TestList (0.00s)
+    --- FAIL: TestList/empty (0.00s)
+        users_test.go:12: list was nil
+FAIL
+FAIL	github.com/acme/api/users	0.002s
+FAIL
+##[endgroup]
+##[group]cargo test
+
+running 2 tests
+test tests::math::fine ... ok
+test tests::math::adds ... FAILED
+
+failures:
+
+---- tests::math::adds stdout ----
+
+thread 'tests::math::adds' (121727) panicked at src/lib.rs:10:21:
+assertion `left == right` failed: sum was wrong
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::math::adds
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+running 1 test
+test src/lib.rs - add (line 1) ... FAILED
+
+failures:
+
+---- src/lib.rs - add (line 1) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (128550) panicked at src/lib.rs:5:1:
+assertion `left == right` failed
+  left: 2
+ right: 3
+
+
+failures:
+    src/lib.rs - add (line 1)
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+##[endgroup]
+##[group]jest
+FAIL src/user.test.ts
+  UserService
+    getUser
+      ✕ returns the user (5 ms)
+      ✓ handles missing (1 ms)
+
+  ● UserService › getUser › returns the user
+
+    expect(received).toBe(expected) // Object.is equality
+
+    Expected: 200
+    Received: 500
+
+       8 |   it('returns the user', () => {
+       9 |     const r = get();
+    > 10 |     expect(r.status).toBe(200);
+         |                      ^
+      11 |   });
+
+      at Object.<anonymous> (src/user.test.ts:10:5)
+
+PASS src/other.test.ts
+
+Summary of all failing tests
+FAIL src/user.test.ts
+  ● UserService › getUser › returns the user
+
+    expect(received).toBe(expected) // Object.is equality
+
+      at Object.<anonymous> (src/user.test.ts:10:5)
+
+
+Test Suites: 1 failed, 1 passed, 2 total
+Tests:       1 failed, 2 passed, 3 total
+##[endgroup]

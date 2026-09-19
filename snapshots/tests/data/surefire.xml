@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://maven.apache.org/surefire/maven-surefire-plugin/xsd/surefire-test-report-3.0.xsd" version="3.0" name="com.example.UserServiceTest" time="0.052" tests="3" errors="1" skipped="1" failures="0">
+  <properties>
+    <property name="java.version" value="21.0.2"/>
+    <property name="user.name" value="ci-runner"/>
+  </properties>
+  <testcase name="testGetUser" classname="com.example.UserServiceTest" time="0.012">
+    <error message="Connection refused (user-db:5432)" type="java.net.ConnectException"><![CDATA[java.net.ConnectException: Connection refused (user-db:5432)
+	at com.example.UserService.getUser(UserService.java:42)
+	at com.example.UserServiceTest.testGetUser(UserServiceTest.java:17)
+]]></error>
+    <system-out><![CDATA[connecting to user-db as app with a pooled session]]></system-out>
+  </testcase>
+  <testcase name="testList" classname="com.example.UserServiceTest" time="0.001"/>
+  <testcase name="testLater" classname="com.example.UserServiceTest" time="0">
+    <skipped message="not ready"/>
+  </testcase>
+</testsuite>

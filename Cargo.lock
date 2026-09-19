@@ -365,7 +365,11 @@ dependencies = [
 name = "glia-snapshots"
 version = "0.4.18"
 dependencies = [
+ "quick-xml",
  "repo-graph-code-domain",
+ "repo-graph-engine",
+ "repo-graph-projection-text",
+ "repo-graph-store",
  "serde",
  "tempfile",
 ]
