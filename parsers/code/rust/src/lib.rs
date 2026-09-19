@@ -39,70 +39,15 @@ pub fn parse_file(
     let module_simple = module_qname.rsplit("::").next().unwrap_or(module_qname);
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
+    acc.file_module = Some(module_id);
 
-    // First pass: collect type names → NodeId for impl block resolution.
-    let mut type_ids: HashMap<String, NodeId> = HashMap::new();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        match child.kind() {
-            "struct_item" | "enum_item" | "trait_item" => {
-                if let Some(name) = child.child_by_field_name("name") {
-                    let name_str = text_of(name, src);
-                    let kind = match child.kind() {
-                        "struct_item" => node_kind::STRUCT,
-                        "enum_item" => node_kind::ENUM,
-                        "trait_item" => node_kind::INTERFACE,
-                        _ => unreachable!(),
-                    };
-                    let qname = format!("{module_qname}::{name_str}");
-                    let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
-                    type_ids.insert(name_str.to_string(), id);
-
-                    acc.nodes.push(Node {
-                        id,
-                        repo,
-                        confidence: Confidence::Strong,
-                        cells: entity_cells(&child, src, file_rel_path),
-                    });
-                    acc.edges.push(Edge {
-                        from: module_id,
-                        to: id,
-                        category: edge_category::DEFINES,
-                        confidence: Confidence::Strong,
-                    });
-                    acc.nav.record(id, name_str, &qname, kind, Some(module_id));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Second pass: functions, impl blocks, use statements.
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        match child.kind() {
-            "function_item" => {
-                visit_function(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
-            }
-            "impl_item" => {
-                visit_impl(
-                    child, src, file_rel_path, module_qname, module_id, repo, &type_ids, &mut acc,
-                );
-            }
-            "const_item" | "static_item" => {
-                visit_const_static(
-                    child, src, file_rel_path, module_qname, module_id, repo, &mut acc,
-                );
-            }
-            "use_declaration" => {
-                collect_use(child, src, module_qname, &mut acc);
-            }
-            "attribute_item" => {
-                visit_route_attr(child, src, file_rel_path, module_id, repo, &mut acc);
-            }
-            _ => {}
-        }
-    }
+    // The file MODULE stays `nodes[0]`: engine `apply_rpc_needles` pairs a
+    // parse to its file by `fp.nodes.first()`.
+    let file_scope = Scope {
+        qname: module_qname.to_string(),
+        id: module_id,
+    };
+    visit_items(root, &file_scope, src, file_rel_path, repo, &mut acc);
 
     scan_axum_routes(source, module_id, repo, &mut acc);
     scan_at_path_chains(source, repo, &mut acc);
@@ -157,6 +102,175 @@ struct Acc {
     /// Verb-chain windows whose end fell inside a multibyte char and was
     /// snapped down to a char boundary (LA.25b `[rust-routes]` marker).
     window_snaps: usize,
+    /// The file MODULE: the `from_module` of every enum-variant USES ref
+    /// (LA.3). `None` only when a test drives `collect_calls_in` directly.
+    file_module: Option<NodeId>,
+}
+
+/// Where an item is declared: the file MODULE, or an inline `mod x { .. }`
+/// PACKAGE (LA.3). Items take their qname prefix and DEFINES parent from it.
+struct Scope {
+    qname: String,
+    id: NodeId,
+}
+
+/// Every item of one container (`source_file`, or an inline mod's
+/// `declaration_list`) under `scope`. Types first, so an `impl` anywhere in
+/// the container finds its type; then fns, impls, consts, uses, route
+/// attributes and nested inline mods in source order. `type_ids` is per
+/// container: an `impl Foo` inside `mod tests` does not see a file-level
+/// `Foo` (it parents to the PACKAGE, like an impl whose type is in another
+/// file).
+fn visit_items(
+    container: TsNode,
+    scope: &Scope,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut type_ids: HashMap<String, NodeId> = HashMap::new();
+    let mut cursor = container.walk();
+    for child in container.named_children(&mut cursor) {
+        if matches!(child.kind(), "struct_item" | "enum_item" | "trait_item") {
+            visit_type(child, scope, src, file_rel, repo, &mut type_ids, acc);
+        }
+    }
+
+    let mut cursor = container.walk();
+    for child in container.named_children(&mut cursor) {
+        match child.kind() {
+            "function_item" => visit_function(child, src, file_rel, scope, repo, acc),
+            "impl_item" => visit_impl(child, src, file_rel, scope, repo, &type_ids, acc),
+            "const_item" | "static_item" => {
+                visit_const_static(child, src, file_rel, scope, repo, acc);
+            }
+            // A `use` inside an inline mod is recorded against the PACKAGE
+            // qname. `resolve_imports_python` keys `from_module` on MODULEs
+            // only, so it binds nothing yet (LA.1b) - never the file module,
+            // which would leak a test-only import into file-level resolution.
+            "use_declaration" => collect_use(child, src, &scope.qname, acc),
+            "attribute_item" => visit_route_attr(child, src, file_rel, scope.id, repo, acc),
+            "mod_item" => visit_mod(child, scope, src, file_rel, repo, acc),
+            _ => {}
+        }
+    }
+}
+
+/// A STRUCT / ENUM / INTERFACE under `scope`; an enum's variants become
+/// ATTRIBUTE children (the kind Python gives an `Enum` member), joined by
+/// HAS_ATTRIBUTE. Unit, tuple and struct variants alike; a discriminant is
+/// part of the variant's CODE.
+fn visit_type(
+    node: TsNode,
+    scope: &Scope,
+    src: &[u8],
+    file_rel: &str,
+    repo: RepoId,
+    type_ids: &mut HashMap<String, NodeId>,
+    acc: &mut Acc,
+) {
+    let Some(name) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name_str = text_of(name, src);
+    let kind = match node.kind() {
+        "struct_item" => node_kind::STRUCT,
+        "enum_item" => node_kind::ENUM,
+        _ => node_kind::INTERFACE,
+    };
+    let qname = format!("{}::{name_str}", scope.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
+    type_ids.insert(name_str.to_string(), id);
+
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: entity_cells(&node, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: scope.id,
+        to: id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+    });
+    acc.nav.record(id, name_str, &qname, kind, Some(scope.id));
+
+    if kind != node_kind::ENUM {
+        return;
+    }
+    let Some(body) = node.child_by_field_name("body") else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for variant in body.named_children(&mut cursor) {
+        if variant.kind() != "enum_variant" {
+            continue;
+        }
+        let Some(vname) = variant.child_by_field_name("name").map(|n| text_of(n, src)) else {
+            continue;
+        };
+        let vq = format!("{qname}::{vname}");
+        let vid = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &vq);
+        acc.nodes.push(Node {
+            id: vid,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&variant, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: id,
+            to: vid,
+            category: edge_category::HAS_ATTRIBUTE,
+            confidence: Confidence::Strong,
+        });
+        acc.nav
+            .record(vid, vname, &vq, node_kind::ATTRIBUTE, Some(id));
+    }
+}
+
+/// An inline `mod x { .. }`: a PACKAGE node (qname `<scope>::x`, the kind
+/// C# / PHP / Ruby / C++ / Elixir give an in-file namespace) joined to its
+/// scope by CONTAINS, then every item inside it under the PACKAGE's scope.
+/// POSITION + DOC only: a module block's CODE would repeat every child's.
+/// `mod x;` has no body and emits nothing - the file module exists on its own.
+fn visit_mod(node: TsNode, scope: &Scope, src: &[u8], file_rel: &str, repo: RepoId, acc: &mut Acc) {
+    let (Some(body), Some(name_node)) = (
+        node.child_by_field_name("body"),
+        node.child_by_field_name("name"),
+    ) else {
+        return;
+    };
+    let name = text_of(name_node, src);
+    let qname = format!("{}::{name}", scope.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::PACKAGE, &qname);
+    let mut cells = vec![Cell {
+        kind: cell_type::POSITION,
+        payload: CellPayload::Json(repo_graph_doc::position_json(&node, file_rel)),
+    }];
+    if let Some(doc) = repo_graph_doc::leading_doc(&node, src) {
+        cells.push(Cell {
+            kind: cell_type::DOC,
+            payload: CellPayload::Text(doc),
+        });
+    }
+    acc.nodes.push(Node {
+        id,
+        repo,
+        confidence: Confidence::Strong,
+        cells,
+    });
+    acc.edges.push(Edge {
+        from: scope.id,
+        to: id,
+        category: edge_category::CONTAINS,
+        confidence: Confidence::Strong,
+    });
+    acc.nav
+        .record(id, name, &qname, node_kind::PACKAGE, Some(scope.id));
+    let inner = Scope { qname, id };
+    visit_items(body, &inner, src, file_rel, repo, acc);
 }
 
 /// `GLIA_RUST_DEBUG=1` turns on the `[rust-macro-calls]` marker, read once. Off
@@ -171,8 +285,7 @@ fn visit_function(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    module_qname: &str,
-    module_id: NodeId,
+    scope: &Scope,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -180,7 +293,7 @@ fn visit_function(
         return;
     };
     let name = text_of(name_node, src);
-    let qname = format!("{module_qname}::{name}");
+    let qname = format!("{}::{name}", scope.qname);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::FUNCTION, &qname);
 
     acc.nodes.push(Node {
@@ -190,13 +303,13 @@ fn visit_function(
         cells: entity_cells(&node, src, file_rel),
     });
     acc.edges.push(Edge {
-        from: module_id,
+        from: scope.id,
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
     });
     acc.nav
-        .record(id, name, &qname, node_kind::FUNCTION, Some(module_id));
+        .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, id, acc);
@@ -205,13 +318,11 @@ fn visit_function(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn visit_impl(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    module_qname: &str,
-    module_id: NodeId,
+    scope: &Scope,
     repo: RepoId,
     type_ids: &HashMap<String, NodeId>,
     acc: &mut Acc,
@@ -224,7 +335,7 @@ fn visit_impl(
     let type_name = text_of(type_node, src);
     // Strip generic parameters: `Foo<T>` → `Foo`
     let base_name = type_name.split('<').next().unwrap_or(type_name);
-    let parent_id = type_ids.get(base_name).copied().unwrap_or(module_id);
+    let parent_id = type_ids.get(base_name).copied().unwrap_or(scope.id);
 
     // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
     // the `trait` field. Emit IMPLEMENTS (Type → trait) only when the trait is
@@ -252,7 +363,7 @@ fn visit_impl(
                 continue;
             };
             let name = text_of(name_node, src);
-            let qname = format!("{module_qname}::{base_name}::{name}");
+            let qname = format!("{}::{base_name}::{name}", scope.qname);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
 
             acc.nodes.push(Node {
@@ -287,8 +398,7 @@ fn visit_const_static(
     node: TsNode,
     src: &[u8],
     file_rel: &str,
-    module_qname: &str,
-    module_id: NodeId,
+    scope: &Scope,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -308,7 +418,7 @@ fn visit_const_static(
     }
 
     let name = text_of(name_node, src);
-    let qname = format!("{module_qname}::{name}");
+    let qname = format!("{}::{name}", scope.qname);
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
 
     acc.nodes.push(Node {
@@ -318,13 +428,13 @@ fn visit_const_static(
         cells: entity_cells(&node, src, file_rel),
     });
     acc.edges.push(Edge {
-        from: module_id,
+        from: scope.id,
         to: id,
         category: edge_category::DEFINES,
         confidence: Confidence::Strong,
     });
     acc.nav
-        .record(id, name, &qname, node_kind::STATE_VAR, Some(module_id));
+        .record(id, name, &qname, node_kind::STATE_VAR, Some(scope.id));
 }
 
 fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
@@ -409,11 +519,12 @@ fn collect_use(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
     // External crate imports (std::, etc.) — skip, won't resolve internally.
 }
 
+/// `scope_id`: the file MODULE, or the inline-mod PACKAGE the attribute sits in.
 fn visit_route_attr(
     node: TsNode,
     src: &[u8],
     _file_rel: &str,
-    module_id: NodeId,
+    scope_id: NodeId,
     repo: RepoId,
     acc: &mut Acc,
 ) {
@@ -440,7 +551,7 @@ fn visit_route_attr(
             });
             acc.edges.push(Edge {
                 from: route_id,
-                to: module_id,
+                to: scope_id,
                 category: edge_category::HANDLED_BY,
                 confidence: Confidence::Strong,
             });
@@ -736,19 +847,51 @@ fn emit_axum_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
 }
 
 fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    // (base, variant) pairs this fn already references (LA.3): a 40-arm
+    // match over one enum is one USES ref per variant, not per arm.
+    let mut variants: HashSet<(String, String)> = HashSet::new();
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
-        if n.kind() == "call_expression"
-            && let Some(func) = n.child_by_field_name("function")
-        {
-            let qualifier = classify_call(func, src);
-            acc.calls.push(CallSite { from, qualifier });
-        }
-        // A macro's arguments are a flat token tree, never a call_expression,
-        // so the walk below finds nothing in them: scan the tokens instead.
-        if n.kind() == "macro_invocation" {
-            let found = collect_macro_calls(n, src, from, acc);
-            acc.macro_calls += found;
+        match n.kind() {
+            "call_expression" => {
+                // `MatchTier::Suffix(3)` constructs a tuple variant: its callee
+                // is a USES ref (the scoped_identifier arm), never a CallSite.
+                if let Some(func) = n.child_by_field_name("function")
+                    && variant_path(func, src).is_none()
+                {
+                    let qualifier = classify_call(func, src);
+                    acc.calls.push(CallSite { from, qualifier });
+                }
+            }
+            // A macro's arguments are a flat token tree, never a call_expression,
+            // so the walk below finds nothing in them: scan the tokens instead.
+            "macro_invocation" => {
+                let found = collect_macro_calls(n, src, from, acc);
+                acc.macro_calls += found;
+            }
+            // `MatchTier::Exact` in value or pattern position, a tuple-variant
+            // constructor or pattern. Only the outermost path of a nested
+            // `a::B::C` is read: its children are never pushed, and a path's
+            // segments hold no expression.
+            "scoped_identifier" => {
+                push_variant_ref(n, src, from, &mut variants, acc);
+                continue;
+            }
+            // `MatchTier::Named { n: 1 }` / `MatchTier::Named { n }` patterns.
+            "struct_expression" | "struct_pattern" => {
+                let field = if n.kind() == "struct_expression" {
+                    "name"
+                } else {
+                    "type"
+                };
+                if let Some(name) = n.child_by_field_name(field) {
+                    push_variant_ref(name, src, from, &mut variants, acc);
+                }
+            }
+            // A type path names no variant, and a `use` inside a body is an
+            // import, not a reference.
+            "scoped_type_identifier" | "use_declaration" => continue,
+            _ => {}
         }
         // Don't recurse into nested function items (closures are ok).
         let mut cursor = n.walk();
@@ -808,6 +951,73 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
             name: String::new(),
         },
     }
+}
+
+// ============================================================================
+// Enum-variant references (LA.3)
+// ============================================================================
+
+/// `(base, Variant)` when `node` is a `scoped_identifier` /
+/// `scoped_type_identifier` whose name and the last segment of whose path
+/// both start with an ASCII uppercase letter: `MatchTier::Exact`,
+/// `crate::tier::MatchTier::Suffix`, `Self::Named`. The case test is the whole
+/// heuristic: an associated const (`Self::MAX`) passes it and stays an
+/// unresolved ref; `u32::MAX` and `endpoint::url_to_path` fail it.
+fn variant_path(node: TsNode, src: &[u8]) -> Option<(String, String)> {
+    if !matches!(node.kind(), "scoped_identifier" | "scoped_type_identifier") {
+        return None;
+    }
+    let name = text_of(node.child_by_field_name("name")?, src);
+    let base = text_of(node.child_by_field_name("path")?, src);
+    let upper = |s: &str| s.bytes().next().is_some_and(|b| b.is_ascii_uppercase());
+    (upper(name) && upper(&last_path_segment(base))).then(|| (base.to_string(), name.to_string()))
+}
+
+/// The last `::` segment of a path, generic arguments dropped
+/// (`Wrap::<u8>` -> `Wrap`, `a::B` -> `B`).
+fn last_path_segment(path: &str) -> String {
+    let mut plain = String::with_capacity(path.len());
+    let mut depth = 0usize;
+    for ch in path.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => plain.push(ch),
+            _ => {}
+        }
+    }
+    let plain = plain.trim_end_matches(':');
+    plain
+        .rsplit("::")
+        .next()
+        .unwrap_or(plain)
+        .trim()
+        .to_string()
+}
+
+/// One USES ref from `from` to the variant `node` names, once per
+/// (base, variant) inside one fn. The graph crate binds it (an imported enum
+/// through `resolve_refs`, a same-file / path-qualified / `Self` one through
+/// `rust_paths`).
+fn push_variant_ref(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    seen: &mut HashSet<(String, String)>,
+    acc: &mut Acc,
+) {
+    let (Some((base, name)), Some(from_module)) = (variant_path(node, src), acc.file_module) else {
+        return;
+    };
+    if !seen.insert((base.clone(), name.clone())) {
+        return;
+    }
+    acc.refs.push(UnresolvedRef {
+        from,
+        from_module,
+        qualifier: CallQualifier::Attribute { base, name },
+        category: edge_category::USES,
+    });
 }
 
 // ============================================================================
@@ -1332,6 +1542,288 @@ pub trait Drawable {
         let fp = parse_file(source, "src/lib.rs", "myapp", repo()).unwrap();
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::ENUM).count(), 1);
         assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::INTERFACE).count(), 1);
+        // LA.3: the three variants are ATTRIBUTE children of the ENUM.
+        let color = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "myapp::Color");
+        let mut variants: Vec<&str> = fp.nav.children_of[&color]
+            .iter()
+            .filter(|c| fp.nav.kind_by_id[*c] == node_kind::ATTRIBUTE)
+            .map(|c| fp.nav.qname_by_id[c].as_str())
+            .collect();
+        variants.sort_unstable();
+        assert_eq!(
+            variants,
+            vec![
+                "myapp::Color::Blue",
+                "myapp::Color::Green",
+                "myapp::Color::Red"
+            ]
+        );
+    }
+
+    // ---- LA.3: inline mods and enum variants --------------------------------
+
+    /// bench/substrate-gap/fixtures/rust-inline-mod-enum/src/lib.rs, verbatim.
+    const INLINE_FIXTURE: &str = r#"pub enum MatchTier { Exact, BaseFold, Suffix(u8), Named { n: u32 } }
+
+impl MatchTier {
+    pub fn rank(&self) -> u8 { self.weight() }
+    fn weight(&self) -> u8 { 1 }
+}
+
+pub fn helper() -> u8 { 0 }
+
+pub mod endpoint {
+    pub fn url_to_path(s: &str) -> String { let _ = helper(); s.to_string() }
+    fn helper() -> u8 { 1 }
+    pub mod inner {
+        pub fn deep() {}
+    }
+}
+
+pub fn tier() -> MatchTier { MatchTier::BaseFold }
+pub fn mk() -> MatchTier { MatchTier::Suffix(3) }
+pub fn named() -> MatchTier { MatchTier::Named { n: 1 } }
+pub fn use_ep() -> String { endpoint::url_to_path("x") }
+pub fn use_inner() { endpoint::inner::deep() }
+pub fn classify(t: MatchTier) -> u8 {
+    match t { MatchTier::Exact => 0, MatchTier::Suffix(_) => 2, _ => 1 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tier_is_base_fold() { let _ = tier(); }
+}
+"#;
+
+    fn nid(kind: repo_graph_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn has_edge(
+        fp: &FileParse,
+        from: NodeId,
+        to: NodeId,
+        cat: repo_graph_core::EdgeCategoryId,
+    ) -> bool {
+        fp.edges
+            .iter()
+            .any(|e| e.from == from && e.to == to && e.category == cat)
+    }
+
+    #[test]
+    fn inline_mod_items_are_nodes() {
+        let fp = parse_file(INLINE_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        let file = nid(node_kind::MODULE, "m");
+        let ep = nid(node_kind::PACKAGE, "m::endpoint");
+        let inner = nid(node_kind::PACKAGE, "m::endpoint::inner");
+        let tests = nid(node_kind::PACKAGE, "m::tests");
+        assert_eq!(fp.nodes[0].id, file, "the file MODULE stays nodes[0]");
+        for (pkg, parent) in [(ep, file), (inner, ep), (tests, file)] {
+            assert_eq!(fp.nav.kind_by_id.get(&pkg), Some(&node_kind::PACKAGE));
+            assert_eq!(fp.nav.parent_of.get(&pkg), Some(&parent));
+            assert!(has_edge(&fp, parent, pkg, edge_category::CONTAINS));
+        }
+        for (q, parent) in [
+            ("m::endpoint::url_to_path", ep),
+            ("m::endpoint::helper", ep),
+            ("m::endpoint::inner::deep", inner),
+            ("m::tests::tier_is_base_fold", tests),
+        ] {
+            let id = nid(node_kind::FUNCTION, q);
+            assert_eq!(fp.nav.parent_of.get(&id), Some(&parent), "{q}");
+            assert!(has_edge(&fp, parent, id, edge_category::DEFINES), "{q}");
+        }
+        assert!(
+            !fp.nav.qname_by_id.values().any(|q| q == "m::url_to_path"),
+            "a fn inside `mod endpoint` never flattens into the file module"
+        );
+        // A PACKAGE carries POSITION, never CODE (its children carry theirs).
+        let ep_node = fp.nodes.iter().find(|n| n.id == ep).unwrap();
+        let kinds: Vec<_> = ep_node.cells.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, vec![cell_type::POSITION]);
+        // `use super::*` inside `mod tests` is recorded against the PACKAGE.
+        assert!(fp.imports.iter().any(|i| i.from_module == "m::tests"
+            && matches!(&i.target, ImportTarget::Module { path, .. } if path == "super::*")));
+        // The bare call inside the mod is the mod fn's CallSite.
+        let url = nid(node_kind::FUNCTION, "m::endpoint::url_to_path");
+        assert!(
+            fp.calls
+                .iter()
+                .any(|c| c.from == url && c.qualifier == bare("helper"))
+        );
+    }
+
+    /// Top-level items keep their qnames and relative order: an inline mod's
+    /// nodes slot in at its position, and nothing before or after moves.
+    #[test]
+    fn top_level_order_is_unchanged() {
+        let fp = parse_file(INLINE_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        let top: Vec<&str> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.parent_of.get(&n.id) == Some(&nid(node_kind::MODULE, "m")))
+            .map(|n| fp.nav.qname_by_id[&n.id].as_str())
+            .collect();
+        assert_eq!(
+            top,
+            vec![
+                "m::MatchTier",
+                "m::helper",
+                "m::endpoint",
+                "m::tier",
+                "m::mk",
+                "m::named",
+                "m::use_ep",
+                "m::use_inner",
+                "m::classify",
+                "m::tests",
+            ]
+        );
+    }
+
+    #[test]
+    fn mod_without_body_emits_nothing() {
+        let fp = parse_file(
+            "mod api;\npub mod util;\nfn f() {}\n",
+            "src/lib.rs",
+            "m",
+            repo(),
+        )
+        .unwrap();
+        assert!(!fp.nav.kind_by_id.values().any(|k| *k == node_kind::PACKAGE));
+        assert_eq!(fp.nodes.len(), 2, "the file MODULE and `f`");
+    }
+
+    #[test]
+    fn enum_variants_are_attributes() {
+        let fp = parse_file(INLINE_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        let tier = nid(node_kind::ENUM, "m::MatchTier");
+        for v in ["Exact", "BaseFold", "Suffix", "Named"] {
+            let id = nid(node_kind::ATTRIBUTE, &format!("m::MatchTier::{v}"));
+            assert!(has_edge(&fp, tier, id, edge_category::HAS_ATTRIBUTE), "{v}");
+            assert_eq!(fp.nav.parent_of.get(&id), Some(&tier), "{v}");
+            assert_eq!(fp.nav.name_by_id[&id], v);
+        }
+        let attrs = fp
+            .nav
+            .kind_by_id
+            .values()
+            .filter(|k| **k == node_kind::ATTRIBUTE)
+            .count();
+        assert_eq!(attrs, 4);
+        // A tuple / struct variant's CODE is the whole variant.
+        let named = nid(node_kind::ATTRIBUTE, "m::MatchTier::Named");
+        let code = fp.nodes.iter().find(|n| n.id == named).and_then(|n| {
+            n.cells.iter().find_map(|c| match &c.payload {
+                CellPayload::Text(t) if c.kind == cell_type::CODE => Some(t.as_str()),
+                _ => None,
+            })
+        });
+        assert_eq!(code, Some("Named { n: u32 }"));
+    }
+
+    /// `(from fn name, base, variant)` of every USES ref.
+    fn uses_refs(fp: &FileParse) -> Vec<(String, String, String)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, name } => Some((
+                    fp.nav.name_by_id[&r.from].clone(),
+                    base.clone(),
+                    name.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn variant_refs_are_uses_refs() {
+        let fp = parse_file(INLINE_FIXTURE, "src/lib.rs", "m", repo()).unwrap();
+        let mut refs = uses_refs(&fp);
+        refs.sort();
+        let r = |f: &str, v: &str| (f.to_string(), "MatchTier".to_string(), v.to_string());
+        assert_eq!(
+            refs,
+            vec![
+                r("classify", "Exact"),
+                r("classify", "Suffix"),
+                r("mk", "Suffix"),
+                r("named", "Named"),
+                r("tier", "BaseFold"),
+            ]
+        );
+        let file = nid(node_kind::MODULE, "m");
+        assert!(
+            fp.refs
+                .iter()
+                .all(|r| r.category != edge_category::USES || r.from_module == file)
+        );
+        // `MatchTier::Suffix(3)` constructs a variant: no CallSite.
+        let mk = nid(node_kind::FUNCTION, "m::mk");
+        assert!(
+            !fp.calls.iter().any(|c| c.from == mk),
+            "{:?}",
+            fn_calls(&fp, "mk")
+        );
+        // The path calls into the inline mod stay CallSites.
+        assert_eq!(
+            fn_calls(&fp, "use_ep"),
+            vec![attr("endpoint", "url_to_path")]
+        );
+        assert_eq!(
+            fn_calls(&fp, "use_inner"),
+            vec![attr("endpoint::inner", "deep")]
+        );
+    }
+
+    #[test]
+    fn variant_refs_dedupe_and_skip_non_variants() {
+        let source = r#"
+pub enum Op { Add, Sub(u8), Mul { k: u8 } }
+impl Op {
+    fn flip(&self) -> Op {
+        match self { Self::Add => Self::Sub(1), Op::Sub(_) => Op::Add, Op::Mul { .. } => Op::Add }
+    }
+}
+fn other() -> u32 {
+    use crate::Op::Add;
+    let _ = Self::MAX;
+    let _ = u32::MAX + node_kind::MODULE;
+    let _ = crate::ops::Op::Mul { k: 2 };
+    let _ = Box::new(Wrap::<u8>::Inner);
+    endpoint::url_to_path("x")
+}
+"#;
+        let fp = parse_file(source, "src/lib.rs", "m", repo()).unwrap();
+        let mut refs = uses_refs(&fp);
+        refs.sort();
+        let r = |f: &str, b: &str, v: &str| (f.to_string(), b.to_string(), v.to_string());
+        assert_eq!(
+            refs,
+            vec![
+                r("flip", "Op", "Add"),
+                r("flip", "Op", "Mul"),
+                r("flip", "Op", "Sub"),
+                r("flip", "Self", "Add"),
+                r("flip", "Self", "Sub"),
+                r("other", "Self", "MAX"),
+                r("other", "Wrap::<u8>", "Inner"),
+                r("other", "crate::ops::Op", "Mul"),
+            ],
+            "Op::Add twice in `flip` is one ref; `use` paths, `u32::MAX` and \
+             lower-case paths are not variant refs; `Self::MAX` passes the case test"
+        );
+        // Box::new stays a call; only the variant constructions are dropped.
+        let flip = nid(node_kind::METHOD, "m::Op::flip");
+        assert!(!fp.calls.iter().any(|c| c.from == flip));
+        assert_eq!(
+            fn_calls(&fp, "other"),
+            vec![attr("endpoint", "url_to_path"), attr("Box", "new")]
+        );
     }
 
     #[test]

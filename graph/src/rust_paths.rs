@@ -15,15 +15,24 @@
 //! module no package covers (loose `.rs` files) takes the nearest `lib` /
 //! `main` file up its directory as its crate root, else the repo root.
 //!
+//! LA.3 adds the Rust item-coverage passes that ride on the same index: a
+//! `self.m()` whose `impl` sits in another file than its type, the inline-mod
+//! Bare pre-pass (`resolve_scoped_bare`, innermost `mod` first), the
+//! enum-variant USES refs (`resolve_leftover_refs`) and the `[rust-items]`
+//! marker.
+//!
 //! Every lookup is by key, and every candidate list is sorted by qname before
 //! a tie-break, so no winner is ever picked by iterating a `HashMap`.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use repo_graph_code_domain::{CallQualifier, CallSite, CodeNav, cell_type, node_kind};
+use repo_graph_code_domain::{
+    CallQualifier, CallSite, CodeNav, cell_type, edge_category, node_kind,
+};
 use repo_graph_core::{CellPayload, NodeId, NodeKindId};
 
+use crate::calls::{position_file, push_edge};
 use crate::types::RepoGraph;
 
 /// One Cargo package's crate roots, as the engine found them in the walk.
@@ -116,9 +125,9 @@ pub(crate) struct RustIndex {
     /// modules of that crate, sorted by qname, deduped). Feeds the
     /// unique-in-crate fallback at a crate root.
     items: HashMap<String, HashMap<String, Vec<NodeId>>>,
-    /// (type simple name, member) -> METHODs whose nav parent is a MODULE
-    /// (an `impl` in another file than its type), as (qname, id, package),
-    /// sorted by qname.
+    /// (type simple name, member) -> METHODs whose nav parent is a MODULE or
+    /// an inline-mod PACKAGE (an `impl` outside its type's container), as
+    /// (qname, id, package), sorted by qname.
     impl_elsewhere: HashMap<(String, String), Vec<ElsewhereMethod>>,
     /// Node id -> index into `g.nodes`, for the caller's CODE cell.
     node_pos: HashMap<NodeId, usize>,
@@ -218,7 +227,15 @@ impl RustIndex {
             let Some(parent) = g.nav.parent_of.get(id) else {
                 continue;
             };
-            if g.nav.kind_by_id.get(parent) != Some(&node_kind::MODULE) {
+            // A method whose `impl` names a type its container does not
+            // define: parented to the file MODULE, or (LA.3) to the inline-mod
+            // PACKAGE it sits in (`mod tests { impl Foo { .. } }`).
+            if !g
+                .nav
+                .kind_by_id
+                .get(parent)
+                .is_some_and(|k| is_scope_kind(*k))
+            {
                 continue;
             }
             let (Some(pq), Some(q)) = (g.nav.qname_by_id.get(parent), g.nav.qname_by_id.get(id))
@@ -248,11 +265,14 @@ impl RustIndex {
         idx
     }
 
-    /// The `extra_hook` body: resolve one Attribute call site as a Rust path.
-    /// `None` for every other qualifier shape.
+    /// The `extra_hook` body: resolve one Attribute call site as a Rust path,
+    /// or (LA.3) one `self.m()` the generic owner walk missed. `None` for
+    /// every other qualifier shape.
     pub(crate) fn resolve_call(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
-        let CallQualifier::Attribute { base, name } = &site.qualifier else {
-            return None;
+        let (base, name) = match &site.qualifier {
+            CallQualifier::Attribute { base, name } => (base, name),
+            CallQualifier::SelfMethod(name) => return self.resolve_self_method(g, site.from, name),
+            _ => return None,
         };
         if name.is_empty() {
             return None;
@@ -276,6 +296,7 @@ impl RustIndex {
         Stats::bump(&self.stats.by_rule[rule as usize]);
         let mut used_fallback = false;
         let pos = self.walk(g, start, &segs[1..], &mut used_fallback)?;
+        let pos = self.settle_type_name(g, pos, file_module);
         let caller_pkg = g
             .nav
             .qname_by_id
@@ -322,6 +343,217 @@ impl RustIndex {
         );
     }
 
+    // ---- LA.3: self calls, inline-mod scoping, enum variants --------------
+
+    /// `self.name()` the generic pass missed. For a METHOD parented to its
+    /// type that is a member written in another file's `impl` (or a trait
+    /// default); for a METHOD parented to a MODULE / PACKAGE (its `impl`
+    /// names a type defined in another file, e.g. `impl MergedGraph` in
+    /// `blast.rs`) the type is the one crate-local STRUCT / ENUM / CLASS of
+    /// that name, else the other-file impls of that name.
+    fn resolve_self_method(&self, g: &RepoGraph, from: NodeId, name: &str) -> Option<NodeId> {
+        if name.is_empty() {
+            return None;
+        }
+        let file_module = enclosing(&g.nav, from, false)?;
+        let pos = self.settle_type_name(g, self_type(&g.nav, from)?, file_module);
+        let caller_pkg = g
+            .nav
+            .qname_by_id
+            .get(&file_module)
+            .and_then(|q| self.covering(q));
+        let mut unused = false;
+        self.final_name(g, &pos, name, caller_pkg, &mut unused)
+    }
+
+    /// `Pos::TypeName(ty)` -> `Pos::Type` when the caller's crate defines
+    /// exactly one top-level type named `ty`; anything else unchanged.
+    fn settle_type_name(&self, g: &RepoGraph, pos: Pos, file_module: NodeId) -> Pos {
+        let Pos::TypeName(ty) = &pos else {
+            return pos;
+        };
+        let root = g
+            .nav
+            .qname_by_id
+            .get(&file_module)
+            .and_then(|q| self.crate_root(g, q));
+        let Some(Root::Module(root)) = root else {
+            return pos;
+        };
+        let types: Vec<NodeId> = self
+            .items
+            .get(&root)
+            .and_then(|names| names.get(ty.as_str()))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| g.nav.kind_by_id.get(id).is_some_and(|k| is_type_kind(*k)))
+            .collect();
+        match types.as_slice() {
+            [only] => Pos::Type(*only),
+            _ => pos,
+        }
+    }
+
+    /// The inline-mod pre-pass for one `Bare(name)` call site: the first
+    /// callable `name` defined directly in a PACKAGE ancestor of the caller,
+    /// innermost first, stopping at the file MODULE. Rust scoping is
+    /// innermost-first, while the generic Bare order checks the FILE module
+    /// before any PACKAGE, so without this `fn helper` inside `mod endpoint`
+    /// would lose to a file-level `fn helper`. `None` when the caller is in no
+    /// inline mod or no enclosing mod defines `name`: the site then goes to
+    /// the generic pass (the `use super::*` case).
+    pub(crate) fn resolve_scoped_bare(&self, g: &RepoGraph, site: &CallSite) -> Option<NodeId> {
+        let CallQualifier::Bare(name) = &site.qualifier else {
+            return None;
+        };
+        let mut cur = site.from;
+        loop {
+            let parent = *g.nav.parent_of.get(&cur)?;
+            match g.nav.kind_by_id.get(&parent) {
+                Some(k) if *k == node_kind::MODULE => return None,
+                Some(k) if *k == node_kind::PACKAGE => {
+                    let hit = g
+                        .symbols
+                        .module_symbols
+                        .get(&parent)
+                        .and_then(|s| s.get(name))
+                        .filter(|id| g.nav.kind_by_id.get(*id).is_some_and(|k| is_callable(*k)));
+                    if let Some(id) = hit {
+                        return Some(*id);
+                    }
+                }
+                _ => {}
+            }
+            cur = parent;
+        }
+    }
+
+    /// Bind the enum-variant USES refs `resolve_refs` left unresolved (a
+    /// same-file, path-qualified or `Self::` variant; an imported enum's
+    /// variant already bound there through the module's import bindings).
+    /// Drains `g.unresolved_refs`; misses go back in their original order,
+    /// every other ref untouched.
+    pub(crate) fn resolve_leftover_refs(&self, g: &mut RepoGraph) {
+        let pending = std::mem::take(&mut g.unresolved_refs);
+        for r in pending {
+            let hit = match &r.qualifier {
+                CallQualifier::Attribute { base, name } if r.category == edge_category::USES => {
+                    self.resolve_variant(g, r.from, base, name)
+                }
+                _ => None,
+            };
+            match hit {
+                Some(to) => push_edge(g, r.from, to, edge_category::USES),
+                None => g.unresolved_refs.push(r),
+            }
+        }
+    }
+
+    /// The ATTRIBUTE variant `name` of the enum the path `base` names, from
+    /// the caller `from`'s scope: the same first-segment rules and walk as a
+    /// path call, ending on an ENUM instead of a callable.
+    fn resolve_variant(
+        &self,
+        g: &RepoGraph,
+        from: NodeId,
+        base: &str,
+        name: &str,
+    ) -> Option<NodeId> {
+        let segs = split_path(base)?;
+        let scope = enclosing(&g.nav, from, true)?;
+        let file_module = enclosing(&g.nav, from, false)?;
+        let (start, _) = self.start(g, from, scope, file_module, &segs[0])?;
+        let mut unused = false;
+        let pos = self.walk(g, start, &segs[1..], &mut unused)?;
+        match self.settle_type_name(g, pos, file_module) {
+            Pos::Type(ty) if g.nav.kind_by_id.get(&ty) == Some(&node_kind::ENUM) => {
+                enum_variant(&g.nav, ty, name)
+            }
+            _ => None,
+        }
+    }
+
+    /// LA.3 fired_on marker, once per `build_rust`:
+    /// `[rust-items] inline_mods=N fns_in_inline_mods=F enum_variants=V
+    /// variant_uses=R/T enum_self_calls=S mod_scoped_calls=M`. Counted off the
+    /// built graph, so cache-served files count too: N = PACKAGE nodes in a
+    /// `.rs` file, F = FUNCTION / METHOD nodes under one, V = ATTRIBUTE
+    /// children of an ENUM, R/T = USES edges onto a variant / those plus the
+    /// USES refs still unresolved, S = CALLS from a method to a method of its
+    /// own enum, M = the inline-mod pre-pass's binds (`mod_scoped`).
+    pub(crate) fn report_items(&self, g: &RepoGraph, mod_scoped: usize) {
+        let kind = |id: &NodeId| g.nav.kind_by_id.get(id).copied();
+        let parent_kind = |id: &NodeId| g.nav.parent_of.get(id).and_then(kind);
+        let inline_mods = g
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(id, k)| {
+                **k == node_kind::PACKAGE
+                    && self
+                        .node_pos
+                        .get(*id)
+                        .and_then(|i| g.nodes.get(*i))
+                        .and_then(position_file)
+                        .is_some_and(|f| f.ends_with(".rs"))
+            })
+            .count();
+        let fns_in_mods = g
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(id, k)| {
+                (**k == node_kind::FUNCTION || **k == node_kind::METHOD)
+                    && enclosing(&g.nav, **id, true)
+                        .is_some_and(|s| kind(&s) == Some(node_kind::PACKAGE))
+            })
+            .count();
+        let is_variant = |id: &NodeId| {
+            kind(id) == Some(node_kind::ATTRIBUTE) && parent_kind(id) == Some(node_kind::ENUM)
+        };
+        let variants = g.nav.kind_by_id.keys().filter(|id| is_variant(id)).count();
+        let uses_bound = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES && is_variant(&e.to))
+            .count();
+        let uses_left = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .count();
+        let enum_self = g
+            .edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::CALLS && kind(&e.to) == Some(node_kind::METHOD)
+            })
+            .filter(|e| {
+                let Some(owner) = g
+                    .nav
+                    .parent_of
+                    .get(&e.to)
+                    .filter(|p| kind(p) == Some(node_kind::ENUM))
+                else {
+                    return false;
+                };
+                kind(&e.from) == Some(node_kind::METHOD)
+                    && match self_type(&g.nav, e.from) {
+                        Some(Pos::Type(t)) => t == *owner,
+                        Some(Pos::TypeName(n)) => g.nav.name_by_id.get(owner) == Some(&n),
+                        _ => false,
+                    }
+            })
+            .count();
+        eprintln!(
+            "[rust-items] inline_mods={inline_mods} fns_in_inline_mods={fns_in_mods} \
+             enum_variants={variants} variant_uses={uses_bound}/{} enum_self_calls={enum_self} \
+             mod_scoped_calls={mod_scoped}",
+            uses_bound + uses_left
+        );
+    }
+
     // ---- first segment ------------------------------------------------------
 
     fn start(
@@ -348,11 +580,23 @@ impl RustIndex {
                 }) {
                     return Some((p, Rule::Import));
                 }
-                if let Some(p) = self.child_pos(g, &Pos::Scope(scope), seg) {
-                    return Some((p, Rule::Child));
-                }
-                if let Some(p) = type_pos(g, scope, seg) {
-                    return Some((p, Rule::Type));
+                // Innermost scope first, then (LA.3) each enclosing scope out
+                // to the file module: an inline `mod tests` reaches its parent's
+                // modules and types, the `use super::*` every test mod opens
+                // with. Top-level code has no enclosing scope, so this is
+                // LA.1a's lookup unchanged there.
+                let mut cur = Some(scope);
+                while let Some(s) = cur {
+                    if let Some(p) = self.child_pos(g, &Pos::Scope(s), seg) {
+                        return Some((p, Rule::Child));
+                    }
+                    if let Some(p) = type_pos(g, s, seg) {
+                        return Some((p, Rule::Type));
+                    }
+                    cur = (s != file_module)
+                        .then(|| g.nav.parent_of.get(&s))
+                        .flatten()
+                        .and_then(|up| enclosing(&g.nav, *up, true));
                 }
                 let q = g.nav.qname_by_id.get(&file_module)?;
                 Some((self.crate_name_pos(g, q, seg)?, Rule::CrateName))
@@ -793,6 +1037,31 @@ fn self_type(nav: &CodeNav, from: NodeId) -> Option<Pos> {
 fn type_pos(g: &RepoGraph, scope: NodeId, seg: &str) -> Option<Pos> {
     let id = *g.symbols.module_symbols.get(&scope)?.get(seg)?;
     is_type_kind(*g.nav.kind_by_id.get(&id)?).then_some(Pos::Type(id))
+}
+
+/// A scope items are declared in: a file MODULE or an inline-mod PACKAGE.
+fn is_scope_kind(k: NodeKindId) -> bool {
+    k == node_kind::MODULE || k == node_kind::PACKAGE
+}
+
+/// The ATTRIBUTE child of `enum_id` named `name` (a variant). The same id
+/// twice (children repeat across merged files) is one variant; two distinct
+/// same-named children is ambiguous -> `None`, never first-wins.
+fn enum_variant(nav: &CodeNav, enum_id: NodeId, name: &str) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for &child in nav.children_of.get(&enum_id)? {
+        if nav.kind_by_id.get(&child) != Some(&node_kind::ATTRIBUTE)
+            || nav.name_by_id.get(&child).map(String::as_str) != Some(name)
+        {
+            continue;
+        }
+        match hit {
+            Some(existing) if existing == child => {}
+            Some(_) => return None,
+            None => hit = Some(child),
+        }
+    }
+    hit
 }
 
 fn is_type_kind(k: NodeKindId) -> bool {

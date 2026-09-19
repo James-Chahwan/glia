@@ -3,10 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use repo_graph_code_domain::{CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, node_kind};
+use repo_graph_code_domain::{
+    CallSite, CodeNav, FileParse, ImportStmt, UnresolvedRef, edge_category, node_kind,
+};
 use repo_graph_core::{Cell, NodeId, RepoId};
 
-use crate::calls::{emit_method_level_implements, resolve_calls, resolve_refs};
+use crate::calls::{emit_method_level_implements, push_edge, resolve_calls, resolve_refs};
 use crate::imports::{
     resolve_imports_go, resolve_imports_python, resolve_imports_slash, resolve_imports_ts,
 };
@@ -80,6 +82,11 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// generic pass misses (`crate::a::f()`, `super::f()`, `Self::f()`,
 /// `other_crate::f()`) is resolved against the module tree and `crates`, the
 /// Cargo packages the walk found (LA.1a, [`crate::rust_paths`]).
+///
+/// LA.3: a Bare call inside an inline `mod x { .. }` first tries the
+/// enclosing mods' own fns, innermost first (the generic order would bind a
+/// same-named file-level fn), and the enum-variant USES refs `resolve_refs`
+/// leaves are bound through the same path rules.
 pub fn build_rust(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -89,10 +96,25 @@ pub fn build_rust(
     build_symbol_table(&mut g);
     resolve_imports_python(&mut g, &all_imports);
     let idx = RustIndex::build(&g, crates);
-    resolve_calls(&mut g, &all_calls, |g, site| idx.resolve_call(g, site));
+    // Inline-mod pre-pass: a hit is a CALLS edge now; a miss (and every other
+    // site) keeps its original position for the generic pass.
+    let mut rest: Vec<CallSite> = Vec::with_capacity(all_calls.len());
+    let mut mod_scoped = 0usize;
+    for site in all_calls {
+        match idx.resolve_scoped_bare(&g, &site) {
+            Some(to) => {
+                push_edge(&mut g, site.from, to, edge_category::CALLS);
+                mod_scoped += 1;
+            }
+            None => rest.push(site),
+        }
+    }
+    resolve_calls(&mut g, &rest, |g, site| idx.resolve_call(g, site));
     resolve_refs(&mut g, &all_refs);
+    idx.resolve_leftover_refs(&mut g);
     emit_method_level_implements(&mut g);
     idx.report();
+    idx.report_items(&g, mod_scoped);
     Ok(g)
 }
 

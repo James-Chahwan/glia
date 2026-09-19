@@ -1,0 +1,38 @@
+{
+  "framework": "rust-inline-mod-enum",
+  "language": "rust",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["rust/calls"],
+  "expect_nodes": [
+    {"kind": "PACKAGE", "name": "src/lib/endpoint", "note": "inline `pub mod endpoint {}` - a namespace inside the file, like a C# namespace"},
+    {"kind": "PACKAGE", "name": "src/lib/endpoint/inner"},
+    {"kind": "PACKAGE", "name": "src/lib/tests", "note": "#[cfg(test)] mod tests {} is an inline mod too"},
+    {"kind": "FUNCTION", "name": "src/lib/endpoint/url_to_path", "note": "a fn inside an inline mod - not a node at all on HEAD"},
+    {"kind": "FUNCTION", "name": "src/lib/endpoint/helper", "note": "a private fn inside the inline mod, shadowing the file-level helper"},
+    {"kind": "FUNCTION", "name": "src/lib/endpoint/inner/deep"},
+    {"kind": "FUNCTION", "name": "src/lib/tests/tier_is_base_fold"},
+    {"kind": "ATTRIBUTE", "name": "src/lib/MatchTier/BaseFold", "note": "enum variant, same kind Python gives an Enum member"},
+    {"kind": "ATTRIBUTE", "name": "src/lib/MatchTier/Suffix"},
+    {"kind": "ATTRIBUTE", "name": "src/lib/MatchTier/Named"}
+  ],
+  "expect_edges": [
+    {"from": "src/lib", "to": "src/lib/endpoint", "category": "CONTAINS"},
+    {"from": "src/lib/MatchTier", "to": "src/lib/MatchTier/BaseFold", "category": "HAS_ATTRIBUTE"},
+    {"from": "src/lib/tier", "to": "src/lib/MatchTier/BaseFold", "category": "USES", "note": "unit variant in value position"},
+    {"from": "src/lib/mk", "to": "src/lib/MatchTier/Suffix", "category": "USES", "note": "tuple-variant construction"},
+    {"from": "src/lib/named", "to": "src/lib/MatchTier/Named", "category": "USES", "note": "struct-variant construction"},
+    {"from": "src/lib/classify", "to": "src/lib/MatchTier/Exact", "category": "USES", "note": "variant in a match pattern"},
+    {"from": "src/lib/use_ep", "to": "src/lib/endpoint/url_to_path", "category": "CALLS", "note": "path call into an inline mod"},
+    {"from": "src/lib/use_inner", "to": "src/lib/endpoint/inner/deep", "category": "CALLS"},
+    {"from": "src/lib/endpoint/url_to_path", "to": "src/lib/endpoint/helper", "category": "CALLS", "note": "bare call inside an inline mod binds the mod's own fn (innermost scope first)"},
+    {"from": "src/lib/tests/tier_is_base_fold", "to": "src/lib/tier", "category": "CALLS", "note": "test fn in an inline test mod calling its parent module"},
+    {"from": "src/lib/MatchTier/rank", "to": "src/lib/MatchTier/weight", "category": "CALLS", "note": "self.weight() inside an enum impl (resolves before LA.3: LA.30a)"}
+  ],
+  "forbid": [
+    {"from": "src/lib/tier", "to": "src/lib/MatchTier/Exact", "category": "USES", "note": "only the variant actually named is used"},
+    {"kind": "FUNCTION", "name": "src/lib/url_to_path", "note": "a fn inside `mod endpoint` must carry the mod segment, never flatten into the file module"},
+    {"from": "src/lib/endpoint/url_to_path", "to": "src/lib/helper", "category": "CALLS", "note": "PRECISION: the generic Bare order checks the FILE module before the PACKAGE; the pre-pass must bind endpoint::helper, never the file-level helper"}
+  ],
+  "note": "LA.3. Baseline 2026-09-19, W6 wheel (0.4.18, HEAD f92d557 code), grade.py: nodes 0/10 (no PACKAGE, no fn inside any inline mod, no variant node), CONTAINS 0/1, HAS_ATTRIBUTE 0/1, USES 0/4, CALLS 1/5 (only rank -> weight, bound by LA.30a); forbid 0 violations. The shadowing forbid (url_to_path -> file-level helper) is live: with build_rust's inline-mod pre-pass bypassed the generic Bare order binds the FILE module first and engine/tests/rust_inline_items.rs fails."
+}
