@@ -1,0 +1,45 @@
+{
+  "framework": "java-quartz-cron",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "java/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0/15 * * * ?",
+      "note": "Quartz cronSchedule(\"...\"), 6/7-field syntax kept verbatim"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 4 * * *",
+      "note": "control: Spring @Scheduled(cron=...) in the client repo, extracted on HEAD"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Jobs",
+      "to": "0 0/15 * * * ?",
+      "category": "SCHEDULES",
+      "note": "module -> job"
+    },
+    {
+      "from": "0 0/15 * * * ?",
+      "to": "ReportJob",
+      "category": "HANDLED_BY",
+      "note": "JobBuilder.newJob(ReportJob.class) is the handler"
+    },
+    {
+      "from": "0 0 4 * * *",
+      "to": "purge",
+      "category": "HANDLED_BY",
+      "note": "the existing Spring path gains its handler ref"
+    }
+  ],
+  "note": "LA.19a. Quartz trigger + job class (server), Spring @Scheduled control (client). Baseline HEAD: the Quartz job is invisible; only the @Scheduled control is extracted and no job has a handler edge."
+}

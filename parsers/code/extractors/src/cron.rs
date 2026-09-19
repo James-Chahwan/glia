@@ -1,19 +1,29 @@
-//! Cron extraction (v0.4.x — task #7).
+//! Cron extraction (v0.4.x — task #7; framework schedulers LA.19a).
 //!
 //! Emits `CRON_JOB` nodes for every scheduled invocation we can see in the
-//! repo. Five high-leverage in-repo sources (path/content gated):
+//! repo. In-repo sources (path/content gated):
 //!
 //!   1. GitHub Actions — `.github/workflows/*.yml` with `on.schedule.cron`
 //!   2. k8s CronJob YAML — file containing `kind: CronJob` + `schedule:`
 //!   3. node-cron / cron — `cron.schedule('* * * * *', handler)`
 //!   4. Celery beat — entries inside an `app.conf.beat_schedule = { ... }`
 //!      dict, looking for `'schedule': crontab(...)` or `'schedule': N.0`
-//!   5. Java/Spring/Quartz — `@Scheduled(cron = "...")`
+//!   5. Spring — `@Scheduled(cron = "...")`
+//!   6. Quartz — `cronSchedule("...")` / `new CronExpression("...")` (LA.19a)
+//!   7. Hangfire — `RecurringJob.AddOrUpdate(.., () => X.M(), "..." | Cron.X)`
+//!   8. Go — robfig `c.AddFunc("..", fn)` / `c.AddJob`, gocron `.Cron("..").Do(fn)`
+//!   9. APScheduler — `@s.scheduled_job("cron", **kw)`, `s.add_job(f, ..)`
 //!
-//! Out of scope (deliberate v1 cut, see ship-plan memory):
+//! Sources 5–9 are CODE sources: their jobs also carry a
+//! `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the graph
+//! builder's `resolve_refs`), so trace / blast-radius walk from a job into the
+//! code it runs. YAML jobs carry none: they live in the synthetic yaml graph,
+//! where a handler in another language's graph can never resolve.
+//!
+//! Out of scope:
 //!   - Server-side `crontab -e` entries that aren't committed
 //!   - UI-configured cloud schedulers (GCP Scheduler / EventBridge)
-//!   - systemd `*.timer`, Sidekiq-cron, Hangfire, APScheduler, Rails whenever
+//!   - systemd `*.timer`, Sidekiq-cron, Rails whenever, Laravel, Oban (LA.19b)
 //!   - Dockerfile CMD bridging to external scheduler — IaC resolver (#9) closes
 //!     this gap by linking image → k8s CronJob via Resource nodes.
 //!
@@ -21,22 +31,76 @@
 //! cron expression (or a normalised rate marker). `<target_id>` is the script
 //! basename / handler symbol when extractable, else `anon`. The full qname is
 //! the join key for `CronResolver` — drift detection rather than schedule
-//! overlap.
+//! overlap. The code sources run their schedule through [`normalise_schedule`]
+//! (descriptors such as `@daily` become their 5-field expansion) so a robfig
+//! `@hourly` job and a manifest's `0 * * * *` share one identity.
 
-use repo_graph_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
+use repo_graph_code_domain::{
+    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, node_kind,
+};
 use repo_graph_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 pub struct CronNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub nav: CodeNav,
+    /// LA.19a: `CRON_JOB --HANDLED_BY--> handler` refs for code-sourced jobs.
+    pub refs: Vec<UnresolvedRef>,
 }
 
 #[derive(Debug, Clone)]
 struct CronJob {
     schedule: String,
     target: String,
-    source: &'static str, // workflow / k8s / node-cron / celery / scheduled-annot
+    /// workflow / k8s / node-cron / celery / scheduled-annot / quartz /
+    /// hangfire / robfig / gocron / apscheduler
+    source: &'static str,
+    /// The code the job runs: `Bare(fn)` or `Attribute { base, name }`.
+    handler: Option<CallQualifier>,
+}
+
+/// Per-file tally of code-sourced jobs, for the LA.19a fired_on marker.
+#[derive(Debug, Default, PartialEq)]
+struct CodeCounts {
+    quartz: usize,
+    hangfire: usize,
+    go: usize,
+    apscheduler: usize,
+    spring: usize,
+}
+
+impl CodeCounts {
+    fn bump(&mut self, source: &str) {
+        match source {
+            "quartz" => self.quartz += 1,
+            "hangfire" => self.hangfire += 1,
+            "robfig" | "gocron" => self.go += 1,
+            "apscheduler" => self.apscheduler += 1,
+            "scheduled_annot" => self.spring += 1,
+            _ => {}
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.quartz + self.hangfire + self.go + self.apscheduler + self.spring
+    }
+}
+
+/// LA.19a fired_on: `[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0
+/// spring=0 handler_refs=1 path=Jobs.java`, or `None` when the file declared no
+/// code-sourced job. The prefix and field order are stable.
+fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String> {
+    (c.total() > 0).then(|| {
+        format!(
+            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} handler_refs={handler_refs} path={path}",
+            c.total(),
+            c.quartz,
+            c.hangfire,
+            c.go,
+            c.apscheduler,
+            c.spring,
+        )
+    })
 }
 
 pub fn extract_cron_nodes(
@@ -48,6 +112,7 @@ pub fn extract_cron_nodes(
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut nav = CodeNav::default();
+    let mut refs: Vec<UnresolvedRef> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     let mut jobs: Vec<CronJob> = Vec::new();
@@ -68,40 +133,87 @@ pub fn extract_cron_nodes(
     jobs.extend(extract_node_cron(source));
     jobs.extend(extract_celery_beat(source));
     jobs.extend(extract_scheduled_annotation(source));
-
-    for job in jobs {
-        let qname = format!("cron:{}:{}", job.schedule, job.target);
-        if !seen.insert(qname.clone()) {
-            continue;
+    // LA.19a framework schedulers. Each is gated on the file's language AND
+    // its library's import / namespace, so every other file costs one
+    // extension test.
+    let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
+    if matches!(ext, "java" | "kt" | "kts" | "groovy" | "scala") && source.contains("org.quartz") {
+        jobs.extend(extract_quartz(source));
+    }
+    if matches!(ext, "cs" | "vb" | "fs") && source.contains("Hangfire") {
+        jobs.extend(extract_hangfire(source));
+    }
+    if ext == "go" {
+        let robfig = source.contains("robfig/cron");
+        let gocron = source.contains("go-co-op/gocron");
+        if robfig || gocron {
+            jobs.extend(extract_go_cron(source, robfig, gocron));
         }
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CRON_JOB, &qname);
-        let payload = format!(
-            r#"{{"schedule":"{}","target":"{}","source":"{}"}}"#,
-            escape_json(&job.schedule),
-            escape_json(&job.target),
-            job.source,
-        );
-        nodes.push(Node {
-            id,
-            repo,
-            confidence: Confidence::Medium,
-            cells: vec![Cell {
-                kind: repo_graph_code_domain::cell_type::CODE,
-                payload: CellPayload::Json(payload),
-            }],
-        });
-        nav.record(id, &job.schedule, &qname, node_kind::CRON_JOB, Some(module_id));
-        // Edge from the file's module → the cron job — lets a graph query find
-        // every job a service registers without a separate index.
-        edges.push(Edge {
-            from: module_id,
-            to: id,
-            category: edge_category::SCHEDULES,
-            confidence: Confidence::Medium,
-        });
+    }
+    if matches!(ext, "py" | "pyw") && source.contains("apscheduler") {
+        jobs.extend(extract_apscheduler(source));
     }
 
-    CronNodes { nodes, edges, nav }
+    let mut counts = CodeCounts::default();
+    for job in jobs {
+        let qname = format!("cron:{}:{}", job.schedule, job.target);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CRON_JOB, &qname);
+        if seen.insert(qname.clone()) {
+            let payload = format!(
+                r#"{{"schedule":"{}","target":"{}","source":"{}"}}"#,
+                escape_json(&job.schedule),
+                escape_json(&job.target),
+                job.source,
+            );
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: vec![Cell {
+                    kind: repo_graph_code_domain::cell_type::CODE,
+                    payload: CellPayload::Json(payload),
+                }],
+            });
+            nav.record(
+                id,
+                &job.schedule,
+                &qname,
+                node_kind::CRON_JOB,
+                Some(module_id),
+            );
+            // Edge from the file's module → the cron job — lets a graph query
+            // find every job a service registers without a separate index.
+            edges.push(Edge {
+                from: module_id,
+                to: id,
+                category: edge_category::SCHEDULES,
+                confidence: Confidence::Medium,
+            });
+            counts.bump(job.source);
+        }
+        // A duplicate qname is one node, but a second handler spelling for it
+        // is still a distinct ref.
+        if let Some(handler) = job.handler
+            && !refs.iter().any(|r| r.from == id && r.qualifier == handler)
+        {
+            refs.push(UnresolvedRef {
+                from: id,
+                from_module: module_id,
+                qualifier: handler,
+                category: edge_category::HANDLED_BY,
+            });
+        }
+    }
+    if let Some(marker) = code_marker(&counts, refs.len(), path) {
+        eprintln!("{marker}");
+    }
+
+    CronNodes {
+        nodes,
+        edges,
+        nav,
+        refs,
+    }
 }
 
 fn escape_json(s: &str) -> String {
@@ -134,6 +246,7 @@ fn extract_github_actions(source: &str, path: &str) -> Vec<CronJob> {
                         schedule,
                         target: target.clone(),
                         source: "github_actions",
+                        handler: None,
                     });
                 }
             }
@@ -261,6 +374,7 @@ fn extract_k8s_cronjob_doc(doc: &str) -> Option<CronJob> {
         schedule,
         target,
         source: "k8s_cronjob",
+        handler: None,
     })
 }
 
@@ -295,6 +409,7 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
                     schedule,
                     target,
                     source: "node_cron",
+                    handler: None,
                 });
             }
         }
@@ -321,6 +436,7 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
                     schedule,
                     target,
                     source: "node_cron",
+                    handler: None,
                 });
             }
         }
@@ -353,6 +469,7 @@ fn extract_celery_beat(source: &str) -> Vec<CronJob> {
                 schedule,
                 target,
                 source: "celery_beat",
+                handler: None,
             });
         }
         search_from = pos + "'schedule':".len();
@@ -371,6 +488,7 @@ fn extract_celery_beat(source: &str) -> Vec<CronJob> {
                 schedule,
                 target,
                 source: "celery_beat",
+                handler: None,
             });
         }
         search_from = pos + "\"schedule\":".len();
@@ -418,7 +536,7 @@ fn celery_task_in(context: &str) -> Option<String> {
 }
 
 // ----------------------------------------------------------------------------
-// Java/Spring/Quartz: `@Scheduled(cron = "0 4 * * * *")`
+// Java/Spring: `@Scheduled(cron = "0 4 * * * *")`
 // ----------------------------------------------------------------------------
 
 fn extract_scheduled_annotation(source: &str) -> Vec<CronJob> {
@@ -459,12 +577,21 @@ fn extract_scheduled_annotation(source: &str) -> Vec<CronJob> {
                 let after_eq = &tail[eq + 1..];
                 if let Some(schedule) = first_quoted(after_eq) {
                     if looks_like_cron_expr(&schedule) {
-                        let target = method_name_after_annotation(&source[j..])
-                            .unwrap_or_else(|| "anon".to_string());
+                        let method = method_name_after_annotation(&source[j..]);
+                        // LA.19a: the annotated method, scoped by the class
+                        // the annotation sits in, is the job's handler.
+                        let handler = method.as_ref().and_then(|m| {
+                            let class = enclosing_class_name(source.get(..pos)?)?;
+                            Some(CallQualifier::Attribute {
+                                base: class,
+                                name: m.clone(),
+                            })
+                        });
                         out.push(CronJob {
                             schedule,
-                            target,
+                            target: method.unwrap_or_else(|| "anon".to_string()),
                             source: "scheduled_annot",
+                            handler,
                         });
                     }
                 }
@@ -514,6 +641,845 @@ fn method_name_after_annotation(after_close: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Nearest Java / Kotlin / C# `class <Name>` declaration in `before` (the
+/// source up to an annotation). A `class ` hit counts only when everything
+/// between its line start and the keyword is modifiers or annotations, so
+/// prose (`// this class handles ..`) and `subclass ` never match.
+fn enclosing_class_name(before: &str) -> Option<String> {
+    const MODIFIERS: &[&str] = &[
+        "public",
+        "private",
+        "protected",
+        "internal",
+        "static",
+        "final",
+        "abstract",
+        "sealed",
+        "open",
+        "data",
+        "strictfp",
+        "non-sealed",
+        "partial",
+    ];
+    let mut end = before.len();
+    for _ in 0..64 {
+        let idx = before.get(..end)?.rfind("class ")?;
+        end = idx;
+        let line_start = before.get(..idx)?.rfind('\n').map_or(0, |n| n + 1);
+        let prefix = before.get(line_start..idx)?;
+        if !prefix
+            .split_whitespace()
+            .all(|t| MODIFIERS.contains(&t) || t.starts_with('@'))
+        {
+            continue;
+        }
+        let name = leading_ident(before.get(idx + "class ".len()..)?.trim_start())?;
+        return Some(name.to_string());
+    }
+    None
+}
+
+// ----------------------------------------------------------------------------
+// LA.19a framework schedulers. Every scan is a byte-safe `match_indices` over
+// the source with a bounded argument reader ([`call_args`]); all slicing goes
+// through `get(..)` at ASCII delimiters.
+// ----------------------------------------------------------------------------
+
+/// The shared schedule normaliser for code sources: cron descriptors expand to
+/// their 5-field form (robfig / Cronos / Vixie agree on these), `@every <dur>`
+/// and `@reboot` stay verbatim as rate / event markers, anything else must
+/// already look like a cron expression and is kept verbatim.
+fn normalise_schedule(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let Some(descriptor) = s.strip_prefix('@') else {
+        return looks_like_cron_expr(s).then(|| s.to_string());
+    };
+    let fixed = match descriptor {
+        "yearly" | "annually" => "0 0 1 1 *",
+        "monthly" => "0 0 1 * *",
+        "weekly" => "0 0 * * 0",
+        "daily" | "midnight" => "0 0 * * *",
+        "hourly" => "0 * * * *",
+        "reboot" => "@reboot",
+        _ => {
+            let dur = descriptor.strip_prefix("every ")?.trim();
+            let valid =
+                !dur.is_empty() && dur.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.');
+            return valid.then(|| format!("@every {dur}"));
+        }
+    };
+    Some(fixed.to_string())
+}
+
+/// Skip a string literal opening at `at`; the index just past its close,
+/// which must come before `limit`.
+fn skip_string(bytes: &[u8], at: usize, limit: usize) -> Option<usize> {
+    let quote = *bytes.get(at)?;
+    let mut j = at + 1;
+    while j < limit.min(bytes.len()) {
+        match bytes[j] {
+            b'\\' => j += 2,
+            b if b == quote => return Some(j + 1),
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+/// The top-level arguments of the call whose `(` ends just before `open`,
+/// trimmed, plus the index just past its `)`. Nested brackets and string
+/// literals are skipped whole; `None` when the call does not close within
+/// 4 KiB (a truncated or non-call needle).
+fn call_args(source: &str, open: usize) -> Option<(Vec<&str>, usize)> {
+    const MAX_CALL_BYTES: usize = 4096;
+    let bytes = source.as_bytes();
+    let limit = open.saturating_add(MAX_CALL_BYTES).min(bytes.len());
+    let mut args = Vec::new();
+    let (mut depth, mut start, mut i) = (0usize, open, open);
+    while i < limit {
+        match bytes[i] {
+            b'"' | b'\'' | b'`' => {
+                i = skip_string(bytes, i, limit)?;
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth > 0 => depth -= 1,
+            b')' => {
+                let last = source.get(start..i)?.trim();
+                if !last.is_empty() {
+                    args.push(last);
+                }
+                return Some((args, i + 1));
+            }
+            b']' | b'}' => return None,
+            b',' if depth == 0 => {
+                args.push(source.get(start..i)?.trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `"x"` / `'x'` / `` `x` `` — the text of an argument that is exactly one
+/// string literal, else `None` (a variable, a concatenation, an interpolation).
+fn string_literal(arg: &str) -> Option<String> {
+    let bytes = arg.as_bytes();
+    let first = *bytes.first()?;
+    if !matches!(first, b'"' | b'\'' | b'`') {
+        return None;
+    }
+    (skip_string(bytes, 0, bytes.len())? == bytes.len())
+        .then(|| arg.get(1..arg.len() - 1).map(str::to_string))?
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The identifier `s` starts with, if any.
+fn leading_ident(s: &str) -> Option<&str> {
+    let n = s.bytes().take_while(|b| is_ident_byte(*b)).count();
+    let id = s.get(..n)?;
+    (n > 0 && !id.as_bytes()[0].is_ascii_digit()).then_some(id)
+}
+
+/// `a` / `a.b` / `a.b.c` — every dot-separated segment an identifier.
+fn ident_path(s: &str) -> Option<Vec<&str>> {
+    let segs: Vec<&str> = s.trim().split('.').collect();
+    segs.iter()
+        .all(|seg| leading_ident(seg).is_some_and(|id| id.len() == seg.len()))
+        .then_some(segs)
+}
+
+/// The identifier ending right before byte `end`, if any.
+fn ident_before(source: &str, end: usize) -> Option<&str> {
+    let head = source.get(..end)?;
+    let n = head.bytes().rev().take_while(|b| is_ident_byte(*b)).count();
+    head.get(end - n..).filter(|id| !id.is_empty())
+}
+
+/// `(target, handler)` for a handler written as an identifier path: `f` is
+/// `Bare(f)`, `a.b.f` is `Attribute { base: b, name: f }`.
+fn handler_from_path(segs: &[&str]) -> Option<(String, CallQualifier)> {
+    let name = segs.last()?.to_string();
+    let q = match segs {
+        [_] => CallQualifier::Bare(name.clone()),
+        [.., base, _] => CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.clone(),
+        },
+        [] => return None,
+    };
+    Some((name, q))
+}
+
+/// A function-valued argument (Go `AddFunc`, gocron `Do`, APScheduler
+/// `add_job`): a named function or method reference binds, an inline
+/// `func() {..}` / `lambda: ..` is `anon` with no handler.
+fn func_arg_handler(arg: &str) -> (String, Option<CallQualifier>) {
+    match ident_path(arg).as_deref().and_then(handler_from_path) {
+        Some((target, q)) => (target, Some(q)),
+        None => ("anon".to_string(), None),
+    }
+}
+
+// --- Quartz ------------------------------------------------------------------
+
+/// Quartz (gate `org.quartz`): `cronSchedule("..")` (static import or
+/// `CronScheduleBuilder.cronSchedule`) and `new CronExpression("..")`, the
+/// 6/7-field expression verbatim. A file building exactly one job class
+/// (`newJob(X.class)`) runs X; otherwise the trigger statement's
+/// `withIdentity("name")` names the job and there is no handler.
+fn extract_quartz(source: &str) -> Vec<CronJob> {
+    let mut classes: Vec<&str> = Vec::new();
+    for (pos, needle) in source.match_indices("newJob(") {
+        if ident_before(source, pos).is_some() {
+            continue;
+        }
+        let class = call_args(source, pos + needle.len())
+            .and_then(|(args, _)| args.first()?.strip_suffix(".class").map(str::trim))
+            .and_then(ident_path)
+            .and_then(|segs| segs.last().copied());
+        if let Some(c) = class
+            && !classes.contains(&c)
+        {
+            classes.push(c);
+        }
+    }
+    let job_class = match classes.as_slice() {
+        [only] => Some(only.to_string()),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for needle in ["cronSchedule(", "new CronExpression("] {
+        for (pos, _) in source.match_indices(needle) {
+            if ident_before(source, pos).is_some() {
+                continue;
+            }
+            let Some((args, _)) = call_args(source, pos + needle.len()) else {
+                continue;
+            };
+            let Some(schedule) = args
+                .first()
+                .and_then(|a| string_literal(a))
+                .and_then(|raw| normalise_schedule(&raw))
+            else {
+                continue;
+            };
+            let (target, handler) = match &job_class {
+                Some(x) => (x.clone(), Some(CallQualifier::Bare(x.clone()))),
+                None => (
+                    statement_identity(source, pos).unwrap_or_else(|| "anon".to_string()),
+                    None,
+                ),
+            };
+            out.push(CronJob {
+                schedule,
+                target,
+                source: "quartz",
+                handler,
+            });
+        }
+    }
+    out
+}
+
+/// The `withIdentity("name")` literal of the statement holding byte `pos`
+/// (bounded by the nearest `;` / `{` / `}` either side).
+fn statement_identity(source: &str, pos: usize) -> Option<String> {
+    let start = source
+        .get(..pos)?
+        .rfind([';', '{', '}'])
+        .map_or(0, |i| i + 1);
+    let end = source
+        .get(pos..)?
+        .find(';')
+        .map_or(source.len(), |i| pos + i);
+    let stmt = source.get(start..end)?;
+    let (at, needle) = stmt.match_indices("withIdentity(").next()?;
+    let (args, _) = call_args(source, start + at + needle.len())?;
+    string_literal(args.first()?)
+}
+
+// --- Hangfire ----------------------------------------------------------------
+
+/// Hangfire (gate `Hangfire`): `RecurringJob.AddOrUpdate[<T>](..)` or the
+/// same call on an `IRecurringJobManager` receiver. The arguments are an
+/// optional job id, the job lambda, then the schedule: a string literal or a
+/// `Cron.X` helper. The job is named by the lambda's method.
+fn extract_hangfire(source: &str) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    for (pos, needle) in source.match_indices(".AddOrUpdate") {
+        let Some(recv) = ident_before(source, pos) else {
+            continue;
+        };
+        let manager = recv == "RecurringJob"
+            || recv.to_ascii_lowercase().contains("recurringjob")
+            || source.contains(&format!("IRecurringJobManager {recv}"));
+        if !manager {
+            continue;
+        }
+        let mut i = pos + needle.len();
+        let mut generic: Option<&str> = None;
+        if source.get(i..).is_some_and(|r| r.starts_with('<')) {
+            let Some(close) = matching_angle(source.as_bytes(), i) else {
+                continue;
+            };
+            generic = source.get(i + 1..close).map(str::trim);
+            i = close + 1;
+        }
+        if !source.get(i..).is_some_and(|r| r.starts_with('(')) {
+            continue;
+        }
+        let Some((args, _)) = call_args(source, i + 1) else {
+            continue;
+        };
+        let Some(li) = args.iter().position(|a| a.contains("=>")) else {
+            continue;
+        };
+        let Some(schedule) = args.get(li + 1).and_then(|a| hangfire_schedule(a)) else {
+            continue;
+        };
+        let (method, handler) = hangfire_lambda(args[li], generic);
+        let target = method
+            .or_else(|| args[..li].iter().find_map(|a| string_literal(a)))
+            .unwrap_or_else(|| "anon".to_string());
+        out.push(CronJob {
+            schedule,
+            target,
+            source: "hangfire",
+            handler,
+        });
+    }
+    out
+}
+
+/// The `>` closing the generic argument list whose `<` is at `open`, within
+/// 256 bytes; nested `<..>` (`Repo<Order>`) count.
+fn matching_angle(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, &b) in bytes.get(open..)?.iter().take(256).enumerate() {
+        match b {
+            b'<' => depth += 1,
+            b'>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + k);
+                }
+            }
+            b'(' | b')' | b';' | b'{' | b'}' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A Hangfire schedule argument: a cron string, or `Cron.X` / `Cron.X(..)`.
+fn hangfire_schedule(arg: &str) -> Option<String> {
+    if let Some(raw) = string_literal(arg) {
+        return normalise_schedule(&raw);
+    }
+    let arg = arg.strip_prefix("Hangfire.").unwrap_or(arg);
+    let rest = arg.strip_prefix("Cron.")?;
+    let member = leading_ident(rest)?;
+    let tail = rest.get(member.len()..)?.trim_start();
+    if tail.is_empty() {
+        return hangfire_cron(member, &[]);
+    }
+    let offset = arg.len() - tail.len();
+    if !tail.starts_with('(') {
+        return None;
+    }
+    let (args, end) = call_args(arg, offset + 1)?;
+    if !arg.get(end..)?.trim().is_empty() {
+        return None;
+    }
+    hangfire_cron(member, &args)
+}
+
+/// Hangfire's own `Cron` helpers (Hangfire.Core `Cron.cs`), positional or
+/// named arguments. Unknown members, and any argument that is not a literal,
+/// are skipped — never guessed.
+fn hangfire_cron(member: &str, args: &[&str]) -> Option<String> {
+    let params: &[&str] = match member {
+        "Minutely" => &[],
+        "Hourly" => &["minute"],
+        "Daily" => &["hour", "minute"],
+        "Weekly" => &["dayOfWeek", "hour", "minute"],
+        "Monthly" => &["day", "hour", "minute"],
+        "Yearly" => &["month", "day", "hour", "minute"],
+        _ => return None,
+    };
+    if args.len() > params.len() {
+        return None;
+    }
+    let mut got: Vec<Option<u32>> = vec![None; params.len()];
+    for (i, arg) in args.iter().enumerate() {
+        let (slot, value) = match arg.split_once(':') {
+            Some((name, v)) => (params.iter().position(|p| *p == name.trim())?, v.trim()),
+            None => (i, arg.trim()),
+        };
+        got[slot] = Some(if params[slot] == "dayOfWeek" {
+            day_of_week_index(value)?
+        } else {
+            value.parse().ok()?
+        });
+    }
+    let get = |p: &str, default: u32| {
+        params
+            .iter()
+            .position(|x| *x == p)
+            .and_then(|i| got[i])
+            .unwrap_or(default)
+    };
+    let (m, h) = (get("minute", 0), get("hour", 0));
+    Some(match member {
+        "Minutely" => "* * * * *".to_string(),
+        "Hourly" => format!("{m} * * * *"),
+        "Daily" => format!("{m} {h} * * *"),
+        // `Cron.Weekly()` is Monday in Hangfire, not cron's Sunday.
+        "Weekly" => format!("{m} {h} * * {}", get("dayOfWeek", 1)),
+        "Monthly" => format!("{m} {h} {} * *", get("day", 1)),
+        _ => format!("{m} {h} {} {} *", get("day", 1), get("month", 1)),
+    })
+}
+
+/// `DayOfWeek.Monday` → 1 (.NET's `DayOfWeek` numbering, Sunday = 0).
+fn day_of_week_index(v: &str) -> Option<u32> {
+    const DAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let day = v.strip_prefix("DayOfWeek.")?;
+    DAYS.iter()
+        .position(|d| *d == day)
+        .and_then(|i| u32::try_from(i).ok())
+}
+
+/// The method a Hangfire job lambda calls, and its handler ref:
+/// `() => Cleaner.Run()` → `Attribute { Cleaner, Run }`; `x => x.Send()` on
+/// `AddOrUpdate<IFoo>` → `Attribute { IFoo, Send }`. A receiver that is the
+/// lambda parameter with no generic type, or a bare call, names the job but
+/// binds nothing.
+fn hangfire_lambda(arg: &str, generic: Option<&str>) -> (Option<String>, Option<CallQualifier>) {
+    let Some((params, body)) = arg.split_once("=>") else {
+        return (None, None);
+    };
+    let params = params.trim();
+    let params = params.strip_prefix("async").map_or(params, str::trim_start);
+    let param = params
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(',')
+        .next()
+        .and_then(|p| p.split_whitespace().last());
+    let mut body = body.trim();
+    if let Some(block) = body.strip_prefix('{') {
+        body = block.trim_start();
+    }
+    if let Some(awaited) = body.strip_prefix("await ") {
+        body = awaited.trim_start();
+    }
+    let Some(segs) = body.split_once('(').and_then(|(path, _)| ident_path(path)) else {
+        return (None, None);
+    };
+    let Some(name) = segs.last().map(|s| s.to_string()) else {
+        return (None, None);
+    };
+    let handler = match segs.as_slice() {
+        [.., base, _] if Some(*base) == param => generic
+            .and_then(|t| t.split('<').next())
+            .and_then(|t| t.trim().rsplit('.').next())
+            .filter(|t| leading_ident(t).is_some_and(|id| id.len() == t.len()))
+            .map(|t| CallQualifier::Attribute {
+                base: t.to_string(),
+                name: name.clone(),
+            }),
+        [.., base, _] => Some(CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.clone(),
+        }),
+        _ => None,
+    };
+    (Some(name), handler)
+}
+
+// --- Go: robfig/cron and gocron ------------------------------------------------
+
+/// Go schedulers. robfig (gate `robfig/cron`): `c.AddFunc("spec", fn)` and
+/// `c.AddJob("spec", job)`. gocron (gate `go-co-op/gocron`): v1
+/// `s.Cron("spec")..Do(fn)` / `CronWithSeconds`, v2
+/// `gocron.CronJob("spec", secs), gocron.NewTask(fn, ..)`.
+fn extract_go_cron(source: &str, robfig: bool, gocron: bool) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    let mut push = |schedule: Option<String>, (target, handler), src: &'static str| {
+        if let Some(schedule) = schedule {
+            out.push(CronJob {
+                schedule,
+                target,
+                source: src,
+                handler,
+            });
+        }
+    };
+    let spec = |args: &[&str]| {
+        args.first()
+            .and_then(|a| string_literal(a))
+            .and_then(|raw| normalise_schedule(&raw))
+    };
+    if robfig {
+        for needle in [".AddFunc(", ".AddJob("] {
+            for (pos, _) in source.match_indices(needle) {
+                let Some((args, _)) = call_args(source, pos + needle.len()) else {
+                    continue;
+                };
+                let Some(job) = args.get(1) else {
+                    continue;
+                };
+                let handler = if needle == ".AddFunc(" {
+                    func_arg_handler(job)
+                } else {
+                    go_job_handler(job)
+                };
+                push(spec(&args), handler, "robfig");
+            }
+        }
+    }
+    if gocron {
+        for needle in [".Cron(", ".CronWithSeconds("] {
+            for (pos, _) in source.match_indices(needle) {
+                let Some((args, end)) = call_args(source, pos + needle.len()) else {
+                    continue;
+                };
+                let handler = chained_call_arg(source, end, "Do")
+                    .map_or_else(|| ("anon".to_string(), None), func_arg_handler);
+                push(spec(&args), handler, "gocron");
+            }
+        }
+        for (pos, needle) in source.match_indices("gocron.CronJob(") {
+            let Some((args, end)) = call_args(source, pos + needle.len()) else {
+                continue;
+            };
+            let task = source.get(end..).and_then(|rest| {
+                let rest = rest.trim_start().strip_prefix(',')?.trim_start();
+                let rest = rest.strip_prefix("gocron.NewTask(")?;
+                let open = source.len() - rest.len();
+                call_args(source, open).and_then(|(a, _)| a.first().copied())
+            });
+            let handler = task.map_or_else(|| ("anon".to_string(), None), func_arg_handler);
+            push(spec(&args), handler, "gocron");
+        }
+    }
+    out
+}
+
+/// robfig `AddJob`'s job value: `&T{..}` / `T{..}` runs `T.Run`,
+/// `cron.FuncJob(f)` runs `f`; a plain variable names the job but binds
+/// nothing (its type is not visible to a text scan).
+fn go_job_handler(arg: &str) -> (String, Option<CallQualifier>) {
+    if let Some(inner) = arg
+        .strip_prefix("cron.FuncJob(")
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        return func_arg_handler(inner);
+    }
+    let lit = arg.strip_prefix('&').unwrap_or(arg);
+    if let Some((ty, _)) = lit.split_once('{')
+        && let Some(t) = ident_path(ty).and_then(|segs| segs.last().copied())
+    {
+        let q = CallQualifier::Attribute {
+            base: t.to_string(),
+            name: "Run".to_string(),
+        };
+        return (t.to_string(), Some(q));
+    }
+    match ident_path(arg).as_deref() {
+        Some([var]) => (var.to_string(), None),
+        _ => ("anon".to_string(), None),
+    }
+}
+
+/// Walk a method chain from byte `i` (just past a call's `)`): the first
+/// argument of the `.method(..)` link, if the chain reaches one.
+fn chained_call_arg<'s>(source: &'s str, mut i: usize, method: &str) -> Option<&'s str> {
+    for _ in 0..8 {
+        let rest = source.get(i..)?;
+        let link = rest.trim_start().strip_prefix('.')?;
+        let name = leading_ident(link)?;
+        if !link.get(name.len()..)?.starts_with('(') {
+            return None;
+        }
+        let open = source.len() - link.len() + name.len() + 1;
+        let (args, end) = call_args(source, open)?;
+        if name == method {
+            return args.first().copied();
+        }
+        i = end;
+    }
+    None
+}
+
+// --- APScheduler ---------------------------------------------------------------
+
+/// APScheduler (gate `apscheduler`): the `@s.scheduled_job(trigger, **kw)`
+/// decorator (handler: the decorated `def`) and `s.add_job(f, trigger, **kw)`
+/// / 4.x `s.add_schedule(..)` (handler: `f`). The trigger is `"cron"` /
+/// `"interval"` with field kwargs, `CronTrigger(**kw)`,
+/// `CronTrigger.from_crontab("..")` or `IntervalTrigger(**kw)`.
+fn extract_apscheduler(source: &str) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    for (pos, needle) in source.match_indices(".scheduled_job(") {
+        let line_start = source
+            .get(..pos)
+            .and_then(|h| h.rfind('\n'))
+            .map_or(0, |n| n + 1);
+        if !source
+            .get(line_start..pos)
+            .is_some_and(|l| l.trim_start().starts_with('@'))
+        {
+            continue;
+        }
+        let Some((args, end)) = call_args(source, pos + needle.len()) else {
+            continue;
+        };
+        let (positional, kw) = split_kwargs(&args);
+        let trigger = positional
+            .first()
+            .copied()
+            .or_else(|| kw_get(&kw, "trigger"));
+        let Some(schedule) = aps_schedule(trigger, &kw) else {
+            continue;
+        };
+        let func = decorated_def(source, end);
+        out.push(CronJob {
+            schedule,
+            target: func.clone().unwrap_or_else(|| "anon".to_string()),
+            source: "apscheduler",
+            handler: func.map(CallQualifier::Bare),
+        });
+    }
+    for needle in [".add_job(", ".add_schedule("] {
+        for (pos, _) in source.match_indices(needle) {
+            let Some((args, _)) = call_args(source, pos + needle.len()) else {
+                continue;
+            };
+            let (positional, kw) = split_kwargs(&args);
+            let (func, rest) = match kw_get(&kw, "func") {
+                Some(f) => (Some(f), positional.as_slice()),
+                None => (
+                    positional.first().copied(),
+                    positional.get(1..).unwrap_or(&[]),
+                ),
+            };
+            let trigger = rest.first().copied().or_else(|| kw_get(&kw, "trigger"));
+            let Some(schedule) = aps_schedule(trigger, &kw) else {
+                continue;
+            };
+            let (target, handler) =
+                func.map_or_else(|| ("anon".to_string(), None), py_func_handler);
+            out.push(CronJob {
+                schedule,
+                target,
+                source: "apscheduler",
+                handler,
+            });
+        }
+    }
+    out
+}
+
+/// Split call arguments into positionals and `name=value` keywords.
+fn split_kwargs<'a>(args: &[&'a str]) -> (Vec<&'a str>, Vec<(&'a str, &'a str)>) {
+    let mut positional = Vec::new();
+    let mut kw = Vec::new();
+    for arg in args {
+        let named = arg.split_once('=').filter(|(name, value)| {
+            let name = name.trim();
+            leading_ident(name).is_some_and(|id| id.len() == name.len()) && !value.starts_with('=')
+        });
+        match named {
+            Some((name, value)) => kw.push((name.trim(), value.trim())),
+            None => positional.push(*arg),
+        }
+    }
+    (positional, kw)
+}
+
+fn kw_get<'a>(kw: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
+    kw.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+}
+
+/// A job function reference: `f`, `mod.f`, or APScheduler's textual
+/// `"pkg.mod:f"` reference.
+fn py_func_handler(arg: &str) -> (String, Option<CallQualifier>) {
+    if let Some(text) = string_literal(arg) {
+        if let Some((_, func)) = text.split_once(':') {
+            return func_arg_handler(func);
+        }
+        return ("anon".to_string(), None);
+    }
+    func_arg_handler(arg)
+}
+
+/// The name of the `def` a decorator ending at byte `end` decorates, skipping
+/// any further stacked decorators.
+fn decorated_def(source: &str, end: usize) -> Option<String> {
+    let mut rest = source.get(end..)?;
+    // The rest of the decorator's own line.
+    rest = rest.split_once('\n')?.1;
+    for _ in 0..8 {
+        let t = rest.trim_start();
+        if t.starts_with('@') {
+            rest = t.split_once('\n')?.1;
+            continue;
+        }
+        let t = t.strip_prefix("async ").map_or(t, str::trim_start);
+        let name = leading_ident(t.strip_prefix("def ")?.trim_start())?;
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// The schedule an APScheduler trigger argument (plus the call's kwargs)
+/// describes.
+fn aps_schedule(trigger: Option<&str>, kw: &[(&str, &str)]) -> Option<String> {
+    let trigger = trigger?;
+    if let Some(alias) = string_literal(trigger) {
+        return match alias.as_str() {
+            "cron" => aps_cron(kw),
+            "interval" => aps_interval(kw),
+            _ => None,
+        };
+    }
+    let (head, _) = trigger.split_once('(')?;
+    let (args, end) = call_args(trigger, head.len() + 1)?;
+    if !trigger.get(end..)?.trim().is_empty() {
+        return None;
+    }
+    let head = head.trim();
+    if head == "CronTrigger.from_crontab" || head.ends_with(".CronTrigger.from_crontab") {
+        return normalise_schedule(&string_literal(args.first()?)?);
+    }
+    let (positional, inner) = split_kwargs(&args);
+    if !positional.is_empty() {
+        return None;
+    }
+    match head.rsplit('.').next()? {
+        "CronTrigger" => aps_cron(&inner),
+        "IntervalTrigger" => aps_interval(&inner),
+        _ => None,
+    }
+}
+
+/// A Python kwarg value that is a literal: `3` or `'mon'` / `"*/5"`.
+fn py_literal(v: &str) -> Option<String> {
+    if let Some(s) = string_literal(v) {
+        return Some(s);
+    }
+    (!v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())).then(|| v.to_string())
+}
+
+/// APScheduler cron-trigger kwargs → a cron expression, by APScheduler's own
+/// rule: fields coarser than the least-significant explicitly given field
+/// default to `*`, finer ones to their minimum (`hour=3` → `0 3 * * *`).
+/// `second` is dropped when 0 and otherwise leads a 6-field expression.
+/// `year` / `week` have no 5-field slot, so a trigger using them is skipped;
+/// so is any field whose value is not a literal.
+fn aps_cron(kw: &[(&str, &str)]) -> Option<String> {
+    // (name, APScheduler's DEFAULT_VALUES entry), coarse to fine.
+    const FIELDS: [(&str, &str); 8] = [
+        ("year", "*"),
+        ("month", "1"),
+        ("day", "1"),
+        ("week", "*"),
+        ("day_of_week", "*"),
+        ("hour", "0"),
+        ("minute", "0"),
+        ("second", "0"),
+    ];
+    let mut given: Vec<Option<String>> = Vec::with_capacity(FIELDS.len());
+    for (name, _) in FIELDS {
+        given.push(match kw_get(kw, name) {
+            Some(v) => Some(py_literal(v)?),
+            None => None,
+        });
+    }
+    if given[0].is_some() || given[3].is_some() {
+        return None;
+    }
+    let last = given.iter().rposition(Option::is_some);
+    let vals: Vec<String> = given
+        .into_iter()
+        .enumerate()
+        .map(|(i, g)| match g {
+            Some(v) => v,
+            None if last.is_some_and(|l| i > l) => FIELDS[i].1.to_string(),
+            None => "*".to_string(),
+        })
+        .collect();
+    let dow = aps_day_of_week(&vals[4])?;
+    let five = format!("{} {} {} {} {dow}", vals[6], vals[5], vals[2], vals[1]);
+    let expr = if vals[7] == "0" {
+        five
+    } else {
+        format!("{} {five}", vals[7])
+    };
+    looks_like_cron_expr(&expr).then_some(expr)
+}
+
+/// APScheduler numbers weekdays from Monday = 0; cron from Sunday = 0. Every
+/// number that is a weekday (not a `/step`) becomes its name, so the
+/// expression means the same day in both.
+fn aps_day_of_week(v: &str) -> Option<String> {
+    const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let bytes = v.as_bytes();
+    let mut out = String::with_capacity(v.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() && (i == 0 || bytes[i - 1] != b'/') {
+            let n = bytes[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+            let day: usize = v.get(i..i + n)?.parse().ok()?;
+            out.push_str(DAYS.get(day)?);
+            i += n;
+            continue;
+        }
+        out.push(char::from(bytes[i]));
+        i += 1;
+    }
+    Some(out)
+}
+
+/// APScheduler interval kwargs → an `@every` rate marker (robfig's family):
+/// `minutes=5` → `@every 5m`.
+fn aps_interval(kw: &[(&str, &str)]) -> Option<String> {
+    const UNITS: [(&str, &str); 5] = [
+        ("weeks", "w"),
+        ("days", "d"),
+        ("hours", "h"),
+        ("minutes", "m"),
+        ("seconds", "s"),
+    ];
+    let mut dur = String::new();
+    for (name, unit) in UNITS {
+        if let Some(v) = kw_get(kw, name) {
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            dur.push_str(v);
+            dur.push_str(unit);
+        }
+    }
+    (!dur.is_empty()).then(|| format!("@every {dur}"))
 }
 
 // ----------------------------------------------------------------------------
@@ -676,6 +1642,39 @@ mod tests {
 
     fn cron_qnames(out: &CronNodes) -> Vec<String> {
         out.nav.qname_by_id.values().cloned().collect()
+    }
+
+    fn sorted_qnames(out: &CronNodes) -> Vec<String> {
+        let mut q = cron_qnames(out);
+        q.sort();
+        q
+    }
+
+    /// `(job qname, handler)` per HANDLED_BY ref, sorted by qname.
+    fn handlers(out: &CronNodes) -> Vec<(String, CallQualifier)> {
+        let mut v: Vec<(String, CallQualifier)> = out
+            .refs
+            .iter()
+            .map(|r| (out.nav.qname_by_id[&r.from].clone(), r.qualifier.clone()))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn run(src: &str, path: &str) -> CronNodes {
+        let repo = RepoId(1);
+        extract_cron_nodes(src, path, module_id(repo), repo)
     }
 
     #[test]
@@ -925,6 +1924,25 @@ public class NightlyJob {
         let qnames = cron_qnames(&out);
         assert!(qnames.contains(&"cron:0 0 4 * * *:runCleanup".to_string()));
         assert!(qnames.contains(&"cron:*/15 * * * *:poll".to_string()));
+        // LA.19a: each annotated method is its job's handler, scoped by class.
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:*/15 * * * *:poll".to_string(),
+                    attr("NightlyJob", "poll")
+                ),
+                (
+                    "cron:0 0 4 * * *:runCleanup".to_string(),
+                    attr("NightlyJob", "runCleanup")
+                ),
+            ]
+        );
+        assert!(
+            out.refs
+                .iter()
+                .all(|r| r.category == edge_category::HANDLED_BY)
+        );
     }
 
     #[test]
@@ -999,6 +2017,450 @@ cron.schedule('*/5 * * * *', cleanupSessions);
                 qnames.contains(&"cron:crontab(minute=0):tasks.cleanup".to_string()),
                 "{schedule}: {qnames:?}"
             );
+        }
+    }
+    // ---- LA.19a: framework schedulers ------------------------------------
+
+    #[test]
+    fn normalise_schedule_descriptors_and_verbatim() {
+        for (raw, want) in [
+            ("@yearly", Some("0 0 1 1 *")),
+            ("@annually", Some("0 0 1 1 *")),
+            ("@monthly", Some("0 0 1 * *")),
+            ("@weekly", Some("0 0 * * 0")),
+            ("@daily", Some("0 0 * * *")),
+            ("@midnight", Some("0 0 * * *")),
+            ("@hourly", Some("0 * * * *")),
+            ("@every 1h30m", Some("@every 1h30m")),
+            ("@reboot", Some("@reboot")),
+            ("0 0/15 * * * ?", Some("0 0/15 * * * ?")),
+            (" 15 3 * * * ", Some("15 3 * * *")),
+            ("@every ", None),
+            ("@sometimes", None),
+            ("not a schedule", None),
+        ] {
+            assert_eq!(normalise_schedule(raw).as_deref(), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn quartz_single_job_class_is_the_handler() {
+        let src = r#"
+import static org.quartz.CronScheduleBuilder.cronSchedule;
+import org.quartz.*;
+public class Jobs {
+    void schedule(Scheduler s) {
+        JobDetail job = JobBuilder.newJob(ReportJob.class).withIdentity("report").build();
+        Trigger t = TriggerBuilder.newTrigger().withSchedule(cronSchedule("0 0/15 * * * ?")).build();
+        Trigger u = newTrigger().withSchedule(CronScheduleBuilder.cronSchedule("0 0 12 ? * MON-FRI")).build();
+    }
+}
+"#;
+        let out = run(src, "src/Jobs.java");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 0 12 ? * MON-FRI:ReportJob",
+                "cron:0 0/15 * * * ?:ReportJob"
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:0 0 12 ? * MON-FRI:ReportJob".to_string(),
+                    bare("ReportJob")
+                ),
+                (
+                    "cron:0 0/15 * * * ?:ReportJob".to_string(),
+                    bare("ReportJob")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn quartz_many_job_classes_fall_back_to_trigger_identity() {
+        let src = r#"
+import org.quartz.*;
+class Jobs {
+    void schedule(Scheduler s) {
+        JobDetail a = newJob(ReportJob.class).build();
+        JobDetail b = newJob(PurgeJob.class).build();
+        Trigger t = newTrigger().withIdentity("nightly-report").withSchedule(cronSchedule("0 0 2 * * ?")).build();
+        CronExpression e = new CronExpression("0 30 6 * * ?");
+    }
+}
+"#;
+        let out = run(src, "src/Jobs.java");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec!["cron:0 0 2 * * ?:nightly-report", "cron:0 30 6 * * ?:anon"]
+        );
+        assert!(out.refs.is_empty(), "no single job class, no handler");
+    }
+
+    #[test]
+    fn quartz_needs_its_import_and_a_java_file() {
+        let src = "Trigger t = newTrigger().withSchedule(cronSchedule(\"0 0 2 * * ?\")).build();";
+        assert!(
+            run(src, "src/Jobs.java").nodes.is_empty(),
+            "no org.quartz import"
+        );
+        let gated = format!("import org.quartz.*;\n{src}");
+        assert!(
+            run(&gated, "src/jobs.ts").nodes.is_empty(),
+            "not a JVM file"
+        );
+        assert_eq!(run(&gated, "src/Jobs.java").nodes.len(), 1);
+    }
+
+    #[test]
+    fn hangfire_recurring_jobs_and_handlers() {
+        let src = r#"
+using Hangfire;
+public class Startup {
+    public void Configure(IRecurringJobManager manager) {
+        RecurringJob.AddOrUpdate<IInvoiceService>("invoices", x => x.SendReminders(), Cron.Daily);
+        RecurringJob.AddOrUpdate("cleanup", () => Cleaner.Run(), "*/10 * * * *");
+        RecurringJob.AddOrUpdate(() => Reports.Build(), Cron.Daily(3, 15));
+        manager.AddOrUpdate("sync", () => Sync.Pull(), Cron.Hourly());
+        _recurringJobManager.AddOrUpdate<Repo<Order>>("orders", r => r.Flush(), Cron.Weekly());
+        RecurringJob.AddOrUpdate("async", async () => await Mailer.SendAsync(), Cron.Daily(hour: 4));
+        RecurringJob.AddOrUpdate("never", () => Cleaner.Run(), Cron.Never());
+        cache.AddOrUpdate("key", k => k.Value(), "0 0 * * *");
+    }
+}
+"#;
+        let out = run(src, "Startup.cs");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:*/10 * * * *:Run",
+                "cron:0 * * * *:Pull",
+                "cron:0 0 * * *:SendReminders",
+                "cron:0 0 * * 1:Flush",
+                "cron:0 4 * * *:SendAsync",
+                "cron:15 3 * * *:Build",
+            ],
+            "Cron.Never() is skipped; a non-Hangfire receiver never fires"
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                ("cron:*/10 * * * *:Run".to_string(), attr("Cleaner", "Run")),
+                ("cron:0 * * * *:Pull".to_string(), attr("Sync", "Pull")),
+                (
+                    "cron:0 0 * * *:SendReminders".to_string(),
+                    attr("IInvoiceService", "SendReminders")
+                ),
+                ("cron:0 0 * * 1:Flush".to_string(), attr("Repo", "Flush")),
+                (
+                    "cron:0 4 * * *:SendAsync".to_string(),
+                    attr("Mailer", "SendAsync")
+                ),
+                (
+                    "cron:15 3 * * *:Build".to_string(),
+                    attr("Reports", "Build")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn hangfire_cron_helpers_follow_hangfire() {
+        for (member, args, want) in [
+            ("Minutely", &[][..], Some("* * * * *")),
+            ("Hourly", &[][..], Some("0 * * * *")),
+            ("Hourly", &["5"][..], Some("5 * * * *")),
+            ("Daily", &[][..], Some("0 0 * * *")),
+            ("Daily", &["3"][..], Some("0 3 * * *")),
+            ("Daily", &["3", "15"][..], Some("15 3 * * *")),
+            ("Daily", &["minute: 30"][..], Some("30 0 * * *")),
+            ("Weekly", &[][..], Some("0 0 * * 1")),
+            (
+                "Weekly",
+                &["DayOfWeek.Friday", "18"][..],
+                Some("0 18 * * 5"),
+            ),
+            ("Monthly", &[][..], Some("0 0 1 * *")),
+            ("Monthly", &["15", "6"][..], Some("0 6 15 * *")),
+            ("Yearly", &[][..], Some("0 0 1 1 *")),
+            ("Yearly", &["6", "2", "9", "45"][..], Some("45 9 2 6 *")),
+            ("Daily", &["hourOfDay"][..], None),
+            ("Daily", &["1", "2", "3"][..], None),
+            ("MinuteInterval", &["5"][..], None),
+        ] {
+            assert_eq!(
+                hangfire_cron(member, args).as_deref(),
+                want,
+                "{member}{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hangfire_needs_its_namespace() {
+        let src = "RecurringJob.AddOrUpdate(\"c\", () => Cleaner.Run(), \"*/10 * * * *\");";
+        assert!(run(src, "Startup.cs").nodes.is_empty());
+        let gated = format!("using Hangfire;\n{src}");
+        assert_eq!(run(&gated, "Startup.cs").nodes.len(), 1);
+    }
+
+    #[test]
+    fn robfig_add_func_and_add_job() {
+        let src = r#"
+package main
+
+import "github.com/robfig/cron/v3"
+
+func main() {
+	c := cron.New()
+	c.AddFunc("15 3 * * *", sweep)
+	c.AddFunc("0 * * * *", jobs.Cleanup)
+	c.AddFunc("@hourly", h.Refresh)
+	c.AddFunc("@every 5m", func() { log.Println("tick") })
+	c.AddJob("0 6 * * 1", &Reporter{})
+	c.AddJob("30 6 * * *", cron.FuncJob(rotate))
+	c.AddJob("45 6 * * *", job)
+}
+"#;
+        let out = run(src, "cmd/worker.go");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 * * * *:Cleanup",
+                "cron:0 * * * *:Refresh",
+                "cron:0 6 * * 1:Reporter",
+                "cron:15 3 * * *:sweep",
+                "cron:30 6 * * *:rotate",
+                "cron:45 6 * * *:job",
+                "cron:@every 5m:anon",
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:0 * * * *:Cleanup".to_string(),
+                    attr("jobs", "Cleanup")
+                ),
+                ("cron:0 * * * *:Refresh".to_string(), attr("h", "Refresh")),
+                (
+                    "cron:0 6 * * 1:Reporter".to_string(),
+                    attr("Reporter", "Run")
+                ),
+                ("cron:15 3 * * *:sweep".to_string(), bare("sweep")),
+                ("cron:30 6 * * *:rotate".to_string(), bare("rotate")),
+            ],
+            "a func literal and a plain job variable bind nothing"
+        );
+    }
+
+    #[test]
+    fn gocron_v1_chain_and_v2_job() {
+        let src = r#"
+package main
+
+import "github.com/go-co-op/gocron/v2"
+
+func main() {
+	s.Cron("*/1 * * * *").Tag("t").Do(task)
+	s.CronWithSeconds("0 */5 * * * *").Do(svc.Poll)
+	s.NewJob(gocron.CronJob("0 2 * * *", false), gocron.NewTask(nightly, 1))
+}
+"#;
+        let out = run(src, "main.go");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:*/1 * * * *:task",
+                "cron:0 */5 * * * *:Poll",
+                "cron:0 2 * * *:nightly"
+            ]
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                ("cron:*/1 * * * *:task".to_string(), bare("task")),
+                ("cron:0 */5 * * * *:Poll".to_string(), attr("svc", "Poll")),
+                ("cron:0 2 * * *:nightly".to_string(), bare("nightly")),
+            ]
+        );
+    }
+
+    #[test]
+    fn go_add_func_without_robfig_emits_nothing() {
+        let src = "package main\n\nfunc main() {\n\tc.AddFunc(\"15 3 * * *\", sweep)\n}\n";
+        let out = run(src, "main.go");
+        assert!(out.nodes.is_empty() && out.refs.is_empty());
+    }
+
+    #[test]
+    fn apscheduler_decorator_and_add_job() {
+        let src = r#"
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+sched = BlockingScheduler()
+
+
+@sched.scheduled_job("cron", hour=3, minute=15)
+def nightly():
+    pass
+
+
+@sched.scheduled_job('interval', minutes=5)
+@traced
+async def poll():
+    pass
+
+
+sched.add_job(rollup, CronTrigger.from_crontab("0 6 * * mon"))
+sched.add_job(tasks.purge, "cron", day_of_week="0-4", hour=1)
+sched.add_job("app.jobs:digest", trigger=CronTrigger(month=6, timezone="UTC"))
+sched.add_job(func=rebuild, trigger="cron", hour=cfg.hour)
+sched.add_job(lambda: None, "cron", second=30, minute="*/2")
+"#;
+        let out = run(src, "app/sched.py");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 0 1 6 *:digest",
+                "cron:0 1 * * mon-fri:purge",
+                "cron:0 6 * * mon:rollup",
+                "cron:15 3 * * *:nightly",
+                "cron:30 */2 * * * *:anon",
+                "cron:@every 5m:poll",
+            ],
+            "a non-literal field value skips the job"
+        );
+        assert_eq!(
+            handlers(&out),
+            vec![
+                ("cron:0 0 1 6 *:digest".to_string(), bare("digest")),
+                (
+                    "cron:0 1 * * mon-fri:purge".to_string(),
+                    attr("tasks", "purge")
+                ),
+                ("cron:0 6 * * mon:rollup".to_string(), bare("rollup")),
+                ("cron:15 3 * * *:nightly".to_string(), bare("nightly")),
+                ("cron:@every 5m:poll".to_string(), bare("poll")),
+            ]
+        );
+    }
+
+    #[test]
+    fn apscheduler_kwargs_follow_the_default_rule() {
+        let kw = |pairs: &[(&'static str, &'static str)]| pairs.to_vec();
+        for (pairs, want) in [
+            (kw(&[("hour", "3")]), Some("0 3 * * *")),
+            (kw(&[("hour", "3"), ("minute", "15")]), Some("15 3 * * *")),
+            (kw(&[("day_of_week", "'mon'")]), Some("0 0 * * mon")),
+            (kw(&[("day_of_week", "6")]), Some("0 0 * * sun")),
+            (kw(&[("minute", "'*/10'")]), Some("*/10 * * * *")),
+            (kw(&[("second", "30")]), Some("30 * * * * *")),
+            // `minute` is coarser than the last given field (`second`): `*`.
+            (kw(&[("hour", "2"), ("second", "0")]), Some("* 2 * * *")),
+            (kw(&[("day", "1"), ("id", "'x'")]), Some("0 0 1 * *")),
+            (kw(&[("year", "2027")]), None),
+            (kw(&[("week", "2")]), None),
+            (kw(&[("hour", "h")]), None),
+        ] {
+            assert_eq!(aps_cron(&pairs).as_deref(), want, "{pairs:?}");
+        }
+        assert_eq!(
+            aps_interval(&[("hours", "1"), ("minutes", "30")]).as_deref(),
+            Some("@every 1h30m")
+        );
+        assert_eq!(aps_interval(&[("minutes", "n")]), None);
+    }
+
+    #[test]
+    fn apscheduler_needs_its_import() {
+        let src = "@sched.scheduled_job(\"cron\", hour=3)\ndef nightly():\n    pass\n";
+        assert!(run(src, "sched.py").nodes.is_empty());
+        let gated = format!("from apscheduler.schedulers.blocking import BlockingScheduler\n{src}");
+        assert_eq!(run(&gated, "sched.py").nodes.len(), 1);
+    }
+
+    #[test]
+    fn yaml_jobs_carry_no_handler_refs() {
+        let src = "kind: CronJob\nspec:\n  schedule: \"0 * * * *\"\n  jobTemplate:\n    spec:\n      template:\n        spec:\n          containers:\n          - image: example/cleanup:1\n";
+        let out = run(src, "k8s/cleanup.yaml");
+        assert_eq!(out.nodes.len(), 1);
+        assert!(out.refs.is_empty());
+    }
+
+    #[test]
+    fn code_marker_counts_code_sources_only() {
+        let mut c = CodeCounts::default();
+        assert_eq!(
+            code_marker(&c, 0, "a.ts"),
+            None,
+            "no code-sourced job, no marker"
+        );
+        c.bump("node_cron");
+        c.bump("k8s_cronjob");
+        assert_eq!(code_marker(&c, 0, "a.ts"), None);
+        c.bump("quartz");
+        assert_eq!(
+            code_marker(&c, 1, "Jobs.java").as_deref(),
+            Some(
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 handler_refs=1 path=Jobs.java"
+            )
+        );
+        c.bump("robfig");
+        c.bump("gocron");
+        c.bump("scheduled_annot");
+        assert_eq!(
+            code_marker(&c, 3, "w.go").as_deref(),
+            Some(
+                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 handler_refs=3 path=w.go"
+            )
+        );
+    }
+
+    #[test]
+    fn enclosing_class_skips_prose_and_subclass() {
+        let before =
+            "@Component\npublic class Cleanup {\n    // this class handles the subclass case\n    ";
+        assert_eq!(enclosing_class_name(before).as_deref(), Some("Cleanup"));
+        assert_eq!(enclosing_class_name("// no class here\n"), None);
+    }
+
+    #[test]
+    fn framework_scans_survive_multibyte_text() {
+        // Every reader slices through `get(..)` at ASCII delimiters, so a
+        // 4-byte char anywhere near a needle is inert.
+        let wide = "\u{1F600}";
+        for (src, path) in [
+            (
+                format!(
+                    "import org.quartz.*; // {wide}\nx(cronSchedule(\"{wide}\")); newJob({wide}.class); cronSchedule(\"0 0 2 * * ?\"{wide}"
+                ),
+                "J.java",
+            ),
+            (
+                format!(
+                    "using Hangfire; RecurringJob.AddOrUpdate<{wide}>(\"{wide}\", () => {wide}.Run(), Cron.Daily({wide})); RecurringJob.AddOrUpdate(\"x\", () => A.B(), \"{wide}"
+                ),
+                "S.cs",
+            ),
+            (
+                format!(
+                    "import \"github.com/robfig/cron/v3\"\nc.AddFunc(\"{wide}\", {wide})\nc.AddJob(\"0 * * * *\", &{wide}{{}})\nc.AddFunc(\"0 * * * *\""
+                ),
+                "w.go",
+            ),
+            (
+                format!(
+                    "import apscheduler\n@s.scheduled_job(\"cron\", hour='{wide}')\ndef {wide}(): pass\ns.add_job({wide}, CronTrigger.from_crontab(\"{wide}\"))\ns.add_job(f, \"cron\", hour=3"
+                ),
+                "s.py",
+            ),
+        ] {
+            let _ = run(&src, path);
         }
     }
 }

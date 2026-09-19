@@ -249,7 +249,17 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_with_edges!(data_entities::extract_data_entity_nodes(
         source, module_id, repo
     ));
-    run_with_edges!(cron::extract_cron_nodes(source, path, module_id, repo));
+    // LA.19a: not `run_with_edges!` — code-sourced jobs (Quartz, Hangfire,
+    // robfig / gocron, APScheduler, Spring `@Scheduled`) also carry
+    // `CRON_JOB --HANDLED_BY--> handler` refs, bound by the graph builder's
+    // `resolve_refs`. The extractor prints its own `[cron] code` marker.
+    {
+        let out = cron::extract_cron_nodes(source, path, module_id, repo);
+        fp.nodes.extend(out.nodes);
+        fp.edges.extend(out.edges);
+        fp.refs.extend(out.refs);
+        merge_nav(&mut fp.nav, out.nav);
+    }
     run_with_edges!(config::extract_config_reads(source, module_id, repo));
 
     if matches!(lang, "typescript" | "react" | "angular" | "vue") {

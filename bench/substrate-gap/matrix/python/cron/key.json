@@ -1,0 +1,43 @@
+{
+  "framework": "python-apscheduler-cron",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "python/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "15 3 * * *",
+      "note": "@sched.scheduled_job(\"cron\", hour=3, minute=15)"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 6 * * mon",
+      "note": "CronTrigger.from_crontab verbatim"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sched",
+      "to": "15 3 * * *",
+      "category": "SCHEDULES"
+    },
+    {
+      "from": "15 3 * * *",
+      "to": "nightly",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "0 6 * * mon",
+      "to": "rollup",
+      "category": "HANDLED_BY",
+      "note": "sched.add_job(rollup, ...) binds through `from tasks import rollup`"
+    }
+  ],
+  "note": "LA.19a. APScheduler decorator + add_job. Baseline HEAD: 0 APScheduler CRON_JOB."
+}

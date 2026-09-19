@@ -1,0 +1,44 @@
+{
+  "framework": "csharp-hangfire-cron",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "csharp/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "*/10 * * * *",
+      "note": "RecurringJob.AddOrUpdate(\"cleanup\", () => Cleaner.Run(), \"*/10 * * * *\")"
+    },
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 * * *",
+      "note": "Cron.Daily normalised to Hangfire's own 5-field default"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Startup",
+      "to": "*/10 * * * *",
+      "category": "SCHEDULES"
+    },
+    {
+      "from": "0 0 * * *",
+      "to": "SendReminders",
+      "category": "HANDLED_BY",
+      "note": "x => x.SendReminders() on IInvoiceService; the interface method is not in class_methods, so the unique implementation binds"
+    },
+    {
+      "from": "*/10 * * * *",
+      "to": "Run",
+      "category": "HANDLED_BY",
+      "note": "() => Cleaner.Run()"
+    }
+  ],
+  "note": "LA.19a. Hangfire recurring jobs (string cron + Cron.Daily). client/ holds a k8s CronJob control. Baseline HEAD: 0 Hangfire CRON_JOB."
+}
