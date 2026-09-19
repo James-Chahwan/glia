@@ -8,6 +8,9 @@
 //! run on the same pool, each with its own `[parallel]` line: one
 //! `[parallel] walk <root>: read ...` per walk and one
 //! `[parallel] <repo>: const-scan ...` per repo build.
+//!
+//! LG.1c: the per-language graph builds run on the pool too, and the
+//! const-scan line counts them: `..., <g> language graphs on <t> threads`.
 
 use std::path::PathBuf;
 use std::process::Output;
@@ -68,10 +71,11 @@ fn analyze_reports_parallel_routing() {
         walk.contains(" files on 4 threads (md 0, json 0, source "),
         "{walk}"
     );
-    // LG.1b: the const-table scan and the RPC needle pass, once per repo.
+    // LG.1b: the const-table scan and the RPC needle pass, once per repo;
+    // LG.1c: py_smoke's one language graph (Python) built on the pool.
     let consts = parallel_line(&four, ": const-scan ");
     assert!(
-        consts.contains(" files, rpc-needles 0 files on 4 threads"),
+        consts.contains(" files, rpc-needles 0 files, 1 language graphs on 4 threads"),
         "{consts}"
     );
 
@@ -79,7 +83,10 @@ fn analyze_reports_parallel_routing() {
     let line = parallel_line(&one, ": routed ");
     assert!(line.contains("on 1 threads"), "{line}");
     assert!(parallel_line(&one, "[parallel] walk ").contains(" files on 1 threads ("));
-    assert!(parallel_line(&one, ": const-scan ").contains(" files on 1 threads"));
+    assert!(
+        parallel_line(&one, ": const-scan ")
+            .contains(" files, rpc-needles 0 files, 1 language graphs on 1 threads")
+    );
 
     assert!(!four.stdout.is_empty());
     assert!(

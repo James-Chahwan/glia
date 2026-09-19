@@ -13,7 +13,7 @@ use repo_graph_code_domain::{
     FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
 };
 use repo_graph_core::{EdgeCategoryId, NodeId, RepoId};
-use repo_graph_graph::RepoGraph;
+use repo_graph_graph::{GraphError, RepoGraph};
 use repo_graph_graph::rust_paths::RustCrate;
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
@@ -42,14 +42,35 @@ use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 const JVM_HOST: &str = "java";
 const JVM_GUEST: &str = "kotlin";
 
+/// What [`build_language_graphs`] hands back to `build_graphs_for_repo`.
+pub(super) struct LanguageGraphs {
+    /// The per-language graphs, in sorted language order, the TS family last.
+    pub(super) graphs: Vec<RepoGraph>,
+    /// The A7.0 `[di]` marker input: INJECTS refs per matrix row.
+    pub(super) di_refs: Vec<(&'static str, usize)>,
+    /// LG.1c: the language builds mapped on the engine pool (every build
+    /// group but the TS family), for the `[parallel]` line.
+    pub(super) pooled: usize,
+}
+
 /// Build one repo's per-language graphs from its finished parses, in sorted
-/// language order with the TS family last. Returns the graphs and the A7.0
-/// `[di]` marker input (INJECTS refs per matrix row); graph build failures go
-/// to `parse_errors`. Prints the A6.2a `[recv]` and A6.3 `[heritage]` markers
-/// for `repo_label`.
+/// language order with the TS family last ([`LanguageGraphs`]); graph build
+/// failures go to `parse_errors`. Prints the LC.3b `[evidence-lines]`, A6.2a
+/// `[recv]` and A6.3 `[heritage]` markers for `repo_label`.
 /// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a);
 /// `ts_aliases` the TS family's import resolver ([`resolve_ts_source_aliased`],
 /// A6.8).
+///
+/// LG.1c: every build group but the TS family builds on the engine pool
+/// ([`crate::parallel::par_map_owned`]), one [`build_one`] per language; the
+/// TS family then builds on this thread, last, as before. The builds are
+/// folded in that order (graphs, errors, the `[recv]` and `[heritage]`
+/// counts), so the graphs and the per-repo `[recv]` / `[heritage]` lines are
+/// the sequential build's. The per-build lines (`[evidence-lines]`, and the
+/// graph crate's own) print on the thread that ran the build, right after
+/// it: under `GLIA_THREADS=1` in the sequential order, on a pool interleaved
+/// across languages. A panicking pool build is re-raised here, the first in
+/// language order, as the inline build let it propagate.
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
     repo: RepoId,
@@ -57,7 +78,7 @@ pub(super) fn build_language_graphs(
     rust_crates: &[RustCrate],
     ts_aliases: &TsAliasSet,
     parse_errors: &mut Vec<String>,
-) -> (Vec<RepoGraph>, Vec<(&'static str, usize)>) {
+) -> LanguageGraphs {
     let mut graphs = Vec::new();
     // Deterministic per-language build order: HashMap iteration is seeded per
     // process, and the resulting `graphs` order decides shard indices in
@@ -106,55 +127,34 @@ pub(super) fn build_language_graphs(
     join_jvm_family(&mut parses_by_lang);
     let mut recv_bound: Vec<(&str, usize)> = Vec::new();
     let mut heritage: Vec<HeritageTally> = Vec::new();
-    recv_stats::reset();
     let mut ts_family: Vec<FileParse> = Vec::new();
+    let mut pool_builds: Vec<(&'static str, Vec<FileParse>)> = Vec::new();
     for (lang, parses) in parses_by_lang {
         if build_group(lang) == "typescript" {
             ts_family.extend(parses);
-            continue;
+        } else {
+            pool_builds.push((lang, parses));
         }
-        let unattributed = unattributed_parse_edges(&parses);
-        let graph = match lang {
-            "python" => repo_graph_graph::build_python(repo, parses),
-            "go" => repo_graph_graph::build_go(repo, parses),
-            "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" | "elixir" => {
-                repo_graph_graph::build_dotted(repo, parses)
-            }
-            "rust" => repo_graph_graph::build_rust(repo, parses, rust_crates),
-            "ruby" => repo_graph_graph::build_ruby(repo, parses),
-            "c_cpp" => repo_graph_graph::build_c_cpp(repo, parses, resolve_include_source),
-            _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
-        };
-        recv_bound.push((lang, recv_stats::take()));
-        match graph {
-            Ok(mut g) => {
-                stamp_graph_edges(&mut g, unattributed);
-                heritage.push(HeritageTally::of(lang, &g));
-                if let Some(line) = LineTally::of(&g).marker(lang) {
-                    eprintln!("{line}");
-                }
-                graphs.push(g);
-            }
-            Err(e) => parse_errors.push(format!("{lang} graph: {e}")),
+    }
+    let pooled = pool_builds.len();
+    let (built, _threads) = crate::parallel::par_map_owned(pool_builds, |(lang, parses)| {
+        crate::parallel::quiet(|| {
+            build_one(lang, parses, |parses| build_solo(lang, parses, repo, rust_crates))
+        })
+    });
+    for build in built {
+        match build {
+            Ok(build) => build.fold(&mut graphs, &mut recv_bound, &mut heritage, parse_errors),
+            Err(payload) => std::panic::resume_unwind(payload),
         }
     }
     if !ts_family.is_empty() {
-        let unattributed = unattributed_parse_edges(&ts_family);
-        let graph = repo_graph_graph::build_typescript(repo, ts_family, |from, spec| {
-            resolve_ts_source_aliased(from, spec, ts_aliases)
-        });
-        recv_bound.push(("typescript", recv_stats::take()));
-        match graph {
-            Ok(mut g) => {
-                stamp_graph_edges(&mut g, unattributed);
-                heritage.push(HeritageTally::of("typescript", &g));
-                if let Some(line) = LineTally::of(&g).marker("typescript") {
-                    eprintln!("{line}");
-                }
-                graphs.push(g);
-            }
-            Err(e) => parse_errors.push(format!("typescript graph: {e}")),
-        }
+        build_one("typescript", ts_family, |parses| {
+            repo_graph_graph::build_typescript(repo, parses, |from, spec| {
+                resolve_ts_source_aliased(from, spec, ts_aliases)
+            })
+        })
+        .fold(&mut graphs, &mut recv_bound, &mut heritage, parse_errors);
     }
     // A6.2a fired_on marker, once per repo, every `recv_stats::LANGS` row
     // zero-filled (LA.35a adds `rust`: bound = the field- and local-typed
@@ -167,7 +167,95 @@ pub(super) fn build_language_graphs(
         eprintln!("{line}");
     }
 
-    (graphs, di_refs)
+    LanguageGraphs {
+        graphs,
+        di_refs,
+        pooled,
+    }
+}
+
+/// One non-TS build group's graph: the `build_*` its language takes.
+fn build_solo(
+    lang: &'static str,
+    parses: Vec<FileParse>,
+    repo: RepoId,
+    rust_crates: &[RustCrate],
+) -> Result<RepoGraph, GraphError> {
+    match lang {
+        "python" => repo_graph_graph::build_python(repo, parses),
+        "go" => repo_graph_graph::build_go(repo, parses),
+        "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" | "elixir" => {
+            repo_graph_graph::build_dotted(repo, parses)
+        }
+        "rust" => repo_graph_graph::build_rust(repo, parses, rust_crates),
+        "ruby" => repo_graph_graph::build_ruby(repo, parses),
+        "c_cpp" => repo_graph_graph::build_c_cpp(repo, parses, resolve_include_source),
+        _ => repo_graph_graph::build_typescript(repo, parses, resolve_relative_source),
+    }
+}
+
+/// One language build's result, made on the thread that ran the build and
+/// folded into the repo's lists by [`build_language_graphs`], in language
+/// order.
+struct LangBuild {
+    lang: &'static str,
+    /// The graph with its `graph:build` evidence stamped, and its
+    /// `[heritage]` tally; or the `parse_errors` line of a failed build.
+    graph: Result<(RepoGraph, HeritageTally), String>,
+    /// The receiver-typed binds `recv_stats` counted during the build.
+    recv_bound: usize,
+}
+
+impl LangBuild {
+    /// Append this build to the repo's lists: the sequential loop's
+    /// per-language step.
+    fn fold(
+        self,
+        graphs: &mut Vec<RepoGraph>,
+        recv_bound: &mut Vec<(&'static str, usize)>,
+        heritage: &mut Vec<HeritageTally>,
+        parse_errors: &mut Vec<String>,
+    ) {
+        recv_bound.push((self.lang, self.recv_bound));
+        match self.graph {
+            Ok((g, h)) => {
+                heritage.push(h);
+                graphs.push(g);
+            }
+            Err(e) => parse_errors.push(e),
+        }
+    }
+}
+
+/// Run one language's graph build on THIS thread, tally it and print its
+/// LC.3b `[evidence-lines]` line. `recv_stats` is per thread (LG.1c) and the
+/// graph crate spawns no threads, so the `reset` .. `take` bracket holds
+/// exactly this build's receiver-typed binds.
+fn build_one(
+    lang: &'static str,
+    parses: Vec<FileParse>,
+    build: impl FnOnce(Vec<FileParse>) -> Result<RepoGraph, GraphError>,
+) -> LangBuild {
+    let unattributed = unattributed_parse_edges(&parses);
+    recv_stats::reset();
+    let graph = build(parses);
+    let recv_bound = recv_stats::take();
+    let graph = match graph {
+        Ok(mut g) => {
+            stamp_graph_edges(&mut g, unattributed);
+            let h = HeritageTally::of(lang, &g);
+            if let Some(line) = LineTally::of(&g).marker(lang) {
+                eprintln!("{line}");
+            }
+            Ok((g, h))
+        }
+        Err(e) => Err(format!("{lang} graph: {e}")),
+    };
+    LangBuild {
+        lang,
+        graph,
+        recv_bound,
+    }
 }
 
 /// An edge's identity without its cells ([`repo_graph_core::Edge::key`]).

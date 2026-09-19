@@ -4,7 +4,6 @@
 //! calls (LA.17). `grafts::apply_post_cache` runs them.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use repo_graph_code_domain::evidence::{self, Evidence};
 use repo_graph_code_domain::{FileParse, attach_imports_cell};
@@ -23,14 +22,6 @@ pub(super) struct RpcContext {
     /// Sorted and deduplicated, so needle order (and therefore GRPC_CLIENT
     /// emission order) does not depend on walk or repo order.
     pub(super) services: Vec<ProtoServiceRef>,
-    /// LG.1b: the files the last [`apply_rpc_needles`] call ran its needles
-    /// on, drained by `build_graphs_for_repo` ([`Self::take_needle_files`])
-    /// for its `[parallel]` line. It rides the build-wide context because the
-    /// post-cache sequence that calls the pass (`grafts::apply_post_cache`)
-    /// returns nothing; repos are built one at a time, so the value is always
-    /// the current repo's. Removal path: once `apply_post_cache` returns its
-    /// tallies, return this count with them and drop the field.
-    needle_files: AtomicUsize,
 }
 
 impl RpcContext {
@@ -43,11 +34,6 @@ impl RpcContext {
         }
         self.services.sort_unstable();
         self.services.dedup();
-    }
-
-    /// The needle-pass file count of the repo just built, reset to 0.
-    pub(super) fn take_needle_files(&self) -> usize {
-        self.needle_files.swap(0, Ordering::Relaxed)
     }
 }
 
@@ -89,6 +75,8 @@ impl RpcContext {
 /// CLASS / STRUCT and METHOD / FUNCTION nodes (their spans, names and
 /// parents), and a graft adds only marker kinds. A file's parse is found
 /// through [`parse_index`], built once, instead of a scan of every parse.
+/// The counts' `files` is how many files the needles ran on (LG.1c: returned
+/// through `grafts::apply_post_cache` to the `[parallel]` line).
 pub(super) fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -98,7 +86,6 @@ pub(super) fn apply_rpc_needles(
     parse_errors: &mut Vec<String>,
 ) -> RpcNeedleCounts {
     let mut added = RpcNeedleCounts::default();
-    rpc.needle_files.store(0, Ordering::Relaxed);
     if rpc.services.is_empty() {
         return added;
     }
@@ -116,10 +103,9 @@ pub(super) fn apply_rpc_needles(
         };
         needle_one(&file, modules, &index, parses)
     });
-    let mut needle_files = 0usize;
     for ((path, _), out) in files.iter().zip(outs) {
         let Some(out) = out else { continue };
-        needle_files += 1;
+        added.files += 1;
         let NeedleOut {
             lang,
             slot,
@@ -150,7 +136,6 @@ pub(super) fn apply_rpc_needles(
             None => {}
         }
     }
-    rpc.needle_files.store(needle_files, Ordering::Relaxed);
     added
 }
 
@@ -267,9 +252,13 @@ fn is_twirp_repo(files: &[(String, String)]) -> bool {
     })
 }
 
-/// Markers the post-cache RPC pass added to one repo's parses.
+/// Markers the post-cache RPC pass added to one repo's parses, and the files
+/// it ran on.
 #[derive(Default)]
 pub(super) struct RpcNeedleCounts {
+    /// LG.1b: files the needles ran on (a text gate passed, the file has a
+    /// source language and a parse), for the `[parallel]` line.
+    pub(super) files: usize,
     pub(super) clients: usize,
     pub(super) servers: usize,
     /// LA.17: the Connect / Twirp pass's tallies, summed over the repo.

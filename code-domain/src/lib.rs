@@ -2630,21 +2630,26 @@ pub mod di_stats {
 ///
 /// * **bound** counts calls `resolve_calls` bound ONLY through a receiver's
 ///   type: a field's declared type
-///   ([`CodeNav::field_types`](super::CodeNav::field_types)) or a local's
-///   ([`CodeNav::local_types`](super::CodeNav::local_types), Rust since
+///   ([`CodeNav::field_types`](CodeNav::field_types)) or a local's
+///   ([`CodeNav::local_types`](CodeNav::local_types), Rust since
 ///   LA.35a). The generic pass does not know its language, so it calls
-///   [`record`] per bind and the engine [`take`]s the count after each
-///   per-language build.
+///   [`record`](recv_stats::record) per bind and the engine
+///   [`take`](recv_stats::take)s the count after each per-language build.
 /// * **fields** counts the declared field types the parses carry, per
 ///   language, so a cache-served file counts too. `fields > 0` with `bound = 0`
 ///   means the carrier is populated but nothing resolved against it.
 ///
-/// Every [`LANGS`] entry is printed, zero or not, so ` csharp=[1-9]` is an
-/// unambiguous grep. Any other language appears only when non-zero. Same
-/// shape and caveats as [`di_stats`](super::di_stats): diagnostics only, a
-/// process-global counter that assumes one build at a time per process.
+/// Every [`LANGS`](recv_stats::LANGS) entry is printed, zero or not, so
+/// ` csharp=[1-9]` is an unambiguous grep. Any other language appears only
+/// when non-zero. Diagnostics only, like [`di_stats`], but the count is PER
+/// THREAD (LG.1c): [`record`](recv_stats::record),
+/// [`reset`](recv_stats::reset) and [`take`](recv_stats::take) act on the
+/// calling thread's counter. The engine builds a repo's languages
+/// concurrently, each build on one thread (the graph crate spawns none), and
+/// brackets it with `reset()` .. `take()` on that thread, so each language's
+/// count holds its own binds and no other build's, in this repo or another.
 pub mod recv_stats {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::cell::Cell;
 
     /// Languages always printed: the matrix rows whose parser records
     /// receiver types (C# since A6.2a; java / typescript by A6.2b / A6.2c;
@@ -2652,22 +2657,29 @@ pub mod recv_stats {
     pub const LANGS: [&str; 8] =
         ["csharp", "java", "typescript", "python", "ruby", "go", "dart", "rust"];
 
-    static BOUND: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        /// This thread's receiver-typed binds since its last [`reset`] /
+        /// [`take`].
+        static BOUND: Cell<usize> = const { Cell::new(0) };
+    }
 
-    /// Count one call bound through a field's declared type.
+    /// Count one call bound through a receiver's declared type, on the
+    /// calling thread's counter.
     pub fn record() {
-        BOUND.fetch_add(1, Ordering::Relaxed);
+        BOUND.with(|b| b.set(b.get() + 1));
     }
 
-    /// Zero the counter. The engine calls this before a repo's language
-    /// builds, so a stray `build_*` outside a repo build cannot leak into it.
+    /// Zero the calling thread's counter. The engine calls this before each
+    /// language build, on the thread that runs it, so a stray `build_*`
+    /// earlier on that thread cannot leak into it.
     pub fn reset() {
-        BOUND.store(0, Ordering::Relaxed);
+        BOUND.with(|b| b.set(0));
     }
 
-    /// Read and zero the counter: the binds of the build that just finished.
+    /// Read and zero the calling thread's counter: the binds of the build that
+    /// just finished on this thread.
     pub fn take() -> usize {
-        BOUND.swap(0, Ordering::Relaxed)
+        BOUND.with(|b| b.replace(0))
     }
 
     /// Print the `[recv]` line for one repo build when any count is non-zero.
@@ -4111,7 +4123,8 @@ mod tests {
 
     #[test]
     fn recv_stats_record_take_and_reset() {
-        // The ONLY test in this crate that touches the process-global counter.
+        // The counter is this test thread's own (LG.1c), so no other test can
+        // move it.
         recv_stats::record();
         recv_stats::record();
         assert_eq!(recv_stats::take(), 2);
@@ -4119,6 +4132,44 @@ mod tests {
         recv_stats::record();
         recv_stats::reset();
         assert_eq!(recv_stats::take(), 0);
+    }
+
+    /// LG.1c: two concurrent "builds" record different counts and each
+    /// `take()` sees only its own. The barriers hold both threads between
+    /// their records and their takes, so a shared counter would read 3 + 5 on
+    /// one side and 0 on the other.
+    #[test]
+    fn recv_stats_counts_stay_on_their_thread() {
+        let recorded = std::sync::Barrier::new(3);
+        let taken = std::sync::Barrier::new(3);
+        recv_stats::reset();
+        recv_stats::record();
+        let (a, b) = std::thread::scope(|s| {
+            let build = |n: usize| {
+                let (recorded, taken) = (&recorded, &taken);
+                move || {
+                    recv_stats::reset();
+                    for _ in 0..n {
+                        recv_stats::record();
+                    }
+                    recorded.wait();
+                    let own = recv_stats::take();
+                    taken.wait();
+                    own
+                }
+            };
+            let a = s.spawn(build(3));
+            let b = s.spawn(build(5));
+            recorded.wait();
+            taken.wait();
+            (a.join(), b.join())
+        });
+        assert_eq!((a.ok(), b.ok()), (Some(3), Some(5)));
+        assert_eq!(
+            recv_stats::take(),
+            1,
+            "the spawning thread keeps its own count"
+        );
     }
 
     #[test]

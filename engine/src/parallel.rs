@@ -2,16 +2,19 @@
 //! (LG.1a), thread-safe quiet panics, and the order-preserving map that keeps
 //! a parallel build byte-identical to a sequential one. LG.1b maps four more
 //! stages through [`par_map_ordered`]: the walk's file reads, the const-table
-//! scan, the RPC needle pass and a multi-repo build's per-repo walks.
+//! scan, the RPC needle pass and a multi-repo build's per-repo walks. LG.1c
+//! runs a repo's per-language graph builds (every build group but the TS
+//! family, which builds last on the calling thread) through
+//! [`par_map_owned`], each build moving its parses in.
 //!
 //! Why a dedicated pool and not rayon's global one: the worker stack size is
 //! ours to set (see [`WORKER_STACK`]), and an embedding app that uses the
 //! global pool (neuropil) never shares queues with a build.
 //!
-//! Determinism: [`par_map_ordered`] collects through an indexed parallel
-//! iterator, so result `i` is item `i`'s whatever thread ran it. Callers fold
-//! the results sequentially, in input order, and never push into shared state
-//! from inside the mapped closure.
+//! Determinism: [`par_map_ordered`] and [`par_map_owned`] collect through an
+//! indexed parallel iterator, so result `i` is item `i`'s whatever thread ran
+//! it. Callers fold the results sequentially, in input order, and never push
+//! into shared state from inside the mapped closure.
 //!
 //! Quiet panics: one process-wide panic hook, installed once and never
 //! swapped back, forwards to the hook it replaced unless the panicking thread
@@ -113,6 +116,30 @@ pub(crate) fn par_map_ordered<T: Sync, R: Send>(
             pool.current_num_threads(),
         ),
         None => (items.iter().map(f).collect(), 1),
+    }
+}
+
+/// [`par_map_ordered`] over owned items: `items.into_par_iter().map(f)` in
+/// input order, plus the thread count that ran it. Same placement: on the
+/// current rayon pool when called from one of its workers, else on the
+/// engine pool, else (`GLIA_THREADS=1`) sequentially on this thread. For
+/// work that consumes its input, like a language build its parses (LG.1c).
+pub(crate) fn par_map_owned<T: Send, R: Send>(
+    items: Vec<T>,
+    f: impl Fn(T) -> R + Sync + Send,
+) -> (Vec<R>, usize) {
+    if rayon::current_thread_index().is_some() {
+        return (
+            items.into_par_iter().map(f).collect(),
+            rayon::current_num_threads(),
+        );
+    }
+    match engine_pool() {
+        Some(pool) => (
+            pool.install(|| items.into_par_iter().map(&f).collect()),
+            pool.current_num_threads(),
+        ),
+        None => (items.into_iter().map(f).collect(), 1),
     }
 }
 
@@ -227,6 +254,24 @@ mod tests {
         });
         assert_eq!(threads, 4);
         assert_eq!(out, items.iter().map(|x| x * 2).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn par_map_owned_keeps_input_order() {
+        let pool = build_pool(4).expect("a 4-thread pool");
+        let items: Vec<Vec<u64>> = (0..2_000).map(|i| vec![i; 3]).collect();
+        let expected: Vec<u64> = (0..2_000).map(|i| i * 3).collect();
+        let (out, threads) = pool.install(|| {
+            par_map_owned(items, |v| {
+                let start = std::time::Instant::now();
+                while start.elapsed() < std::time::Duration::from_micros(20) {
+                    std::hint::spin_loop();
+                }
+                v.into_iter().sum::<u64>()
+            })
+        });
+        assert_eq!(threads, 4);
+        assert_eq!(out, expected);
     }
 
     /// Recurse until this thread's stack is `bytes` below `base` (the

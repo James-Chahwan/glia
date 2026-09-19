@@ -20,7 +20,7 @@ use repo_graph_core::{CellPayload, NodeId, RepoId};
 use repo_graph_graph::rust_paths::RustCrate;
 
 use super::lang_build::TsAliasSet;
-use super::rpc_needles::{RpcContext, apply_rpc_needles};
+use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
 use crate::endpoint_fold;
 use crate::external::{WrapperPass, WrapperPhase};
 use crate::extract::{detect_language, merge_nav};
@@ -40,7 +40,9 @@ use crate::route::ModuleQnames;
 /// `ts_aliases` key matches (A6.8). `wrappers` is the repo's
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
-/// (`external::WrapperPass`).
+/// (`external::WrapperPass`). Returns the RPC needle pass's counts
+/// (`apply_rpc_needles`), whose `files` the caller's `[parallel]` line reads
+/// (LG.1c).
 ///
 /// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
 /// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
@@ -62,7 +64,7 @@ pub(super) fn apply_post_cache(
     wrappers: Option<&LoadedConfig>,
     parse_errors: &mut Vec<String>,
     repo_label: &str,
-) {
+) -> RpcNeedleCounts {
     // LB.9b: the router's MODULE plan, recomputed from the same walked list
     // (a pure function of it), so every graft below finds a file's parse by
     // the MODULE id the router gave it.
@@ -171,6 +173,8 @@ pub(super) fn apply_post_cache(
     // cache (cached parses are filtered too) and after the RPC grafts (whose
     // markers carry the same cell).
     filter_imports_cells(parses_by_lang, rust_crates, ts_aliases, repo_label);
+
+    rpc_added
 }
 
 /// LA.6d: per-repo tallies of the Next.js page graft.

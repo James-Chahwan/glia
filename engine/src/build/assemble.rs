@@ -173,7 +173,7 @@ pub(super) fn build_graphs_for_repo(
     // LF.2e (http), A11.2, LA.6d, LA.4, LF.2e (queue), A5.2 / A5.3, A5.8,
     // LB.4a / LB.8, A16.4: the post-cache grafts, in that order. The overlay
     // `[[wrapper]]` stage runs only when the build applies the overlay.
-    grafts::apply_post_cache(
+    let rpc_added = grafts::apply_post_cache(
         &mut parses_by_lang,
         files,
         repo,
@@ -187,7 +187,11 @@ pub(super) fn build_graphs_for_repo(
         repo_label,
     );
 
-    let (graphs, di_refs) = lang_build::build_language_graphs(
+    let lang_build::LanguageGraphs {
+        graphs,
+        di_refs,
+        pooled,
+    } = lang_build::build_language_graphs(
         parses_by_lang,
         repo,
         repo_label,
@@ -199,17 +203,17 @@ pub(super) fn build_graphs_for_repo(
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);
     msgtype_marker(&graphs, repo_label);
-    // LG.1b fired_on marker, once per repo, after its graphs are built:
-    //   `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files on <t> threads`
+    // LG.1b / LG.1c fired_on marker, once per repo, after its graphs are built:
+    //   `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`
     // `c` = files the A11.1 const-table scan read (every file with a source
     // language), `r` = files the RPC needle pass ran on (text-gated, with a
-    // parse; 0 when the build knows no proto service), `t` = the pool that ran
-    // both. The per-language graph builds stay sequential: `recv_stats` (the
-    // A6.2a `[recv]` counter) is one process-global count taken after each
-    // language's build, so concurrent builds would mix its per-language counts.
+    // parse; 0 when the build knows no proto service; `apply_post_cache`
+    // returns it), `g` = the per-language graph builds mapped on the pool
+    // (every build group but the TS family, which builds last on this thread),
+    // `t` = the pool that ran all three.
     eprintln!(
-        "[parallel] {repo_label}: const-scan {const_files} files, rpc-needles {} files on {threads} threads",
-        rpc.take_needle_files()
+        "[parallel] {repo_label}: const-scan {const_files} files, rpc-needles {} files, {pooled} language graphs on {threads} threads",
+        rpc_added.files
     );
 
     (graphs, parse_errors)
