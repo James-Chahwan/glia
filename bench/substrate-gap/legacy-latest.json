@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 241,
+  "fixtures": 247,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -482,6 +482,13 @@
         "IMPORTS": 1.0
       }
     },
+    "go-package-multifile-calls": {
+      "framework": "go-package-multifile-calls",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "go-route-per-method": {
       "framework": "go-route-per-method",
       "language": "go",
@@ -602,6 +609,13 @@
         "TESTS": 1.0
       }
     },
+    "java-dagger-injects": {
+      "framework": "java-dagger",
+      "language": "java",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
     "java-declarative-clients": {
       "framework": "java-declarative-clients",
       "language": "java",
@@ -639,6 +653,13 @@
       "per_category": {
         "IMPLEMENTS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "java-lombok-injects": {
+      "framework": "java-lombok",
+      "language": "java",
+      "per_category": {
+        "INJECTS": 1.0
       }
     },
     "java-package-qnames": {
@@ -1003,6 +1024,14 @@
         "IMPORTS": 1.0
       }
     },
+    "rpc-event-monorepo-owner": {
+      "framework": "rpc-event-monorepo-owner",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "RPC_CALLS": 1.0
+      }
+    },
     "ruby-ar-tablename": {
       "framework": "ruby-ar-tablename",
       "language": "ruby",
@@ -1204,6 +1233,13 @@
       "language": "solidity",
       "per_category": {}
     },
+    "sql-migration-ddl": {
+      "framework": "sql-migration-ddl",
+      "language": "sql",
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
+    },
     "swift-calls": {
       "framework": "swift-calls",
       "language": "swift",
@@ -1330,6 +1366,14 @@
       "language": "typescript",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "ts-route-per-method": {
+      "framework": "ts-route-per-method",
+      "language": "typescript",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
       }
     },
     "ts-tests": {

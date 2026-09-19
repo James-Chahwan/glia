@@ -974,12 +974,13 @@
     },
     "go/calls": {
       "extract": [
-        3,
-        3
+        5,
+        5
       ],
       "fixtures": [
         "fixtures/go-calls",
-        "fixtures/go-field-dispatch"
+        "fixtures/go-field-dispatch",
+        "fixtures/go-package-multifile-calls"
       ],
       "forbid": [
         0,
@@ -987,15 +988,15 @@
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        4,
+        4
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        3,
-        3
+        6,
+        6
       ],
       "via": "call"
     },
@@ -1799,10 +1800,12 @@
     },
     "java/injects": {
       "extract": [
-        2,
-        2
+        6,
+        6
       ],
       "fixtures": [
+        "fixtures/java-dagger-injects",
+        "fixtures/java-lombok-injects",
         "fixtures/java-spring-injects"
       ],
       "forbid": [
@@ -1811,13 +1814,13 @@
       ],
       "level": "full",
       "literal": [
-        2,
-        2
+        6,
+        6
       ],
       "reasons": [],
       "route": [
-        1,
-        1
+        5,
+        5
       ],
       "via": "di"
     },
@@ -1848,7 +1851,7 @@
     },
     "java/migrations": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1858,17 +1861,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "java/redis": {
       "extract": [
@@ -2644,7 +2647,7 @@
     },
     "python/migrations": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -2654,17 +2657,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "python/mqtt": {
       "extract": [
@@ -3118,7 +3121,7 @@
     },
     "ruby/migrations": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -3128,17 +3131,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "ruby/service": {
       "extract": [
@@ -4456,16 +4459,19 @@
     "fixtures/py-router-prefix",
     "fixtures/py-typer-argparse-cli",
     "fixtures/react-hook",
+    "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
     "fixtures/scala-package-qnames",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
+    "fixtures/sql-migration-ddl",
     "fixtures/swift-imports",
     "fixtures/swift-module-qnames",
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
     "fixtures/ts-enum-members",
+    "fixtures/ts-route-per-method",
     "fixtures/ts-typeorm",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
@@ -4503,14 +4509,14 @@
   "totals": {
     "covered": 175,
     "error": 0,
-    "full": 141,
+    "full": 144,
     "grid": 480,
-    "none": 11,
+    "none": 8,
     "partial": 23,
     "unknown": 305
   },
   "vocabulary": {
-    "digest": "94620ab664d0",
+    "digest": "916e9fb659ff",
     "languages": 16,
     "mechanisms": 30
   }

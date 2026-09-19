@@ -30,7 +30,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.4.18` · vocabulary digest `94620ab664d0` · schema 1
+Engine `0.4.18` · vocabulary digest `916e9fb659ff` · schema 1
 
 Columns, left to right (the review's own abbreviations):
 
@@ -68,12 +68,12 @@ Columns, left to right (the review's own abbreviations):
 ```
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
-python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ◐       ●       ?       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ?
+python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ◐       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ?
 go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
 typescript       ●       ●       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ●       ?       ●       ?       ●       ●       ●       ●       ●       ●       ●
-java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ●       ●       ●       ·       ?       ?       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ●
+java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ●       ●       ●       ●       ?       ?       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ●
 csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ●       ?       ●       ?       ?       ?       ?       ·       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ?
-ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ●       ?       ●       ·       ?       ?       ?       ●       ●       ?       ●       ●       ◐       ?       ◐       ●       ?
+ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ●       ?       ●       ●       ?       ?       ?       ●       ●       ?       ●       ●       ◐       ?       ◐       ●       ?
 php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ●       ?       ◐       ●       ?
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
@@ -102,7 +102,7 @@ PER-MECHANISM  across 16 languages:
   ws           ● 6   ◐ 1   · 0   ? 9   ! 0
   eventbus     ● 3   ◐ 0   · 0   ? 13  ! 0
   db           ● 4   ◐ 0   · 0   ? 12  ! 0
-  migrations   ● 0   ◐ 0   · 3   ? 13  ! 0
+  migrations   ● 3   ◐ 0   · 0   ? 13  ! 0
   config       ● 1   ◐ 0   · 0   ? 15  ! 0
   secrets      ● 2   ◐ 0   · 1   ? 13  ! 0
   flags        ● 3   ◐ 0   · 0   ? 13  ! 0
@@ -118,12 +118,12 @@ PER-MECHANISM  across 16 languages:
   subproject   ● 3   ◐ 0   · 0   ? 13  ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
-  python       ● 23  ◐ 3   · 2   ? 2   ! 0
+  python       ● 24  ◐ 3   · 1   ? 2   ! 0
   go           ● 17  ◐ 2   · 3   ? 8   ! 0
   typescript   ● 19  ◐ 4   · 0   ? 7   ! 0
-  java         ● 16  ◐ 2   · 3   ? 9   ! 0
+  java         ● 17  ◐ 2   · 2   ? 9   ! 0
   csharp       ● 14  ◐ 2   · 1   ? 13  ! 0
-  ruby         ● 10  ◐ 2   · 1   ? 17  ! 0
+  ruby         ● 11  ◐ 2   · 0   ? 17  ! 0
   php          ● 7   ◐ 1   · 0   ? 22  ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  ! 0
   c_cpp        ● 2   ◐ 0   · 1   ? 27  ! 0
@@ -136,9 +136,9 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 175/480 cells have a fixture (36.5%) — 141 full, 23 partial, 11 none, 305 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 175/480 cells have a fixture (36.5%) — 144 full, 23 partial, 8 none, 305 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 117
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 120
 
 ## Cells routed via an alternative mechanism
 
