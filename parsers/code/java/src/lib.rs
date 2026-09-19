@@ -11,6 +11,7 @@ use repo_graph_code_domain::endpoint::{
     self, ClientEndpoint, HitExtras, push_client_endpoint_with,
 };
 use repo_graph_code_domain::jvm;
+use repo_graph_code_domain::di_stats::{self, DiShape};
 
 pub fn parse_file(
     source: &str,
@@ -157,6 +158,11 @@ struct Acc {
     nav: CodeNav,
     /// Dedups client ENDPOINT nodes across a file (Pattern A).
     endpoint_seen: HashSet<NodeId>,
+    /// A7.2: the `(class, dependency type)` pairs that already carry an
+    /// INJECTS ref, so a class that injects one type twice (an `@Autowired`
+    /// field plus an `@Autowired` constructor, or a Lombok constructor beside
+    /// a hand-written one) emits it once. Keyed by class id, so per class.
+    inject_seen: HashSet<(NodeId, String)>,
     /// LA.22a: the imperative HTTP client libraries this file imports.
     http_libs: JavaHttpLibs,
     /// LA.22a: imperative-client call sites that became an ENDPOINT, per
@@ -753,15 +759,26 @@ fn visit_type_decl(
     }
     emit_repository_access(&node, src, id, repo, acc);
 
+    // Pattern E: a Spring stereotype (@Service/@Component/@RestController/…) or
+    // a JSR-330 class marker makes this class a DI-managed bean, so its
+    // constructor params are injected dependencies. A7.2: a Lombok
+    // constructor generator (`@RequiredArgsConstructor`) on such a class is a
+    // constructor too, over its fields. Field injection (@Autowired on a
+    // field) and an `@Inject` constructor are gated per member below and do
+    // not require the class itself to be a stereotype.
+    let di = di_gate(node, src);
+    // A7.2: a record's components ARE its canonical constructor's parameters.
+    if node.kind() == "record_declaration"
+        && (di.is_bean || di.lombok.is_some())
+        && let Some(params) = node.child_by_field_name("parameters")
+    {
+        emit_params_as_injects(params, src, id, module_id, DiShape::JavaCtor, acc);
+    }
+
     // Walk body for methods + nested types.
     let Some(body) = node.child_by_field_name("body") else {
         return true;
     };
-    // Pattern E: a Spring stereotype (@Service/@Component/@RestController/…) marks
-    // this class as a DI-managed bean, so its constructor params are injected
-    // dependencies. Field injection (@Autowired on a field) is gated per-field
-    // below and does not require the class itself to be a stereotype.
-    let is_bean = is_spring_bean(&node, src);
     // A4.4: Spring `@RequestMapping` / Micronaut `@Controller` / JAX-RS `@Path`
     // on the class is a PREFIX for every action method below, not a route the
     // methods own. Read it once here and compose it per method.
@@ -779,7 +796,7 @@ fn visit_type_decl(
         module_id,
         class_prefix: &class_prefix,
         client: client.as_ref(),
-        is_bean,
+        di,
         enum_ctx: None,
     };
     let composed = if node.kind() == "enum_declaration" {
@@ -837,8 +854,8 @@ struct MemberOwner<'a> {
     class_prefix: &'a str,
     /// LA.22b: the declarative client interface this type is, if any.
     client: Option<&'a ClientIface>,
-    /// Pattern E: a Spring stereotype, so constructor params are injected.
-    is_bean: bool,
+    /// Pattern E / A7.2: the type's DI gates (bean marker, Lombok constructor).
+    di: DiGate,
     /// LA.30b: the enclosing enum's qname when the owner IS an enum, so its
     /// methods record bare references to its constants.
     enum_ctx: Option<&'a str>,
@@ -870,8 +887,8 @@ fn visit_type_member(
                 owner.enum_ctx,
                 acc,
             );
-            if owner.is_bean {
-                emit_constructor_injects(child, src, owner.id, owner.module_id, acc);
+            if let Some(shape) = ctor_inject_shape(&child, src, owner.di.is_bean) {
+                emit_constructor_injects(child, src, owner.id, owner.module_id, shape, acc);
             }
             composed
         }
@@ -890,6 +907,9 @@ fn visit_type_member(
         "field_declaration" => {
             visit_field_decl(child, src, file_rel, owner.qname, owner.id, repo, acc);
             emit_field_inject(child, src, owner.id, owner.module_id, acc);
+            if let Some(ctor) = owner.di.lombok {
+                emit_lombok_field_inject(child, src, owner.id, owner.module_id, ctor, acc);
+            }
             collect_field_types(child, src, owner.id, acc);
             0
         }
@@ -1328,6 +1348,9 @@ fn is_primitive_literal(kind: &str) -> bool {
 
 /// Pattern E (dependency injection): Spring stereotype annotations that mark a
 /// class as a DI-managed bean whose constructor params are injected beans.
+/// A7.2: plus the JSR-330 class markers — `@Named` is a Spring component-scan
+/// marker, and `@Singleton` a Micronaut bean definition — whose single
+/// constructor is injected without an `@Inject` on it.
 const SPRING_STEREOTYPES: &[&str] = &[
     "@Service",
     "@Component",
@@ -1335,7 +1358,97 @@ const SPRING_STEREOTYPES: &[&str] = &[
     "@Controller",
     "@Repository",
     "@Configuration",
+    "@Named",
+    "@Singleton",
 ];
+
+/// A7.2: which fields a Lombok-generated constructor takes as parameters.
+/// This is Lombok's own rule (`HandleConstructor.findRequiredFields` /
+/// `findAllFields`), so a `@RequiredArgsConstructor` bean's injected
+/// dependencies are read off its fields exactly as the generated constructor
+/// would take them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LombokCtor {
+    /// `@RequiredArgsConstructor`: every non-static field that is `final` or
+    /// `@NonNull` and has no initialiser.
+    Required,
+    /// `@AllArgsConstructor`: every non-static field except an initialised
+    /// `final` one (it cannot be assigned again).
+    All,
+}
+
+/// A7.2: the DI gates of one type, read once by [`visit_type_decl`].
+#[derive(Clone, Copy)]
+struct DiGate {
+    /// A Spring stereotype or JSR-330 class marker: every constructor's
+    /// parameters are injected.
+    is_bean: bool,
+    /// The Lombok-generated constructor that is a DI constructor: the class is
+    /// a bean, or the Lombok annotation puts an inject annotation on the
+    /// constructor it generates (`onConstructor = @__(@Inject)`). A Lombok
+    /// constructor on anything else — a DTO, a JPA entity, an enum — is a
+    /// plain constructor and injects nothing, like a hand-written one.
+    lombok: Option<LombokCtor>,
+}
+
+/// A7.2: read a type's [`DiGate`]. `@lombok.RequiredArgsConstructor` matches
+/// by its simple name. When a type carries both Lombok generators, the
+/// all-args constructor's parameters are a superset, so it wins when it is a
+/// DI constructor.
+fn di_gate(node: TsNode, src: &[u8]) -> DiGate {
+    let is_bean = is_spring_bean(&node, src);
+    let mut required = false;
+    let mut all = false;
+    for (name, ann) in own_annotation_nodes(node, src) {
+        let slot = match name.as_str() {
+            "RequiredArgsConstructor" => &mut required,
+            "AllArgsConstructor" => &mut all,
+            _ => continue,
+        };
+        let inject_on_ctor = ann.child_by_field_name("arguments").is_some_and(|args| {
+            let text = text_of(args, src);
+            text.contains("onConstructor") && INJECT_ANNOTATIONS.iter().any(|a| has_annotation(text, a))
+        });
+        *slot |= is_bean || inject_on_ctor;
+    }
+    let lombok = if all {
+        Some(LombokCtor::All)
+    } else if required {
+        Some(LombokCtor::Required)
+    } else {
+        None
+    };
+    DiGate { is_bean, lombok }
+}
+
+/// A7.2: the DI shape of a hand-written constructor, or `None` when its
+/// parameters are not injected. JSR-330 `@Inject` on the constructor itself
+/// (Dagger, Guice, CDI; Spring honours it too) injects in any class, bean or
+/// not. Otherwise a constructor of a bean, or one marked `@Autowired`, is the
+/// Spring shape.
+fn ctor_inject_shape(ctor: &TsNode, src: &[u8], class_is_bean: bool) -> Option<DiShape> {
+    let mods = modifiers_text(ctor, src).unwrap_or("");
+    if has_annotation(mods, "@Inject") {
+        Some(DiShape::JavaJsr330)
+    } else if class_is_bean || INJECT_ANNOTATIONS.iter().any(|a| has_annotation(mods, a)) {
+        Some(DiShape::JavaCtor)
+    } else {
+        None
+    }
+}
+
+/// True if `node`'s `modifiers` child carries the keyword `kw` (`static`,
+/// `final`) as its own token. An AST check, so an annotation argument or an
+/// identifier like `staticCache` never matches.
+fn has_modifier(node: TsNode, kw: &str) -> bool {
+    let mut c = node.walk();
+    node.children(&mut c)
+        .filter(|m| m.kind() == "modifiers")
+        .any(|m| {
+            let mut mc = m.walk();
+            m.children(&mut mc).any(|t| !t.is_named() && t.kind() == kw)
+        })
+}
 
 /// Field/constructor-level annotations that request injection of the annotated
 /// member (`@Autowired` is Spring; `@Inject`/`@Resource` are JSR-330/JSR-250).
@@ -1385,7 +1498,9 @@ fn is_non_injectable_type(name: &str) -> bool {
 }
 
 /// Simple type name of an injectable dependency, or `None` for primitives,
-/// value types (String/boxed), generics (`List<T>`, `Optional<T>`) and arrays.
+/// value types (String/boxed), arrays and collection generics (`List<T>`,
+/// `Map<K, V>`). A7.2: a DI wrapper generic around one bean type unwraps to
+/// that bean.
 fn injectable_type_name<'a>(type_node: TsNode<'a>, src: &'a [u8]) -> Option<String> {
     match type_node.kind() {
         "type_identifier" => {
@@ -1398,6 +1513,32 @@ fn injectable_type_name<'a>(type_node: TsNode<'a>, src: &'a [u8]) -> Option<Stri
             let simple = full.rsplit('.').next().unwrap_or(full).trim();
             (!simple.is_empty() && !is_non_injectable_type(simple)).then(|| simple.to_string())
         }
+        // A7.2: Dagger `Provider<Foo>` / `Lazy<Foo>`, Spring `ObjectProvider<Foo>`
+        // / `ObjectFactory<Foo>` / `Optional<Foo>`, CDI `Instance<Foo>` — a DI
+        // wrapper around ONE bean type. Unwrap to the bean. Everything else
+        // (`List<Foo>`, `Map<String, Foo>`, `Repository<User, Long>`) stays
+        // `None`: a collection is not a single dependency. INJECTS only —
+        // `collect_field_types` gates on the node kind before calling this, so
+        // a `Provider<Foo>` field never types `foo.get()` as `Foo::get`.
+        "generic_type" => {
+            const DI_WRAPPERS: [&str; 6] =
+                ["Provider", "Lazy", "ObjectProvider", "ObjectFactory", "Optional", "Instance"];
+            let mut c = type_node.walk();
+            let mut parts = type_node.named_children(&mut c);
+            let head = parts.next()?;
+            let head_text = text_of(head, src);
+            let head_name = head_text.rsplit('.').next().unwrap_or(head_text).trim();
+            if !DI_WRAPPERS.contains(&head_name) {
+                return None;
+            }
+            let args = parts.find(|n| n.kind() == "type_arguments")?;
+            let mut ac = args.walk();
+            let inner: Vec<TsNode> = args.named_children(&mut ac).collect();
+            match inner.as_slice() {
+                [only] => injectable_type_name(*only, src),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1405,7 +1546,21 @@ fn injectable_type_name<'a>(type_node: TsNode<'a>, src: &'a [u8]) -> Option<Stri
 /// Record an INJECTS ref: the consumer class → the bare dependency TYPE name.
 /// The graph resolver binds `Bare(TypeName)` to the uniquely-named class /
 /// interface node across the repo and forms the CLASS→service INJECTS edge.
-fn push_inject_ref(from: NodeId, from_module: NodeId, type_name: String, acc: &mut Acc) {
+///
+/// The single funnel for every Java DI shape. A7.2: a class injects each type
+/// at most once (`Acc::inject_seen`), and every ref it does push is counted
+/// for the `[di]` marker under `shape`.
+fn push_inject_ref(
+    from: NodeId,
+    from_module: NodeId,
+    type_name: String,
+    shape: DiShape,
+    acc: &mut Acc,
+) {
+    if !acc.inject_seen.insert((from, type_name.clone())) {
+        return;
+    }
+    di_stats::record(shape);
     acc.refs.push(UnresolvedRef {
         from,
         from_module,
@@ -1420,11 +1575,25 @@ fn emit_constructor_injects(
     src: &[u8],
     class_id: NodeId,
     module_id: NodeId,
+    shape: DiShape,
     acc: &mut Acc,
 ) {
-    let Some(params) = ctor.child_by_field_name("parameters") else {
-        return;
-    };
+    if let Some(params) = ctor.child_by_field_name("parameters") {
+        emit_params_as_injects(params, src, class_id, module_id, shape, acc);
+    }
+}
+
+/// One INJECTS ref per bean-typed parameter of a `formal_parameters` list: a
+/// constructor's, or (A7.2) a record's components, which are its canonical
+/// constructor's parameters.
+fn emit_params_as_injects(
+    params: TsNode,
+    src: &[u8],
+    class_id: NodeId,
+    module_id: NodeId,
+    shape: DiShape,
+    acc: &mut Acc,
+) {
     let mut c = params.walk();
     for p in params.named_children(&mut c) {
         if p.kind() != "formal_parameter" {
@@ -1434,7 +1603,7 @@ fn emit_constructor_injects(
             continue;
         };
         if let Some(name) = injectable_type_name(ty, src) {
-            push_inject_ref(class_id, module_id, name, acc);
+            push_inject_ref(class_id, module_id, name, shape, acc);
         }
     }
 }
@@ -1457,7 +1626,54 @@ fn emit_field_inject(
         return;
     };
     if let Some(name) = injectable_type_name(ty, src) {
-        push_inject_ref(class_id, module_id, name, acc);
+        push_inject_ref(class_id, module_id, name, DiShape::JavaField, acc);
+    }
+}
+
+/// A7.2: a field that is a parameter of the class's Lombok-generated DI
+/// constructor → INJECTS its type. `@RequiredArgsConstructor` +
+/// `private final OrderService orders;` has no `constructor_declaration` and
+/// no `@Autowired` for either other gate to see. Which fields count is
+/// Lombok's rule ([`LombokCtor`]); a field whose name starts with `$` is
+/// skipped, as Lombok skips it. `private final FooService a, b = x;` counts
+/// when any declarator is a parameter.
+fn emit_lombok_field_inject(
+    field: TsNode,
+    src: &[u8],
+    class_id: NodeId,
+    module_id: NodeId,
+    ctor: LombokCtor,
+    acc: &mut Acc,
+) {
+    if has_modifier(field, "static") {
+        return;
+    }
+    let is_final = has_modifier(field, "final");
+    let non_null = own_annotation_nodes(field, src)
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("NonNull"));
+    let mut c = field.walk();
+    let is_param = field
+        .children_by_field_name("declarator", &mut c)
+        .any(|decl| {
+            let named = decl
+                .child_by_field_name("name")
+                .is_some_and(|n| !text_of(n, src).starts_with('$'));
+            let initialised = decl.child_by_field_name("value").is_some();
+            named
+                && match ctor {
+                    LombokCtor::Required => (is_final || non_null) && !initialised,
+                    LombokCtor::All => !(is_final && initialised),
+                }
+        });
+    if !is_param {
+        return;
+    }
+    let Some(ty) = field.child_by_field_name("type") else {
+        return;
+    };
+    if let Some(name) = injectable_type_name(ty, src) {
+        push_inject_ref(class_id, module_id, name, DiShape::JavaLombok, acc);
     }
 }
 
@@ -3839,6 +4055,231 @@ class Point {
             !fp.refs.iter().any(|r| r.category == edge_category::INJECTS),
             "plain data class must not emit INJECTS refs"
         );
+    }
+
+    /// A7.2: the INJECTS dependency type names `class` (a `com::example` type)
+    /// emits, in ref order, duplicates included.
+    fn injects_from(fp: &FileParse, class: &str) -> Vec<String> {
+        let id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            &format!("com::example::{class}"),
+        );
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS && r.from == id)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A7.2: Lombok `@RequiredArgsConstructor` on a bean generates a
+    /// constructor over the non-static `final` / `@NonNull` fields with no
+    /// initialiser. There is no `constructor_declaration` and no `@Autowired`.
+    #[test]
+    fn lombok_required_args_emits_injects_for_final_fields() {
+        let source = r#"
+package com.example;
+
+@RestController
+@lombok.RequiredArgsConstructor
+class OrderController {
+    private final OrderService orderService;
+    @NonNull private Validator validator;
+    private final Pricing pricing = new Pricing();
+    private AuditLog audit;
+    private String greeting;
+    private static final Clock CLOCK = Clock.systemUTC();
+    private final OrderRepo staticCache, $lombokSkipped;
+    @Qualifier("static") private final Pool pool;
+}
+"#;
+        let fp = parse_file(source, "OrderController.java", "com::example::OrderController", repo())
+            .unwrap();
+        assert_eq!(
+            injects_from(&fp, "OrderController"),
+            ["OrderService", "Validator", "OrderRepo", "Pool"],
+            "final / @NonNull uninitialised fields only; initialised, non-final, \
+             value-typed and static fields are not constructor parameters"
+        );
+    }
+
+    /// A7.2: `@AllArgsConstructor` takes every non-static field, final or not,
+    /// except an initialised `final` one.
+    #[test]
+    fn lombok_all_args_includes_non_final() {
+        let source = r#"
+package com.example;
+
+@Component
+@AllArgsConstructor
+class Mailer {
+    private final Ledger ledger;
+    private Transport transport;
+    private Template template = new Template();
+    private final Pricing pricing = new Pricing();
+    private static Clock clock;
+}
+"#;
+        let fp = parse_file(source, "Mailer.java", "com::example::Mailer", repo()).unwrap();
+        assert_eq!(
+            injects_from(&fp, "Mailer"),
+            ["Ledger", "Transport", "Template"],
+            "non-static fields bar the initialised final one"
+        );
+    }
+
+    /// A7.2: a Lombok constructor is a DI constructor only where a hand-written
+    /// one would be — on a bean, or when Lombok is told to put `@Inject` on it.
+    /// A Lombok DTO, JPA entity or enum injects nothing.
+    #[test]
+    fn lombok_ctor_injects_only_on_a_di_class() {
+        let source = r#"
+package com.example;
+
+@Data
+@AllArgsConstructor
+class OrderDto {
+    private Customer customer;
+}
+
+@Entity
+@RequiredArgsConstructor
+class Order {
+    private final Customer customer;
+}
+
+@RequiredArgsConstructor
+enum Status {
+    ACTIVE(null);
+    private final Code code;
+}
+
+@RequiredArgsConstructor(onConstructor = @__(@Inject))
+class Engine {
+    private final Ignition ignition;
+}
+"#;
+        let fp = parse_file(source, "OrderDto.java", "com::example::OrderDto", repo()).unwrap();
+        assert!(injects_from(&fp, "OrderDto").is_empty(), "a DTO is not a DI consumer");
+        assert!(injects_from(&fp, "Order").is_empty(), "an entity is not a DI consumer");
+        let enum_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "com::example::Status");
+        assert!(
+            !fp.refs
+                .iter()
+                .any(|r| r.category == edge_category::INJECTS && r.from == enum_id),
+            "an enum is not a DI consumer"
+        );
+        assert_eq!(injects_from(&fp, "Engine"), ["Ignition"], "onConstructor @Inject");
+    }
+
+    /// A7.2: JSR-330 `@Inject` on the constructor itself (Dagger / Guice)
+    /// injects in a class with no Spring stereotype.
+    #[test]
+    fn jsr330_inject_ctor_without_stereotype_emits_injects() {
+        let source = r#"
+package com.example;
+
+import javax.inject.Inject;
+
+class CheckoutFlow {
+    private final PaymentGateway gateway;
+
+    @Inject
+    CheckoutFlow(PaymentGateway gateway, int retries) {
+        this.gateway = gateway;
+    }
+
+    CheckoutFlow(Fallback fallback) {}
+}
+"#;
+        let fp = parse_file(source, "CheckoutFlow.java", "com::example::CheckoutFlow", repo())
+            .unwrap();
+        assert_eq!(
+            injects_from(&fp, "CheckoutFlow"),
+            ["PaymentGateway"],
+            "only the @Inject constructor of a non-bean injects"
+        );
+    }
+
+    /// A7.2: a DI wrapper around one bean type unwraps to the bean; a
+    /// collection generic, or a wrapper around one, is not a dependency.
+    #[test]
+    fn provider_generic_unwraps_to_bean() {
+        let source = r#"
+package com.example;
+
+class Wiring {
+    @Inject
+    Wiring(Provider<AuditLog> audit,
+           Lazy<Cache> cache,
+           Optional<Metrics> metrics,
+           javax.inject.Provider<Tracer> tracer,
+           ObjectProvider<String> name,
+           List<Handler> handlers,
+           Map<String, Router> routers,
+           Provider<List<Codec>> codecs,
+           Provider<? extends Sink> sink) {}
+}
+"#;
+        let fp = parse_file(source, "Wiring.java", "com::example::Wiring", repo()).unwrap();
+        assert_eq!(
+            injects_from(&fp, "Wiring"),
+            ["AuditLog", "Cache", "Metrics", "Tracer"]
+        );
+    }
+
+    /// A7.2: a bean record's components are its canonical constructor's
+    /// parameters; a plain record is data.
+    #[test]
+    fn bean_record_components_are_injected() {
+        let source = r#"
+package com.example;
+
+@Component
+record OrderHandler(OrderService orders, String name) {}
+
+record Point(Helper helper, int x) {}
+"#;
+        let fp = parse_file(source, "OrderHandler.java", "com::example::OrderHandler", repo())
+            .unwrap();
+        assert_eq!(injects_from(&fp, "OrderHandler"), ["OrderService"]);
+        assert!(injects_from(&fp, "Point").is_empty(), "a plain record is data");
+    }
+
+    /// A7.2 (breaking: edge_removal): a class that reaches one dependency
+    /// type through two shapes — an `@Autowired` field and an `@Autowired`
+    /// constructor, or a Lombok constructor beside a hand-written one — emits
+    /// its INJECTS ref once.
+    #[test]
+    fn inject_ref_is_deduped_per_class() {
+        let source = r#"
+package com.example;
+
+@RestController
+@RequiredArgsConstructor
+class UserController {
+    @Autowired
+    private final FooService foo;
+
+    @Autowired
+    UserController(FooService foo, BarService bar) {}
+}
+
+@Service
+class Other {
+    @Autowired
+    private FooService foo;
+}
+"#;
+        let fp = parse_file(source, "UserController.java", "com::example::UserController", repo())
+            .unwrap();
+        assert_eq!(injects_from(&fp, "UserController"), ["FooService", "BarService"]);
+        assert_eq!(injects_from(&fp, "Other"), ["FooService"], "the dedupe is per class");
     }
 
     #[test]

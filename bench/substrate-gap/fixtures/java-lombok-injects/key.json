@@ -1,0 +1,15 @@
+{
+  "framework": "java-lombok",
+  "language": "java",
+  "dirs": ["."],
+  "cells": ["java/injects"],
+  "note": "A7.2: Lombok @RequiredArgsConstructor on a Spring bean generates the constructor over the non-static, uninitialised final fields, so there is no constructor_declaration and no @Autowired for either existing gate to see. greeting (initialised, and String) and MAX (static) are not constructor parameters.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "OrderController", "note": "@RestController @RequiredArgsConstructor consumer"},
+    {"kind": "CLASS", "name": "OrderService", "note": "@Service bean"}
+  ],
+  "expect_edges": [
+    {"from": "OrderController", "to": "OrderService", "category": "INJECTS", "note": "GAP: Lombok-generated ctor over final fields; no constructor_declaration exists"},
+    {"from": "OrderController", "to": "OrderRepo", "category": "INJECTS", "note": "second final field"}
+  ]
+}

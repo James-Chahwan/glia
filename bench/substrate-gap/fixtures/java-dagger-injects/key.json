@@ -1,0 +1,15 @@
+{
+  "framework": "java-dagger",
+  "language": "java",
+  "dirs": ["."],
+  "cells": ["java/injects"],
+  "note": "A7.2: a JSR-330 @Inject constructor (Dagger / Guice) in a class with no Spring stereotype, one of whose parameters is wrapped in Provider<T>, the DI wrapper around a single bean type.",
+  "expect_nodes": [
+    {"kind": "CLASS", "name": "CheckoutFlow", "note": "@Inject ctor, no Spring stereotype"},
+    {"kind": "CLASS", "name": "PaymentGateway", "note": "@Singleton bean"}
+  ],
+  "expect_edges": [
+    {"from": "CheckoutFlow", "to": "PaymentGateway", "category": "INJECTS", "note": "GAP: ctor path gated on is_spring_bean, ignores @Inject on the ctor itself"},
+    {"from": "CheckoutFlow", "to": "AuditLog", "category": "INJECTS", "note": "GAP: Provider<AuditLog> is a generic_type, dropped by injectable_type_name"}
+  ]
+}
