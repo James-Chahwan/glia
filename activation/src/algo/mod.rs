@@ -1,5 +1,6 @@
 //! Domain-agnostic graph algorithms (LD.15a): the home of reachability
-//! ([`reach`]) and graph delta ([`delta`], LE.1a), and next of cycles (LE.6).
+//! ([`reach`](crate::algo::reach)), graph delta ([`delta`](crate::algo::delta),
+//! LE.1a) and cycles ([`cycles`](crate::algo::cycles), LE.6a).
 //!
 //! This crate depends on `core` only, so nothing here can name a domain's
 //! node kind or edge category: an algorithm takes the categories it follows
@@ -21,6 +22,7 @@ use repo_graph_core::{Edge, EdgeCategoryId, NodeId};
 
 use crate::profile::DomainTables;
 
+pub mod cycles;
 pub mod delta;
 pub mod reach;
 
