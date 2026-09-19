@@ -1,6 +1,6 @@
 {
   "engine": "0.4.18",
-  "fixtures": 259,
+  "fixtures": 262,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1254,6 +1254,20 @@
         "CALLS": 1.0
       }
     },
+    "sdd-quokka-feature": {
+      "framework": "sdd-quokka-feature",
+      "language": "go",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "sdd-speckit-features": {
+      "framework": "sdd-speckit-features",
+      "language": "python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
     "secrets-vault-aws": {
       "framework": "secrets-vault-aws",
       "language": "python",
@@ -1600,6 +1614,15 @@
       "language": "proto",
       "per_category": {
         "SHARES_SCHEMA": 1.0
+      }
+    },
+    "xcut-queue-anchor": {
+      "framework": "xcut-queue-anchor",
+      "language": "typescript",
+      "per_category": {
+        "CONTAINS": 1.0,
+        "HANDLED_BY": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-queue-annot-listener": {
