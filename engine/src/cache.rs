@@ -18,10 +18,14 @@
 // `engine/tests/byte_identical.rs` already held with the HashMap. What it buys is
 // "same input, same bytes", which makes the sidecar diffable and
 // content-addressable — what a future Engram `--since` diff would stand on.
-use std::collections::{BTreeMap, HashSet};
+// The parses inside the entries need the same care: their hash containers are
+// written in key order by `canonical_parse` (LC.11), without which no two
+// builds wrote equal bytes and `ParseCache::save` rewrote the sidecar forever.
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use repo_graph_code_domain::FileParse;
+use repo_graph_code_domain::{CodeNav, FileParse};
+use repo_graph_core::NodeId;
 
 /// Build identity a cache must match to be reused: `<release>+p<parser stamp>`
 /// (see the `stamp` crate).
@@ -58,6 +62,32 @@ fn tmp_name() -> String {
     format!("{CACHE_FILE}.{}.tmp", std::process::id())
 }
 
+/// Does the file at `path` hold exactly `bytes`? Length first, from the
+/// opened handle's metadata, so a cache that changed size costs no read; then
+/// the content in fixed chunks, so a 20 MB sidecar is never held twice and a
+/// difference stops the read at its chunk. Best-effort like [`ParseCache::save`]:
+/// any failure (missing file, unreadable, shorter than stat said) is "differs",
+/// which means write.
+fn on_disk_equals(path: &Path, bytes: &[u8]) -> bool {
+    use std::io::Read;
+    const CHUNK: usize = 64 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    if !f.metadata().is_ok_and(|m| m.len() == bytes.len() as u64) {
+        return false;
+    }
+    let mut buf = vec![0u8; CHUNK.min(bytes.len())];
+    for want in bytes.chunks(CHUNK) {
+        let got = &mut buf[..want.len()];
+        if f.read_exact(got).is_err() || got != want {
+            return false;
+        }
+    }
+    // The file must end here too: it may have grown since the stat.
+    f.read(&mut [0u8; 1]).is_ok_and(|n| n == 0)
+}
+
 /// Conventional cache location: the repo's layout directory
 /// (`repo_graph_store::default_gmap_dir`, `<repo>/.glia/graph`), so the parse
 /// cache sits beside the gmap it is invalidated with.
@@ -79,7 +109,89 @@ pub fn content_hash(source: &str) -> u64 {
 struct CacheEntry {
     content_hash: u64,
     lang: String,
+    #[serde(serialize_with = "canonical_parse")]
     parse: FileParse,
+}
+
+/// `FileParse` serialized with every hash container in key order (LC.11).
+///
+/// `FileParse::properties` and `CodeNav`'s seven maps are std hash
+/// containers, which iterate in a per-instance RandomState order, so the
+/// derived serializer wrote the same parse as different bytes on every build
+/// and [`ParseCache::save`] could never find the sidecar unchanged. This is
+/// the derived wire shape (same fields, same order, a map still a length and
+/// its entries) with only the entry order fixed, so old sidecars load and
+/// `FileParse`'s own `Deserialize` reads this back; the cache format and
+/// [`CACHE_VERSION`] are unchanged. The destructuring below names every
+/// field, so a field added to `FileParse` or `CodeNav` fails to compile here
+/// rather than drop out of the cache. Vec fields keep their parser order.
+/// Removal path: once `CodeNav` and `properties` are ordered containers
+/// (BTreeMap / BTreeSet in code-domain), the derived serializer is canonical
+/// and this function and its helpers go.
+fn canonical_parse<S: serde::Serializer>(p: &FileParse, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeStruct;
+    let FileParse { nodes, edges, imports, calls, refs, nav, properties } = p;
+    let mut props: Vec<&NodeId> = properties.iter().collect();
+    props.sort_unstable_by_key(|id| id.0);
+    let mut st = s.serialize_struct("FileParse", 7)?;
+    st.serialize_field("nodes", nodes)?;
+    st.serialize_field("edges", edges)?;
+    st.serialize_field("imports", imports)?;
+    st.serialize_field("calls", calls)?;
+    st.serialize_field("refs", refs)?;
+    st.serialize_field("nav", &CanonicalNav(nav))?;
+    st.serialize_field("properties", &props)?;
+    st.end()
+}
+
+/// `CodeNav` in the derived wire shape, each map in key order.
+struct CanonicalNav<'a>(&'a CodeNav);
+
+impl serde::Serialize for CanonicalNav<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let CodeNav {
+            name_by_id,
+            qname_by_id,
+            kind_by_id,
+            parent_of,
+            children_of,
+            field_types,
+            local_types,
+        } = self.0;
+        let mut st = s.serialize_struct("CodeNav", 7)?;
+        st.serialize_field("name_by_id", &by_id(name_by_id, |v| v))?;
+        st.serialize_field("qname_by_id", &by_id(qname_by_id, |v| v))?;
+        st.serialize_field("kind_by_id", &by_id(kind_by_id, |v| v))?;
+        st.serialize_field("parent_of", &by_id(parent_of, |v| v))?;
+        st.serialize_field("children_of", &by_id(children_of, |v| v))?;
+        st.serialize_field("field_types", &by_id(field_types, by_name))?;
+        st.serialize_field("local_types", &by_id(local_types, by_name))?;
+        st.end()
+    }
+}
+
+/// Entries serialized as a map, in the order held.
+struct OrderedMap<K, V>(Vec<(K, V)>);
+
+impl<K: serde::Serialize, V: serde::Serialize> serde::Serialize for OrderedMap<K, V> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+/// A `NodeId`-keyed map in id order, each value through `f`.
+fn by_id<'a, V, W>(m: &'a HashMap<NodeId, V>, f: impl Fn(&'a V) -> W) -> OrderedMap<&'a NodeId, W> {
+    let mut e: Vec<(&NodeId, W)> = m.iter().map(|(k, v)| (k, f(v))).collect();
+    e.sort_unstable_by_key(|(k, _)| k.0);
+    OrderedMap(e)
+}
+
+/// A name-keyed map in name order.
+fn by_name(m: &HashMap<String, String>) -> OrderedMap<&String, &String> {
+    let mut e: Vec<(&String, &String)> = m.iter().collect();
+    e.sort_unstable();
+    OrderedMap(e)
 }
 
 /// Counters for the build's `[incremental]` marker. Not persisted.
@@ -324,11 +436,29 @@ impl ParseCache {
     /// The directory gets its self-ignoring `.gitignore` here too (as from
     /// `persist::persist_result`), so a cache-only build (pyo3 `generate` under
     /// `GLIA_NO_PERSIST=1`) never shows up in the repo's `git status` either.
+    ///
+    /// Written only when it changed (LC.11), as the store already skips an
+    /// unchanged shard or manifest: when the sidecar on disk holds exactly
+    /// these bytes nothing is written, so a build that changed no entry keeps
+    /// the file's inode and mtime. A watcher rebuilding on every inotify event
+    /// otherwise rewrote the whole cache each time (~1.2 TB in a day on a
+    /// 21 MB sidecar). The comparison is against the file actually on disk,
+    /// not a digest kept from `load`: another writer may have replaced it
+    /// since, and then ours is written, as before. The mtime staying put
+    /// cannot make a layout look stale: `store::scan_for_newer` skips the
+    /// layout directory by prefix.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {
         let dir = gmap_dir(repo_path);
         std::fs::create_dir_all(&dir)?;
         crate::persist::write_self_ignore(&dir)?;
         let bytes = bincode::serialize(self).map_err(std::io::Error::other)?;
+        if on_disk_equals(&dir.join(CACHE_FILE), &bytes) {
+            eprintln!(
+                "[incremental] unchanged {} entries - parse_cache.bin not rewritten",
+                self.entries.len()
+            );
+            return Ok(());
+        }
         let tmp = dir.join(tmp_name());
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, dir.join(CACHE_FILE))?;
@@ -455,5 +585,179 @@ mod tests {
             name.contains(&std::process::id().to_string()),
             "staging name {name} does not carry this pid"
         );
+    }
+
+    /// A parse with every field filled: `n` entries in each hash container
+    /// (inserted in `order`), one row in each Vec, so a field serialized out
+    /// of place or dropped changes the bytes.
+    fn rich_parse(n: u64, order: &[u64]) -> FileParse {
+        use repo_graph_code_domain::{
+            CallQualifier, CallSite, ImportStmt, ImportTarget, UnresolvedRef, edge_category, node_kind,
+        };
+        use repo_graph_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId, RepoId};
+        let mut p = FileParse::default();
+        let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text("code".into()) };
+        let node = Node { id: NodeId(1), repo: RepoId(7), confidence: Confidence::Strong, cells: vec![cell] };
+        p.nodes.push(node);
+        p.edges.push(Edge {
+            from: NodeId(1),
+            to: NodeId(2),
+            category: edge_category::CALLS,
+            confidence: Confidence::Medium,
+            cells: vec![],
+        });
+        p.imports.push(ImportStmt {
+            from_module: "m".into(),
+            target: ImportTarget::Module { path: "p".into(), alias: None },
+            line: 3,
+        });
+        p.calls.push(CallSite { from: NodeId(1), qualifier: CallQualifier::Bare("f".into()), line: 4 });
+        p.refs.push(UnresolvedRef {
+            from: NodeId(1),
+            from_module: NodeId(9),
+            qualifier: CallQualifier::SelfMethod("g".into()),
+            category: edge_category::CALLS,
+            line: 5,
+        });
+        for &i in order.iter().filter(|&&i| i < n) {
+            let id = NodeId(100 + i);
+            p.nav.name_by_id.insert(id, format!("n{i}"));
+            p.nav.qname_by_id.insert(id, format!("m::q{i}"));
+            p.nav.kind_by_id.insert(id, if i % 2 == 0 { node_kind::FUNCTION } else { node_kind::METHOD });
+            p.nav.parent_of.insert(id, NodeId(1000 + i));
+            p.nav.children_of.insert(id, vec![NodeId(2000 + i), NodeId(3000 + i)]);
+            for &j in order.iter().filter(|&&j| j < n) {
+                p.nav.field_types.entry(id).or_default().insert(format!("f{j}"), format!("T{j}"));
+                p.nav.local_types.entry(id).or_default().insert(format!("l{j}"), format!("U{j}"));
+            }
+            p.properties.insert(id);
+        }
+        p
+    }
+
+    /// LC.11: equal parses serialize to equal bytes whatever order their hash
+    /// containers were filled in (`CodeNav`'s maps and `properties` iterate in
+    /// a per-instance RandomState order), or no rebuild could ever match the
+    /// sidecar on disk.
+    #[test]
+    fn equal_parses_serialize_to_equal_bytes() {
+        let fwd: Vec<u64> = (0..24).collect();
+        let rev: Vec<u64> = (0..24).rev().collect();
+        let mut a = ParseCache::new();
+        let mut b = ParseCache::new();
+        a.put("src/x.rs".into(), 1, "rust", rich_parse(24, &fwd));
+        b.put("src/x.rs".into(), 1, "rust", rich_parse(24, &rev));
+        let ba = bincode::serialize(&a).expect("serialize a");
+        let bb = bincode::serialize(&b).expect("serialize b");
+        assert!(ba == bb, "equal parses serialized to different bytes ({} vs {} bytes)", ba.len(), bb.len());
+    }
+
+    /// The canonical order is a reordering, never a new wire shape: with at
+    /// most one entry per hash container (one possible order) it is byte for
+    /// byte `FileParse`'s derived serialization, so a field written out of
+    /// place, dropped or wrapped fails here. With many entries the derived
+    /// deserializer reads it back to equal containers, and an old sidecar
+    /// (hash order) still loads.
+    #[test]
+    fn canonical_parse_is_the_derived_wire_shape() {
+        let one = rich_parse(1, &[0]);
+        let mut c = ParseCache::new();
+        c.put("a".into(), 1, "rust", one.clone());
+        let mut derived = bincode::serialize(&c.stamp).expect("stamp");
+        derived.extend(bincode::serialize(&c.repo_canonical).expect("repo"));
+        derived.extend(bincode::serialize(&c.go_prefix).expect("go"));
+        derived.extend(bincode::serialize(&1u64).expect("n entries"));
+        derived.extend(bincode::serialize("a").expect("key"));
+        derived.extend(bincode::serialize(&1u64).expect("hash"));
+        derived.extend(bincode::serialize("rust").expect("lang"));
+        derived.extend(bincode::serialize(&one).expect("derived parse"));
+        let canonical = bincode::serialize(&c).expect("canonical");
+        assert!(canonical == derived, "canonical != derived wire shape");
+
+        let order: Vec<u64> = (0..24).rev().collect();
+        let many = rich_parse(24, &order);
+        let mut c = ParseCache::new();
+        c.put("a".into(), 1, "rust", many.clone());
+        let back: ParseCache = bincode::deserialize(&bincode::serialize(&c).expect("ser")).expect("de");
+        let got = &back.entries["a"].parse;
+        assert_eq!(got.nav.name_by_id, many.nav.name_by_id);
+        assert_eq!(got.nav.qname_by_id, many.nav.qname_by_id);
+        assert_eq!(got.nav.kind_by_id, many.nav.kind_by_id);
+        assert_eq!(got.nav.parent_of, many.nav.parent_of);
+        assert_eq!(got.nav.children_of, many.nav.children_of);
+        assert_eq!(got.nav.field_types, many.nav.field_types);
+        assert_eq!(got.nav.local_types, many.nav.local_types);
+        assert_eq!(got.properties, many.properties);
+        assert_eq!((&got.nodes, &got.edges, &got.imports), (&many.nodes, &many.edges, &many.imports));
+        assert_eq!((&got.calls, &got.refs), (&many.calls, &many.refs));
+
+        // A sidecar an older glia wrote (derived serializer, hash order) loads:
+        // the same cache header, then the derived bytes of `many`.
+        let header_len = derived.len() - bincode::serialize(&one).expect("one").len();
+        let mut old = derived[..header_len].to_vec();
+        old.extend(bincode::serialize(&many).expect("derived many"));
+        let loaded: ParseCache = bincode::deserialize(&old).expect("old sidecar loads");
+        assert_eq!(loaded.entries["a"].parse.nav.field_types, many.nav.field_types);
+    }
+
+    /// LC.11: a build that changed no entry writes nothing. The tmp + rename
+    /// always lands a new inode, so an unchanged inode proves no write.
+    #[cfg(unix)]
+    #[test]
+    fn save_twice_unchanged_does_not_rewrite() {
+        use std::os::unix::fs::MetadataExt;
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let c = filled(8);
+        c.save(&repo).expect("first save");
+        let path = sidecar(d.path());
+        let before = std::fs::metadata(&path).expect("stat after first save");
+
+        c.save(&repo).expect("second save");
+        let after = std::fs::metadata(&path).expect("stat after second save");
+        assert_eq!(before.ino(), after.ino(), "an unchanged cache was rewritten (new inode)");
+        assert_eq!(
+            (before.mtime(), before.mtime_nsec()),
+            (after.mtime(), after.mtime_nsec()),
+            "an unchanged cache was rewritten (mtime moved)"
+        );
+        assert!(!gmap_dir(&repo).join(tmp_name()).exists(), "a staging file was left behind");
+    }
+
+    /// A changed entry of the same serialized length: the length gate cannot
+    /// decide it, the byte comparison must.
+    #[test]
+    fn save_after_change_rewrites() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let mut c = filled(8);
+        c.save(&repo).expect("first save");
+        let old = std::fs::read(sidecar(d.path())).expect("read first");
+
+        c.put("src/f03.rs".to_string(), 999, "rust", FileParse::default());
+        c.save(&repo).expect("second save");
+        let new = std::fs::read(sidecar(d.path())).expect("read second");
+        assert_eq!(new.len(), old.len(), "fixture must keep the length so the bytes decide");
+        assert_ne!(new, old, "the changed cache was not written");
+        assert_eq!(new, bincode::serialize(&c).expect("serialize"), "disk != the new serialization");
+    }
+
+    /// Another writer replaced the sidecar with other bytes of the same
+    /// length: the comparison is against the disk, so ours is written back.
+    #[test]
+    fn save_when_on_disk_differs_rewrites() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let c = filled(8);
+        c.save(&repo).expect("first save");
+        let path = sidecar(d.path());
+        let mut tampered = std::fs::read(&path).expect("read");
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0xFF;
+        std::fs::write(&path, &tampered).expect("tamper");
+
+        c.save(&repo).expect("second save");
+        let now = std::fs::read(&path).expect("read back");
+        assert_eq!(now, bincode::serialize(&c).expect("serialize"), "the differing sidecar was kept");
     }
 }
