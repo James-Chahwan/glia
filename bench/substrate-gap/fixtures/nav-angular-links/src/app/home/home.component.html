@@ -1,0 +1,5 @@
+<a routerLink="/home">Home</a>
+<div *ngFor="let m of members">
+  <a [routerLink]="m.id ? ['/user', m.id] : null">user</a>
+</div>
+<img src="/logo.png">

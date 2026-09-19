@@ -16,7 +16,7 @@ use crate::extract::{
     ExtractStats, apply_cross_cutting_extractors, detect_language, merge_nav, parse_one_with,
     path_to_qname,
 };
-use crate::walk::{is_dockerfile_path, is_dotenv_path};
+use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 
 /// The per-file half of `build_graphs_for_repo`: route every walked file to
 /// its parser or synthetic extractor and return the parses grouped by
@@ -84,6 +84,14 @@ pub(crate) fn parse_repo_files(
     let mut nav_catchalls = 0usize;
     // A3.5 `[extract] ts-routes` marker counter, same reparsed-only caveat.
     let mut ts_client_calls_skipped = 0usize;
+    // LA.6c `[nav-links]` marker counters: link sites of the reparsed
+    // TS-family files (same reparsed-only caveat) plus every `.component.html`
+    // template, which is never cached.
+    let mut links_router = 0usize;
+    let mut links_href = 0usize;
+    let mut links_origin = 0usize;
+    let mut links_template = 0usize;
+    let mut links_dynamic = 0usize;
 
     for (path, source) in files {
         let yaml_ext = matches!(
@@ -212,6 +220,45 @@ pub(crate) fn parse_repo_files(
                     vec![],
                     &mut parses_by_lang,
                 );
+            }
+            continue;
+        }
+
+        // LA.6c: an Angular `.component.html` template (admitted by the walk)
+        // holds its component's navigation links. It shares the MODULE qname
+        // of its `.component.ts` (`path_to_qname` strips only the last
+        // extension), so the refs go out from that module under the `angular`
+        // key, into the TS-family graph where the nav routes and the
+        // component's page live. A bare `FileParse`, never
+        // `stash_synthetic_parse`: that mints a MODULE node, and this id is
+        // the `.component.ts` parse's. Before detect_language, which has no
+        // html arm.
+        if is_angular_template_path(path) {
+            let module_id =
+                NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, &path_to_qname(path));
+            match catch_unwind(AssertUnwindSafe(|| {
+                repo_graph_code_extractors::nav_links::extract_template_links(source, module_id)
+            })) {
+                Ok(links) => {
+                    links_router += links.router;
+                    links_href += links.href;
+                    links_origin += links.origin;
+                    links_template += links.template;
+                    links_dynamic += links.dynamic_skipped;
+                    if !links.refs.is_empty() {
+                        parses_by_lang
+                            .entry("angular")
+                            .or_default()
+                            .push(FileParse {
+                                refs: links.refs,
+                                ..Default::default()
+                            });
+                    }
+                }
+                Err(payload) => parse_errors.push(format!(
+                    "{path}: PANIC (nav template links): {}",
+                    panic_payload_str(&payload)
+                )),
             }
             continue;
         }
@@ -456,6 +503,10 @@ pub(crate) fn parse_repo_files(
                 nav_rejected += stats.nav_rejected;
                 nav_catchalls += stats.nav_catchalls;
                 ts_client_calls_skipped += stats.ts_client_calls_skipped;
+                links_router += stats.nav_links_router;
+                links_href += stats.nav_links_href;
+                links_origin += stats.nav_links_origin;
+                links_dynamic += stats.nav_links_dynamic;
                 if let Some(h) = hash {
                     pending.push((path.clone(), h, lang, fp.clone()));
                 }
@@ -536,6 +587,17 @@ pub(crate) fn parse_repo_files(
     // HTTP-client call (`this.http.get('/users')`). Only printed when it did.
     if ts_client_calls_skipped > 0 {
         eprintln!("[extract] ts-routes client-calls skipped: {ts_client_calls_skipped}");
+    }
+
+    // LA.6c fired_on marker: navigation link sites became NAVIGATES_TO refs
+    // (`router` includes the `origin` share links; `template` counts the refs
+    // read from `.component.html`, which are also in `router` / `href`).
+    // Printed once per repo build that emitted a link.
+    if links_router + links_href > 0 {
+        eprintln!(
+            "[nav-links] router={links_router} href={links_href} origin={links_origin} \
+             template={links_template} dynamic_skipped={links_dynamic}"
+        );
     }
 
     // A5.1 fired_on marker: a `.proto` is now a first-class parsed file, not a
@@ -787,6 +849,32 @@ mod tests {
             route("testdata/settings.json", r#"{"config":{"type":"object","properties":{}}}"#).is_empty(),
             "a nested look-alike stashes nothing, not even a MODULE"
         );
+    }
+
+    /// LA.6c: a `.component.html` template becomes a bare parse under the
+    /// `angular` key carrying only its link refs, from the component's MODULE
+    /// id; it mints no node (the MODULE is the `.component.ts` parse's).
+    #[test]
+    fn component_templates_route_to_bare_link_parses() {
+        let html = "<a routerLink=\"/home\">h</a>\n<a href=\"/favicon.ico\">i</a>\n";
+        let parses = route("src/app/home/home.component.html", html);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["angular"]);
+        let fp = &parses["angular"][0];
+        assert!(fp.nodes.is_empty() && fp.edges.is_empty() && fp.nav.qname_by_id.is_empty());
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "src::app::home::home.component",
+        );
+        assert_eq!(fp.refs.len(), 1);
+        assert_eq!(
+            (fp.refs[0].from, fp.refs[0].from_module),
+            (module_id, module_id)
+        );
+        assert_eq!(fp.refs[0].category, edge_category::NAVIGATES_TO);
+
+        assert!(route("src/app/home/empty.component.html", "<p>no links</p>").is_empty());
     }
 
     #[test]

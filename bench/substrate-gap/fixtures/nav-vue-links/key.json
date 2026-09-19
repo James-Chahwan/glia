@@ -1,0 +1,28 @@
+{
+  "framework": "nav-vue-links",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_edges": [
+    {
+      "from": "Home",
+      "to": "/cart",
+      "category": "NAVIGATES_TO",
+      "note": "<router-link to=\"/cart\"> and router.push('/cart') dedupe to one edge"
+    },
+    {
+      "from": "Home",
+      "to": "/users/:id",
+      "category": "NAVIGATES_TO",
+      "note": "<RouterLink :to=\"`/users/${u.id}`\">"
+    },
+    {
+      "from": "Home",
+      "to": "/orders",
+      "category": "NAVIGATES_TO",
+      "note": "router.push({ path: '/orders' })"
+    }
+  ],
+  "note": "LA.6c. Vue Router links from an SFC: <router-link to>, <RouterLink :to> template literal, router.push string and object forms; a named-route push is skipped as dynamic. Baseline HEAD: NAVIGATES_TO raises in grade.py until L0.1 ships in the wheel."
+}

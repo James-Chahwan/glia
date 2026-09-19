@@ -149,6 +149,14 @@ pub(crate) struct ExtractStats {
     /// an HTTP client (`this.http.get('/users')`) — phantom server ROUTEs no
     /// longer minted.
     pub ts_client_calls_skipped: usize,
+    /// LA.6c: router-tier `NAVIGATES_TO` link refs (`/path`) emitted.
+    pub nav_links_router: usize,
+    /// LA.6c: plain-anchor link refs (`href:/path`) emitted.
+    pub nav_links_href: usize,
+    /// LA.6c: the router-tier links built from `location.origin`.
+    pub nav_links_origin: usize,
+    /// LA.6c: link sites skipped because the target is not a literal path.
+    pub nav_links_dynamic: usize,
 }
 
 pub(crate) fn apply_cross_cutting_extractors(
@@ -162,7 +170,8 @@ pub(crate) fn apply_cross_cutting_extractors(
 ) {
     use repo_graph_code_extractors::{
         anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
-        nav_routes, openapi_annot, queues, react, services, trpc, ts_routes, vue, websocket,
+        nav_links, nav_routes, openapi_annot, queues, react, services, trpc, ts_routes, vue,
+        websocket,
     };
 
     macro_rules! run {
@@ -287,6 +296,16 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.refs.extend(tables.refs);
         fp.nodes.extend(tables.nodes);
         merge_nav(&mut fp.nav, tables.nav);
+        // LA.6c: the file's navigation link sites (router APIs, link
+        // components, anchors, origin share links) as NAVIGATES_TO refs from
+        // its MODULE, LA.6a's link contract. A `.component.html` template's
+        // links take the template branch in route.rs instead.
+        let links = nav_links::extract_nav_links(source, lang, module_id);
+        stats.nav_links_router += links.router;
+        stats.nav_links_href += links.href;
+        stats.nav_links_origin += links.origin;
+        stats.nav_links_dynamic += links.dynamic_skipped;
+        fp.refs.extend(links.refs);
     }
     if matches!(lang, "react" | "typescript") {
         let module_qname = fp

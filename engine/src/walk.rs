@@ -343,7 +343,15 @@ fn is_bypass_path(path: &str) -> bool {
     }
     is_dockerfile_path(path)
         || is_dotenv_path(path)
+        || is_angular_template_path(path)
         || repo_graph_code_extractors::packages::is_manifest_path(path)
+}
+
+/// LA.6c: an Angular CLI component template (`home.component.html`). Read only
+/// for its navigation links (`route.rs`); a plain `.html` page stays out.
+pub(crate) fn is_angular_template_path(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base.len() > ".component.html".len() && base.ends_with(".component.html")
 }
 
 pub(crate) fn is_dockerfile_path(path: &str) -> bool {
@@ -678,6 +686,39 @@ mod walk_tests {
             ["message:jsonschema:User", "message:jsonschema:User.Address", "message:jsonschema:refund"]
         );
         assert_eq!(settings_nodes, 0, "the look-alike mints no MESSAGE_TYPE and no MODULE");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// LA.6c: an Angular `*.component.html` template is walked (for its
+    /// navigation links); a plain `.html` page is not.
+    #[test]
+    fn walk_admits_component_templates_only() {
+        let root = walk_tmp("templates");
+        std::fs::create_dir_all(root.join("src/app/home")).unwrap();
+        for (rel, body) in [
+            ("src/index.html", "<base href=\"/\">"),
+            (
+                "src/app/home/home.component.html",
+                "<a routerLink=\"/home\">h</a>",
+            ),
+            (
+                "src/app/home/home.component.ts",
+                "export class HomeComponent {}",
+            ),
+            ("src/app/.component.html", "<a routerLink=\"/x\">x</a>"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let html: Vec<&str> = files
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .filter(|p| p.ends_with(".html"))
+            .collect();
+        assert_eq!(html, ["src/app/home/home.component.html"]);
+        assert!(is_angular_template_path("a/b/user-list.component.html"));
+        assert!(!is_angular_template_path("a/b/index.html"));
+        assert!(!is_angular_template_path("a/b/component.html"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

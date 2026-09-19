@@ -1,0 +1,42 @@
+{
+  "framework": "nav-react-links",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_edges": [
+    {
+      "from": "Nav",
+      "to": "/dashboard",
+      "category": "NAVIGATES_TO",
+      "note": "<Link to=\"/dashboard\">"
+    },
+    {
+      "from": "Nav",
+      "to": "/users/:id",
+      "category": "NAVIGATES_TO",
+      "note": "<NavLink to={`/users/${id}`}>"
+    },
+    {
+      "from": "Nav",
+      "to": "/settings",
+      "category": "NAVIGATES_TO",
+      "note": "navigate(\"/settings\")"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Nav",
+      "to": "GET /*",
+      "category": "NAVIGATES_TO",
+      "note": "the root catch-all never absorbs the dead /billing link (legacy nav qname shape)"
+    },
+    {
+      "from": "Nav",
+      "to": "page:/*",
+      "category": "NAVIGATES_TO",
+      "note": "the root catch-all never absorbs the dead /billing link (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6c. React Router link forms, template-literal params, a dead /billing link and a plain <a href> to a server path that must never be reported dead. Baseline HEAD: NAVIGATES_TO raises in grade.py until L0.1 ships in the wheel."
+}

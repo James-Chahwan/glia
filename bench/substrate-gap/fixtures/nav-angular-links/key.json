@@ -1,0 +1,60 @@
+{
+  "framework": "nav-angular-links",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "expect_edges": [
+    {
+      "from": "HomeComponent",
+      "to": "/home",
+      "category": "NAVIGATES_TO",
+      "note": "home.component.html `<a routerLink=\"/home\">`, lifted from the shared MODULE to its page component"
+    },
+    {
+      "from": "HomeComponent",
+      "to": "/user/:publicId",
+      "category": "NAVIGATES_TO",
+      "note": "[routerLink]=\"['/user', m.id]\" array form -> /user/${...} -> param tier"
+    },
+    {
+      "from": "LoginComponent",
+      "to": "/home",
+      "category": "NAVIGATES_TO",
+      "note": "this.router.navigate(['/home'])"
+    },
+    {
+      "from": "LoginComponent",
+      "to": "/verify-email",
+      "category": "NAVIGATES_TO",
+      "note": "this.router.navigateByUrl('/verify-email')"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ProfileComponent",
+      "to": "GET /**",
+      "category": "NAVIGATES_TO",
+      "note": "the dead /connect share link must not bind to the catch-all (legacy nav qname shape)"
+    },
+    {
+      "from": "ProfileComponent",
+      "to": "page:/**",
+      "category": "NAVIGATES_TO",
+      "note": "the dead /connect share link must not bind to the catch-all (LB.4c page: qname shape)"
+    },
+    {
+      "from": "HomeComponent",
+      "to": "GET /**",
+      "category": "NAVIGATES_TO",
+      "note": "no template link binds to the catch-all (legacy nav qname shape)"
+    },
+    {
+      "from": "HomeComponent",
+      "to": "page:/**",
+      "category": "NAVIGATES_TO",
+      "note": "no template link binds to the catch-all (LB.4c page: qname shape)"
+    }
+  ],
+  "note": "LA.6c. The quokka /connect shape: a share link built from window.location.origin to a path the route table lacks, routerLink in a .component.html template, router.navigate array forms, and a ** catch-all that must not absorb the dead link. The dead link itself is asserted by engine/tests/page_flow.rs (LA.6e), since key.json cannot express an unresolved ref. Baseline HEAD: .html is never walked; NAVIGATES_TO raises in grade.py until L0.1 ships in the wheel."
+}
