@@ -1154,9 +1154,40 @@ pub struct CodeNav {
     /// Build-time only: deliberately NOT mirrored into the store's
     /// `CodeNavStore`, because resolution finishes before the .gmap is written.
     pub field_types: HashMap<NodeId, HashMap<String, String>>,
+    /// Local bindings of a fn / METHOD body, per enclosing callable: scope ->
+    /// (bound name -> simple type name). A parameter, a `let` or any pattern
+    /// binding. `""` records a local of unknown type: it still shadows a
+    /// same-named field in the receiver pass. A type of the form `self.<f>`
+    /// aliases the enclosing type's field `f` (`let r = &self.repo`). Filled
+    /// through [`CodeNav::record_local_type`] (Rust, LA.35a); read by
+    /// `resolve_calls`' receiver-type inference, innermost-first, before
+    /// `field_types`.
+    ///
+    /// Build-time only, like `field_types`: never mirrored into the store.
+    pub local_types: HashMap<NodeId, HashMap<String, String>>,
 }
 
 impl CodeNav {
+    /// Record that `scope` (a fn / METHOD) binds a local `name` of simple type
+    /// `ty` (`""` = a local whose type is unknown). An empty `name` is
+    /// ignored. The first record stores `ty`; a later record of a DIFFERENT
+    /// type stores `""`: a name bound to two types in one body (Rust
+    /// shadowing, two match arms) is a local of unknown type, which loses an
+    /// edge rather than guess one.
+    pub fn record_local_type(&mut self, scope: NodeId, name: &str, ty: &str) {
+        if name.is_empty() {
+            return;
+        }
+        let locals = self.local_types.entry(scope).or_default();
+        match locals.get_mut(name) {
+            Some(existing) if existing != ty => existing.clear(),
+            Some(_) => {}
+            None => {
+                locals.insert(name.to_string(), ty.to_string());
+            }
+        }
+    }
+
     /// Record that `owner` (a CLASS / STRUCT) declares a field or property
     /// `field` of simple type `type_name`. Empty names are ignored. A second
     /// record for the same `(owner, field)` replaces the first.
@@ -2414,13 +2445,16 @@ pub mod di_stats {
 /// build by the engine:
 ///
 /// ```text
-/// [recv] receiver-typed calls bound: csharp=N java=N typescript=N (fields: csharp=F java=F typescript=F) repo=<label>
+/// [recv] receiver-typed calls bound: csharp=N java=N typescript=N python=N ruby=N go=N dart=N rust=N (fields: csharp=F .. rust=F) repo=<label>
 /// ```
 ///
-/// * **bound** counts calls `resolve_calls` bound ONLY through a field's
-///   declared type ([`CodeNav::field_types`](super::CodeNav::field_types)).
-///   The generic pass does not know its language, so it calls [`record`] per
-///   bind and the engine [`take`]s the count after each per-language build.
+/// * **bound** counts calls `resolve_calls` bound ONLY through a receiver's
+///   type: a field's declared type
+///   ([`CodeNav::field_types`](super::CodeNav::field_types)) or a local's
+///   ([`CodeNav::local_types`](super::CodeNav::local_types), Rust since
+///   LA.35a). The generic pass does not know its language, so it calls
+///   [`record`] per bind and the engine [`take`]s the count after each
+///   per-language build.
 /// * **fields** counts the declared field types the parses carry, per
 ///   language, so a cache-served file counts too. `fields > 0` with `bound = 0`
 ///   means the carrier is populated but nothing resolved against it.
@@ -2432,10 +2466,11 @@ pub mod di_stats {
 pub mod recv_stats {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Languages always printed: the matrix rows whose parser records field
-    /// types, or will (C# since A6.2a; java / typescript are fed by A6.2b /
-    /// A6.2c; LA.23 extends the set with python / ruby / go / dart).
-    pub const LANGS: [&str; 3] = ["csharp", "java", "typescript"];
+    /// Languages always printed: the matrix rows whose parser records
+    /// receiver types (C# since A6.2a; java / typescript by A6.2b / A6.2c;
+    /// python / ruby / go / dart by LA.23a-e; rust fields and locals by LA.35a).
+    pub const LANGS: [&str; 8] =
+        ["csharp", "java", "typescript", "python", "ruby", "go", "dart", "rust"];
 
     static BOUND: AtomicUsize = AtomicUsize::new(0);
 
@@ -3738,21 +3773,23 @@ mod tests {
         assert_eq!(
             render(&[], &[("csharp", 2)], "a").as_deref(),
             Some(
-                "[recv] receiver-typed calls bound: csharp=0 java=0 typescript=0 \
-                 (fields: csharp=2 java=0 typescript=0) repo=a"
+                "[recv] receiver-typed calls bound: csharp=0 java=0 typescript=0 python=0 \
+                 ruby=0 go=0 dart=0 rust=0 (fields: csharp=2 java=0 typescript=0 python=0 \
+                 ruby=0 go=0 dart=0 rust=0) repo=a"
             )
         );
         // Repeated languages sum; a non-LANGS language appears only when non-zero.
         assert_eq!(
             render(
-                &[("csharp", 1), ("csharp", 2), ("python", 0)],
-                &[("csharp", 4), ("python", 1)],
+                &[("csharp", 1), ("csharp", 2), ("rust", 5), ("kotlin", 0)],
+                &[("csharp", 4), ("rust", 2), ("kotlin", 1)],
                 "fixtures/csharp-field-dispatch"
             )
             .as_deref(),
             Some(
-                "[recv] receiver-typed calls bound: csharp=3 java=0 typescript=0 \
-                 (fields: csharp=4 java=0 typescript=0 python=1) repo=fixtures/csharp-field-dispatch"
+                "[recv] receiver-typed calls bound: csharp=3 java=0 typescript=0 python=0 \
+                 ruby=0 go=0 dart=0 rust=5 (fields: csharp=4 java=0 typescript=0 python=0 \
+                 ruby=0 go=0 dart=0 rust=2 kotlin=1) repo=fixtures/csharp-field-dispatch"
             )
         );
     }
@@ -3786,6 +3823,33 @@ mod tests {
         // A re-record of the same field replaces the type.
         nav.record_field_type(a, "_repo", "CachedRepo");
         assert_eq!(nav.field_types[&a]["_repo"], "CachedRepo");
+    }
+
+    #[test]
+    fn record_local_type_keys_by_scope_and_a_conflict_is_unknown() {
+        let r = repo_graph_core::RepoId(1);
+        let f = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::f");
+        let g = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::g");
+        let mut nav = CodeNav::default();
+        nav.record_local_type(f, "r", "Repo");
+        nav.record_local_type(f, "r", "Repo");
+        nav.record_local_type(f, "x", "");
+        nav.record_local_type(g, "r", "Index");
+        nav.record_local_type(f, "", "Repo");
+        assert_eq!(nav.local_types[&f].len(), 2);
+        // The same type twice keeps it; an unknown local is recorded as "".
+        assert_eq!(nav.local_types[&f]["r"], "Repo");
+        assert_eq!(nav.local_types[&f]["x"], "");
+        assert_eq!(nav.local_types[&g]["r"], "Index");
+        // A second, different type (shadowing) makes the local unknown, and
+        // it stays unknown: a later record never revives a type.
+        nav.record_local_type(f, "r", "Index");
+        assert_eq!(nav.local_types[&f]["r"], "");
+        nav.record_local_type(f, "r", "Repo");
+        assert_eq!(nav.local_types[&f]["r"], "");
+        // An unknown record after a typed one is a conflict too.
+        nav.record_local_type(g, "r", "");
+        assert_eq!(nav.local_types[&g]["r"], "");
     }
 
     #[test]

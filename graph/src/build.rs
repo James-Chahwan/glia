@@ -268,6 +268,11 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     for (owner, fields) in src.field_types {
         dst.field_types.entry(owner).or_default().extend(fields);
     }
+    // LA.35a: per-scope merge. A scope is one fn body, so it comes from one
+    // file; `extend` only matters for a fn id two parses share.
+    for (scope, locals) in src.local_types {
+        dst.local_types.entry(scope).or_default().extend(locals);
+    }
 }
 
 // ============================================================================

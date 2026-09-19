@@ -131,8 +131,10 @@ pub(super) fn build_language_graphs(
             Err(e) => parse_errors.push(format!("typescript graph: {e}")),
         }
     }
-    // A6.2a fired_on marker, once per repo:
-    //   `[recv] receiver-typed calls bound: csharp=N … (fields: csharp=F …) repo=<label>`
+    // A6.2a fired_on marker, once per repo, every `recv_stats::LANGS` row
+    // zero-filled (LA.35a adds `rust`: bound = the field- and local-typed
+    // binds of `build_rust`, fields = the Rust parses' struct field types):
+    //   `[recv] receiver-typed calls bound: csharp=N … rust=N (fields: csharp=F … rust=F) repo=<label>`
     recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
     // A6.3 fired_on marker, once per repo (A6.4 / A6.5 read their rows here):
     //   `[heritage] refs bound: dart=N … typescript=N unresolved: dart=M … repo=<label>`

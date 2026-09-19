@@ -612,24 +612,27 @@ fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<N
 /// (`constructor(private api: Api)`, `def __init__(self, api: Api)`); the
 /// `this.x` / `self.x` form arrives as `ComplexReceiver` and is unaffected.
 /// `gate` resolves the caller's language and tallies what it skips.
+///
+/// LA.35a: the receiver's type comes from [`receiver_type`], which reads the
+/// caller's own locals (a parameter, a `let`) before the fields. A type found
+/// through a local is not gated: the gate exists because a bare name may be a
+/// local rather than the field, and a recorded local answers that.
 fn resolve_via_receiver_type(
     g: &RepoGraph,
     site: &CallSite,
     from_module: NodeId,
     gate: &mut BareFieldGate,
 ) -> Option<NodeId> {
-    let (field, method, bare) = match &site.qualifier {
-        CallQualifier::Attribute { base, name } => (base.as_str(), name.as_str(), true),
-        CallQualifier::ComplexReceiver { receiver, name } => {
-            (receiver_field(receiver)?, name.as_str(), false)
+    let method = match &site.qualifier {
+        CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
+            name.as_str()
         }
         _ => return None,
     };
     if method.is_empty() {
         return None;
     }
-    let owner = enclosing_class_or_struct(&g.nav, site.from)?;
-    let type_name = g.nav.field_types.get(&owner)?.get(field)?;
+    let type_name = receiver_type(g, site)?;
     let type_id = resolve_type_name(g, from_module, type_name)?;
     let hit = g
         .symbols
@@ -637,10 +640,70 @@ fn resolve_via_receiver_type(
         .get(&type_id)
         .and_then(|m| m.get(method).copied())
         .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))?;
-    if bare && !gate.admits(g, site.from) {
+    // A6.2a's gate: an Attribute base the caller does not bind as a local
+    // was read as a field of the enclosing type.
+    if let CallQualifier::Attribute { base, .. } = &site.qualifier
+        && local_type(g, site.from, base).is_none()
+        && !gate.admits(g, site.from)
+    {
         return None;
     }
     Some(hit)
+}
+
+/// The simple type name of a call's receiver, innermost scope first (LA.35a),
+/// for A6.2a's receiver pass and the Rust hook (LA.35b).
+///
+/// The receiver is an `Attribute` base (read as written, as in A6.2a) or a
+/// `ComplexReceiver` receiver (`this.` / `self.` stripped by
+/// [`receiver_field`], which also rejects chains). A `this.` / `self.`
+/// receiver names a field of the enclosing type. Any other receiver is first
+/// looked up in the caller's `local_types`: a recorded local decides, a local
+/// of unknown type (`""`) returns `None` rather than fall through to a
+/// same-named field (it shadows it), and a local recorded as `self.<f>`
+/// aliases field `f`. A receiver no local claims falls through to A6.2a's
+/// field lookup, so parsers that record no locals see A6.2a exactly.
+pub(crate) fn receiver_type<'g>(g: &'g RepoGraph, site: &CallSite) -> Option<&'g str> {
+    let (name, is_self) = match &site.qualifier {
+        CallQualifier::Attribute { base, .. } => (base.as_str(), false),
+        CallQualifier::ComplexReceiver { receiver, .. } => {
+            let is_self = receiver.starts_with("this.") || receiver.starts_with("self.");
+            (receiver_field(receiver)?, is_self)
+        }
+        _ => return None,
+    };
+    if !is_self && let Some(ty) = local_type(g, site.from, name) {
+        if ty.is_empty() {
+            return None;
+        }
+        return match ty.strip_prefix("self.") {
+            Some(field) => field_type(g, site.from, field),
+            None => Some(ty),
+        };
+    }
+    field_type(g, site.from, name)
+}
+
+/// The type `scope` records for its local `name` (`""` = unknown type), or
+/// `None` when `name` is not a local of `scope`.
+fn local_type<'g>(g: &'g RepoGraph, scope: NodeId, name: &str) -> Option<&'g str> {
+    g.nav
+        .local_types
+        .get(&scope)?
+        .get(name)
+        .map(String::as_str)
+}
+
+/// The declared type of `field` on the innermost CLASS / STRUCT / ENUM
+/// enclosing `from` (A6.2a's `field_types`).
+fn field_type<'g>(g: &'g RepoGraph, from: NodeId, field: &str) -> Option<&'g str> {
+    let owner = enclosing_class_or_struct(&g.nav, from)?;
+    g.nav
+        .field_types
+        .get(&owner)?
+        .get(field)
+        .map(String::as_str)
+        .filter(|t| !t.is_empty())
 }
 
 /// Where a bare identifier can name an instance field (A6.6, the A6.2b
@@ -1160,6 +1223,86 @@ mod tests {
         let g = build_dotted(repo(), vec![repo_file, s4.file(vec![], vec![], vec![]), caller])
             .unwrap();
         assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    // ---- LA.35a: locals before fields ----------------------------------------
+
+    fn recv(receiver: &str, name: &str) -> CallQualifier {
+        CallQualifier::ComplexReceiver { receiver: receiver.to_string(), name: name.to_string() }
+    }
+
+    /// `m3`: `struct Index { find() }` — a second type with a `find`.
+    fn index_module() -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m3 = s.add(node_kind::MODULE, "m3", None);
+        let index = s.add(node_kind::STRUCT, "m3::Index", Some(m3));
+        let find = s.add(node_kind::METHOD, "m3::Index::find", Some(index));
+        (s.file(vec![], vec![], vec![]), find)
+    }
+
+    /// Rust `fn free(r: &UserRepo) { r.find() }`: a free fn has no enclosing
+    /// type, so only its local `r` can type the receiver.
+    #[test]
+    fn local_type_binds_complex_receiver() {
+        let (repo_file, _, find) = repo_module();
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let free = s.add(node_kind::FUNCTION, "m1::free", Some(m1));
+        s.nav.record_local_type(free, "r", "UserRepo");
+        let calls = vec![
+            CallSite { from: free, qualifier: recv("r", "find") },
+            // Not a local of `free`: nothing to type it by.
+            CallSite { from: free, qualifier: recv("q", "find") },
+        ];
+        let g = build_dotted(repo(), vec![repo_file, s.file(vec![], calls, vec![])]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(free, find)]);
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// `let repo = index(); repo.find()` inside a type with a field
+    /// `repo: UserRepo`: the local of unknown type shadows the field, in both
+    /// qualifier shapes, and a `self.repo` receiver still reads the field.
+    #[test]
+    fn unknown_local_shadows_field() {
+        let (repo_file, _, find) = repo_module();
+        let (mut caller, _, get) = caller_module(recv("repo", "find"), vec![]);
+        caller.nav.record_local_type(get, "repo", "");
+        caller.calls.push(CallSite { from: get, qualifier: attr("repo", "find") });
+        let g = build_dotted(repo(), vec![repo_file.clone(), caller.clone()]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 2);
+
+        caller.calls = vec![CallSite { from: get, qualifier: recv("self.repo", "find") }];
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
+    }
+
+    /// Field `repo: UserRepo`, local `repo: Index`: the local is the inner
+    /// scope, so `repo.find()` binds `Index::find`.
+    #[test]
+    fn local_takes_precedence_over_field() {
+        let (repo_file, _, user_find) = repo_module();
+        let (index_file, index_find) = index_module();
+        let (mut caller, _, get) = caller_module(recv("repo", "find"), vec![]);
+        caller.nav.record_local_type(get, "repo", "Index");
+        let g = build_dotted(repo(), vec![repo_file, index_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, index_find)]);
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(get, user_find)));
+    }
+
+    /// `let r = &self.repo; r.find()`: the local aliases the field, whose
+    /// declared type binds the call; an alias to a field the type does not
+    /// declare binds nothing.
+    #[test]
+    fn self_field_alias_resolves_through_field_types() {
+        let (repo_file, _, find) = repo_module();
+        let (mut caller, _, get) = caller_module(recv("r", "find"), vec![]);
+        caller.nav.record_local_type(get, "r", "self.repo");
+        caller.nav.record_local_type(get, "o", "self.other");
+        caller.calls.push(CallSite { from: get, qualifier: recv("o", "find") });
+        let g = build_dotted(repo(), vec![repo_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(get, find)]);
         assert_eq!(g.unresolved_calls.len(), 1);
     }
 

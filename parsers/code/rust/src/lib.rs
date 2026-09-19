@@ -197,6 +197,9 @@ fn visit_type(
     });
     acc.nav.record(id, name_str, &qname, kind, Some(scope.id));
 
+    if kind == node_kind::STRUCT {
+        record_struct_fields(node, src, id, acc);
+    }
     if kind != node_kind::ENUM {
         return;
     }
@@ -312,6 +315,7 @@ fn visit_function(
         .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
 
     if let Some(body) = node.child_by_field_name("body") {
+        collect_local_types(node, body, src, id, None, acc);
         collect_calls_in(body, src, id, &qname, acc);
         let n = collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
         acc.client_endpoints += n;
@@ -336,6 +340,8 @@ fn visit_impl(
     // Strip generic parameters: `Foo<T>` → `Foo`
     let base_name = type_name.split('<').next().unwrap_or(type_name);
     let parent_id = type_ids.get(base_name).copied().unwrap_or(scope.id);
+    // What `Self` names in a method body's local types (LA.35a).
+    let impl_type = rust_type_name(type_node, src, None);
 
     // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
     // the `trait` field. Emit IMPLEMENTS (Type → trait) only when the trait is
@@ -382,6 +388,7 @@ fn visit_impl(
                 .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
             if let Some(fn_body) = child.child_by_field_name("body") {
+                collect_local_types(child, fn_body, src, id, impl_type.as_deref(), acc);
                 collect_calls_in(fn_body, src, id, &qname, acc);
                 let n = collect_client_endpoints_in(fn_body, src, id, repo, file_rel, acc);
                 acc.client_endpoints += n;
@@ -962,12 +969,23 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
                 .child_by_field_name("field")
                 .map(|n| text_of(n, src))
                 .unwrap_or("");
+            let ident = func_node
+                .child_by_field_name("value")
+                .is_some_and(|v| v.kind() == "identifier");
             if obj == "self" {
                 CallQualifier::SelfMethod(field.to_string())
-            } else if func_node
-                .child_by_field_name("value")
-                .is_some_and(|v| v.kind() == "identifier")
-            {
+            } else if ident && is_value_name(obj) {
+                // LA.35a: `r.find()` is a method call on a value (a local,
+                // parameter or static). As an Attribute it shared the
+                // qualifier of the path call `r::find()`, so a local named
+                // like an imported module bound the module's fn.
+                CallQualifier::ComplexReceiver {
+                    receiver: obj.to_string(),
+                    name: field.to_string(),
+                }
+            } else if ident {
+                // `Repo.find()` on a unit-struct value, `CONFIG.get()` on a
+                // static: bound through the import binding as a type base.
                 CallQualifier::Attribute {
                     base: obj.to_string(),
                     name: field.to_string(),
@@ -998,6 +1016,389 @@ fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
             name: String::new(),
         },
     }
+}
+
+/// True for an identifier that names a value by Rust convention: its first
+/// char is lowercase or `_` (`r`, `repo`, `_tmp`, `r#type`). An UpperCamel
+/// (`Repo`) or SCREAMING (`CONFIG`) identifier names a type, a unit value or
+/// a static and stays an `Attribute` base (LA.35a).
+fn is_value_name(ident: &str) -> bool {
+    ident.chars().next().is_some_and(|c| c == '_' || c.is_lowercase())
+}
+
+// ============================================================================
+// Receiver types: struct fields and fn-body locals (LA.35a)
+// ============================================================================
+//
+// A method call on a value, `r.find()`, reaches the graph crate as a
+// ComplexReceiver. What the parser can read off the AST is the value's type:
+// a struct field's declared type (`CodeNav::field_types`, for `self.repo`),
+// and a parameter's or a `let`'s type (`CodeNav::local_types`, per fn). The
+// generic receiver pass binds the call on that type; nothing is resolved here.
+
+/// Pointer-like wrappers whose methods are called on the wrapped type
+/// (auto-deref): the receiver type is their first type argument.
+const DEREF_WRAPPERS: &[&str] = &["Arc", "Rc", "Box", "Cow"];
+
+/// Containers: a method called on one is the container's (`opt.map`,
+/// `list.push`), never the element type's, so a value of one has no type the
+/// graph can bind.
+const CONTAINERS: &[&str] = &[
+    "Option", "Result", "Vec", "HashMap", "BTreeMap", "HashSet", "RefCell", "Mutex", "RwLock",
+];
+
+/// Constructor-shaped associated fns: `T::new(..)` / `T::default()` /
+/// `T::from(..)` return a `T`.
+const CONSTRUCTORS: &[&str] = &["new", "default", "from"];
+
+/// The simple name of the type a value of type `ty` has methods of:
+/// `&Repo` / `&'a mut Repo` / `Repo<T>` / `crate::repo::Repo` -> `Repo`,
+/// `Arc<Repo>` / `Box<Repo>` -> `Repo`, `Self` -> `impl_type`. `None` for a
+/// container (`Option<Repo>`, `Vec<Repo>`), a primitive, a tuple, array,
+/// pointer, fn, `dyn` or `impl` type.
+fn rust_type_name(ty: TsNode, src: &[u8], impl_type: Option<&str>) -> Option<String> {
+    match ty.kind() {
+        "reference_type" => rust_type_name(ty.child_by_field_name("type")?, src, impl_type),
+        "generic_type" => {
+            let base = last_path_segment(text_of(ty.child_by_field_name("type")?, src));
+            if DEREF_WRAPPERS.contains(&base.as_str()) {
+                let args = ty.child_by_field_name("type_arguments")?;
+                let mut cursor = args.walk();
+                let first = args
+                    .named_children(&mut cursor)
+                    .find(|a| !matches!(a.kind(), "lifetime" | "type_binding"))?;
+                return rust_type_name(first, src, impl_type);
+            }
+            type_named(base, impl_type)
+        }
+        "scoped_type_identifier" => {
+            type_named(text_of(ty.child_by_field_name("name")?, src).to_string(), impl_type)
+        }
+        "type_identifier" => type_named(text_of(ty, src).to_string(), impl_type),
+        _ => None,
+    }
+}
+
+/// `name` as a receiver type: `Self` -> `impl_type`; a container or a
+/// lowercase (primitive-style) name -> `None`.
+fn type_named(name: String, impl_type: Option<&str>) -> Option<String> {
+    if name == "Self" {
+        return impl_type.map(str::to_string);
+    }
+    let upper = name.chars().next().is_some_and(|c| c.is_uppercase());
+    (upper && !CONTAINERS.contains(&name.as_str())).then_some(name)
+}
+
+/// Every named field of a `struct` with a readable type becomes a
+/// `field_types` entry of the STRUCT. A tuple struct's fields have no names.
+fn record_struct_fields(node: TsNode, src: &[u8], struct_id: NodeId, acc: &mut Acc) {
+    let Some(body) = node
+        .child_by_field_name("body")
+        .filter(|b| b.kind() == "field_declaration_list")
+    else {
+        return;
+    };
+    let mut cursor = body.walk();
+    for field in body.named_children(&mut cursor) {
+        if field.kind() != "field_declaration" {
+            continue;
+        }
+        let (Some(name), Some(ty)) = (
+            field.child_by_field_name("name"),
+            field.child_by_field_name("type"),
+        ) else {
+            continue;
+        };
+        if let Some(type_name) = rust_type_name(ty, src, None) {
+            acc.nav
+                .record_field_type(struct_id, text_of(name, src), &type_name);
+        }
+    }
+}
+
+/// Every local a fn binds, recorded on `local_types[fn_id]` in source order:
+/// its parameters, then one walk of `body` (never into a nested item).
+///
+/// - a parameter / typed closure parameter with an identifier pattern: its
+///   type through [`rust_type_name`], else `""`; `self` is not a local;
+/// - `let x: T = ..` -> `T`; `let x = <init>` -> [`init_type`];
+/// - every other binding (untyped closure parameters, `for` / `if let` /
+///   `while let` / match-arm patterns, destructuring `let`s) -> `""`.
+///
+/// `""` still shadows a same-named field in the receiver pass, and a name
+/// bound to two types in one fn becomes `""` (`record_local_type`): Rust
+/// scopes are block-structured, this flattens them per fn, so a conflict
+/// loses an edge rather than guess one.
+fn collect_local_types(
+    fn_node: TsNode,
+    body: TsNode,
+    src: &[u8],
+    fn_id: NodeId,
+    impl_type: Option<&str>,
+    acc: &mut Acc,
+) {
+    if let Some(params) = fn_node.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        for p in params.named_children(&mut cursor) {
+            if p.kind() == "parameter" {
+                record_parameter(p, src, fn_id, impl_type, acc);
+            }
+        }
+    }
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            // A closure's typed parameter; a fn's are read above.
+            "parameter" => record_parameter(n, src, fn_id, impl_type, acc),
+            "closure_parameters" => {
+                let mut cursor = n.walk();
+                for p in n.named_children(&mut cursor) {
+                    if p.kind() != "parameter" {
+                        record_unknown_bindings(p, src, fn_id, acc);
+                    }
+                }
+            }
+            "let_declaration" => record_let(n, src, fn_id, impl_type, acc),
+            "for_expression" | "let_condition" => {
+                if let Some(p) = n.child_by_field_name("pattern") {
+                    record_unknown_bindings(p, src, fn_id, acc);
+                }
+            }
+            "match_arm" => {
+                if let Some(p) = n.child_by_field_name("pattern") {
+                    record_unknown_bindings(p, src, fn_id, acc);
+                }
+            }
+            _ => {}
+        }
+        // Children in reverse so the stack pops them in source order: a
+        // `let a = b` must see `b` recorded first.
+        let mut cursor = n.walk();
+        let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            if !NOT_LOCAL_SCOPES.contains(&child.kind()) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// Nodes inside a fn body whose parameters are not the fn's locals: nested
+/// items, and a fn-pointer type's named parameters (`fn(x: u32)`).
+const NOT_LOCAL_SCOPES: &[&str] = &[
+    "function_item",
+    "function_signature_item",
+    "impl_item",
+    "trait_item",
+    "mod_item",
+    "function_type",
+];
+
+/// `r: &Repo` / `mut r: Repo` -> `r` typed `Repo`; `(a, b): (A, B)` -> `a`
+/// and `b` unknown; `self: Box<Self>` -> nothing.
+fn record_parameter(
+    p: TsNode,
+    src: &[u8],
+    fn_id: NodeId,
+    impl_type: Option<&str>,
+    acc: &mut Acc,
+) {
+    let Some(pattern) = p.child_by_field_name("pattern") else {
+        return;
+    };
+    match binding_ident(pattern, src) {
+        Some(name) => {
+            let ty = p
+                .child_by_field_name("type")
+                .and_then(|t| rust_type_name(t, src, impl_type))
+                .unwrap_or_default();
+            acc.nav.record_local_type(fn_id, name, &ty);
+        }
+        None => record_unknown_bindings(pattern, src, fn_id, acc),
+    }
+}
+
+/// `let x: T = ..` -> `T` (`""` when [`rust_type_name`] cannot name it);
+/// `let x = <init>` -> [`init_type`]; a destructuring `let` binds every name
+/// as unknown.
+fn record_let(n: TsNode, src: &[u8], fn_id: NodeId, impl_type: Option<&str>, acc: &mut Acc) {
+    let Some(pattern) = n.child_by_field_name("pattern") else {
+        return;
+    };
+    let Some(name) = binding_ident(pattern, src) else {
+        record_unknown_bindings(pattern, src, fn_id, acc);
+        return;
+    };
+    let ty = match (n.child_by_field_name("type"), n.child_by_field_name("value")) {
+        (Some(t), _) => rust_type_name(t, src, impl_type).unwrap_or_default(),
+        (None, Some(v)) => init_type(v, src, fn_id, impl_type, acc),
+        (None, None) => String::new(),
+    };
+    acc.nav.record_local_type(fn_id, name, &ty);
+}
+
+/// The name a pattern binds when it is one identifier (`x`, `mut x`,
+/// `ref x`); `None` for any other pattern, `self` included.
+fn binding_ident<'a>(pattern: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    match pattern.kind() {
+        "identifier" => Some(text_of(pattern, src)),
+        "mut_pattern" | "ref_pattern" => {
+            let mut cursor = pattern.walk();
+            let inner = pattern
+                .named_children(&mut cursor)
+                .find(|c| c.kind() != "mutable_specifier")?;
+            (inner.kind() == "identifier").then(|| text_of(inner, src))
+        }
+        _ => None,
+    }
+}
+
+/// Record every name `pattern` binds as a local of unknown type. A path
+/// (`E::V`, the `Some` of `Some(x)`, a struct pattern's type) binds nothing,
+/// nor does an UpperCamel identifier (a unit variant or const: `None`), nor a
+/// match-arm guard.
+fn record_unknown_bindings(pattern: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" | "shorthand_field_identifier" => {
+                let name = text_of(n, src);
+                if is_value_name(name) {
+                    acc.nav.record_local_type(fn_id, name, "");
+                }
+                continue;
+            }
+            "scoped_identifier" | "scoped_type_identifier" | "range_pattern"
+            | "macro_invocation" | "closure_expression" => continue,
+            _ => {}
+        }
+        // Fields that hold no binding: a pattern's type path, a field
+        // pattern's field name, a match arm's guard.
+        let skip: Vec<usize> = ["type", "name", "condition"]
+            .iter()
+            .filter(|f| !(n.kind() == "field_pattern" && **f == "name" && is_shorthand(n)))
+            .filter_map(|f| n.child_by_field_name(f))
+            .map(|c| c.id())
+            .collect();
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            if !skip.contains(&child.id()) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+/// `Foo { x }` / `Foo { mut x }`: the field pattern's name IS the binding.
+fn is_shorthand(field_pattern: TsNode) -> bool {
+    field_pattern
+        .child_by_field_name("name")
+        .is_some_and(|n| n.kind() == "shorthand_field_identifier")
+}
+
+/// The type a `let` initialiser gives its binding, or `""`:
+///
+/// - `T { .. }` -> `T`; `T::new(..)` / `T::default()` / `T::from(..)` -> `T`
+///   (`Self` -> `impl_type`; `Arc::new(x)` / `Box::new(x)` / `Rc::new(x)` ->
+///   the type of `x`);
+/// - an enum value `E::Variant` / `E::Variant(..)` / `E::Variant { .. }` -> `E`;
+/// - `self.f` / `&self.f` / `self.f.clone()` -> the alias `self.f`, which the
+///   receiver pass reads through the field's declared type;
+/// - `b` naming a local already recorded -> `b`'s type;
+/// - anything else (a free fn's return, a chain, a literal) -> `""`.
+fn init_type(
+    value: TsNode,
+    src: &[u8],
+    fn_id: NodeId,
+    impl_type: Option<&str>,
+    acc: &Acc,
+) -> String {
+    let named = |name: String| type_named(name, impl_type).unwrap_or_default();
+    match value.kind() {
+        "reference_expression" => value
+            .child_by_field_name("value")
+            .map(|v| init_type(v, src, fn_id, impl_type, acc))
+            .unwrap_or_default(),
+        "field_expression" => self_field_alias(value, src).unwrap_or_default(),
+        "identifier" => acc
+            .nav
+            .local_types
+            .get(&fn_id)
+            .and_then(|l| l.get(text_of(value, src)))
+            .cloned()
+            .unwrap_or_default(),
+        "struct_expression" => match value.child_by_field_name("name") {
+            Some(name) => match variant_path(name, src) {
+                Some((base, _)) => named(last_path_segment(&base)),
+                None => named(last_path_segment(text_of(name, src))),
+            },
+            None => String::new(),
+        },
+        "scoped_identifier" => variant_path(value, src)
+            .map(|(base, _)| named(last_path_segment(&base)))
+            .unwrap_or_default(),
+        "call_expression" => {
+            let Some(mut func) = value.child_by_field_name("function") else {
+                return String::new();
+            };
+            // `T::new::<U>()`.
+            if func.kind() == "generic_function"
+                && let Some(inner) = func.child_by_field_name("function")
+            {
+                func = inner;
+            }
+            // `self.f.clone()`.
+            if func.kind() == "field_expression" {
+                let clone = func
+                    .child_by_field_name("field")
+                    .is_some_and(|f| text_of(f, src) == "clone");
+                return func
+                    .child_by_field_name("value")
+                    .filter(|_| clone)
+                    .and_then(|recv| self_field_alias(recv, src))
+                    .unwrap_or_default();
+            }
+            if func.kind() != "scoped_identifier" {
+                return String::new();
+            }
+            if let Some((base, _)) = variant_path(func, src) {
+                return named(last_path_segment(&base));
+            }
+            let (Some(path), Some(name)) = (
+                func.child_by_field_name("path"),
+                func.child_by_field_name("name"),
+            ) else {
+                return String::new();
+            };
+            if !CONSTRUCTORS.contains(&text_of(name, src)) {
+                return String::new();
+            }
+            let ty = last_path_segment(text_of(path, src));
+            if DEREF_WRAPPERS.contains(&ty.as_str()) {
+                // `Arc::new(Repo::new())`: the wrapped value's type.
+                return value
+                    .child_by_field_name("arguments")
+                    .and_then(|args| {
+                        let mut cursor = args.walk();
+                        args.named_children(&mut cursor).next()
+                    })
+                    .map(|arg| init_type(arg, src, fn_id, impl_type, acc))
+                    .unwrap_or_default();
+            }
+            named(ty)
+        }
+        _ => String::new(),
+    }
+}
+
+/// `self.f` -> `Some("self.f")`: a local initialised from a field aliases it.
+fn self_field_alias(expr: TsNode, src: &[u8]) -> Option<String> {
+    if expr.kind() != "field_expression" {
+        return None;
+    }
+    let base = expr.child_by_field_name("value")?;
+    let field = expr.child_by_field_name("field")?;
+    (base.kind() == "self").then(|| format!("self.{}", text_of(field, src)))
 }
 
 // ============================================================================
@@ -1262,6 +1663,13 @@ fn method_qualifier(toks: &[TsNode], dot: usize, name: String, src: &[u8]) -> Ca
     let lone = dot < 2 || !matches!(toks[dot - 2].kind(), "." | "::");
     match recv {
         Some(r) if lone && r.kind() == "self" => CallQualifier::SelfMethod(name),
+        // LA.35a: a method call on a value, as in `classify_call`.
+        Some(r) if lone && r.kind() == "identifier" && is_value_name(text_of(r, src)) => {
+            CallQualifier::ComplexReceiver {
+                receiver: text_of(r, src).to_string(),
+                name,
+            }
+        }
         Some(r) if lone && r.kind() == "identifier" => CallQualifier::Attribute {
             base: text_of(r, src).to_string(),
             name,
@@ -2470,6 +2878,13 @@ impl Svc {
         }
     }
 
+    fn recv(receiver: &str, name: &str) -> CallQualifier {
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
+    }
+
     /// Calls of `fn f() { <body> }`.
     fn body_calls(body: &str) -> Vec<CallQualifier> {
         let source = format!("fn f() {{ {body} }}\n");
@@ -2561,15 +2976,18 @@ impl Svc {
 
     #[test]
     fn macro_method_receivers_match_classify_call() {
+        // LA.35a: a lowercase receiver is a value (ComplexReceiver), an
+        // UpperCamel / SCREAMING one a type base (Attribute), as in
+        // `classify_call`.
         let calls = body_calls(
             "log!(x.go(1) && !y.is_ok(), a.b.c(), format!(\"{}\", 1).len(), load()?.id(), \
-             Self::new(2), u32::from(3));",
+             Self::new(2), u32::from(3), Repo.find(5), CONFIG.get(), _tmp.run());",
         );
         assert_eq!(
             calls,
             vec![
-                attr("x", "go"),
-                attr("y", "is_ok"),
+                recv("x", "go"),
+                recv("y", "is_ok"),
                 CallQualifier::ComplexReceiver {
                     receiver: "a.b".to_string(),
                     name: "c".to_string()
@@ -2585,6 +3003,9 @@ impl Svc {
                 },
                 attr("Self", "new"),
                 attr("u32", "from"),
+                attr("Repo", "find"),
+                attr("CONFIG", "get"),
+                recv("_tmp", "run"),
             ]
         );
     }
@@ -2628,5 +3049,221 @@ impl Svc {
             stack.extend(n.named_children(&mut cursor));
         }
         assert_eq!((acc.macro_calls, acc.macro_invocations), (6, 8));
+    }
+
+    // ---- LA.35a: typed receivers ------------------------------------------------
+
+    /// `local_types` of the fn / method with this qname.
+    fn locals(fp: &FileParse, kind: repo_graph_core::NodeKindId, qname: &str) -> Vec<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        let mut out: Vec<(String, String)> = fp
+            .nav
+            .local_types
+            .get(&id)
+            .map(|l| l.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> =
+            list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn dot_call_on_identifier_is_complex_receiver() {
+        let mut calls = body_calls(
+            "r.find(); repo::find(); _r.go(); Repo.find(5); CONFIG.get(); a.b.c(); \
+             crate::repo::index();",
+        );
+        // `collect_calls_in` pops sibling statements last-first.
+        calls.reverse();
+        assert_eq!(
+            calls,
+            vec![
+                recv("r", "find"),
+                attr("repo", "find"),
+                recv("_r", "go"),
+                attr("Repo", "find"),
+                attr("CONFIG", "get"),
+                recv("a.b", "c"),
+                attr("crate::repo", "index"),
+            ]
+        );
+        // `self.x()` stays a SelfMethod.
+        let source = "struct S;\nimpl S {\n    fn run(&self) { self.x(); }\n    fn x(&self) {}\n}\n";
+        let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
+        assert_eq!(fp.calls.len(), 1);
+        assert_eq!(fp.calls[0].qualifier, CallQualifier::SelfMethod("x".to_string()));
+    }
+
+    #[test]
+    fn struct_fields_record_types() {
+        let source = "\
+use std::sync::Arc;
+pub struct Service<'a, T> {
+    repo: Repo,
+    cache: Arc<Cache>,
+    r: &'a Repo,
+    g: Repo<T>,
+    p: crate::repo::Repo,
+    b: Box<std::rc::Rc<Index>>,
+    opt: Option<Repo>,
+    list: Vec<Repo>,
+    n: u32,
+    f: fn(u32) -> u32,
+    d: Box<dyn Store>,
+}
+pub struct Tuple(Repo, u32);
+";
+        let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
+        let svc = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "m::Service");
+        let mut got: Vec<(String, String)> = fp.nav.field_types[&svc]
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            pairs(&[
+                ("repo", "Repo"),
+                ("cache", "Cache"),
+                ("r", "Repo"),
+                ("g", "Repo"),
+                ("p", "Repo"),
+                ("b", "Index"),
+            ])
+        );
+        // A tuple struct's fields have no names.
+        let tuple = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "m::Tuple");
+        assert!(!fp.nav.field_types.contains_key(&tuple));
+    }
+
+    #[test]
+    fn params_and_lets_record_local_types() {
+        let source = "\
+pub fn f(a: &Repo, mut b: &mut Repo, n: u32, (t, u): (Repo, Repo), o: Option<Repo>) {
+    let c: Index = make();
+    let d = Repo::new();
+    let e = Cache::default();
+    let h = crate::repo::Repo::from(1);
+    let i = Repo { id: 1 };
+    let j = Tier::Base;
+    let k = Tier::Suffix(3);
+    let l = a;
+    let m = make();
+    let q = Arc::new(Repo::new());
+    let v = Vec::new();
+    let w = 1;
+    let cl = |x: Repo, y| x.find(y);
+    for it in list.iter() {}
+    if let Some(s) = opt {}
+    while let Some(wl) = next() {}
+    match val {
+        Tier::Named { inner, other: renamed } => {}
+        Some(arm) if check(arm) => {}
+        None => {}
+        _ => {}
+    }
+    let (p1, p2) = pair();
+    let dup = Repo::new();
+    let dup = Index::default();
+    fn nested(z: Repo) {}
+}
+";
+        let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
+        assert_eq!(
+            locals(&fp, node_kind::FUNCTION, "m::f"),
+            pairs(&[
+                ("a", "Repo"),
+                ("b", "Repo"),
+                ("n", ""),
+                ("t", ""),
+                ("u", ""),
+                ("o", ""),
+                ("c", "Index"),
+                ("d", "Repo"),
+                ("e", "Cache"),
+                ("h", "Repo"),
+                ("i", "Repo"),
+                ("j", "Tier"),
+                ("k", "Tier"),
+                ("l", "Repo"),
+                ("m", ""),
+                ("q", "Repo"),
+                ("v", ""),
+                ("w", ""),
+                ("cl", ""),
+                ("x", "Repo"),
+                ("y", ""),
+                ("it", ""),
+                ("s", ""),
+                ("wl", ""),
+                ("inner", ""),
+                ("renamed", ""),
+                ("arm", ""),
+                ("p1", ""),
+                ("p2", ""),
+                ("dup", ""),
+            ])
+        );
+    }
+
+    #[test]
+    fn self_field_aliases_record_the_field() {
+        let source = "\
+struct S { repo: Repo }
+impl S {
+    fn run(&self) {
+        let a = &self.repo;
+        let b = self.repo.clone();
+        let c = self.repo;
+        let d = self.repo.get();
+    }
+}
+";
+        let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
+        assert_eq!(
+            locals(&fp, node_kind::METHOD, "m::S::run"),
+            pairs(&[("a", "self.repo"), ("b", "self.repo"), ("c", "self.repo"), ("d", "")])
+        );
+    }
+
+    #[test]
+    fn self_type_uses_the_impl_type() {
+        let source = "\
+struct Repo;
+impl Repo {
+    fn fresh(&self, other: &Self) {
+        let a = Self::new();
+        let b = Self { };
+        let c: Self = make();
+        let d: Box<Self> = make();
+    }
+}
+impl<T> Wrapper<T> {
+    fn get(&self) { let w = Self::default(); }
+}
+pub fn free() { let s = Self::new(); }
+";
+        let fp = parse_file(source, "src/m.rs", "m", repo()).unwrap();
+        assert_eq!(
+            locals(&fp, node_kind::METHOD, "m::Repo::fresh"),
+            pairs(&[("other", "Repo"), ("a", "Repo"), ("b", "Repo"), ("c", "Repo"), ("d", "Repo")])
+        );
+        assert_eq!(
+            locals(&fp, node_kind::FUNCTION, "m::Wrapper::get").len(),
+            0,
+            "a method is a METHOD"
+        );
+        assert_eq!(
+            locals(&fp, node_kind::METHOD, "m::Wrapper::get"),
+            pairs(&[("w", "Wrapper")])
+        );
+        // No impl: `Self` names nothing.
+        assert_eq!(locals(&fp, node_kind::FUNCTION, "m::free"), pairs(&[("s", "")]));
     }
 }

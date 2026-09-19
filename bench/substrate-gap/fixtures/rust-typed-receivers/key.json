@@ -1,0 +1,20 @@
+{
+  "framework": "rust-typed-receivers",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_edges": [
+    {"from": "src/lib/Service/get", "to": "src/repo/Repo/find", "category": "CALLS", "note": "field receiver self.repo"},
+    {"from": "src/lib/Service/cached", "to": "src/cache_impl/Cache/lookup", "category": "CALLS", "note": "field receiver Arc<Cache>; impl in another file (LA.35b)"},
+    {"from": "src/lib/Service/via_param", "to": "src/repo/Repo/find", "category": "CALLS", "note": "parameter r: &Repo"},
+    {"from": "src/lib/Service/via_local", "to": "src/repo/Repo/find", "category": "CALLS", "note": "let r = Repo::new()"},
+    {"from": "src/lib/Service/via_typed", "to": "src/repo/Repo/find", "category": "CALLS", "note": "let r: Repo"},
+    {"from": "src/lib/free", "to": "src/repo/Repo/find", "category": "CALLS", "note": "free-fn parameter r: &mut Repo"},
+    {"from": "src/lib/Service/unit_value", "to": "src/repo/Repo/find", "category": "CALLS", "note": "CONTROL (resolves on HEAD): `Repo.find(5)` on the unit-struct value `Repo` is an Attribute site bound through the import binding; an UpperCamel receiver must stay Attribute"},
+    {"from": "src/lib/sized", "to": "src/repo/Index/size", "category": "CALLS", "note": "parameter `repo: &repo::Index` - the method call binds through the parameter's type"}
+  ],
+  "forbid": [
+    {"from": "src/lib/Service/shadowed", "to": "src/repo/Repo/find", "category": "CALLS", "note": "PRECISION: `let repo = index()` (type unknown) shadows the field `repo: Repo`; binding through the field type would be a wrong edge"},
+    {"from": "src/lib/sized", "to": "src/repo/size", "category": "CALLS", "note": "PRECISION (violated on HEAD): `repo.size()` is a method call on the parameter `repo`, not a path call into the imported module `repo`; HEAD classifies `x.m()` as Attribute{x, m}, the same qualifier as `x::m()`, and binds the module-level fn"}
+  ],
+  "note": "LA.35: Rust method calls on a typed receiver resolve through the receiver's type: a struct field (`self.repo.find`, A6.2a's field_types carrier, Arc/Box/Rc/& peeled), a parameter (`r: &Repo`), a `let` with an annotation or a `Type::new()` / `Type::default()` / `Type::from(..)` / `Type { .. }` initialiser, and an impl block in another file (LA.1a impl_elsewhere, via the Rust hook, LA.35b). A local of unknown type shadows a same-named field (the forbid). `unit_value -> Repo::find` is a HEAD control (UpperCamel receivers stay Attribute); `sized` pins the path-vs-method split. Baseline 2026-09-19 at LA.35a start, HEAD 5b73542 (after wave 12), installed wheel: see the LA.35a commit body."
+}

@@ -125,11 +125,12 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // LA.1b: with crate paths (LA.1a), macro-argument calls (LA.2), inline
     // mods (LA.3) and `use` trees (LA.1b) resolved, the Rust CALLS gap left
-    // is a method call on a typed local or field.
+    // was a method call on a typed local or field. LA.35a binds those whose
+    // type the parser can read; the row keeps the receivers it cannot.
     CoverageCaveat {
         language: "rust",
         edge_category: "CALLS",
-        note: "method calls on a local variable or field (`x.m()`) resolve only when the receiver is `self`/`Self` or a module/type path; typed-receiver inference is not implemented",
+        note: "a method call on a value (`x.m()`) binds through the type of a struct field, a parameter, or a `let` with a type annotation or a `T::new()` / `T::default()` / `T::from(..)` / `T { .. }` / enum-variant initialiser (`&`, `Arc`, `Rc`, `Box` peeled); it stays unresolved when the receiver's type comes from a function's return value (`let r = make()`), a chain (`a.b().m()`) or a container (`Option<T>`, `Vec<T>`), is generic, `dyn` or `impl Trait`, when the name is rebound to another type in the same fn, or when the method sits in an `impl` block in another file than its type",
         verify: "grep the method name",
     },
     CoverageCaveat {
@@ -455,15 +456,18 @@ mod tests {
 
     #[test]
     fn rust_calls_caveat_names_the_receiver_gap() {
-        // LA.1b: a Rust repo states the one CALLS gap LA.1-LA.3 leave; a
-        // repo without Rust gets no such row.
+        // LA.1b: a Rust repo states the one CALLS gap LA.1-LA.3 leave, which
+        // LA.35a narrows to the untyped receivers; a repo without Rust gets
+        // no such row.
         let report = coverage_report(&graph_with_file("src/lib.rs"));
         let rust: Vec<_> = report.iter().filter(|n| n.language == "rust").collect();
         assert_eq!(rust.len(), 1);
         assert_eq!((rust[0].edge_category, rust[0].edges_found), ("CALLS", 0));
         let note = rust[0].note;
-        assert!(note.contains("typed-receiver inference is not implemented"));
-        assert!(note.contains("`self`/`Self`"));
+        // LA.35a: typed receivers bind; the row names the receivers that do not.
+        assert!(!note.contains("not implemented"), "{note}");
+        assert!(note.contains("a function's return value"), "{note}");
+        assert!(note.contains("in another file than its type"), "{note}");
         assert_eq!(rust[0].verify, "grep the method name");
         let go = coverage_report(&graph_with_file("main.go"));
         assert!(go.iter().all(|n| n.language != "rust"));
