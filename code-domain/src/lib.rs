@@ -497,6 +497,15 @@ pub mod cell_type {
     pub const INTENT: CellTypeId = CellTypeId(4);
     pub const ROUTE_METHOD: CellTypeId = CellTypeId(5);
     pub const ENDPOINT_HIT: CellTypeId = CellTypeId(6);
+    /// The tests that cover a node DIRECTLY: the sources of the TESTS edges
+    /// into it (the Python parser's function-level edges, the engine's module
+    /// name pairing, overlay-declared ones), a compact JSON cell
+    /// `{"tests":[{"test":"<qname>","kind":"FUNCTION"}],"total":N}` with
+    /// `tests` sorted by qname, deduped and capped at 50 (`total` is the real
+    /// count). One cell per node, on its first copy in graph order. Never
+    /// transitive: the tests reaching a node through its callers are a query
+    /// (LE.3b tests-for), not a stored cell. Emitter LE.3a
+    /// (`engine::passes::fill_test_cells`, the `fill_test_cells` Post pass).
     pub const TEST: CellTypeId = CellTypeId(7);
     pub const ATTN: CellTypeId = CellTypeId(8);
     pub const FAIL: CellTypeId = CellTypeId(9);

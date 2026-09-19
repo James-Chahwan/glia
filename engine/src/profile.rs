@@ -169,6 +169,16 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         populates: &[],
         run: |m, _| passes::emit_tests_edges(m),
     },
+    // LE.3a: a TEST cell on every node a TESTS edge points at, listing its
+    // direct tests - reads the parser's function-level edges, the module
+    // pairing just emitted and the overlay's declared ones.
+    PassSpec {
+        name: "fill_test_cells",
+        stage: Stage::Post,
+        after: &["external_edges", "emit_tests_edges"],
+        populates: &[cell_type::TEST],
+        run: |m, _| passes::fill_test_cells(m).report(),
+    },
     PassSpec {
         name: "link_doc_sections",
         stage: Stage::Post,
@@ -283,7 +293,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 25] = [
+    const HEAD_ORDER: [&str; 26] = [
         "http",
         "grpc",
         "rpc",
@@ -303,6 +313,7 @@ mod tests {
         "downgrade_test_paths",
         "demote_unmatched_http_nodes",
         "emit_tests_edges",
+        "fill_test_cells",
         "link_doc_sections",
         "fill_adr_decisions",
         "link_contract_routes",
@@ -314,7 +325,8 @@ mod tests {
     /// The registry reproduces the pre-LD.13 hardcoded tail exactly:
     /// `run_all_resolvers` (15), `post_passes` (6), then fill-then-sort as
     /// the last two steps (LC.3a); LF.2b's external edges are the first
-    /// post-pass, and LF.4b's ADR decisions follow the doc linker.
+    /// post-pass, LE.3a's TEST cells follow the TESTS emitter, and LF.4b's
+    /// ADR decisions follow the doc linker.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -324,7 +336,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (15, 8, 2)
+            (15, 9, 2)
         );
     }
 
@@ -507,6 +519,7 @@ mod tests {
         assert_eq!(
             CODE_PROFILE.cell_populators(),
             [
+                ("fill_test_cells", &[cell_type::TEST][..]),
                 ("fill_adr_decisions", &[cell_type::DECISION][..]),
                 ("tag_synthetic_provenance", &[cell_type::ORIGIN][..]),
             ]

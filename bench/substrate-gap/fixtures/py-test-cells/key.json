@@ -1,0 +1,16 @@
+{
+  "framework": "py-test-cells",
+  "language": "python",
+  "note": "LE.3a: TEST cell (7) filled at build time from TESTS edges - module-level name pairing (tests/test_service.py -> orders/service.py) and python fn-level (test_price -> price, test_audited_place -> audited_place). Direct tests only: place is reached from test_audited_place transitively and carries no TEST cell. Baseline (installed leap wheel, HEAD cb356fc, 2026-09-19): TESTS 1/1, TEST 0/3 - the 4 TESTS edges (2 module, 2 function) present, no node carrying cell 7.",
+  "expect_edges": [
+    {"from": "test_service", "to": "shop::orders::service", "category": "TESTS"}
+  ],
+  "expect_cells": [
+    {"kind": "MODULE", "node": "shop::orders::service", "cell": "TEST", "contains": "shop::tests::test_service"},
+    {"kind": "FUNCTION", "node": "shop::orders::service::price", "cell": "TEST", "contains": "test_price"},
+    {"kind": "FUNCTION", "node": "shop::orders::audit::audited_place", "cell": "TEST", "contains": "test_audited_place"}
+  ],
+  "forbid": [
+    {"from": "shop::tests::test_service", "to": "shop::orders::audit", "category": "TESTS"}
+  ]
+}

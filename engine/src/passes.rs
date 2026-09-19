@@ -1,10 +1,11 @@
 //! Post-passes over the merged graph: the doc linker, synthetic-node
-//! provenance tagging, TESTS edges, and the confidence demotions, plus the
+//! provenance tagging, TESTS edges and the TEST cells that list them (LE.3a),
+//! and the confidence demotions, plus the
 //! evidence fill that precedes the deterministic cross-edge sort. They run as
 //! `Post` / `Finalize` specs of the code domain's pass registry
 //! ([`crate::profile::CODE_PASSES`], LD.13), which owns their order.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use repo_graph_code_domain::evidence::{self, Basis, Evidence, Location};
 use repo_graph_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
@@ -1044,6 +1045,193 @@ fn common_prefix_len(a: &[&str], b: &[&str]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
+// ----------------------------------------------------------------------------
+// TEST cells (LE.3a)
+// ----------------------------------------------------------------------------
+
+/// Most tests one TEST cell lists; its `total` keeps the real count.
+const MAX_TEST_ENTRIES: usize = 50;
+
+/// What [`fill_test_cells`] did, for its marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct TestCellStats {
+    /// Nodes given a TEST cell.
+    pub(crate) nodes: usize,
+    /// Distinct tests those cells name.
+    pub(crate) tests: usize,
+    /// Distinct `(test, target)` TESTS pairs read, intra and cross: an edge
+    /// seen in two graphs counts once, a self-loop not at all.
+    pub(crate) edges: usize,
+    /// Of `edges`, those whose test is a FUNCTION or METHOD (the Python
+    /// parser's `collect_test_targets`, bound by the graph builder).
+    pub(crate) fn_level: usize,
+    /// Of `edges`, those whose test is a MODULE (`emit_tests_edges`' name
+    /// pairing). The rest name a test of another kind, or none.
+    pub(crate) module: usize,
+    /// TESTS endpoints no graph holds: a test with no qname (left out of
+    /// every list) or a target with no node (no cell).
+    pub(crate) dangling: usize,
+}
+
+impl TestCellStats {
+    /// LE.3a fired_on marker, once per build that read a TESTS edge:
+    ///   `[test-cells] nodes=<N> tests=<T> edges=<E> (fn=<F> module=<M>) dangling=<D>`
+    /// (grep token `[test-cells]`). `None` when no TESTS edge exists.
+    pub(crate) fn marker(&self) -> Option<String> {
+        (self.edges > 0).then(|| {
+            format!(
+                "[test-cells] nodes={} tests={} edges={} (fn={} module={}) dangling={}",
+                self.nodes, self.tests, self.edges, self.fn_level, self.module, self.dangling
+            )
+        })
+    }
+
+    /// Print [`Self::marker`] to stderr, if any.
+    pub(crate) fn report(self) {
+        if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// One entry of a TEST cell's `tests` list. Field order is the payload's key
+/// order.
+#[derive(serde::Serialize)]
+struct TestEntry<'a> {
+    test: &'a str,
+    kind: &'static str,
+}
+
+/// A TEST cell's payload: the documented shape of `cell_type::TEST`.
+#[derive(serde::Serialize)]
+struct TestCellPayload<'a> {
+    tests: Vec<TestEntry<'a>>,
+    total: usize,
+}
+
+/// LE.3a: a TEST cell on every node a TESTS edge points at, listing the
+/// node's DIRECT tests (the sources of those edges, intra and cross: the
+/// Python parser's function-level edges, `emit_tests_edges`' module pairing,
+/// overlay `[[edge]]` stanzas). Payload: `cell_type::TEST`'s doc.
+///
+/// Direct only: what tests a node transitively (through its callers) is the
+/// tests-for query's walk, never frozen into every stored graph, where it
+/// would go stale on any edit elsewhere.
+///
+/// A node held by several per-language graphs (one NodeId: repo + kind +
+/// qname) carries ONE cell, on its first copy in graph order; consumers that
+/// fold a node's copies concatenate their cells. The pass owns the TEST type
+/// (no extractor and no sidecar writes it: `external_inputs::WRITABLE`), so a
+/// re-run over a graph that already carries TEST cells (a layout merge,
+/// LC.10b) rewrites each cell in place and drops the ones its edges no longer
+/// support. BTreeMaps only: the output does not depend on hash order.
+pub(crate) fn fill_test_cells(merged: &mut MergedGraph) -> TestCellStats {
+    use repo_graph_code_domain::cell_type;
+    use repo_graph_core::{Cell, CellPayload};
+
+    let mut stats = TestCellStats::default();
+
+    // Target -> its direct tests, by raw id (NodeId is not Ord).
+    let mut targets: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    for e in merged.all_edges() {
+        if e.category == edge_category::TESTS && e.from != e.to {
+            targets.entry(e.to.0).or_default().insert(e.from.0);
+        }
+    }
+    stats.edges = targets.values().map(BTreeSet::len).sum();
+
+    // Every test's qname and kind, and every target's first copy
+    // (graph index, node index), in graph order.
+    let tests: BTreeSet<u64> = targets.values().flatten().copied().collect();
+    let mut test_info: BTreeMap<u64, (&str, NodeKindId)> = BTreeMap::new();
+    let mut first: BTreeMap<u64, (usize, usize)> = BTreeMap::new();
+    for (gi, g) in merged.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
+            if targets.contains_key(&n.id.0) {
+                first.entry(n.id.0).or_insert((gi, ni));
+            }
+            if tests.contains(&n.id.0)
+                && !test_info.contains_key(&n.id.0)
+                && let (Some(q), Some(k)) =
+                    (g.nav.qname_by_id.get(&n.id), g.nav.kind_by_id.get(&n.id))
+            {
+                test_info.insert(n.id.0, (q.as_str(), *k));
+            }
+        }
+    }
+    stats.dangling = tests.iter().filter(|t| !test_info.contains_key(t)).count()
+        + targets.keys().filter(|t| !first.contains_key(t)).count();
+    for set in targets.values() {
+        for t in set {
+            match test_info.get(t).map(|(_, k)| *k) {
+                Some(node_kind::FUNCTION | node_kind::METHOD) => stats.fn_level += 1,
+                Some(node_kind::MODULE) => stats.module += 1,
+                _ => {}
+            }
+        }
+    }
+
+    // (graph index, node index) -> the payload its TEST cell holds.
+    let mut named: BTreeSet<u64> = BTreeSet::new();
+    let mut payloads: BTreeMap<(usize, usize), String> = BTreeMap::new();
+    for (target, set) in &targets {
+        let Some(&place) = first.get(target) else { continue };
+        let mut entries: Vec<(&str, &'static str, u64)> = set
+            .iter()
+            .filter_map(|t| test_info.get(t).map(|(q, k)| (*q, node_kind::name(*k), *t)))
+            .collect();
+        if entries.is_empty() {
+            continue;
+        }
+        entries.sort_unstable();
+        named.extend(entries.iter().map(|(_, _, t)| *t));
+        let total = entries.len();
+        let payload = TestCellPayload {
+            tests: entries
+                .iter()
+                .take(MAX_TEST_ENTRIES)
+                .map(|(test, kind, _)| TestEntry { test, kind })
+                .collect(),
+            total,
+        };
+        if let Ok(json) = serde_json::to_string(&payload) {
+            payloads.insert(place, json);
+        }
+    }
+    stats.nodes = payloads.len();
+    stats.tests = named.len();
+
+    for (gi, g) in merged.graphs.iter_mut().enumerate() {
+        for (ni, n) in g.nodes.iter_mut().enumerate() {
+            match payloads.remove(&(gi, ni)) {
+                Some(json) => {
+                    // Rewrite the first TEST cell where it stands (a re-run
+                    // keeps the cell order a single build gives), drop any
+                    // other.
+                    let mut json = Some(json);
+                    n.cells.retain_mut(|c| {
+                        if c.kind != cell_type::TEST {
+                            return true;
+                        }
+                        match json.take() {
+                            Some(j) => {
+                                c.payload = CellPayload::Json(j);
+                                true
+                            }
+                            None => false,
+                        }
+                    });
+                    if let Some(j) = json {
+                        n.cells.push(Cell { kind: cell_type::TEST, payload: CellPayload::Json(j) });
+                    }
+                }
+                None => n.cells.retain(|c| c.kind != cell_type::TEST),
+            }
+        }
+    }
+    stats
+}
+
 /// Weak for every node under a test / fixture / example path segment.
 pub(crate) fn downgrade_test_paths(merged: &mut MergedGraph) {
     for g in &mut merged.graphs {
@@ -1906,5 +2094,83 @@ mod passes_tests {
         assert_eq!(conf(&m, e_medium), vec![Medium]);
         assert_eq!(conf(&m, r_weak), vec![Weak]);
         assert_eq!(conf(&m, e_mixed), vec![Medium, Weak]);
+    }
+
+    // ------------------------------------------------------------------
+    // LE.3a - fill_test_cells, on a hand-built merge
+    // ------------------------------------------------------------------
+
+    fn test_payloads(m: &MergedGraph, id: NodeId) -> Vec<Vec<String>> {
+        m.graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .filter(|n| n.id == id)
+            .map(|n| {
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == cell_type::TEST)
+                    .map(|c| match &c.payload {
+                        CellPayload::Json(j) => j.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cell_marker_needs_a_tests_edge() {
+        assert_eq!(TestCellStats::default().marker(), None, "no TESTS edge, no marker");
+        let stats =
+            TestCellStats { nodes: 3, tests: 3, edges: 4, fn_level: 2, module: 2, dangling: 0 };
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[test-cells] nodes=3 tests=3 edges=4 (fn=2 module=2) dangling=0")
+        );
+    }
+
+    /// Two tests of one target, sorted by qname; the edge seen twice (intra
+    /// and cross) counted once; a dangling test left out and counted; a
+    /// stale TEST cell rewritten where it stands and one no edge supports
+    /// dropped; a second run changes nothing.
+    #[test]
+    fn test_cells_rewrite_in_place_and_drop_stale() {
+        let stale = || Cell { kind: cell_type::TEST, payload: CellPayload::Json("{}".into()) };
+        let position = Cell { kind: cell_type::POSITION, payload: CellPayload::Json("{}".into()) };
+        let origin = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) };
+
+        let mut h = Hand::new("test://le3a");
+        let target = h.add(
+            node_kind::FUNCTION,
+            "price",
+            "shop::price",
+            vec![position.clone(), stale(), origin.clone()],
+        );
+        let untested = h.add(node_kind::FUNCTION, "place", "shop::place", vec![stale()]);
+        let t_b = h.add(node_kind::FUNCTION, "test_b", "tests::test_shop::test_b", vec![]);
+        let t_a = h.add(node_kind::FUNCTION, "test_a", "tests::test_shop::test_a", vec![]);
+        let t_mod = h.add(node_kind::MODULE, "test_shop", "tests::test_shop", vec![]);
+        let ghost = NodeId(42);
+        let mut g = h.graph();
+        let tests = |from| Edge::new(from, target, edge_category::TESTS, Confidence::Strong);
+        g.edges = vec![tests(t_b), tests(t_a), tests(ghost)];
+        let mut m = MergedGraph::new(vec![g]);
+        m.cross_edges = vec![tests(t_a), tests(t_mod), tests(target)];
+
+        let stats = fill_test_cells(&mut m);
+        assert_eq!(
+            stats,
+            TestCellStats { nodes: 1, tests: 3, edges: 4, fn_level: 2, module: 1, dangling: 1 }
+        );
+        let want = r#"{"tests":[{"test":"tests::test_shop","kind":"MODULE"},{"test":"tests::test_shop::test_a","kind":"FUNCTION"},{"test":"tests::test_shop::test_b","kind":"FUNCTION"}],"total":3}"#;
+        assert_eq!(test_payloads(&m, target), vec![vec![want.to_string()]]);
+        let kinds: Vec<_> =
+            m.graphs[0].nodes[0].cells.iter().map(|c| c.kind).collect();
+        assert_eq!(kinds, [cell_type::POSITION, cell_type::TEST, cell_type::ORIGIN], "rewritten in place");
+        assert_eq!(test_payloads(&m, untested), vec![Vec::<String>::new()], "stale cell dropped");
+
+        let before = m.graphs[0].nodes.clone();
+        assert_eq!(fill_test_cells(&mut m), stats);
+        assert_eq!(m.graphs[0].nodes, before, "a re-run changes nothing");
     }
 }
