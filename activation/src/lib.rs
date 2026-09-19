@@ -20,6 +20,14 @@ pub mod passes;
 
 pub use passes::{PassRegistry, PassReport, PassSpec, Stage};
 
+/// Domain profile (LD.14a): the data a domain declares so the query and
+/// build layers read its dials instead of hardcoding them —
+/// [`DomainTables`] (registries, entry rule, carry edges, effect sinks,
+/// activation weights + presets) and [`DomainProfile`] (tables + passes).
+pub mod profile;
+
+pub use profile::{ActivationPreset, DomainProfile, DomainTables, EntryRule, NamedEntry, Registries};
+
 // ============================================================================
 // Config
 // ============================================================================

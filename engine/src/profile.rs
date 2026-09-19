@@ -17,8 +17,17 @@
 //! The first stage that does (LF.1a's external cells, LF.2b's external edges,
 //! LF.2d's mounts) turns it into a `CodeBuildCtx` struct carrying exactly its
 //! arguments.
+//!
+//! LD.14a: [`CODE_PROFILE`] is the code domain's whole
+//! [`DomainProfile`]: the data tables (`code_domain::profile::CODE_TABLES` —
+//! registries, entry rule, carry edges, effect sinks, activation weights and
+//! presets) plus [`CODE_PASSES`]. [`run_code_passes`] runs the passes through
+//! it. The query consumers (liveness, blast radius, PPR) switch to its tables
+//! in LD.14b; until then `code_profile_matches_head_tables` pins the tables
+//! equal to the hardcoded functions they replace.
 
 use repo_graph_activation::passes::{PassRegistry, PassSpec, Stage};
+use repo_graph_activation::profile::DomainProfile;
 use repo_graph_code_domain::{cell_type, evidence};
 use repo_graph_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
@@ -145,19 +154,26 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph> = PassRegistry::new(&[
     },
 ]);
 
-/// Run [`CODE_PASSES`] over an assembled graph: the whole build tail.
+/// The code domain's profile: [`CODE_TABLES`](repo_graph_code_domain::profile::CODE_TABLES)
+/// plus [`CODE_PASSES`]. A `static` (a `const` would copy it at every use);
+/// its initializer reads only consts.
+pub static CODE_PROFILE: DomainProfile<MergedGraph> = DomainProfile {
+    tables: repo_graph_code_domain::profile::CODE_TABLES,
+    passes: CODE_PASSES,
+};
+
+/// Run [`CODE_PASSES`] over an assembled graph, through [`CODE_PROFILE`]: the
+/// whole build tail.
 ///
-/// Markers, once per call: LC.2's `[edge-cells] intra=<n> cross=<c> with_cells=<k>`,
-/// then LD.13's fired_on line
+/// Markers, once per call: LD.13's fired_on line, printed by
+/// `DomainProfile::run_passes` with `domain=` read from the tables'
+/// `graph_type`,
 ///   `[passes] domain=code resolve=<r> post=<p> finalize=<f>`
-/// (grep token `[passes] domain=code`).
+/// (grep token `[passes] domain=code`), then LC.2's
+/// `[edge-cells] intra=<n> cross=<c> with_cells=<k>`.
 pub(crate) fn run_code_passes(merged: &mut MergedGraph) {
-    let report = CODE_PASSES.run(merged, &());
+    CODE_PROFILE.run_passes(merged, &());
     passes::edge_cells_marker(merged);
-    eprintln!(
-        "[passes] domain=code resolve={} post={} finalize={}",
-        report.resolve, report.post, report.finalize
-    );
 }
 
 #[cfg(test)]
@@ -209,6 +225,89 @@ mod tests {
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
             (15, 6, 2)
         );
+    }
+
+    /// LD.14a: [`CODE_PROFILE`]'s tables equal the HEAD hardcoding they
+    /// replace — the carry edges in order, the activation config of every
+    /// preset field by field (exact f64), and the entrypoint truth table —
+    /// until LD.14b switches the consumers and deletes the originals.
+    #[test]
+    fn code_profile_matches_head_tables() {
+        use repo_graph_activation::ActivationConfig;
+        use repo_graph_code_domain::{edge_category as ec, node_kind as nk};
+        use repo_graph_core::NodeKindId;
+        use repo_graph_graph::{blast_carry_edges, code_activation_defaults, code_activation_profile};
+
+        let t = &CODE_PROFILE.tables;
+        assert_eq!(t.carry_edges, blast_carry_edges().as_slice());
+        assert_eq!(t.carry_edges.len(), 26);
+
+        for p in [None, Some("default"), Some("repair"), Some("review"), Some("onboard"), Some("nonsense")] {
+            let head: ActivationConfig = match p {
+                None => code_activation_defaults(),
+                Some(name) => code_activation_profile(name),
+            };
+            let got = t.activation_config(p);
+            assert_eq!(got.edge_weights, head.edge_weights, "edge_weights, preset {p:?}");
+            assert_eq!(got.damping, head.damping, "damping, preset {p:?}");
+            assert_eq!(got.direction, head.direction, "direction, preset {p:?}");
+            assert_eq!(got.node_specificity, head.node_specificity, "specificity, preset {p:?}");
+            assert_eq!(got.top_k, head.top_k, "top_k, preset {p:?}");
+            assert_eq!(got.max_iterations, head.max_iterations, "max_iterations, preset {p:?}");
+            assert_eq!(got.epsilon, head.epsilon, "epsilon, preset {p:?}");
+        }
+        assert_eq!(t.activation_weights.len(), 19);
+        let presets: Vec<(&str, usize)> =
+            t.activation_presets.iter().map(|p| (p.name, p.overrides.len())).collect();
+        assert_eq!(presets, [("repair", 6), ("review", 5), ("onboard", 5)]);
+
+        // HEAD `engine::answers::is_entrypoint(kind, name, roles)`, literally.
+        const ENTRY_KINDS: [NodeKindId; 6] = [
+            nk::ROUTE,
+            nk::GRPC_SERVICE,
+            nk::WS_HANDLER,
+            nk::EVENT_HANDLER,
+            nk::CLI_COMMAND,
+            nk::COMPONENT,
+        ];
+        let head_entry = |kind: Option<NodeKindId>, name: &str, roles: &[NodeKindId]| {
+            if roles.contains(&nk::COMPONENT) {
+                return true;
+            }
+            match kind {
+                Some(k) if ENTRY_KINDS.contains(&k) => true,
+                Some(k) if k == nk::FUNCTION || k == nk::METHOD => {
+                    name == "main" || name.starts_with("test") || name.starts_with("Test")
+                }
+                _ => false,
+            }
+        };
+        const NAMES: [&str; 8] = ["main", "Main", "test_x", "testFoo", "TestFoo", "tester", "handler", ""];
+        let role_sets: [&[NodeKindId]; 4] =
+            [&[], &[nk::COMPONENT], &[nk::SERVICE, nk::HOOK], &[nk::HOOK, nk::COMPONENT]];
+        let kinds: Vec<Option<NodeKindId>> =
+            nk::ALL.iter().map(|(k, _)| Some(*k)).chain([None]).collect();
+        let mut entries_without_roles = 0;
+        for &kind in &kinds {
+            for name in NAMES {
+                for roles in role_sets {
+                    let head = head_entry(kind, name, roles);
+                    assert_eq!(t.entry.is_entry(kind, name, roles), head, "{kind:?} {name:?} {roles:?}");
+                    entries_without_roles += usize::from(head && roles.is_empty());
+                }
+            }
+        }
+        // 6 entry kinds x 8 names, plus FUNCTION / METHOD x the 5 names
+        // `main` / `test*` / `Test*` match.
+        assert_eq!(entries_without_roles, 6 * 8 + 2 * 5);
+
+        assert_eq!(CODE_PROFILE.validate(), Ok(()));
+        assert_eq!(
+            CODE_PROFILE.cell_populators(),
+            [("tag_synthetic_provenance", &[cell_type::ORIGIN][..])]
+        );
+        assert_eq!(t.effect_sinks, [ec::ACCESSES_DATA, ec::QUEUE_FLOWS, ec::HTTP_CALLS, ec::EVENT_FLOWS]);
+        assert_eq!(t.graph_type, repo_graph_code_domain::GRAPH_TYPE);
     }
 
     fn workspace() -> PathBuf {

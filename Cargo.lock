@@ -872,6 +872,7 @@ name = "repo-graph-code-domain"
 version = "0.4.3"
 dependencies = [
  "ignore",
+ "repo-graph-activation",
  "repo-graph-core",
  "rkyv",
  "serde",
