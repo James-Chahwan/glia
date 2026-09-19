@@ -30,8 +30,11 @@ projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights;
                     also the domain-free build-pass registry (`passes`: Stage, PassSpec,
                     PassRegistry) — build-time, so PARSER_STAMP hashes it — and `algo`:
-                    GraphSource, CategorySet, the CSR Adjacency index and `algo::reach`
-                    (bfs / reachable / reachable_by), O(V+E) per walk
+                    GraphSource, CategorySet, the CSR Adjacency index, `algo::reach`
+                    (bfs / reachable / reachable_by, O(V+E) per walk), `algo::delta`
+                    (graph delta) and `algo::cycles` (Tarjan SCC); `plan` (one
+                    ActivationPlan over the RankingSignal / FilterPredicate / SynthHook
+                    hooks) and `profile` (DomainTables / DomainProfile)
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
@@ -48,7 +51,7 @@ toy-domain/         test-only second domain (publish = false) proving the domain
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh
 ```
 
-Parsers live at `parsers/<domain>/<language>/`. When v0.5.0 adds non-code domains, they nest alongside `parsers/code/`.
+Parsers live at `parsers/<domain>/<language>/`. When a non-code domain lands (0.5.0 ships the seam, not a domain), its parsers nest alongside `parsers/code/`.
 
 ### Module layout — every hot crate is a facade over modules
 
@@ -80,11 +83,16 @@ The facade rules:
 ```
 engine/src/   lib.rs        facade (rules above)
               walk.rs       repo walk, gitignore, region graph
-              route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache
+              route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache;
+                            ModuleQnames::plan names each file's MODULE (same-stem code files,
+                            LB.9b / LB.13, and every C/C++ file, LB.10a, are named by file
+                            name; graph/src/imports.rs `SameStem` picks the importer's
+                            sibling, `[imports] same-stem picks`)
               extract.rs    detect_language, parse_one, parse_one_with, cross-cutting extractors
               build/        mod.rs         GenerateResult, generate_one* / generate_many* pipeline;
                                            assemble_many (generate_many before its passes run)
-                            assemble.rs    build_graphs_for_repo, build_const_table, SuppressPanicHook
+                            assemble.rs    build_graphs_for_repo, build_const_table (panics go
+                                           quiet through parallel::quiet; SuppressPanicHook is gone)
                             grafts.rs      apply_post_cache — every post-cache graft goes here
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
                             lang_build.rs  build_language_graphs — per-language build + markers;
@@ -105,7 +113,7 @@ engine/src/   lib.rs        facade (rules above)
               spec_status LE.9b        gaps LF.2c (+LF.2e, LF.5c)   feature_flows LG.3a
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
-              adr LF.4b                parallel LG.1a (+LG.1b)
+              adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
               external/ LF.1a — directory module; LF.2b, LF.2e, LF.3b, LF.4a, LF.5b, LF.6b
                         add their stage files and declare them in external/mod.rs
 
@@ -131,7 +139,8 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
                             then add_class PyGraph — never edited for a new API
               graph.rs      #[pyclass] PyGraph (fields pub(crate)) + its core methods
               registry.rs   the ModuleFns inventory type + registry / version functions
-              convert.rs    escape_json (LD.2 adds the JSON -> Python converter)
+              convert.rs    escape_json + to_py: LD.2's return convention (an answer is a
+                            native dict / list; only a `*_json` method returns JSON text)
               build.rs layout.rs      #[pyfunction]s (generate*, load_from_gmap, is_stale ...)
               text.rs records.rs traversal.rs blast.rs trace.rs find.rs docs.rs
               arch.rs contracts.rs    one `#[pymethods] impl PyGraph` block each
@@ -177,28 +186,56 @@ source files
    → per-language parser (tree-sitter → ExtractedItems)
    → extractors (cross-cutting: HTTP, gRPC, queues, data_sources, CLI)
    → graph builder (resolves intra-repo references)
-   → cross-graph resolvers (HttpStack, GraphQL, gRPC, Queue, WebSocket, EventBus, SharedSchema, DB, CLI)
+   → CODE_PASSES (engine/src/profile.rs): the 15 cross-graph resolvers (HttpStack, gRPC, RPC,
+     Queue, GraphQL, WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron, Config,
+     IaC, Package), then the post-passes, evidence fill and determinism sort
    → merged graph
-   → .gmap (rkyv + mmap, sharded)
+   → .gmap layout at <repo>/.glia/graph/ (rkyv + mmap, sharded)
    → [optional] activation (PPR) / projection-text / pyo3 → Python
 ```
+
+**Parallel build (LG.1a–c).** The walk's reads, the per-file route / parse / extract, the
+const-table scan, the RPC needle pass, a multi-repo build's per-repo walks and the per-language
+graph builds (every build group but the TS family, which builds last on the calling thread)
+run on the engine's own rayon pool (`engine/src/parallel.rs`, 16 MiB worker stacks), each
+through an order-preserving map folded in input order, so a build is byte-identical at any
+pool size (`--test byte_identical`, `--test parallel_build`). `GLIA_THREADS` sets the size:
+unset / `0` = every core, clamped 1..=256, `1` = no pool. Parser panics are silenced by a
+thread-local flag one process-wide hook reads (`parallel::quiet`), so other threads' panics
+still reach the embedding app's hook. fired_on, on stderr:
+`[parallel] walk <root>: read <n> files on <t> threads (...)` once per walk,
+`[parallel] <repo>: routed <n> files on <t> threads (...)` and
+`[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`
+once per repo. Per-language builder markers interleave at default threads;
+`GLIA_THREADS=1` keeps them in sequential order.
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
 Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems` with unresolved references (`UnresolvedRef`). The graph builder walks the tree to turn those into concrete edges uniformly across languages.
 
 - `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent.
-- A reserved `extra_hook` seam lets a parser contribute language-specific resolution when the generic walker isn't enough.
-  Rust is the first language to use it: `build_rust` hands `resolve_calls` the path resolver in
-  `graph/src/rust_paths.rs` (`crate::` / `self::` / `super::` / `Self::` / workspace-crate paths),
-  fed the walk's Cargo packages as `RustCrate`s by `lang_build::rust_crates` (LA.1a).
+- An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
+  walker misses; it is consulted only after every generic lookup failed. Three builders use it:
+  `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
+  `super::` / `Self::` / workspace-crate paths), fed the walk's Cargo packages as `RustCrate`s by
+  `lang_build::rust_crates` (LA.1a); `build_go` hands it `GoPackages` (a package is its
+  directory, LA.13b); `build_c_cpp` hands it `CppCallScope` (out-of-line members and directly
+  `#include`d headers, LB.10c).
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
 
 Zero-copy rkyv serialisation with memory-mapped read. Sharded by kind to keep hot paths local. Write-once, rebuild-whole-file — no in-place mutation. Owned vs Archived types are the mental model: loaded views are `Archived<T>`, writes go through `Owned<T>` then serialise.
 
-Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache).
+Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache), the one layout
+`glia build`, the install-hooks hooks and pyo3 all write (LC.9). `FORMAT_VERSION` 2 and
+`MANIFEST_VERSION` 2 (LC.1): every file opens with a `GLIAGMAP` preamble, so an old, future or
+foreign file reports OldFormat / FutureFormat / Corrupt ("rebuild the graph"), and
+`load_from_gmap` rebuilds such a layout from its repo root instead of raising (LC.8). The header
+names its own node-kind / edge-category / cell-type registries (LC.4, read by `glia inspect`);
+the container is a domain-free core plus named domain sections (`code`: nav, symbols,
+interface methods; LC.5b, LC.6); edges carry cells (LC.2), every edge one EVIDENCE cell with its
+emitter, rule, file and 0-based line (LC.3).
 
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
@@ -257,8 +294,8 @@ its `pub use resolvers::{…}` list only if it must be public. Register it by ad
 pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
 `populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
 and `populates_is_exact` tests pin the order and the declared cell types.
-`resolvers/http.rs` is the canonical example. Shipped: HTTP, gRPC, Queue, GraphQL,
-WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
+`resolvers/http.rs` is the canonical example. Shipped (15): HTTP, gRPC, RPC, Queue, GraphQL,
+WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron, Config, IaC, Package. See
 `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
 
 ## Key Design Decisions
@@ -266,48 +303,77 @@ WebSocket, EventBus, SharedSchema, DB, Cron, Config, IaC, Package, CLI. See
 - **Tree-sitter, not regex.** 0.4.x moved to AST extraction; 0.2.0 regex is not a ceiling.
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
-- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability now (LD.15a), graph delta (LE.1) and SCC / cycles (LE.6) next; a graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node.
+- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); a graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node.
 - **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3)
+## Query & Answer Surface (v6 P2/P3, 0.5.0)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
 Every record's `line` is 1-based (an editor's line), located through one
 `Locator` per answer; POSITION cells store 0-based rows — `Locator::locate` is
-the only place that converts.
+the only place that converts (LD.1). A list answer that can come back empty is
+`Answer { results, absence }`: the absence is a FACT-tier reason plus the coverage
+caveats of the mechanisms it depended on (LD.8a, `engine::absence`). Rows carry an
+evidence tier — FACT (read at a site), DERIVED (paired by a resolver or pass) or
+HEURISTIC (a name guess, an overlay, git history) — never an unexplained score.
 
-CLI (all accept `--with <repo>` repeatable for cross-service merge; `--json`):
-- `glia arch <repo> [--mermaid] [--include-shared]` — the whole-stack view: the
-  services present and the cross-service links between them, each with mechanism
-  + channel + count (A9.2 `service_map`). A single repo keys services by
-  top-level directory, so a monorepo does not collapse to one node. Non-flow
-  links (`SHARES_*`, `DOCUMENTS`) are hidden unless `--include-shared`.
-  `glia analyze --format mermaid` renders the same service graph.
-- `glia blast-radius <repo> <qname>` — edge-category-aware, PPR-ranked, located
-  closure with per-node edge-reason + `live` flag (`--live-only`, `--direction`,
-  `--depth`, `--top-k`). Excludes structural import/contain edges (no fan-out noise).
-- `glia trace <repo> <feature>` — ordered cross-service path with mechanism labels
-  (http/queue/grpc/call) + `cross_service` flags.
-- `glia resolve <repo> <signal> [--kind stacktrace|test|diff|auto]` — signal →
-  ranked located nodes.
-- `glia coverage <repo>` — P2 blind-spot signaling: per-language known extraction
-  caveats + edges-found, so graph+grep fallback is deliberate.
-- `glia docs-for <repo> <qname>` — the DOC_SECTIONs that DOCUMENTS a symbol
-  (governing_docs). Tier-4 doc ingestion: `glia docs sync --space <KEY>` /
-  `glia docs push` (network; feeds the deterministic build via a local snapshot).
-- `glia pages <repo> [--dead-only]` — frontend page flow (LA.6e `pages::page_flow`):
-  client-router pages with their handlers, the links between them, dead deep links
-  (a router link no route serves, with the catch-all that absorbs it) and unlinked
-  pages (no in-repo link reaches them: a fact, never "dead"). Exits 0 either way.
+CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surface/`
+(regenerate: `GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface`). Most take
+`--with <repo>` (repeatable, merge first) and `--json`; `--scope` takes a path or a
+`glia projects` label. By `cli/src/cmd/` area:
+- pre-0.5.0 (`cmd/<command>.rs`): `analyze`, `arch` (A9.2 `service_map`; a single
+  repo keys services by top-level directory; `SHARES_*` / `DOCUMENTS` only with
+  `--include-shared`), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d),
+  `impact`, `blast-radius` (many seeds are one walk and one ranking, LD.5), `trace`
+  (ranked distinct paths, `--to`, `--max-paths`, LD.4a), `resolve`, `coverage` (+ the
+  co-change audit, LF.5c), `docs-for`, `docs sync|push`, `merge` (`--gmap`,
+  `--workspace`, `--layout`, LC.10c), `build`, `install-hooks` (`--pair`, LG.2).
+- query: `pages` (LA.6e), `find` (LD.3b), `flows` (LD.4b; `--features` / `--out`, LG.3c),
+  `implementors` (LD.7c), `serves <repo> <channel> [--mechanism auto|http|queue]`
+  (LD.8b), `why <repo> <from> <to>` (LE.5; exits 1 when not found).
+- change: `delta [--base <rev>] [--edges-only] [--category <NAME>]...` (LE.1c),
+  `diff-impact` (LE.2), `tests-for` (LE.3b), `patterns --experimental` (LE.7b). A git
+  or build error exits 2.
+- rules: `effects` (LE.4d), `cycles` (LE.6b), `check` (LE.8; exits 0 clean, 1 on
+  violations, 2 on an error), `spec-status` (LE.9b).
+- store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c).
+- inputs: `gaps [--overlay-delta]` (LF.2c; `cochange_no_edge` rows carry no repo, so a
+  merge with one relative path in two repos gives two alike rows), `history sync`
+  (LF.5d), `tests ingest` (LF.6d). A snapshot step never runs inside a build.
+- hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
 
-pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `resolve`, `coverage`,
-`governing_docs`, `page_flow` (+ `activate`, `find_node`, `node_cells`,
-`dense_text*`). Engine entry points: `blast_radius_by_qname`, `cross_stack_trace`,
-`resolve_signal_located`, `coverage_report`, `governing_docs`,
-`entrypoint_reachable`, `locate_node`, `service_map` / `service_map_with` (A9.2,
-behind `glia arch`), `pages::page_flow` (behind `glia pages`).
+pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
+`feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
+`governing_docs`, `page_flow`, `service_map`, `contracts`, `contract_fields`,
+`implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`,
+`effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns_experimental`,
+traversal — `neighbours(node_id, direction="out", categories=None)` -> `(id, category,
+"out"|"in")`, `bfs`, `predecessors`, `reachable_by`, `shortest_path` (categories=None is
+every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `activate`,
+`node_cells`, `dense_text*`, `nodes_json` / `edges_json`, `save_to*`). Module functions:
+`generate` / `generate_many`, `load_from_gmap` (rebuilds a stale or old layout, LC.8),
+`is_stale`, `merge_gmaps`, `graph_delta`, `diff_impact_vs_rev`, `tests_for_rev`,
+`patterns_vs_rev_experimental`, `overlay_delta`, `history_sync`, `tests_ingest`,
+`write_cell` / `remove_cell`, `kind_names` / `category_names` / `cell_type_names` /
+`entry_kinds`. An answer is a native dict / list; only `*_json` returns JSON text (LD.2).
+The committed surface is `py/api_surface/<module>.txt`.
+
+Engine entry points — flat: `blast_radius`, `resolve_signal_located`,
+`coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
+`service_map` / `service_map_with`; by module path: `trace::{cross_stack_trace,
+entry_flows}`, `find::find_nodes`, `pages::page_flow`, `implementors::implementors`,
+`serves::serves`, `why::why_edge`, `delta::graph_delta_vs_rev`,
+`diff_impact::{diff_impact_vs_rev, diff_impact_from_diff}`,
+`tests_for::{tests_for, tests_for_diff, tests_for_rev}`, `effects::effects`,
+`cycles::cycles`, `check::check`, `spec_status::spec_status`,
+`patterns::{pattern_conformance, pattern_conformance_delta}`,
+`gaps::{gaps_report, overlay_delta}`, `contract_fields::contract_fields`,
+`feature_flows::{feature_flows, write_feature_flows}`,
+`merge::{merge_layouts, read_workspace}`, `persist::{load_layout, load_or_rebuild}`.
+A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
+questions over one graph computes `entrypoint_reachable` once.
 
 ## Roadmap
 
@@ -315,13 +381,29 @@ behind `glia arch`), `pages::page_flow` (behind `glia pages`).
   `bench/substrate-gap`), P2 coverage signaling, P3 answer-shaped primitives
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
-- **0.5.0** — finish the **glia** rename; domain registries for non-code (video, chemistry, policy, climate); code stays the reference domain.
-  Renamed, all table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists anything
+- **0.5.0 — landed on local `main`, not yet released.** The 2026-09 programme (unreleased
+  since v0.4.18; there is no 0.4.19) plus the leap, waves A–G of
+  `dev-notes/next-leap-0.5.0.md`, packets in `dev-notes/leap-packets.json`: every id /
+  qname / format / API break at once. It is cross-domain *prep* — header registries,
+  domain container sections, the domain profile, pass composition, `activation::algo`,
+  the test-only `toy-domain/` — and ships no second domain. README.md `## Roadmap` lists
+  what landed by packet id. Before the tag: Engram contract v6 and `engram-export`
+  (LG.7–LG.12, LG.14), the repo-graph and neuropil handoffs (LG.5a, LG.5b), then the
+  version bump — the Cargo workspace and `py/pyproject.toml` still say 0.4.18, so the
+  wheel builds as `glia_py-0.4.18-*.whl` until then. James walks the commits, then push →
+  tag `v0.5.0` → PyPI (the leap doc's §1 checklist).
+  The rename is done, table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists anything
   left on the old names): the repo, the `glia` binary (`cli/Cargo.toml`), every library
   crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python package: PyPI
   dist `glia-py`, module `glia_py`, wheel `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b,
   `--python`). The repo-graph MCP wrapper still imports the old module until its own
-  session moves to `glia-py` (LG.5), so both wheels stay installed side by side.
+  session moves to `glia-py` (LG.5a), so both wheels stay installed side by side.
+- **After 0.5.0:** the leap doc's §6 "Later" list (`.graphqls` routing, struct-held Go
+  routers, ws / graphql / grpc client host narrowing, communities, duplicate flows,
+  dominators once middleware is extracted and the security gate is ruled on, hubs,
+  RuntimeZone, cross-repo node dedupe, Notion / wiki adapters, LSP, per-graph-area
+  rebuilds if a big repo is slow after LG.1) and its §7.6 per-language backlog. The
+  §6 "Gated" items stay out (`SECURITY.md`).
 
 ## Memory
 
