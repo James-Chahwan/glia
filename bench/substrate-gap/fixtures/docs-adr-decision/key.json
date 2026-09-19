@@ -1,0 +1,35 @@
+{
+  "framework": "docs-adr-decision",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "LF.4b. Baseline 2026-09-19 (HEAD 4af6559, installed wheel = W22 code): include_doc does not admit doc/adr (adr-tools' default dir), and no pass writes DECISION - DOC_SECTION 0/1, DOCUMENTS 0/1, DECISION 0/1, forbid 0. The qnames are LB.12's directory-scoped docs shape (docs::<dirs>::<stem>::<slug>). The forbid is the exact name doc/notes.md would mint if the ADR widening leaked to all of doc/.",
+  "expect_nodes": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::doc::adr::0001-use-flask-for-orders::decision"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "docs::doc::adr::0001-use-flask-for-orders::decision",
+      "to": "api::app::list_orders",
+      "category": "DOCUMENTS"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "FUNCTION",
+      "node": "api::app::list_orders",
+      "cell": "DECISION",
+      "contains": "Use Flask for orders"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::doc::notes::notes"
+    }
+  ]
+}

@@ -49,7 +49,7 @@ use repo_graph_graph::{
 
 use crate::build::BuildOptions;
 use crate::external::{RepoInputs, apply_external_edges};
-use crate::passes;
+use crate::{adr, passes};
 
 /// What every code pass receives besides the graph (LF.2b): each built repo's
 /// external inputs, in argument order, and whether the overlay applies
@@ -159,6 +159,16 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         populates: &[],
         run: |m, _| passes::link_doc_sections(m),
     },
+    // LF.4b: a DECISION entry on every node an ADR section DOCUMENTS - reads
+    // the doc linker's edges; the external cell stage (after the passes)
+    // merges sidecar / declared decisions into the same entry array.
+    PassSpec {
+        name: "fill_adr_decisions",
+        stage: Stage::Post,
+        after: &["link_doc_sections"],
+        populates: &[cell_type::DECISION],
+        run: |m, _| adr::fill_adr_decisions(m).report(),
+    },
     // A contract edge is never above its ROUTE's confidence, so it reads the
     // confidence the HTTP demotion left.
     PassSpec {
@@ -238,7 +248,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 24] = [
+    const HEAD_ORDER: [&str; 25] = [
         "http",
         "grpc",
         "rpc",
@@ -259,6 +269,7 @@ mod tests {
         "demote_unmatched_http_nodes",
         "emit_tests_edges",
         "link_doc_sections",
+        "fill_adr_decisions",
         "link_contract_routes",
         "tag_synthetic_provenance",
         "fill_evidence_sites",
@@ -268,7 +279,7 @@ mod tests {
     /// The registry reproduces the pre-LD.13 hardcoded tail exactly:
     /// `run_all_resolvers` (15), `post_passes` (6), then fill-then-sort as
     /// the last two steps (LC.3a); LF.2b's external edges are the first
-    /// post-pass.
+    /// post-pass, and LF.4b's ADR decisions follow the doc linker.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -278,7 +289,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (15, 7, 2)
+            (15, 8, 2)
         );
     }
 
@@ -450,7 +461,10 @@ mod tests {
         assert_eq!(CODE_PROFILE.validate(), Ok(()));
         assert_eq!(
             CODE_PROFILE.cell_populators(),
-            [("tag_synthetic_provenance", &[cell_type::ORIGIN][..])]
+            [
+                ("fill_adr_decisions", &[cell_type::DECISION][..]),
+                ("tag_synthetic_provenance", &[cell_type::ORIGIN][..]),
+            ]
         );
         assert_eq!(t.effect_sinks, [ec::ACCESSES_DATA, ec::QUEUE_FLOWS, ec::HTTP_CALLS, ec::EVENT_FLOWS]);
         assert_eq!(t.graph_type, repo_graph_code_domain::GRAPH_TYPE);
@@ -506,12 +520,13 @@ mod tests {
     /// every declared type is written at least once.
     #[test]
     fn populates_is_exact() {
-        const FIXTURES: [&str; 5] = [
+        const FIXTURES: [&str; 6] = [
             "arch-monorepo-flows",
             "py-tests",
             "xstack-go-http",
             "xcut-queue-queue_flows",
             "contract-openapi-yaml",
+            "docs-adr-decision",
         ];
         let mut observed: BTreeMap<&str, BTreeSet<u32>> = BTreeMap::new();
         for fixture in FIXTURES {

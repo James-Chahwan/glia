@@ -27,7 +27,8 @@ fn is_wellknown_doc(rel: &str) -> bool {
 }
 
 /// Should this markdown path be ingested? Root well-known files, anything under
-/// a top-level `docs/`, or under `.ai/` (≤2 levels). License boilerplate skipped.
+/// a top-level `docs/`, or under `.ai/` (≤2 levels), and (LF.4b) an ADR
+/// directory ([`is_adr_path`]). License boilerplate skipped.
 fn include_doc(rel: &str) -> bool {
     let lower = rel.to_ascii_lowercase();
     if lower.ends_with("license.md") || lower.contains("license") {
@@ -36,7 +37,35 @@ fn include_doc(rel: &str) -> bool {
     if is_wellknown_doc(rel) {
         return true;
     }
-    rel.starts_with("docs/") || rel.starts_with(".ai/")
+    rel.starts_with("docs/") || rel.starts_with(".ai/") || is_adr_path(rel)
+}
+
+/// LF.4b: a markdown file inside an architecture-decision-record directory: a
+/// path segment `adr`, `adrs` or `decisions` (case-insensitive) whose parents
+/// are only `doc`, `docs` or `architecture` segments, so the ADR directory
+/// sits at depth <= 3 - `adr/`, `doc/adr/` (adr-tools' default),
+/// `docs/decisions/` (MADR's), `architecture/decisions/`,
+/// `doc/architecture/decisions/`. The file may sit anywhere below it.
+///
+/// The widening is ADR-only: `doc/notes.md` stays out, and so does an `adr/`
+/// nested in source (`src/adr/x.md`).
+pub(crate) fn is_adr_path(rel: &str) -> bool {
+    let lower = rel.replace('\\', "/").to_ascii_lowercase();
+    if !lower.ends_with(".md") {
+        return false;
+    }
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    // The file name is never the ADR directory.
+    segments.pop();
+    for (depth, seg) in segments.iter().enumerate() {
+        if matches!(*seg, "adr" | "adrs" | "decisions") {
+            return depth <= 2;
+        }
+        if !matches!(*seg, "doc" | "docs" | "architecture") {
+            return false;
+        }
+    }
+    false
 }
 
 /// A slug for a heading line: lowercased, alnum runs joined by `-` (GitHub anchor).
@@ -424,6 +453,39 @@ mod docs_tests {
         assert!(include_doc("docs/architecture.md"));
         assert!(!include_doc("LICENSE.md"));
         assert!(!include_doc("src/notes.md")); // not root-wellknown / docs/ / .ai/
+    }
+
+    /// LF.4b: ADR directories are admitted - adr-tools' `doc/adr`, a root
+    /// `adr/`, `architecture/decisions/` - and nothing else of `doc/`.
+    #[test]
+    fn adr_directories_are_included() {
+        for rel in [
+            "doc/adr/0001-use-flask-for-orders.md",
+            "adr/0001-record-architecture-decisions.md",
+            "adrs/0002-x.md",
+            "architecture/decisions/0003-y.md",
+            "doc/architecture/decisions/0004-z.md",
+            "docs/decisions/0005-madr.md",
+            "Doc/ADR/0006-Upper.md",
+            "doc/adr/archive/0007-old.md",
+            "doc\\adr\\0008-windows.md",
+        ] {
+            assert!(is_adr_path(rel), "{rel} is an ADR path");
+            assert!(include_doc(rel), "{rel} is ingested");
+        }
+        for rel in [
+            "doc/notes.md",
+            "doc/adr.md",
+            "src/adr/0001-x.md",
+            "services/api/doc/adr/0001-x.md",
+            "doc/docs/architecture/adr/0001-x.md",
+            "doc/adr/diagram.png",
+            "adr",
+        ] {
+            assert!(!is_adr_path(rel), "{rel} is not an ADR path");
+        }
+        assert!(!include_doc("doc/notes.md"), "the widening is ADR-only");
+        assert!(!include_doc("doc/adr/LICENSE.md"), "licence boilerplate stays out");
     }
 
     /// LB.12: a repo doc's sections are scoped by its directories + stem, so
