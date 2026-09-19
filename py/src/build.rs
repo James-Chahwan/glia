@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use repo_graph_code_domain::node_kind;
 use repo_graph_core::{Confidence, RepoId};
 use repo_graph_engine::{generate_many as engine_generate_many, generate_one, parse_one};
-use repo_graph_store::{default_gmap_dir as store_default_gmap_dir, write_merged_sharded};
+use repo_graph_store::default_gmap_dir as store_default_gmap_dir;
 
 use crate::convert::escape_json;
 use crate::graph::PyGraph;
@@ -44,17 +44,23 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
         )));
     }
     // Auto-persist to the conventional gmap dir so the next session can
-    // `load_from_gmap` instead of regenerating. Failure to write is logged but
-    // not fatal — a fresh in-memory graph is still usable, the cache layer is
-    // an optimization. Opt out with `GLIA_NO_PERSIST=1` (tests / experiments
-    // that don't want side effects on the target repo).
+    // `load_from_gmap` instead of regenerating — labels, roots and parse
+    // errors included (LC.7), so the loaded graph answers like this one.
+    // Failure to write is logged but not fatal — a fresh in-memory graph is
+    // still usable, the cache layer is an optimization. Opt out with
+    // `GLIA_NO_PERSIST=1` (tests / experiments that don't want side effects on
+    // the target repo).
     if std::env::var("GLIA_NO_PERSIST").as_deref() != Ok("1") {
         let dir = store_default_gmap_dir(Path::new(repo_path));
-        if let Err(e) = write_merged_sharded(&result.merged, &dir) {
-            eprintln!(
-                "[repo-graph-py] warning: failed to persist gmap to {}: {e}",
-                dir.display()
-            );
+        if let Err(e) = PyGraph::persist(
+            &result.merged,
+            &result.repo_labels,
+            &result.repo_roots,
+            &result.parse_errors,
+            &dir,
+            "py",
+        ) {
+            eprintln!("[repo-graph-py] warning: failed to persist gmap: {e}");
         }
     }
     if !result.parse_errors.is_empty() {
@@ -63,11 +69,7 @@ fn generate(repo_path: &str, incremental: bool) -> PyResult<PyGraph> {
             result.parse_errors.len()
         );
     }
-    Ok(PyGraph {
-        merged: result.merged,
-        parse_errors: result.parse_errors,
-        repo_labels: result.repo_labels,
-    })
+    Ok(PyGraph::from_result(result))
 }
 
 /// Generate a single MergedGraph from multiple repo paths. Each path becomes
@@ -98,11 +100,7 @@ fn generate_many(repo_paths: Vec<String>, incremental: bool) -> PyResult<PyGraph
             result.parse_errors.len()
         );
     }
-    Ok(PyGraph {
-        merged: result.merged,
-        parse_errors: result.parse_errors,
-        repo_labels: result.repo_labels,
-    })
+    Ok(PyGraph::from_result(result))
 }
 
 #[pyfunction]

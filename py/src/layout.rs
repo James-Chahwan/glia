@@ -6,30 +6,26 @@ use std::path::Path;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use repo_graph_store::{
-    default_gmap_dir as store_default_gmap_dir, is_gmap_stale, read_merged_sharded,
-};
+use repo_graph_engine::persist::load_layout;
+use repo_graph_store::{default_gmap_dir as store_default_gmap_dir, is_gmap_stale};
 
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// Load a previously-generated graph from a sharded `.gmap` directory.
 /// `dir` must contain `manifest.json` + the per-shard `.gmap` files written by
-/// `PyGraph.save_to` / `save_to_default`. Returns a `PyGraph` whose downstream
-/// methods (node_count, dense_text, activate, …) behave identically to a fresh
-/// `generate()` result, except `RepoGraph.properties` is empty (parse-time-only
-/// state, not persisted at FORMAT_VERSION=1).
+/// `PyGraph.save_to` / `save_to_default` / `generate`'s auto-persist. Returns a
+/// `PyGraph` whose downstream methods (node_count, dense_text, activate,
+/// service_map, …) behave like the fresh `generate()` result that was saved:
+/// repo labels, repo roots, parse errors and `RepoGraph.properties` are all
+/// persisted (LC.7). A layout written without that metadata loads with none,
+/// so `service_map` names its repos `repo<id>`. The error text is the engine's
+/// `LoadError`, ending "rebuild the graph" when regenerating is the fix.
 #[pyfunction]
 fn load_from_gmap(dir: &str) -> PyResult<PyGraph> {
-    let merged = read_merged_sharded(Path::new(dir))
-        .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))?;
-    Ok(PyGraph {
-        merged,
-        parse_errors: Vec::new(),
-        // Not persisted at FORMAT_VERSION=1: `service_map` degrades to
-        // `repo<id>` ids for this graph. Documented on the method.
-        repo_labels: std::collections::BTreeMap::new(),
-    })
+    load_layout(Path::new(dir))
+        .map(PyGraph::from_result)
+        .map_err(|e| PyValueError::new_err(format!("load_from_gmap({dir}): {e}")))
 }
 
 /// Conventional gmap directory path for a repo: `<repo>/.ai/repo-graph`.

@@ -2,6 +2,11 @@
 //! (`DEFAULT_GMAP_SUBDIR`), the sharded `manifest.json` + per-shard `.gmap` +
 //! `cross_stack.gmap` format, the `MergedGraph` round-trip, sharded cell
 //! mutation, and the `is_gmap_stale` freshness scan.
+//!
+//! The manifest also carries the layout's metadata (LC.7, [`LayoutMeta`]):
+//! each repo's label and root, and the build's parse errors. They describe
+//! the LAYOUT (a multi-repo build has several repos and one error list), not
+//! any single shard, so they live in the human-readable `manifest.json`.
 
 use std::path::{Path, PathBuf};
 
@@ -77,6 +82,43 @@ pub struct Manifest {
     pub shards: Vec<ShardEntry>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cross: Option<ShardEntry>,
+    /// The repos this layout was built from, sorted by id (LC.7): the human
+    /// label a `RepoId` hash cannot give back, and the repo root relative to
+    /// the manifest's directory. Additive under schema 2, so a manifest
+    /// without it deserialises (as empty) and one written without metadata
+    /// omits the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<RepoMeta>,
+    /// Files the build that wrote this layout could not parse, as
+    /// `"<path>: <reason>"`, in build order (LC.7). A loaded graph reports them
+    /// so "no gRPC here" and "the file that had it failed" stay apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_errors: Vec<String>,
+}
+
+/// One repo of a layout (LC.7): its `RepoId.0`, its human label (the one
+/// `service_map` names services by), and its root.
+///
+/// `root` is RELATIVE to the layout directory with `/` separators (`../..`
+/// for `<repo>/.ai/repo-graph`), so a committed layout carries no absolute
+/// path and still resolves after a clone. It is absolute only when no
+/// relative path exists (another Windows drive), and absent when the writer
+/// did not know it.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RepoMeta {
+    pub id: u64,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+/// The layout-level metadata a sharded write records beside the shards and a
+/// read hands back (LC.7): the repos, sorted by id when written, and the
+/// build's parse errors in build order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayoutMeta {
+    pub repos: Vec<RepoMeta>,
+    pub parse_errors: Vec<String>,
 }
 
 /// Just the schema number, parsed before the full `Manifest` so a manifest of
@@ -119,10 +161,24 @@ pub struct ShardEntry {
 /// write, `k` = shards carrying a code section.
 ///
 /// Shard names must be unique and non-empty — duplicates produce a manifest
-/// whose loader will reject it.
+/// whose loader will reject it. Records no layout metadata: see
+/// [`write_sharded_meta`].
 pub fn write_sharded(
     shards: &[(&str, &RepoGraph)],
     cross_edges: &[Edge],
+    dir: &Path,
+) -> Result<Manifest, StoreError> {
+    write_sharded_meta(shards, cross_edges, &LayoutMeta::default(), dir)
+}
+
+/// [`write_sharded`] plus the layout's metadata in the manifest (LC.7):
+/// `meta.repos` sorted by id and `meta.parse_errors` in the order given, so
+/// the same build writes the same manifest bytes and the skip-when-unchanged
+/// check still holds.
+pub fn write_sharded_meta(
+    shards: &[(&str, &RepoGraph)],
+    cross_edges: &[Edge],
+    meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
     std::fs::create_dir_all(dir)?;
@@ -196,12 +252,16 @@ pub fn write_sharded(
     };
 
     let shard_files = entries.len() + usize::from(cross.is_some());
+    let mut repos = meta.repos.clone();
+    repos.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.label.cmp(&b.label)));
     let manifest = Manifest {
         schema_version: MANIFEST_VERSION,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
         build_stamp: repo_graph_stamp::BUILD_STAMP.to_string(),
         shards: entries,
         cross,
+        repos,
+        parse_errors: meta.parse_errors.clone(),
     };
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     // Skip the manifest write only if it's byte-identical to the prior one
@@ -314,9 +374,21 @@ fn verify_hash(entry: &ShardEntry, path: &Path) -> Result<(), StoreError> {
 /// Write a merged graph to a sharded directory. Each `RepoGraph` becomes one
 /// shard; cross-repo edges go in `cross_stack.gmap`. Shard names use
 /// `repo-<u64>-<idx>` so the same repo's multiple language sub-graphs don't
-/// collide. Returns the manifest that was written.
+/// collide. Returns the manifest that was written. Records no layout
+/// metadata: see [`write_merged_sharded_meta`].
 pub fn write_merged_sharded(
     merged: &repo_graph_graph::MergedGraph,
+    dir: &Path,
+) -> Result<Manifest, StoreError> {
+    write_merged_sharded_meta(merged, &LayoutMeta::default(), dir)
+}
+
+/// [`write_merged_sharded`] plus the layout's metadata (repo labels and roots,
+/// parse errors) in the manifest (LC.7). [`read_merged_sharded_meta`] is its
+/// inverse.
+pub fn write_merged_sharded_meta(
+    merged: &repo_graph_graph::MergedGraph,
+    meta: &LayoutMeta,
     dir: &Path,
 ) -> Result<Manifest, StoreError> {
     let names: Vec<String> = merged
@@ -336,13 +408,13 @@ pub fn write_merged_sharded(
         .zip(merged.graphs.iter())
         .map(|(n, g)| (n.as_str(), g))
         .collect();
-    write_sharded(&shards, &merged.cross_edges, dir)
+    write_sharded_meta(&shards, &merged.cross_edges, meta, dir)
 }
 
 /// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
-/// every per-language `RepoGraph` from its archived shard, then attaches the
-/// cross-stack edges. Loaded `RepoGraph.properties` is empty (parse-time-only
-/// field, not persisted at FORMAT_VERSION=2).
+/// every per-language `RepoGraph` from its archived shard (core + code
+/// section, `properties` included since LC.7), then attaches the cross-stack
+/// edges. Drops the layout metadata: see [`read_merged_sharded_meta`].
 ///
 /// When the layout cannot be served (`StoreError::needs_rebuild`) it prints one
 /// `[gmap] needs rebuild: <dir>: <reason>` line before returning the error, so
@@ -350,6 +422,16 @@ pub fn write_merged_sharded(
 pub fn read_merged_sharded(
     dir: &Path,
 ) -> Result<repo_graph_graph::MergedGraph, StoreError> {
+    read_merged_sharded_meta(dir).map(|(merged, _meta)| merged)
+}
+
+/// [`read_merged_sharded`] plus the manifest's layout metadata (LC.7): repo
+/// labels and roots as written (roots still relative to `dir`) and the parse
+/// errors. A layout written without metadata reads back an empty
+/// [`LayoutMeta`]. Prints the same `[gmap] needs rebuild` line on failure.
+pub fn read_merged_sharded_meta(
+    dir: &Path,
+) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
     let result = read_merged_sharded_inner(dir);
     if let Err(e) = &result
         && let Some(reason) = e.rebuild_reason()
@@ -361,7 +443,7 @@ pub fn read_merged_sharded(
 
 fn read_merged_sharded_inner(
     dir: &Path,
-) -> Result<repo_graph_graph::MergedGraph, StoreError> {
+) -> Result<(repo_graph_graph::MergedGraph, LayoutMeta), StoreError> {
     let sharded = ShardedMmap::open(dir)?;
     let mut graphs = Vec::with_capacity(sharded.shards.len());
     for (_name, mmap) in &sharded.shards {
@@ -375,10 +457,17 @@ fn read_merged_sharded_inner(
     } else {
         Vec::new()
     };
-    Ok(repo_graph_graph::MergedGraph {
-        graphs,
-        cross_edges,
-    })
+    let meta = LayoutMeta {
+        repos: sharded.manifest.repos.clone(),
+        parse_errors: sharded.manifest.parse_errors.clone(),
+    };
+    Ok((
+        repo_graph_graph::MergedGraph {
+            graphs,
+            cross_edges,
+        },
+        meta,
+    ))
 }
 
 /// Cheap freshness check: is anything under `repo_path` that the BUILDER would
@@ -731,6 +820,40 @@ mod tests {
         let shard = &reopened.shards[0].1;
         assert_eq!(shard.section_bytes(CODE_SECTION).unwrap().unwrap(), code_before.as_slice());
         assert_eq!(shard.archived().unwrap().kind(NodeId(101)), Some(node_kind::FUNCTION));
+    }
+
+    /// LC.7: the layout metadata round-trips through the manifest, repos are
+    /// written sorted by id whatever order the caller gives, and a write
+    /// without metadata keeps the manifest free of both keys.
+    #[test]
+    fn layout_meta_round_trips_through_the_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let g = empty_graph("test://lc7-meta");
+        let merged = repo_graph_graph::MergedGraph { graphs: vec![g], cross_edges: vec![] };
+        let meta = LayoutMeta {
+            repos: vec![
+                RepoMeta { id: 9, label: "web".into(), root: Some("../web".into()) },
+                RepoMeta { id: 3, label: "api".into(), root: None },
+            ],
+            parse_errors: vec!["b.py: second".into(), "a.py: first".into()],
+        };
+        let dir = tmp.path().join("with");
+        let written = write_merged_sharded_meta(&merged, &meta, &dir).unwrap();
+        assert_eq!(written.repos.iter().map(|r| r.id).collect::<Vec<_>>(), vec![3, 9]);
+        let (_, back) = read_merged_sharded_meta(&dir).unwrap();
+        assert_eq!(back.repos, written.repos);
+        assert_eq!(back.parse_errors, meta.parse_errors, "build order, not sorted");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap();
+        assert!(json["repos"][0].get("root").is_none(), "an unknown root is omitted: {json}");
+
+        let bare = tmp.path().join("bare");
+        write_merged_sharded(&merged, &bare).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(bare.join(MANIFEST_NAME)).unwrap()).unwrap();
+        assert!(json.get("repos").is_none() && json.get("parse_errors").is_none(), "{json}");
+        let (_, empty) = read_merged_sharded_meta(&bare).unwrap();
+        assert_eq!(empty, LayoutMeta::default());
     }
 
     #[test]

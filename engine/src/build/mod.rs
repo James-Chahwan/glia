@@ -44,6 +44,7 @@ use rpc_needles::RpcContext;
 ///     total_edges: 0,
 ///     parse_errors: vec![],
 ///     repo_labels: Default::default(),
+///     repo_roots: Default::default(),
 /// };
 /// ```
 #[non_exhaustive]
@@ -54,11 +55,18 @@ pub struct GenerateResult {
     pub parse_errors: Vec<String>,
     /// `RepoId.0` → human repo label (A9.2). The RepoId is an xxhash of the
     /// repo identity key (git remote / git dir / dir name, LB.1), so the human
-    /// label — the path the caller gave — survives only here: it is captured
-    /// where the path and the id still coexist, and deliberately NOT on
-    /// `MergedGraph`, which would change the `.gmap` bytes. Present only on a
-    /// freshly generated result; a `.gmap` load has none.
+    /// label — derived from the path the caller gave — cannot be recovered
+    /// from the graph: it is captured where the path and the id still coexist,
+    /// and deliberately NOT on `MergedGraph`, which would change the shard
+    /// bytes. It is persisted in the layout's `manifest.json` instead (LC.7),
+    /// so [`crate::persist::load_layout`] returns the same map a fresh build
+    /// did; a layout written without metadata loads with none.
     pub repo_labels: std::collections::BTreeMap<u64, String>,
+    /// `RepoId.0` → the repo root, as the caller gave it on a fresh build
+    /// (LC.7). [`crate::persist::layout_meta`] records it relative to the
+    /// layout dir; [`crate::persist::load_layout`] returns it resolved against
+    /// the dir it loaded from, canonicalised when the path still exists.
+    pub repo_roots: std::collections::BTreeMap<u64, String>,
 }
 
 /// Generate a `MergedGraph` from a single repo path. The repo gets one RepoId,
@@ -107,6 +115,7 @@ fn generate_one_inner(
     let repo = RepoId::from_canonical(&ident.key);
     repo_id_marker(&ident, repo_path);
     let repo_labels = crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]);
+    let repo_roots = std::collections::BTreeMap::from([(repo.0, repo_path.to_string())]);
     // Project roots (A8.4) become PROJECT nodes below (A8.5); per-root go.mod
     // prefixes are A8.7.
     let (files, regions, md, roots) = walk_source_files(&root);
@@ -146,6 +155,7 @@ fn generate_one_inner(
         total_edges,
         parse_errors,
         repo_labels,
+        repo_roots,
     })
 }
 
@@ -176,6 +186,7 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
     let mut all_graphs = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
+    let mut repo_roots: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
 
     // Phase 1 — walk every repo before building any (A5.2), so the proto
     // service set is the UNION across the build: in a client/server split the
@@ -222,6 +233,9 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
         let repo = RepoId::from_canonical(&ident.key);
         repo_id_marker(&ident, path);
         label_inputs.push((repo.0, path.clone()));
+        // First path wins, like `repo_label_map` (inputs sharing a key are
+        // disambiguated above, so a repeat is the same repo given twice).
+        repo_roots.entry(repo.0).or_insert_with(|| path.clone());
         let go_prefix = read_go_module_prefix(&root);
         let mut cache = incremental.then(|| ParseCache::load(path));
         if let Some(c) = cache.as_mut() {
@@ -268,6 +282,7 @@ fn generate_many_inner(repo_paths: &[String], incremental: bool) -> Result<Gener
         total_edges,
         parse_errors: all_errors,
         repo_labels: crate::arch::repo_label_map(&label_inputs),
+        repo_roots,
     })
 }
 

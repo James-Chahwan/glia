@@ -1,9 +1,9 @@
 //! The code domain's section of a container (LC.5b): `CodeSection` - the
 //! sorted-`Vec` mirrors of `CodeNav` and `SymbolTable` (`CodeNavStore`,
-//! `SymbolTableStore`) plus the unresolved calls / refs - written as the named
-//! section `"code"` beside the domain-free core, and the `RepoGraph` codec over
-//! core + section (`encode_repo_graph` / `decode_repo_graph`,
-//! `write_repo_graph`).
+//! `SymbolTableStore`), the unresolved calls / refs and the `@property`-style
+//! accessor set (`properties`, LC.7) - written as the named section `"code"`
+//! beside the domain-free core, and the `RepoGraph` codec over core + section
+//! (`encode_repo_graph` / `decode_repo_graph`, `write_repo_graph`).
 //!
 //! Node kinds are not here: they are core state (`Container::node_kinds`), so
 //! `CodeNavStore` carries no `kind_by_id` and `CodeNavStore::to_owned` rebuilds
@@ -25,7 +25,7 @@ use crate::error::StoreError;
 pub const CODE_SECTION: &str = "code";
 
 /// Everything the code domain persists beyond the core: navigation maps, the
-/// symbol table, and the references resolution left unbound.
+/// symbol table, the references resolution left unbound, and the accessor set.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug))]
@@ -34,6 +34,10 @@ pub struct CodeSection {
     pub symbols: SymbolTableStore,
     pub unresolved_calls: Vec<CallSite>,
     pub unresolved_refs: Vec<UnresolvedRef>,
+    /// `RepoGraph.properties` (LC.7): the methods a parser marked as property
+    /// accessors (Python `@property`), sorted by id so the bytes are
+    /// deterministic. Before LC.7 a loaded graph had none.
+    pub properties: Vec<NodeId>,
 }
 
 impl CodeSection {
@@ -45,6 +49,7 @@ impl CodeSection {
             symbols: SymbolTableStore::from_owned(&g.symbols),
             unresolved_calls: g.unresolved_calls.clone(),
             unresolved_refs: g.unresolved_refs.clone(),
+            properties: sorted_properties(&g.properties),
         }
     }
 
@@ -54,6 +59,14 @@ impl CodeSection {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// `properties` as a `Vec` sorted by id: a `HashSet` iterates in a
+/// per-process random order.
+fn sorted_properties(set: &HashSet<NodeId>) -> Vec<NodeId> {
+    let mut out: Vec<NodeId> = set.iter().copied().collect();
+    out.sort_by_key(|id| id.0);
+    out
 }
 
 impl ArchivedCodeSection {
@@ -192,9 +205,8 @@ impl SymbolTableStore {
 }
 
 impl SymbolTableStore {
-    /// Inverse of `from_owned`. Note: `properties` lives on `RepoGraph`, not on
-    /// `SymbolTable`, so cache-loaded graphs have `properties = HashSet::new()`
-    /// (it's only populated at parse time and isn't currently persisted).
+    /// Inverse of `from_owned`. `properties` lives on `RepoGraph`, not on
+    /// `SymbolTable`: it is its own `CodeSection` field.
     pub fn to_owned_table(&self) -> SymbolTable {
         use std::collections::HashMap;
         let module_by_qname: HashMap<_, _> = self
@@ -286,20 +298,18 @@ pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<(Vec<u8>, bool)
 
 /// Encode a `RepoGraph` as the bytes of one `.gmap`: the domain-free core
 /// (code header, nodes, edges, `node_kinds` from `g.nav.kind_by_id`) plus the
-/// `"code"` section (nav maps, symbols, unresolved calls / refs). A graph with
-/// nothing for the section (no nav, symbols or unresolved refs) is written as
-/// its core alone. Deterministic: every map is flattened sorted by key.
+/// `"code"` section (nav maps, symbols, unresolved calls / refs, properties).
+/// A graph with nothing for the section (no nav, symbols, unresolved refs or
+/// properties) is written as its core alone. Deterministic: every map and set
+/// is flattened sorted by key.
 pub fn encode_repo_graph(g: &RepoGraph) -> Result<Vec<u8>, StoreError> {
     Ok(encode_repo_graph_counted(g)?.0)
 }
 
 /// The inverse of `encode_repo_graph`: the core's nodes, edges and kinds plus
-/// the `"code"` section. A file without a code section (a nav-less graph, or
-/// `cross_stack.gmap`) decodes with empty nav / symbols / unresolved refs.
-/// `properties` is empty: it is parse-time state on `RepoGraph` and not part of
-/// the on-disk schema - cache-load consumers don't need it (only parse-time
-/// composition does), so this is a deliberate information loss bounded by the
-/// format version.
+/// the `"code"` section, `properties` included (LC.7). A file without a code
+/// section (a nav-less graph, or `cross_stack.gmap`) decodes with empty nav /
+/// symbols / unresolved refs / properties.
 pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
     let core: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(m.archived()?)?;
     let code: CodeSection = match code_section_of(m)? {
@@ -314,7 +324,7 @@ pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
         symbols: code.symbols.to_owned_table(),
         unresolved_calls: code.unresolved_calls,
         unresolved_refs: code.unresolved_refs,
-        properties: HashSet::new(),
+        properties: code.properties.into_iter().collect(),
     })
 }
 
@@ -360,5 +370,31 @@ mod tests {
         let store = CodeNavStore::from_owned(&nav);
         let ids: Vec<u64> = store.name_by_id.iter().map(|(k, _)| k.0).collect();
         assert_eq!(ids, vec![10, 30, 50]);
+    }
+
+    /// LC.7: `properties` rides the code section, sorted, and decodes back into
+    /// the set - also for a graph whose only code-section state it is.
+    #[test]
+    fn properties_round_trip_through_the_code_section() {
+        let repo = RepoId::from_canonical("test://lc7-properties");
+        let g = RepoGraph {
+            repo,
+            nodes: vec![],
+            edges: vec![],
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: [NodeId(30), NodeId(7), NodeId(19)].into_iter().collect(),
+        };
+        let section = CodeSection::from_repo_graph(&g);
+        assert_eq!(section.properties, vec![NodeId(7), NodeId(19), NodeId(30)]);
+        assert!(!section.is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("p.gmap");
+        write_repo_graph(&g, &path).unwrap();
+        let back = decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap();
+        assert_eq!(back.properties, g.properties);
     }
 }

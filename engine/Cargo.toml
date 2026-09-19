@@ -41,9 +41,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
 twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
+# The one persist / load module (`persist`, LC.7) that py and cli share, so
+# neither calls the store for a layout. One-way: the store depends on core,
+# code-domain, graph and stamp, never on the engine, so there is no cycle.
+repo-graph-store = { path = "../store" }
 
 [dev-dependencies]
-# Gate test only: the bytes-on-disk byte-identical check writes real sharded
-# layouts via the store (engine itself stays store-independent).
-repo-graph-store = { path = "../store" }
 tempfile = "3"

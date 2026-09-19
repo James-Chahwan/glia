@@ -56,9 +56,10 @@ impl PyGraph {
     /// `repo_graph_engine::arch`, shared with `glia analyze`, so the CLI and
     /// MCP answers cannot drift apart.
     ///
-    /// A graph from `load_from_gmap` carries no repo labels (they are not
-    /// persisted), so its per-repo service ids fall back to `repo<id>`.
-    /// Build with `generate`/`generate_many` for human-readable ids.
+    /// A graph from `load_from_gmap` carries the repo labels its layout's
+    /// `manifest.json` recorded (LC.7), so it names services like the fresh
+    /// build did; only a layout written without that metadata falls back to
+    /// `repo<id>` ids.
     fn service_map(&self) -> PyResult<String> {
         service_map_json(&self.merged, &self.repo_labels)
             .map_err(|e| PyValueError::new_err(e.to_string()))
