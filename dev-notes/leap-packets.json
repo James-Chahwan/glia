@@ -16046,6 +16046,39 @@
    "risks": "depends_on LE.4d is SEQUENCING ONLY (no code relation): the scheduler replans from scratch and sorts ready packets by how many packets they unblock, so a dependency on any landed packet (LG.1b, or LE.4b which held code-domain/src/lib.rs in W28) reorders landed waves and fails --verify. LE.4d first became ready in W29, so raising its count moves nothing landed; LG.1c lands in W30. A language build that itself spawns threads would split its record() calls across threads - none does today (the graph crate has no rayon); the per-thread unit test pins the assumption. Memory: building several language graphs at once raises peak memory on very large polyglot repos; report peak RSS for grpc-go before/after.",
    "fixtures": [],
    "spec_group": "LG"
+  },
+  {
+   "id": "LG.15",
+   "title": "glia skill: skills/glia/SKILL.md - a Claude Code skill for using glia through its CLI without the MCP server, its command list checked against cli/surface by a test",
+   "batch": "LG",
+   "area": "docs + cli test - non-MCP agent surface",
+   "loc": 220,
+   "rationale": "Added mid-run 2026-09-20 at James's request (verbatim: \"also provide a non mcp way like skills and cli\"). The repo-graph MCP server holds ~1.0 GB RSS (peak 1.41 GB) while one glia self-build peaks at 90 MB, and the resident watcher rebuilds about every 1.4 s. Every glia answer is already a `glia <cmd> --json` subcommand and the .glia/graph layout is reused across calls, so an agent needs only instructions to use it per call. The repo-graph handoff (dev-notes/repo-graph-handoff-0.5.0.md section 7b) asks repo-graph to ship its own skill + CLI and points at this one.",
+   "entry_points": [
+    "skills/glia/SKILL.md (new): frontmatter `name: glia`, a `description` that says when to use it (structural questions about a codebase: where is X, what does changing X affect, how does feature Y flow, what calls/serves/implements X, what does X write) and the body: which command answers which question, with `--json` and one worked example each for arch, find, resolve, blast-radius, diff-impact, trace, flows, why, serves, implementors, effects, tests-for, delta, cycles, check, coverage, gaps, docs-for; reading answers (every row has file:line; absence rows name what glia cannot see; blind spots via `glia coverage`); `--with <repo>` for cross-service; GLIA_NO_PERSIST for probing a repo you must not write to; install: copy to `~/.claude/skills/glia/` or `<repo>/.claude/skills/glia/`",
+    "cli/tests/skill_surface.rs (new): parse every `glia <cmd> ...` invocation in skills/glia/SKILL.md; assert the command has a cli/surface/<cmd>.txt snapshot and every `--flag` it uses appears in that snapshot (or _global.txt); fail listing file:line of each stale mention",
+    "README.md: one short 'Use without MCP' paragraph pointing at skills/glia/SKILL.md"
+   ],
+   "files_touched": [
+    "skills/glia/SKILL.md",
+    "cli/tests/skill_surface.rs",
+    "README.md"
+   ],
+   "implementation": "Derive, do not hand-write, capability claims: read cli/surface/*.txt and each command's --help for flags and defaults; run every example in the skill against bench/substrate-gap/fixtures (e.g. xstack-go-http, arch-monorepo-flows) with GLIA_NO_PERSIST=1 ./target/debug/glia and paste the real output shape. Keep the skill short (an agent reads it every time): a question -> command table first, then details. Do not describe MCP tools; point at the repo-graph product for MCP.",
+   "acceptance": "`cargo test -p glia-cli --test skill_surface` green, and red when a command or flag in SKILL.md is misspelled (mutation-check it, then revert). Every example in SKILL.md was run and its output shape matches what the skill says. README links it.",
+   "fired_on_marker": "none - documentation; proven by cli/tests/skill_surface.rs",
+   "breaking": {
+    "is_breaking": false,
+    "kind": [],
+    "what_changes": "New file only.",
+    "in_repo_consumers": []
+   },
+   "depends_on": [
+    "LG.9"
+   ],
+   "risks": "depends_on LG.9 is SEQUENCING ONLY (no code relation): added mid-run while W35 ran; LG.9 first becomes ready in a not-yet-launched wave, so the replan moves nothing landed or running and LG.15 joins W38 beside LG.12. The CLI surface it documents is final by then (the remaining packets are Engram-side).",
+   "fixtures": [],
+   "spec_group": "LG"
   }
  ],
  "batch_c": [

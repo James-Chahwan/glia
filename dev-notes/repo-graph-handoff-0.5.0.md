@@ -47,6 +47,7 @@ the specs alone and reports different counts.
    find, impact, trace and the governed-by footer silently answer nothing.
 4. The watcher loops. It rebuilds on read-only inotify events, and it does not skip the new layout
    dir `.glia/graph` (section 1, items 1-2).
+5. New ask (section 7b): ship a non-MCP way in, a skill plus a CLI entry point, beside the server.
 
 Bump order. Nothing is pushed before James says go.
 1. **glia:** James walks the local commits. Bump `py/pyproject.toml` and `[workspace.package].version`
@@ -433,6 +434,40 @@ Candidates for new modes rather than new tools, to keep the fixed per-turn schem
 `service_map`, the overlay loop (`gaps` -> write `.glia/overlay.toml` -> `overlay_delta`) and the cell
 writers for agent notes. Changing the tool set means updating `constants.py:30` `TOOL_NAMES`,
 `tests/test_mcp_tools.py:314-322`, `mcpb/manifest.json:39-61` and the CLAUDE.md tool list together.
+
+## 7b. A non-MCP way in: a skill and the CLI (James, 2026-09-20)
+
+James asked for a way to use the graph **without** the resident MCP server. Two reasons, both measured:
+the server holds **~1.0 GB** RSS (all anonymous memory, peak 1.41 GB) while one glia build of the glia
+repo peaks at **90 MB** (release binary, 2.5 s), and while it runs, the watcher loop (section 1, item 1)
+rebuilds about every 1.4 s. A per-call surface has neither cost.
+
+What already exists on the glia side: every answer is a `glia` subcommand with `--json`, and the layout
+at `<repo>/.glia/graph` is reused across calls (`load_from_gmap` / `is_stale`), so a call after the first
+is a load, not a build. The surfaces are pinned in `cli/surface/*.txt`: `arch`, `find`, `resolve`,
+`blast-radius`, `impact`, `trace`, `flows`, `why`, `serves`, `implementors`, `effects`, `tests-for`,
+`diff-impact`, `delta`, `cycles`, `check`, `spec-status`, `pages`, `contracts`, `coverage`, `gaps`,
+`docs-for`, `patterns --experimental`.
+
+What repo-graph should ship beside the MCP server (repo-graph decides the shape):
+1. **A Claude Code skill** (`SKILL.md`) that maps the six MCP tools to CLI calls, so an agent with no MCP
+   server runs `glia <cmd> <repo> ... --json`: orient -> `glia arch` + `glia coverage` + `glia flows`;
+   find -> `glia find` / `glia resolve`; impact -> `glia blast-radius` (`glia diff-impact` for a diff);
+   trace -> `glia trace` / `glia flows --features`; read -> the `file:line` every answer row carries.
+   Keep the skill's command list checked against `cli/surface/*.txt`, not hand-maintained (glia's
+   own skill, LG.15, does exactly that - reuse it or point at it).
+2. **A `repo-graph` CLI entry point** that runs the same tool functions as the server, without the
+   MCP SDK, for users who do not run an MCP client. It shares `server.py`'s renderers, so output
+   matches the MCP tools byte for byte.
+3. Say in the README which to pick: MCP for an always-on agent session, the skill / CLI for occasional
+   queries, CI and low-memory machines.
+
+**Memory, to verify after the watcher fix:** the ~1.0 GB is most likely (a) allocator high-water from
+rebuilding every ~1.4 s for 30+ hours (freed graphs are not returned to the OS) plus (b) the wrapper's
+Python copy of the graph (dicts per node and edge from `nodes_json` / `edges_json`, plus the flows
+index). Check: reconnect the server and record RSS at start and after an hour of normal use. If it
+starts near 200-300 MB and climbs, it is (a); the watcher fix removes it. The P4 collapse (section 7)
+removes most of (b), because the primitives return only the rows asked for.
 
 ## 8. Gotchas carried over
 

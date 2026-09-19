@@ -402,3 +402,8 @@ the run. The leap brief now forbids the wheel on other repos.
   Known limit: the TS family still builds last and serially (only for output order, not a data dependency), so a
   backend + TS-frontend repo overlaps nothing; moving it into the pool, appended last, is the fix if a big
   polyglot repo needs it. Cost: the graph crate's per-language stderr markers are unordered at default threads.
+- **LG.15 — glia skill** (added 2026-09-20; James: *"also provide a non mcp way like skills and cli"*):
+  `skills/glia/SKILL.md`, a Claude Code skill for using glia through its CLI with no MCP server, its command list
+  checked against `cli/surface/*.txt` by `cli/tests/skill_surface.rs`. The repo-graph MCP was measured at ~1.0 GB
+  RSS vs 90 MB for one glia self-build. The repo-graph handoff gained section 7b (ship a skill + CLI beside the
+  server; the memory check). Lands in W38 through a sequencing-only dependency on LG.9. 251 packets.
