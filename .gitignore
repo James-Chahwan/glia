@@ -50,3 +50,6 @@ bench/substrate-gap/results.jsonl
 
 # Atlassian/Confluence API token for `glia docs sync` (Tier-4) — never commit
 .env
+
+# Gradle build caches, created when a fixture probe runs gradle
+.gradle/
