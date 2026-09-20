@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "glia-engine"
-version = "0.4.18"
+version = "0.5.0"
 dependencies = [
  "bincode",
  "glia-activation",
@@ -651,11 +651,11 @@ dependencies = [
 
 [[package]]
 name = "glia-stamp"
-version = "0.4.18"
+version = "0.5.0"
 
 [[package]]
 name = "glia-store"
-version = "0.4.18"
+version = "0.5.0"
 dependencies = [
  "glia-code-domain",
  "glia-core",

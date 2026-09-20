@@ -4412,7 +4412,7 @@
       "via": "websocket"
     }
   },
-  "engine": "0.4.18",
+  "engine": "0.5.0",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",

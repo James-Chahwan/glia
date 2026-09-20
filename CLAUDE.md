@@ -381,17 +381,17 @@ questions over one graph computes `entrypoint_reachable` once.
   `bench/substrate-gap`), P2 coverage signaling, P3 answer-shaped primitives
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
-- **0.5.0 — landed on local `main`, not yet released.** The 2026-09 programme (unreleased
+- **0.5.0 — complete on local `main`, version bumped, awaiting the tag.** The 2026-09 programme (unreleased
   since v0.4.18; there is no 0.4.19) plus the leap, waves A–G of
   `dev-notes/next-leap-0.5.0.md`, packets in `dev-notes/leap-packets.json`: every id /
   qname / format / API break at once. It is cross-domain *prep* — header registries,
   domain container sections, the domain profile, pass composition, `activation::algo`,
   the test-only `toy-domain/` — and ships no second domain. README.md `## Roadmap` lists
-  what landed by packet id. Before the tag: Engram contract v6 and `engram-export`
-  (LG.7–LG.12, LG.14), the repo-graph and neuropil handoffs (LG.5a, LG.5b), then the
-  version bump — the Cargo workspace and `py/pyproject.toml` still say 0.4.18, so the
-  wheel builds as `glia_py-0.4.18-*.whl` until then. James walks the commits, then push →
-  tag `v0.5.0` → PyPI (the leap doc's §1 checklist).
+  what landed by packet id. All 41 waves landed (251 packets, 3,185 tests); the
+  Cargo workspace and `py/pyproject.toml` are at 0.5.0, so the wheel builds as
+  `glia_py-0.5.0-*.whl`. What remains is release mechanics: James walks the commits, a PyPI
+  pending trusted publisher for `glia-py`, then push → tag `v0.5.0` → PyPI (the leap doc's
+  §1 checklist), and the consumers apply their handoffs.
   The rename is done, table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists anything
   left on the old names): the repo, the `glia` binary (`cli/Cargo.toml`), every library
   crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python package: PyPI
