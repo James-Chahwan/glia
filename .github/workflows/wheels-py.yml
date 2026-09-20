@@ -28,6 +28,12 @@ on:
       # `py` depends on `snapshots` (history_sync, LF.5d): a PR touching only
       # that crate must still build a wheel.
       - "snapshots/**"
+      # The wheel also links `activation` (the PPR / plan / algo home, LD.12-LD.15)
+      # and `projection-text` (dense_text*). Checked against
+      # `cargo tree -p glia-py --edges normal`; `cli`, `doc-sources` and
+      # `toy-domain` are NOT linked, so they stay out.
+      - "activation/**"
+      - "projection-text/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/wheels-py.yml"
