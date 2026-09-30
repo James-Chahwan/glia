@@ -310,7 +310,7 @@ def main():
 
     if leap or release:
         # Record this wave's 5-hour usage cost and say whether the next wave can start (usage_gate.py).
-        sh(f"python3 dev-notes/wave-runner/usage_gate.py --end W{wave}")
+        sh(f"python3 dev-notes/wave-runner/usage_gate.py --end {'R051-' if release else ''}W{wave}")
         out, _ = sh("python3 dev-notes/wave-runner/usage_gate.py")
         say("== usage for the next wave: " + out.strip().replace("\n", " | "))
 
