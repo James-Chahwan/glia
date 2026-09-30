@@ -11,8 +11,8 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, emit_method_level_implements, enclosing_module, graph_evidence, push_edge,
-    resolve_calls, resolve_refs,
+    EvidenceTally, emit_method_level_implements, enclosing_class_or_struct, enclosing_module,
+    graph_evidence, push_edge, resolve_calls, resolve_refs, unique_global_type,
 };
 use crate::imports::{
     SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
@@ -64,8 +64,13 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// LA.13b: a package is a directory, so an import binds the imported
 /// directory and a call every generic lookup missed resolves across the
 /// package's files ([`GoPackages`]), with no qname or persisted-table change.
+///
+/// CA.2b: the same hook binds a method call whose receiver is a call chain,
+/// a local / parameter, a package var or a struct-field chain on that
+/// receiver's type ([`GoPackages::typed_receiver`]); `[go-receivers]` prints
+/// what it bound.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (g, split, implicit, packages) = build_go_passes(repo, parses);
+    let (g, split, implicit, packages, receivers) = build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
@@ -75,6 +80,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     if let Some(line) = packages.marker() {
         eprintln!("{line}");
     }
+    eprintln!("{}", receivers.marker());
     eprintln!("{}", go_types_marker(&g.nav));
     Ok(g)
 }
@@ -104,7 +110,7 @@ fn go_types_marker(nav: &CodeNav) -> String {
 fn build_go_passes(
     repo: RepoId,
     parses: Vec<FileParse>,
-) -> (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats) {
+) -> (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats, ReceiverTally) {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
@@ -114,6 +120,7 @@ fn build_go_passes(
     let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
     resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
     let package_stats = packages.stats(dir_bound_imports);
+    let receivers = packages.tally.clone();
     let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
     resolve_refs(&mut g, &refs, &mut tally);
@@ -121,7 +128,7 @@ fn build_go_passes(
     let implicit = emit_go_implicit_implements(&mut g);
     emit_method_level_implements(&mut g);
     tally.report();
-    (g, split, implicit, package_stats)
+    (g, split, implicit, package_stats, receivers)
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -718,8 +725,18 @@ pub(crate) struct GoPackages {
     /// Importing file MODULE -> local package name -> import path, for every
     /// `ImportTarget::Module` except a blank (`_`) or dot (`.`) import.
     import_path: HashMap<NodeId, HashMap<String, String>>,
-    /// Calls [`GoPackages::resolve`] bound.
+    /// Calls [`GoPackages::package_call`] bound.
     sibling_calls: std::cell::Cell<usize>,
+    /// METHOD -> the file MODULE that DEFINES it, for a method whose nav
+    /// parent is not its file: a split-file method (LA.23d) sits under a
+    /// struct of ANOTHER file, whose imports are not the ones its receiver
+    /// facts and result type name packages by (CA.2b).
+    method_file: HashMap<NodeId, NodeId>,
+    /// Bare type name -> [`unique_global_type`]'s answer, memoised: the
+    /// symbol table does not change while calls resolve.
+    global_types: std::cell::RefCell<HashMap<String, Option<NodeId>>>,
+    /// What [`GoPackages::typed_receiver`] bound and missed (CA.2b).
+    tally: ReceiverTally,
 }
 
 /// Where an import of a package directory binds ([`GoPackages::import_target`]).
@@ -810,6 +827,16 @@ impl GoPackages {
                 import_path.entry(from).or_default().insert(local.to_string(), path.clone());
             }
         }
+        let mut method_file: HashMap<NodeId, NodeId> = HashMap::new();
+        for e in &g.edges {
+            if e.category == edge_category::DEFINES
+                && g.nav.kind_by_id.get(&e.from) == Some(&node_kind::MODULE)
+                && g.nav.kind_by_id.get(&e.to) == Some(&node_kind::METHOD)
+                && g.nav.parent_of.get(&e.to) != Some(&e.from)
+            {
+                method_file.insert(e.to, e.from);
+            }
+        }
         GoPackages {
             by_dir,
             dir_named,
@@ -817,6 +844,9 @@ impl GoPackages {
             tests,
             import_path,
             sibling_calls: std::cell::Cell::new(0),
+            method_file,
+            global_types: std::cell::RefCell::new(HashMap::new()),
+            tally: ReceiverTally::default(),
         }
     }
 
@@ -838,7 +868,14 @@ impl GoPackages {
     }
 
     /// `resolve_calls`' `extra_hook`, consulted only after every generic
-    /// lookup missed:
+    /// lookup missed: a package call ([`GoPackages::package_call`]), else a
+    /// method on a typed receiver ([`GoPackages::typed_receiver`], CA.2b). A
+    /// base that is not an import no longer ends the hook.
+    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+        self.package_call(g, site).or_else(|| self.typed_receiver(g, site))
+    }
+
+    /// A call into a package:
     ///
     /// * `Bare(name)`: the def `name` of another file in the caller's package
     ///   (a package's top-level names are one scope in Go). A test file's
@@ -859,7 +896,7 @@ impl GoPackages {
     ///
     /// The hit's evidence (LC.3d) is `graph:go_packages` with rule
     /// `package_sibling` (Bare) or `package_import` (Attribute).
-    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+    fn package_call(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
         let module = enclosing_module(&g.nav, site.from)?;
         let from_test = self.tests.contains(&module);
         let (hit, rule) = match &site.qualifier {
@@ -939,6 +976,507 @@ impl GoPackages {
             dir_bound_imports,
             sibling_calls: self.sibling_calls.get(),
         }
+    }
+}
+
+// ============================================================================
+// Go typed receivers (CA.2b)
+// ============================================================================
+
+/// The longest receiver chain [`GoPackages::typed_receiver`] walks, in
+/// segments (`a.b().c.d()` is four).
+const RECV_MAX_SEGS: usize = 6;
+
+/// How deep one receiver walk follows recorded type texts into each other (a
+/// local's call chain, a callee's result type, a package var's initialiser):
+/// bounds the work and ends a self-referential local (`a := a.Next()`).
+const RECV_MAX_DEPTH: u8 = 4;
+
+/// Which recorded fact typed the LAST hop of a receiver chain, written as the
+/// EVIDENCE rule of the CALLS edge the hook draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecvSource {
+    /// A call's result type (`return_types`), or a conversion `pkg.T(x)`.
+    Return,
+    /// A parameter or local of the caller (`local_types[caller]`).
+    Local,
+    /// A package-level var (`local_types[<file MODULE>]`).
+    PackageVar,
+    /// A struct field's declared type (`field_types`), or the receiver's own
+    /// struct (`self`).
+    FieldChain,
+}
+
+impl RecvSource {
+    fn rule(self) -> &'static str {
+        match self {
+            RecvSource::Return => "receiver_return",
+            RecvSource::Local => "receiver_local",
+            RecvSource::PackageVar => "receiver_package_var",
+            RecvSource::FieldChain => "receiver_field_chain",
+        }
+    }
+}
+
+/// One link of a receiver chain as the Go parser normalises it (CA.2a
+/// `chain_text`): a name `repo`, or a call `Repo()` (arguments elided).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seg<'s> {
+    Ident(&'s str),
+    Call(&'s str),
+}
+
+/// Split a normalised chain (`Services.UserRepository()`, `self.deps.repo`,
+/// `repo`) into its links. Anything else — the raw text of a chain through an
+/// index, a type assertion or a literal, or a chain longer than
+/// [`RECV_MAX_SEGS`] — is `None`.
+fn receiver_segments(text: &str) -> Option<Vec<Seg<'_>>> {
+    let mut segs = Vec::new();
+    for part in text.split('.') {
+        let (name, call) = match part.strip_suffix("()") {
+            Some(name) => (name, true),
+            None => (part, false),
+        };
+        let ident = name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+        if !ident || segs.len() == RECV_MAX_SEGS {
+            return None;
+        }
+        segs.push(if call { Seg::Call(name) } else { Seg::Ident(name) });
+    }
+    Some(segs)
+}
+
+/// True for a Go exported name (upper-case first letter): the only names
+/// another package can reach.
+fn is_exported(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
+}
+
+/// The METHOD `name` a value of type `ty` has: its declared method, else (an
+/// INTERFACE) the interface's own METHOD, which A6.6's method-level
+/// IMPLEMENTS carries on to the implementations.
+fn method_on(g: &RepoGraph, ty: NodeId, name: &str) -> Option<NodeId> {
+    g.symbols
+        .class_methods
+        .get(&ty)
+        .and_then(|m| m.get(name).copied())
+        .or_else(|| g.symbols.interface_methods.get(&ty).and_then(|m| m.get(name).copied()))
+}
+
+/// Where a receiver chain stands after a hop: a type, or an imported package
+/// (only ever the chain's root).
+#[derive(Clone, Copy)]
+enum Hop<'p> {
+    Type(NodeId),
+    Package(&'p str),
+}
+
+/// The scope a chain's names are read in.
+#[derive(Clone, Copy)]
+struct RecvScope<'p> {
+    /// The fn / METHOD whose locals the chain's root may name; `None` at
+    /// package scope (a package var's initialiser, a callee's result type).
+    func: Option<NodeId>,
+    /// The file MODULE whose imports and package the chain's names resolve
+    /// through.
+    module: NodeId,
+    /// The call site's own package dir.
+    caller_dir: &'p str,
+    /// The call site's file is a `_test.go` file.
+    from_test: bool,
+}
+
+impl RecvScope<'_> {
+    /// A test file of `dir` answers only a test caller in that same package
+    /// ([`GoPackages::unique_in`]'s `with_tests` rule).
+    fn with_tests(&self, dir: &str) -> bool {
+        self.from_test && dir == self.caller_dir
+    }
+}
+
+/// What [`GoPackages::typed_receiver`] did to one Go graph, as Cell counters
+/// (the hook takes `&self`), for the `[go-receivers]` marker.
+#[derive(Debug, Default, Clone)]
+struct ReceiverTally {
+    ret: std::cell::Cell<usize>,
+    local: std::cell::Cell<usize>,
+    package_var: std::cell::Cell<usize>,
+    field_chain: std::cell::Cell<usize>,
+    /// Sites whose receiver had a recorded type text (a local, package var,
+    /// result or field type) but whose type or method did not resolve: a
+    /// type of another module (`gin.Context`), an ambiguous name, a method
+    /// promoted from an embedded field.
+    typed_unbound: std::cell::Cell<usize>,
+}
+
+impl ReceiverTally {
+    fn bound(&self, source: RecvSource) {
+        let c = match source {
+            RecvSource::Return => &self.ret,
+            RecvSource::Local => &self.local,
+            RecvSource::PackageVar => &self.package_var,
+            RecvSource::FieldChain => &self.field_chain,
+        };
+        c.set(c.get() + 1);
+    }
+
+    /// `[go-receivers] bound=<n> (return=<a> local=<b> package_var=<c>
+    /// field_chain=<d>) typed_unbound=<u>`, once per Go graph.
+    fn marker(&self) -> String {
+        let (r, l, p, f) =
+            (self.ret.get(), self.local.get(), self.package_var.get(), self.field_chain.get());
+        format!(
+            "[go-receivers] bound={} (return={r} local={l} package_var={p} field_chain={f}) \
+             typed_unbound={}",
+            r + l + p + f,
+            self.typed_unbound.get()
+        )
+    }
+}
+
+impl GoPackages {
+    /// CA.2b: a method call on a typed receiver, the second half of
+    /// [`GoPackages::resolve`] (so only after every generic lookup and the
+    /// package call missed). The receiver is an `Attribute` base or a
+    /// `ComplexReceiver` chain ([`receiver_segments`]); [`GoPackages::chain_type`]
+    /// types it through the facts CA.2a recorded, and the method binds on
+    /// that type ([`method_on`]). Every lookup is exact-name, kind-filtered
+    /// and unique-or-nothing. Evidence `graph:go_packages` with rule
+    /// `receiver_return` / `receiver_local` / `receiver_package_var` /
+    /// `receiver_field_chain`: the fact that typed the chain's last hop.
+    fn typed_receiver(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+        let (segs, name) = match &site.qualifier {
+            CallQualifier::Attribute { base, name } => (receiver_segments(base)?, name),
+            CallQualifier::ComplexReceiver { receiver, name } => {
+                (receiver_segments(receiver)?, name)
+            }
+            _ => return None,
+        };
+        if name.is_empty() {
+            return None;
+        }
+        let module = self.file_of(g, site.from)?;
+        let scope = RecvScope {
+            func: (g.nav.kind_by_id.get(&site.from) != Some(&node_kind::MODULE))
+                .then_some(site.from),
+            module,
+            caller_dir: self.dir_of.get(&module)?,
+            from_test: self.tests.contains(&module),
+        };
+        let mut typed = false;
+        let hit = self
+            .chain_type(g, scope, &segs, 0, &mut typed)
+            .and_then(|(ty, source)| Some((method_on(g, ty, name)?, source)));
+        match hit {
+            Some((method, source)) => {
+                self.tally.bound(source);
+                Some((method, go_ev(source.rule())))
+            }
+            None => {
+                if typed {
+                    self.tally.typed_unbound.set(self.tally.typed_unbound.get() + 1);
+                }
+                None
+            }
+        }
+    }
+
+    /// The file MODULE a node's facts are written in: a split-file method's
+    /// own file ([`GoPackages::method_file`]), else its nearest MODULE.
+    fn file_of(&self, g: &RepoGraph, id: NodeId) -> Option<NodeId> {
+        self.method_file.get(&id).copied().or_else(|| enclosing_module(&g.nav, id))
+    }
+
+    /// The type a receiver chain `segs` read in `scope` evaluates to, with
+    /// the fact that typed its last hop. `typed` turns true once any
+    /// recorded type text was consulted.
+    fn chain_type<'a>(
+        &'a self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        segs: &[Seg<'_>],
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<(NodeId, RecvSource)> {
+        if depth > RECV_MAX_DEPTH || segs.len() > RECV_MAX_SEGS {
+            return None;
+        }
+        let (&root, rest) = segs.split_first()?;
+        let (mut hop, mut source) = self.root_hop(g, scope, root, depth, typed)?;
+        for &seg in rest {
+            (hop, source) = self.next_hop(g, scope, hop, seg, depth, typed)?;
+        }
+        match hop {
+            Hop::Type(ty) => Some((ty, source)),
+            Hop::Package(_) => None,
+        }
+    }
+
+    /// A chain's first link, Go's scoping innermost first:
+    ///
+    /// * `x` a local or parameter of the scope's fn: its recorded type text
+    ///   ([`GoPackages::type_of_text`]); `""` (unknown, it shadows) -> `None`.
+    /// * `self`: the receiver's own struct.
+    /// * `x` an import of the scope's file: that package.
+    /// * `x` a package var of the scope's package ([`GoPackages::package_var_type`]).
+    /// * `f()`: the result type of the function `f` of the scope's file,
+    ///   else of its package; a type `T(x)` is a conversion to `T`. A local
+    ///   named `f` (a func value) shadows it: unknown.
+    fn root_hop<'a>(
+        &'a self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        seg: Seg<'_>,
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<(Hop<'a>, RecvSource)> {
+        let local = |name: &str| {
+            let f = scope.func?;
+            g.nav.local_types.get(&f)?.get(name).map(String::as_str)
+        };
+        match seg {
+            Seg::Ident(x) => {
+                if let Some(text) = local(x) {
+                    if text.is_empty() {
+                        return None;
+                    }
+                    *typed = true;
+                    let ty = self.type_of_text(g, scope, text, depth + 1, typed)?;
+                    return Some((Hop::Type(ty), RecvSource::Local));
+                }
+                if x == "self" {
+                    let owner = enclosing_class_or_struct(&g.nav, scope.func?)?;
+                    return Some((Hop::Type(owner), RecvSource::FieldChain));
+                }
+                if let Some(dir) = self.imported_dir(g, scope.module, x) {
+                    return Some((Hop::Package(dir), RecvSource::Return));
+                }
+                let dir = self.dir_of.get(&scope.module)?;
+                let ty = self.package_var_type(g, scope, dir, x, depth, typed)?;
+                Some((Hop::Type(ty), RecvSource::PackageVar))
+            }
+            Seg::Call(f) => {
+                if local(f).is_some() {
+                    return None;
+                }
+                let dir = self.dir_of.get(&scope.module)?;
+                let callee = g
+                    .symbols
+                    .module_symbols
+                    .get(&scope.module)
+                    .and_then(|s| s.get(f).copied())
+                    .or_else(|| self.unique_in(g, dir, f, scope.module, scope.with_tests(dir)))?;
+                let ty = self.callee_type(g, scope, callee, depth, typed)?;
+                Some((Hop::Type(ty), RecvSource::Return))
+            }
+        }
+    }
+
+    /// A chain's next link from `hop`:
+    ///
+    /// * package + `F()`: the exported function `F` of that package -> its
+    ///   result type; a type `T` -> `T` itself (a conversion `pkg.T(x)`).
+    /// * package + `V`: the exported package var `V` of that package.
+    /// * type `T` + `f`: `T`'s field `f` -> its declared type, a bare name
+    ///   (LA.23c) looked up in `T`'s package, else repo-wide
+    ///   ([`GoPackages::global_type`]).
+    /// * type `T` + `m()`: `T`'s method `m` -> its result type, read in the
+    ///   method's own file.
+    fn next_hop<'a>(
+        &'a self,
+        g: &RepoGraph,
+        scope: RecvScope<'a>,
+        hop: Hop<'a>,
+        seg: Seg<'_>,
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<(Hop<'a>, RecvSource)> {
+        match (hop, seg) {
+            (Hop::Package(dir), Seg::Call(f)) => {
+                if !is_exported(f) {
+                    return None;
+                }
+                let callee = self.unique_in(g, dir, f, scope.module, scope.with_tests(dir))?;
+                let ty = self.callee_type(g, scope, callee, depth, typed)?;
+                Some((Hop::Type(ty), RecvSource::Return))
+            }
+            (Hop::Package(dir), Seg::Ident(v)) => {
+                if !is_exported(v) {
+                    return None;
+                }
+                let ty = self.package_var_type(g, scope, dir, v, depth, typed)?;
+                Some((Hop::Type(ty), RecvSource::PackageVar))
+            }
+            (Hop::Type(owner), Seg::Ident(field)) => {
+                let name = g
+                    .nav
+                    .field_types
+                    .get(&owner)?
+                    .get(field)
+                    .filter(|t| !t.is_empty())?;
+                *typed = true;
+                let owner_dir = self.dir_of.get(&enclosing_module(&g.nav, owner)?)?;
+                let ty = self
+                    .unique_type_in(g, owner_dir, name, scope.with_tests(owner_dir))
+                    .or_else(|| self.global_type(g, name, scope.from_test))?;
+                Some((Hop::Type(ty), RecvSource::FieldChain))
+            }
+            (Hop::Type(owner), Seg::Call(m)) => {
+                let method = method_on(g, owner, m)?;
+                let ret = g.nav.return_types.get(&method)?;
+                *typed = true;
+                let at = RecvScope { func: None, module: self.file_of(g, method)?, ..scope };
+                let ty = self.type_of_text(g, at, ret, depth + 1, typed)?;
+                Some((Hop::Type(ty), RecvSource::Return))
+            }
+        }
+    }
+
+    /// What calling `callee` yields: a FUNCTION's recorded result type, read
+    /// in the function's own file; a STRUCT / INTERFACE itself (a
+    /// conversion). Any other kind -> `None`.
+    fn callee_type(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'_>,
+        callee: NodeId,
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<NodeId> {
+        let kind = *g.nav.kind_by_id.get(&callee)?;
+        if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
+            return Some(callee);
+        }
+        if kind != node_kind::FUNCTION {
+            return None;
+        }
+        let ret = g.nav.return_types.get(&callee)?;
+        *typed = true;
+        let at = RecvScope { func: None, module: self.file_of(g, callee)?, ..scope };
+        self.type_of_text(g, at, ret, depth + 1, typed)
+    }
+
+    /// The type of package var `name` of package `dir`: every file of `dir`
+    /// that declares it (a build-tag pair may declare it twice) must record
+    /// one and the same type text, and that text must resolve, in each such
+    /// file, to one and the same type. A test file's vars answer only a test
+    /// caller in its own package.
+    fn package_var_type(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'_>,
+        dir: &str,
+        name: &str,
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<NodeId> {
+        let with_tests = scope.with_tests(dir);
+        let mut text: Option<&str> = None;
+        let mut answer: Option<NodeId> = None;
+        for &m in self.by_dir.get(dir)? {
+            if !with_tests && self.tests.contains(&m) {
+                continue;
+            }
+            let Some(t) = g.nav.local_types.get(&m).and_then(|vars| vars.get(name)) else {
+                continue;
+            };
+            match text {
+                Some(seen) if seen != t => return None,
+                _ => text = Some(t),
+            }
+            if t.is_empty() {
+                return None;
+            }
+            *typed = true;
+            let at = RecvScope { func: None, module: m, ..scope };
+            let ty = self.type_of_text(g, at, t, depth + 1, typed)?;
+            match answer {
+                Some(a) if a != ty => return None,
+                _ => answer = Some(ty),
+            }
+        }
+        answer
+    }
+
+    /// The type a recorded type text names, read in `scope`: a call chain
+    /// (`Services.UserRepository()`, a `self.<field>` alias) is walked as a
+    /// chain; `pkg.T` is the STRUCT / INTERFACE `T` of the package the
+    /// scope's file imports as `pkg`; a bare `T` is the one of the scope's
+    /// own package, else the repo-unique type ([`GoPackages::global_type`]).
+    fn type_of_text(
+        &self,
+        g: &RepoGraph,
+        scope: RecvScope<'_>,
+        text: &str,
+        depth: u8,
+        typed: &mut bool,
+    ) -> Option<NodeId> {
+        if depth > RECV_MAX_DEPTH {
+            return None;
+        }
+        let segs = receiver_segments(text)?;
+        let chain = segs.first() == Some(&Seg::Ident("self"))
+            || segs.iter().any(|s| matches!(s, Seg::Call(_)));
+        if chain {
+            return self.chain_type(g, scope, &segs, depth, typed).map(|(ty, _)| ty);
+        }
+        match segs.as_slice() {
+            [Seg::Ident(pkg), Seg::Ident(name)] => {
+                let dir = self.imported_dir(g, scope.module, pkg)?;
+                self.unique_type_in(g, dir, name, scope.with_tests(dir))
+            }
+            [Seg::Ident(name)] => {
+                let dir = self.dir_of.get(&scope.module)?;
+                self.unique_type_in(g, dir, name, scope.with_tests(dir))
+                    .or_else(|| self.global_type(g, name, scope.from_test))
+            }
+            _ => None,
+        }
+    }
+
+    /// [`GoPackages::unique_in`] for a type: the one STRUCT / INTERFACE
+    /// `name` across every file of `dir` (the caller's own included), test
+    /// files only `with_tests`. A same-named FUNCTION never answers.
+    fn unique_type_in(
+        &self,
+        g: &RepoGraph,
+        dir: &str,
+        name: &str,
+        with_tests: bool,
+    ) -> Option<NodeId> {
+        let mut hit: Option<NodeId> = None;
+        for &m in self.by_dir.get(dir)? {
+            if !with_tests && self.tests.contains(&m) {
+                continue;
+            }
+            let Some(&id) = g.symbols.module_symbols.get(&m).and_then(|s| s.get(name)) else {
+                continue;
+            };
+            let kind = g.nav.kind_by_id.get(&id);
+            if kind != Some(&node_kind::STRUCT) && kind != Some(&node_kind::INTERFACE) {
+                continue;
+            }
+            match hit {
+                Some(existing) if existing == id => {}
+                Some(_) => return None,
+                None => hit = Some(id),
+            }
+        }
+        hit
+    }
+
+    /// The repo-unique type `name` ([`unique_global_type`], memoised), unless
+    /// it is declared in a test file and the caller is not one.
+    fn global_type(&self, g: &RepoGraph, name: &str, from_test: bool) -> Option<NodeId> {
+        let hit = *self
+            .global_types
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_insert_with(|| unique_global_type(g, name));
+        let hit = hit?;
+        let in_test = enclosing_module(&g.nav, hit).is_some_and(|m| self.tests.contains(&m));
+        (from_test || !in_test).then_some(hit)
     }
 }
 
@@ -1045,7 +1583,9 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
 
 /// The evidence of an edge a Go package-as-directory pass drew (LC.3d):
 /// `graph:go_packages` with rule `split_receiver` (LA.23d), `package_sibling`
-/// / `package_import` (the LA.13b call hook) or `embed_package` /
+/// / `package_import` (the LA.13b call hook), `receiver_return` /
+/// `receiver_local` / `receiver_package_var` / `receiver_field_chain` (the
+/// CA.2b typed-receiver half of that hook) or `embed_package` /
 /// `embed_import` (LD.7b interface embeds).
 fn go_ev(rule: &str) -> Evidence {
     graph_evidence("graph:go_packages", rule)
@@ -2554,7 +3094,7 @@ mod tests {
 
     /// `build_go` with the implicit pass's stats.
     fn go_implicit(parses: Vec<FileParse>) -> (RepoGraph, Option<GoImplicitStats>) {
-        let (g, _, stats, _) = build_go_passes(repo(), parses);
+        let (g, _, stats, _, _) = build_go_passes(repo(), parses);
         (g, stats)
     }
 
@@ -2917,7 +3457,7 @@ mod tests {
     /// bound in a sibling file; the fixture prints the packet's marker.
     #[test]
     fn go_package_stats_and_marker() {
-        let (g, _, _, stats) = build_go_passes(repo(), multifile_package_shape());
+        let (g, _, _, stats, receivers) = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(
             stats,
             GoPackageStats { dirs: 2, multi_file: 1, dir_bound_imports: 1, sibling_calls: 2 }
@@ -2932,9 +3472,87 @@ mod tests {
         assert!(has_edge(&g, main, gid(node_kind::FUNCTION, "internal::store::load::Load"), edge_category::CALLS));
         assert!(has_edge(&g, save, gid(node_kind::FUNCTION, "internal::store::load::helper"), edge_category::CALLS));
         assert!(g.unresolved_calls.is_empty());
+        assert_eq!(
+            receivers.marker(),
+            "[go-receivers] bound=0 (return=0 local=0 package_var=0 field_chain=0) typed_unbound=0",
+            "package calls are not typed-receiver binds"
+        );
 
-        let (_, _, _, empty) = build_go_passes(repo(), vec![]);
+        let (_, _, _, empty, _) = build_go_passes(repo(), vec![]);
         assert_eq!(empty.marker(), None, "no MODULE, no marker");
+    }
+
+    // ---- CA.2b: Go typed receivers -----------------------------------------
+
+    /// The `[go-receivers]` marker: bound is the sum of the four sources.
+    #[test]
+    fn receiver_tally_marker_shape() {
+        let tally = ReceiverTally::default();
+        for (source, n) in [
+            (RecvSource::Return, 3),
+            (RecvSource::Local, 2),
+            (RecvSource::PackageVar, 1),
+            (RecvSource::FieldChain, 1),
+        ] {
+            for _ in 0..n {
+                tally.bound(source);
+            }
+        }
+        tally.typed_unbound.set(2);
+        assert_eq!(
+            tally.marker(),
+            "[go-receivers] bound=7 (return=3 local=2 package_var=1 field_chain=1) typed_unbound=2"
+        );
+    }
+
+    /// A receiver chain splits into names and calls; raw fallback text (an
+    /// index, an assertion, a literal) and an over-long chain do not parse.
+    #[test]
+    fn receiver_segments_parse_normalised_chains_only() {
+        use Seg::{Call, Ident};
+        assert_eq!(
+            receiver_segments("Services.UserRepository()"),
+            Some(vec![Ident("Services"), Call("UserRepository")])
+        );
+        assert_eq!(
+            receiver_segments("self.deps.repo"),
+            Some(vec![Ident("self"), Ident("deps"), Ident("repo")])
+        );
+        assert_eq!(receiver_segments("repo"), Some(vec![Ident("repo")]));
+        for raw in ["a[0]", "x.(T)", "\"s\".f", "a()()", "a..b", "", "1x", "a b"] {
+            assert_eq!(receiver_segments(raw), None, "{raw:?}");
+        }
+        assert!(receiver_segments("a.b.c.d.e.f").is_some());
+        assert_eq!(receiver_segments("a.b.c.d.e.f.g"), None, "longer than RECV_MAX_SEGS");
+    }
+
+    /// The bench fixture go-return-type-receivers, parsed as the engine
+    /// does: one bind per source kind it exercises, and no typed site left
+    /// unbound.
+    #[test]
+    fn go_receiver_tally_counts_the_fixture() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("bench/substrate-gap/fixtures/go-return-type-receivers"))
+            .expect("workspace root");
+        let parses: Vec<FileParse> = [
+            "handlers/users.go",
+            "repositories/order_repository.go",
+            "repositories/user_repository.go",
+            "services/provider.go",
+        ]
+        .iter()
+        .map(|rel| {
+            let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
+            let qname = rel.trim_end_matches(".go").replace('/', "::");
+            glia_parser_go::parse_file(&src, rel, &qname, "example.com/shop", repo()).expect("parse")
+        })
+        .collect();
+        let (_, _, _, _, receivers) = build_go_passes(repo(), parses);
+        assert_eq!(
+            receivers.marker(),
+            "[go-receivers] bound=4 (return=1 local=2 package_var=1 field_chain=0) typed_unbound=0"
+        );
     }
 
     /// An import of a directory binds its dir-named file, else its first
@@ -3063,7 +3681,7 @@ mod tests {
     fn go_packages_read_a_file_named_module_once_by_its_bare_form() {
         // `infra/main.go` + `infra/main.tf`, `infra/main_test.go` + `.py`:
         // one member each, the test file still a test, the alias not a member.
-        let (g, _, _, stats) = build_go_passes(
+        let (g, _, _, stats, _) = build_go_passes(
             repo(),
             vec![
                 named_module("infra::main.go", "main", &[]),

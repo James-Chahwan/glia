@@ -679,6 +679,39 @@ pub(crate) fn unique_global_function(g: &RepoGraph, name: &str) -> Option<NodeId
     hit
 }
 
+/// A top-level type named `name` across the repo, iff unique:
+/// [`unique_global_function`] restricted to STRUCT / CLASS / INTERFACE /
+/// ENUM, so a same-named FUNCTION never answers a type lookup (quokka's
+/// FUNCTION `repository_provider::UserRepository` beside the STRUCT
+/// `user_repository::UserRepository`). Two distinct types -> `None`. The Go
+/// call hook's last-resort type lookup (CA.2b); `resolve_type_name` (the
+/// generic A6.2a chain) keeps `unique_global_function`, so no other
+/// language's CALLS move.
+pub(crate) fn unique_global_type(g: &RepoGraph, name: &str) -> Option<NodeId> {
+    let is_type = |id: &NodeId| {
+        matches!(
+            g.nav.kind_by_id.get(id).copied(),
+            Some(k) if k == node_kind::STRUCT
+                || k == node_kind::CLASS
+                || k == node_kind::INTERFACE
+                || k == node_kind::ENUM
+        )
+    };
+    let mut hit: Option<NodeId> = None;
+    for syms in g.symbols.module_symbols.values() {
+        let Some(&id) = syms.get(name).filter(|id| is_type(id)) else {
+            continue;
+        };
+        match hit {
+            // One type registered under its MODULE and its PACKAGE.
+            Some(existing) if existing == id => {}
+            Some(_) => return None,
+            None => hit = Some(id),
+        }
+    }
+    hit
+}
+
 /// Walk `parent_of` until we hit a module node. For a top-level function this
 /// returns its module directly; for a method it walks method → class → module.
 /// `pub(crate)` for the Go package hook (`build::GoPackages`, LA.13b), which
@@ -711,7 +744,9 @@ fn enclosing_package(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> {
 /// type. The walk passes through intermediate parents, so a METHOD under an
 /// ATTRIBUTE under an ENUM (a Java constant body) reaches the ENUM. The name
 /// predates ENUM and is kept: other passes call it by this name.
-fn enclosing_class_or_struct(nav: &CodeNav, start: NodeId) -> Option<NodeId> {
+/// `pub(crate)` for the Go call hook (CA.2b), whose receiver chain `self.a.b`
+/// starts at the caller's struct.
+pub(crate) fn enclosing_class_or_struct(nav: &CodeNav, start: NodeId) -> Option<NodeId> {
     let mut cur = start;
     loop {
         let parent = *nav.parent_of.get(&cur)?;

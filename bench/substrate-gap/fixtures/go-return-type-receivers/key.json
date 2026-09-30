@@ -1,0 +1,61 @@
+{
+  "framework": "go-return-type-receivers",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "calls",
+  "cells": [
+    "go/calls"
+  ],
+  "note": "CA-2: a Go receiver typed by a call's return type (chained services.UserRepository().FindByID, a local repo := services.UserRepository()), a parameter's declared type and a package var initialised by a call bind the method on that type. The FUNCTION services::UserRepository shares its name with the STRUCT repositories::UserRepository (quokka), and OrderRepository repeats every method name, so no repo-unique fallback can bind.",
+  "expect_edges": [
+    {
+      "from": "handlers::users::GetUser",
+      "to": "services::provider::UserRepository",
+      "category": "CALLS",
+      "note": "CONTROL: the inner call binds without CA.2b (the generic attribute branch, through the import of services)"
+    },
+    {
+      "from": "handlers::users::GetUser",
+      "to": "repositories::user_repository::UserRepository::FindByID",
+      "category": "CALLS",
+      "note": "chained: receiver is the inner call's return type"
+    },
+    {
+      "from": "handlers::users::SaveUser",
+      "to": "repositories::user_repository::UserRepository::Save",
+      "category": "CALLS",
+      "note": "local bound to a call"
+    },
+    {
+      "from": "handlers::users::CountUsers",
+      "to": "repositories::user_repository::UserRepository::Count",
+      "category": "CALLS",
+      "note": "parameter's declared type (package-qualified)"
+    },
+    {
+      "from": "handlers::users::DefaultUser",
+      "to": "repositories::user_repository::UserRepository::FindByID",
+      "category": "CALLS",
+      "note": "package-level var initialised by a call"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "handlers::users::GetUser",
+      "to": "repositories::order_repository::OrderRepository::FindByID",
+      "category": "CALLS"
+    },
+    {
+      "from": "handlers::users::SaveUser",
+      "to": "repositories::order_repository::OrderRepository::Save",
+      "category": "CALLS"
+    },
+    {
+      "from": "handlers::users::CountUsers",
+      "to": "repositories::order_repository::OrderRepository::Count",
+      "category": "CALLS"
+    }
+  ]
+}
