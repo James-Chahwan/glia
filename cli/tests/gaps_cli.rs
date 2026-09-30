@@ -253,6 +253,191 @@ fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
     );
 }
 
+/// CD.3b's suspected_edges fixture (engine/tests/suspected_edges.rs) under a
+/// fresh temp root: an Angular client (`web/`) whose `list()` / `count()`
+/// pair through the HTTP resolver, so (ENDPOINT, HTTP_CALLS, ROUTE) is
+/// learned, and whose `markAllRead()` posts through a class-field
+/// `${environment.apiUrl}` base the resolver cannot pair; an Express API
+/// (`api/`) serving all three.
+fn suspected(tag: &str) -> PathBuf {
+    const SERVICE_TS: &str = "import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { environment } from '../environments/environment';
+
+@Injectable({ providedIn: 'root' })
+export class NotificationsApi {
+  private readonly base = `${environment.apiUrl}/notifications`;
+  constructor(private http: HttpClient) {}
+
+  markAllRead() {
+    return this.http.post(`${this.base}/read-all`, {});
+  }
+
+  list() {
+    return this.http.get('/notifications');
+  }
+
+  count() {
+    return this.http.get('/notifications/count');
+  }
+}
+";
+    const ENVIRONMENT_TS: &str =
+        "export const environment = { production: false, apiUrl: 'http://localhost:8080/api' };\n";
+    const WEB_PACKAGE: &str = "{\"name\":\"web\",\"dependencies\":{\"@angular/core\":\"17.0.0\",\"@angular/common\":\"17.0.0\"}}\n";
+    const ROUTES_TS: &str = "import express from 'express';
+const router = express.Router();
+
+function markAll(req, res) { res.json({}); }
+function getOne(req, res) { res.json({}); }
+function listAll(req, res) { res.json([]); }
+function countAll(req, res) { res.json(0); }
+
+router.post('/notifications/read-all', markAll);
+router.get('/notifications/read-all', getOne);
+router.get('/notifications', listAll);
+router.get('/notifications/count', countAll);
+
+export default router;
+";
+    const API_PACKAGE: &str = "{\"name\":\"api\",\"dependencies\":{\"express\":\"4.18.0\"}}\n";
+
+    let root = std::env::temp_dir().join(format!("glia-cd3c-cli-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    write(&root, "web/src/notifications.service.ts", SERVICE_TS);
+    write(&root, "web/environments/environment.ts", ENVIRONMENT_TS);
+    write(&root, "web/package.json", WEB_PACKAGE);
+    write(&root, "api/src/routes.ts", ROUTES_TS);
+    write(&root, "api/package.json", API_PACKAGE);
+    root
+}
+
+/// The fenced ```toml blocks of `stdout`, each without its fences.
+fn toml_blocks(stdout: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut open: Option<Vec<&str>> = None;
+    for line in stdout.lines() {
+        match open.as_mut() {
+            None if line == "```toml" => open = Some(Vec::new()),
+            Some(body) if line == "```" => {
+                blocks.push(body.join("\n") + "\n");
+                open = None;
+            }
+            Some(body) => body.push(line),
+            None => {}
+        }
+    }
+    assert!(open.is_none(), "an unclosed fence: {stdout}");
+    blocks
+}
+
+/// CD.3c: after the suspected_edge table, one ```toml block per row holding
+/// the row's `draft` verbatim — a `# gap: <id>` comment, then one `[[edge]]`
+/// — under a `paste into <repo>/.glia/overlay.toml` header. Pasted (after
+/// `version = 1`), it is the overlay `--overlay-delta` keeps. Pre-CD.3c:
+/// the table only, no block.
+#[test]
+fn suspected_edge_prints_stanza() {
+    let root = suspected("stanza");
+    let out = glia(&["gaps", s(&root), "--category", "suspected_edge"]);
+    let json = glia(&["gaps", s(&root), "--category", "suspected_edge", "--json"]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(json.status.code(), Some(0), "{}", text(&json.stderr));
+    assert!(stdout.contains("## suspected_edge — 1"), "{stdout}");
+    assert!(
+        stderr.lines().any(|l| l.starts_with("[gaps] rows=1 (")
+            && l.contains(" suspected_edge=1 ")
+            && l.ends_with(" surface=cli")),
+        "{stderr}"
+    );
+
+    let overlay = root.join(".glia/overlay.toml");
+    let header = format!(
+        "paste into {} (heuristic - check it, then try it with --overlay-delta)",
+        overlay.display()
+    );
+    let lines: Vec<&str> = stdout.lines().collect();
+    let at = lines.iter().position(|l| *l == header);
+    assert!(at.is_some(), "{header:?} in {stdout}");
+    assert_eq!(
+        lines.get(at.unwrap_or_default() + 1).copied(),
+        Some("(no such file yet: a new overlay starts with `version = 1`)"),
+        "{stdout}"
+    );
+    let table_row = lines.iter().position(|l| l.contains("`endpoint:POST:"));
+    assert!(
+        table_row.is_some_and(|t| Some(t) < at),
+        "the stanza follows the table: {stdout}"
+    );
+
+    let blocks = toml_blocks(&stdout);
+    assert_eq!(blocks.len(), 1, "one block per suspected row: {stdout}");
+    let block = &blocks[0];
+    let first = block.lines().next().unwrap_or_default();
+    let hex = first.strip_prefix("# gap: gap:").unwrap_or_default();
+    assert!(
+        hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{block}"
+    );
+    assert_eq!(block.lines().nth(1), Some("[[edge]]"), "{block}");
+    for line in [
+        "category = \"HTTP_CALLS\"",
+        "from = \"endpoint:POST:${…}/read-all @web\"",
+        "to = \"POST /notifications/read-all @api\"",
+    ] {
+        assert!(block.lines().any(|l| l == line), "{line:?} in {block}");
+    }
+    assert!(
+        !block.lines().any(|l| l.starts_with("gap = ")),
+        "the id rides in a comment: {block}"
+    );
+
+    // Verbatim: the block is the row's JSON `draft`, and its comment names
+    // the row's id.
+    let v: serde_json::Value =
+        serde_json::from_str(&text(&json.stdout)).expect("stdout is one JSON object");
+    let row = &v["rows"][0];
+    assert_eq!(row["category"], "suspected_edge", "{v}");
+    assert_eq!(row["draft"].as_str(), Some(block.as_str()), "{v}");
+    assert_eq!(
+        Some(first),
+        row["id"]
+            .as_str()
+            .map(|id| format!("# gap: {id}"))
+            .as_deref(),
+        "{v}"
+    );
+
+    // Pasted as told, the stanza binds: the orphan pairs, the row goes, and
+    // the overlay is kept.
+    write(
+        &root,
+        ".glia/overlay.toml",
+        &format!("version = 1\n\n{block}"),
+    );
+    let delta = glia(&["gaps", s(&root), "--overlay-delta", "--json"]);
+    let again = glia(&["gaps", s(&root), "--category", "suspected_edge"]);
+    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(delta.status.code(), Some(0), "{}", text(&delta.stderr));
+    let d: serde_json::Value = serde_json::from_str(&text(&delta.stdout)).expect("one JSON object");
+    assert_eq!(d["added_by_category"]["HTTP_CALLS"], 1, "{d}");
+    assert_eq!(
+        (
+            &d["without"]["gaps_by_category"]["suspected_edge"],
+            &d["with"]["gaps_by_category"]["suspected_edge"]
+        ),
+        (&serde_json::json!(1), &serde_json::json!(0)),
+        "{d}"
+    );
+    assert_eq!(d["verdict"], "keep", "{d}");
+    let again = text(&again.stdout);
+    assert!(
+        !again.contains("## suspected_edge") && !again.contains("```toml"),
+        "nothing left to propose: {again}"
+    );
+}
+
 /// CE.3a: the table gains an `id` column first, one `gap:<16 hex>` per row.
 #[test]
 fn gaps_table_leads_with_the_id() {

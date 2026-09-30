@@ -42,7 +42,8 @@ impl PyGraph {
     /// `{counts, skipped, rows}` — the prompt material of an overlay agent.
     ///
     /// `rows`: `{id, category, qname, kind, file, line, detail, suggest,
-    /// tier}` (+ `draft` on a `suspected_edge` row), `line` 1-based, sorted
+    /// tier}` (+ `draft`, the last key, on a `suspected_edge` row — the
+    /// stanza `glia gaps` prints after that table, CD.3c), `line` 1-based, sorted
     /// by (category, file, line, qname). `id`
     /// (CE.3a) is `gap:<16 hex>`, unique in the report and stable across
     /// rebuilds: keyed by the node / stanza / sidecar row, never by a line or

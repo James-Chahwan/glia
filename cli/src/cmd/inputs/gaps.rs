@@ -7,12 +7,19 @@
 //! Every category, the ordering and the marker live in the engine; this is
 //! transport + rendering only. A report, not a gate: it exits 0 whatever it
 //! finds, and 2 on a build error or an unknown `--category`.
+//!
+//! The `suspected_edge` table (CD.3b) is followed by each shown row's
+//! paste-ready `[[edge]]` stanza, one fenced toml block per row (CD.3c):
+//! the text table shows `detail` only, and the stanza is the point of the
+//! row. Printed only — nothing here writes an overlay.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use glia_code_domain::glia_config::OVERLAY_FILE;
 use glia_engine::gaps::{
-    CATEGORIES, DROP, GapRow, GapsOptions, KEEP, OverlayDelta, REVIEW, gaps_report, overlay_delta,
+    CATEGORIES, DROP, GapRow, GapsOptions, KEEP, OverlayDelta, REVIEW, SUSPECTED_EDGE, gaps_report,
+    overlay_delta,
 };
 
 use crate::common::generate_for;
@@ -76,6 +83,33 @@ fn verdict_reason(v: &str) -> &'static str {
         REVIEW => "the graph improved, but a gap category rose too",
         DROP => "no gap category fell and the graph did not grow",
         _ => "unknown verdict",
+    }
+}
+
+/// CD.3c: the `draft` of each `rows` entry that has one, in row order, as a
+/// fenced toml block under one `paste into <repo>/.glia/overlay.toml` header.
+/// A draft's first line is `# gap: <id>`, a TOML comment, so each block
+/// pastes as is; a file that does not exist yet also needs `version = 1`
+/// first (the loader ignores a file without it), which the note says.
+fn print_stanzas(repo: &str, rows: &[&GapRow]) {
+    let drafts: Vec<&str> = rows.iter().filter_map(|r| r.draft.as_deref()).collect();
+    if drafts.is_empty() {
+        return;
+    }
+    let file = Path::new(repo).join(OVERLAY_FILE);
+    println!();
+    println!(
+        "paste into {} (heuristic - check it, then try it with --overlay-delta)",
+        file.display()
+    );
+    if !file.is_file() {
+        println!("(no such file yet: a new overlay starts with `version = 1`)");
+    }
+    for draft in drafts {
+        println!();
+        println!("```toml");
+        println!("{}", draft.trim_end_matches('\n'));
+        println!("```");
     }
 }
 
@@ -196,7 +230,7 @@ pub(crate) fn run(args: Args) -> i32 {
         println!();
         println!("| id | qname | kind | at | tier | suggest | detail |");
         println!("|---|---|---|---|---|---|---|");
-        for r in rows {
+        for r in &rows {
             println!(
                 "| {} | `{}` | {} | {} | {} | {} | {} |",
                 r.id,
@@ -207,6 +241,9 @@ pub(crate) fn run(args: Args) -> i32 {
                 cell(r.suggest),
                 cell(&r.detail)
             );
+        }
+        if category == SUSPECTED_EDGE {
+            print_stanzas(&args.repo, &rows);
         }
     }
     println!();

@@ -4,7 +4,9 @@ category=None)` returns a native dict {counts, skipped, rows}; the module
 function `overlay_delta(repo_paths, incremental=False)` returns a native dict
 {rules, edges_without, edges_with, added_by_category, orphans_without,
 orphans_with, without, with, nodes_added_by_kind, verdict} (CE.3a); a row
-carries a stable `id` first. Shared helpers: test_build.py."""
+carries a stable `id` first, and a `suspected_edge` row (CD.3b) a `draft` last:
+the paste-ready `# gap: <id>` + `[[edge]]` stanza (CD.3c). Shared helpers:
+test_build.py."""
 from __future__ import annotations
 
 import pathlib
@@ -21,6 +23,41 @@ API_PY = ("from flask import Flask\n\napp = Flask(__name__)\n\n\n"
           "@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n")
 PAIR = ("version = 1\n\n[[edge]]\nfrom = \"endpoint:GET:<unresolved>\"\n"
         "to = \"GET /users\"\ncategory = \"HTTP_CALLS\"\n")
+
+# CD.3b's suspected_edges fixture (engine/tests/suspected_edges.rs): an Angular
+# client whose list() / count() pair through the HTTP resolver, so (ENDPOINT,
+# HTTP_CALLS, ROUTE) is learned, and whose markAllRead() posts through a
+# class-field `${environment.apiUrl}` base no resolver pairs; an Express API.
+SUSPECTED = {
+    "web/src/notifications.service.ts": (
+        "import { Injectable } from '@angular/core';\n"
+        "import { HttpClient } from '@angular/common/http';\n"
+        "import { environment } from '../environments/environment';\n\n"
+        "@Injectable({ providedIn: 'root' })\n"
+        "export class NotificationsApi {\n"
+        "  private readonly base = `${environment.apiUrl}/notifications`;\n"
+        "  constructor(private http: HttpClient) {}\n\n"
+        "  markAllRead() {\n    return this.http.post(`${this.base}/read-all`, {});\n  }\n\n"
+        "  list() {\n    return this.http.get('/notifications');\n  }\n\n"
+        "  count() {\n    return this.http.get('/notifications/count');\n  }\n}\n"),
+    "web/environments/environment.ts": (
+        "export const environment = { production: false, apiUrl: 'http://localhost:8080/api' };\n"),
+    "web/package.json": ('{"name":"web","dependencies":{"@angular/core":"17.0.0",'
+                         '"@angular/common":"17.0.0"}}\n'),
+    "api/src/routes.ts": (
+        "import express from 'express';\nconst router = express.Router();\n\n"
+        "function markAll(req, res) { res.json({}); }\n"
+        "function getOne(req, res) { res.json({}); }\n"
+        "function listAll(req, res) { res.json([]); }\n"
+        "function countAll(req, res) { res.json(0); }\n\n"
+        "router.post('/notifications/read-all', markAll);\n"
+        "router.get('/notifications/read-all', getOne);\n"
+        "router.get('/notifications', listAll);\n"
+        "router.get('/notifications/count', countAll);\n\n"
+        "export default router;\n"),
+    "api/package.json": '{"name":"api","dependencies":{"express":"4.18.0"}}\n',
+}
+ORPHAN = "endpoint:POST:${…}/read-all @web"
 
 
 def main() -> int:
@@ -52,6 +89,8 @@ def main() -> int:
                 bool(rows) and list(rows[0]) == ["id", "category", "qname", "kind", "file", "line",
                                                  "detail", "suggest", "tier"],
                 rows[:1])
+        c.check("no draft off suspected_edge", all("draft" not in r for r in rows),
+                [r for r in rows if "draft" in r])
         c.check("row ids are gap:<16 hex> and unique",
                 bool(rows) and all(str(r.get("id", "")).startswith("gap:")
                                    and len(r["id"]) == 20 for r in rows)
@@ -89,6 +128,34 @@ def main() -> int:
         c.check("HTTP_CALLS +1", type(d) is dict and d.get("added_by_category") == {"HTTP_CALLS": 1}, d)
         c.check("accept-loop marker", "[overlay] 1 rules, +1 edges, orphans 1→0, gaps 4→2, verdict=keep" in err, err[-400:])
         c.raises("no repo paths", ValueError, lambda: rg.overlay_delta([]), "no repo paths")
+
+    with tempfile.TemporaryDirectory(prefix="glia-surface-gaps-suspected-") as tmp:
+        root = pathlib.Path(tmp) / "notif"
+        for rel, body in SUSPECTED.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(body)
+        g = rg.generate(str(root))
+        rep, err = stderr_of(lambda: g.gaps(category="suspected_edge"))
+        rows = rep.get("rows", []) if type(rep) is dict else []
+        c.check("one suspected row: the orphan",
+                [(r.get("category"), r.get("qname")) for r in rows]
+                == [("suspected_edge", ORPHAN)], rows)
+        row = rows[0] if rows else {}
+        draft = row.get("draft")
+        c.check("suspected row keys in field order, draft last",
+                list(row) == ["id", "category", "qname", "kind", "file", "line", "detail",
+                              "suggest", "tier", "draft"], list(row))
+        c.check("draft is a str: `# gap: <id>`, then [[edge]]",
+                type(draft) is str and draft.startswith(f"# gap: {row.get('id')}\n")
+                and draft.splitlines()[1:2] == ["[[edge]]"], draft)
+        c.check("draft pairs the orphan with the POST route",
+                type(draft) is str
+                and f'from = "{ORPHAN}"' in draft.splitlines()
+                and 'to = "POST /notifications/read-all @api"' in draft.splitlines()
+                and 'category = "HTTP_CALLS"' in draft.splitlines()
+                and not any(line.startswith("gap = ") for line in draft.splitlines()), draft)
+        c.check("suspected marker", " suspected_edge=1 " in err and " surface=py" in err,
+                err[-400:])
     return c.done()
 
 
