@@ -1347,6 +1347,15 @@ pub struct CodeNav {
     /// `resolve_calls`' receiver-type inference, innermost-first, before
     /// `field_types`.
     ///
+    /// Two more forms (Go, CA.2a): a MODULE scope holds that file's
+    /// package-level vars (the generic receiver pass looks up the caller's
+    /// own scope, never a MODULE, so only a language hook reads them); and a
+    /// type ending in `()` is a normalised call chain (`svc.Repo()`,
+    /// `repositories.NewX()`, arguments elided): the local holds that call's
+    /// result, whose type a language hook reads off [`CodeNav::return_types`].
+    /// Go keeps a package qualifier (`repositories.UserRepository`), which no
+    /// bare-name lookup matches.
+    ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub local_types: HashMap<NodeId, HashMap<String, String>>,
     /// Per-scope language facts that are neither a node, an edge, an import
@@ -1357,6 +1366,18 @@ pub struct CodeNav {
     /// Build-time only, like `field_types`: never mirrored into the store. A
     /// reader walks scopes in a fixed order (`g.nodes`), never this map's.
     pub nav_facts: HashMap<NodeId, Vec<NavFact>>,
+    /// The type a FUNCTION / METHOD (an interface METHOD included) returns,
+    /// as the source names it: its first result, pointers unwrapped, generic
+    /// arguments dropped, a package qualifier kept (Go:
+    /// `func X() (*repositories.UserRepository, error)` ->
+    /// `repositories.UserRepository`). A callable whose first result owns no
+    /// in-repo method (a predeclared type, a slice / map / func type, a type
+    /// parameter) records nothing. Filled through
+    /// [`CodeNav::record_return_type`] (Go, CA.2a); read by the Go call hook
+    /// (CA.2b) to type a receiver that is a call chain.
+    ///
+    /// Build-time only, like `field_types`: never mirrored into the store.
+    pub return_types: HashMap<NodeId, String>,
 }
 
 /// A build-time fact a parser records for a scope (a MODULE, or a fn / METHOD)
@@ -1440,6 +1461,15 @@ impl CodeNav {
                 locals.insert(name.to_string(), ty.to_string());
             }
         }
+    }
+
+    /// Record that the callable `f` returns type `ty` (CA.2a). An empty `ty`
+    /// is ignored; a second record for `f` replaces the first.
+    pub fn record_return_type(&mut self, f: NodeId, ty: &str) {
+        if ty.is_empty() {
+            return;
+        }
+        self.return_types.insert(f, ty.to_string());
     }
 
     /// Record that `owner` (a CLASS / STRUCT) declares a field or property
@@ -4563,6 +4593,23 @@ mod tests {
         // An unknown record after a typed one is a conflict too.
         nav.record_local_type(g, "r", "");
         assert_eq!(nav.local_types[&g]["r"], "");
+    }
+
+    /// CA.2a: one result type per callable; an empty type records nothing,
+    /// a re-record replaces.
+    #[test]
+    fn record_return_type_ignores_an_empty_type() {
+        let r = glia_core::RepoId(1);
+        let f = NodeId::from_parts(GRAPH_TYPE, r, node_kind::FUNCTION, "m::f");
+        let g = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "m::T::g");
+        let mut nav = CodeNav::default();
+        nav.record_return_type(f, "repositories.UserRepository");
+        nav.record_return_type(g, "");
+        assert_eq!(nav.return_types.len(), 1);
+        assert_eq!(nav.return_types[&f], "repositories.UserRepository");
+        nav.record_return_type(f, "Bundle");
+        assert_eq!(nav.return_types[&f], "Bundle");
+        assert!(!nav.return_types.contains_key(&g));
     }
 
     #[test]

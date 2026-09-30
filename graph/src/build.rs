@@ -75,7 +75,29 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     if let Some(line) = packages.marker() {
         eprintln!("{line}");
     }
+    eprintln!("{}", go_types_marker(&g.nav));
     Ok(g)
+}
+
+/// CA.2a: `[go-types] return_types=<R> local_scopes=<L> locals=<N>
+/// package_vars=<V>` over a Go graph's merged nav: R callables with a
+/// recorded result type, L fn / METHOD scopes in `local_types` and N their
+/// entries, V the package-level vars recorded under file MODULE scopes. The
+/// facts the Go call hook (CA.2b) types receivers with; only counted.
+fn go_types_marker(nav: &CodeNav) -> String {
+    let (mut scopes, mut locals, mut vars) = (0usize, 0usize, 0usize);
+    for (scope, names) in &nav.local_types {
+        if nav.kind_by_id.get(scope) == Some(&node_kind::MODULE) {
+            vars += names.len();
+        } else {
+            scopes += 1;
+            locals += names.len();
+        }
+    }
+    format!(
+        "[go-types] return_types={} local_scopes={scopes} locals={locals} package_vars={vars}",
+        nav.return_types.len()
+    )
 }
 
 /// [`build_go`]'s passes, returning the stats its markers print.
@@ -351,6 +373,11 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     // share is kept once, as `CodeNav::record_fact` keeps it within a parse.
     for (scope, facts) in src.nav_facts {
         append_facts(dst.nav_facts.entry(scope).or_default(), facts);
+    }
+    // CA.2a: one result type per callable; a callable two parses share keeps
+    // the first parse's, as `rename_nodes` keeps the surviving id's.
+    for (f, ty) in src.return_types {
+        dst.return_types.entry(f).or_insert(ty);
     }
 }
 
@@ -1682,7 +1709,8 @@ fn place_out_of_line(g: &RepoGraph, stats: &mut OutOfLineStats) -> Vec<Placement
 /// (`from`, `from_module`), the unresolved lists, `properties`, and the nav
 /// (name / qname / kind / parent records, `parent_of` values, `children_of`
 /// keys and entries, deduped keeping the first occurrence, the field /
-/// local type tables, and the per-scope `nav_facts`, deduped likewise).
+/// local type tables, the per-scope `nav_facts`, deduped likewise, and the
+/// callable's return type, the new id's own kept when both have one).
 ///
 /// A new id that already exists absorbs the renamed record: its cells are
 /// appended to the existing node's (merge_parses' duplicate rule) and the
@@ -1825,6 +1853,9 @@ fn rename_nodes(
         }
         if let Some(facts) = nav.nav_facts.remove(&old) {
             append_facts(nav.nav_facts.entry(new).or_default(), facts);
+        }
+        if let Some(ty) = nav.return_types.remove(&old) {
+            nav.return_types.entry(new).or_insert(ty);
         }
     }
     for parent in nav.parent_of.values_mut() {
@@ -3210,6 +3241,39 @@ mod tests {
         );
     }
 
+    /// CA.2a: `[go-types]` counts the Go parser's receiver-type facts over
+    /// the merged nav of every file: result types, fn / METHOD scopes and
+    /// their locals, and package vars under a file MODULE.
+    #[test]
+    fn go_types_marker_counts() {
+        let mut vars = go_file(
+            "app::vars",
+            &[(node_kind::FUNCTION, "app::vars::New", None)],
+        );
+        let (module, new) = (
+            gid(node_kind::MODULE, "app::vars"),
+            gid(node_kind::FUNCTION, "app::vars::New"),
+        );
+        vars.nav.record_local_type(module, "svc", "New()");
+        vars.nav.record_return_type(new, "Service");
+        let mut h = go_file("app::h", &[(node_kind::FUNCTION, "app::h::Find", None)]);
+        let find = gid(node_kind::FUNCTION, "app::h::Find");
+        h.nav
+            .record_return_type(find, "repositories.UserRepository");
+        h.nav
+            .record_local_type(find, "repo", "repositories.UserRepository");
+        h.nav.record_local_type(find, "n", "");
+        let g = build_go(repo(), vec![vars, h]).expect("build");
+        assert_eq!(
+            go_types_marker(&g.nav),
+            "[go-types] return_types=2 local_scopes=1 locals=2 package_vars=1"
+        );
+        assert_eq!(
+            go_types_marker(&CodeNav::default()),
+            "[go-types] return_types=0 local_scopes=0 locals=0 package_vars=0"
+        );
+    }
+
     /// No trace of `old` anywhere an id lives.
     fn assert_gone(g: &RepoGraph, old: NodeId) {
         assert!(g.nodes.iter().all(|n| n.id != old), "node record");
@@ -3231,6 +3295,7 @@ mod tests {
         );
         assert!(!nav.local_types.contains_key(&old) && !g.properties.contains(&old));
         assert!(!nav.nav_facts.contains_key(&old), "nav_facts key");
+        assert!(!nav.return_types.contains_key(&old), "return_types key");
         assert!(
             g.unresolved_calls.iter().all(|c| c.from != old),
             "unresolved calls"
@@ -3437,6 +3502,7 @@ mod tests {
             w.refs = vec![uses(old, cpp), uses(cpp, old)];
             w.properties.insert(old);
             w.nav.record_local_type(old, "w", "Widget");
+            w.nav.record_return_type(old, "Widget");
             vec![h, w]
         };
         assert_eq!(
@@ -3481,6 +3547,7 @@ mod tests {
         assert_eq!(refs, vec![(run, cpp), (cpp, run)]);
         assert!(g.properties.contains(&run));
         assert_eq!(g.nav.local_types[&run]["w"], "Widget");
+        assert_eq!(g.nav.return_types[&run], "Widget");
     }
 
     /// Two global `Widget` classes (a/, b/) and a definition in c/: neither

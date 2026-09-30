@@ -115,7 +115,7 @@ struct CacheEntry {
 
 /// `FileParse` serialized with every hash container in key order (LC.11).
 ///
-/// `FileParse::properties` and `CodeNav`'s eight maps are std hash
+/// `FileParse::properties` and `CodeNav`'s nine maps are std hash
 /// containers, which iterate in a per-instance RandomState order, so the
 /// derived serializer wrote the same parse as different bytes on every build
 /// and [`ParseCache::save`] could never find the sidecar unchanged. This is
@@ -160,8 +160,9 @@ impl serde::Serialize for CanonicalNav<'_> {
             field_types,
             local_types,
             nav_facts,
+            return_types,
         } = self.0;
-        let mut st = s.serialize_struct("CodeNav", 8)?;
+        let mut st = s.serialize_struct("CodeNav", 9)?;
         st.serialize_field("name_by_id", &by_id(name_by_id, |v| v))?;
         st.serialize_field("qname_by_id", &by_id(qname_by_id, |v| v))?;
         st.serialize_field("kind_by_id", &by_id(kind_by_id, |v| v))?;
@@ -170,6 +171,7 @@ impl serde::Serialize for CanonicalNav<'_> {
         st.serialize_field("field_types", &by_id(field_types, by_name))?;
         st.serialize_field("local_types", &by_id(local_types, by_name))?;
         st.serialize_field("nav_facts", &by_id(nav_facts, |v| v))?;
+        st.serialize_field("return_types", &by_id(return_types, |v| v))?;
         st.end()
     }
 }
@@ -643,6 +645,8 @@ mod tests {
             // CB.6: one fact per scope; its Vec keeps parser order.
             let fact = NavFact::DeclaresFn { ns: format!("ns{i}"), name: format!("proto{i}") };
             p.nav.record_fact(id, fact);
+            // CA.2a: one result type per callable.
+            p.nav.record_return_type(id, &format!("pkg.R{i}"));
             p.properties.insert(id);
         }
         p
@@ -799,6 +803,7 @@ mod tests {
         assert_eq!(got.nav.field_types, many.nav.field_types);
         assert_eq!(got.nav.local_types, many.nav.local_types);
         assert_eq!(got.nav.nav_facts, many.nav.nav_facts);
+        assert_eq!(got.nav.return_types, many.nav.return_types);
         assert_eq!(got.properties, many.properties);
         assert_eq!((&got.nodes, &got.edges, &got.imports), (&many.nodes, &many.edges, &many.imports));
         assert_eq!((&got.calls, &got.refs), (&many.calls, &many.refs));

@@ -277,6 +277,11 @@ struct Acc {
     closure_bodies: usize,
     closure_calls: usize,
     route_literals_skipped: usize,
+    /// CA.2a: the type parameters of the callable being visited (its own
+    /// `[T any]`, or a generic receiver's `Collection[T]`), so a receiver
+    /// fact never types a local or result by one. Set and cleared by
+    /// `visit_function` / `visit_method`.
+    type_params: Vec<String>,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
@@ -420,6 +425,13 @@ fn collect_interface_elems(
     repo: RepoId,
     acc: &mut Acc,
 ) {
+    let iface_params = type_param_names(
+        iface
+            .parent()
+            .filter(|spec| spec.kind() == "type_spec")
+            .and_then(|spec| spec.child_by_field_name("type_parameters")),
+        src,
+    );
     let mut cursor = iface.walk();
     for elem in iface.named_children(&mut cursor) {
         match elem.kind() {
@@ -447,6 +459,13 @@ fn collect_interface_elems(
                     confidence: Confidence::Strong,
                     cells: Vec::new(),
                 });
+                // CA.2a: the method's result type; the interface's own type
+                // parameters (`type Repo[T any] interface`) type nothing.
+                if let Some(ty) =
+                    result_type(elem.child_by_field_name("result"), src, &iface_params)
+                {
+                    acc.nav.record_return_type(id, &ty);
+                }
             }
             "type_elem" => {
                 let mut tc = elem.walk();
@@ -574,7 +593,11 @@ fn field_decl_types(
     let Some(ty) = go_type_name(type_node, src) else {
         return Vec::new();
     };
-    let inner = unwrap_pointer(type_node);
+    // CA.2a: a generic instantiation's guards read its base, so an external
+    // `atomic.Pointer[T]` records nothing, as `atomic.Value` never did.
+    let Some(inner) = generic_base(unwrap_pointer(type_node)) else {
+        return Vec::new();
+    };
     if inner.kind() == "qualified_type" {
         let external = inner
             .child_by_field_name("package")
@@ -596,17 +619,30 @@ fn field_decl_types(
 }
 
 /// The bare type name a field's declared type binds by: `*T` -> `T`,
-/// `pkg.T` -> `T`, `T` -> `T`. Slices, arrays, maps, channels, func types,
-/// generic instantiations and anonymous struct / interface types -> `None`:
-/// a call through such a field has no single method table to bind against.
+/// `pkg.T` -> `T`, `T` -> `T`, and a generic instantiation by its base
+/// (`*Collection[User]` -> `Collection`, `pkg.Page[T]` -> `Page`, CA.2a).
+/// Slices, arrays, maps, channels, func types and anonymous struct /
+/// interface types -> `None`: a call through such a field has no single
+/// method table to bind against.
 fn go_type_name(type_node: TsNode, src: &[u8]) -> Option<String> {
-    let inner = unwrap_pointer(type_node);
+    let inner = generic_base(unwrap_pointer(type_node))?;
     let name = match inner.kind() {
         "type_identifier" => text_of(inner, src),
         "qualified_type" => text_of(inner.child_by_field_name("name")?, src),
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// A generic instantiation's base type (`Collection[T]` -> `Collection`,
+/// `pkg.Page[T]` -> `pkg.Page`); any other node is its own base. `None` for
+/// a `generic_type` without a base (a parse error).
+fn generic_base(node: TsNode) -> Option<TsNode> {
+    if node.kind() == "generic_type" {
+        node.child_by_field_name("type")
+    } else {
+        Some(node)
+    }
 }
 
 /// Strip every `*` off a pointer type: `**T` -> `T`.
@@ -693,6 +729,12 @@ fn emit_state_var_spec(
     }
     if names.is_empty() {
         return;
+    }
+
+    // CA.2a: a package-level var's type, on the file MODULE scope, before the
+    // noise gate (`var repo *repositories.X` has no initialiser).
+    if spec.kind() == "var_spec" {
+        record_package_vars(spec, &names, src, module_id, acc);
     }
 
     if state_var_is_noise(spec, src) {
@@ -808,12 +850,20 @@ fn visit_function(
         cells: Vec::new(),
     });
 
+    // CA.2a: result type and parameters.
+    acc.type_params = type_param_names(decl.child_by_field_name("type_parameters"), src);
+    if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
+        acc.nav.record_return_type(id, &ty);
+    }
+    record_params(decl.child_by_field_name("parameters"), src, id, acc);
+
     if let Some(body) = decl.child_by_field_name("body") {
         let mut closures = Vec::new();
         collect_calls_in(body, src, id, None, repo, file_rel, acc, &mut closures);
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
         collect_closure_calls(closures, src, id, None, repo, file_rel, acc);
     }
+    acc.type_params.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -871,6 +921,14 @@ fn visit_method(
         try_emit_gorm_table_name(decl, &receiver_type, src, repo, acc);
     }
 
+    // CA.2a: result type and parameters (the receiver is not a local:
+    // SelfMethod and `self.` cover it).
+    acc.type_params = receiver_type_params(receiver, src);
+    if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
+        acc.nav.record_return_type(id, &ty);
+    }
+    record_params(decl.child_by_field_name("parameters"), src, id, acc);
+
     if let Some(body) = decl.child_by_field_name("body") {
         let receiver_var = receiver_var.as_deref();
         let mut closures = Vec::new();
@@ -887,6 +945,7 @@ fn visit_method(
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
         collect_closure_calls(closures, src, id, receiver_var, repo, file_rel, acc);
     }
+    acc.type_params.clear();
 }
 
 /// Pull the receiver variable name and type name out of a `parameter_list`
@@ -1274,6 +1333,8 @@ fn collect_calls_in<'t>(
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
+        // CA.2a: the locals this statement binds, on the enclosing fn.
+        record_body_locals(child, src, from, receiver_var, acc);
         if child.kind() == "call_expression" {
             if let Some(q) = classify_call(child, src, receiver_var) {
                 acc.calls.push(CallSite {
@@ -1341,6 +1402,9 @@ fn collect_closure_calls(
             continue;
         }
         acc.closure_bodies += 1;
+        // CA.2a: a drained literal's parameters are locals of `from`, as its
+        // calls are `from`'s CallSites.
+        record_params(lit.child_by_field_name("parameters"), src, from, acc);
         let Some(body) = lit.child_by_field_name("body") else {
             continue;
         };
@@ -1377,8 +1441,13 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
                         Some(CallQualifier::Attribute { base, name })
                     }
                 }
+                // CA.2a: the receiver is its normalised chain ([`chain_text`]):
+                // `s.repo` in a method of receiver `s` -> `self.repo` (LA.23c,
+                // which A6.2a binds through the struct's field type),
+                // `svc.Repo()`, `repositories.NewX()` (arguments elided);
+                // a chain through an index or assertion stays raw.
                 _ => Some(CallQualifier::ComplexReceiver {
-                    receiver: receiver_field_path(operand, src, receiver_var)
+                    receiver: chain_text(operand, src, receiver_var)
                         .unwrap_or_else(|| text_of(operand, src).to_string()),
                     name,
                 }),
@@ -1388,28 +1457,448 @@ fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option
     }
 }
 
-/// LA.23c: `s.repo` inside a method whose receiver is `s` -> `self.repo`.
-///
-/// Go names its receiver freely (`s`, `h`, `svc`), while the graph crate's
-/// receiver-type pass (A6.2a `receiver_field`) only strips `this.` / `self.`.
-/// Normalising here lets `s.repo.Find()` bind through the struct's declared
-/// field type. One hop only: the operand must be a selector whose own operand
-/// IS the receiver identifier and whose field is a plain field name, so
-/// `s.a.b.Find()` stays raw and a local variable `x.repo.Find()` is untouched.
-fn receiver_field_path(operand: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<String> {
-    let receiver_var = receiver_var?;
-    if operand.kind() != "selector_expression" {
-        return None;
+// ============================================================================
+// Receiver-type facts (CA.2a)
+// ============================================================================
+//
+// What a call's receiver is typed by, recorded for the graph: every callable's
+// first result type (`CodeNav::return_types`), and every parameter, local and
+// package-level var (`CodeNav::local_types`, a package var under the file's
+// MODULE scope). A type keeps its package qualifier (`repositories.X`), and a
+// value bound from a call records the call's normalised chain (`svc.Repo()`),
+// whose type is that call's result. This parser only records; the graph's
+// generic receiver pass reads a bare same-package type, the Go call hook the
+// rest (CA.2b).
+
+/// The text a receiver fact names a type by: every pointer unwrapped,
+/// `T` -> `T`, `pkg.T` -> `pkg.T` (the file's own import name kept, so the
+/// graph resolves it through this file's imports), a generic instantiation
+/// by its base (`Collection[T]` -> `Collection`, `repositories.Page[User]`
+/// -> `repositories.Page`), a parenthesised type by its inner type. A
+/// predeclared type (it owns no in-repo method) and every other shape
+/// (slice, array, map, chan, func, `interface{}`, `struct{}`) -> `None`.
+fn go_type_ref(type_node: TsNode, src: &[u8]) -> Option<String> {
+    let mut node = unwrap_pointer(type_node);
+    while node.kind() == "parenthesized_type" {
+        let mut c = node.walk();
+        node = unwrap_pointer(node.named_children(&mut c).next()?);
     }
-    let base = operand.child_by_field_name("operand")?;
-    let field = operand.child_by_field_name("field")?;
-    if base.kind() != "identifier"
-        || text_of(base, src) != receiver_var
-        || field.kind() != "field_identifier"
-    {
-        return None;
+    let node = generic_base(node)?;
+    match node.kind() {
+        "type_identifier" => {
+            let name = text_of(node, src);
+            (!name.is_empty() && !is_predeclared_type(name)).then(|| name.to_string())
+        }
+        "qualified_type" => {
+            let pkg = text_of(node.child_by_field_name("package")?, src);
+            let name = text_of(node.child_by_field_name("name")?, src);
+            (!pkg.is_empty() && !name.is_empty()).then(|| format!("{pkg}.{name}"))
+        }
+        _ => None,
     }
-    Some(format!("self.{}", text_of(field, src)))
+}
+
+/// Go's predeclared type names (and the `comparable` constraint): none owns
+/// an in-repo method.
+fn is_predeclared_type(name: &str) -> bool {
+    matches!(
+        name,
+        "any"
+            | "bool"
+            | "byte"
+            | "comparable"
+            | "complex64"
+            | "complex128"
+            | "error"
+            | "float32"
+            | "float64"
+            | "int"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "rune"
+            | "string"
+            | "uint"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uintptr"
+    )
+}
+
+/// [`go_type_ref`], except that a type naming one of the enclosing
+/// callable's type parameters (`T` in `func Get[T any]() T`, or in a method
+/// of `Collection[T]`) is unknown: it stands for whatever the caller picks.
+fn fact_type(type_node: TsNode, src: &[u8], type_params: &[String]) -> Option<String> {
+    go_type_ref(type_node, src).filter(|t| !type_params.iter().any(|p| p == t))
+}
+
+/// The names a `type_parameter_list` declares (`[K comparable, V any]` ->
+/// `K`, `V`); empty for `None`.
+fn type_param_names(list: Option<TsNode>, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(list) = list else {
+        return out;
+    };
+    let mut lc = list.walk();
+    for decl in list.named_children(&mut lc) {
+        if decl.kind() != "type_parameter_declaration" {
+            continue;
+        }
+        let mut nc = decl.walk();
+        out.extend(
+            decl.children_by_field_name("name", &mut nc)
+                .map(|n| text_of(n, src).to_string()),
+        );
+    }
+    out
+}
+
+/// The type parameters a generic receiver binds (`(c *Collection[T])` ->
+/// `T`); empty for a plain receiver.
+fn receiver_type_params(receiver: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rc = receiver.walk();
+    for param in receiver.named_children(&mut rc) {
+        let Some(ty) = param.child_by_field_name("type") else {
+            continue;
+        };
+        let ty = unwrap_pointer(ty);
+        let Some(args) = (ty.kind() == "generic_type")
+            .then(|| ty.child_by_field_name("type_arguments"))
+            .flatten()
+        else {
+            continue;
+        };
+        let mut ac = args.walk();
+        for elem in args.named_children(&mut ac) {
+            let mut ec = elem.walk();
+            let arg = if elem.kind() == "type_elem" {
+                elem.named_children(&mut ec).next()
+            } else {
+                Some(elem)
+            };
+            if let Some(arg) = arg.filter(|a| a.kind() == "type_identifier") {
+                out.push(text_of(arg, src).to_string());
+            }
+        }
+    }
+    out
+}
+
+/// The first result type of a function, method or interface method whose
+/// `result` field is `result`: a bare type, or the first declaration of a
+/// result list (`(*T, error)`, `(u *T, err error)`), as [`fact_type`] names it.
+fn result_type(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> Option<String> {
+    let result = result?;
+    let ty = if result.kind() == "parameter_list" {
+        let mut c = result.walk();
+        let first = result
+            .named_children(&mut c)
+            .find(|p| p.kind() == "parameter_declaration");
+        first?.child_by_field_name("type")?
+    } else {
+        result
+    };
+    fact_type(ty, src, type_params)
+}
+
+/// Record `name` as a local of `scope` with type text `ty` (`""` = unknown).
+/// `_` binds nothing.
+fn record_local(acc: &mut Acc, scope: NodeId, name: &str, ty: &str) {
+    if name != "_" {
+        acc.nav.record_local_type(scope, name, ty);
+    }
+}
+
+/// Every parameter of a `parameter_list` as a local of `scope`: grouped names
+/// (`a, b *T`) share the type, a variadic `...T` is a slice (`""`), an
+/// unnamed parameter binds nothing.
+fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    let Some(params) = params else {
+        return;
+    };
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        let ty = match param.kind() {
+            "parameter_declaration" => param
+                .child_by_field_name("type")
+                .and_then(|t| fact_type(t, src, &acc.type_params))
+                .unwrap_or_default(),
+            "variadic_parameter_declaration" => String::new(),
+            _ => continue,
+        };
+        let mut nc = param.walk();
+        let names: Vec<TsNode> = param.children_by_field_name("name", &mut nc).collect();
+        for name in names {
+            record_local(acc, scope, text_of(name, src), &ty);
+        }
+    }
+}
+
+/// Go's builtin functions whose result owns no in-repo method (a `new(T)` is
+/// read for its `T` instead).
+fn is_untyped_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "append"
+            | "cap"
+            | "clear"
+            | "close"
+            | "complex"
+            | "copy"
+            | "delete"
+            | "imag"
+            | "len"
+            | "make"
+            | "max"
+            | "min"
+            | "panic"
+            | "print"
+            | "println"
+            | "real"
+            | "recover"
+    )
+}
+
+/// The type text a local takes from its initialiser `value`:
+/// * a call -> its [`chain_text`] (`repo.Find()`: the call's result), `new(T)`
+///   -> `T`, and a builtin whose result owns no method (`make`, `len`) -> `""`;
+/// * `T{..}` / `pkg.T{..}` / `&T{..}` -> the composite's type, `x.(T)` -> `T`;
+/// * `s.repo` inside a method of receiver `s` -> `self.repo`, the alias of
+///   the enclosing struct's field the receiver pass already follows;
+/// * anything else -> `""`.
+fn go_value_type(value: TsNode, src: &[u8], receiver_var: Option<&str>, acc: &Acc) -> String {
+    let tp = acc.type_params.as_slice();
+    match value.kind() {
+        "call_expression" => {
+            let func = value.child_by_field_name("function");
+            if let Some(f) = func.filter(|f| f.kind() == "identifier") {
+                let name = text_of(f, src);
+                if name == "new" {
+                    return value
+                        .child_by_field_name("arguments")
+                        .and_then(|a| a.named_child(0))
+                        .and_then(|a| type_expr_ref(a, src, tp))
+                        .unwrap_or_default();
+                }
+                if is_untyped_builtin(name) {
+                    return String::new();
+                }
+            }
+            chain_text(value, src, receiver_var).unwrap_or_default()
+        }
+        "composite_literal" | "type_assertion_expression" => value
+            .child_by_field_name("type")
+            .and_then(|t| fact_type(t, src, tp))
+            .unwrap_or_default(),
+        "unary_expression" => {
+            let is_ref = value
+                .child_by_field_name("operator")
+                .is_some_and(|o| o.kind() == "&");
+            match value.child_by_field_name("operand") {
+                Some(inner) if is_ref && inner.kind() == "composite_literal" => {
+                    go_value_type(inner, src, receiver_var, acc)
+                }
+                _ => String::new(),
+            }
+        }
+        "selector_expression" => chain_text(value, src, receiver_var)
+            .filter(|t| {
+                t.strip_prefix("self.")
+                    .is_some_and(|f| !f.is_empty() && !f.contains('.'))
+            })
+            .unwrap_or_default(),
+        "parenthesized_expression" => {
+            let mut c = value.walk();
+            let inner = value.named_children(&mut c).find(|n| n.kind() != "comment");
+            inner.map_or_else(String::new, |i| go_value_type(i, src, receiver_var, acc))
+        }
+        _ => String::new(),
+    }
+}
+
+/// A type written where an expression may stand (`new(T)`'s argument):
+/// `T` and `pkg.T` parse as an identifier / selector there, any other type
+/// shape as a type node ([`fact_type`]).
+fn type_expr_ref(node: TsNode, src: &[u8], type_params: &[String]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = text_of(node, src);
+            (!name.is_empty()
+                && !is_predeclared_type(name)
+                && !type_params.iter().any(|p| p == name))
+            .then(|| name.to_string())
+        }
+        "selector_expression" => {
+            let pkg = node.child_by_field_name("operand")?;
+            let name = node.child_by_field_name("field")?;
+            (pkg.kind() == "identifier")
+                .then(|| format!("{}.{}", text_of(pkg, src), text_of(name, src)))
+        }
+        _ => fact_type(node, src, type_params),
+    }
+}
+
+/// The normalised text of a call receiver chain, or `None` when a link is
+/// not a name, a field or a call: an identifier is its name (`self` when it
+/// is the method's receiver `receiver_var`), `x.f` joins with `.`, a call
+/// appends `()` with its arguments and type arguments elided (`NewX(a, b)`
+/// -> `NewX()`), parentheses are dropped. An index, slice, type assertion or
+/// literal anywhere in the chain -> `None`.
+fn chain_text(node: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let name = text_of(node, src);
+            if name.is_empty() {
+                None
+            } else if Some(name) == receiver_var {
+                Some("self".to_string())
+            } else {
+                Some(name.to_string())
+            }
+        }
+        "selector_expression" => {
+            let operand = chain_text(node.child_by_field_name("operand")?, src, receiver_var)?;
+            let field = text_of(node.child_by_field_name("field")?, src);
+            (!field.is_empty()).then(|| format!("{operand}.{field}"))
+        }
+        "call_expression" => {
+            let func = chain_text(node.child_by_field_name("function")?, src, receiver_var)?;
+            Some(format!("{func}()"))
+        }
+        "parenthesized_expression" => {
+            let mut c = node.walk();
+            let inner = node
+                .named_children(&mut c)
+                .find(|n| n.kind() != "comment")?;
+            chain_text(inner, src, receiver_var)
+        }
+        _ => None,
+    }
+}
+
+/// The named children of `node` (an `expression_list`), none for `None`.
+fn named_kids(node: Option<TsNode>) -> Vec<TsNode> {
+    node.map(|n| {
+        let mut c = n.walk();
+        n.named_children(&mut c).collect()
+    })
+    .unwrap_or_default()
+}
+
+/// True when a `range_clause` / `receive_statement` declares its left-hand
+/// names (`:=`), rather than assigning existing ones (`=`).
+fn declares(node: TsNode) -> bool {
+    let mut c = node.walk();
+    node.children(&mut c).any(|ch| ch.kind() == ":=")
+}
+
+/// The initialiser of the `i`-th of `n` declared names: by position, or, for
+/// one initialiser and several names (`x, err := f()`), that initialiser for
+/// the first name and none for the others.
+fn paired<'t>(values: &[TsNode<'t>], n: usize, i: usize) -> Option<TsNode<'t>> {
+    if values.len() == n {
+        values.get(i).copied()
+    } else if i == 0 && values.len() == 1 {
+        values.first().copied()
+    } else {
+        None
+    }
+}
+
+/// Declared `names` as locals of `scope`, each typed by its [`paired`]
+/// initialiser ([`go_value_type`]; none -> `""`).
+fn pair_values(
+    names: &[TsNode],
+    values: &[TsNode],
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
+    for (i, name) in names.iter().enumerate() {
+        if name.kind() != "identifier" {
+            continue;
+        }
+        let ty = paired(values, names.len(), i)
+            .map_or_else(String::new, |v| go_value_type(v, src, receiver_var, acc));
+        record_local(acc, scope, text_of(*name, src), &ty);
+    }
+}
+
+/// The locals one statement inside a callable body binds, recorded on
+/// `scope` (the enclosing function, which a func literal's body shares):
+/// `a, b := x, y`, `var x T` / `var x = v`, a `range` / `select` receive with
+/// `:=` and a type switch's bound name (both of unknown type).
+fn record_body_locals(
+    node: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    acc: &mut Acc,
+) {
+    match node.kind() {
+        "short_var_declaration" => {
+            let names = named_kids(node.child_by_field_name("left"));
+            let values = named_kids(node.child_by_field_name("right"));
+            pair_values(&names, &values, src, scope, receiver_var, acc);
+        }
+        "var_spec" => {
+            let mut nc = node.walk();
+            let names: Vec<TsNode> = node.children_by_field_name("name", &mut nc).collect();
+            if let Some(ty) = node.child_by_field_name("type") {
+                let ty = fact_type(ty, src, &acc.type_params).unwrap_or_default();
+                for name in names {
+                    record_local(acc, scope, text_of(name, src), &ty);
+                }
+            } else {
+                let values = named_kids(node.child_by_field_name("value"));
+                pair_values(&names, &values, src, scope, receiver_var, acc);
+            }
+        }
+        "range_clause" | "receive_statement" if declares(node) => {
+            for name in named_kids(node.child_by_field_name("left")) {
+                if name.kind() == "identifier" {
+                    record_local(acc, scope, text_of(name, src), "");
+                }
+            }
+        }
+        "type_switch_statement" => {
+            for name in named_kids(node.child_by_field_name("alias")) {
+                if name.kind() == "identifier" {
+                    record_local(acc, scope, text_of(name, src), "");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A package-level `var` spec's names as locals of the file's MODULE scope:
+/// the declared type, else each name's initialiser ([`go_value_type`]).
+fn record_package_vars(
+    spec: TsNode,
+    names: &[String],
+    src: &[u8],
+    module_id: NodeId,
+    acc: &mut Acc,
+) {
+    if let Some(ty) = spec.child_by_field_name("type") {
+        let ty = go_type_ref(ty, src).unwrap_or_default();
+        for name in names {
+            record_local(acc, module_id, name, &ty);
+        }
+        return;
+    }
+    let values = named_kids(spec.child_by_field_name("value"));
+    for (i, name) in names.iter().enumerate() {
+        let ty = paired(&values, names.len(), i)
+            .map_or_else(String::new, |v| go_value_type(v, src, None, acc));
+        record_local(acc, module_id, name, &ty);
+    }
 }
 
 // ============================================================================
@@ -4833,12 +5322,10 @@ func (svc UserService) Put(id int) {
         assert!(get.contains(&complex("self.repo", "Find")), "{get:?}");
         // A local variable that happens to hold a struct is untouched.
         assert!(get.contains(&complex("x.repo", "Find")), "{get:?}");
-        // Two hops stay raw: only one level is inferred.
-        assert!(get.contains(&complex("s.a.b", "Find")), "{get:?}");
-        assert!(!get.iter().any(|q| matches!(
-            q,
-            CallQualifier::ComplexReceiver { receiver, .. } if receiver.starts_with("self.a")
-        )));
+        // CA.2a: a longer chain off the receiver is normalised whole (A6.2a's
+        // `receiver_field` still rejects it: only one hop has a field type).
+        assert!(get.contains(&complex("self.a.b", "Find")), "{get:?}");
+        assert!(!get.contains(&complex("s.a.b", "Find")), "{get:?}");
         // Receiver `svc`, value receiver.
         let put = method_calls(&parse, "shop::UserService::Put");
         assert_eq!(put, vec![complex("self.repo", "Save")]);
@@ -4909,8 +5396,10 @@ type UserService struct {
         let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
         let expect = pairs(&[
             // Embedded fields record under the type's own name; `*Audit`
-            // embedded and `a, b *Audit` agree on the type.
+            // embedded and `a, b *Audit` agree on the type. CA.2a: an
+            // embedded generic instantiation `Base[int]` records its base.
             ("Audit", "Audit"),
+            ("Base", "Base"),
             ("Tx", "Tx"),
             ("UserRepo", "UserRepo"),
             // Multi-name: both names.
@@ -4920,14 +5409,16 @@ type UserService struct {
             ("cache", "Cache"),
             // Qualified through an in-module import: the type name side.
             ("db", "DB"),
+            // CA.2a: a generic instantiation binds by its base type.
+            ("gen", "Box"),
             ("pdb", "DB"),
             ("pp", "UserRepo"),
             // Pointer: the pointee.
             ("repo", "UserRepo"),
         ]);
-        // Slices, maps, channels, funcs, generics, anonymous structs and
-        // types of packages outside the module (`net.Conn`, `*zap.Logger`,
-        // embedded `*zap.SugaredLogger`): none.
+        // Slices, maps, channels, funcs, anonymous structs and types of
+        // packages outside the module (`net.Conn`, `*zap.Logger`, embedded
+        // `*zap.SugaredLogger`): none.
         assert_eq!(struct_fields(&parse, "shop::UserService"), expect);
     }
 
@@ -4946,10 +5437,12 @@ type UserService struct {
         let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "", repo()).unwrap();
         let expect = pairs(&[
             ("Audit", "Audit"),
+            ("Base", "Base"),
             ("UserRepo", "UserRepo"),
             ("a", "Audit"),
             ("b", "Audit"),
             ("cache", "Cache"),
+            ("gen", "Box"),
             ("pp", "UserRepo"),
             ("repo", "UserRepo"),
         ]);
@@ -4959,7 +5452,7 @@ type UserService struct {
 
     #[test]
     fn go_type_name_shapes() {
-        let src = "package p\nvar a *T\nvar b pkg.T\nvar c T\nvar d []T\nvar e map[K]T\nvar f chan T\nvar g func()\nvar h G[T]\nvar i **pkg.T\n";
+        let src = "package p\nvar a *T\nvar b pkg.T\nvar c T\nvar d []T\nvar e map[K]T\nvar f chan T\nvar g func()\nvar h G[T]\nvar i **pkg.T\nvar j *pkg.G[T, U]\n";
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
         parser.set_language(&lang).unwrap();
@@ -4978,7 +5471,302 @@ type UserService struct {
             }
         }
         let t = || Some("T".to_string());
-        assert_eq!(got, vec![t(), t(), t(), None, None, None, None, None, t()]);
+        // CA.2a: a generic instantiation names its base type.
+        let g = || Some("G".to_string());
+        assert_eq!(
+            got,
+            vec![t(), t(), t(), None, None, None, None, g(), t(), g()]
+        );
+    }
+
+    // ---- CA.2a: receiver-type facts (return types, params, locals, vars) ----
+
+    /// A name -> type map as sorted pairs (`None` = no entry at all).
+    fn sorted(m: Option<&HashMap<String, String>>) -> Option<Vec<(String, String)>> {
+        m.map(|m| {
+            let mut v: Vec<(String, String)> =
+                m.iter().map(|(k, t)| (k.clone(), t.clone())).collect();
+            v.sort();
+            v
+        })
+    }
+
+    fn locals_of(parse: &FileParse, id: NodeId) -> Option<Vec<(String, String)>> {
+        sorted(parse.nav.local_types.get(&id))
+    }
+
+    fn method_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname)
+    }
+
+    #[test]
+    fn return_types_keep_the_package_qualifier() {
+        let source = r#"package app
+
+import (
+    "example.com/app/models"
+    "example.com/app/repositories"
+)
+
+type Bundle struct{}
+
+type Repo struct{}
+
+type Collection[T any] struct{}
+
+type Page[T any] struct{}
+
+type Builder interface {
+    Build() Bundle
+    Close() error
+}
+
+func UserRepository() *repositories.UserRepository {
+    return nil
+}
+
+func (r *Repo) Find() (*models.User, error) {
+    return nil, nil
+}
+
+func Get[T any]() T {
+    var zero T
+    return zero
+}
+
+func N() error {
+    return nil
+}
+
+func (c *Collection[T]) One() (*T, error) {
+    return nil, nil
+}
+
+func (c *Collection[T]) Paged() Page[T] {
+    return Page[T]{}
+}
+
+func Names() []string {
+    return nil
+}
+"#;
+        let parse = parse_file(source, "app/app.go", "app", "example.com/app", repo()).unwrap();
+        let mut got: Vec<(String, String)> = parse
+            .nav
+            .return_types
+            .iter()
+            .map(|(id, ty)| (parse.nav.qname_by_id[id].clone(), ty.clone()))
+            .collect();
+        got.sort();
+        // `Get[T]() T` and the generic receiver's `*T` name a type parameter;
+        // `error` and `[]string` own no in-repo method.
+        assert_eq!(
+            got,
+            pairs(&[
+                ("app::Builder::Build", "Bundle"),
+                ("app::Collection::Paged", "Page"),
+                ("app::Repo::Find", "models.User"),
+                ("app::UserRepository", "repositories.UserRepository"),
+            ])
+        );
+    }
+
+    #[test]
+    fn params_and_locals_are_recorded() {
+        let source = r#"package app
+
+func H(repo *repositories.UserRepository, n int) {
+    a := services.UserRepository()
+    b, err := repo.Find()
+    c := &models.User{}
+    d := x.y
+    for _, u := range us {
+        _ = u
+    }
+    _ = err
+}
+"#;
+        let parse = parse_file(source, "app/h.go", "app", "", repo()).unwrap();
+        assert_eq!(
+            locals_of(&parse, func_id("app::H")),
+            Some(pairs(&[
+                ("a", "services.UserRepository()"),
+                ("b", "repo.Find()"),
+                ("c", "models.User"),
+                ("d", ""),
+                ("err", ""),
+                ("n", ""),
+                ("repo", "repositories.UserRepository"),
+                ("u", ""),
+            ]))
+        );
+    }
+
+    #[test]
+    fn every_binding_form_records_a_local() {
+        let source = r#"package app
+
+type Svc struct{ repo *Repo }
+
+func (s *Svc) M(a, b *Repo, opts ...Option) {
+    var x Repo
+    var y = NewRepo(ctx, 1)
+    var p, q = &Repo{}, Other{}
+    z := new(Repo)
+    w := new(store.Repo)
+    r := s.repo
+    k, v := Repo{}, store.Page[User]{}
+    m := make(map[string]int)
+    switch t := val.(type) {
+    case int:
+        _ = t
+    }
+    select {
+    case msg := <-ch:
+        _ = msg
+    }
+    if f, ok := s.repo.Get(); ok {
+        _ = f
+    }
+    for i := 0; i < 3; i++ {
+    }
+    _, _ = k, m
+}
+
+func Gen[T any](x T, y *T, h Handler[T]) {}
+"#;
+        let parse = parse_file(source, "app/m.go", "app", "", repo()).unwrap();
+        // The receiver `s` is not a local: SelfMethod / `self.` cover it.
+        assert_eq!(
+            locals_of(&parse, method_id("app::Svc::M")),
+            Some(pairs(&[
+                ("a", "Repo"),
+                ("b", "Repo"),
+                ("f", "self.repo.Get()"),
+                ("i", ""),
+                ("k", "Repo"),
+                ("m", ""),
+                ("msg", ""),
+                ("ok", ""),
+                ("opts", ""),
+                ("p", "Repo"),
+                ("q", "Other"),
+                ("r", "self.repo"),
+                ("t", ""),
+                ("v", "store.Page"),
+                ("w", "store.Repo"),
+                ("x", "Repo"),
+                ("y", "NewRepo()"),
+                ("z", "Repo"),
+            ]))
+        );
+        // A parameter typed by a type parameter has no known type.
+        assert_eq!(
+            locals_of(&parse, func_id("app::Gen")),
+            Some(pairs(&[("h", "Handler"), ("x", ""), ("y", "")]))
+        );
+    }
+
+    #[test]
+    fn package_vars_use_the_module_scope() {
+        let source = r#"package app
+
+import "sync"
+
+var defaultRepo = repositories.NewUserRepository()
+var svc = New()
+var once sync.Once
+"#;
+        let parse = parse_file(source, "app/vars.go", "app", "", repo()).unwrap();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app");
+        assert_eq!(
+            locals_of(&parse, module),
+            Some(pairs(&[
+                ("defaultRepo", "repositories.NewUserRepository()"),
+                ("once", "sync.Once"),
+                ("svc", "New()"),
+            ]))
+        );
+        // The module scope holds package vars only: no fn scope appeared.
+        assert_eq!(parse.nav.local_types.len(), 1);
+    }
+
+    #[test]
+    fn chained_receivers_are_normalised() {
+        let source = r#"package app
+
+func H(id int) {
+    Services.UserRepository().FindByID(id)
+    repositories.NewX(client, db).Find()
+}
+"#;
+        let parse = parse_file(source, "app/h.go", "app", "", repo()).unwrap();
+        let calls: Vec<CallQualifier> = calls_from(&parse, func_id("app::H"))
+            .into_iter()
+            .map(|(q, _)| q)
+            .collect();
+        assert!(
+            calls.contains(&complex("Services.UserRepository()", "FindByID")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&complex("repositories.NewX()", "Find")),
+            "{calls:?}"
+        );
+    }
+
+    #[test]
+    fn generic_field_type_binds_by_base() {
+        let source = r#"package app
+
+import (
+    "sync/atomic"
+
+    "example.com/app/store"
+)
+
+type R struct {
+    c *Collection[User]
+    p atomic.Pointer[Cfg]
+    s store.Page[User]
+}
+"#;
+        let parse = parse_file(source, "app/r.go", "app", "example.com/app", repo()).unwrap();
+        // `atomic` is outside the module: its `Pointer` records nothing.
+        assert_eq!(
+            struct_fields(&parse, "app::R"),
+            pairs(&[("c", "Collection"), ("s", "Page")])
+        );
+    }
+
+    #[test]
+    fn closure_params_are_locals_of_the_enclosing_fn() {
+        let source = r#"package app
+
+import "github.com/gin-gonic/gin"
+
+func Run() {
+    go func(repo *Repo) {
+        repo.Save()
+    }(r)
+}
+
+func Routes(r *gin.Engine) {
+    r.GET("/x", func(c *gin.Context) {
+        c.JSON(200, nil)
+    })
+}
+"#;
+        let parse = parse_file(source, "app/run.go", "app", "example.com/app", repo()).unwrap();
+        assert_eq!(
+            locals_of(&parse, func_id("app::Run")),
+            Some(pairs(&[("repo", "Repo")]))
+        );
+        // A route-handler literal is never drained: its `c` records nothing.
+        assert_eq!(
+            locals_of(&parse, func_id("app::Routes")),
+            Some(pairs(&[("r", "gin.Engine")]))
+        );
     }
 
     // ---- LA.13: per-go.mod module map ----------------------------------------
