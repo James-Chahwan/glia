@@ -1,0 +1,37 @@
+{
+  "framework": "rust-tonic",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "grpc",
+  "cells": [
+    "rust/grpc"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRPC_SERVICE",
+      "name": "shop.OrderService"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "OrderService"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrderService",
+      "to": "grpc:shop.OrderService",
+      "category": "GRPC_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "GRPC_SERVICE",
+      "max_nodes": 1
+    }
+  ],
+  "note": "tonic server impl + generated OrderServiceClient || CF.8b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=1/1) via=grpc. Nothing to fix: the cell is covered at HEAD."
+}

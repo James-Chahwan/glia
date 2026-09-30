@@ -1,0 +1,32 @@
+{
+  "framework": "rust-async-graphql",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "rust/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "orders"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "GRAPHQL_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "async-graphql #[Object] QueryRoot::orders + Apollo TS client || CF.8b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=graphql. Predicted extractor gap (backlog, not fixed by the probe): async-graphql `#[Object] impl QueryRoot { async fn orders(..) }` has no resolver row in parsers/code/extractors/src/graphql.rs; the Apollo TS client side is found."
+}

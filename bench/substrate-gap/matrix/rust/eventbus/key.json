@@ -1,0 +1,31 @@
+{
+  "framework": "rust-tokio-broadcast",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "rust/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "OrderPlaced"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "OrderPlaced"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrderPlaced",
+      "to": "OrderPlaced",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "tokio broadcast channel of an Event enum: the in-process bus idiom; the event name is the variant || CF.8b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): tokio `broadcast::channel::<Event>()` + `tx.send(Event::OrderPlaced(..))` / `rx.recv()`: typed channel, no string name; no row in parsers/code/extractors/src/eventbus.rs."
+}
