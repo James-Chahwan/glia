@@ -133,6 +133,8 @@ graph/src/    lib.rs        facade (rules above)
               identity LB.6                     cells LF.1a
               nav LA.6a   is_nav_route / nav_route_path, and the NAVIGATES_TO resolver
                           + page-component lift that calls::resolve_refs runs last
+  private slots (items pub(crate)):
+              go_mounts CB.20   swift_scope CB.18   cpp_scope CB.25
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
