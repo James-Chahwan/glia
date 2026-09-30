@@ -26,7 +26,7 @@ FILES = (
      'text = "charges are idempotent"\n'),
 )
 
-REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations"]
+REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations", "reflexion"]
 VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "count", "evidence"]
 EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
 
@@ -51,6 +51,8 @@ def main() -> int:
                 and report.get("checked") == 2, report)
         c.check("invariant unchecked", report.get("unchecked") == ["prose"], report.get("unchecked"))
         c.check("no errors", report.get("errors") == [], report.get("errors"))
+        c.check("no reflexion model without a component (CC.5b)",
+                "reflexion" in report and report["reflexion"] is None, report.get("reflexion"))
         rows = report.get("violations", [])
         c.check("violations sorted by rule id",
                 [v.get("rule_id") for v in rows] == ["api-acyclic", "web-no-api-internals"],

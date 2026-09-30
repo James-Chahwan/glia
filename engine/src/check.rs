@@ -67,25 +67,94 @@
 //!
 //! Architecture rules only: nothing here carries auth or security semantics.
 //!
+//! # Reflexion model (check v2)
+//!
+//! CC.5a stores a reflexion model (Murphy, Notkin and Sullivan) as CONSTRAINT
+//! entries of three kinds: `component {name, paths}` and `layer {name, rank,
+//! components, strict}` are model DECLARATIONS (not counted in
+//! [`CheckReport::rules`], never listed unchecked); `allow {from, to}` is a
+//! rule, counted and checked when the model is evaluated. An allow, or a
+//! layer, naming a component no entry declares (rejected or orphaned at
+//! build, or written through the cell API) is an error for that entry's id,
+//! as is a component whose path an equal path of a smaller-named component
+//! already owns (possible only through the cell API; the smaller name keeps
+//! it).
+//!
+//! The model is evaluated once per check, only when at least one component is
+//! declared ([`CheckReport::reflexion`] is `None` otherwise), as named
+//! relations, the stratified-negation Datalog 0.5.2's rule layer compiles the
+//! same stanzas into (renaming one needs that translation updated with it).
+//! [`ReflexionFacts`] holds them, one field per relation, each derived by one
+//! function whose doc comment states its rule:
+//!
+//! | relation | rule |
+//! |---|---|
+//! | `component_path(C, Path)` | EDB: each component entry's resolved paths |
+//! | `layer_of(C, Rank, Strict)` | EDB: each layer entry's components; rank 0 is the top |
+//! | `allow(C1, C2)` | EDB: each allow entry without an error |
+//! | `located(N, F)` | EDB: the file one [`Locator`] places `N` in (strict, as forbid_edge) |
+//! | `edge(From, Category, To, E)` | EDB: every edge whose category is checked |
+//! | `in_component(N, C)` | `located(N, F), component_path(C, P), under(F, P), not shadowed(F, P)` |
+//! | `shadowed(F, P)` | `component_path(_, P2), under(F, P2), longer(P2, P)` |
+//! | `dep(C1, C2, E)` | `edge(A, _, B, E), in_component(A, C1), in_component(B, C2), C1 != C2` |
+//! | `allowed(C1, C2)` | `allow(C1, C2)` |
+//! | | `layer_of(C1, R1, false), layer_of(C2, R2, _), R1 < R2` |
+//! | | `layer_of(C1, R1, true), layer_of(C2, R2, _), R2 = R1 + 1` |
+//! | `closed()` | `allow(_, _)` ; `layer_of(_, _, _)` |
+//! | `convergence(C1, C2)` | `dep(C1, C2, _), allowed(C1, C2)` |
+//! | `divergence(C1, C2, E)` | `closed(), dep(C1, C2, E), not allowed(C1, C2)` |
+//! | `absence(C1, C2)` | `allow(C1, C2), not dep(C1, C2, _)` |
+//! | `unmapped(N, F)` | `located(N, F), not in_component(N, _)` |
+//!
+//! Membership is a pure function of (node file, declared paths): the longest
+//! declared path on a path-segment boundary above the file (`web/admin` owns
+//! `web/admin/panel.py` over `web`; it does not own `web/admin.py`), a PROJECT
+//! by its own path. A node no file places (a queue topic, a SQL table) is in
+//! no component and is not unmapped; a cross-service HTTP edge maps through
+//! its ENDPOINT's and ROUTE's located files.
+//!
+//! The checked categories are the union of the allows' `categories` when any
+//! sets them, else [`default_forbid_categories`]. What the report says:
+//!
+//! - the matrix, one [`MatrixCell`] per `dep` pair: [`CONVERGENCE`],
+//!   [`DIVERGENCE`], or [`OBSERVED`] in an OPEN model (components only, no
+//!   layer and no allow): the map is informative before the rules are
+//!   written, and an open model never raises a divergence;
+//! - each divergence is also a [`Violation`] (`rule_id`
+//!   `reflexion:<C1>-><C2>`, rule_kind [`DIVERGENCE`], `decl` C1's
+//!   component, tier its strongest edge's as forbid_edge, evidence located
+//!   and tiered like forbid_edge's), so `glia check` exits 1 on it;
+//! - each absence (an allow the code never realises) is a
+//!   [`ReflexionAbsence`], a [`FACT`] about the graph as built carrying the
+//!   coverage caveats (LD.8a) of the checked categories: a blind extraction
+//!   looks exactly like an absence. Never a violation;
+//! - [`Unmapped`]: the files holding a located MODULE / CLASS / FUNCTION /
+//!   METHOD that no component owns.
+//!
 //! Fired-on marker, one line per call (two when a rule is violated):
 //! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`,
 //! where `V` counts [`Violation`] records (a forbid_edge rule makes at most
-//! one, a no_cycle rule one per cycle) and `F` / `N` split them by kind; when
-//! `V` > 0 a second line
+//! one, a no_cycle rule one per cycle, the reflexion model one per
+//! divergent pair) and `F` / `N` split out the forbid_edge and no_cycle
+//! ones only; when `V` > 0 a second line
 //! `[check] tiers fact=<F> derived=<D> heuristic=<H>` splits them by tier
-//! (CC.3) — grep `^\[check\] tiers`.
+//! (CC.3) — grep `^\[check\] tiers`. A check with a model prints, before
+//! them, `[reflexion] components=<C> closed=<true|false> deps=<P>
+//! convergences=<V> divergences=<D> absences=<A> unmapped_files=<U>` (`P`
+//! counts dependent component pairs) — grep `^\[reflexion\]`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
 use glia_code_domain::{edge_category, node_kind};
-use glia_core::{Edge, EdgeCategoryId, NodeId};
+use glia_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
 use crate::answers::{Locator, in_scope, project_roots};
+use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::module_import_graph;
 use crate::external::declared::declared_constraints;
 use crate::profile::CODE_PROFILE;
@@ -108,6 +177,17 @@ pub const DERIVED: &str = "derived";
 pub const HEURISTIC: &str = "heuristic";
 /// Evidence rows kept per [`Violation`]; `count` keeps the full number.
 pub const MAX_EVIDENCE: usize = 100;
+/// [`Violation::rule_kind`] of a reflexion-model divergence, and the
+/// [`MatrixCell::status`] of a dependency a closed model does not allow.
+pub const DIVERGENCE: &str = "divergence";
+/// [`MatrixCell::status`]: a dependency the model allows.
+pub const CONVERGENCE: &str = "convergence";
+/// [`MatrixCell::status`] in an open model (components only): the dependency
+/// is reported, not judged.
+pub const OBSERVED: &str = "observed";
+/// Unmapped files listed in [`Unmapped::sample`]; `files` keeps the full
+/// number.
+pub const MAX_UNMAPPED_SAMPLE: usize = 50;
 
 /// One edge that breaks a rule: a forbidden edge, or a hop of a witness cycle.
 #[non_exhaustive]
@@ -133,23 +213,26 @@ pub struct ViolationEdge {
     pub note: Option<String>,
 }
 
-/// One broken rule: all of a forbid_edge rule's edges, or one cycle of a
-/// no_cycle rule.
+/// One broken rule: all of a forbid_edge rule's edges, one cycle of a
+/// no_cycle rule, or one divergent component pair of the reflexion model.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct Violation {
+    /// The rule's id; `reflexion:<C1>-><C2>` for a divergence.
     pub rule_id: String,
-    /// [`FORBID_EDGE`] or [`NO_CYCLE`].
+    /// [`FORBID_EDGE`], [`NO_CYCLE`] or [`DIVERGENCE`].
     pub rule_kind: &'static str,
-    /// `.glia/overlay.toml:<line>` of the stanza; `None` for a cell-API rule.
+    /// `.glia/overlay.toml:<line>` of the stanza (a divergence: of C1's
+    /// `[[component]]`); `None` for a cell-API rule.
     pub decl: Option<String>,
     /// Always [`VIOLATION`].
     pub severity: &'static str,
-    /// forbid_edge: its strongest evidence row's tier. no_cycle: [`DERIVED`],
-    /// or [`HEURISTIC`] when a hop of the witness is (module doc "Tiers").
+    /// forbid_edge and divergence: the strongest evidence row's tier.
+    /// no_cycle: [`DERIVED`], or [`HEURISTIC`] when a hop of the witness is
+    /// (module doc "Tiers").
     pub tier: &'static str,
-    /// forbid_edge: the forbidden edges, all of them (the evidence lists at
-    /// most [`MAX_EVIDENCE`]). no_cycle: the nodes (modules, for an import
+    /// forbid_edge and divergence: the edges, all of them (the evidence lists
+    /// at most [`MAX_EVIDENCE`]). no_cycle: the nodes (modules, for an import
     /// rule) in the cycle's strongly-connected component; the evidence is
     /// one shortest cycle through it.
     pub count: usize,
@@ -160,17 +243,112 @@ pub struct Violation {
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct CheckReport {
-    /// CONSTRAINT rules read.
+    /// CONSTRAINT rules read: every entry but the reflexion model's component
+    /// and layer declarations (an allow is a rule).
     pub rules: usize,
-    /// forbid_edge + no_cycle rules evaluated (a rule with an error is not).
+    /// forbid_edge + no_cycle rules evaluated, plus the allows of an
+    /// evaluated model (a rule with an error is not).
     pub checked: usize,
     /// Ids of the rules no graph query evaluates (`invariant`), in rule order.
     pub unchecked: Vec<String>,
-    /// `(rule id, message)`: a rule that could not be evaluated (an unknown
-    /// edge category, a scope no node sits in). The rule is skipped.
+    /// `(entry id, message)`: a rule that could not be evaluated (an unknown
+    /// edge category, a scope no node sits in, an allow naming an undeclared
+    /// component) is skipped; a model declaration in error (a layer naming an
+    /// undeclared component, a component on a path another owns) keeps the
+    /// rest of its entry. Rules first, in rule order; then the model's.
     pub errors: Vec<(String, String)>,
     /// Sorted by rule id; a rule's cycles in the order of their first member.
+    /// A closed reflexion model's divergences are here too.
     pub violations: Vec<Violation>,
+    /// The reflexion model, evaluated (module doc "Reflexion model"); `None`
+    /// when no component is declared.
+    pub reflexion: Option<Reflexion>,
+}
+
+/// One declared component of the reflexion model.
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ComponentSummary {
+    pub name: String,
+    /// Its paths as stored: resolved, repo-relative, `.` = the root; every
+    /// entry's paths when several entries declare the name (a merge).
+    pub paths: Vec<String>,
+    /// The layer it sits in, if any.
+    pub layer: Option<String>,
+    /// Nodes `in_component` places in it.
+    pub nodes: usize,
+    /// `.glia/overlay.toml:<line>` of its `[[component]]`; `None` for a
+    /// cell-API component.
+    pub decl: Option<String>,
+}
+
+/// One dependent component pair: the `dep` edges from `from` into `to`.
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct MatrixCell {
+    pub from: String,
+    pub to: String,
+    /// The distinct edges (an edge two graphs both hold is one).
+    pub edges: usize,
+    /// [`CONVERGENCE`], [`DIVERGENCE`] or [`OBSERVED`] (an open model).
+    pub status: &'static str,
+    /// The strongest edge's tier: one fact edge proves the dependency.
+    pub tier: &'static str,
+    /// What allows it: an allow id, else `layer:<upper>><lower>`; `None`
+    /// when nothing does.
+    pub allowed_by: Option<String>,
+}
+
+/// An allow the code never realises: no checked edge from `from` into `to`.
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ReflexionAbsence {
+    pub from: String,
+    pub to: String,
+    /// The allow's id.
+    pub rule_id: String,
+    /// The allow's `.glia/overlay.toml:<line>`; `None` for a cell-API allow.
+    pub decl: Option<String>,
+    /// Always [`FACT`]: a fact about the graph as built.
+    pub tier: &'static str,
+    /// The coverage caveats of the checked categories for the languages
+    /// present: a blind extraction looks exactly like an absence.
+    pub caveats: Vec<CoverageNote>,
+}
+
+/// The code no component owns.
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone, Default)]
+pub struct Unmapped {
+    /// Files holding a located MODULE / CLASS / FUNCTION / METHOD that maps to
+    /// no component.
+    pub files: usize,
+    /// Those MODULE / CLASS / FUNCTION / METHOD nodes.
+    pub nodes: usize,
+    /// Distinct checked-category edges between an unmapped located node (of
+    /// any kind) and a node in a component, either direction.
+    pub edges_to_mapped: usize,
+    /// The first [`MAX_UNMAPPED_SAMPLE`] of those files, sorted.
+    pub sample: Vec<String>,
+}
+
+/// The reflexion model, evaluated (module doc "Reflexion model").
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct Reflexion {
+    /// Any allow or layer is declared: dependencies are judged.
+    pub closed: bool,
+    /// Sorted by name.
+    pub components: Vec<ComponentSummary>,
+    /// Sorted by `(from, to)`.
+    pub matrix: Vec<MatrixCell>,
+    /// Sorted by `(from, to, rule_id)`.
+    pub absences: Vec<ReflexionAbsence>,
+    pub unmapped: Unmapped,
+    /// Convergent pairs.
+    pub convergences: usize,
+    /// Divergent pairs (each one [`Violation`]).
+    pub divergences: usize,
 }
 
 /// The categories a forbid_edge rule without `categories` checks: IMPORTS
@@ -194,16 +372,31 @@ pub fn check(merged: &MergedGraph) -> CheckReport {
 /// rule) against `merged`, whichever graph they were read from: a review
 /// checks the working tree's rules against the base graph. Emits the marker.
 pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -> CheckReport {
+    // Component and layer entries declare the model; every other entry, an
+    // allow included, is a rule.
+    let (decls, rules): (Vec<&ConstraintRule>, Vec<&ConstraintRule>) = rules
+        .iter()
+        .map(|(_, r)| r)
+        .partition(|r| is_model_decl(&r.kind));
     let mut report = CheckReport {
         rules: rules.len(),
         checked: 0,
         unchecked: Vec::new(),
         errors: Vec::new(),
         violations: Vec::new(),
+        reflexion: None,
     };
-    if !rules.is_empty() {
+    if !rules.is_empty() || !decls.is_empty() {
         let mut ctx = Ctx::new(merged);
-        for (_, rule) in rules {
+        let mut model = ModelEdb::declare(&decls);
+        for rule in &rules {
+            if let ConstraintKind::Allow { from, to } = &rule.kind {
+                match model.admit_allow(rule, from, to) {
+                    Ok(()) => report.checked += 1,
+                    Err(msg) => report.errors.push((rule.id.clone(), msg)),
+                }
+                continue;
+            }
             match evaluate(&mut ctx, rule) {
                 Outcome::Unchecked => report.unchecked.push(rule.id.clone()),
                 Outcome::Error(msg) => report.errors.push((rule.id.clone(), msg)),
@@ -212,6 +405,12 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
                     report.violations.extend(found);
                 }
             }
+        }
+        report.errors.append(&mut model.errors);
+        if !model.components.is_empty() {
+            let (reflexion, divergences) = evaluate_model(&mut ctx, model);
+            report.violations.extend(divergences);
+            report.reflexion = Some(reflexion);
         }
     }
     // Stable: a rule's cycles keep their order.
@@ -428,8 +627,10 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// A [`Violation`] of `(rule id, decl)`, its evidence capped at
+/// [`MAX_EVIDENCE`].
 fn violation(
-    rule: &ConstraintRule,
+    (rule_id, decl): (String, Option<String>),
     kind: &'static str,
     tier: &'static str,
     count: usize,
@@ -437,14 +638,56 @@ fn violation(
 ) -> Violation {
     evidence.truncate(MAX_EVIDENCE);
     Violation {
-        rule_id: rule.id.clone(),
+        rule_id,
         rule_kind: kind,
-        decl: rule.decl.clone(),
+        decl,
         severity: VIOLATION,
         tier,
         count,
         evidence,
     }
+}
+
+/// `(id, decl)` of a rule, for [`violation`].
+fn id_decl(rule: &ConstraintRule) -> (String, Option<String>) {
+    (rule.id.clone(), rule.decl.clone())
+}
+
+/// Strongest tier first (so the [`MAX_EVIDENCE`] cut keeps the facts), then
+/// located rows by (file, line, category); qnames break the rest.
+fn sort_rows(rows: &mut [ViolationEdge]) {
+    rows.sort_by(|a, b| {
+        (
+            tier_rank(a.tier),
+            a.file.is_none(),
+            &a.file,
+            a.line.is_none(),
+            a.line,
+            a.category,
+        )
+            .cmp(&(
+                tier_rank(b.tier),
+                b.file.is_none(),
+                &b.file,
+                b.line.is_none(),
+                b.line,
+                b.category,
+            ))
+            .then_with(|| a.from_qname.cmp(&b.from_qname))
+            .then_with(|| a.to_qname.cmp(&b.to_qname))
+    });
+}
+
+/// The dedup key of an edge as reported (an edge two graphs both hold is one
+/// row).
+fn edge_site(e: &Edge, ev: Option<&Evidence>) -> EdgeSite {
+    (
+        e.from,
+        e.category.0,
+        e.to,
+        ev.and_then(|x| x.file.clone()),
+        ev.and_then(|x| x.line),
+    )
 }
 
 // ============================================================================
@@ -472,14 +715,7 @@ fn forbid_edge(
             continue;
         }
         let ev = Evidence::of(e);
-        let key = (
-            e.from,
-            e.category.0,
-            e.to,
-            ev.as_ref().and_then(|x| x.file.clone()),
-            ev.as_ref().and_then(|x| x.line),
-        );
-        if !seen.insert(key) {
+        if !seen.insert(edge_site(e, ev.as_ref())) {
             continue;
         }
         let tier = tier_of(ev.as_ref(), e);
@@ -488,32 +724,17 @@ fn forbid_edge(
     if rows.is_empty() {
         return Ok(None);
     }
-    // Strongest tier first (so the MAX_EVIDENCE cut keeps the facts), then
-    // located rows by (file, line, category); qnames break the rest.
-    rows.sort_by(|a, b| {
-        (
-            tier_rank(a.tier),
-            a.file.is_none(),
-            &a.file,
-            a.line.is_none(),
-            a.line,
-            a.category,
-        )
-            .cmp(&(
-                tier_rank(b.tier),
-                b.file.is_none(),
-                &b.file,
-                b.line.is_none(),
-                b.line,
-                b.category,
-            ))
-            .then_with(|| a.from_qname.cmp(&b.from_qname))
-            .then_with(|| a.to_qname.cmp(&b.to_qname))
-    });
+    sort_rows(&mut rows);
     // Sorted tier-first: the first row holds the strongest tier.
     let tier = rows.first().map_or(FACT, |r| r.tier);
     let count = rows.len();
-    Ok(Some(violation(rule, FORBID_EDGE, tier, count, rows)))
+    Ok(Some(violation(
+        id_decl(rule),
+        FORBID_EDGE,
+        tier,
+        count,
+        rows,
+    )))
 }
 
 // ============================================================================
@@ -632,10 +853,637 @@ fn no_cycle(
         } else {
             DERIVED
         };
-        cycles.push((first, violation(rule, NO_CYCLE, tier, comp.len(), evidence)));
+        cycles.push((
+            first,
+            violation(id_decl(rule), NO_CYCLE, tier, comp.len(), evidence),
+        ));
     }
     cycles.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(cycles.into_iter().map(|(_, v)| v).collect())
+}
+
+// ============================================================================
+// reflexion model (module doc "Reflexion model")
+// ============================================================================
+
+/// A component or layer entry: a model declaration, not a rule.
+fn is_model_decl(kind: &ConstraintKind) -> bool {
+    matches!(
+        kind,
+        ConstraintKind::Component { .. } | ConstraintKind::Layer { .. }
+    )
+}
+
+/// A path as membership compares it: no leading `./` or `/`, no trailing
+/// `/`; the root is `.`.
+fn norm_path(p: &str) -> String {
+    let s = p
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    if s.is_empty() {
+        ".".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// One declared component: every entry that names it, merged.
+struct ComponentDecl {
+    name: String,
+    /// Stored paths, deduplicated, in entry order.
+    paths: Vec<String>,
+    /// The first entry's decl and id.
+    decl: Option<String>,
+    id: String,
+}
+
+/// `layer_of(C, Rank, Strict)`, with the layer's name for `allowed_by`.
+struct LayerFact {
+    name: String,
+    rank: u32,
+    strict: bool,
+}
+
+/// The allows of one component pair, `(id, decl)`, in rule order.
+type Allows = Vec<(String, Option<String>)>;
+
+/// The model's base relations (EDB), read from the stored entries. A
+/// component is its index in `components` (sorted by name), so every
+/// index-keyed collection iterates in name order.
+struct ModelEdb {
+    components: Vec<ComponentDecl>,
+    index: BTreeMap<String, usize>,
+    /// `component_path(C, Path)`: each normalised path with its owner.
+    component_path: BTreeMap<String, usize>,
+    /// `layer_of(C, Rank, Strict)`.
+    layer_of: BTreeMap<usize, LayerFact>,
+    /// `allow(C1, C2)`: the admitted allows.
+    allow: BTreeMap<(usize, usize), Allows>,
+    /// The union of the admitted allows' `categories`.
+    allow_categories: Vec<EdgeCategoryId>,
+    /// `(entry id, message)` of the declarations in error.
+    errors: Vec<(String, String)>,
+}
+
+impl ModelEdb {
+    /// `component_path` and `layer_of` from the component and layer entries
+    /// (in [`declared_constraints`] order). Entries naming one component merge
+    /// their paths. An equal path two components claim (possible only through
+    /// the cell API: the loader and the build reject it in an overlay) goes to
+    /// the smaller name, an error on the other. A layer entry naming an
+    /// undeclared component, or one another layer holds, leaves it out, an
+    /// error on the layer.
+    fn declare(decls: &[&ConstraintRule]) -> Self {
+        let mut by_name: BTreeMap<String, ComponentDecl> = BTreeMap::new();
+        let mut layers: Vec<(&ConstraintRule, &str, u32, &[String], bool)> = Vec::new();
+        for r in decls {
+            match &r.kind {
+                ConstraintKind::Component { name, paths } => {
+                    let c = by_name
+                        .entry(name.clone())
+                        .or_insert_with(|| ComponentDecl {
+                            name: name.clone(),
+                            paths: Vec::new(),
+                            decl: r.decl.clone(),
+                            id: r.id.clone(),
+                        });
+                    for p in paths {
+                        if !c.paths.contains(p) {
+                            c.paths.push(p.clone());
+                        }
+                    }
+                }
+                ConstraintKind::Layer {
+                    name,
+                    rank,
+                    components,
+                    strict,
+                } => layers.push((r, name, *rank, components, *strict)),
+                _ => {}
+            }
+        }
+        let components: Vec<ComponentDecl> = by_name.into_values().collect();
+        let index: BTreeMap<String, usize> = components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.clone(), i))
+            .collect();
+        let mut errors = Vec::new();
+
+        // Name order: the first claimant of a path is the smaller name.
+        let mut component_path: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, c) in components.iter().enumerate() {
+            for p in &c.paths {
+                match component_path.get(&norm_path(p)) {
+                    Some(&owner) if owner != i => errors.push((
+                        c.id.clone(),
+                        format!(
+                            "path `{p}` is also claimed by component `{}`, which keeps it (an equal path goes to the smaller name)",
+                            components[owner].name
+                        ),
+                    )),
+                    Some(_) => {}
+                    None => {
+                        component_path.insert(norm_path(p), i);
+                    }
+                }
+            }
+        }
+
+        // Top first; a layer's name breaks a rank tie.
+        layers.sort_by(|a, b| (a.2, a.1).cmp(&(b.2, b.1)));
+        let mut layer_of: BTreeMap<usize, LayerFact> = BTreeMap::new();
+        for (r, name, rank, members, strict) in layers {
+            for c in members {
+                let Some(&i) = index.get(c) else {
+                    errors.push((
+                        r.id.clone(),
+                        format!(
+                            "component `{c}` is not declared (rejected or orphaned at build, or never written); the layer leaves it out"
+                        ),
+                    ));
+                    continue;
+                };
+                match layer_of.get(&i) {
+                    Some(held) if held.name != name => errors.push((
+                        r.id.clone(),
+                        format!(
+                            "component `{c}` already sits in layer `{}`; this layer leaves it out",
+                            held.name
+                        ),
+                    )),
+                    Some(_) => {}
+                    None => {
+                        layer_of.insert(
+                            i,
+                            LayerFact {
+                                name: name.to_string(),
+                                rank,
+                                strict,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        ModelEdb {
+            components,
+            index,
+            component_path,
+            layer_of,
+            allow: BTreeMap::new(),
+            allow_categories: Vec::new(),
+            errors,
+        }
+    }
+
+    /// Admit one allow into `allow(C1, C2)`, or the rule error that skips
+    /// it: a `from` / `to` no component entry declares, a component allowed
+    /// to use itself, an unknown edge category.
+    fn admit_allow(&mut self, rule: &ConstraintRule, from: &str, to: &str) -> Result<(), String> {
+        let (Some(&c1), Some(&c2)) = (self.index.get(from), self.index.get(to)) else {
+            let mut unknown: Vec<String> = [from, to]
+                .iter()
+                .filter(|c| !self.index.contains_key(**c))
+                .map(|c| format!("`{c}`"))
+                .collect();
+            unknown.dedup();
+            return Err(format!(
+                "allow names undeclared component{} {} (rejected or orphaned at build, or never written); the allow is skipped",
+                if unknown.len() == 1 { "" } else { "s" },
+                unknown.join(", ")
+            ));
+        };
+        if c1 == c2 {
+            return Err(format!(
+                "allow lets component `{from}` use itself; a use within one component is no dependency (the allow is skipped)"
+            ));
+        }
+        for c in categories_of(&rule.categories)? {
+            if !self.allow_categories.contains(&c) {
+                self.allow_categories.push(c);
+            }
+        }
+        // One allow stored in two merged repos is one allow.
+        let ids = self.allow.entry((c1, c2)).or_default();
+        if !ids.iter().any(|(id, _)| *id == rule.id) {
+            ids.push((rule.id.clone(), rule.decl.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// One distinct `dep` edge, with its `why` tier and note.
+struct DepEdge<'m> {
+    edge: &'m Edge,
+    ev: Option<Evidence>,
+    tier: &'static str,
+    note: Option<String>,
+}
+
+/// The model as named relations (module doc "Reflexion model"): the EDB
+/// ([`ModelEdb`]'s, moved in, plus `located` = `Ctx::files` and `edge` = the
+/// `checked` categories) and every IDB relation, one field each. Components
+/// are [`ModelEdb::components`] indices.
+struct ReflexionFacts<'m> {
+    components: Vec<ComponentDecl>,
+    component_path: BTreeMap<String, usize>,
+    layer_of: BTreeMap<usize, LayerFact>,
+    allow: BTreeMap<(usize, usize), Allows>,
+    /// The categories `edge(From, Category, To, E)` ranges over.
+    checked: Vec<EdgeCategoryId>,
+    /// `in_component(N, C)`.
+    in_component: HashMap<NodeId, usize>,
+    /// `unmapped(N, F)`.
+    unmapped: HashMap<NodeId, String>,
+    /// `dep(C1, C2, E)`: each pair's distinct edges.
+    dep: BTreeMap<(usize, usize), Vec<DepEdge<'m>>>,
+    /// Distinct checked edges between an `unmapped` node and an
+    /// `in_component` one, either direction.
+    unmapped_edges: usize,
+    /// `allowed(C1, C2)`, with what allows it.
+    allowed: BTreeMap<(usize, usize), String>,
+    /// `closed()`.
+    closed: bool,
+    /// `convergence(C1, C2)`.
+    convergence: BTreeSet<(usize, usize)>,
+    /// `divergence(C1, C2, E)`: the pairs; their edges are `dep`'s.
+    divergence: BTreeSet<(usize, usize)>,
+    /// `absence(C1, C2)`.
+    absence: BTreeSet<(usize, usize)>,
+}
+
+impl<'m> ReflexionFacts<'m> {
+    /// Derive every IDB relation from `edb`, stratum by stratum: membership,
+    /// then the edge pass, then the verdicts (each negation reads a relation
+    /// already complete).
+    fn derive(ctx: &Ctx<'m>, edb: ModelEdb) -> Self {
+        let checked = if edb.allow_categories.is_empty() {
+            default_forbid_categories()
+        } else {
+            edb.allow_categories
+        };
+        let mut f = ReflexionFacts {
+            components: edb.components,
+            component_path: edb.component_path,
+            layer_of: edb.layer_of,
+            allow: edb.allow,
+            checked,
+            in_component: HashMap::new(),
+            unmapped: HashMap::new(),
+            dep: BTreeMap::new(),
+            unmapped_edges: 0,
+            allowed: BTreeMap::new(),
+            closed: false,
+            convergence: BTreeSet::new(),
+            divergence: BTreeSet::new(),
+            absence: BTreeSet::new(),
+        };
+        f.in_component = in_component_rel(ctx, &f.component_path);
+        f.unmapped = unmapped_rel(ctx, &f.in_component);
+        (f.dep, f.unmapped_edges) = dep_rel(ctx.merged, &f.checked, &f.in_component, &f.unmapped);
+        f.allowed = allowed_rel(&f.allow, &f.layer_of);
+        f.closed = closed_rel(&f.allow, &f.layer_of);
+        f.convergence = convergence_rel(&f.dep, &f.allowed);
+        f.divergence = divergence_rel(f.closed, &f.dep, &f.allowed);
+        f.absence = absence_rel(&f.allow, &f.dep);
+        f
+    }
+}
+
+/// `in_component(N, C) :- located(N, F), component_path(C, P), under(F, P),
+/// not shadowed(F, P).` with `shadowed(F, P) :- component_path(_, P2),
+/// under(F, P2), longer(P2, P).`: the component of the longest declared
+/// path at or above the node's file ([`owner`]). A PROJECT is placed by its
+/// own path, as scope membership places it.
+fn in_component_rel(
+    ctx: &Ctx<'_>,
+    component_path: &BTreeMap<String, usize>,
+) -> HashMap<NodeId, usize> {
+    let mut out = HashMap::new();
+    for (id, file) in &ctx.files {
+        let place = ctx.projects.get(id).or(file.as_ref());
+        if let Some(c) = place.and_then(|p| owner(component_path, p)) {
+            out.insert(*id, c);
+        }
+    }
+    out
+}
+
+/// The unshadowed `component_path` above `path`: walk its path-segment
+/// prefixes longest first (`web/admin/panel.py`, `web/admin`, `web`), then
+/// the root `.`. One lookup per segment, no scan of the declared paths.
+fn owner(component_path: &BTreeMap<String, usize>, path: &str) -> Option<usize> {
+    let mut p = norm_path(path);
+    loop {
+        if let Some(c) = component_path.get(&p) {
+            return Some(*c);
+        }
+        match p.rfind('/') {
+            Some(i) => p.truncate(i),
+            None => break,
+        }
+    }
+    if p == "." {
+        None
+    } else {
+        component_path.get(".").copied()
+    }
+}
+
+/// `unmapped(N, F) :- located(N, F), not in_component(N, _).`
+fn unmapped_rel(ctx: &Ctx<'_>, in_component: &HashMap<NodeId, usize>) -> HashMap<NodeId, String> {
+    ctx.files
+        .iter()
+        .filter(|(id, _)| !in_component.contains_key(id))
+        .filter_map(|(id, f)| f.clone().map(|f| (*id, f)))
+        .collect()
+}
+
+/// `dep(C1, C2, E) :- edge(A, _, B, E), in_component(A, C1),
+/// in_component(B, C2), C1 != C2.` One pass over `all_edges`; an edge two
+/// graphs both hold is one `E` (keyed as forbid_edge keys its rows). The same
+/// pass counts the distinct checked edges between an `unmapped` node and an
+/// `in_component` one.
+fn dep_rel<'m>(
+    merged: &'m MergedGraph,
+    checked: &[EdgeCategoryId],
+    in_component: &HashMap<NodeId, usize>,
+    unmapped: &HashMap<NodeId, String>,
+) -> (BTreeMap<(usize, usize), Vec<DepEdge<'m>>>, usize) {
+    let mut dep: BTreeMap<(usize, usize), Vec<DepEdge<'m>>> = BTreeMap::new();
+    let mut seen: HashSet<EdgeSite> = HashSet::new();
+    let mut unmapped_edges = 0;
+    for e in merged.all_edges() {
+        if !checked.contains(&e.category) {
+            continue;
+        }
+        let (a, b) = (in_component.get(&e.from), in_component.get(&e.to));
+        let pair = match (a, b) {
+            (Some(&c1), Some(&c2)) if c1 != c2 => Some((c1, c2)),
+            (Some(_), None) if unmapped.contains_key(&e.to) => None,
+            (None, Some(_)) if unmapped.contains_key(&e.from) => None,
+            _ => continue,
+        };
+        let ev = Evidence::of(e);
+        if !seen.insert(edge_site(e, ev.as_ref())) {
+            continue;
+        }
+        let Some(pair) = pair else {
+            unmapped_edges += 1;
+            continue;
+        };
+        let (tier, note) = tier_of(ev.as_ref(), e);
+        dep.entry(pair).or_default().push(DepEdge {
+            edge: e,
+            ev,
+            tier,
+            note,
+        });
+    }
+    (dep, unmapped_edges)
+}
+
+/// `allowed(C1, C2) :- allow(C1, C2).`
+/// `allowed(C1, C2) :- layer_of(C1, R1, false), layer_of(C2, R2, _), R1 < R2.`
+/// `allowed(C1, C2) :- layer_of(C1, R1, true), layer_of(C2, R2, _), R2 = R1 + 1.`
+/// Each allowed pair with what allows it: its smallest allow id, else
+/// `layer:<upper>><lower>` (an explicit allow names the decision better).
+fn allowed_rel(
+    allow: &BTreeMap<(usize, usize), Allows>,
+    layer_of: &BTreeMap<usize, LayerFact>,
+) -> BTreeMap<(usize, usize), String> {
+    let mut out = BTreeMap::new();
+    for (&c1, l1) in layer_of {
+        for (&c2, l2) in layer_of {
+            let below = if l1.strict {
+                l1.rank.checked_add(1) == Some(l2.rank)
+            } else {
+                l1.rank < l2.rank
+            };
+            if below {
+                out.insert((c1, c2), format!("layer:{}>{}", l1.name, l2.name));
+            }
+        }
+    }
+    for (pair, ids) in allow {
+        if let Some((id, _)) = ids.iter().min_by(|a, b| a.0.cmp(&b.0)) {
+            out.insert(*pair, id.clone());
+        }
+    }
+    out
+}
+
+/// `closed() :- allow(_, _).` `closed() :- layer_of(_, _, _).`
+fn closed_rel(
+    allow: &BTreeMap<(usize, usize), Allows>,
+    layer_of: &BTreeMap<usize, LayerFact>,
+) -> bool {
+    !allow.is_empty() || !layer_of.is_empty()
+}
+
+/// `convergence(C1, C2) :- dep(C1, C2, _), allowed(C1, C2).`
+fn convergence_rel(
+    dep: &BTreeMap<(usize, usize), Vec<DepEdge<'_>>>,
+    allowed: &BTreeMap<(usize, usize), String>,
+) -> BTreeSet<(usize, usize)> {
+    dep.keys()
+        .filter(|p| allowed.contains_key(p))
+        .copied()
+        .collect()
+}
+
+/// `divergence(C1, C2, E) :- closed(), dep(C1, C2, E), not allowed(C1, C2).`
+fn divergence_rel(
+    closed: bool,
+    dep: &BTreeMap<(usize, usize), Vec<DepEdge<'_>>>,
+    allowed: &BTreeMap<(usize, usize), String>,
+) -> BTreeSet<(usize, usize)> {
+    if !closed {
+        return BTreeSet::new();
+    }
+    dep.keys()
+        .filter(|p| !allowed.contains_key(p))
+        .copied()
+        .collect()
+}
+
+/// `absence(C1, C2) :- allow(C1, C2), not dep(C1, C2, _).`
+fn absence_rel(
+    allow: &BTreeMap<(usize, usize), Allows>,
+    dep: &BTreeMap<(usize, usize), Vec<DepEdge<'_>>>,
+) -> BTreeSet<(usize, usize)> {
+    allow
+        .keys()
+        .filter(|p| !dep.contains_key(p))
+        .copied()
+        .collect()
+}
+
+/// Evaluate the model: derive [`ReflexionFacts`], then render the report
+/// and one [`DIVERGENCE`] [`Violation`] per divergent pair. Emits the
+/// `[reflexion]` marker.
+fn evaluate_model(ctx: &mut Ctx<'_>, edb: ModelEdb) -> (Reflexion, Vec<Violation>) {
+    let merged = ctx.merged;
+    let facts = ReflexionFacts::derive(ctx, edb);
+    let name = |c: usize| facts.components[c].name.clone();
+
+    let mut owned = vec![0usize; facts.components.len()];
+    for c in facts.in_component.values() {
+        owned[*c] += 1;
+    }
+    let components: Vec<ComponentSummary> = facts
+        .components
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ComponentSummary {
+            name: c.name.clone(),
+            paths: c.paths.clone(),
+            layer: facts.layer_of.get(&i).map(|l| l.name.clone()),
+            nodes: owned[i],
+            decl: c.decl.clone(),
+        })
+        .collect();
+
+    let strongest = |edges: &[DepEdge<'_>]| {
+        edges
+            .iter()
+            .map(|d| d.tier)
+            .min_by_key(|t| tier_rank(t))
+            .unwrap_or(FACT)
+    };
+    let matrix: Vec<MatrixCell> = facts
+        .dep
+        .iter()
+        .map(|(pair, edges)| MatrixCell {
+            from: name(pair.0),
+            to: name(pair.1),
+            edges: edges.len(),
+            status: if !facts.closed {
+                OBSERVED
+            } else if facts.convergence.contains(pair) {
+                CONVERGENCE
+            } else {
+                DIVERGENCE
+            },
+            tier: strongest(edges),
+            allowed_by: facts.allowed.get(pair).cloned(),
+        })
+        .collect();
+
+    let mut divergences = Vec::with_capacity(facts.divergence.len());
+    for pair in &facts.divergence {
+        let Some(edges) = facts.dep.get(pair) else {
+            continue;
+        };
+        let mut rows: Vec<ViolationEdge> = edges
+            .iter()
+            .map(|d| {
+                let e = d.edge;
+                ctx.row(
+                    e.from,
+                    e.category,
+                    e.to,
+                    d.ev.as_ref(),
+                    (d.tier, d.note.clone()),
+                )
+            })
+            .collect();
+        sort_rows(&mut rows);
+        let tier = rows.first().map_or(FACT, |r| r.tier);
+        let id = format!("reflexion:{}->{}", name(pair.0), name(pair.1));
+        let decl = facts.components[pair.0].decl.clone();
+        divergences.push(violation((id, decl), DIVERGENCE, tier, edges.len(), rows));
+    }
+
+    let caveats = if facts.absence.is_empty() {
+        Vec::new()
+    } else {
+        let names: Vec<&str> = facts
+            .checked
+            .iter()
+            .map(|c| edge_category::name(*c))
+            .collect();
+        caveats_for(merged, &names, None)
+    };
+    let mut absences: Vec<ReflexionAbsence> = Vec::new();
+    for pair in &facts.absence {
+        let mut ids: Vec<&(String, Option<String>)> =
+            facts.allow.get(pair).into_iter().flatten().collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        for (id, decl) in ids {
+            absences.push(ReflexionAbsence {
+                from: name(pair.0),
+                to: name(pair.1),
+                rule_id: id.clone(),
+                decl: decl.clone(),
+                tier: FACT,
+                caveats: caveats.clone(),
+            });
+        }
+    }
+
+    let unmapped = unmapped_summary(merged, &facts);
+    let reflexion = Reflexion {
+        closed: facts.closed,
+        components,
+        matrix,
+        absences,
+        unmapped,
+        convergences: facts.convergence.len(),
+        divergences: facts.divergence.len(),
+    };
+    eprintln!(
+        "[reflexion] components={} closed={} deps={} convergences={} divergences={} absences={} unmapped_files={}",
+        reflexion.components.len(),
+        reflexion.closed,
+        facts.dep.len(),
+        reflexion.convergences,
+        reflexion.divergences,
+        reflexion.absences.len(),
+        reflexion.unmapped.files,
+    );
+    (reflexion, divergences)
+}
+
+/// [`Unmapped`] over `unmapped(N, F)`: the files and nodes of its MODULE /
+/// CLASS / FUNCTION / METHOD members (one node read once), and the edges the
+/// edge pass counted.
+fn unmapped_summary(merged: &MergedGraph, facts: &ReflexionFacts<'_>) -> Unmapped {
+    const CODE: [NodeKindId; 4] = [
+        node_kind::MODULE,
+        node_kind::CLASS,
+        node_kind::FUNCTION,
+        node_kind::METHOD,
+    ];
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut files: BTreeSet<&str> = BTreeSet::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let Some(file) = facts.unmapped.get(&n.id) else {
+                continue;
+            };
+            let code = g
+                .nav
+                .kind_by_id
+                .get(&n.id)
+                .is_some_and(|k| CODE.contains(k));
+            if code && seen.insert(n.id) {
+                files.insert(file);
+            }
+        }
+    }
+    Unmapped {
+        files: files.len(),
+        nodes: seen.len(),
+        edges_to_mapped: facts.unmapped_edges,
+        sample: files
+            .into_iter()
+            .take(MAX_UNMAPPED_SAMPLE)
+            .map(String::from)
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -689,5 +1537,75 @@ mod tests {
         let r = check(&MergedGraph::new(Vec::new()));
         assert_eq!((r.rules, r.checked), (0, 0));
         assert!(r.violations.is_empty() && r.unchecked.is_empty() && r.errors.is_empty());
+        assert!(r.reflexion.is_none());
+    }
+
+    fn paths(pairs: &[(&str, usize)]) -> BTreeMap<String, usize> {
+        pairs.iter().map(|(p, c)| (norm_path(p), *c)).collect()
+    }
+
+    #[test]
+    fn owner_is_the_longest_path_on_a_segment_boundary() {
+        let cp = paths(&[("web", 0), ("web/admin", 1), ("./services/api/", 2)]);
+        assert_eq!(owner(&cp, "web/admin/panel.py"), Some(1));
+        assert_eq!(owner(&cp, "web/admin.py"), Some(0), "no segment boundary");
+        assert_eq!(owner(&cp, "web/app.py"), Some(0));
+        assert_eq!(owner(&cp, "services/api/h.py"), Some(2));
+        assert_eq!(owner(&cp, "webhooks/app.py"), None);
+        assert_eq!(owner(&cp, "."), None);
+        // The root `.` owns what nothing longer does, a PROJECT at `.` too.
+        let rooted = paths(&[(".", 3), ("web", 0)]);
+        assert_eq!(owner(&rooted, "scripts/tool.py"), Some(3));
+        assert_eq!(owner(&rooted, "web/app.py"), Some(0));
+        assert_eq!(owner(&rooted, "."), Some(3));
+        assert_eq!(norm_path(""), ".");
+        assert_eq!(norm_path("/a/b/"), "a/b");
+    }
+
+    fn layer(name: &str, rank: u32, strict: bool) -> LayerFact {
+        LayerFact {
+            name: name.into(),
+            rank,
+            strict,
+        }
+    }
+
+    #[test]
+    fn allowed_follows_layers_and_allows() {
+        // 0 ui (strict, rank 0), 1 core (rank 1), 2 data (rank 2), 3 also in
+        // core; 4 has no layer.
+        let layers: BTreeMap<usize, LayerFact> = [
+            (0, layer("ui", 0, true)),
+            (1, layer("core", 1, false)),
+            (2, layer("data", 2, false)),
+            (3, layer("core", 1, false)),
+        ]
+        .into_iter()
+        .collect();
+        let mut allow: BTreeMap<(usize, usize), Allows> = BTreeMap::new();
+        allow.insert((0, 2), vec![("z-id".into(), None), ("a-id".into(), None)]);
+        allow.insert((4, 0), vec![("up".into(), None)]);
+        allow.insert((3, 2), vec![("core-data".into(), None)]);
+        let a = allowed_rel(&allow, &layers);
+        assert_eq!(a.get(&(0, 1)).map(String::as_str), Some("layer:ui>core"));
+        assert_eq!(
+            a.get(&(0, 2)).map(String::as_str),
+            Some("a-id"),
+            "smallest allow id; strict skips data"
+        );
+        assert_eq!(a.get(&(1, 2)).map(String::as_str), Some("layer:core>data"));
+        assert_eq!(
+            a.get(&(3, 2)).map(String::as_str),
+            Some("core-data"),
+            "an allow names it over a layer"
+        );
+        assert_eq!(a.get(&(4, 0)).map(String::as_str), Some("up"));
+        assert!(!a.contains_key(&(1, 3)), "same layer");
+        assert!(!a.contains_key(&(2, 1)), "upward");
+        assert!(!a.contains_key(&(1, 0)), "upward");
+        assert!(closed_rel(&allow, &layers));
+        assert!(closed_rel(&BTreeMap::new(), &layers));
+        assert!(closed_rel(&allow, &BTreeMap::new()));
+        assert!(!closed_rel(&BTreeMap::new(), &BTreeMap::new()));
     }
 }

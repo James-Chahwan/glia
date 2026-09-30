@@ -20,7 +20,8 @@ impl PyGraph {
     /// `[[constraint]]` stanzas and cell-API rules, stored as CONSTRAINT
     /// cells) evaluated against this graph.
     ///
-    /// Returns a dict `{rules, checked, unchecked, errors, violations}`:
+    /// Returns a dict `{rules, checked, unchecked, errors, violations,
+    /// reflexion}`:
     /// `rules` read, `checked` evaluated (forbid_edge + no_cycle),
     /// `unchecked` the ids of the rules no query evaluates (invariant),
     /// `errors` `[rule_id, message]` pairs for a rule that could not be
@@ -39,6 +40,23 @@ impl PyGraph {
     /// violation is `derived` unless a hop is `heuristic`. A node is in a
     /// scope only when its file sits under that path (or it is a PROJECT
     /// there): a node with no file never matches.
+    ///
+    /// `reflexion` (CC.5b) is `None` unless the overlay declares a reflexion
+    /// model (`[[component]]`, `[[layer]]`, `kind = "allow"`); components and
+    /// layers are declarations, not rules, and an allow is a checked rule.
+    /// Then it is `{closed, components, matrix, absences, unmapped,
+    /// convergences, divergences}`: `components` `{name, paths, layer, nodes,
+    /// decl}` by name (a file belongs to the component with the longest path
+    /// above it); `matrix` one `{from, to, edges, status, tier, allowed_by}`
+    /// per dependent component pair, `status` `convergence` / `divergence`,
+    /// or `observed` in an open model (components only), `allowed_by` an
+    /// allow id or `layer:<upper>><lower>`; `absences` `{from, to, rule_id,
+    /// decl, tier, caveats}` for an allow the code never realises (`tier`
+    /// `fact`, `caveats` the coverage notes of the checked categories: a
+    /// blind extraction looks like an absence); `unmapped` `{files, nodes,
+    /// edges_to_mapped, sample}` for the code no component owns. Each
+    /// divergence is also a violation, `rule_id` `reflexion:<from>-><to>`,
+    /// `rule_kind` `divergence`, evidence as forbid_edge's.
     fn check(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         to_py(py, check_json(&self.merged))
     }
@@ -56,7 +74,7 @@ mod tests {
         let empty = check_json(&MergedGraph::new(Vec::new())).expect("serialises");
         assert_eq!(
             empty,
-            r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[]}"#
+            r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[],"reflexion":null}"#
         );
 
         let root = std::env::temp_dir().join(format!("glia-le8-check-{}", std::process::id()));
@@ -94,6 +112,8 @@ mod tests {
         assert_eq!(row["severity"], "VIOLATION", "{json}");
         assert_eq!(row["decl"], ".glia/overlay.toml:3", "{json}");
         assert_eq!(row["evidence"].as_array().map(Vec::len), Some(2), "{json}");
+        // CC.5b: no component declared, so no reflexion model.
+        assert!(v["reflexion"].is_null(), "{json}");
         assert_eq!(row["evidence"][0]["line"], 1, "{json}");
         // CC.3: every row carries why's tier and note; two observed imports
         // are facts, and the computed cycle is derived.

@@ -515,6 +515,6 @@ fn no_rules_is_an_empty_report() {
     let json = serde_json::to_string(&report).expect("serialises");
     assert_eq!(
         json,
-        r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[]}"#
+        r#"{"rules":0,"checked":0,"unchecked":[],"errors":[],"violations":[],"reflexion":null}"#
     );
 }
