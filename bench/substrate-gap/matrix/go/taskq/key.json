@@ -1,0 +1,33 @@
+{
+  "framework": "go-asynq",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "go/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "email:welcome"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "email:welcome"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "email:welcome",
+      "to": "email:welcome",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "hibiken/asynq: the task type string is the identity on both sides (NewTask / mux.HandleFunc) || CF.2a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): no Go task-queue framework in parsers/code/extractors/src/queues.rs (QueueFramework has Celery/Dramatiq/BullMQ/Sidekiq/Oban): asynq `asynq.NewTask(\"type\")` / `mux.HandleFunc(\"type\", h)`."
+}

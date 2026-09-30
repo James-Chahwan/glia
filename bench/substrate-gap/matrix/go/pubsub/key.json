@@ -1,0 +1,33 @@
+{
+  "framework": "go-cloud-pubsub",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "pubsub",
+  "cells": [
+    "go/pubsub"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "cloud.google.com/go/pubsub: client.Topic(\"orders\").Publish / client.Subscription(\"orders\").Receive; the Go SDK capitalises Topic/Subscription, queues.rs rows are the JS `.topic(` / Python `.topic_path(` || CF.2a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): no Go GCP Pub/Sub row in parsers/code/extractors/src/queues.rs: `client.Topic(\"x\")` / `client.Subscription(\"x\")` are capitalised and the `.topic(` / `.topic_path(` rows are gated to @google-cloud/pubsub / google.cloud."
+}
