@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/hotspots.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.hotspots(level: &str = "both", top: usize = 20, min_churn: u32 = 2, include_tests: bool = false, scope: Option<String> = None) -> PyResult<Py<PyAny>>

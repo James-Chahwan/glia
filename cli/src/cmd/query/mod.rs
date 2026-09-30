@@ -36,6 +36,14 @@ pub(crate) enum QueryCmd {
     /// it reaches, whether it crosses a service, the mechanisms it uses and
     /// where the entry is. Rows sharing a key are all kept. Exits 0.
     Flows(flows::Args),
+    /// Hotspots (CC.10b): modules and symbols that change often AND sit where
+    /// much depends on them — each row's git churn, its churn rank and its
+    /// PageRank centrality rank over the same ranked population, its last
+    /// change and where it is; no composite score. Module churn is commits,
+    /// symbol churn is blame span changes, both read from the history
+    /// snapshot (`glia history sync [--blame]`). Tier heuristic. Exits 0 with
+    /// rows, 1 with none (the absence says why), 2 on an error.
+    Hotspots(hotspots::Args),
     /// Implementors (LD.7c): who implements or extends a type, or overrides a
     /// method, over IMPLEMENTS / INHERITS_FROM — the whole hierarchy unless
     /// `--direct`, the supertypes with `--up`. Each row is located, names the
@@ -67,6 +75,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
+        QueryCmd::Hotspots(a) => hotspots::run(a),
         QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
