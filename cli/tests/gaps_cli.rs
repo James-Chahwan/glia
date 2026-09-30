@@ -3,8 +3,8 @@
 //! and a flask API) laid out under one root.
 //!
 //! The `[gaps] rows=... surface=cli` and `[overlay] N rules, +M edges,
-//! orphans K→J` stderr lines are the fired_on markers; asserting them here
-//! makes them a tested contract.
+//! orphans K→J, gaps G0→G1, verdict=<v>` stderr lines are the fired_on
+//! markers; asserting them here makes them a tested contract.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -152,10 +152,130 @@ fn overlay_delta_prints_the_accept_line() {
         "{stdout}"
     );
     assert_eq!(d["added_by_category"]["HTTP_CALLS"], 1, "{stdout}");
+    assert_eq!(d["verdict"], "keep", "{stdout}");
+    // The graph gaps: dead_symbol 1 + unpaired_route 2 + unresolved_endpoint 1
+    // without; the stanza pairs the sink with GET /users.
+    assert_eq!(
+        (
+            &d["without"]["gaps_by_category"]["unresolved_endpoint"],
+            &d["with"]["gaps_by_category"]["unresolved_endpoint"],
+            &d["without"]["gaps_by_category"]["unpaired_route"],
+            &d["with"]["gaps_by_category"]["unpaired_route"],
+        ),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(0),
+            &serde_json::json!(2),
+            &serde_json::json!(1)
+        ),
+        "{stdout}"
+    );
     assert!(
         stderr
             .lines()
-            .any(|l| l == "[overlay] 1 rules, +1 edges, orphans 1→0"),
+            .any(|l| l == "[overlay] 1 rules, +1 edges, orphans 1→0, gaps 4→2, verdict=keep"),
         "{stderr}"
+    );
+}
+
+/// CE.3a: the go-overlay-data-wrapper fixture, its NewCollection body changed
+/// to `.Collection(strings.ToLower(name))` so CA.4 infers no wrapper (no bare
+/// parameter reaches the driver): the overlay [[wrapper]] mints one
+/// DATA_ENTITY and its ACCESSES_DATA edge, no orphan and no graph gap moves,
+/// and the verdict keeps it (pre-CE.3a: `[overlay] 1 rules, +1 edges,
+/// orphans 0→0` and "orphans did not fall").
+#[test]
+fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/go-overlay-data-wrapper");
+    let read = |rel: &str| std::fs::read_to_string(fixture.join(rel)).expect("fixture file");
+    let collection = read("collection.go")
+        .replace(
+            "import (\n\t\"go.mongodb.org",
+            "import (\n\t\"strings\"\n\n\t\"go.mongodb.org",
+        )
+        .replace(".Collection(name)}", ".Collection(strings.ToLower(name))}");
+    assert!(
+        collection.contains("strings.ToLower(name)") && collection.contains("\"strings\""),
+        "{collection}"
+    );
+    let root = std::env::temp_dir().join(format!("glia-ce3a-cli-gowrap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    write(&root, "collection.go", &collection);
+    write(
+        &root,
+        "chat_preview_repository.go",
+        &read("chat_preview_repository.go"),
+    );
+    write(&root, ".glia/overlay.toml", &read(".glia/overlay.toml"));
+
+    let json = glia(&["gaps", s(&root), "--overlay-delta", "--json"]);
+    let table = glia(&["gaps", s(&root), "--overlay-delta"]);
+    std::fs::remove_dir_all(&root).ok();
+    let (stdout, stderr) = (text(&json.stdout), text(&json.stderr));
+    assert_eq!(json.status.code(), Some(0), "{stderr}");
+    assert!(
+        !stderr.lines().any(|l| l.starts_with("[wrappers] inferred")),
+        "CA.4 infers nothing from the ToLower body: {stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l == "[overlay] 1 rules, +1 edges, orphans 0→0, gaps 3→3, verdict=keep"),
+        "{stderr}"
+    );
+    let d: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON object");
+    assert_eq!(
+        d["nodes_added_by_kind"],
+        serde_json::json!({"DATA_ENTITY": 1}),
+        "{stdout}"
+    );
+    assert_eq!(
+        d["added_by_category"],
+        serde_json::json!({"ACCESSES_DATA": 1}),
+        "{stdout}"
+    );
+    assert_eq!(d["verdict"], "keep", "{stdout}");
+
+    let out = text(&table.stdout);
+    assert_eq!(table.status.code(), Some(0), "{}", text(&table.stderr));
+    for line in [
+        "| gaps | 3 | 3 |",
+        "- node kind DATA_ENTITY: 0→1 (+1)",
+        "- edge category ACCESSES_DATA: 0→1 (+1)",
+        "verdict: keep - a gap category fell or the graph grew, none rose",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line:?} in {out}");
+    }
+    assert!(
+        !out.lines().any(|l| l.starts_with("- gap category")),
+        "no gap category moved: {out}"
+    );
+}
+
+/// CE.3a: the table gains an `id` column first, one `gap:<16 hex>` per row.
+#[test]
+fn gaps_table_leads_with_the_id() {
+    let root = r1("ids");
+    let out = glia(&["gaps", s(&root), "--category", "unresolved_endpoint"]);
+    std::fs::remove_dir_all(&root).ok();
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        stdout.contains("| id | qname | kind | at | tier | suggest | detail |"),
+        "{stdout}"
+    );
+    let row = stdout
+        .lines()
+        .find(|l| l.contains("`endpoint:GET:<unresolved>`"))
+        .expect("the sink's row");
+    let id = row
+        .strip_prefix("| gap:")
+        .and_then(|r| r.split_once(' '))
+        .map(|(hex, _)| hex)
+        .unwrap_or_default();
+    assert!(
+        id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{row}"
     );
 }

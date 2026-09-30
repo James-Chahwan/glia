@@ -8,10 +8,11 @@
 //! transport + rendering only. A report, not a gate: it exits 0 whatever it
 //! finds, and 2 on a build error or an unknown `--category`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use glia_engine::gaps::{
-    CATEGORIES, GapRow, GapsOptions, OverlayDelta, gaps_report, overlay_delta,
+    CATEGORIES, DROP, GapRow, GapsOptions, KEEP, OverlayDelta, REVIEW, gaps_report, overlay_delta,
 };
 
 use crate::common::generate_for;
@@ -37,7 +38,8 @@ pub(crate) struct Args {
     #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(CATEGORIES))]
     category: Option<String>,
     /// Build without and then with the overlay and print what it changed
-    /// (rules, edges per category, orphans before -> after). Two builds.
+    /// (rules; nodes per kind, edges per category and gaps per category
+    /// before -> after; orphans) and the verdict: keep, review or drop. Two builds.
     #[arg(long)]
     overlay_delta: bool,
 }
@@ -56,29 +58,69 @@ fn cell(s: &str) -> String {
     s.replace('|', "\\|")
 }
 
+/// `before→after (+d)` of one key in two count maps.
+fn moved(
+    before: &BTreeMap<&'static str, usize>,
+    after: &BTreeMap<&'static str, usize>,
+    key: &str,
+    d: i64,
+) -> String {
+    let n = |m: &BTreeMap<&'static str, usize>| m.get(key).copied().unwrap_or(0);
+    format!("{}→{} ({d:+})", n(before), n(after))
+}
+
+/// Why the engine's verdict is what it is (`gaps::verdict`).
+fn verdict_reason(v: &str) -> &'static str {
+    match v {
+        KEEP => "a gap category fell or the graph grew, none rose",
+        REVIEW => "the graph improved, but a gap category rose too",
+        DROP => "no gap category fell and the graph did not grow",
+        _ => "unknown verdict",
+    }
+}
+
 fn print_delta(d: &OverlayDelta) {
     println!("| | without overlay | with overlay |");
     println!("|---|---|---|");
     println!("| edges | {} | {} |", d.edges_without, d.edges_with);
     println!("| orphans | {} | {} |", d.orphans_without, d.orphans_with);
+    println!(
+        "| gaps | {} | {} |",
+        d.without.total_gaps(),
+        d.with.total_gaps()
+    );
     println!();
     println!("rules: {}", d.rules);
-    if d.added_by_category.is_empty() {
-        println!("edges by category: unchanged");
-    } else {
-        let per: Vec<String> = d
-            .added_by_category
-            .iter()
-            .map(|(c, n)| format!("{c} {n:+}"))
-            .collect();
-        println!("edges by category: {}", per.join(", "));
+    let mut changed: Vec<String> = Vec::new();
+    for (k, n) in &d.nodes_added_by_kind {
+        let (b, a) = (&d.without.nodes_by_kind, &d.with.nodes_by_kind);
+        changed.push(format!("node kind {k}: {}", moved(b, a, k, *n)));
     }
-    let verdict = if d.orphans_with < d.orphans_without {
-        "orphans fell: keep the overlay"
+    for (c, n) in &d.added_by_category {
+        let (b, a) = (&d.without.edges_by_category, &d.with.edges_by_category);
+        changed.push(format!("edge category {c}: {}", moved(b, a, c, *n)));
+    }
+    let (b, a) = (&d.without.gaps_by_category, &d.with.gaps_by_category);
+    let gap_keys: BTreeSet<&'static str> = b.keys().chain(a.keys()).copied().collect();
+    for c in gap_keys {
+        let n = |m: &BTreeMap<&'static str, usize>| {
+            i64::try_from(m.get(c).copied().unwrap_or(0)).unwrap_or(i64::MAX)
+        };
+        let delta = n(a) - n(b);
+        if delta != 0 {
+            changed.push(format!("gap category {c}: {}", moved(b, a, c, delta)));
+        }
+    }
+    if changed.is_empty() {
+        println!("changed: nothing (no node kind, edge category or gap category moved)");
     } else {
-        "orphans did not fall"
-    };
-    println!("{verdict}");
+        println!("changed:");
+        for line in changed {
+            println!("- {line}");
+        }
+    }
+    println!();
+    println!("verdict: {} - {}", d.verdict, verdict_reason(d.verdict));
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -152,11 +194,12 @@ pub(crate) fn run(args: Args) -> i32 {
             println!("## {category} — {total}");
         }
         println!();
-        println!("| qname | kind | at | tier | suggest | detail |");
-        println!("|---|---|---|---|---|---|");
+        println!("| id | qname | kind | at | tier | suggest | detail |");
+        println!("|---|---|---|---|---|---|---|");
         for r in rows {
             println!(
-                "| `{}` | {} | {} | {} | {} | {} |",
+                "| {} | `{}` | {} | {} | {} | {} | {} |",
+                r.id,
                 cell(&r.qname),
                 r.kind,
                 cell(&at(r)),

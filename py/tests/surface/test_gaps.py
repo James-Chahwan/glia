@@ -3,7 +3,8 @@
 category=None)` returns a native dict {counts, skipped, rows}; the module
 function `overlay_delta(repo_paths, incremental=False)` returns a native dict
 {rules, edges_without, edges_with, added_by_category, orphans_without,
-orphans_with}. Shared helpers: test_build.py."""
+orphans_with, without, with, nodes_added_by_kind, verdict} (CE.3a); a row
+carries a stable `id` first. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import pathlib
@@ -48,9 +49,14 @@ def main() -> int:
                 [(r.get("qname"), r.get("detail")) for r in unresolved]
                 == [("endpoint:GET:<unresolved>", "owner=web::src::client::request")], unresolved)
         c.check("row keys in field order",
-                bool(rows) and list(rows[0]) == ["category", "qname", "kind", "file", "line",
+                bool(rows) and list(rows[0]) == ["id", "category", "qname", "kind", "file", "line",
                                                  "detail", "suggest", "tier"],
                 rows[:1])
+        c.check("row ids are gap:<16 hex> and unique",
+                bool(rows) and all(str(r.get("id", "")).startswith("gap:")
+                                   and len(r["id"]) == 20 for r in rows)
+                and len({r.get("id") for r in rows}) == len(rows),
+                [r.get("id") for r in rows])
         c.check("located line is an int", bool(unresolved) and type(unresolved[0].get("line")) is int,
                 unresolved)
         c.check("root categories computed", rep.get("skipped") == [], rep.get("skipped"))
@@ -70,12 +76,18 @@ def main() -> int:
         c.check("delta keys in field order",
                 type(d) is dict and list(d) == ["rules", "edges_without", "edges_with",
                                                 "added_by_category", "orphans_without",
-                                                "orphans_with"],
+                                                "orphans_with", "without", "with",
+                                                "nodes_added_by_kind", "verdict"],
                 type(d) is dict and list(d))
+        c.check("counts keys in field order",
+                type(d) is dict and type(d.get("with")) is dict
+                and list(d["with"]) == ["nodes_by_kind", "edges_by_category", "gaps_by_category"],
+                type(d) is dict and d.get("with"))
+        c.check("verdict keep", type(d) is dict and d.get("verdict") == "keep", d)
         c.check("orphans fall 1 -> 0",
                 type(d) is dict and (d.get("orphans_without"), d.get("orphans_with")) == (1, 0), d)
         c.check("HTTP_CALLS +1", type(d) is dict and d.get("added_by_category") == {"HTTP_CALLS": 1}, d)
-        c.check("accept-loop marker", "[overlay] 1 rules, +1 edges, orphans 1→0" in err, err[-400:])
+        c.check("accept-loop marker", "[overlay] 1 rules, +1 edges, orphans 1→0, gaps 4→2, verdict=keep" in err, err[-400:])
         c.raises("no repo paths", ValueError, lambda: rg.overlay_delta([]), "no repo paths")
     return c.done()
 

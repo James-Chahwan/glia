@@ -41,8 +41,11 @@ impl PyGraph {
     /// **gaps** (LF.2c): the ranked blind-spot report, as one dict
     /// `{counts, skipped, rows}` — the prompt material of an overlay agent.
     ///
-    /// `rows`: `{category, qname, kind, file, line, detail, suggest, tier}`,
-    /// `line` 1-based, sorted by (category, file, line, qname). Categories, in
+    /// `rows`: `{id, category, qname, kind, file, line, detail, suggest,
+    /// tier}`, `line` 1-based, sorted by (category, file, line, qname). `id`
+    /// (CE.3a) is `gap:<16 hex>`, unique in the report and stable across
+    /// rebuilds: keyed by the node / stanza / sidecar row, never by a line or
+    /// an ordinal, so a stanza can name the gap it targets. Categories, in
     /// order: `unpaired_endpoint`, `ambiguous_endpoint`,
     /// `unresolved_endpoint`, `wrapped_sink` (an `<unresolved>` sink owned by
     /// a declared `[[wrapper]]`: informational), `unpaired_route`,
@@ -76,14 +79,21 @@ fn delta_of(repo_paths: &[String], incremental: bool) -> Result<OverlayDelta, St
     overlay_delta(repo_paths, incremental)
 }
 
-/// **overlay_delta** (LF.2c): build `repo_paths` without and then with their
-/// `.glia/overlay.toml` overlay sections and return what the overlay changed,
-/// as one dict `{rules, edges_without, edges_with, added_by_category,
-/// orphans_without, orphans_with}`. Orphans are unpaired + unresolved
-/// endpoints + tag-only queue nodes: keep an overlay edit only if they fall.
-/// Two builds, by design; neither is persisted. One path builds like
-/// `generate`, several like `generate_many`. Prints
-/// `[overlay] N rules, +M edges, orphans K→J`.
+/// **overlay_delta** (LF.2c, CE.3a): build `repo_paths` without and then
+/// with their `.glia/overlay.toml` overlay sections and return what the
+/// overlay changed, as one dict `{rules, edges_without, edges_with,
+/// added_by_category, orphans_without, orphans_with, without, with,
+/// nodes_added_by_kind, verdict}`. Orphans are unpaired + unresolved
+/// endpoints + tag-only queue nodes. `without` / `with` are each build's
+/// counts `{nodes_by_kind, edges_by_category, gaps_by_category}` (the gaps
+/// of the categories that need no repo root); `nodes_added_by_kind` and
+/// `added_by_category` are the non-zero per-kind / per-category deltas.
+/// `verdict` is `keep` (some gap category fell or some node kind or edge
+/// category other than DEFINES / CONTAINS rose, and no gap category rose),
+/// `review` (improved, but a gap category rose too) or `drop` (not
+/// improved). Two builds, by design; neither is persisted. One path builds
+/// like `generate`, several like `generate_many`. Prints
+/// `[overlay] N rules, +M edges, orphans K→J, gaps G0→G1, verdict=<v>`.
 #[pyfunction]
 #[pyo3(name = "overlay_delta", signature = (repo_paths, incremental=false))]
 fn overlay_delta_py(
@@ -170,6 +180,17 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&rep).expect("json")).expect("json");
         let rows = v["rows"].as_array().expect("rows");
         assert_eq!(rows.len(), 1, "{v}");
+        assert!(
+            rows[0]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("gap:")),
+            "{v}"
+        );
+        let json = serde_json::to_string(&rep).expect("json");
+        assert!(
+            json.contains("\"rows\":[{\"id\":\"gap:"),
+            "id is a row's first key: {json}"
+        );
         assert_eq!(rows[0]["qname"], "GET /users", "{v}");
         assert!(rows[0]["line"].is_i64(), "a 1-based int line: {v}");
         assert_eq!(v["counts"]["unpaired_route"], 2, "{v}");
@@ -187,15 +208,27 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(
-            delta
-                .find("\"rules\"")
-                .zip(delta.find("\"orphans_with\""))
-                .map(|(a, b)| a < b),
-            Some(true),
-            "field order: {delta}"
-        );
-        assert_eq!(keys.len(), 6, "{delta}");
+        let order = [
+            "{\"rules\":",
+            ",\"edges_without\":",
+            ",\"edges_with\":",
+            ",\"added_by_category\":",
+            ",\"orphans_without\":",
+            ",\"orphans_with\":",
+            ",\"without\":",
+            ",\"with\":",
+            ",\"nodes_added_by_kind\":",
+            ",\"verdict\":",
+        ];
+        // The top-level keys in field order: each after the previous one.
+        let mut at = 0;
+        for k in order {
+            let found = delta[at..].find(k).map(|i| at + i);
+            assert!(found.is_some(), "{k} after byte {at}: {delta}");
+            at = found.unwrap_or(at) + k.len();
+        }
+        assert_eq!(keys.len(), 10, "{delta}");
+        assert_eq!(d["verdict"], "keep", "{delta}");
         assert_eq!(
             (d["orphans_without"].as_u64(), d["orphans_with"].as_u64()),
             (Some(1), Some(0)),

@@ -30,6 +30,27 @@
 //! [`Locator`] for a node, the stanza's header line for a rule, the row's line
 //! for a sidecar row.
 //!
+//! `id` (CE.3a) names a gap across rebuilds, so a candidate stanza can say
+//! which gap it targets and a re-run can show it gone: `gap:` + 16 lower-hex
+//! of xxhash64 (seed 0) over `category \x1f key`. The key never holds a line,
+//! an ordinal or a count:
+//!
+//! | rows | key |
+//! |---|---|
+//! | node rows (the endpoint / route / queue / dead-symbol / wrapped-sink categories) | the node's NodeId in decimal (path-independent since LB.1, distinct across repos) |
+//! | `cochange_no_edge` | `module_a` NodeId `\x1f` the other file |
+//! | `orphaned_rule` / `redundant_rule` | repo id `\x1f` section `\x1f` the stanza's identity: `[[edge]]` from `\x1f` to `\x1f` category; `[[constraint]]` / `[[decision]]` id; `[[note]]` id, else anchor `\x1f` text; `[entrypoints]` the pattern |
+//! | `orphaned_cell` | repo id `\x1f` sidecar file `\x1f` cell type `\x1f` qname `\x1f` kind `\x1f` hint |
+//!
+//! Two rows with one key (two identical `[[edge]]` stanzas, two identical
+//! sidecar rows) are told apart by their rank among the rows sharing that key
+//! (`\x1f2`, `\x1f3`, ... on the second and later), which moves only when an
+//! identical twin is added or removed above them.
+//!
+//! [`graph_counts`] counts a graph whole (nodes by kind, edges by category,
+//! the graph-category gaps) and [`verdict`] compares two counts; together
+//! they are how [`overlay_delta`] judges a candidate overlay.
+//!
 //! `wrapped_sink` and the last three categories read each repo's files (its
 //! `.glia/overlay.toml`, its sidecars), so they need its root: with no roots
 //! they are not computed and are listed in [`GapsReport::skipped`] instead of
@@ -59,14 +80,17 @@
 //!   once per co-change audit: per [`cochange_gaps`] call (`coverage`, the
 //!   `glia coverage` section) and per report that computes
 //!   `cochange_no_edge` (`gaps`);
-//! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>` once per
-//!   [`overlay_delta`], the review's accept-loop line.
+//! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps <G0>→<G1>, verdict=<keep|review|drop>`
+//!   once per [`overlay_delta`], the review's accept-loop line; `G` is the
+//!   sum of [`GraphCounts::gaps_by_category`].
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use twox_hash::XxHash64;
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
@@ -114,6 +138,31 @@ pub const CATEGORIES: [&str; 11] = [
 /// The categories that read a repo's files, so need its root.
 const ROOT_CATEGORIES: [&str; 4] = [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL];
 
+/// The categories read off the graph alone: [`CATEGORIES`] minus
+/// [`ROOT_CATEGORIES`], what [`graph_counts`] counts. A root category reads
+/// the overlay file on disk, not the overlay a build applied, so it cannot
+/// measure a candidate overlay.
+const GRAPH_CATEGORIES: [&str; 7] = [
+    UNPAIRED_ENDPOINT,
+    AMBIGUOUS_ENDPOINT,
+    UNRESOLVED_ENDPOINT,
+    UNPAIRED_ROUTE,
+    TAG_ONLY_QUEUE,
+    DEAD_SYMBOL,
+    COCHANGE_NO_EDGE,
+];
+
+/// [`verdict`]: some gap category fell or the graph grew, and no gap category rose.
+pub const KEEP: &str = "keep";
+/// [`verdict`]: the graph improved, but some gap category rose too.
+pub const REVIEW: &str = "review";
+/// [`verdict`]: no gap category fell and the graph did not grow.
+pub const DROP: &str = "drop";
+
+/// Edge categories whose growth is not improvement: structure a new node
+/// brings with it (its node kind counts instead).
+const STRUCTURAL: [EdgeCategoryId; 2] = [edge_category::DEFINES, edge_category::CONTAINS];
+
 /// The categories [`overlay_delta`] counts as orphans: a client-side sink the
 /// overlay exists to pair. A `wrapped_sink` is not one: its identity lives at
 /// the wrapper's call sites, so declaring the `[[wrapper]]` takes the sink out
@@ -134,6 +183,9 @@ const MAX_NAMED: usize = 5;
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GapRow {
+    /// Stable across rebuilds: `gap:<16 hex>` (see the module doc), unique
+    /// within a report.
+    pub id: String,
     pub category: &'static str,
     pub qname: String,
     /// Node kind (graph rows), overlay section (rule rows) or cell type (cell rows).
@@ -193,6 +245,113 @@ pub struct OverlayDelta {
     /// `unpaired_endpoint + unresolved_endpoint + tag_only_queue`.
     pub orphans_without: usize,
     pub orphans_with: usize,
+    /// [`graph_counts`] of the build without the overlay (CE.3a).
+    pub without: GraphCounts,
+    /// [`graph_counts`] of the build with it.
+    pub with: GraphCounts,
+    /// Per node kind, nodes with minus nodes without; zero deltas left out.
+    pub nodes_added_by_kind: BTreeMap<&'static str, i64>,
+    /// [`verdict`]`(without, with)`: [`KEEP`], [`REVIEW`] or [`DROP`].
+    pub verdict: &'static str,
+}
+
+/// A graph counted whole (CE.3a): what [`overlay_delta`] compares, so every
+/// effect of a candidate overlay shows, not only the orphan categories.
+/// Built by [`graph_counts`].
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GraphCounts {
+    /// Distinct nodes per node-kind name (kinds with none left out).
+    pub nodes_by_kind: BTreeMap<&'static str, usize>,
+    /// Edges per edge-category name (categories with none left out).
+    pub edges_by_category: BTreeMap<&'static str, usize>,
+    /// Per graph category (the categories that need no repo root: every one
+    /// but `wrapped_sink`, `orphaned_rule`, `redundant_rule`,
+    /// `orphaned_cell`), its gap count; 0 kept.
+    pub gaps_by_category: BTreeMap<&'static str, usize>,
+}
+
+impl GraphCounts {
+    /// The sum of [`GraphCounts::gaps_by_category`].
+    pub fn total_gaps(&self) -> usize {
+        self.gaps_by_category.values().sum()
+    }
+}
+
+/// Count `merged` whole: its distinct nodes by kind (a node id counted once,
+/// as the report sees it), its edges by category, and what [`gaps_report`]
+/// with no roots counts per category. Read-only, prints no `[gaps]` marker
+/// (the co-change audit still prints its `[cochange] ... surface=gaps`).
+pub fn graph_counts(merged: &MergedGraph) -> GraphCounts {
+    let mut nodes_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            let Some(kind) = g.nav.kind_by_id.get(&n.id) else {
+                continue;
+            };
+            if seen.insert(n.id) {
+                *nodes_by_kind.entry(node_kind::name(*kind)).or_default() += 1;
+            }
+        }
+    }
+    let mut edges_by_category: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for e in merged.all_edges() {
+        *edges_by_category
+            .entry(edge_category::name(e.category))
+            .or_default() += 1;
+    }
+    let mut gaps_by_category: BTreeMap<&'static str, usize> =
+        GRAPH_CATEGORIES.iter().map(|c| (*c, 0)).collect();
+    for r in collect_rows(merged, &[], &GRAPH_CATEGORIES, &Wrapped::new()) {
+        *gaps_by_category.entry(r.category).or_default() += 1;
+    }
+    GraphCounts {
+        nodes_by_kind,
+        edges_by_category,
+        gaps_by_category,
+    }
+}
+
+/// Judge a candidate overlay by two [`graph_counts`] — the build without it
+/// (`before`) and with it (`after`). It *improved* the graph when some gap
+/// category fell, or some node kind or edge category (DEFINES / CONTAINS
+/// excluded: structure) rose; it *regressed* it when some gap category rose.
+/// [`KEEP`] = improved and not regressed, [`REVIEW`] = both, [`DROP`] = not
+/// improved. It measures; it cannot tell whether an added edge is right.
+pub fn verdict(before: &GraphCounts, after: &GraphCounts) -> &'static str {
+    let structural: Vec<&str> = STRUCTURAL.iter().map(|c| edge_category::name(*c)).collect();
+    let gaps = deltas(&before.gaps_by_category, &after.gaps_by_category);
+    let grew = deltas(&before.nodes_by_kind, &after.nodes_by_kind)
+        .values()
+        .any(|d| *d > 0)
+        || deltas(&before.edges_by_category, &after.edges_by_category)
+            .iter()
+            .any(|(c, d)| *d > 0 && !structural.contains(c));
+    let improved = gaps.values().any(|d| *d < 0) || grew;
+    let regressed = gaps.values().any(|d| *d > 0);
+    match (improved, regressed) {
+        (true, false) => KEEP,
+        (true, true) => REVIEW,
+        (false, _) => DROP,
+    }
+}
+
+/// Per key of either map, `after - before`; zero deltas left out.
+fn deltas(
+    before: &BTreeMap<&'static str, usize>,
+    after: &BTreeMap<&'static str, usize>,
+) -> BTreeMap<&'static str, i64> {
+    let n = |m: &BTreeMap<&'static str, usize>, k: &str| {
+        i64::try_from(m.get(k).copied().unwrap_or(0)).unwrap_or(i64::MAX)
+    };
+    let keys: BTreeSet<&'static str> = before.keys().chain(after.keys()).copied().collect();
+    keys.into_iter()
+        .filter_map(|k| {
+            let d = n(after, k) - n(before, k);
+            (d != 0).then_some((k, d))
+        })
+        .collect()
 }
 
 /// The ranked blind-spot report of `merged`. `roots` are `(RepoId.0, repo
@@ -228,6 +387,14 @@ pub fn gaps_report(
     };
     let mut rows = collect_rows(merged, roots, &wanted, &wrapped);
     rows.sort_by(row_order);
+    debug_assert!(
+        {
+            let mut ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+            ids.sort_unstable();
+            ids.windows(2).all(|w| w[0] != w[1])
+        },
+        "gap ids are unique within a report"
+    );
 
     let mut counts: BTreeMap<&'static str, usize> = wanted.iter().map(|c| (*c, 0)).collect();
     for r in &rows {
@@ -269,8 +436,10 @@ pub fn gaps_report(
 }
 
 /// Build `repo_paths` twice through `generate_*_opts` — the overlay off, then
-/// on — and measure what the overlay changed: edges per category, and the
-/// orphan count ([`ORPHAN_CATEGORIES`]) before and after. The `with` count
+/// on — and measure what the overlay changed: each build's [`graph_counts`]
+/// (nodes by kind, edges by category, graph gaps by category), their
+/// per-kind / per-category deltas, the [`verdict`] on them, and the orphan
+/// count ([`ORPHAN_CATEGORIES`]) before and after. The `with` orphan count
 /// reads the repos' `[[wrapper]]` stanzas, so a wrapper's `<unresolved>` sink
 /// is a `wrapped_sink` there and not an orphan; the `without` build applies
 /// no overlay, so it stays an `unresolved_endpoint`. One path builds
@@ -280,7 +449,8 @@ pub fn gaps_report(
 /// section that re-keys nodes cannot be undone by filtering edges).
 /// `incremental` reuses each repo's parse cache (and saves it).
 ///
-/// Prints `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>`.
+/// Prints `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps
+/// <G0>→<G1>, verdict=<v>`.
 pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<OverlayDelta, String> {
     if repo_paths.is_empty() {
         return Err("overlay_delta: no repo paths".to_string());
@@ -300,16 +470,8 @@ pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<Overlay
         .filter_map(|p| glia_config::load(Path::new(p)))
         .map(|cfg| overlay_rule_count(&cfg))
         .sum();
-    let per_without = edges_by_category(&without.merged);
-    let per_with = edges_by_category(&with.merged);
-    let mut added_by_category = BTreeMap::new();
-    for (_, name) in edge_category::ALL {
-        let d =
-            per_with.get(name).copied().unwrap_or(0) - per_without.get(name).copied().unwrap_or(0);
-        if d != 0 {
-            added_by_category.insert(*name, d);
-        }
-    }
+    let counts_without = graph_counts(&without.merged);
+    let counts_with = graph_counts(&with.merged);
     let orphans = |m: &MergedGraph, wrapped: &Wrapped| {
         collect_rows(m, &[], &ORPHAN_CATEGORIES, wrapped).len()
     };
@@ -322,15 +484,27 @@ pub fn overlay_delta(repo_paths: &[String], incremental: bool) -> Result<Overlay
         rules,
         edges_without: without.total_edges,
         edges_with: with.total_edges,
-        added_by_category,
+        added_by_category: deltas(
+            &counts_without.edges_by_category,
+            &counts_with.edges_by_category,
+        ),
         orphans_without: orphans(&without.merged, &Wrapped::new()),
         orphans_with: orphans(&with.merged, &declared_wrappers(&with_roots)),
+        nodes_added_by_kind: deltas(&counts_without.nodes_by_kind, &counts_with.nodes_by_kind),
+        verdict: verdict(&counts_without, &counts_with),
+        without: counts_without,
+        with: counts_with,
     };
     let added = i64::try_from(delta.edges_with).unwrap_or(i64::MAX)
         - i64::try_from(delta.edges_without).unwrap_or(i64::MAX);
     eprintln!(
-        "[overlay] {} rules, {added:+} edges, orphans {}→{}",
-        delta.rules, delta.orphans_without, delta.orphans_with
+        "[overlay] {} rules, {added:+} edges, orphans {}→{}, gaps {}→{}, verdict={}",
+        delta.rules,
+        delta.orphans_without,
+        delta.orphans_with,
+        delta.without.total_gaps(),
+        delta.with.total_gaps(),
+        delta.verdict
     );
     Ok(delta)
 }
@@ -341,12 +515,45 @@ fn overlay_rule_count(cfg: &LoadedConfig) -> usize {
     c.constants.len() + c.route_prefix.len() + c.wrapper.len() + c.edge.len()
 }
 
-fn edges_by_category(merged: &MergedGraph) -> BTreeMap<&'static str, i64> {
-    let mut out: BTreeMap<&'static str, i64> = BTreeMap::new();
-    for e in merged.all_edges() {
-        *out.entry(edge_category::name(e.category)).or_default() += 1;
+/// A row's `id`: `gap:` + 16 lower-hex of xxhash64 (seed 0) over
+/// `category \x1f key`.
+fn gap_id(category: &str, key: &str) -> String {
+    let mut h = XxHash64::with_seed(0);
+    h.write(category.as_bytes());
+    h.write(b"\x1f");
+    h.write(key.as_bytes());
+    format!("gap:{:016x}", h.finish())
+}
+
+/// Hands out the ids of one report: [`gap_id`] of the row's key, the second
+/// and later rows sharing a (category, key) keyed `key \x1f <rank>` (rank 2,
+/// 3, ... in collection order) so twins stay distinct.
+#[derive(Default)]
+struct Ids {
+    seen: HashMap<(&'static str, String), usize>,
+}
+
+impl Ids {
+    fn id(&mut self, category: &'static str, key: String) -> String {
+        let n = self.seen.entry((category, key.clone())).or_default();
+        *n += 1;
+        if *n == 1 {
+            gap_id(category, &key)
+        } else {
+            gap_id(category, &format!("{key}\x1f{n}"))
+        }
     }
-    out
+}
+
+/// The key of a rule row (`orphaned_rule` / `redundant_rule`): repo id,
+/// section and the stanza's identity, `\x1f`-joined.
+fn rule_key(repo: u64, section: &str, identity: &[&str]) -> String {
+    let mut k = format!("{repo}\x1f{section}");
+    for part in identity {
+        k.push('\x1f');
+        k.push_str(part);
+    }
+    k
 }
 
 fn row_order(a: &GapRow, b: &GapRow) -> std::cmp::Ordering {
@@ -616,12 +823,14 @@ fn collect_rows(
         .collect();
 
     let live = want(DEAD_SYMBOL).then(|| entrypoint_reachable(merged));
+    let mut ids = Ids::default();
 
     for n in &view.nodes {
-        let node_row =
+        let mut node_row =
             |category: &'static str, detail: String, suggest: &'static str, tier: &'static str| {
                 let at = loc.locate(n.id);
                 GapRow {
+                    id: ids.id(category, n.id.0.to_string()),
                     category,
                     qname: n.qname.to_string(),
                     kind: at.kind,
@@ -812,6 +1021,10 @@ fn collect_rows(
         for p in cochange_audit(merged, "gaps") {
             let at = loc.locate(p.module_a);
             rows.push(GapRow {
+                id: ids.id(
+                    COCHANGE_NO_EDGE,
+                    format!("{}\x1f{}", p.module_a.0, p.gap.file_b),
+                ),
                 category: COCHANGE_NO_EDGE,
                 qname: at.qname,
                 kind: at.kind,
@@ -834,9 +1047,9 @@ fn collect_rows(
             want: wanted,
         };
         for (repo, root) in roots {
-            ctx.rule_rows(*repo, root, &mut rows);
+            ctx.rule_rows(*repo, root, &mut ids, &mut rows);
             if want(ORPHANED_CELL) {
-                ctx.cell_rows(*repo, root, &mut rows);
+                ctx.cell_rows(*repo, root, &mut ids, &mut rows);
             }
         }
     }
@@ -1243,22 +1456,25 @@ impl RootCtx<'_> {
         self.view.nodes.iter().any(|n| n.qname.starts_with(&p))
     }
 
-    fn rule_rows(&mut self, repo: u64, root: &Path, rows: &mut Vec<GapRow>) {
+    fn rule_rows(&mut self, repo: u64, root: &Path, ids: &mut Ids, rows: &mut Vec<GapRow>) {
         let Some(cfg) = glia_config::load(root) else {
             return;
         };
         let label = label_of(self.labels, repo);
         let own = QnameIndex::build(self.merged, Some(RepoId(repo)));
-        let orphan = |kind: &'static str, qname: &str, line: u32, detail: String| GapRow {
-            category: ORPHANED_RULE,
-            qname: qname.to_string(),
-            kind,
-            file: Some(OVERLAY_FILE.to_string()),
-            line: Some(i64::from(line)),
-            detail: format!("repo={label} {detail}"),
-            suggest: "remove",
-            tier: FACT,
-        };
+        // `id`: the stanza's [`rule_key`] through `ids`, never its line or ordinal.
+        let orphan =
+            |id: String, kind: &'static str, qname: &str, line: u32, detail: String| GapRow {
+                id,
+                category: ORPHANED_RULE,
+                qname: qname.to_string(),
+                kind,
+                file: Some(OVERLAY_FILE.to_string()),
+                line: Some(i64::from(line)),
+                detail: format!("repo={label} {detail}"),
+                suggest: "remove",
+                tier: FACT,
+            };
         let want_orphans = self.want.contains(&ORPHANED_RULE);
         let want_redundant = self.want.contains(&REDUNDANT_RULE);
 
@@ -1269,6 +1485,7 @@ impl RootCtx<'_> {
             let ordinal = 1 + kept + rejected.iter().filter(|l| **l < line).count();
             let from = self.bind(&own, &decl.from);
             let to = self.bind(&own, &decl.to);
+            let key = rule_key(repo, "edge", &[&decl.from, &decl.to, &decl.category]);
             match (from, to) {
                 (Some(from), Some(to)) => {
                     let Some(cat) = decl.category_id() else {
@@ -1276,6 +1493,7 @@ impl RootCtx<'_> {
                     };
                     if want_redundant && self.is_extracted(from, to, cat.0) {
                         rows.push(GapRow {
+                            id: ids.id(REDUNDANT_RULE, key),
                             category: REDUNDANT_RULE,
                             qname: decl.from.clone(),
                             kind: "edge",
@@ -1300,7 +1518,13 @@ impl RootCtx<'_> {
                         "edge#{ordinal} from={} to={} category={} (no node: {side})",
                         decl.from, decl.to, decl.category
                     );
-                    rows.push(orphan("edge", missing, line, detail));
+                    rows.push(orphan(
+                        ids.id(ORPHANED_RULE, key),
+                        "edge",
+                        missing,
+                        line,
+                        detail,
+                    ));
                 }
                 _ => {}
             }
@@ -1308,48 +1532,60 @@ impl RootCtx<'_> {
         if !want_orphans {
             return;
         }
-        let mut anchors: Vec<(&'static str, &str, u32, String)> = Vec::new();
+        // (kind, anchor, line, what, key).
+        let mut anchors: Vec<(&'static str, &str, u32, String, String)> = Vec::new();
         for s in &cfg.config.constraint {
-            if let Some(a) = s.get_ref().anchor.as_deref() {
+            let c = s.get_ref();
+            if let Some(a) = c.anchor.as_deref() {
                 anchors.push((
                     "constraint",
                     a,
                     cfg.line_of(s.span()),
-                    format!("constraint {}", s.get_ref().id),
+                    format!("constraint {}", c.id),
+                    rule_key(repo, "constraint", &[&c.id]),
                 ));
             }
         }
         for s in &cfg.config.decision {
-            if let Some(a) = s.get_ref().anchor.as_deref() {
+            let d = s.get_ref();
+            if let Some(a) = d.anchor.as_deref() {
                 anchors.push((
                     "decision",
                     a,
                     cfg.line_of(s.span()),
-                    format!("decision {}", s.get_ref().id),
+                    format!("decision {}", d.id),
+                    rule_key(repo, "decision", &[&d.id]),
                 ));
             }
         }
         for (i, s) in cfg.config.note.iter().enumerate() {
-            let id = s
-                .get_ref()
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("note#{}", i + 1));
+            let n = s.get_ref();
+            // An id-less note is shown as `note#<n>` (the declared stage's
+            // default) but keyed by its content: `<n>` moves with the file.
+            let (id, key) = match &n.id {
+                Some(id) => (id.clone(), rule_key(repo, "note", &[id])),
+                None => (
+                    format!("note#{}", i + 1),
+                    rule_key(repo, "note", &[&n.anchor, &n.text]),
+                ),
+            };
             anchors.push((
                 "note",
-                s.get_ref().anchor.as_str(),
+                n.anchor.as_str(),
                 cfg.line_of(s.span()),
                 format!("note {id}"),
+                key,
             ));
         }
         // Declared knowledge (LF.4a `external::declared`) binds an anchor in
         // its own repo only, with no cross-repo fallback.
-        for (kind, anchor, line, what) in anchors {
+        for (kind, anchor, line, what, key) in anchors {
             if !matches!(
                 own.resolve(anchor, None, None),
                 CellTarget::Bound(_) | CellTarget::Ambiguous(_)
             ) {
                 rows.push(orphan(
+                    ids.id(ORPHANED_RULE, key),
                     kind,
                     anchor,
                     line,
@@ -1366,6 +1602,7 @@ impl RootCtx<'_> {
             };
             if !found {
                 rows.push(orphan(
+                    ids.id(ORPHANED_RULE, rule_key(repo, "entrypoints", &[pattern])),
                     "entrypoint",
                     pattern,
                     line,
@@ -1389,7 +1626,7 @@ impl RootCtx<'_> {
         map.get(&(from.0, to.0, cat)).copied().unwrap_or(false)
     }
 
-    fn cell_rows(&mut self, repo: u64, root: &Path, rows: &mut Vec<GapRow>) {
+    fn cell_rows(&mut self, repo: u64, root: &Path, ids: &mut Ids, rows: &mut Vec<GapRow>) {
         let cells_path = root.join(CELLS_FILE);
         let vectors_path = root.join(VECTORS_FILE);
         if !cells_path.is_file() && !vectors_path.is_file() {
@@ -1413,7 +1650,17 @@ impl RootCtx<'_> {
             if let Some(h) = hint {
                 detail.push_str(&format!(" hint={h}"));
             }
+            let key = [
+                file,
+                cell,
+                qname,
+                kind.unwrap_or_default(),
+                hint.unwrap_or_default(),
+            ]
+            .iter()
+            .fold(repo.to_string(), |k, part| format!("{k}\x1f{part}"));
             rows.push(GapRow {
+                id: ids.id(ORPHANED_CELL, key),
                 category: ORPHANED_CELL,
                 qname: qname.to_string(),
                 kind: cell,
@@ -1545,6 +1792,93 @@ mod tests {
         assert!(r.rows.is_empty());
         assert_eq!(r.skipped, ROOT_CATEGORIES);
         assert_eq!(r.counts.len(), CATEGORIES.len() - ROOT_CATEGORIES.len());
+    }
+
+    #[test]
+    fn graph_categories_are_the_rootless_ones_in_order() {
+        let rootless: Vec<&str> = CATEGORIES
+            .iter()
+            .copied()
+            .filter(|c| !ROOT_CATEGORIES.contains(c))
+            .collect();
+        assert_eq!(rootless, GRAPH_CATEGORIES);
+    }
+
+    #[test]
+    fn gap_ids_are_hex_and_twins_stay_distinct() {
+        let a = gap_id(DEAD_SYMBOL, "42");
+        assert_eq!(a.len(), "gap:".len() + 16, "{a}");
+        assert!(a.starts_with("gap:"), "{a}");
+        assert!(
+            a[4..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{a}"
+        );
+        assert_eq!(a, gap_id(DEAD_SYMBOL, "42"), "deterministic");
+        assert_ne!(a, gap_id(UNPAIRED_ROUTE, "42"), "the category is hashed");
+        let mut ids = Ids::default();
+        let first = ids.id(ORPHANED_RULE, "k".into());
+        let twin = ids.id(ORPHANED_RULE, "k".into());
+        assert_eq!(first, gap_id(ORPHANED_RULE, "k"));
+        assert_eq!(twin, gap_id(ORPHANED_RULE, "k\x1f2"));
+        assert_ne!(first, twin);
+    }
+
+    fn counts(
+        nodes: &[(&'static str, usize)],
+        edges: &[(&'static str, usize)],
+        gaps: &[(&'static str, usize)],
+    ) -> GraphCounts {
+        GraphCounts {
+            nodes_by_kind: nodes.iter().copied().collect(),
+            edges_by_category: edges.iter().copied().collect(),
+            gaps_by_category: gaps.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn verdict_keeps_reviews_and_drops() {
+        let base = counts(
+            &[("FUNCTION", 3)],
+            &[("CALLS", 2), ("DEFINES", 3)],
+            &[(DEAD_SYMBOL, 3), (UNRESOLVED_ENDPOINT, 1)],
+        );
+        assert_eq!(verdict(&base, &base), DROP, "nothing moved");
+        let grew = counts(
+            &[("FUNCTION", 3), ("DATA_ENTITY", 1)],
+            &[("CALLS", 2), ("DEFINES", 3), ("ACCESSES_DATA", 1)],
+            &[(DEAD_SYMBOL, 3), (UNRESOLVED_ENDPOINT, 1)],
+        );
+        assert_eq!(verdict(&base, &grew), KEEP, "a new kind and category");
+        let fell = counts(
+            &[("FUNCTION", 3)],
+            &[("CALLS", 2), ("DEFINES", 3)],
+            &[(DEAD_SYMBOL, 3), (UNRESOLVED_ENDPOINT, 0)],
+        );
+        assert_eq!(verdict(&base, &fell), KEEP, "a gap category fell");
+        let structure = counts(
+            &[("FUNCTION", 3)],
+            &[("CALLS", 2), ("DEFINES", 5), ("CONTAINS", 1)],
+            &[(DEAD_SYMBOL, 3), (UNRESOLVED_ENDPOINT, 1)],
+        );
+        assert_eq!(verdict(&base, &structure), DROP, "structure is not growth");
+        let mixed = counts(
+            &[("FUNCTION", 3)],
+            &[("CALLS", 3), ("DEFINES", 3)],
+            &[(DEAD_SYMBOL, 4), (UNRESOLVED_ENDPOINT, 1)],
+        );
+        assert_eq!(verdict(&base, &mixed), REVIEW, "grew, but a gap rose");
+        let worse = counts(
+            &[("FUNCTION", 3)],
+            &[("CALLS", 1), ("DEFINES", 3)],
+            &[(DEAD_SYMBOL, 4), (UNRESOLVED_ENDPOINT, 1)],
+        );
+        assert_eq!(verdict(&base, &worse), DROP, "only worse");
+        assert_eq!(
+            deltas(&base.nodes_by_kind, &grew.nodes_by_kind),
+            BTreeMap::from([("DATA_ENTITY", 1)])
+        );
     }
 
     #[test]

@@ -4,14 +4,20 @@
 //! base that fans out to two services' `GET /users`, and a gateway-prefixed
 //! `/orders-svc/orders` that pairs with nothing). A key.json grades nodes,
 //! edges and cells, not an answer, so the report itself is pinned here.
+//!
+//! CE.3a: a row's `id` survives line moves and stanza insertions, and
+//! `overlay_delta` measures every node kind, edge category and graph gap
+//! category, with a keep / review / drop verdict.
 
 use std::path::{Path, PathBuf};
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use glia_engine::gaps::{
-    AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, FACT, GapRow, GapsOptions,
-    GapsReport, HEURISTIC, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE,
+    AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, FACT, GapRow, GapsOptions,
+    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE,
     UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
-    overlay_delta,
+    graph_counts, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
@@ -209,6 +215,236 @@ fn overlay_delta_counts_orphans() {
         "only the stanza's edge moved: {d:?}"
     );
     assert_eq!(d.edges_with, d.edges_without + 1, "{d:?}");
+    // The graph gaps: the stanza pairs the sink with GET /users.
+    assert_eq!(
+        (d.without.total_gaps(), d.with.total_gaps()),
+        (4, 2),
+        "{d:?}"
+    );
+    assert_eq!(
+        d.without.gaps_by_category.get(UNRESOLVED_ENDPOINT),
+        Some(&1)
+    );
+    assert_eq!(d.with.gaps_by_category.get(UNRESOLVED_ENDPOINT), Some(&0));
+    assert_eq!(d.with.gaps_by_category.get(UNPAIRED_ROUTE), Some(&1));
+    assert!(d.nodes_added_by_kind.is_empty(), "{d:?}");
+    assert_eq!(d.verdict, KEEP);
+}
+
+/// `(id, category, qname)` of every row.
+type Identities = BTreeSet<(String, String, String)>;
+
+/// [`Identities`] of a report, and its rows' lines by id.
+fn identities(rep: &GapsReport) -> (Identities, BTreeMap<String, i64>) {
+    let set = rep
+        .rows
+        .iter()
+        .map(|r| (r.id.clone(), r.category.to_string(), r.qname.clone()))
+        .collect();
+    let lines = rep
+        .rows
+        .iter()
+        .filter_map(|r| Some((r.id.clone(), r.line?)))
+        .collect();
+    (set, lines)
+}
+
+/// CE.3a (1): an id is keyed by the node / stanza, never by a line or an
+/// ordinal. Five blank lines above every source move every located row; the
+/// (id, category, qname) set is unchanged. A stanza inserted above an
+/// orphaned `[[edge]]` moves its line and its `edge#` ordinal, not its id.
+#[test]
+fn gap_ids_are_stable_across_line_moves() {
+    const ORPHAN: &str =
+        "[[edge]]\nfrom = \"src::client::gone\"\nto = \"GET /users\"\ncategory = \"CALLS\"\n";
+    const ABOVE: &str =
+        "[[edge]]\nfrom = \"src::client::vanished\"\nto = \"GET /orders\"\ncategory = \"CALLS\"\n";
+    let (web, api) = r1_pair("ids");
+    let paths = [s(&web), s(&api)];
+    write(
+        &web,
+        ".glia/overlay.toml",
+        &format!("version = 1\n\n{ORPHAN}"),
+    );
+    let before = report(&generate_many(&paths).expect("build"));
+
+    let pad = "\n\n\n\n\n";
+    write(&web, "src/client.ts", &format!("{pad}{CLIENT_TS}"));
+    write(&api, "app.py", &format!("{pad}{API_PY}"));
+    let moved = report(&generate_many(&paths).expect("build"));
+
+    write(
+        &web,
+        ".glia/overlay.toml",
+        &format!("version = 1\n\n{ABOVE}\n{ORPHAN}"),
+    );
+    let inserted = report(&generate_many(&paths).expect("build"));
+    std::fs::remove_dir_all(web.parent().expect("parent")).ok();
+
+    let (ids_before, lines_before) = identities(&before);
+    let (ids_moved, lines_moved) = identities(&moved);
+    assert_eq!(ids_before, ids_moved, "{before:#?}\n{moved:#?}");
+    // unresolved sink, two routes, the dead loadUsers, the orphaned stanza.
+    assert_eq!(ids_before.len(), 5, "{before:#?}");
+    let distinct: BTreeSet<&str> = before.rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(distinct.len(), before.rows.len(), "ids unique: {before:#?}");
+    assert!(
+        before
+            .rows
+            .iter()
+            .all(|r| r.id.len() == 20 && r.id.starts_with("gap:")),
+        "{before:#?}"
+    );
+    for r in &before.rows {
+        let shift = if r.category == ORPHANED_RULE { 0 } else { 5 };
+        assert_eq!(
+            lines_moved.get(&r.id).copied(),
+            lines_before.get(&r.id).map(|l| l + shift),
+            "{} {}: every source line shifted",
+            r.category,
+            r.qname
+        );
+    }
+
+    let orphan = |rep: &GapsReport, qname: &str| -> GapRow {
+        rep.rows
+            .iter()
+            .find(|r| r.category == ORPHANED_RULE && r.qname == qname)
+            .cloned()
+            .expect("orphaned stanza row")
+    };
+    let (was, now) = (
+        orphan(&moved, "src::client::gone"),
+        orphan(&inserted, "src::client::gone"),
+    );
+    assert!(was.detail.contains("edge#1 "), "{}", was.detail);
+    assert!(now.detail.contains("edge#2 "), "{}", now.detail);
+    assert_eq!((was.line, now.line), (Some(3), Some(8)));
+    assert_eq!(was.id, now.id, "the ordinal moved, the id did not");
+    let above = orphan(&inserted, "src::client::vanished");
+    assert_ne!(above.id, now.id);
+    // Every other row keeps its id too.
+    let (ids_inserted, _) = identities(&inserted);
+    assert!(ids_moved.is_subset(&ids_inserted), "{inserted:#?}");
+    assert_eq!(ids_inserted.len(), ids_moved.len() + 1);
+}
+
+/// Two identical orphaned stanzas stay two rows with two ids.
+#[test]
+fn twin_stanzas_get_distinct_ids() {
+    let (web, api) = r1_pair("twins");
+    let stanza =
+        "[[edge]]\nfrom = \"src::client::gone\"\nto = \"GET /users\"\ncategory = \"CALLS\"\n";
+    write(
+        &web,
+        ".glia/overlay.toml",
+        &format!("version = 1\n\n{stanza}\n{stanza}"),
+    );
+    let rep = report(&generate_many(&[s(&web), s(&api)]).expect("build"));
+    std::fs::remove_dir_all(web.parent().expect("parent")).ok();
+    let ids: Vec<&str> = rows(&rep, ORPHANED_RULE)
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(ids.len(), 2, "{rep:#?}");
+    assert_ne!(ids[0], ids[1]);
+}
+
+/// go-overlay-data-wrapper's `NewCollection`, its body changed to
+/// `.Collection(strings.ToLower(name))`: no bare parameter reaches the driver
+/// needle, so CA.4's inference mints nothing and only the overlay
+/// `[[wrapper]]` does.
+fn data_wrapper_repo(tag: &str, overlay: &str) -> PathBuf {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/go-overlay-data-wrapper");
+    let read = |rel: &str| std::fs::read_to_string(fixture.join(rel)).expect("fixture file");
+    let collection = read("collection.go")
+        .replace(
+            "import (\n\t\"go.mongodb.org",
+            "import (\n\t\"strings\"\n\n\t\"go.mongodb.org",
+        )
+        .replace(".Collection(name)}", ".Collection(strings.ToLower(name))}");
+    assert!(
+        collection.contains(".Collection(strings.ToLower(name))")
+            && collection.contains("\"strings\""),
+        "{collection}"
+    );
+    let root = tmp(tag);
+    write(&root, "collection.go", &collection);
+    write(
+        &root,
+        "chat_preview_repository.go",
+        &read("chat_preview_repository.go"),
+    );
+    write(&root, ".glia/overlay.toml", overlay);
+    root
+}
+
+/// CE.3a (2): a stanza that pairs no orphan still shows every effect: one
+/// DATA_ENTITY and its ACCESSES_DATA edge, the graph gaps unchanged
+/// (dead_symbol 3 both ways), verdict keep. Pre-CE.3a the only verdict was
+/// "orphans did not fall" (0 -> 0). A stanza binding nothing is a drop.
+#[test]
+fn overlay_delta_measures_every_category() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/go-overlay-data-wrapper");
+    let stanza = std::fs::read_to_string(fixture.join(".glia/overlay.toml")).expect("overlay");
+    let root = data_wrapper_repo("datawrap", &stanza);
+    let d = overlay_delta(&[s(&root)], false).expect("both builds");
+    // CA.4 inferred no wrapper: the extraction-only build has no entity and
+    // no `inferred:wrapper` ORIGIN anywhere.
+    let bare = generate_one(&s(&root)).expect("build");
+    std::fs::remove_dir_all(&root).ok();
+
+    assert_eq!(d.rules, 1);
+    assert_eq!(
+        d.nodes_added_by_kind,
+        BTreeMap::from([("DATA_ENTITY", 1)]),
+        "{d:?}"
+    );
+    assert_eq!(
+        d.added_by_category,
+        BTreeMap::from([("ACCESSES_DATA", 1)]),
+        "{d:?}"
+    );
+    assert_eq!(d.without.gaps_by_category, d.with.gaps_by_category, "{d:?}");
+    assert_eq!(
+        d.without.gaps_by_category.get(DEAD_SYMBOL),
+        Some(&3),
+        "{d:?}"
+    );
+    assert_eq!((d.without.total_gaps(), d.with.total_gaps()), (3, 3));
+    assert_eq!((d.orphans_without, d.orphans_with), (0, 0));
+    assert_eq!(d.without.nodes_by_kind.get("DATA_ENTITY"), None, "{d:?}");
+    assert_eq!(d.verdict, KEEP);
+    let with_bare = graph_counts(&bare.merged);
+    assert_eq!(
+        with_bare, d.with,
+        "graph_counts of a plain build is the with side"
+    );
+    let inferred = bare
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter())
+        .flat_map(|n| n.cells.iter())
+        .any(|c| format!("{:?}", c.payload).contains("inferred:wrapper"));
+    assert!(!inferred, "CA.4 inferred a wrapper");
+
+    // An [[edge]] between two qnames that do not exist changes nothing.
+    let root = data_wrapper_repo(
+        "datawrap-drop",
+        "version = 1\n\n[[edge]]\nfrom = \"repositories::nowhere\"\nto = \"repositories::nobody\"\ncategory = \"CALLS\"\n",
+    );
+    let d = overlay_delta(&[s(&root)], false).expect("both builds");
+    std::fs::remove_dir_all(&root).ok();
+    assert_eq!(d.rules, 1);
+    assert!(
+        d.nodes_added_by_kind.is_empty() && d.added_by_category.is_empty(),
+        "{d:?}"
+    );
+    assert_eq!(d.without, d.with);
+    assert_eq!(d.verdict, DROP);
 }
 
 #[test]
@@ -382,4 +618,8 @@ fn deterministic() {
     std::fs::remove_dir_all(web.parent().expect("parent")).ok();
     assert_eq!(a, b);
     assert!(a.starts_with("{\"counts\":{"), "{a}");
+    assert!(
+        a.contains("\"rows\":[{\"id\":\"gap:"),
+        "id leads a row: {a}"
+    );
 }
