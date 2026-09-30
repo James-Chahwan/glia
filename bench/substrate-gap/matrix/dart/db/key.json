@@ -1,0 +1,27 @@
+{
+  "framework": "dart-sqflite",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "db",
+  "cells": [
+    "dart/db"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "repo",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "sqflite db.query('users') / db.insert('users') || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): sqflite `db.query('users')` / `db.insert('users', ..)` have no DATA_ENTITY row in parsers/code/extractors/src/data_entities.rs."
+}

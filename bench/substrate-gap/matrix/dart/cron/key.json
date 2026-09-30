@@ -1,0 +1,27 @@
+{
+  "framework": "dart-cron",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "dart/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "*/5 * * * *"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "jobs",
+      "to": "*/5 * * * *",
+      "category": "SCHEDULES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "package:cron Cron().schedule(Schedule.parse('*/5 * * * *'), ..) || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=0/0) via=cron. Nothing to fix: the cell is covered at HEAD."
+}

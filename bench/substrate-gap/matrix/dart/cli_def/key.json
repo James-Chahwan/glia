@@ -1,0 +1,32 @@
+{
+  "framework": "dart-args-commandrunner",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "dart/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "mytool"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "sync"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:mytool",
+      "to": "cli:mytool",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "package:args CommandRunner('mytool') + Command name 'sync'; pubspec executables || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): package:args `CommandRunner('mytool', ..)` + `Command.name = 'sync'` and pubspec `executables:` have no row in parsers/code/extractors/src/cli.rs."
+}

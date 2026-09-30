@@ -1,0 +1,38 @@
+{
+  "framework": "dart-platform-environment",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "config",
+  "cells": [
+    "dart/config"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DATABASE_URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "db",
+      "to": "DATABASE_URL",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "Dockerfile",
+      "to": "DATABASE_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "DATABASE_URL",
+      "to": "DATABASE_URL",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "dart:io Platform.environment['X'] (server Dart) + Dockerfile ENV || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/3 forbid=0/0) via=config. Predicted extractor gap (backlog, not fixed by the probe): `Platform.environment['X']` is not a read needle in parsers/code/extractors/src/config.rs."
+}
