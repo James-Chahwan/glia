@@ -8638,6 +8638,7 @@
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
     "fixtures/contract-per-file-identity",
+    "fixtures/cpp-call-scope",
     "fixtures/cpp-declarations",
     "fixtures/cpp-header-extensions",
     "fixtures/cpp-header-impl-files",

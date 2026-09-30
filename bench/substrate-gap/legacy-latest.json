@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 322,
+  "fixtures": 323,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -183,6 +183,13 @@
       "language": "yaml+json+python+markdown",
       "per_category": {
         "DOCUMENTS": 1.0
+      }
+    },
+    "cpp-call-scope": {
+      "framework": "cpp-call-scope",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "cpp-declarations": {
