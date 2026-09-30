@@ -188,6 +188,18 @@ pub fn generate_one_with_cache(
     generate_one_inner(repo_path, repo_path, Some(cache), &BuildOptions::default())
 }
 
+/// [`generate_one_with_cache`] built with `opts` (CE.3c): the overlay loop's
+/// trial threads one in-memory `cache` through every variant it builds (base,
+/// base + candidate, each leave-one-out), so a parse is paid at most once. It
+/// neither loads nor saves the sidecar; the caller does, once.
+pub(crate) fn generate_one_with_cache_opts(
+    repo_path: &str,
+    cache: &mut ParseCache,
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
+    generate_one_inner(repo_path, repo_path, Some(cache), opts)
+}
+
 /// Disk-backed incremental build: load the parse cache from
 /// `<repo>/.glia/graph/parse_cache.bin` (beside the layout), build, then
 /// persist it. Cache save failures are logged, not fatal. Backs pyo3

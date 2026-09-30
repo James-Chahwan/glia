@@ -14,9 +14,18 @@
 //! takes one back out. A build reads a candidate through
 //! `BuildOptions::with_overlay_text`, never through the file, and such a
 //! build is never persisted.
+//!
+//! `trial` (CE.3c): [`try_candidate`] builds the tree with the overlay as it
+//! is, with the candidate merged in and, per stanza, with every stanza but
+//! that one, all on one in-memory parse cache, and reports every category's
+//! delta ([`GraphDelta`]), each stanza's marginal effect and the target gaps
+//! it closes ([`StanzaTrial`]), and a keep / review / drop verdict
+//! ([`TryReport`]). It writes nothing but the parse cache.
 
+mod trial;
 mod writer;
 
+pub use trial::{GraphDelta, StanzaTrial, TryOptions, TryReport, try_candidate};
 pub use writer::{
     Candidate, Location, Merged, StanzaRef, merge, parse_candidate, report_candidate, without,
 };
