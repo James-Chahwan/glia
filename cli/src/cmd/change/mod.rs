@@ -1,5 +1,6 @@
 //! `change` area: change-driven views — delta (LE.1c), diff-impact (LE.2),
-//! tests-for (LE.3b), patterns (LE.7b).
+//! tests-for (LE.3b), patterns (LE.7b), review (CC.6b), contract-breaks
+//! (CC.8b, +CC.8c), cochange (CC.11c), timeline (CD.5d).
 //!
 //! Each command is a variant of `ChangeCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -8,10 +9,14 @@
 
 use clap::Subcommand;
 
+mod cochange;
+mod contract_breaks;
 mod delta;
 mod diff_impact;
 mod patterns;
+mod review;
 mod tests_for;
+mod timeline;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ChangeCmd {

@@ -179,11 +179,17 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               cmd/<command>.rs   one per pre-0.5.0 command: clap Args + run(a) -> i32
               cmd/<area>/mod.rs  flattened Subcommand enum per area of leap commands:
                   query   pages LA.6e, find LD.3b, flows LD.4b, implementors LD.7c,
-                          serves LD.8b, why LE.5
-                  change  delta LE.1c, diff-impact LE.2, tests-for LE.3b, patterns LE.7b
-                  rules   effects LE.4d, cycles LE.6b, check LE.8, spec-status LE.9b
-                  store   inspect LC.4, cell LF.1c
-                  inputs  gaps LF.2c, history LF.5d, tests LF.6d
+                          serves LD.8b, why LE.5; 0.5.1: pack CC.4c, hotspots CC.10b,
+                          communities CD.1e, splits CD.2d, hubs CD.4c,
+                          duplicate-flows CD.4f
+                  change  delta LE.1c, diff-impact LE.2, tests-for LE.3b, patterns LE.7b;
+                          0.5.1: review CC.6b, contract-breaks CC.8b (+CC.8c),
+                          cochange CC.11c, timeline CD.5d
+                  rules   effects LE.4d, cycles LE.6b, check LE.8, spec-status LE.9b;
+                          0.5.1: flags CC.7c
+                  store   inspect LC.4, cell LF.1c; 0.5.1: cache/ CE.2c (+CE.2d, CE.2e)
+                  inputs  gaps LF.2c, history LF.5d, tests LF.6d; 0.5.1: overlay CE.3e,
+                          scip/ CE.1c
 ```
 
 - **py:** pyo3 `multiple-pymethods` lets each module carry its own
@@ -194,7 +200,10 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
   Cargo feature of py/ (maturin turns it on for wheels via pyproject.toml); re-adding it
   there stops the unit tests linking.
 - **cli:** a new command adds one variant and one match arm to its area's `mod.rs` and
-  its own `cli/src/cmd/<area>/<name>.rs` (`Args` + `run`).
+  its own `cli/src/cmd/<area>/<name>.rs` (`Args` + `run`). The 0.5.1 command files
+  (C0.5) are declared as doc-only slots (`mod <name>;` plus one `//!` paragraph, no
+  items); the owner adds `Args`, `run`, its variant `<Name>(<module>::Args)` (the doc
+  comment is clap's about) and its arm, and regenerates `cli/surface/<cmd>.txt`.
 - **Snapshot ownership:** the packet that claims `py/src/<m>.rs` owns
   `py/api_surface/<m>.txt` and `py/tests/surface/test_<m>.py`; the packet that claims
   `cli/src/cmd/<..>/<c>.rs` owns `cli/surface/<c>.txt` (global options:

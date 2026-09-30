@@ -1,5 +1,5 @@
 //! `rules` area: rule and structure checks — effects (LE.4d), cycles (LE.6b),
-//! check (LE.8), spec-status (LE.9b).
+//! check (LE.8), spec-status (LE.9b), flags (CC.7c).
 //!
 //! Each command is a variant of `RulesCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -11,6 +11,7 @@ use clap::Subcommand;
 mod check;
 mod cycles;
 mod effects;
+mod flags;
 mod spec_status;
 
 #[derive(Subcommand, Debug)]

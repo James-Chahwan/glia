@@ -1,4 +1,5 @@
-//! `store` area: the .gmap store — inspect (LC.4), cell (LF.1c).
+//! `store` area: the .gmap store — inspect (LC.4), cell (LF.1c), cache (CE.2c,
+//! +CE.2d, CE.2e).
 //!
 //! Each command is a variant of `StoreCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -7,6 +8,7 @@
 
 use clap::Subcommand;
 
+mod cache;
 mod cell;
 mod inspect;
 

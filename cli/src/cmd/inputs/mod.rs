@@ -1,4 +1,5 @@
-//! `inputs` area: non-code inputs — gaps (LF.2c), history (LF.5d), tests (LF.6d).
+//! `inputs` area: non-code inputs — gaps (LF.2c), history (LF.5d), tests (LF.6d),
+//! overlay (CE.3e), scip (CE.1c).
 //!
 //! Each command is a variant of `InputsCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -9,6 +10,8 @@ use clap::Subcommand;
 
 mod gaps;
 mod history;
+mod overlay;
+mod scip;
 mod tests;
 
 #[derive(Subcommand, Debug)]
