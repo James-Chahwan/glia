@@ -10,7 +10,9 @@
 //!
 //! [`signals`] (CC.2) is not a stage: it is the one reader of the ATTN and
 //! FAIL cells the history and test-report stages write, for the answers
-//! that rank by them.
+//! that rank by them. [`commit_file_sets`] (CC.11b) is the history stage's
+//! rename fold, lent to the co-change suggestions' multi-file rules, which
+//! read the snapshot's commits themselves.
 //!
 //! Per repo, a build makes one [`RepoInputs`] right after the walk (before
 //! any graph is built, so the build stages can read the overlay). The code
@@ -64,6 +66,7 @@ pub(crate) mod signals;
 mod test_reports;
 mod wrappers;
 
+pub(crate) use history::{MAX_COMMIT_FILES, commit_file_sets};
 pub(crate) use infer_wrappers::infer_entity_wrappers;
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
 

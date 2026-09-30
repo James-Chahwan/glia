@@ -14,6 +14,8 @@
 //! newest to oldest with an alias map (old path -> current path); a file entry
 //! with `from = old` sets `alias[old] = current(new)`, so every commit before
 //! a rename is attributed to the path the file has at the snapshot's head.
+//! The fold is [`current_paths`]; [`commit_file_sets`] lends it, one path set
+//! per commit, to the co-change suggestions' multi-file rules (CC.11b).
 //!
 //! - [`history_edges`] (a `Post` pass, through `apply_external_edges`): per
 //!   commit whose mapped files number 2..=[`MAX_COMMIT_FILES`] (a mass
@@ -204,6 +206,41 @@ fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, NodeId> 
     out
 }
 
+/// Every file entry of every commit of `snapshot` under the path it has at
+/// the snapshot's head: `out[i][j]` is `commits[i].files[j]`'s current path.
+/// The one rename fold (module docs): commits are walked newest to oldest and
+/// a file entry with `from = old` sets `alias[old] = current(new)`, each entry
+/// resolved before its own alias is recorded.
+fn current_paths(snapshot: &HistorySnapshot) -> Vec<Vec<String>> {
+    let mut alias: BTreeMap<String, String> = BTreeMap::new();
+    snapshot
+        .commits
+        .iter()
+        .map(|commit| {
+            commit
+                .files
+                .iter()
+                .map(|f| {
+                    let current = alias.get(&f.p).cloned().unwrap_or_else(|| f.p.clone());
+                    if let Some(old) = &f.from {
+                        alias.insert(old.clone(), current.clone());
+                    }
+                    current
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Each commit's files under their current paths (the rename fold of
+/// [`current_paths`]), one set per commit, newest first. Every path is kept,
+/// MODULE or not (a deleted file included): the consumer filters. Read by the
+/// co-change suggestions' multi-file rules (`cochange::cochange_multi`,
+/// CC.11b).
+pub(crate) fn commit_file_sets(snapshot: &HistorySnapshot) -> Vec<BTreeSet<String>> {
+    current_paths(snapshot).into_iter().map(|paths| paths.into_iter().collect()).collect()
+}
+
 /// Read `input`'s snapshot and fold it over the repo's modules. `None` when
 /// the repo has no complete snapshot.
 fn ingest(merged: &MergedGraph, input: &RepoInputs) -> Option<Ingest> {
@@ -211,18 +248,13 @@ fn ingest(merged: &MergedGraph, input: &RepoInputs) -> Option<Ingest> {
     let modules = module_files(merged, input.repo);
     let head = snapshot.meta.head.get(..12).unwrap_or(&snapshot.meta.head).to_string();
 
-    let mut alias: BTreeMap<String, String> = BTreeMap::new();
     let mut churn: BTreeMap<String, Churn> = BTreeMap::new();
     let mut unmapped: BTreeSet<String> = BTreeSet::new();
     let mut pair_counts: BTreeMap<(String, String), u32> = BTreeMap::new();
 
-    for commit in &snapshot.commits {
+    for (commit, paths) in snapshot.commits.iter().zip(current_paths(&snapshot)) {
         let mut touched: BTreeSet<String> = BTreeSet::new();
-        for f in &commit.files {
-            let current = alias.get(&f.p).cloned().unwrap_or_else(|| f.p.clone());
-            if let Some(old) = &f.from {
-                alias.insert(old.clone(), current.clone());
-            }
+        for (f, current) in commit.files.iter().zip(paths) {
             if !modules.contains_key(&current) {
                 unmapped.insert(current);
                 continue;
@@ -521,6 +553,19 @@ mod tests {
         let z = ing.churn["z.py"];
         assert_eq!((z.commits, z.added, z.first, z.last), (3, 7, 1, 3));
         assert!(ing.unmapped.is_empty(), "{:?}", ing.unmapped);
+    }
+
+    #[test]
+    fn commit_file_sets_fold_renames_and_keep_every_path() {
+        // Newest first: y -> z, then x -> y beside a doc, then x with a lockfile.
+        let commits = vec![
+            commit("c3", 3, &[("z.py", 1, Some("y.py"))]),
+            commit("c2", 2, &[("y.py", 1, Some("x.py")), ("docs/x.md", 1, None)]),
+            commit("c1", 1, &[("x.py", 5, None), ("Cargo.lock", 9, None)]),
+        ];
+        let sets = commit_file_sets(&snapshot(commits, vec![]));
+        let names: Vec<Vec<&str>> = sets.iter().map(|s| s.iter().map(String::as_str).collect()).collect();
+        assert_eq!(names, [vec!["z.py"], vec!["docs/x.md", "z.py"], vec!["Cargo.lock", "z.py"]]);
     }
 
     #[test]

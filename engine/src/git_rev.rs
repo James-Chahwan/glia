@@ -23,6 +23,9 @@
 //!   read by both builds and is no delta. A control file the rev tracks
 //!   (`.glia/overlay.toml`) comes from the rev; one tracked since, from nobody:
 //!   it is part of the change.
+//!
+//! [`changed_files`] (CC.11b) lists the working tree's change against a rev
+//! (a name-only `diff` plus the untracked files), with the same helpers.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -417,6 +420,39 @@ pub(crate) fn declared_renames(repo: &Path, rev: &Rev) -> Vec<(String, String)> 
     }
 }
 
+/// The working tree's changed files against `rev`, relative to `repo`, sorted
+/// and deduplicated (CC.11b, the co-change suggestions' `--base` query):
+/// every tracked path whose working-tree content differs from the rev
+/// (`diff --relative --no-renames --name-only`, so a rename lists both of its
+/// paths whatever `diff.renames` says, a deletion included) plus every
+/// untracked, not-ignored file (`ls-files --others --exclude-standard`).
+/// Paths under the `.glia` control dir are dropped: the walk hard-skips it
+/// (LF.1d) and a snapshot is an input, not a change. `Err` when either git
+/// command fails.
+pub(crate) fn changed_files(repo: &Path, rev: &Rev) -> Result<Vec<String>, String> {
+    let diff = ["diff", "--relative", "--no-renames", "--name-only", "-z", "--no-color", &rev.sha, "--"];
+    let tracked = git_output(repo, &diff)?
+        .ok_or_else(|| format!("git diff {} failed in {}", rev.given, repo.display()))?;
+    let others = ["ls-files", "--others", "--exclude-standard", "-z"];
+    let untracked = git_output(repo, &others)?
+        .ok_or_else(|| format!("git ls-files failed in {}", repo.display()))?;
+    Ok(changed_paths(&[&tracked, &untracked]))
+}
+
+/// The NUL-separated paths of `listings`, deduplicated and sorted, with every
+/// path under the `.glia` control dir dropped.
+fn changed_paths(listings: &[&[u8]]) -> Vec<String> {
+    let control = format!("{CONTROL_DIR}/");
+    let set: BTreeSet<String> = listings
+        .iter()
+        .flat_map(|out| out.split(|b| *b == 0))
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .filter(|p| p != CONTROL_DIR && !p.starts_with(&control))
+        .collect();
+    set.into_iter().collect()
+}
+
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
@@ -490,6 +526,14 @@ mod tests {
             ]
         );
         assert!(parse_name_status(b"").is_empty());
+    }
+
+    #[test]
+    fn changed_paths_merge_sort_and_skip_the_control_dir() {
+        let tracked = b"src/b.py\x00.glia/overlay.toml\x00a.py\x00";
+        let untracked = b"a.py\x00.glia/history-snapshot/commits.jsonl\x00new.py\x00.gliax/keep.txt\x00";
+        assert_eq!(changed_paths(&[tracked, untracked]), [".gliax/keep.txt", "a.py", "new.py", "src/b.py"]);
+        assert!(changed_paths(&[b"", b""]).is_empty());
     }
 
     #[test]
