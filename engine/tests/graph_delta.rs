@@ -317,3 +317,42 @@ fn symlinks_and_gitlinks_do_not_show_as_delta() {
     let d = delta(&repo, "HEAD");
     assert!(d.answer.nodes.is_empty() && d.answer.edges.is_empty(), "{}", rows(&d));
 }
+
+#[test]
+fn schema_only_change_is_modified() {
+    // CC.8a: an op whose CODE cell (`GET /orders/{id} — getOrder`) is unchanged
+    // but whose declared response fields lose `total` is a modified node: its
+    // SCHEMA_FIELDS cell is content too.
+    const SPEC: &str = "openapi: 3.0.0
+info:
+  title: orders
+  version: \"1\"
+paths:
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      responses:
+        \"200\":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  total:
+                    type: number
+";
+    let repo = GitRepo::init();
+    repo.write("openapi.yaml", SPEC);
+    repo.commit("v1");
+    repo.write("openapi.yaml", &SPEC.replace("                  total:\n                    type: number\n", ""));
+    let d = delta(&repo, "HEAD");
+    assert_eq!(d.answer.counts.nodes_modified, 1, "{}", rows(&d));
+    let op = node(&d, "modified", "contract::openapi::GET:/orders/{id}")
+        .unwrap_or_else(|| panic!("the op is modified:\n{}", rows(&d)));
+    assert_eq!(op.kind, "DOC_SECTION");
+    assert_eq!(op.file.as_deref(), Some("openapi.yaml"));
+    assert_eq!(d.answer.nodes.len(), 1, "nothing else changed:\n{}", rows(&d));
+}

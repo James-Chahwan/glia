@@ -22,6 +22,13 @@
 //! they sit on disk, which a materialised rev cannot reproduce (an untracked,
 //! gitignored `node_modules/` exists in the working tree only).
 //!
+//! A node's content is its [`CONTENT_CELLS`]: its CODE text and its declared
+//! SCHEMA_FIELDS (CC.8a), so a contract op or message type whose fields
+//! changed while its CODE line did not is a `modified` row. SCHEMA_FIELDS is
+//! canonical JSON (LE.10a / LE.10b); the domain-free LE.1a delta compares Text
+//! payloads only (it skips the positional JSON the queue and cron extractors
+//! keep under CODE), so [`side`] hands it each SCHEMA_FIELDS payload as Text.
+//!
 //! Fired-on markers, one of each per delta:
 //! `[delta] materialized <n> files from <rev> (gitlinks_skipped=.. symlinks=.. skipped_symlinks=.. snapshots=..)`
 //! and `[delta] base=<rev> files: reused=R reparsed=P evicted=E | nodes +A -D ~M >V | edges +a -r ~c | regions_excluded=X ignored_moves=I`.
@@ -32,7 +39,7 @@ use std::path::Path;
 use glia_activation::algo::delta::{DeltaOptions, DeltaSide, EdgeKey, GraphDelta, graph_delta};
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{Confidence, Edge, NodeId};
+use glia_core::{Cell, CellPayload, CellTypeId, Confidence, Edge, Node, NodeId};
 use glia_graph::MergedGraph;
 use glia_graph::identity::detect_moves_with;
 
@@ -134,22 +141,84 @@ pub struct RevDelta {
     pub delta: GraphDelta,
 }
 
-/// One graph as a delta side: every graph's nodes in order and
-/// `all_edges()`, minus REGION nodes and every edge with a REGION endpoint.
-/// Also returns the REGION ids it dropped.
-pub(crate) fn side(m: &MergedGraph) -> (DeltaSide<'_>, BTreeSet<u64>) {
+/// The cell kinds whose payloads are a node's content in every graph delta:
+/// its CODE text and its declared SCHEMA_FIELDS. One list, so every caller of
+/// [`side`] and `graph_delta` compares the same thing.
+pub(crate) const CONTENT_CELLS: &[CellTypeId] = &[cell_type::CODE, cell_type::SCHEMA_FIELDS];
+
+/// What [`side`] borrows beyond the graph: the REGION ids it drops, and a
+/// Text copy of every node that carries a JSON SCHEMA_FIELDS payload.
+pub(crate) struct SideParts {
+    regions: BTreeSet<u64>,
+    /// Nodes holding only their [`CONTENT_CELLS`] cells, each SCHEMA_FIELDS
+    /// payload as Text, in graph order.
+    schema_copies: Vec<Node>,
+    /// `(graph index, node index)` of every node in `schema_copies`.
+    replaced: BTreeSet<(usize, usize)>,
+}
+
+impl SideParts {
+    /// The REGION ids dropped from this side.
+    pub(crate) fn regions(&self) -> &BTreeSet<u64> {
+        &self.regions
+    }
+}
+
+/// Collect [`SideParts`] for `m`: the REGION ids, and the Text copies of the
+/// nodes whose SCHEMA_FIELDS payload is JSON (every writer's shape, LE.10a /
+/// LE.10b). The copies keep CODE exactly as it was, JSON included, so the
+/// delta still skips a positional CODE payload.
+pub(crate) fn side_parts(m: &MergedGraph) -> SideParts {
     let mut regions: BTreeSet<u64> = BTreeSet::new();
-    for g in &m.graphs {
-        for n in &g.nodes {
+    let mut schema_copies: Vec<Node> = Vec::new();
+    let mut replaced: BTreeSet<(usize, usize)> = BTreeSet::new();
+    for (gi, g) in m.graphs.iter().enumerate() {
+        for (ni, n) in g.nodes.iter().enumerate() {
             if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::REGION) {
                 regions.insert(n.id.0);
+                continue;
             }
+            let json_schema = n
+                .cells
+                .iter()
+                .any(|c| c.kind == cell_type::SCHEMA_FIELDS && matches!(c.payload, CellPayload::Json(_)));
+            if !json_schema {
+                continue;
+            }
+            let cells = n
+                .cells
+                .iter()
+                .filter(|c| CONTENT_CELLS.contains(&c.kind))
+                .map(|c| match &c.payload {
+                    CellPayload::Json(j) if c.kind == cell_type::SCHEMA_FIELDS => {
+                        Cell { kind: c.kind, payload: CellPayload::Text(j.clone()) }
+                    }
+                    _ => c.clone(),
+                })
+                .collect();
+            schema_copies.push(Node { id: n.id, repo: n.repo, confidence: n.confidence, cells });
+            replaced.insert((gi, ni));
         }
     }
-    let nodes = m.graphs.iter().flat_map(|g| g.nodes.iter()).filter(|n| !regions.contains(&n.id.0));
+    SideParts { regions, schema_copies, replaced }
+}
+
+/// One graph as a delta side: every graph's nodes in order and
+/// `all_edges()`, minus REGION nodes and every edge with a REGION endpoint,
+/// with each node that carries a JSON SCHEMA_FIELDS payload stood in for by
+/// its Text copy in `parts` (module docs).
+pub(crate) fn side<'a>(m: &'a MergedGraph, parts: &'a SideParts) -> DeltaSide<'a> {
+    let regions = &parts.regions;
+    let nodes = m
+        .graphs
+        .iter()
+        .enumerate()
+        .flat_map(|(gi, g)| g.nodes.iter().enumerate().map(move |(ni, n)| (gi, ni, n)))
+        .filter(|&(gi, ni, n)| !regions.contains(&n.id.0) && !parts.replaced.contains(&(gi, ni)))
+        .map(|(_, _, n)| n)
+        .chain(parts.schema_copies.iter());
     let edges = m.all_edges().filter(|e| !regions.contains(&e.from.0) && !regions.contains(&e.to.0));
-    let side = DeltaSide::new(nodes, edges);
-    (side, regions)
+    DeltaSide::new(nodes, edges)
 }
 
 /// [`located_delta_with`] with no declared renames: move detection pairs
@@ -186,11 +255,11 @@ struct LocatedDelta {
 fn locate_delta(before: &MergedGraph, after: &MergedGraph, renames: &[(String, String)]) -> LocatedDelta {
     let moves = detect_moves_with(before, after, renames);
     let pairs: Vec<(NodeId, NodeId)> = moves.nodes.iter().map(|m| (m.old_id, m.new_id)).collect();
-    let (old_side, old_regions) = side(before);
-    let (new_side, new_regions) = side(after);
-    let opts = DeltaOptions { content_cells: &[cell_type::CODE], moves: &pairs };
+    let (old_parts, new_parts) = (side_parts(before), side_parts(after));
+    let (old_side, new_side) = (side(before, &old_parts), side(after, &new_parts));
+    let opts = DeltaOptions { content_cells: CONTENT_CELLS, moves: &pairs };
     let delta = graph_delta(&old_side, &new_side, &opts);
-    let regions_excluded = old_regions.union(&new_regions).count();
+    let regions_excluded = old_parts.regions().union(new_parts.regions()).count();
 
     let (then, now) = (Locator::new(before), Locator::new(after));
     // After id -> before id, for the moves LE.1a applied.

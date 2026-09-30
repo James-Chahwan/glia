@@ -70,7 +70,9 @@ pub struct FieldChange {
     /// when both sides declare it.
     pub field: String,
     /// `type`, `number`, `name`, `label`, `reserved`, `producer_only`,
-    /// `consumer_only` or `unknown`.
+    /// `consumer_only` or `unknown`; CC.8a's contract breaks add `required`
+    /// (a field's requiredness changed) and `section` (a whole section
+    /// declared on one side only).
     pub change: &'static str,
     /// The producer's type (a proto field number for `number`, the name for
     /// `name`, `reserved` for the side that reserves it).
@@ -307,30 +309,30 @@ fn row(
 
 /// A MESSAGE_TYPE or contract-op DOC_SECTION, folded across every graph that
 /// carries a copy of it.
-struct Holder {
-    repo: u64,
-    message: bool,
-    qname: String,
+pub(crate) struct Holder {
+    pub(crate) repo: u64,
+    pub(crate) message: bool,
+    pub(crate) qname: String,
     /// Distinct SCHEMA_FIELDS payloads, first-seen order.
-    payloads: Vec<String>,
+    pub(crate) payloads: Vec<String>,
     /// The parsed ORIGIN, when it says `provenance: contract`.
-    origin: Option<Value>,
+    pub(crate) origin: Option<Value>,
 }
 
 /// Why a side's fields cannot be compared.
 #[derive(Clone, Copy)]
-enum Gap {
+pub(crate) enum Gap {
     NoFields,
     Conflicting,
     Unparsable,
 }
 
 impl Holder {
-    fn origin_str(&self, key: &str) -> Option<&str> {
+    pub(crate) fn origin_str(&self, key: &str) -> Option<&str> {
         self.origin.as_ref()?.get(key)?.as_str()
     }
 
-    fn format(&self) -> String {
+    pub(crate) fn format(&self) -> String {
         match self.schema() {
             Ok(s) => s.format,
             Err(_) => self.origin_str("source").unwrap_or_default().to_string(),
@@ -339,7 +341,7 @@ impl Holder {
 
     /// The one SCHEMA_FIELDS payload, parsed. Two different payloads on one
     /// node (one repo declaring the message twice) are not a guess to pick from.
-    fn schema(&self) -> Result<Schema, Gap> {
+    pub(crate) fn schema(&self) -> Result<Schema, Gap> {
         let payload = match self.payloads.as_slice() {
             [] => return Err(Gap::NoFields),
             [one] => one,
@@ -386,7 +388,7 @@ fn payload_str(c: &Cell) -> Option<&str> {
     }
 }
 
-fn collect_holders(merged: &MergedGraph) -> BTreeMap<u64, Holder> {
+pub(crate) fn collect_holders(merged: &MergedGraph) -> BTreeMap<u64, Holder> {
     let mut out: BTreeMap<u64, Holder> = BTreeMap::new();
     for g in &merged.graphs {
         for n in &g.nodes {
@@ -436,7 +438,7 @@ fn collect_holders(merged: &MergedGraph) -> BTreeMap<u64, Holder> {
 }
 
 /// `message:proto:shop.v1.OrderCreated` → `shop.v1.OrderCreated`.
-fn qualified_name(qname: &str) -> &str {
+pub(crate) fn qualified_name(qname: &str) -> &str {
     qname
         .strip_prefix("message:")
         .and_then(|rest| rest.split_once(':'))
@@ -624,13 +626,13 @@ fn template_fit(provider: &str, pact: &str) -> Option<usize> {
 
 // ---- verdict plumbing ------------------------------------------------------
 
-struct Field {
-    name: String,
-    ty: Option<String>,
-    number: Option<u64>,
-    repeated: bool,
-    required: bool,
-    default: bool,
+pub(crate) struct Field {
+    pub(crate) name: String,
+    pub(crate) ty: Option<String>,
+    pub(crate) number: Option<u64>,
+    pub(crate) repeated: bool,
+    pub(crate) required: bool,
+    pub(crate) default: bool,
 }
 
 impl Field {
@@ -647,30 +649,30 @@ impl Field {
     }
 }
 
-struct Schema {
-    format: String,
-    sections: BTreeMap<String, Vec<Field>>,
-    reserved: Vec<String>,
-    truncated: bool,
+pub(crate) struct Schema {
+    pub(crate) format: String,
+    pub(crate) sections: BTreeMap<String, Vec<Field>>,
+    pub(crate) reserved: Vec<String>,
+    pub(crate) truncated: bool,
 }
 
 impl Schema {
-    fn fields(&self, section: &str) -> &[Field] {
+    pub(crate) fn fields(&self, section: &str) -> &[Field] {
         self.sections.get(section).map_or(&[][..], Vec::as_slice)
     }
 }
 
 #[derive(Default)]
-struct Diff {
-    changes: Vec<FieldChange>,
+pub(crate) struct Diff {
+    pub(crate) changes: Vec<FieldChange>,
     /// A comparison was skipped because the other side's cell is truncated.
-    suppressed: bool,
+    pub(crate) suppressed: bool,
 }
 
-const UNKNOWN: &str = "unknown";
+pub(crate) const UNKNOWN: &str = "unknown";
 
 impl Diff {
-    fn push(
+    pub(crate) fn push(
         &mut self,
         (section, field): (&str, &str),
         change: &'static str,
@@ -748,7 +750,7 @@ fn judge(
 /// under two numbers breaks; a number one side reserves and the other uses
 /// breaks; a field only one side knows is skipped as unknown by the other.
 /// Symmetric, so one direction speaks for the pair.
-fn proto_rules(p: &Schema, c: &Schema) -> Diff {
+pub(crate) fn proto_rules(p: &Schema, c: &Schema) -> Diff {
     const S: &str = "fields";
     let mut d = Diff::default();
     let (pf, cf) = (p.fields(S), c.fields(S));
@@ -910,7 +912,7 @@ fn reserves(reserved: &[String], n: u64) -> bool {
 /// Fields match by name. A reader field the writer lacks needs a default; a
 /// writer field the reader lacks is ignored; a type change resolves only by
 /// the spec's promotions and union / named-type rules.
-fn avro_rules(w: &Schema, r: &Schema) -> Diff {
+pub(crate) fn avro_rules(w: &Schema, r: &Schema) -> Diff {
     const S: &str = "fields";
     let mut d = Diff::default();
     let (wf, rf) = (w.fields(S), r.fields(S));
@@ -1199,7 +1201,7 @@ fn route_rules(p: &Schema, c: &Schema) -> Diff {
 }
 
 /// A type that is an external or unresolvable `$ref` string (LE.10b).
-fn is_ref(ty: Option<&str>) -> bool {
+pub(crate) fn is_ref(ty: Option<&str>) -> bool {
     ty.is_some_and(|t| {
         t.contains('#')
             || t.contains('/')
@@ -1208,7 +1210,7 @@ fn is_ref(ty: Option<&str>) -> bool {
 }
 
 /// The flattened names enclosing `name`: `lines[].sku` → `lines`, `lines[]`.
-fn ancestors(name: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn ancestors(name: &str) -> impl Iterator<Item = &str> {
     name.char_indices()
         .filter(|(i, ch)| *i > 0 && matches!(ch, '.' | '['))
         .map(move |(i, _)| &name[..i])
@@ -1348,7 +1350,7 @@ fn json_section(
     }
 }
 
-enum TypeChange {
+pub(crate) enum TypeChange {
     /// Every value the producer's type allows, the consumer's type accepts.
     Widened,
     Changed,
@@ -1359,7 +1361,7 @@ enum TypeChange {
 /// JSON-schema types as LE.10b renders them: `a|b` alternatives, each
 /// `base(format)`. `integer` is a `number`; a consumer with no format accepts
 /// any format. `None` when there is nothing to report.
-fn json_type_change(p: &str, c: &str) -> Option<TypeChange> {
+pub(crate) fn json_type_change(p: &str, c: &str) -> Option<TypeChange> {
     if p == c || c == "any" {
         return None;
     }
