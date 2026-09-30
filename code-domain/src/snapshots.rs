@@ -1,4 +1,4 @@
-//! Git-history and test-report snapshot records, and their `data_hash`.
+//! Git-history, test-report and SCIP-index snapshot records, and their `data_hash`.
 //!
 //! External, HEAD-dependent inputs enter glia the way docs do: a separate
 //! snapshot step (the `glia-snapshots` crate — the only code that shells out)
@@ -31,6 +31,22 @@
 //! free-text field of a case passes through [`redact_untrusted`] (A13.7's key
 //! denylist plus secret-shaped values) when it is written AND when it is read
 //! back, so a hand-edited snapshot cannot carry a secret into the graph either.
+//!
+//! The SCIP snapshot (CE.1a) is `<repo>/.glia/scip-snapshot/`: the facts the
+//! build takes from a compiler-grade SCIP index, decoded once at import
+//! (`glia scip import`) so the build never decodes protobuf.
+//! - `documents.jsonl` — one [`ScipDocumentRecord`] per kept source file,
+//!   sorted by path, its rows sorted by [`ScipDefRow::sort_key`] /
+//!   [`ScipRefRow::sort_key`];
+//! - `symbols.jsonl` — one [`ScipSymbolRecord`] per symbol a row names, ids
+//!   `0..n` in symbol-string order;
+//! - `meta.json` — the [`ScipMeta`], written LAST, `data_hash` over
+//!   `documents.jsonl` then `symbols.jsonl` ([`read_scip`] checks it, the row
+//!   order and every symbol id).
+//!
+//! It holds indexer-generated symbol strings, identifier text sliced at
+//! definition ranges and line numbers: no free text and no values, so nothing
+//! in it is redacted.
 
 use std::path::{Path, PathBuf};
 
@@ -631,6 +647,315 @@ fn truncate_chars(s: &mut String, max: usize) {
 }
 
 // ===========================================================================
+// SCIP index snapshot (CE.1a)
+// ===========================================================================
+
+/// The SCIP snapshot's directory name under the `.glia` control dir.
+pub const SCIP_DIR: &str = "scip-snapshot";
+/// `documents.jsonl`: one [`ScipDocumentRecord`] per kept source file, sorted by path.
+pub const SCIP_DOCUMENTS_FILE: &str = "documents.jsonl";
+/// `symbols.jsonl`: one [`ScipSymbolRecord`] per symbol, sorted by id.
+pub const SCIP_SYMBOLS_FILE: &str = "symbols.jsonl";
+/// [`ScipMeta::version`] this module writes and accepts.
+pub const SCIP_VERSION: u32 = 1;
+/// [`ScipMeta::generator`] of `glia scip import`.
+pub const SCIP_GENERATOR: &str = "glia scip import";
+
+/// `.glia/scip-snapshot/meta.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScipMeta {
+    /// [`SCIP_VERSION`]; any other value reads as an incomplete snapshot.
+    pub version: u32,
+    /// Who wrote it ([`SCIP_GENERATOR`]).
+    pub generator: String,
+    /// The indexer that wrote the SCIP index (its `tool_info.name`), verbatim.
+    pub tool: String,
+    /// The indexer's version (its `tool_info.version`), verbatim.
+    pub tool_version: String,
+    /// The index's document base relative to the repo root, `/`-separated;
+    /// `""` when equal. Every document path is already rebased onto the repo.
+    pub project_root: String,
+    /// Number of rows in `documents.jsonl`.
+    pub documents: usize,
+    /// Number of rows in `symbols.jsonl`.
+    pub symbols: usize,
+    /// Documents the index held that the import did not keep (outside the
+    /// repo, unreadable, or with no kept row).
+    pub skipped_documents: usize,
+    /// [`data_hash`] over `documents.jsonl` then `symbols.jsonl`.
+    pub data_hash: String,
+}
+
+impl ScipMeta {
+    /// A meta for an index written by `tool` at `tool_version`. The derived
+    /// fields (`documents`, `symbols`, `data_hash`) are left empty:
+    /// [`write_scip`] fills them from the rows it writes.
+    pub fn new(tool: String, tool_version: String, project_root: String, skipped_documents: usize) -> Self {
+        Self {
+            version: SCIP_VERSION,
+            generator: SCIP_GENERATOR.to_string(),
+            tool,
+            tool_version,
+            project_root,
+            documents: 0,
+            symbols: 0,
+            skipped_documents,
+            data_hash: String::new(),
+        }
+    }
+}
+
+/// One symbol a kept row names. Its `id` is its row number in
+/// `symbols.jsonl`: ids run `0..n`, and the symbol strings ascend with them,
+/// so the ids never depend on the order the index listed its documents in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScipSymbolRecord {
+    pub id: u32,
+    /// The SCIP symbol string, verbatim.
+    pub symbol: String,
+    /// Ids of the symbols this one implements or extends (the index's
+    /// `is_implementation` relationships), ascending, no repeats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implements: Vec<u32>,
+}
+
+/// A definition occurrence: the symbol defined, where, and the identifier
+/// text the importer read at the definition's range. The build binds a
+/// definition by that text and the glia node's own kind, never by a SCIP kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScipDefRow {
+    /// The defined symbol's [`ScipSymbolRecord::id`].
+    pub s: u32,
+    /// 0-based line of the definition's range.
+    pub line: u32,
+    /// The identifier text at the definition's range.
+    pub name: String,
+}
+
+impl ScipDefRow {
+    /// The order a document's `defs` are written in: (line, symbol, name).
+    pub fn sort_key(&self) -> (u32, u32, &str) {
+        (self.line, self.s, &self.name)
+    }
+}
+
+/// A reference occurrence: the symbol referenced, the 0-based line of the
+/// reference's range, and its flags. Absent flags are false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScipRefRow {
+    /// The referenced symbol's [`ScipSymbolRecord::id`].
+    pub s: u32,
+    /// 0-based line of the reference's range.
+    pub line: u32,
+    /// The reference is followed by a call paren (`f(`, `f::<T>(`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub call: bool,
+    /// The index marks the occurrence a write access.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub write: bool,
+    /// The index marks the occurrence an import.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub import: bool,
+}
+
+impl ScipRefRow {
+    /// The order a document's `refs` are written in: (line, symbol, call,
+    /// write, import).
+    pub fn sort_key(&self) -> (u32, u32, bool, bool, bool) {
+        (self.line, self.s, self.call, self.write, self.import)
+    }
+}
+
+/// One source file of the index, with the rows the import kept from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScipDocumentRecord {
+    /// Path relative to the repo root, `/`-separated.
+    pub path: String,
+    /// The index's language for the document, verbatim.
+    pub language: String,
+    /// [`source_hash`] of the bytes the import read, so the build can skip a
+    /// document edited since the index.
+    pub source_hash: String,
+    /// Sorted by [`ScipDefRow::sort_key`].
+    pub defs: Vec<ScipDefRow>,
+    /// Sorted by [`ScipRefRow::sort_key`].
+    pub refs: Vec<ScipRefRow>,
+}
+
+/// A complete SCIP snapshot, as [`read_scip`] returns it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScipSnapshot {
+    pub meta: ScipMeta,
+    pub documents: Vec<ScipDocumentRecord>,
+    pub symbols: Vec<ScipSymbolRecord>,
+}
+
+/// `<root>/.glia/scip-snapshot`.
+pub fn scip_dir(root: &Path) -> PathBuf {
+    root.join(CONTROL_DIR).join(SCIP_DIR)
+}
+
+/// The hash a [`ScipDocumentRecord`] stores for a source file's bytes:
+/// [`data_hash`] of the bytes alone. The importer and the build stage both
+/// call this, so they agree on what "unchanged since the index" means.
+pub fn source_hash(bytes: &[u8]) -> String {
+    data_hash(&[bytes])
+}
+
+/// Write a SCIP snapshot under `<root>/.glia/scip-snapshot/`, replacing any
+/// earlier one: `documents.jsonl`, `symbols.jsonl`, then `meta.json` LAST. The
+/// old `meta.json` is removed first, so a write that stops part-way leaves a
+/// snapshot [`read_scip`] rejects.
+///
+/// The rows are written in the order given, and that order must already be
+/// the canonical one, so a caller bug can never write an order-dependent
+/// snapshot: documents strictly ascending by path, each path repo-relative
+/// (not empty, not absolute, no `..` component); symbols with ids `0..n` in
+/// row order and strictly ascending symbol strings; every row's `s` and every
+/// `implements` id below `n`, each `implements` strictly ascending; each
+/// document's `defs` and `refs` ascending by their `sort_key` (equal rows
+/// allowed). Anything else, or a `meta.version` other than [`SCIP_VERSION`],
+/// is an `Err` and nothing is written or removed.
+///
+/// `meta.documents`, `meta.symbols` and `meta.data_hash` are derived here from
+/// the rows, whatever the caller set. Returns the meta as written. Prints
+/// nothing and writes no `.gitignore`: the importer owns both.
+pub fn write_scip(
+    root: &Path,
+    mut meta: ScipMeta,
+    documents: &[ScipDocumentRecord],
+    symbols: &[ScipSymbolRecord],
+) -> Result<ScipMeta, String> {
+    if meta.version != SCIP_VERSION {
+        return Err(format!("{META_FILE}: version {} (this writer writes {SCIP_VERSION})", meta.version));
+    }
+    check_scip(documents, symbols)?;
+    let documents_bytes = jsonl(documents.iter())?;
+    let symbols_bytes = jsonl(symbols.iter())?;
+
+    let dir = scip_dir(root);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let meta_path = dir.join(META_FILE);
+    remove_if_present(&meta_path)?;
+    write_atomic(&dir.join(SCIP_DOCUMENTS_FILE), &documents_bytes)?;
+    write_atomic(&dir.join(SCIP_SYMBOLS_FILE), &symbols_bytes)?;
+
+    meta.documents = documents.len();
+    meta.symbols = symbols.len();
+    meta.data_hash = data_hash(&[&documents_bytes, &symbols_bytes]);
+    write_atomic(&meta_path, &meta_bytes(&meta)?)?;
+    Ok(meta)
+}
+
+/// The SCIP snapshot under `<root>/.glia/scip-snapshot/`, or `None`.
+///
+/// No snapshot directory is the normal "never imported" case: `None`,
+/// silently. A directory whose `meta.json` is absent, unreadable or of another
+/// version, whose `documents.jsonl` or `symbols.jsonl` is missing, whose data
+/// does not hash to `meta.data_hash`, whose rows do not parse, whose row
+/// counts disagree with the meta or whose rows break [`write_scip`]'s order
+/// and id rules is an incomplete snapshot: `None` and one
+/// `[scip] snapshot incomplete` line on stderr naming the reason. A snapshot
+/// this returns can be indexed by any row's `s` without a bounds check failing.
+pub fn read_scip(root: &Path) -> Option<ScipSnapshot> {
+    let dir = scip_dir(root);
+    if !dir.is_dir() {
+        return None;
+    }
+    match load_scip(&dir) {
+        Ok(snapshot) => Some(snapshot),
+        Err(reason) => {
+            eprintln!("[scip] snapshot incomplete dir={} reason={reason}", dir.display());
+            None
+        }
+    }
+}
+
+fn load_scip(dir: &Path) -> Result<ScipSnapshot, String> {
+    let meta: ScipMeta = serde_json::from_slice(&read_required(&dir.join(META_FILE))?)
+        .map_err(|e| format!("{META_FILE}: {e}"))?;
+    if meta.version != SCIP_VERSION {
+        return Err(format!("{META_FILE}: version {} (reader wants {SCIP_VERSION})", meta.version));
+    }
+    let documents_bytes = read_required(&dir.join(SCIP_DOCUMENTS_FILE))?;
+    let symbols_bytes = read_required(&dir.join(SCIP_SYMBOLS_FILE))?;
+    let got = data_hash(&[&documents_bytes, &symbols_bytes]);
+    if got != meta.data_hash {
+        return Err(format!("data_hash mismatch: {got} != meta {}", meta.data_hash));
+    }
+    let documents: Vec<ScipDocumentRecord> = parse_jsonl(&documents_bytes, SCIP_DOCUMENTS_FILE)?;
+    let symbols: Vec<ScipSymbolRecord> = parse_jsonl(&symbols_bytes, SCIP_SYMBOLS_FILE)?;
+    if documents.len() != meta.documents || symbols.len() != meta.symbols {
+        return Err(format!(
+            "row counts documents={} symbols={} != meta documents={} symbols={}",
+            documents.len(),
+            symbols.len(),
+            meta.documents,
+            meta.symbols
+        ));
+    }
+    check_scip(&documents, &symbols)?;
+    Ok(ScipSnapshot { meta, documents, symbols })
+}
+
+/// [`write_scip`]'s order and id rules; the error names the file and 1-based row.
+fn check_scip(documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord]) -> Result<(), String> {
+    let n = symbols.len();
+    let dangling = |id: u32| id as usize >= n;
+    for (i, sym) in symbols.iter().enumerate() {
+        let at = format!("{SCIP_SYMBOLS_FILE}:{}", i + 1);
+        if sym.id as usize != i {
+            return Err(format!("{at}: id {} (ids run 0..{n} in row order)", sym.id));
+        }
+        if let Some(prev) = i.checked_sub(1).and_then(|p| symbols.get(p))
+            && prev.symbol >= sym.symbol
+        {
+            return Err(format!("{at}: symbol {:?} does not sort after {:?}", sym.symbol, prev.symbol));
+        }
+        if let Some(&id) = sym.implements.iter().find(|&&id| dangling(id)) {
+            return Err(format!("{at}: implements id {id} out of range (symbols={n})"));
+        }
+        if sym.implements.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(format!("{at}: implements {:?} is not strictly ascending", sym.implements));
+        }
+    }
+    for (i, doc) in documents.iter().enumerate() {
+        let at = format!("{SCIP_DOCUMENTS_FILE}:{}", i + 1);
+        let p = &doc.path;
+        if p.is_empty()
+            || p.starts_with(['/', '\\'])
+            || Path::new(p).is_absolute()
+            || p.split(['/', '\\']).any(|c| c == "..")
+        {
+            return Err(format!("{at}: path {p:?} is not repo-relative"));
+        }
+        if let Some(prev) = i.checked_sub(1).and_then(|k| documents.get(k))
+            && prev.path >= doc.path
+        {
+            return Err(format!("{at}: path {p:?} does not sort after {:?}", prev.path));
+        }
+        if let Some(row) = doc.defs.iter().find(|r| dangling(r.s)) {
+            return Err(format!("{at}: def at line {} names symbol {} out of range (symbols={n})", row.line, row.s));
+        }
+        if let Some(row) = doc.refs.iter().find(|r| dangling(r.s)) {
+            return Err(format!("{at}: ref at line {} names symbol {} out of range (symbols={n})", row.line, row.s));
+        }
+        if doc.defs.windows(2).any(|w| w[0].sort_key() > w[1].sort_key()) {
+            return Err(format!("{at}: defs of {p:?} are not sorted by (line, s, name)"));
+        }
+        if doc.refs.windows(2).any(|w| w[0].sort_key() > w[1].sort_key()) {
+            return Err(format!("{at}: refs of {p:?} are not sorted by (line, s, call, write, import)"));
+        }
+    }
+    Ok(())
+}
+
+// ===========================================================================
 // Untrusted-text redaction
 // ===========================================================================
 
@@ -1220,5 +1545,231 @@ mod tests {
         ] {
             assert_eq!(redact_untrusted(keep), (keep.to_string(), 0), "{keep:?}");
         }
+    }
+
+    // --- SCIP index snapshot (CE.1a) ---
+
+    fn ref_row(s: u32, line: u32) -> ScipRefRow {
+        ScipRefRow { s, line, call: false, write: false, import: false }
+    }
+
+    fn scip_sample() -> (ScipMeta, Vec<ScipDocumentRecord>, Vec<ScipSymbolRecord>) {
+        let meta = ScipMeta::new("scip-python".into(), "0.6.0".into(), String::new(), 1);
+        let documents = vec![
+            ScipDocumentRecord {
+                path: "a/x.py".into(),
+                language: "python".into(),
+                source_hash: source_hash(b"def run():\n"),
+                defs: vec![ScipDefRow { s: 0, line: 3, name: "run".into() }],
+                refs: vec![ScipRefRow { call: true, ..ref_row(1, 7) }],
+            },
+            ScipDocumentRecord {
+                path: "b/y.py".into(),
+                language: "python".into(),
+                source_hash: source_hash(b"total = 0\n"),
+                defs: vec![],
+                refs: vec![ScipRefRow { write: true, ..ref_row(0, 2) }],
+            },
+        ];
+        let symbols = vec![
+            ScipSymbolRecord { id: 0, symbol: "scip-python python app 0.1 `a.x`/run().".into(), implements: vec![] },
+            ScipSymbolRecord { id: 1, symbol: "scip-python python app 0.1 `b.y`/Job#run().".into(), implements: vec![0] },
+        ];
+        (meta, documents, symbols)
+    }
+
+    fn scip_files(root: &Path) -> [Vec<u8>; 3] {
+        [SCIP_DOCUMENTS_FILE, SCIP_SYMBOLS_FILE, META_FILE].map(|f| std::fs::read(scip_dir(root).join(f)).unwrap())
+    }
+
+    #[test]
+    fn source_hash_is_data_hash_of_the_bytes() {
+        assert_eq!(source_hash(b"abc"), data_hash(&[b"abc"]));
+        assert_eq!(source_hash(b""), "ef46db3751d8e999");
+    }
+
+    #[test]
+    fn scip_round_trips() {
+        let root = tmp_root("scip-roundtrip");
+        let (meta, documents, symbols) = scip_sample();
+        let written = write_scip(&root, meta, &documents, &symbols).unwrap();
+        assert_eq!((written.documents, written.symbols, written.skipped_documents), (2, 2, 1));
+        assert_eq!((written.version, written.generator.as_str()), (SCIP_VERSION, SCIP_GENERATOR));
+        let [docs_bytes, syms_bytes, _] = scip_files(&root);
+        assert_eq!(written.data_hash, data_hash(&[&docs_bytes, &syms_bytes]));
+
+        let snap = read_scip(&root).expect("complete snapshot");
+        assert_eq!(snap, ScipSnapshot { meta: written, documents: documents.clone(), symbols });
+
+        // Compact rows: false flags and an empty `implements` are omitted.
+        let docs = String::from_utf8(docs_bytes).unwrap();
+        let lines: Vec<&str> = docs.lines().collect();
+        let h = &documents[0].source_hash;
+        assert_eq!(
+            lines[0],
+            format!(
+                r#"{{"path":"a/x.py","language":"python","source_hash":"{h}","defs":[{{"s":0,"line":3,"name":"run"}}],"refs":[{{"s":1,"line":7,"call":true}}]}}"#
+            )
+        );
+        assert!(lines[1].ends_with(r#""defs":[],"refs":[{"s":0,"line":2,"write":true}]}"#), "{}", lines[1]);
+        let syms = String::from_utf8(syms_bytes).unwrap();
+        assert_eq!(
+            syms.lines().collect::<Vec<_>>(),
+            [
+                r#"{"id":0,"symbol":"scip-python python app 0.1 `a.x`/run()."}"#,
+                r#"{"id":1,"symbol":"scip-python python app 0.1 `b.y`/Job#run().","implements":[0]}"#,
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tampered_scip_is_incomplete() {
+        let root = tmp_root("scip-tampered");
+        let (meta, documents, symbols) = scip_sample();
+        let dir = scip_dir(&root);
+        assert_eq!(read_scip(&root), None, "never imported");
+
+        // One byte appended to documents.jsonl.
+        write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        let path = dir.join(SCIP_DOCUMENTS_FILE);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(b' ');
+        std::fs::write(&path, &bytes).unwrap();
+        let reason = load_scip(&dir).unwrap_err();
+        assert!(reason.starts_with("data_hash mismatch"), "{reason}");
+        assert_eq!(read_scip(&root), None);
+
+        // Another version.
+        let written = write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        let other = ScipMeta { version: 2, ..written.clone() };
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec(&other).unwrap()).unwrap();
+        assert!(load_scip(&dir).unwrap_err().contains("version 2"));
+        assert_eq!(read_scip(&root), None);
+
+        // No meta: a write that never finished.
+        write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        std::fs::remove_file(dir.join(META_FILE)).unwrap();
+        assert_eq!(load_scip(&dir).unwrap_err(), "meta.json absent");
+        assert_eq!(read_scip(&root), None);
+
+        // A data file missing.
+        write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        std::fs::remove_file(dir.join(SCIP_SYMBOLS_FILE)).unwrap();
+        assert_eq!(read_scip(&root), None);
+
+        // A meta whose counts lie.
+        let written = write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        let lying = ScipMeta { symbols: 3, ..written };
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
+        assert!(load_scip(&dir).unwrap_err().starts_with("row counts"));
+
+        // A hand-written snapshot whose hash matches but whose row names a
+        // symbol that does not exist: the reader holds the writer's rules.
+        let docs = b"{\"path\":\"a.py\",\"language\":\"python\",\"source_hash\":\"0\",\"defs\":[],\"refs\":[{\"s\":5,\"line\":0}]}\n";
+        let syms = b"{\"id\":0,\"symbol\":\"s\"}\n";
+        std::fs::write(dir.join(SCIP_DOCUMENTS_FILE), docs).unwrap();
+        std::fs::write(dir.join(SCIP_SYMBOLS_FILE), syms).unwrap();
+        let mut hand = ScipMeta::new("t".into(), "1".into(), String::new(), 0);
+        (hand.documents, hand.symbols, hand.data_hash) = (1, 1, data_hash(&[docs, syms]));
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec(&hand).unwrap()).unwrap();
+        assert!(load_scip(&dir).unwrap_err().contains("names symbol 5 out of range"));
+        assert_eq!(read_scip(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unsorted_or_dangling_input_is_refused() {
+        let (meta, documents, symbols) = scip_sample();
+        let refused = |tag: &str, documents: &[ScipDocumentRecord], symbols: &[ScipSymbolRecord], want: &str| {
+            let root = tmp_root(&format!("scip-refused-{tag}"));
+            let err = write_scip(&root, meta.clone(), documents, symbols).unwrap_err();
+            assert!(err.contains(want), "{tag}: {err}");
+            assert!(!scip_dir(&root).join(META_FILE).exists(), "{tag}: nothing written");
+            let _ = std::fs::remove_dir_all(&root);
+        };
+
+        let mut reversed = documents.clone();
+        reversed.reverse();
+        refused("doc-order", &reversed, &symbols, "does not sort after");
+        let mut dup = documents.clone();
+        dup[1].path = dup[0].path.clone();
+        refused("doc-dup", &dup, &symbols, "does not sort after");
+
+        let mut dangling = documents.clone();
+        dangling[1].refs[0].s = 2;
+        refused("ref-dangling", &dangling, &symbols, "names symbol 2 out of range");
+        let mut dangling = documents.clone();
+        dangling[0].defs[0].s = 9;
+        refused("def-dangling", &dangling, &symbols, "names symbol 9 out of range");
+        let mut bad_impl = symbols.clone();
+        bad_impl[1].implements = vec![2];
+        refused("impl-dangling", &documents, &bad_impl, "implements id 2 out of range");
+        bad_impl[0].implements = vec![1, 1];
+        refused("impl-order", &documents, &bad_impl, "not strictly ascending");
+
+        let mut ids = symbols.clone();
+        ids[1].id = 5;
+        refused("ids", &documents, &ids, "ids run 0..2");
+        let mut names = symbols.clone();
+        names.swap(0, 1);
+        (names[0].id, names[1].id) = (0, 1);
+        refused("symbol-order", &documents, &names, "does not sort after");
+
+        let mut rows = documents.clone();
+        rows[0].refs = vec![ref_row(1, 9), ref_row(0, 8)];
+        refused("row-order", &rows, &symbols, "refs of \"a/x.py\" are not sorted");
+        rows[0].refs = vec![ref_row(1, 7)];
+        rows[0].defs.push(ScipDefRow { s: 0, line: 3, name: "ran".into() });
+        refused("def-order", &rows, &symbols, "defs of \"a/x.py\" are not sorted");
+
+        for bad in ["", "/etc/hosts", "../../etc/passwd", "a/../../b"] {
+            let mut outside = documents.clone();
+            outside[0].path = bad.into();
+            refused("path", &outside, &symbols, "is not repo-relative");
+        }
+
+        let root = tmp_root("scip-refused-version");
+        let err = write_scip(&root, ScipMeta { version: 2, ..meta.clone() }, &documents, &symbols).unwrap_err();
+        assert!(err.contains("version 2"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Equal rows are allowed (`f(f(x))` references `f` twice on one line).
+        let root = tmp_root("scip-equal-rows");
+        let mut twice = documents.clone();
+        twice[0].refs = vec![ref_row(1, 7), ref_row(1, 7)];
+        write_scip(&root, meta.clone(), &twice, &symbols).unwrap();
+        let before = scip_files(&root);
+        // A refused write leaves the snapshot already there untouched.
+        assert!(write_scip(&root, meta, &reversed, &symbols).is_err());
+        assert_eq!(scip_files(&root), before);
+        assert_eq!(read_scip(&root).map(|s| s.documents), Some(twice));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_is_byte_stable() {
+        let root = tmp_root("scip-stable");
+        let (meta, documents, symbols) = scip_sample();
+        write_scip(&root, meta.clone(), &documents, &symbols).unwrap();
+        let first = scip_files(&root);
+        write_scip(&root, meta, &documents, &symbols).unwrap();
+        assert_eq!(first, scip_files(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_scip_writes_no_gitignore() {
+        let root = tmp_root("scip-files");
+        let (meta, documents, symbols) = scip_sample();
+        write_scip(&root, meta, &documents, &symbols).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(scip_dir(&root))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, [SCIP_DOCUMENTS_FILE, META_FILE, SCIP_SYMBOLS_FILE]);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
