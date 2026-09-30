@@ -16,7 +16,7 @@ Check the file in. It is an input, not a cache.
 | sections | kind | applied | `--no-overlay` |
 |---|---|---|---|
 | `[walk]`, `[[project]]`, `[entrypoints]` | user config | always | still applied |
-| `[[constraint]]`, `[[decision]]`, `[[note]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
+| `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge -> CONSTRAINT / DECISION / CONV cells | always | still applied |
 | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay: inference written by a model or a person | by default | skipped |
 
 Provenance: every node, edge or cell the overlay creates carries an ORIGIN cell. An `origin = "llm"`
@@ -80,10 +80,29 @@ origin = "human"
 
 [[constraint]]
 id = "web-no-db"
-kind = "forbid_edge"                      # forbid_edge (needs from + to) | no_cycle | invariant (needs text)
+kind = "forbid_edge"                      # forbid_edge (needs from + to) | no_cycle | invariant (needs text) | allow
 from = "web"
 to = "services/api"
 categories = ["CALLS"]                    # optional; edge category names
+
+[[component]]                             # the reflexion model: see "Reflexion model" below
+name = "web"
+paths = ["web"]                           # repo-relative paths or project labels; one path, one component
+[[component]]
+name = "api"
+paths = ["services/api"]
+text = "orders and payments"              # optional
+
+[[layer]]                                 # layers rank in file order, top first
+name = "ui"
+components = ["web"]
+strict = false                            # true: may use the NEXT layer only
+
+[[constraint]]
+id = "web-uses-api"
+kind = "allow"                            # from / to are [[component]] names
+from = "web"
+to = "api"
 
 [[decision]]
 id = "adr-7"
@@ -97,8 +116,10 @@ text = "retries are safe"                 # 1..=4096 chars; id defaults to note#
 by = "james"
 ```
 
-`origin` is accepted on `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` and `[[constraint]]`.
+`origin` is accepted on `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]`, `[[constraint]]` and `[[component]]`.
 Stanza ids are 1-128 characters with no control characters, unique within their section.
+Component and layer names are 1-118 characters (their entry ids are `component:<name>` /
+`layer:<name>`, so a `[[constraint]]` id may not start with either prefix).
 Every `*_arg` is a 0-based positional index, at most 8.
 
 ## `[[wrapper]]`: call sites of a project's own helpers
@@ -169,11 +190,61 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
   - a `route_prefix` that does not start with `/` or contains whitespace
   - a wrapper whose argument layout does not fit its kind (a `data_entity` wrapper without
     `name_arg`, or with a `flavor` other than `sql` / `nosql` / `graph`)
-  - an unknown constraint kind, or one missing its required fields
-  - a duplicate id
+  - an unknown constraint kind, or one missing its required fields; `kind = "component"` or
+    `"layer"` in a `[[constraint]]` (the model is declared only through its own sections)
+  - an `allow` whose `from` / `to` is not a kept `[[component]]`, names one component twice,
+    or sets `scope`
+  - a component with no paths, an empty path, a path that leaves the repo (`..`), or a path
+    an earlier component already claims (exact-equal paths only; nested paths are legal)
+  - a layer with no components, or naming a component that is not declared or already sits
+    in another layer
+  - a duplicate id, or a duplicate component or layer name
   - a constant name outside `[A-Za-z_][A-Za-z0-9_.]*`
   - an invalid skip pattern
   - a project path that is the repo root or leaves it
+
+## Reflexion model
+
+`glia check` rules (`forbid_edge`, `no_cycle`) judge one pair of scopes at a time. A reflexion
+model (Murphy, Notkin and Sullivan) states the architecture once: the components, the code each
+owns, and the dependencies allowed between them. The checker then reports what the code does
+against that model.
+
+- `[[component]]` maps a `name` to `paths`: repo-relative paths (`.` is the repo root) or
+  project labels. A file belongs to the component with the longest path above it, so
+  `web/admin` can be carved out of `web`. Optional: `text`, `origin`, `anchor`.
+- `[[layer]]` groups components. Layers rank in file order, top first. A component may use a
+  component of any lower layer; with `strict = true`, only of the next layer down. A use
+  within one layer, or upward, is not allowed.
+- `[[constraint]] kind = "allow"` permits `from` -> `to` between two components. `categories`
+  (edge category names) narrows the edges the model checks, as on `forbid_edge`.
+
+Storage. Each stanza is a CONSTRAINT entry (source `overlay`), so a loaded `.gmap` can be
+checked without the file: a component is `{"id":"component:<name>","kind":"component","name",
+"paths":[resolved],"paths_raw":[..],...}` (paths resolved like a rule's scope, so a label is
+stored as its path), a layer `{"id":"layer:<name>","kind":"layer","name","rank","components",
+"strict"}` (rank 0 is the top), and an allow keeps `from` / `to` as component names. Two paths
+that resolve to one directory (a label and its path) count as one path claimed twice, and the
+build rejects the later component.
+
+Anchors. A component with `anchor` hangs on that qname. Otherwise it hangs on the PROJECT at its
+first path, else the repo root's PROJECT, else (a repo with no root manifest) the smallest-id
+MODULE under its first path. A layer, and an allow without `anchor`, hang on the repo root's
+PROJECT, else wherever their first named component hung (the layer's first component, the
+allow's `from`).
+
+Evaluation (`glia check`, CC.5b). Every edge in the checked categories between two different
+components is a dependency. An allowed dependency is a convergence. A dependency the model does
+not allow is a divergence, reported as a violation with located evidence. An allow with no
+dependency behind it is an absence: a FACT about the graph as built, with the coverage caveats of
+the checked categories, never a violation. A model with components only (no layer, no allow) is
+open: the dependency matrix is reported as observed and nothing diverges. Files that no
+component owns are counted as unmapped.
+
+A build with a model prints one line per repo:
+`[declared] model repo=<label> components=<c> layers=<l> allows=<a> anchored=<n> orphaned=<o>`,
+and a detail line for each stanza that did not anchor or was rejected. Component paths resolve
+at build time, like rule scopes: rebuild after adding a project.
 
 ## What the overlay cannot do
 
@@ -197,7 +268,7 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
    be removed.
 
 On every build that finds the file, stderr carries
-`[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N) errors=E`.
+`[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N component=N layer=N) errors=E`.
 The counts are skip patterns for `walk`, qname patterns for `entrypoints`, keys for
 `constants`, and stanzas for every other section.
 

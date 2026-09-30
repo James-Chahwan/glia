@@ -7,7 +7,7 @@
 //! | section | kind | consumer | `--no-overlay` |
 //! |---|---|---|---|
 //! | `[walk]`, `[[project]]`, `[entrypoints]` | user config | LF.3a / LF.3b | still applied |
-//! | `[[constraint]]`, `[[decision]]`, `[[note]]` | declared knowledge | LF.4a | still applied |
+//! | `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge | LF.4a (+CC.5a) | still applied |
 //! | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay (inference) | LF.2d / LF.2e (+LG.3d) / LF.2b | skipped |
 //!
 //! Loading never panics and never bails a build (pipeline stages emit empty):
@@ -45,9 +45,9 @@ pub const MAX_ID_CHARS: usize = 128;
 /// `[[note]] text`: 1..=4096 chars (the CONV entry rule).
 pub const MAX_NOTE_CHARS: usize = 4096;
 /// Section names in `section_counts` / marker order.
-pub const SECTIONS: [&str; 10] = [
+pub const SECTIONS: [&str; 12] = [
     "walk", "project", "entrypoints", "constants", "route_prefix", "wrapper", "edge", "constraint",
-    "decision", "note",
+    "decision", "note", "component", "layer",
 ];
 /// Edge categories an `[[edge]]` may never declare: structural (DEFINES /
 /// CONTAINS) or owned by the git-history snapshot (CO_CHANGES).
@@ -60,8 +60,21 @@ pub const WRAPPER_KINDS: &[&str] = &["http", "queue_producer", "queue_consumer",
 pub const DATA_ENTITY_FLAVORS: &[&str] = &["sql", "nosql", "graph"];
 /// The flavor a `data_entity` wrapper takes when it names none.
 pub const DEFAULT_DATA_ENTITY_FLAVOR: &str = "nosql";
-/// `[[constraint]] kind` values.
-pub const CONSTRAINT_KINDS: &[&str] = &["forbid_edge", "no_cycle", "invariant"];
+/// `[[constraint]] kind` values. `allow` (CC.5a) permits a dependency between
+/// two `[[component]]`s of the reflexion model.
+pub const CONSTRAINT_KINDS: &[&str] = &["forbid_edge", "no_cycle", "invariant", "allow"];
+/// The CONSTRAINT entry kinds of the reflexion model's declarations (CC.5a).
+/// `external_inputs::validate_entry` and `parse_constraints` accept them; the
+/// `[[constraint]]` loader never does: a component is declared only through
+/// `[[component]]`, a layer only through `[[layer]]`.
+pub const MODEL_KINDS: &[&str] = &["component", "layer"];
+/// A `[[component]]`'s CONSTRAINT entry id is `component:<name>`.
+pub const COMPONENT_ID_PREFIX: &str = "component:";
+/// A `[[layer]]`'s CONSTRAINT entry id is `layer:<name>`.
+pub const LAYER_ID_PREFIX: &str = "layer:";
+/// `[[component]]` / `[[layer]]` names: 1..=118 chars, no control chars, so
+/// the `component:<name>` entry id stays within [`MAX_ID_CHARS`].
+pub const MAX_MODEL_NAME_CHARS: usize = MAX_ID_CHARS - COMPONENT_ID_PREFIX.len();
 /// Accepted fixed `[[wrapper]] method` values (case-insensitive).
 pub const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 /// Generated `[[note]]` ids are `note#<n>`; a declared id may not use the prefix.
@@ -104,6 +117,12 @@ pub struct GliaConfig {
     /// Notes -> CONV cells (LF.4a).
     #[serde(default)]
     pub note: Vec<Spanned<NoteDecl>>,
+    /// Reflexion-model components -> CONSTRAINT `component` entries (CC.5a).
+    #[serde(default)]
+    pub component: Vec<Spanned<ComponentDecl>>,
+    /// Reflexion-model layers, top first -> CONSTRAINT `layer` entries (CC.5a).
+    #[serde(default)]
+    pub layer: Vec<Spanned<LayerDecl>>,
 }
 
 /// `[walk]`: gitignore-syntax patterns anchored at the repo root. They only
@@ -127,10 +146,15 @@ pub struct ProjectDecl {
 impl ProjectDecl {
     /// `path` without a leading `./` or `/` and without a trailing `/`.
     pub fn rel_path(&self) -> &str {
-        let p = self.path.trim();
-        let p = p.strip_prefix("./").unwrap_or(p);
-        p.trim_start_matches('/').trim_end_matches('/')
+        rel_path_of(&self.path)
     }
+}
+
+/// `p` without surrounding whitespace, a leading `./` or `/`, or a trailing `/`.
+fn rel_path_of(p: &str) -> &str {
+    let p = p.trim();
+    let p = p.strip_prefix("./").unwrap_or(p);
+    p.trim_start_matches('/').trim_end_matches('/')
 }
 
 /// `[entrypoints]`: exact qnames, or `<prefix>::*` for the prefix's descendants.
@@ -305,6 +329,52 @@ pub struct NoteDecl {
     pub by: Option<String>,
 }
 
+/// `[[component]]`: one component of the reflexion model (CC.5a) - a name and
+/// the repo-relative paths or project labels whose code it owns. Nested paths
+/// are legal (the longest path owns a file); one path belongs to one component.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentDecl {
+    pub name: String,
+    /// Required and non-empty: repo-relative paths (`.` = the repo root) or
+    /// project labels.
+    pub paths: Vec<String>,
+    /// Exact qname to hang the entry on (else the PROJECT at its first path).
+    #[serde(default)]
+    pub anchor: Option<String>,
+    /// Optional description.
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub origin: Origin,
+}
+
+impl ComponentDecl {
+    /// Each path as [`ProjectDecl::rel_path`] normalises it; `.` for the root.
+    pub fn rel_paths(&self) -> Vec<String> {
+        self.paths
+            .iter()
+            .map(|p| match rel_path_of(p) {
+                "" => ".".to_string(),
+                r => r.to_string(),
+            })
+            .collect()
+    }
+}
+
+/// `[[layer]]`: one layer of the reflexion model (CC.5a). Layers rank in file
+/// order, top first: a component may use a component of any LOWER layer (a
+/// later stanza), or with `strict = true` only of the next one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerDecl {
+    pub name: String,
+    /// Declared `[[component]]` names; each sits in at most one layer.
+    pub components: Vec<String>,
+    #[serde(default)]
+    pub strict: bool,
+}
+
 /// Who authored a stanza. Defaults to `llm`: an unmarked stanza is inference.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -360,7 +430,7 @@ impl LoadedConfig {
     /// Per-section entry counts in [`SECTIONS`] order: `walk` counts skip
     /// patterns, `entrypoints` qname patterns, `constants` keys, every other
     /// section its stanzas. Feeds the `[overlay] loaded` marker.
-    pub fn section_counts(&self) -> [(&'static str, usize); 10] {
+    pub fn section_counts(&self) -> [(&'static str, usize); 12] {
         let c = &self.config;
         let n = [
             c.walk.skip.len(),
@@ -373,6 +443,8 @@ impl LoadedConfig {
             c.constraint.len(),
             c.decision.len(),
             c.note.len(),
+            c.component.len(),
+            c.layer.len(),
         ];
         std::array::from_fn(|i| (SECTIONS[i], n[i]))
     }
@@ -499,15 +571,87 @@ impl LoadedConfig {
             }
         });
 
+        // The model's sections go before `[[constraint]]`: an allow names
+        // components, a layer names components, and both are checked against
+        // the components that were KEPT.
+        let mut names = BTreeSet::new();
+        let mut claimed: BTreeMap<String, String> = BTreeMap::new();
+        cfg.component = self.keep("component", cfg.component, &mut errors, |c| {
+            check_model_name(&c.name)?;
+            if names.contains(&c.name) {
+                return Err(format!("duplicate name {:?}", c.name));
+            }
+            if c.paths.is_empty() {
+                return Err("paths must name at least one path or project label".into());
+            }
+            let mut mine = BTreeSet::new();
+            for (raw, rel) in c.paths.iter().zip(c.rel_paths()) {
+                if raw.trim().is_empty() {
+                    return Err("a path is empty (use \".\" for the repo root)".into());
+                }
+                if rel.split('/').any(|seg| seg == "..") {
+                    return Err(format!("path {raw:?} leaves the repo"));
+                }
+                if let Some(owner) = claimed.get(&rel) {
+                    return Err(format!("path {rel:?} is already claimed by component {owner:?}"));
+                }
+                if !mine.insert(rel.clone()) {
+                    return Err(format!("path {rel:?} is listed twice"));
+                }
+            }
+            names.insert(c.name.clone());
+            for rel in mine {
+                claimed.insert(rel, c.name.clone());
+            }
+            Ok(())
+        });
+        let components: BTreeSet<String> = cfg.component.iter().map(|c| c.get_ref().name.clone()).collect();
+
+        let mut layers = BTreeSet::new();
+        let mut layer_of: BTreeMap<String, String> = BTreeMap::new();
+        cfg.layer = self.keep("layer", cfg.layer, &mut errors, |l| {
+            check_model_name(&l.name)?;
+            if layers.contains(&l.name) {
+                return Err(format!("duplicate name {:?}", l.name));
+            }
+            if l.components.is_empty() {
+                return Err("components must name at least one [[component]]".into());
+            }
+            let mut mine = BTreeSet::new();
+            for c in &l.components {
+                if !components.contains(c) {
+                    return Err(format!("component {c:?} is not a declared [[component]]"));
+                }
+                if let Some(other) = layer_of.get(c) {
+                    return Err(format!("component {c:?} is already in layer {other:?}"));
+                }
+                if !mine.insert(c.clone()) {
+                    return Err(format!("component {c:?} is listed twice"));
+                }
+            }
+            layers.insert(l.name.clone());
+            for c in mine {
+                layer_of.insert(c, l.name.clone());
+            }
+            Ok(())
+        });
+
         let mut ids = BTreeSet::new();
         cfg.constraint = self.keep("constraint", cfg.constraint, &mut errors, |c| {
             check_id(&c.id)?;
+            if let Some(p) = [COMPONENT_ID_PREFIX, LAYER_ID_PREFIX].iter().find(|p| c.id.starts_with(**p)) {
+                return Err(format!("id {:?} uses the reserved {p:?} prefix", c.id));
+            }
             let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
             match c.kind.as_str() {
                 "forbid_edge" if !(present(&c.from) && present(&c.to)) => {
                     return Err("kind forbid_edge needs `from` and `to`".into());
                 }
                 "invariant" if !present(&c.text) => return Err("kind invariant needs `text`".into()),
+                "allow" => check_allow(c, &components)?,
+                k if MODEL_KINDS.contains(&k) => {
+                    return Err(format!("kind {k:?} is declared through [[{k}]], not [[constraint]]"));
+                }
                 k if !CONSTRAINT_KINDS.contains(&k) => {
                     return Err(format!("kind {k:?} is not one of {}", CONSTRAINT_KINDS.join(" | ")));
                 }
@@ -643,6 +787,36 @@ fn check_id(id: &str) -> Result<(), String> {
     let n = id.chars().count();
     if n == 0 || n > MAX_ID_CHARS || id.chars().any(char::is_control) {
         return Err(format!("id {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"));
+    }
+    Ok(())
+}
+
+/// A `[[component]]` / `[[layer]]` name: 1..=[`MAX_MODEL_NAME_CHARS`] chars,
+/// no control chars, not blank.
+fn check_model_name(name: &str) -> Result<(), String> {
+    let n = name.chars().count();
+    if name.trim().is_empty() || n > MAX_MODEL_NAME_CHARS || name.chars().any(char::is_control) {
+        return Err(format!("name {name:?} must be 1..={MAX_MODEL_NAME_CHARS} chars with no control chars"));
+    }
+    Ok(())
+}
+
+/// `[[constraint]] kind = "allow"`: `from` and `to` name two different kept
+/// `[[component]]`s; `scope` is not taken (the endpoints are components).
+fn check_allow(c: &ConstraintDecl, components: &BTreeSet<String>) -> Result<(), String> {
+    let (Some(from), Some(to)) = (c.from.as_deref(), c.to.as_deref()) else {
+        return Err("kind allow needs `from` and `to` (component names)".into());
+    };
+    for end in [from, to] {
+        if !components.contains(end) {
+            return Err(format!("kind allow names {end:?}, which is not a declared [[component]]"));
+        }
+    }
+    if from == to {
+        return Err(format!("kind allow from {from:?} to itself: a component always uses itself"));
+    }
+    if c.scope.is_some() {
+        return Err("kind allow takes no `scope` (from / to are component names)".into());
     }
     Ok(())
 }
@@ -792,6 +966,14 @@ status = "accepted"
 anchor = "services::api::app::charge"
 text = "retries are safe"
 by = "james"
+
+[[component]]
+name = "api"
+paths = ["services/api"]
+
+[[layer]]
+name = "core"
+components = ["api"]
 "#;
 
     fn edge_at_line(line: usize, category: &str) -> String {
@@ -824,7 +1006,7 @@ by = "james"
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [2, 1, 2, 2, 1, 4, 1, 1, 1, 1]);
+        assert_eq!(counts, [2, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1]);
     }
 
     #[test]
@@ -1015,6 +1197,122 @@ text = "kept"
         assert_eq!(l.config.constraint[0].get_ref().id, "d");
         assert!(l.config.decision.is_empty());
         assert_eq!(l.config.note.len(), 1);
+    }
+
+    /// CC.5a: every model rule drops only its stanza, with one error line
+    /// naming the stanza's header line; the survivors keep their order.
+    #[test]
+    fn component_and_layer_checks() {
+        let text = r#"version = 1
+[[component]]
+name = "web"
+paths = ["web", "shared/ui"]
+[[component]]
+name = "api"
+paths = ["./services/api/"]
+[[component]]
+name = "web"
+paths = ["web2"]
+[[component]]
+name = "escape"
+paths = ["../outside"]
+[[component]]
+name = "twice"
+paths = ["services/api"]
+[[layer]]
+name = "ui"
+components = ["web"]
+[[layer]]
+name = "ghost"
+components = ["nope"]
+[[layer]]
+name = "core"
+components = ["api", "web"]
+[[constraint]]
+id = "web-uses-api"
+kind = "allow"
+from = "web"
+to = "api"
+[[constraint]]
+id = "web-uses-ghost"
+kind = "allow"
+from = "web"
+to = "ghost"
+"#;
+        let l = parse_str(text);
+        let got: Vec<(&str, &str)> = l
+            .errors
+            .iter()
+            .map(|e| {
+                let (at, rest) = e.split_once(": ").unwrap_or((e, ""));
+                (at, rest.split(' ').next().unwrap_or(""))
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (".glia/overlay.toml:8", "[[component]]"),
+                (".glia/overlay.toml:11", "[[component]]"),
+                (".glia/overlay.toml:14", "[[component]]"),
+                (".glia/overlay.toml:20", "[[layer]]"),
+                (".glia/overlay.toml:23", "[[layer]]"),
+                (".glia/overlay.toml:31", "[[constraint]]"),
+            ],
+            "{:#?}",
+            l.errors
+        );
+        for (e, needle) in l.errors.iter().zip([
+            "duplicate name \"web\"",
+            "leaves the repo",
+            "already claimed by component \"api\"",
+            "\"nope\" is not a declared [[component]]",
+            "\"web\" is already in layer \"ui\"",
+            "\"ghost\", which is not a declared [[component]]",
+        ]) {
+            assert!(e.contains(needle) && e.ends_with("(stanza dropped)"), "{e}");
+        }
+        let names: Vec<&str> = l.config.component.iter().map(|c| c.get_ref().name.as_str()).collect();
+        assert_eq!(names, ["web", "api"]);
+        assert_eq!(l.config.component[1].get_ref().rel_paths(), ["services/api"]);
+        let layers: Vec<&str> = l.config.layer.iter().map(|x| x.get_ref().name.as_str()).collect();
+        assert_eq!(layers, ["ui"]);
+        assert!(!l.config.layer[0].get_ref().strict, "strict defaults to false");
+        let ids: Vec<&str> = l.config.constraint.iter().map(|c| c.get_ref().id.as_str()).collect();
+        assert_eq!(ids, ["web-uses-api"]);
+        let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
+        assert_eq!(counts, [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 2, 1]);
+
+        // One stanza at a time: each is dropped with one line at its header.
+        let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\".\"]\n";
+        let bad = [
+            ("[[constraint]]\nid = \"c\"\nkind = \"component\"", "declared through [[component]]"),
+            ("[[constraint]]\nid = \"c\"\nkind = \"layer\"", "declared through [[layer]]"),
+            ("[[constraint]]\nid = \"component:web\"\nkind = \"no_cycle\"", "reserved"),
+            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"", "needs `from` and `to`"),
+            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"web\"", "to itself"),
+            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\nscope = \"web\"", "no `scope`"),
+            ("[[constraint]]\nid = \"c\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"api\"\ncategories = [\"calls\"]", "calls"),
+            ("[[component]]\nname = \"x\"\npaths = []", "at least one"),
+            ("[[component]]\nname = \"x\"\npaths = [\" \"]", "empty"),
+            ("[[component]]\nname = \"x\"\npaths = [\"a\", \"./a/\"]", "listed twice"),
+            ("[[component]]\nname = \"x\"\npaths = [\"./\"]", "already claimed by component \"api\""),
+            ("[[component]]\nname = \"\"\npaths = [\"x\"]", "name"),
+            ("[[layer]]\nname = \"l\"\ncomponents = []", "at least one"),
+            ("[[layer]]\nname = \"l\"\ncomponents = [\"web\", \"web\"]", "listed twice"),
+        ];
+        for (body, needle) in bad {
+            let l = parse_str(&format!("version = 1\n{model}{body}\n"));
+            assert_eq!(l.errors.len(), 1, "{body}: {:?}", l.errors);
+            assert!(l.errors[0].contains(":8: [[") && l.errors[0].contains(needle), "{body}: {}", l.errors[0]);
+            let n = l.config.constraint.len() + l.config.layer.len() + l.config.component.len();
+            assert_eq!(n, 2, "{body}: only the two model components survive");
+        }
+        let long = "x".repeat(MAX_MODEL_NAME_CHARS + 1);
+        let l = parse_str(&format!("version = 1\n[[component]]\nname = \"{long}\"\npaths = [\"x\"]\n"));
+        assert!(l.errors.len() == 1 && l.config.component.is_empty(), "{:?}", l.errors);
+        // A missing `paths` is a schema error: the whole file is ignored.
+        let l = parse_str("version = 1\n[[component]]\nname = \"x\"\n");
+        assert!(l.errors.len() == 1 && l.errors[0].contains("paths"), "{:?}", l.errors);
     }
 
     #[test]

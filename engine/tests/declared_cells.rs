@@ -9,9 +9,9 @@
 
 use std::path::Path;
 
-use glia_code_domain::cell_type;
-use glia_code_domain::external_inputs::{ConstraintKind, parse_constraints};
-use glia_core::{CellPayload, CellTypeId};
+use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule, parse_constraints};
+use glia_code_domain::{cell_type, glia_config};
+use glia_core::{CellPayload, CellTypeId, NodeId};
 use glia_engine::{
     BuildOptions, GenerateResult, ParseCache, generate_one, generate_one_opts, generate_one_with_cache,
 };
@@ -222,6 +222,128 @@ fn declared_changes_only_its_node_cells() {
         }
     }
     assert_eq!(changed, 2, "project:web and services::api::app::charge");
+}
+
+/// CC.5a: the reflexion model's stanzas are stored as CONSTRAINT entries.
+/// With no root manifest, each component hangs on the PROJECT at its first
+/// path, and each layer / allow on its first component's anchor.
+#[test]
+fn reflexion_model_is_stored_and_anchored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("tier");
+    let overlay = "version = 1
+
+[[component]]
+name = \"web\"
+paths = [\"web\"]
+text = \"the browser app\"
+
+[[component]]
+name = \"api\"
+paths = [\"services/api\"]
+origin = \"human\"
+
+[[layer]]
+name = \"ui\"
+components = [\"web\"]
+
+[[layer]]
+name = \"core\"
+components = [\"api\"]
+
+[[constraint]]
+id = \"web-uses-api\"
+kind = \"allow\"
+from = \"web\"
+to = \"api\"
+";
+    for (path, body) in [
+        ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+        ("web/ui.py", "def render():\n    return 1\n"),
+        ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
+        ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+        (".glia/overlay.toml", overlay),
+    ] {
+        std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(path), body).unwrap();
+    }
+    let loaded = glia_config::parse_str(overlay);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    let r = generate_one(dir.to_str().unwrap()).unwrap();
+
+    // What `declared_constraints` reads: every CONSTRAINT node once, in
+    // NodeId order, a node's rules in stored `(source, id)` order.
+    let mut nodes: Vec<(NodeId, String, CellPayload)> = Vec::new();
+    for g in &r.merged.graphs {
+        for n in &g.nodes {
+            if let Some(c) = n.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT)
+                && !nodes.iter().any(|(id, _, _)| *id == n.id)
+            {
+                let qname = g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                nodes.push((n.id, qname, c.payload.clone()));
+            }
+        }
+    }
+    nodes.sort_by_key(|(id, _, _)| id.0);
+    let rules: Vec<(String, ConstraintRule)> = nodes
+        .iter()
+        .flat_map(|(_, q, p)| parse_constraints(p).into_iter().map(move |rule| (q.clone(), rule)))
+        .collect();
+    assert_eq!(rules.len(), 5, "{rules:#?}");
+    let mut ids: Vec<&str> = rules.iter().map(|(_, x)| x.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["component:api", "component:web", "layer:core", "layer:ui", "web-uses-api"]);
+    let mut kinds: Vec<&str> = rules.iter().map(|(_, x)| x.kind.name()).collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, ["allow", "component", "component", "layer", "layer"]);
+    let anchor = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(q, _)| q.as_str()).unwrap();
+    assert_eq!(anchor("component:web"), "project:web");
+    assert_eq!(anchor("layer:ui"), "project:web", "a layer follows its first component");
+    assert_eq!(anchor("web-uses-api"), "project:web", "an allow follows its `from`");
+    assert_eq!(anchor("component:api"), "project:services/api");
+    assert_eq!(anchor("layer:core"), "project:services/api");
+    // One node's rules keep their stored (source, id) order.
+    let on_web: Vec<&str> =
+        rules.iter().filter(|(q, _)| q == "project:web").map(|(_, x)| x.id.as_str()).collect();
+    assert_eq!(on_web, ["component:web", "layer:ui", "web-uses-api"]);
+    let kind = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
+    assert_eq!(kind("component:api"), ConstraintKind::Component { name: "api".into(), paths: vec!["services/api".into()] });
+    assert_eq!(
+        kind("layer:core"),
+        ConstraintKind::Layer { name: "core".into(), rank: 1, components: vec!["api".into()], strict: false }
+    );
+    assert_eq!(kind("web-uses-api"), ConstraintKind::Allow { from: "web".into(), to: "api".into() });
+
+    assert_eq!(
+        cell(&r, "project:web", cell_type::CONSTRAINT),
+        [concat!(
+            r#"[{"decl":".glia/overlay.toml:3","id":"component:web","kind":"component","name":"web","origin":"llm","paths":["web"],"paths_raw":["web"],"source":"overlay","text":"the browser app"},"#,
+            r#"{"components":["web"],"decl":".glia/overlay.toml:13","id":"layer:ui","kind":"layer","name":"ui","rank":0,"source":"overlay","strict":false},"#,
+            r#"{"decl":".glia/overlay.toml:21","from":"web","id":"web-uses-api","kind":"allow","origin":"llm","source":"overlay","to":"api"}]"#,
+        )]
+    );
+    assert_eq!(
+        cell(&r, "project:services/api", cell_type::CONSTRAINT),
+        [concat!(
+            r#"[{"decl":".glia/overlay.toml:8","id":"component:api","kind":"component","name":"api","origin":"human","paths":["services/api"],"paths_raw":["services/api"],"source":"overlay"},"#,
+            r#"{"components":["api"],"decl":".glia/overlay.toml:17","id":"layer:core","kind":"layer","name":"core","rank":1,"source":"overlay","strict":false}]"#,
+        )]
+    );
+
+    // A component is declared only through [[component]]: the same component
+    // written as a [[constraint]] is a load error on its own line.
+    let as_constraint = glia_config::parse_str(
+        "version = 1\n\n[[component]]\nname = \"web\"\npaths = [\"web\"]\n\n[[constraint]]\nid = \"web\"\nkind = \"component\"\n",
+    );
+    assert_eq!(as_constraint.errors.len(), 1, "{:?}", as_constraint.errors);
+    assert!(
+        as_constraint.errors[0].starts_with(".glia/overlay.toml:7: [[constraint]]")
+            && as_constraint.errors[0].contains("declared through [[component]]"),
+        "{}",
+        as_constraint.errors[0]
+    );
+    assert_eq!(as_constraint.config.component.len(), 1);
+    assert!(as_constraint.config.constraint.is_empty());
 }
 
 /// Map of file name -> bytes for every file in a sharded output dir

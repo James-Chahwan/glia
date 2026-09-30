@@ -43,6 +43,13 @@
 //! label, a qname or a path), so a reader never re-resolves a label. An entry
 //! written through the cell API (`source` `api`) carries the scope strings as
 //! its writer gave them.
+//!
+//! THE REFLEXION MODEL (CC.5a) is stored the same way, so a loaded `.gmap` can
+//! be checked without the overlay file:
+//! - `[[component]]` -> `{"source":"overlay","id":"component:<name>","kind":"component","name","paths":[resolved],"paths_raw":[..],"text"?,"origin","decl"}`;
+//! - `[[layer]]` -> `{"source":"overlay","id":"layer:<name>","kind":"layer","name","rank":<0-based, top first>,"components":[..],"strict":bool,"decl"}`;
+//! - `[[constraint]] kind = "allow"` -> `{"source":"overlay","id","kind":"allow","from","to","categories"?,"text"?,"origin","decl"}`,
+//!   `from` / `to` the component NAMES as written (they are not scopes).
 
 use std::collections::BTreeMap;
 use std::io::{self, Write as _};
@@ -57,7 +64,7 @@ use serde_json::{Map, Value};
 
 use crate::cell_type;
 use crate::edge_category;
-use crate::glia_config::{CONSTRAINT_KINDS, MAX_ID_CHARS, MAX_NOTE_CHARS};
+use crate::glia_config::{CONSTRAINT_KINDS, MAX_ID_CHARS, MAX_NOTE_CHARS, MODEL_KINDS};
 
 /// Repo-relative path of the checked-in cell sidecar.
 pub const CELLS_FILE: &str = ".glia/cells.jsonl";
@@ -295,10 +302,16 @@ pub fn canonical(v: &Value) -> Value {
 /// Check one entry against its cell type's rules. Every entry is an object
 /// with `source` in [`ENTRY_SOURCES`] and an `id` of 1..=128 chars with no
 /// control chars.
-/// - CONSTRAINT: `kind` in `forbid_edge | no_cycle | invariant`; forbid_edge
-///   needs `from` and `to` (scope strings); `categories`, when present, are
-///   edge category NAMES; invariant needs `text`. (The `[[constraint]]` rules
-///   of `glia_config`, sharing its constants.)
+/// - CONSTRAINT: `kind` in `forbid_edge | no_cycle | invariant | allow`
+///   (`glia_config::CONSTRAINT_KINDS`) or `component | layer`
+///   (`glia_config::MODEL_KINDS`); forbid_edge needs `from` and `to` (scope
+///   strings), allow `from` and `to` (component names); `categories`, when
+///   present, are edge category NAMES; invariant needs `text`; component needs
+///   `name` and a non-empty `paths` array of non-empty strings; layer needs
+///   `name`, a u32 `rank` and a non-empty `components` array of non-empty
+///   strings, and `strict`, when present, is a bool. (The `[[constraint]]` /
+///   `[[component]]` / `[[layer]]` rules of `glia_config`, sharing its
+///   constants.)
 /// - DECISION: `title` or `text`; `status` optional (stored lowercased).
 /// - CONV: `text` of 1..=4096 chars; `by` and `at` optional strings (`at` is
 ///   the caller's opaque timestamp: glia never reads the clock).
@@ -320,14 +333,32 @@ pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
     match cell {
         c if c == cell_type::CONSTRAINT => {
             let kind = text("kind")?.unwrap_or_default();
-            if !CONSTRAINT_KINDS.contains(&kind) {
-                return Err(format!("`kind` {kind:?} is not one of {}", CONSTRAINT_KINDS.join(" | ")));
+            if !CONSTRAINT_KINDS.contains(&kind) && !MODEL_KINDS.contains(&kind) {
+                let all: Vec<&str> = CONSTRAINT_KINDS.iter().chain(MODEL_KINDS).copied().collect();
+                return Err(format!("`kind` {kind:?} is not one of {}", all.join(" | ")));
             }
-            if kind == "forbid_edge" && !(present("from")? && present("to")?) {
-                return Err("kind forbid_edge needs `from` and `to`".into());
+            if matches!(kind, "forbid_edge" | "allow") && !(present("from")? && present("to")?) {
+                return Err(format!("kind {kind} needs `from` and `to`"));
             }
             if kind == "invariant" && !present("text")? {
                 return Err("kind invariant needs `text`".into());
+            }
+            if matches!(kind, "component" | "layer") && !present("name")? {
+                return Err(format!("kind {kind} needs `name`"));
+            }
+            if kind == "component" && string_list(obj, "paths").is_none() {
+                return Err("kind component needs `paths`: a non-empty array of non-empty strings".into());
+            }
+            if kind == "layer" {
+                if obj.get("rank").and_then(Value::as_u64).and_then(|r| u32::try_from(r).ok()).is_none() {
+                    return Err("kind layer needs `rank`: an integer 0..=4294967295".into());
+                }
+                if string_list(obj, "components").is_none() {
+                    return Err("kind layer needs `components`: a non-empty array of non-empty strings".into());
+                }
+                if !matches!(obj.get("strict"), None | Some(Value::Null | Value::Bool(_))) {
+                    return Err("`strict` must be a bool".into());
+                }
             }
             text("scope")?;
             match obj.get("categories") {
@@ -366,6 +397,17 @@ pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
         c if c == cell_type::VECTOR => Err("VECTOR takes a vector payload, not an entry".into()),
         c => Err(format!("cell type {} takes no external entries", c.0)),
     }
+}
+
+/// `obj[key]` as a non-empty array of non-empty (trimmed) strings; `None` for
+/// anything else.
+fn string_list(obj: &Map<String, Value>, key: &str) -> Option<Vec<String>> {
+    let items = obj.get(key)?.as_array()?;
+    let out = items
+        .iter()
+        .map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from))
+        .collect::<Option<Vec<_>>>()?;
+    (!out.is_empty()).then_some(out)
 }
 
 /// An optional string field: absent and `null` are `None`, any other type errs.
@@ -443,15 +485,29 @@ pub enum ConstraintKind {
     NoCycle { scope: Option<String> },
     /// A statement no graph query checks.
     Invariant { text: String },
+    /// A reflexion-model component (CC.5a): the code under `paths` (resolved
+    /// repo-relative paths, `.` = the root) belongs to `name`. A declaration,
+    /// not a rule.
+    Component { name: String, paths: Vec<String> },
+    /// A reflexion-model layer (CC.5a): `rank` 0 is the top. Its components
+    /// may use those of any lower layer, or with `strict` only of rank + 1. A
+    /// declaration, not a rule.
+    Layer { name: String, rank: u32, components: Vec<String>, strict: bool },
+    /// The model permits component `from` to depend on component `to` (CC.5a).
+    Allow { from: String, to: String },
 }
 
 impl ConstraintKind {
-    /// The stored `kind` name, one of `glia_config::CONSTRAINT_KINDS`.
+    /// The stored `kind` name, one of `glia_config::CONSTRAINT_KINDS` or
+    /// `glia_config::MODEL_KINDS`.
     pub fn name(&self) -> &'static str {
         match self {
             ConstraintKind::ForbidEdge { .. } => "forbid_edge",
             ConstraintKind::NoCycle { .. } => "no_cycle",
             ConstraintKind::Invariant { .. } => "invariant",
+            ConstraintKind::Component { .. } => "component",
+            ConstraintKind::Layer { .. } => "layer",
+            ConstraintKind::Allow { .. } => "allow",
         }
     }
 }
@@ -475,9 +531,11 @@ pub struct ConstraintRule {
 /// Every well-formed rule in a CONSTRAINT payload, in stored order (sorted by
 /// `(source, id)`). An entry that is not an object, lacks a string `source` /
 /// `id`, names an unknown `kind`, lacks its kind's required field
-/// (forbid_edge `from` + `to`, invariant `text`) or has a non-string where a
-/// string belongs is skipped; a payload that is not a JSON array yields
-/// nothing. Never panics.
+/// (forbid_edge / allow `from` + `to`, invariant `text`, component `name` +
+/// a non-empty `paths` array of non-empty strings, layer `name` + a u32
+/// `rank` + a non-empty `components` array of non-empty strings) or has a
+/// non-string where a string belongs (a non-bool `strict`) is skipped; a
+/// payload that is not a JSON array yields nothing. Never panics.
 pub fn parse_constraints(payload: &CellPayload) -> Vec<ConstraintRule> {
     entry_array(payload).unwrap_or_default().iter().filter_map(constraint_rule).collect()
 }
@@ -493,6 +551,18 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
         "forbid_edge" => ConstraintKind::ForbidEdge { from: required("from")?, to: required("to")? },
         "no_cycle" => ConstraintKind::NoCycle { scope: field("scope")?.map(String::from) },
         "invariant" => ConstraintKind::Invariant { text: required("text")? },
+        "allow" => ConstraintKind::Allow { from: required("from")?, to: required("to")? },
+        "component" => ConstraintKind::Component { name: required("name")?, paths: string_list(obj, "paths")? },
+        "layer" => ConstraintKind::Layer {
+            name: required("name")?,
+            rank: u32::try_from(obj.get("rank")?.as_u64()?).ok()?,
+            components: string_list(obj, "components")?,
+            strict: match obj.get("strict") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return None,
+            },
+        },
         _ => return None,
     };
     let categories = match obj.get("categories") {
@@ -582,6 +652,36 @@ mod tests {
         assert!(ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "no_cycle"})));
         assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "invariant"})));
         assert!(!ok(cell_type::CONSTRAINT, json!({"source": "overlay", "id": "c", "kind": "other"})));
+        // CC.5a: allow needs from + to; component / layer validate like an overlay write.
+        assert!(ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "from": "web", "to": "api"})));
+        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "from": "web"})));
+        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "a", "kind": "allow", "to": "api"})));
+        assert!(ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "component:web", "kind": "component", "name": "web", "paths": ["web"]})
+        ));
+        for bad in [json!([]), json!([""]), json!("web"), json!([1])] {
+            assert!(!ok(
+                cell_type::CONSTRAINT,
+                json!({"source": "api", "id": "component:web", "kind": "component", "name": "web", "paths": bad})
+            ));
+        }
+        assert!(!ok(cell_type::CONSTRAINT, json!({"source": "api", "id": "component:x", "kind": "component", "paths": ["x"]})));
+        assert!(ok(
+            cell_type::CONSTRAINT,
+            json!({"source": "api", "id": "layer:ui", "kind": "layer", "name": "ui", "rank": 0, "components": ["web"], "strict": true})
+        ));
+        for (rank, components, strict) in [
+            (json!(-1), json!(["web"]), json!(false)),
+            (json!(1.5), json!(["web"]), json!(false)),
+            (json!(0), json!([]), json!(false)),
+            (json!(0), json!(["web"]), json!("yes")),
+        ] {
+            assert!(!ok(
+                cell_type::CONSTRAINT,
+                json!({"source": "api", "id": "layer:ui", "kind": "layer", "name": "ui", "rank": rank, "components": components, "strict": strict})
+            ));
+        }
         assert!(!ok(cell_type::VECTOR, json!({"source": "api", "id": "v"})));
         assert!(!ok(cell_type::CODE, json!({"source": "api", "id": "v"})));
     }
@@ -594,7 +694,16 @@ mod tests {
             json!({"source": "overlay", "id": "b", "kind": "no_cycle", "scope": "services/api"}),
             json!({"source": "api", "id": "c", "kind": "no_cycle"}),
             json!({"source": "api", "id": "d", "kind": "invariant", "text": "charges are idempotent"}),
+            json!({"source": "overlay", "id": "component:web", "kind": "component", "name": "web",
+                   "paths": ["web", "shared/ui"], "paths_raw": ["web", "./shared/ui"], "decl": ".glia/overlay.toml:20"}),
+            json!({"source": "overlay", "id": "layer:core", "kind": "layer", "name": "core", "rank": 1,
+                   "components": ["api"], "strict": true}),
+            json!({"source": "overlay", "id": "web-uses-api", "kind": "allow", "from": "web", "to": "api", "categories": ["CALLS"]}),
             // Malformed: each is skipped, never a panic.
+            json!({"source": "api", "id": "l", "kind": "component", "name": "x", "paths": []}),
+            json!({"source": "api", "id": "m", "kind": "layer", "name": "x", "rank": 1.5, "components": ["x"]}),
+            json!({"source": "api", "id": "n", "kind": "layer", "name": "x", "rank": 0, "components": ["x"], "strict": "no"}),
+            json!({"source": "api", "id": "o", "kind": "allow", "from": "web"}),
             json!({"source": "api", "id": "e", "kind": "forbid_edge", "from": "web"}),
             json!({"source": "api", "id": "f", "kind": "invariant", "text": "  "}),
             json!({"source": "api", "id": "g", "kind": "other"}),
@@ -616,6 +725,9 @@ mod tests {
                 ("b", "no_cycle", None),
                 ("c", "no_cycle", None),
                 ("d", "invariant", None),
+                ("component:web", "component", Some(".glia/overlay.toml:20")),
+                ("layer:core", "layer", None),
+                ("web-uses-api", "allow", None),
             ]
         );
         assert_eq!(rules[0].kind, ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into() });
@@ -624,6 +736,20 @@ mod tests {
         assert_eq!(rules[1].kind, ConstraintKind::NoCycle { scope: Some("services/api".into()) });
         assert_eq!(rules[2].kind, ConstraintKind::NoCycle { scope: None });
         assert_eq!(rules[3].kind, ConstraintKind::Invariant { text: "charges are idempotent".into() });
+        assert_eq!(
+            rules[4].kind,
+            ConstraintKind::Component { name: "web".into(), paths: vec!["web".into(), "shared/ui".into()] }
+        );
+        assert_eq!(
+            rules[5].kind,
+            ConstraintKind::Layer { name: "core".into(), rank: 1, components: vec!["api".into()], strict: true }
+        );
+        assert_eq!(rules[6].kind, ConstraintKind::Allow { from: "web".into(), to: "api".into() });
+        assert_eq!(rules[6].categories, ["CALLS"]);
+        // strict defaults to false.
+        let lax = json!([{"source": "api", "id": "l", "kind": "layer", "name": "l", "rank": 0, "components": ["web"]}]);
+        let lax = parse_constraints(&CellPayload::Json(lax.to_string()));
+        assert!(matches!(lax[0].kind, ConstraintKind::Layer { strict: false, .. }), "{lax:?}");
 
         // Round trip through the writer's merge: what merge_entry stores parses back.
         let stored = merge_entry(None, &entries[0]).unwrap();
