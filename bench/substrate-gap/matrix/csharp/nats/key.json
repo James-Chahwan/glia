@@ -1,0 +1,33 @@
+{
+  "framework": "csharp-nats-net",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "nats",
+  "cells": [
+    "csharp/nats"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "NATS.Net v2 (NATS.Client.Core): nc.PublishAsync / nc.SubscribeAsync<T> || CF.5a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=0/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): NATS.Net v2 `nc.PublishAsync(\"x\", ..)` / `nc.SubscribeAsync<T>(\"x\")`: the `nc.Publish` / `nc.Subscribe` needles prefix-match but the ArgLiteral rule reads no literal after `Async(` / `Async<T>(`, so both sides collapse to `unresolved:nats` and cannot pair."
+}

@@ -1,0 +1,33 @@
+{
+  "framework": "csharp-hangfire",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "csharp/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "SendWelcome"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "SendWelcome"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "SendWelcome",
+      "to": "SendWelcome",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Hangfire BackgroundJob.Enqueue<T>(x => x.Method) — the job is the method || CF.5a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): no .NET task-queue row in parsers/code/extractors/src/queues.rs: Hangfire `BackgroundJob.Enqueue<T>(x => x.Method(..))` (Hangfire is read only as cron, LA.19a)."
+}
