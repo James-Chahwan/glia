@@ -68,11 +68,11 @@ Columns, left to right (the review's own abbreviations):
 ```
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
-python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ◐       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ?
-go               ●       ●       ◐       ·       ·       ?       ?       ●       ·       ●       ?       ●       ?       ●       ?       ●       ?       ?       ?       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
-typescript       ●       ●       ●       ◐       ?       ◐       ?       ●       ●       ●       ◐       ●       ●       ◐       ●       ?       ?       ?       ●       ●       ?       ●       ?       ●       ●       ●       ●       ●       ●       ●
-java             ●       ●       ●       ●       ◐       ?       ?       ?       ·       ?       ?       ●       ·       ●       ●       ●       ●       ?       ?       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ●
-csharp           ●       ●       ●       ◐       ?       ?       ●       ?       ●       ?       ?       ●       ?       ●       ?       ◐       ?       ?       ·       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ?
+python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+go               ●       ●       ◐       ·       ·       ·       ·       ●       ·       ●       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
+typescript       ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ◐       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●
+java             ●       ●       ●       ●       ◐       ·       ·       ●       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ◐       ●       ●
+csharp           ●       ●       ●       ◐       ●       ·       ●       ◐       ●       ·       ·       ●       ?       ●       ?       ◐       ?       ?       ·       ?       ●       ●       ?       ●       ●       ●       ●       ◐       ●       ?
 ruby             ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ●       ?       ●       ●       ?       ?       ?       ●       ●       ?       ●       ●       ◐       ?       ◐       ●       ?
 php              ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ●       ?       ◐       ●       ?
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
@@ -90,39 +90,39 @@ PER-MECHANISM  across 16 languages:
   http_server  ● 9   ◐ 4   · 0   ? 3   ! 0
   kafka        ● 4   ◐ 1   · 0   ? 11  ! 0
   amqp         ● 1   ◐ 3   · 1   ? 11  ! 0
-  sqs_sns      ● 1   ◐ 1   · 1   ? 13  ! 0
-  pubsub       ● 0   ◐ 2   · 0   ? 14  ! 0
-  azure_sb     ● 2   ◐ 0   · 0   ? 14  ! 0
-  nats         ● 3   ◐ 0   · 0   ? 13  ! 0
+  sqs_sns      ● 3   ◐ 1   · 1   ? 11  ! 0
+  pubsub       ● 0   ◐ 2   · 3   ? 11  ! 0
+  azure_sb     ● 3   ◐ 0   · 2   ? 11  ! 0
+  nats         ● 4   ◐ 1   · 0   ? 11  ! 0
   redis        ● 3   ◐ 0   · 2   ? 11  ! 0
-  mqtt         ● 3   ◐ 0   · 0   ? 13  ! 0
-  taskq        ● 1   ◐ 1   · 1   ? 13  ! 0
+  mqtt         ● 4   ◐ 0   · 1   ? 11  ! 0
+  taskq        ● 1   ◐ 1   · 4   ? 10  ! 0
   grpc         ● 5   ◐ 0   · 0   ? 11  ! 0
-  graphql      ● 1   ◐ 1   · 1   ? 13  ! 0
+  graphql      ● 2   ◐ 0   · 2   ? 12  ! 0
   ws           ● 6   ◐ 1   · 0   ? 9   ! 0
-  eventbus     ● 3   ◐ 0   · 0   ? 13  ! 0
-  db           ● 4   ◐ 1   · 0   ? 11  ! 0
-  migrations   ● 3   ◐ 0   · 0   ? 13  ! 0
-  config       ● 1   ◐ 0   · 0   ? 15  ! 0
-  secrets      ● 2   ◐ 0   · 1   ? 13  ! 0
-  flags        ● 3   ◐ 0   · 0   ? 13  ! 0
-  cron         ● 7   ◐ 0   · 0   ? 9   ! 0
+  eventbus     ● 3   ◐ 0   · 2   ? 11  ! 0
+  db           ● 5   ◐ 1   · 0   ? 10  ! 0
+  migrations   ● 5   ◐ 0   · 0   ? 11  ! 0
+  config       ● 4   ◐ 0   · 0   ? 12  ! 0
+  secrets      ● 4   ◐ 0   · 1   ? 11  ! 0
+  flags        ● 4   ◐ 0   · 0   ? 12  ! 0
+  cron         ● 7   ◐ 0   · 1   ? 8   ! 0
   cli_def      ● 8   ◐ 0   · 0   ? 8   ! 0
-  cli_inv      ● 2   ◐ 0   · 0   ? 14  ! 0
+  cli_inv      ● 3   ◐ 0   · 1   ? 12  ! 0
   calls        ● 15  ◐ 0   · 0   ? 1   ! 0
   imports      ● 13  ◐ 0   · 0   ? 3   ! 0
   injects      ● 7   ◐ 2   · 0   ? 7   ! 0
   impl         ● 8   ◐ 1   · 0   ? 7   ! 0
   tests        ● 2   ◐ 6   · 0   ? 8   ! 0
   service      ● 11  ◐ 0   · 0   ? 5   ! 0
-  subproject   ● 3   ◐ 0   · 0   ? 13  ! 0
+  subproject   ● 4   ◐ 0   · 0   ? 12  ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
-  python       ● 24  ◐ 3   · 1   ? 2   ! 0
-  go           ● 17  ◐ 2   · 3   ? 8   ! 0
-  typescript   ● 19  ◐ 4   · 0   ? 7   ! 0
-  java         ● 17  ◐ 2   · 2   ? 9   ! 0
-  csharp       ● 14  ◐ 3   · 1   ? 12  ! 0
+  python       ● 26  ◐ 2   · 2   ? 0   ! 0
+  go           ● 20  ◐ 2   · 8   ? 0   ! 0
+  typescript   ● 25  ◐ 4   · 1   ? 0   ! 0
+  java         ● 22  ◐ 2   · 6   ? 0   ! 0
+  csharp       ● 15  ◐ 4   · 4   ? 7   ! 0
   ruby         ● 11  ◐ 2   · 0   ? 17  ! 0
   php          ● 7   ◐ 1   · 0   ? 22  ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  ! 0
@@ -136,9 +136,9 @@ PER-LANGUAGE  across 30 mechanisms:
   terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 176/480 cells have a fixture (36.7%) — 144 full, 24 partial, 8 none, 304 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 207/480 cells have a fixture (43.1%) — 161 full, 24 partial, 22 none, 273 unknown, 0 error.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 163
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 165
 
 ## Cells routed via an alternative mechanism
 
@@ -148,16 +148,20 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 |---|---|---|---|
 | `csharp/azure_sb` | ● full | `queue` | `eventbus` |
 | `csharp/redis` | ● full | `queue` | `eventbus` |
+| `csharp/sqs_sns` | ● full | `queue` | `eventbus` |
 | `go/mqtt` | ● full | `queue` | `eventbus` |
+| `java/mqtt` | ● full | `queue` | `eventbus` |
 | `java/sqs_sns` | ◐ partial | `queue` | `eventbus` |
 | `python/azure_sb` | ● full | `queue` | `eventbus` |
 | `python/mqtt` | ● full | `queue` | `eventbus` |
 | `python/pubsub` | ◐ partial | `queue` | `eventbus` |
 | `python/redis` | ● full | `queue` | `eventbus` |
 | `python/sqs_sns` | ● full | `queue` | `eventbus` |
+| `typescript/azure_sb` | ● full | `queue` | `eventbus` |
 | `typescript/mqtt` | ● full | `queue` | `eventbus` |
 | `typescript/pubsub` | ◐ partial | `queue` | `eventbus` |
 | `typescript/redis` | ● full | `queue` | `eventbus` |
+| `typescript/sqs_sns` | ● full | `queue` | `eventbus` |
 
 ## Cell errors
 
