@@ -20,6 +20,7 @@ use crate::imports::{
     resolve_imports_ts, same_stem_table,
 };
 use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
+use crate::swift_scope::{SwiftModuleTypes, implicit_self};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
 // ============================================================================
@@ -206,6 +207,42 @@ where
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
+    tally.report();
+    Ok(g)
+}
+
+/// Build a per-repo Swift graph (CB.18): [`build_typescript`]'s passes plus
+/// Swift's call scope ([`crate::swift_scope`]). Before `resolve_calls`,
+/// [`implicit_self`] rewrites a bare call inside a type that names one of
+/// the type's members (its own, or one an extension in another file adds)
+/// into a self call, so the member wins over a same-named free function the
+/// generic pass would bind through the caller file's symbols.
+/// `resolve_calls`' `extra_hook` is [`SwiftModuleTypes::resolve`]: every
+/// file of a module sees every type of the module without an import, so
+/// `Formatter.money(n)` / `Formatter()` on a type declared in another file of
+/// the directory bind, and a self call reaches a member of the type's other
+/// node (a STRUCT / ENUM / protocol extended in another file). Prints the
+/// `[swift-scope]` marker once.
+pub fn build_swift<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+) -> Result<RepoGraph, GraphError>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    let (mut g, all_imports, mut all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut same);
+    same.report();
+    let types = SwiftModuleTypes::new(&g);
+    let rewritten = implicit_self(&g, &types, &mut all_calls);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |g, site| types.resolve(g, site), &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
+    emit_method_level_implements(&mut g);
+    eprintln!("{}", types.marker(rewritten));
     tally.report();
     Ok(g)
 }

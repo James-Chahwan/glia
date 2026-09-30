@@ -27,8 +27,9 @@ use super::c_includes::{IncludeRoots, angle_includes, c_cpp_module_qnames};
 // "typescript"), and imports cross those tags. They build as a single graph
 // (their `extract::build_group` is "typescript") so intra-repo ref/import
 // resolution works across the tag boundary (Pattern E DI, Pattern B imports).
-// The `c_cpp` arm and the other `_`-arm langs (dart/swift/solidity/terraform)
-// keep separate graphs — distinct symbol spaces that must not cross-resolve.
+// The `c_cpp` and `swift` (CB.18) arms and the `_`-arm langs (dart/solidity/
+// terraform) keep separate graphs — distinct symbol spaces that must not
+// cross-resolve.
 // ts_family accumulates in the sorted lang order and is the last pooled build
 // (CA.7), so graph/shard order stays deterministic. The LB.9b module plan
 // reads the same `build_group`.
@@ -222,6 +223,7 @@ fn build_solo(
             eprintln!("{}", c_includes.marker(angle, resolver.bound_via_roots(), repo_label));
             graph
         }
+        "swift" => glia_graph::build_swift(repo, parses, resolve_relative_source),
         _ => glia_graph::build_typescript(repo, parses, resolve_relative_source),
     }
 }
@@ -852,12 +854,13 @@ pub(super) fn resolve_ts_source_aliased(
     aliases.scope_of(from_module)?.map(spec)
 }
 
-/// Relative-import resolver for the non-TS `_`-arm languages (dart / swift /
-/// solidity / terraform). Handles dotted specifiers (`./x`, `../a/b`) AND bare
-/// filenames that carry a source extension (`import 'models.dart'`) — both
-/// resolve against the importing file's directory to the `path_to_qname`
-/// form. A bare specifier with no source extension (a package / system import
-/// like `package:collection`, `import Foundation`) is external → None.
+/// Relative-import resolver for the `swift` arm and the non-TS `_`-arm
+/// languages (dart / solidity / terraform). Handles dotted specifiers (`./x`,
+/// `../a/b`) AND bare filenames that carry a source extension (`import
+/// 'models.dart'`) — both resolve against the importing file's directory to
+/// the `path_to_qname` form. A bare specifier with no source extension (a
+/// package / system import like `package:collection`, `import Foundation`) is
+/// external → None.
 /// Superset of `resolve_ts_source`; kept separate so the verified TS-family
 /// path is untouched. C/C++ has [`resolve_include_source`].
 fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String> {

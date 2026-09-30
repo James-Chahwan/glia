@@ -1,0 +1,42 @@
+{
+  "framework": "swift-implicit-self",
+  "language": "swift",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-S1 / CB-S5: Swift has no builder of its own (engine/src/build/lang_build.rs build_solo sends it to build_typescript). Inside a method an unqualified call names the enclosing type's member before any free function, and every file of a module sees every type of the module without an import. HEAD 2170ff8 (`[evidence-graph] calls ... module_symbol=2`): BOTH `helper()` calls bind the free function Sources::App::Pricing::helper through the module symbol - the one in Cart::checkout, and the one in the `extension Cart` of Cart+Tax.swift (its method walks up to the one Cart node, whose nav parent is Pricing.swift); `Formatter.money(n)` on a type declared in another file binds nothing.",
+  "expect_edges": [
+    {
+      "from": "Sources::App::Cart::checkout",
+      "to": "Sources::App::Cart::helper",
+      "category": "CALLS",
+      "note": "implicit self: the member wins over the same-file free function"
+    },
+    {
+      "from": "Sources::App::Cart::withTax",
+      "to": "Sources::App::Cart::helper",
+      "category": "CALLS",
+      "note": "an extension in another file shares the type's members"
+    },
+    {
+      "from": "Sources::App::Cart::checkout",
+      "to": "Sources::App::Formatter::money",
+      "category": "CALLS",
+      "note": "static call on a same-module type declared in another file"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Sources::App::Cart::checkout",
+      "to": "Sources::App::Pricing::helper",
+      "category": "CALLS",
+      "note": "what HEAD binds: the same-file free function shadows nothing inside a member"
+    },
+    {
+      "from": "Sources::App::Cart::withTax",
+      "to": "Sources::App::Pricing::helper",
+      "category": "CALLS",
+      "note": "what HEAD binds from the extension: the free function reached through the class's nav parent file"
+    }
+  ]
+}
