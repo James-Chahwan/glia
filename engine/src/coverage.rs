@@ -151,10 +151,12 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         verify: "grep the trait bound (`trait .*: <Name>`)",
     },
     // LD.7b: Go satisfaction is inferred, so its edges are Medium (DERIVED).
+    // CA.3b: gated on signatures and, for a one-method set or a test side,
+    // package reachability.
     CoverageCaveat {
         language: "go",
         edge_category: "IMPLEMENTS",
-        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method NAMES: signatures are not compared, so same-named methods with different signatures pair (gRPC clients and servers share method names); pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind (another package's, `comparable`) is skipped as open; constraint type terms are ignored",
+        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface, or a pair with a side in a _test.go file, pairs only across an import path (same package, a transitive import either way, or a package importing both); an import of the repository-root package is not recorded, so a root-package side is assumed reachable; a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
         verify: "check the method signatures and receivers against the interface",
     },
     CoverageCaveat {
@@ -587,6 +589,12 @@ mod tests {
         let go_row = go.iter().find(|n| n.language == "go").map(|n| n.note);
         assert!(
             go_row.is_some_and(|n| n.contains("DERIVED") && n.contains("pointer and value receivers")),
+            "{go_row:?}"
+        );
+        // CA.3b: the row says signatures are compared and what they miss.
+        assert!(
+            go_row.is_some_and(|n| n.contains("signatures (parameter and result types")
+                && n.contains("a type alias are not resolved")),
             "{go_row:?}"
         );
     }

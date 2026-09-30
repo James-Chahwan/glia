@@ -978,9 +978,14 @@ impl BareFieldGate {
 /// tables are HashMaps with a per-process seed, and edge order feeds the
 /// store's shard content hashes (engine `byte_identical`). An edge already
 /// present is not pushed twice.
+///
+/// CA.3b: a pair carries the confidence of the class-level edge it rides on,
+/// the strongest when several produce one pair: an explicit heritage clause
+/// (Strong) keeps its methods Strong, a Go implicit satisfaction (Medium,
+/// inferred from the method set) makes its method pairs Medium too.
 pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
     let mut existing: std::collections::HashSet<(NodeId, NodeId)> = std::collections::HashSet::new();
-    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut pairs: Vec<(NodeId, NodeId, Confidence)> = Vec::new();
     for e in &g.edges {
         if e.category != edge_category::IMPLEMENTS {
             continue;
@@ -996,16 +1001,16 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
         };
         for (name, &iface_mid) in iface_ms {
             if let Some(&impl_mid) = impl_ms.get(name) {
-                pairs.push((impl_mid, iface_mid));
+                pairs.push((impl_mid, iface_mid, e.confidence));
             }
         }
     }
-    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
-    pairs.dedup();
-    pairs.retain(|p| !existing.contains(p));
-    for &(from, to) in &pairs {
+    pairs.sort_unstable_by_key(|(a, b, c)| (a.0, b.0, confidence_rank(*c)));
+    pairs.dedup_by_key(|(a, b, _)| (*a, *b));
+    pairs.retain(|(a, b, _)| !existing.contains(&(*a, *b)));
+    for &(from, to, confidence) in &pairs {
         let ev = graph_evidence("graph:iface", "same_name");
-        push_edge(g, from, to, edge_category::IMPLEMENTS, ev);
+        push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, confidence);
     }
     if !pairs.is_empty() {
         eprintln!(
@@ -1026,9 +1031,32 @@ pub(crate) fn push_edge(
     category: EdgeCategoryId,
     ev: Evidence,
 ) {
-    let mut e = Edge::new(from, to, category, Confidence::Strong);
+    push_edge_with(g, from, to, category, ev, Confidence::Strong);
+}
+
+/// [`push_edge`] at `confidence`: an edge the graph crate infers rather than
+/// reads (CA.3b, a Go implicit method pair) is pushed below Strong.
+pub(crate) fn push_edge_with(
+    g: &mut RepoGraph,
+    from: NodeId,
+    to: NodeId,
+    category: EdgeCategoryId,
+    ev: Evidence,
+    confidence: Confidence,
+) {
+    let mut e = Edge::new(from, to, category, confidence);
     evidence::attach(&mut e, ev);
     g.edges.push(e);
+}
+
+/// Strong < Medium < Weak, for keeping the strongest of several edges that
+/// produce one pair ([`emit_method_level_implements`]).
+fn confidence_rank(c: Confidence) -> u8 {
+    match c {
+        Confidence::Strong => 0,
+        Confidence::Medium => 1,
+        Confidence::Weak => 2,
+    }
 }
 
 #[cfg(test)]
@@ -2021,5 +2049,58 @@ mod tests {
                  enum_member=5"
             )
         );
+    }
+
+    /// CA.3b: a method-level IMPLEMENTS pair carries its class-level edge's
+    /// confidence. A Java `class Repo implements Store` (a heritage ref bound
+    /// Strong) keeps its method pair Strong; with a Medium duplicate of the
+    /// class edge listed first, the strongest still wins.
+    #[test]
+    fn java_explicit_implements_pair_stays_strong() {
+        let r = repo();
+        let id = |kind, q: &str| NodeId::from_parts(GRAPH_TYPE, r, kind, q);
+        let (m, iface, iface_get, cls, cls_get) = (
+            id(node_kind::MODULE, "app::Repo"),
+            id(node_kind::INTERFACE, "app::Repo::Store"),
+            id(node_kind::METHOD, "app::Repo::Store::get"),
+            id(node_kind::CLASS, "app::Repo::Repo"),
+            id(node_kind::METHOD, "app::Repo::Repo::get"),
+        );
+        let mut nav = CodeNav::default();
+        nav.record(m, "Repo", "app::Repo", node_kind::MODULE, None);
+        nav.record(iface, "Store", "app::Repo::Store", node_kind::INTERFACE, Some(m));
+        nav.record(iface_get, "get", "app::Repo::Store::get", node_kind::METHOD, Some(iface));
+        nav.record(cls, "Repo", "app::Repo::Repo", node_kind::CLASS, Some(m));
+        nav.record(cls_get, "get", "app::Repo::Repo::get", node_kind::METHOD, Some(cls));
+        let node = |id| Node { id, repo: r, confidence: Confidence::Strong, cells: vec![] };
+        let file = FileParse {
+            nodes: [m, iface, iface_get, cls, cls_get].into_iter().map(node).collect(),
+            edges: vec![],
+            imports: vec![],
+            calls: vec![],
+            refs: vec![UnresolvedRef {
+                from: cls,
+                from_module: m,
+                qualifier: CallQualifier::Bare("Store".to_string()),
+                category: edge_category::IMPLEMENTS,
+                line: 0,
+            }],
+            nav,
+            properties: HashSet::new(),
+        };
+        let mut g = build_dotted(r, vec![file]).unwrap();
+        let conf = |g: &RepoGraph, from, to| {
+            g.edges
+                .iter()
+                .find(|e| e.from == from && e.to == to && e.category == edge_category::IMPLEMENTS)
+                .map(|e| e.confidence)
+        };
+        assert_eq!(conf(&g, cls, iface), Some(Confidence::Strong));
+        assert_eq!(conf(&g, cls_get, iface_get), Some(Confidence::Strong));
+
+        g.edges.retain(|e| e.from != cls_get);
+        g.edges.insert(0, Edge::new(cls, iface, edge_category::IMPLEMENTS, Confidence::Medium));
+        emit_method_level_implements(&mut g);
+        assert_eq!(conf(&g, cls_get, iface_get), Some(Confidence::Strong), "strongest class edge");
     }
 }

@@ -431,10 +431,10 @@ fn two_call_sites_are_two_rows() {
 
 /// CC.3: a graph-stage edge the graph crate INFERRED below Strong confidence
 /// is derived, not fact. Go implicit interface satisfaction is inferred from
-/// the method-name set (`graph:iface` rule `method_set`, Medium); the
-/// method-level pair it rests on is bound by name and signature at Strong
-/// (`same_name`) and stays a fact. The rule reads confidence, never a list
-/// of rule names.
+/// the method set (`graph:iface`, Medium; rule `method_signature` since
+/// CA.3b, every signature having been compared); the method-level pair A6.6
+/// derives from it (`same_name`) carries that Medium since CA.3b, so it is
+/// derived too. The rule reads confidence, never a list of rule names.
 #[test]
 fn medium_graph_edge_is_derived() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -468,13 +468,13 @@ fn medium_graph_edge_is_derived() {
             "derived",
             "medium",
             Some("graph:iface"),
-            Some("method_set")
+            Some("method_signature")
         ),
         "{r:?}"
     );
     let note = r.note.as_deref().unwrap_or("");
     assert!(
-        note.contains("inferred binding (method_set, medium confidence)"),
+        note.contains("inferred binding (method_signature, medium confidence)"),
         "{r:?}"
     );
 
@@ -483,8 +483,12 @@ fn medium_graph_edge_is_derived() {
     let r = &m_get.edges[0];
     assert_eq!(
         (r.category, r.tier, r.confidence, r.rule.as_deref()),
-        ("IMPLEMENTS", "fact", "strong", Some("same_name")),
+        ("IMPLEMENTS", "derived", "medium", Some("same_name")),
         "{r:?}"
     );
-    assert!(r.note.is_none(), "{r:?}");
+    let note = r.note.as_deref().unwrap_or("");
+    assert!(
+        note.contains("inferred binding (same_name, medium confidence)"),
+        "{r:?}"
+    );
 }

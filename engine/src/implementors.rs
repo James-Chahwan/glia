@@ -36,11 +36,13 @@
 //! type-level edges), carries them through the hierarchy (a class implementing
 //! a sub-interface implements the super-interface's method), adds overrides
 //! along INHERITS_FROM, and gives a Go method pair its type-level DERIVED tier
-//! rather than the Strong A6.6 stamps on the pair. The method's own
+//! (A6.6 stores a Go implicit pair at its type-level edge's Medium since
+//! CA.3b, so the owner walk and the pair agree). The method's own
 //! method-level edges are walked too, and rows the owner walk did not reach
 //! are appended — the only rows for a method with no type owner. Pairing is by
-//! name, as A6.6's is: signatures are not compared, and a type that inherits
-//! the method from a base outside the walk contributes nothing.
+//! name, as A6.6's is: the walk compares no signatures (a Go type-level edge
+//! already passed the CA.3b signature gate), and a type that inherits the
+//! method from a base outside the walk contributes nothing.
 //!
 //! # Target resolution
 //!

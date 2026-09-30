@@ -58,8 +58,9 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// LD.7b: an interface's embedded interfaces bind package-scoped and to an
 /// INTERFACE only ([`resolve_go_embeds`]); then, Go interfaces being
 /// satisfied implicitly, [`emit_go_implicit_implements`] derives each type ->
-/// interface IMPLEMENTS edge from method names, before A6.6 pairs them
-/// method by method.
+/// interface IMPLEMENTS edge from method names, signatures (CA.3b) and, for a
+/// one-method interface or a `_test.go` side, package reachability, before
+/// A6.6 pairs them method by method (at the type-level edge's Medium).
 ///
 /// LA.13b: a package is a directory, so an import binds the imported
 /// directory and a call every generic lookup missed resolves across the
@@ -76,6 +77,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     }
     if let Some(stats) = implicit {
         eprintln!("{}", stats.marker());
+        eprintln!("{}", stats.filtered_marker());
     }
     if let Some(line) = packages.marker() {
         eprintln!("{line}");
@@ -147,7 +149,7 @@ fn build_go_passes(
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
     resolve_refs(&mut g, &refs, &mut tally);
     resolve_go_embeds(&mut g, &embeds, &all_imports);
-    let implicit = emit_go_implicit_implements(&mut g);
+    let implicit = emit_go_implicit_implements(&mut g, &packages);
     emit_method_level_implements(&mut g);
     tally.report();
     (g, split, implicit, package_stats, receivers)
@@ -1004,6 +1006,142 @@ impl GoPackages {
             sibling_calls: self.sibling_calls.get(),
         }
     }
+
+    /// CA.3b: the directory-level import graph ([`DirImportGraph`]): each
+    /// file's in-repo imports read through [`GoPackages::imported_dir`] (the
+    /// tail-fallback binding included), each dir's union over its files
+    /// (test files included: an in-package test can pass the package's own
+    /// types on), and each dir's importers. An external `x_test` file's
+    /// import of its own dir `x` is kept: that file reaches `x`'s imports
+    /// only through it.
+    pub(crate) fn dir_import_graph(&self, g: &RepoGraph) -> DirImportGraph<'_> {
+        let mut of_file: HashMap<NodeId, BTreeSet<&str>> = HashMap::new();
+        let mut of_dir: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        let mut importers: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        for (&module, locals) in &self.import_path {
+            let Some(own) = self.dir_of.get(&module).map(String::as_str) else {
+                continue;
+            };
+            for local in locals.keys() {
+                let Some(dir) = self.imported_dir(g, module, local) else {
+                    continue;
+                };
+                of_file.entry(module).or_default().insert(dir);
+                of_dir.entry(own).or_default().insert(dir);
+                importers.entry(dir).or_default().insert(own);
+            }
+        }
+        DirImportGraph { of_file, of_dir, importers, closure: HashMap::new() }
+    }
+
+    /// The reachability-gate view of a type or interface `id`: its file
+    /// MODULE, that file's package dir and whether it is a `_test.go` file.
+    fn side(&self, g: &RepoGraph, id: NodeId) -> Option<GoSide<'_>> {
+        let file = self.file_of(g, id)?;
+        Some(GoSide {
+            file,
+            dir: self.dir_of.get(&file)?.as_str(),
+            test: self.tests.contains(&file),
+        })
+    }
+}
+
+/// CA.3b: the directory-level import graph of one Go graph
+/// ([`GoPackages::dir_import_graph`]), for the implicit-IMPLEMENTS
+/// reachability gate ([`DirImportGraph::scope`]). Every set is a BTreeSet and
+/// every map is only probed, so no answer depends on a HashMap's seed.
+pub(crate) struct DirImportGraph<'p> {
+    /// File MODULE -> the in-repo package dirs it imports.
+    of_file: HashMap<NodeId, BTreeSet<&'p str>>,
+    /// Package dir -> the union of its files' imports.
+    of_dir: HashMap<&'p str, BTreeSet<&'p str>>,
+    /// Package dir -> the dirs with a file importing it.
+    importers: HashMap<&'p str, BTreeSet<&'p str>>,
+    /// Package dir -> every dir it reaches through zero or more imports,
+    /// memoised on first use (a walk with a seen set: an import cycle
+    /// through a test file or a tail-fallback binding cannot loop).
+    closure: HashMap<&'p str, BTreeSet<&'p str>>,
+}
+
+/// One side of a candidate type -> interface pair ([`GoPackages::side`]).
+#[derive(Clone, Copy)]
+struct GoSide<'p> {
+    file: NodeId,
+    dir: &'p str,
+    test: bool,
+}
+
+/// [`DirImportGraph::scope`]'s verdict on a pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GoReach {
+    /// Same package, a transitive import either way, or a shared importer.
+    Reached,
+    /// Only reached by assuming the repository-root package (dir `""`) is:
+    /// the Go parser records no import OF it (`record_import` returns on an
+    /// empty repo-local path), so every root-package pair would be lost.
+    /// Turns off by itself once root imports are recorded (the root dir then
+    /// has importers and closures that reach it).
+    RootAssumed,
+    Unreached,
+}
+
+impl<'p> DirImportGraph<'p> {
+    /// Every dir `d` reaches through zero or more imports, `d` included.
+    fn closure_of(&mut self, d: &'p str) -> &BTreeSet<&'p str> {
+        let of_dir = &self.of_dir;
+        self.closure.entry(d).or_insert_with(|| {
+            let mut seen: BTreeSet<&'p str> = BTreeSet::new();
+            let mut stack = vec![d];
+            while let Some(x) = stack.pop() {
+                if seen.insert(x) {
+                    stack.extend(of_dir.get(x).into_iter().flatten().copied());
+                }
+            }
+            seen
+        })
+    }
+
+    /// True when a dir of `start` is `target` or imports it transitively.
+    fn reaches(&mut self, start: &[&'p str], target: &str) -> bool {
+        start.iter().any(|&s| self.closure_of(s).contains(target))
+    }
+
+    /// Where a side's code can pass a value on: the imports of its own file
+    /// when that is a `_test.go` file (never importable, so its package's
+    /// other imports are not its own), else of its whole package.
+    fn start(&self, side: GoSide<'p>) -> Vec<&'p str> {
+        let set = if side.test { self.of_file.get(&side.file) } else { self.of_dir.get(side.dir) };
+        set.into_iter().flatten().copied().collect()
+    }
+
+    /// Whether a value of type `t` can reach code typed by interface `i`:
+    /// the same package; else `i`'s package reached from `t`'s side (`i` not
+    /// in a test file, which nothing imports); else `t`'s package reached
+    /// from `i`'s side (`t` not in a test file); else, neither in a test
+    /// file, a package importing both. Transitive, because Go lets a file
+    /// pass a `T` to a parameter typed `I` without importing `I`'s package.
+    fn scope(&mut self, t: GoSide<'p>, i: GoSide<'p>) -> GoReach {
+        if t.dir == i.dir {
+            return GoReach::Reached;
+        }
+        let (from_t, from_i) = (self.start(t), self.start(i));
+        let shared = !t.test
+            && !i.test
+            && match (self.importers.get(t.dir), self.importers.get(i.dir)) {
+                (Some(a), Some(b)) => !a.is_disjoint(b),
+                _ => false,
+            };
+        if shared
+            || (!i.test && self.reaches(&from_t, i.dir))
+            || (!t.test && self.reaches(&from_i, t.dir))
+        {
+            GoReach::Reached
+        } else if (!i.test && i.dir.is_empty()) || (!t.test && t.dir.is_empty()) {
+            GoReach::RootAssumed
+        } else {
+            GoReach::Unreached
+        }
+    }
 }
 
 // ============================================================================
@@ -1618,10 +1756,12 @@ fn go_ev(rule: &str) -> Evidence {
     graph_evidence("graph:go_packages", rule)
 }
 
-/// Method sets of the predeclared interfaces a Go interface can embed. No
-/// parse declares them, so their embed ref stays unresolved; this is what
-/// they contribute instead of leaving the embedding interface's set unknown.
-const GO_PREDECLARED_IFACES: &[(&str, &[&str])] = &[("error", &["Error"])];
+/// Method sets of the predeclared interfaces a Go interface can embed, each
+/// method with its normalised signature (CA.3a's `(<params>)(<results>)`
+/// text). No parse declares them, so their embed ref stays unresolved; this
+/// is what they contribute instead of leaving the embedding interface's set
+/// unknown.
+const GO_PREDECLARED_IFACES: &[(&str, &[(&str, &str)])] = &[("error", &[("Error", "()(string)")])];
 
 /// What [`emit_go_implicit_implements`] did to one Go graph.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1637,6 +1777,22 @@ struct GoImplicitStats {
     /// Interfaces not matched because an embed did not bind, so their method
     /// set is not fully known.
     open: usize,
+    /// CA.3b: name-covering pairs rejected because a method's signature, known
+    /// on both sides, differs from the interface's (a type alias is not
+    /// resolved, so `ID` vs `string` counts here too).
+    signature: usize,
+    /// Pairs rejected by the reachability gate, neither side in a test file
+    /// (a one-method interface).
+    one_method: usize,
+    /// Pairs rejected by the reachability gate with a side in a `_test.go`
+    /// file.
+    test_side: usize,
+    /// Edges pushed whose every method signature was compared (EVIDENCE rule
+    /// `method_signature`; the rest keep `method_set`).
+    signature_checked: usize,
+    /// Edges pushed only by assuming the repository-root package reachable
+    /// ([`GoReach::RootAssumed`]).
+    root_assumed: usize,
 }
 
 impl GoImplicitStats {
@@ -1648,12 +1804,43 @@ impl GoImplicitStats {
             self.edges, self.interfaces, self.types, self.embedded, self.open
         )
     }
+
+    /// CA.3b fired_on, after [`GoImplicitStats::marker`]: `[iface] go implicit
+    /// filtered: signature=S scope=P (one_method=O test_side=X)
+    /// signature_checked=K root_assumed=R`.
+    fn filtered_marker(&self) -> String {
+        format!(
+            "[iface] go implicit filtered: signature={} scope={} (one_method={} test_side={}) \
+             signature_checked={} root_assumed={}",
+            self.signature,
+            self.one_method + self.test_side,
+            self.one_method,
+            self.test_side,
+            self.signature_checked,
+            self.root_assumed
+        )
+    }
 }
 
 /// Go satisfies interfaces implicitly: a named type implements an interface
-/// when its method NAME set covers the interface's (own + embedded,
-/// transitively). Signatures are not compared (the parser records none), so
-/// every edge is `Confidence::Medium`.
+/// when its method set covers the interface's (own + embedded,
+/// transitively). The edge is inferred, so every one is `Confidence::Medium`.
+///
+/// CA.3b gates a name-covering pair twice:
+///
+/// * Signatures (every pair): each interface method's normalised signature
+///   (`nav.method_sigs`, CA.3a; the predeclared `error`'s `Error` is
+///   `()(string)`) against the type's same-named method's. Both known and
+///   different rejects the pair. All known and equal gives the edge EVIDENCE
+///   rule `method_signature`; any unknown (a generic receiver, an element of
+///   a generic interface) keeps today's name match, rule `method_set`.
+/// * Reachability (a one-method interface, or a side declared in a
+///   `_test.go` file, where a name match alone is noise): the two packages
+///   must be linked by an import path ([`DirImportGraph::scope`]); the
+///   repository-root package, whose imports the parser does not record, is
+///   assumed reached ([`GoReach::RootAssumed`]).
+///
+/// The rest of the rules:
 ///
 /// * An interface's own methods are its `interface_methods` (the parser's
 ///   `method_elem` METHOD children). Its embedded interfaces are its
@@ -1681,7 +1868,10 @@ impl GoImplicitStats {
 /// tables are HashMaps with per-process seeds, and edge order feeds the
 /// store's shard hashes), and an IMPLEMENTS edge already present is not
 /// pushed again. `None` when the graph has no INTERFACE.
-fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
+fn emit_go_implicit_implements(
+    g: &mut RepoGraph,
+    packages: &GoPackages,
+) -> Option<GoImplicitStats> {
     let ifaces: Vec<NodeId> = g
         .nodes
         .iter()
@@ -1692,9 +1882,11 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
         return None;
     }
     let mut stats = GoImplicitStats::default();
-    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    // (type, interface, every signature compared, root package assumed).
+    let mut pairs: Vec<(NodeId, NodeId, bool, bool)> = Vec::new();
     {
         let nav = &g.nav;
+        let mut dirs = packages.dir_import_graph(g);
         let is_iface = |id: &NodeId| nav.kind_by_id.get(id) == Some(&node_kind::INTERFACE);
         let pkg_of = |id: &NodeId| -> Option<&str> {
             let parent = nav.parent_of.get(id)?;
@@ -1718,7 +1910,7 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
             }
         }
         stats.embedded = embed_pairs.len();
-        let mut predeclared: HashMap<NodeId, Vec<&'static str>> = HashMap::new();
+        let mut predeclared: HashMap<NodeId, Vec<(&'static str, &'static str)>> = HashMap::new();
         for r in &g.unresolved_refs {
             if r.category != edge_category::INHERITS_FROM || !is_iface(&r.from) {
                 continue;
@@ -1751,8 +1943,10 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
         }
 
         for &iface in &ifaces {
-            // (method name, declaring package when the name is unexported).
-            let mut set: HashSet<(&str, Option<&str>)> = HashSet::new();
+            // (method name, declaring package when the name is unexported) ->
+            // the signature of the interface METHOD declaring it (the first
+            // in the embed walk), `None` when unknown.
+            let mut set: BTreeMap<(&str, Option<&str>), Option<&str>> = BTreeMap::new();
             let mut visited: HashSet<NodeId> = HashSet::new();
             let mut stack = vec![iface];
             let mut known = true;
@@ -1764,18 +1958,19 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
                     known = false;
                     break;
                 }
-                for name in g.symbols.interface_methods.get(&i).into_iter().flat_map(|m| m.keys()) {
-                    if name.chars().next().is_some_and(char::is_uppercase) {
-                        set.insert((name.as_str(), None));
+                for (name, mid) in g.symbols.interface_methods.get(&i).into_iter().flatten() {
+                    let key = if name.chars().next().is_some_and(char::is_uppercase) {
+                        (name.as_str(), None)
                     } else if let Some(pkg) = pkg_of(&i) {
-                        set.insert((name.as_str(), Some(pkg)));
+                        (name.as_str(), Some(pkg))
                     } else {
                         known = false;
                         break 'walk;
-                    }
+                    };
+                    set.entry(key).or_insert_with(|| nav.method_sigs.get(mid).map(String::as_str));
                 }
-                for &name in predeclared.get(&i).into_iter().flatten() {
-                    set.insert((name, None));
+                for &(name, sig) in predeclared.get(&i).into_iter().flatten() {
+                    set.entry((name, None)).or_insert(Some(sig));
                 }
                 stack.extend(embeds.get(&i).into_iter().flatten().copied());
             }
@@ -1788,40 +1983,86 @@ fn emit_go_implicit_implements(g: &mut RepoGraph) -> Option<GoImplicitStats> {
             }
             stats.interfaces += 1;
             let Some(candidates) = set
-                .iter()
+                .keys()
                 .map(|(name, _)| by_method.get(name).map_or(&[][..], Vec::as_slice))
                 .min_by_key(|c| c.len())
             else {
                 continue;
             };
+            // The reachability gate's interface side, and whether it applies
+            // to every pair of this interface (a one-method set).
+            let iface_side = packages.side(g, iface);
+            let one_method = set.len() == 1;
             for &ty in candidates {
                 let Some(methods) = g.symbols.class_methods.get(&ty) else {
                     continue;
                 };
-                let covers = set.iter().all(|&(name, pkg)| {
+                let covers = set.keys().all(|&(name, pkg)| {
                     methods.contains_key(name) && pkg.is_none_or(|p| pkg_of(&ty) == Some(p))
                 });
-                if covers {
-                    pairs.push((ty, iface));
+                if !covers {
+                    continue;
                 }
+                // R1: signatures, where both sides recorded one.
+                let mut checked = true;
+                let mut differs = false;
+                for (&(name, _), &sig_i) in &set {
+                    let sig_t = methods.get(name).and_then(|m| nav.method_sigs.get(m));
+                    match (sig_i, sig_t) {
+                        (Some(a), Some(b)) if a != b.as_str() => {
+                            differs = true;
+                            break;
+                        }
+                        (Some(_), Some(_)) => {}
+                        _ => checked = false,
+                    }
+                }
+                if differs {
+                    stats.signature += 1;
+                    continue;
+                }
+                // R2: an import path, for a one-method set or a test side.
+                let mut root = false;
+                if let (Some(t), Some(i)) = (packages.side(g, ty), iface_side)
+                    && (one_method || t.test || i.test)
+                {
+                    match dirs.scope(t, i) {
+                        GoReach::Reached => {}
+                        GoReach::RootAssumed => root = true,
+                        GoReach::Unreached => {
+                            if t.test || i.test {
+                                stats.test_side += 1;
+                            } else {
+                                stats.one_method += 1;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                pairs.push((ty, iface, checked, root));
             }
         }
     }
-    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
-    pairs.dedup();
+    pairs.sort_unstable_by_key(|(a, b, _, _)| (a.0, b.0));
+    pairs.dedup_by_key(|(a, b, _, _)| (*a, *b));
     let existing: HashSet<(NodeId, NodeId)> = g
         .edges
         .iter()
         .filter(|e| e.category == edge_category::IMPLEMENTS)
         .map(|e| (e.from, e.to))
         .collect();
-    pairs.retain(|p| !existing.contains(p));
-    stats.types = pairs.iter().map(|&(ty, _)| ty).collect::<HashSet<_>>().len();
+    pairs.retain(|(a, b, _, _)| !existing.contains(&(*a, *b)));
+    stats.types = pairs.iter().map(|&(ty, ..)| ty).collect::<HashSet<_>>().len();
     stats.edges = pairs.len();
-    // LC.3d: a method-name-set match, `graph:iface` rule `method_set`.
-    let ev = graph_evidence("graph:iface", "method_set").to_cell();
-    for (from, to) in pairs {
+    stats.signature_checked = pairs.iter().filter(|p| p.2).count();
+    stats.root_assumed = pairs.iter().filter(|p| p.3).count();
+    // LC.3d: `graph:iface` rule `method_signature` when every signature was
+    // compared (CA.3b), else `method_set` (a match on names).
+    let signature_ev = graph_evidence("graph:iface", "method_signature").to_cell();
+    let names_ev = graph_evidence("graph:iface", "method_set").to_cell();
+    for (from, to, checked, _) in pairs {
         let edge = Edge::new(from, to, edge_category::IMPLEMENTS, Confidence::Medium);
+        let ev = if checked { &signature_ev } else { &names_ev };
         g.edges.push(edge.with_cell(ev.clone()));
     }
     Some(stats)
@@ -3221,12 +3462,16 @@ mod tests {
         };
         let first = build_go(repo(), shape()).unwrap();
         let second = build_go(repo(), shape()).unwrap();
-        let implicit: Vec<_> = first
-            .edges
-            .iter()
-            .filter(|e| e.category == edge_category::IMPLEMENTS && e.confidence == Confidence::Medium)
-            .collect();
-        assert_eq!(implicit.len(), 16, "4 types x 4 interfaces");
+        let implements: Vec<_> =
+            first.edges.iter().filter(|e| e.category == edge_category::IMPLEMENTS).collect();
+        let from_kind = |e: &&Edge| first.nav.kind_by_id.get(&e.from).copied();
+        let (types, methods): (Vec<_>, Vec<_>) =
+            implements.into_iter().partition(|e| from_kind(e) == Some(node_kind::STRUCT));
+        assert_eq!(types.len(), 16, "4 types x 4 interfaces");
+        assert!(types.iter().all(|e| e.confidence == Confidence::Medium));
+        // CA.3b: the method-level pairs ride on the Medium type-level edges.
+        assert_eq!(methods.len(), 48, "16 type-level edges x 3 methods");
+        assert!(methods.iter().all(|e| e.confidence == Confidence::Medium));
         assert_eq!(first.edges, second.edges);
     }
 
@@ -3445,6 +3690,263 @@ mod tests {
         );
         let (_, none) = go_implicit(vec![go_file("x", &[(node_kind::STRUCT, "x::T", None)])]);
         assert_eq!(none, None);
+    }
+
+    // ---- CA.3b: signature and reachability gates ----------------------------
+
+    /// Go sources parsed as the engine parses them (go.mod `example.com/scope`
+    /// at the repo root): `a/b.go` is MODULE `a::b`, so its package dir is `a`.
+    fn go_sources(files: &[(&str, &str)]) -> Vec<FileParse> {
+        files
+            .iter()
+            .map(|(rel, src)| {
+                let qname = rel.trim_end_matches(".go").replace('/', "::");
+                glia_parser_go::parse_file(src, rel, &qname, "example.com/scope", repo())
+                    .expect("parse")
+            })
+            .collect()
+    }
+
+    /// The EVIDENCE rule of the IMPLEMENTS edge `from -> to`.
+    fn implements_rule(g: &RepoGraph, from: NodeId, to: NodeId) -> Option<String> {
+        g.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::IMPLEMENTS)
+            .and_then(Evidence::of)
+            .and_then(|ev| ev.rule)
+    }
+
+    fn filtered(stats: &Option<GoImplicitStats>) -> Option<String> {
+        stats.as_ref().map(GoImplicitStats::filtered_marker)
+    }
+
+    const STORE_GO: &str = "package store\n\ntype Store interface {\n\tGet(key string) string\n\
+                            \tPut(key, value string)\n}\n";
+    const CLOSER_GO: &str = "package a\n\ntype Closer interface {\n\tClose()\n}\n";
+    const FILE_GO: &str = "package b\n\ntype File struct{}\n\nfunc (f *File) Close() {}\n";
+
+    /// A type with every one of an interface's method names but other
+    /// signatures does not implement it (parameters or, the Kina
+    /// `FindByID` case, results only); equal signatures under other parameter
+    /// names do, with EVIDENCE rule `method_signature`.
+    #[test]
+    fn go_implicit_signature_mismatch_is_rejected() {
+        let other = "package other\n\ntype Wrong struct{}\n\n\
+                     func (w *Wrong) Get(key int) int { return key }\n\
+                     func (w *Wrong) Put(key, value int) {}\n";
+        let mem = "package mem\n\ntype Mem struct{}\n\n\
+                   func (m *Mem) Get(k string) string { return k }\n\
+                   func (m *Mem) Put(k string, v string) {}\n";
+        let loader = "package store\n\ntype User struct{}\n\ntype KYCDocument struct{}\n\n\
+                      type UserLoader interface {\n\tFindByID(id string) (*User, error)\n}\n\n\
+                      type UserRepo struct{}\n\n\
+                      func (r *UserRepo) FindByID(id string) (*User, error) { return nil, nil }\n\n\
+                      type KYCRepo struct{}\n\n\
+                      func (r *KYCRepo) FindByID(id string) (*KYCDocument, error) { return nil, nil }\n";
+        let parses = go_sources(&[
+            ("store/store.go", STORE_GO),
+            ("store/loader.go", loader),
+            ("other/other.go", other),
+            ("mem/mem.go", mem),
+        ]);
+        let (g, stats) = go_implicit(parses);
+        let store = gid(node_kind::INTERFACE, "store::store::Store");
+        let (wrong, mem_ty) =
+            (gid(node_kind::STRUCT, "other::other::Wrong"), gid(node_kind::STRUCT, "mem::mem::Mem"));
+        assert_eq!(implements_edge(&g, wrong, store), None, "names match, signatures do not");
+        assert_eq!(
+            implements_edge(
+                &g,
+                gid(node_kind::METHOD, "other::other::Wrong::Get"),
+                gid(node_kind::METHOD, "store::store::Store::Get")
+            ),
+            None
+        );
+        assert_eq!(implements_edge(&g, mem_ty, store), Some(Confidence::Medium));
+        assert_eq!(implements_rule(&g, mem_ty, store).as_deref(), Some("method_signature"));
+        let user_loader = gid(node_kind::INTERFACE, "store::loader::UserLoader");
+        assert!(implements_edge(&g, gid(node_kind::STRUCT, "store::loader::UserRepo"), user_loader).is_some());
+        assert_eq!(
+            implements_edge(&g, gid(node_kind::STRUCT, "store::loader::KYCRepo"), user_loader),
+            None,
+            "the result type differs"
+        );
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=2 scope=0 (one_method=0 test_side=0) \
+                 signature_checked=2 root_assumed=0"
+            )
+        );
+    }
+
+    /// With a signature unknown on either side (no parse recorded one, or a
+    /// method on a generic receiver) the name match stands, rule `method_set`.
+    #[test]
+    fn go_implicit_unknown_signature_keeps_the_name_match() {
+        let (store, mem_store) =
+            (gid(node_kind::INTERFACE, "store::Store"), gid(node_kind::STRUCT, "mem::MemStore"));
+        let (g, stats) = go_implicit(implicit_iface_shape());
+        assert_eq!(implements_rule(&g, mem_store, store).as_deref(), Some("method_set"));
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
+                 signature_checked=0 root_assumed=0"
+            )
+        );
+
+        let boxed = "package box\n\ntype Box[T any] struct{}\n\n\
+                     func (b *Box[T]) Get(key string) string { return key }\n\
+                     func (b *Box[T]) Put(key, value string) {}\n";
+        let (g, _) = go_implicit(go_sources(&[("store/store.go", STORE_GO), ("box/box.go", boxed)]));
+        let (store, box_ty) =
+            (gid(node_kind::INTERFACE, "store::store::Store"), gid(node_kind::STRUCT, "box::box::Box"));
+        assert_eq!(implements_rule(&g, box_ty, store).as_deref(), Some("method_set"));
+    }
+
+    /// A one-method interface pairs only across an import path: no import
+    /// either way rejects; the type's package importing the interface's, the
+    /// interface's importing the type's, or a chain of imports keeps it.
+    #[test]
+    fn go_implicit_scope_one_method_needs_an_import_path() {
+        let (closer, file) =
+            (gid(node_kind::INTERFACE, "a::closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
+        let (g, stats) = go_implicit(go_sources(&[("a/closer.go", CLOSER_GO), ("b/file.go", FILE_GO)]));
+        assert_eq!(implements_edge(&g, file, closer), None);
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=1 (one_method=1 test_side=0) \
+                 signature_checked=0 root_assumed=0"
+            )
+        );
+
+        let b_imports_a = "package b\n\nimport \"example.com/scope/a\"\n\ntype File struct{}\n\n\
+                           func (f *File) Close() {}\n\nvar _ a.Closer = (*File)(nil)\n";
+        let (g, stats) =
+            go_implicit(go_sources(&[("a/closer.go", CLOSER_GO), ("b/file.go", b_imports_a)]));
+        assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium), "b imports a");
+        assert_eq!(implements_rule(&g, file, closer).as_deref(), Some("method_signature"));
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
+                 signature_checked=1 root_assumed=0"
+            )
+        );
+
+        let a_imports_b = "package a\n\nimport \"example.com/scope/b\"\n\n\
+                           type Closer interface {\n\tClose()\n}\n\nfunc Wrap(f *b.File) Closer { return f }\n";
+        let (g, _) = go_implicit(go_sources(&[("a/closer.go", a_imports_b), ("b/file.go", FILE_GO)]));
+        assert!(implements_edge(&g, file, closer).is_some(), "a imports b");
+
+        let b_imports_c = "package b\n\nimport \"example.com/scope/c\"\n\ntype File struct{}\n\n\
+                           func (f *File) Close() {}\n\nfunc Use() { c.Take(&File{}) }\n";
+        let c_imports_a = "package c\n\nimport \"example.com/scope/a\"\n\nfunc Take(x a.Closer) {}\n";
+        let (g, _) = go_implicit(go_sources(&[
+            ("a/closer.go", CLOSER_GO),
+            ("b/file.go", b_imports_c),
+            ("c/c.go", c_imports_a),
+        ]));
+        assert!(implements_edge(&g, file, closer).is_some(), "b -> c -> a, transitively");
+    }
+
+    /// A package importing both sides wires them: the pair is kept though
+    /// neither imports the other.
+    #[test]
+    fn go_implicit_scope_shared_importer() {
+        let main = "package main\n\nimport (\n\t\"example.com/scope/a\"\n\t\"example.com/scope/b\"\n)\n\n\
+                    func main() { var c a.Closer = &b.File{}; c.Close() }\n";
+        let (g, stats) = go_implicit(go_sources(&[
+            ("a/closer.go", CLOSER_GO),
+            ("b/file.go", FILE_GO),
+            ("cmd/main.go", main),
+        ]));
+        let (closer, file) =
+            (gid(node_kind::INTERFACE, "a::closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
+        assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
+        assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 0)));
+    }
+
+    /// An interface declared in a `_test.go` file pairs with a type of its
+    /// own directory (test or not) and with a type of a package the test
+    /// file's own imports reach, never with an unreached one; a test file's
+    /// package imports are not its own.
+    #[test]
+    fn go_implicit_scope_test_interface() {
+        let x_test = "package tests\n\nimport \"testing\"\n\n\
+                      type Closable interface {\n\tClose()\n}\n\n\
+                      type fake struct{}\n\nfunc (f fake) Close() {}\n\n\
+                      func TestClose(t *testing.T) { var c Closable = fake{}; c.Close() }\n";
+        let conn = "package tests\n\nimport \"example.com/scope/b\"\n\n\
+                    type Conn struct{ f *b.File }\n\nfunc (c *Conn) Close() {}\n";
+        let closable = gid(node_kind::INTERFACE, "tests::x_test::Closable");
+        let (fake, conn_ty, file) = (
+            gid(node_kind::STRUCT, "tests::x_test::fake"),
+            gid(node_kind::STRUCT, "tests::conn::Conn"),
+            gid(node_kind::STRUCT, "b::file::File"),
+        );
+        let (g, stats) = go_implicit(go_sources(&[
+            ("tests/x_test.go", x_test),
+            ("tests/conn.go", conn),
+            ("b/file.go", FILE_GO),
+        ]));
+        assert_eq!(implements_edge(&g, fake, closable), Some(Confidence::Medium), "same file");
+        assert_eq!(implements_edge(&g, conn_ty, closable), Some(Confidence::Medium), "same dir");
+        assert_eq!(
+            implements_edge(&g, file, closable),
+            None,
+            "conn.go imports b, but the test file does not"
+        );
+        assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 1)));
+
+        let x_test_imports_b = x_test.replace(
+            "import \"testing\"",
+            "import (\n\t\"testing\"\n\n\t\"example.com/scope/b\"\n)\n\nvar _ = b.File{}",
+        );
+        let (g, _) = go_implicit(go_sources(&[
+            ("tests/x_test.go", x_test_imports_b.as_str()),
+            ("b/file.go", FILE_GO),
+        ]));
+        assert!(implements_edge(&g, file, closable).is_some(), "the test file imports b");
+    }
+
+    /// The Go parser records no import of the repository-root package, so a
+    /// root-package side counts as reached (`root_assumed`).
+    #[test]
+    fn go_implicit_root_package_is_assumed_reached() {
+        let root = "package scope\n\ntype Closer interface {\n\tClose()\n}\n";
+        let b = "package b\n\nimport \"example.com/scope\"\n\ntype File struct{}\n\n\
+                 func (f *File) Close() {}\n\nvar _ scope.Closer = (*File)(nil)\n";
+        let parses = go_sources(&[("closer.go", root), ("b/file.go", b)]);
+        assert!(parses[1].imports.is_empty(), "the root import is not recorded");
+        let (g, stats) = go_implicit(parses);
+        let (closer, file) =
+            (gid(node_kind::INTERFACE, "closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
+        assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
+                 signature_checked=1 root_assumed=1"
+            )
+        );
+    }
+
+    /// A6.6's method pairs of a Go implicit (Medium) type-level edge are
+    /// Medium too, as `why` and the implementors owner walk read them.
+    #[test]
+    fn go_method_level_pairs_inherit_medium() {
+        let g = build_go(repo(), implicit_iface_shape()).unwrap();
+        for name in ["Get", "Put"] {
+            let (from, to) = (
+                gid(node_kind::METHOD, &format!("mem::MemStore::{name}")),
+                gid(node_kind::METHOD, &format!("store::Store::{name}")),
+            );
+            assert_eq!(implements_edge(&g, from, to), Some(Confidence::Medium), "{name}");
+            assert_eq!(implements_rule(&g, from, to).as_deref(), Some("same_name"));
+        }
     }
 
     // ---- LA.13b: Go package = directory -------------------------------------

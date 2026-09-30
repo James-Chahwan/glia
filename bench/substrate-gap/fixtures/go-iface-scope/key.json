@@ -1,0 +1,68 @@
+{
+  "framework": "go-iface-scope",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "go/impl"
+  ],
+  "note": "CA-3: Go implicit IMPLEMENTS checks method signatures and, for a one-method interface or a test-file side, package reachability. mem imports store and matches both interfaces with their signatures; other matches Store's names with other signatures and Closer's Close() without any import relation; tests::closer_test::Closable is test-scoped (grpc-go internal/xds/bootstrap/tlscreds Closable: 89 implementors at 0.5.0).",
+  "expect_edges": [
+    {
+      "from": "mem::mem::Mem",
+      "to": "store::store::Store",
+      "category": "IMPLEMENTS",
+      "note": "signatures match"
+    },
+    {
+      "from": "mem::mem::Mem::Get",
+      "to": "store::store::Store::Get",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair"
+    },
+    {
+      "from": "mem::mem::Mem",
+      "to": "store::store::Closer",
+      "category": "IMPLEMENTS",
+      "note": "one-method: mem imports store"
+    },
+    {
+      "from": "tests::closer_test::fakeConn",
+      "to": "tests::closer_test::Closable",
+      "category": "IMPLEMENTS",
+      "note": "test-scoped: same directory"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "other::other::Wrong",
+      "to": "store::store::Store",
+      "category": "IMPLEMENTS",
+      "note": "names match, signatures do not"
+    },
+    {
+      "from": "other::other::Wrong::Get",
+      "to": "store::store::Store::Get",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "other::other::File",
+      "to": "store::store::Closer",
+      "category": "IMPLEMENTS",
+      "note": "one-method, no import relation"
+    },
+    {
+      "from": "mem::mem::Mem",
+      "to": "tests::closer_test::Closable",
+      "category": "IMPLEMENTS",
+      "note": "test-file interface, other directory, not imported by the test file"
+    },
+    {
+      "from": "other::other::File",
+      "to": "tests::closer_test::Closable",
+      "category": "IMPLEMENTS"
+    }
+  ]
+}
