@@ -855,7 +855,7 @@ const MAX_LINK_HOPS: usize = 3;
 /// Edge categories that never link a co-change pair: CO_CHANGES is the claim
 /// under audit; DEFINES / CONTAINS are structure (a module holds its symbols,
 /// a project its files), which would join every pair of one package.
-const NOT_A_LINK: [EdgeCategoryId; 3] = [
+pub(crate) const NOT_A_LINK: [EdgeCategoryId; 3] = [
     edge_category::CO_CHANGES,
     edge_category::DEFINES,
     edge_category::CONTAINS,
@@ -947,7 +947,7 @@ fn cochange_detail(g: &CochangeGap, other: &str) -> String {
 /// Where each node sits: the files its POSITION cells name, and the nodes
 /// each file holds. Lookup only (no map is iterated), so HashMap order never
 /// reaches an answer.
-struct FileIndex {
+pub(crate) struct FileIndex {
     /// Node id -> (its graph's repo, its files in cell order, deduped); the
     /// first instance of an id (graphs, then nodes, in `Vec` order) wins.
     files_of: HashMap<u64, (u64, Vec<String>)>,
@@ -985,7 +985,7 @@ impl FileIndex {
     }
 
     /// `(repo, first file)` of a node that has one.
-    fn first_file(&self, id: NodeId) -> Option<(u64, &str)> {
+    pub(crate) fn first_file(&self, id: NodeId) -> Option<(u64, &str)> {
         let (repo, files) = self.files_of.get(&id.0)?;
         Some((*repo, files.first()?.as_str()))
     }
@@ -1021,7 +1021,7 @@ fn position_file(c: &Cell) -> Option<String> {
 
 /// How a pair's two files are joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Link {
+pub(crate) enum Link {
     /// One edge (or one node placed in both files).
     Direct,
     /// Two or three edges through file-less nodes.
@@ -1031,7 +1031,12 @@ enum Link {
 
 /// Bounded BFS from `a` (one file's nodes) to `b` (the other's) over the
 /// undirected link adjacency, expanding only through file-less nodes.
-fn link_between(adj: &HashMap<u64, Vec<u64>>, ix: &FileIndex, a: &[u64], b: &HashSet<u64>) -> Link {
+pub(crate) fn link_between(
+    adj: &HashMap<u64, Vec<u64>>,
+    ix: &FileIndex,
+    a: &[u64],
+    b: &HashSet<u64>,
+) -> Link {
     if a.iter().any(|n| b.contains(n)) {
         return Link::Direct;
     }
@@ -1061,6 +1066,46 @@ fn link_between(adj: &HashMap<u64, Vec<u64>>, ix: &FileIndex, a: &[u64], b: &Has
     Link::None
 }
 
+/// The static-link test of the co-change audit (LF.5c), shared with the
+/// co-change suggestions (`cochange`, CC.11a): the [`FileIndex`] plus the
+/// undirected link adjacency — every edge of `merged` but a self-loop or a
+/// [`NOT_A_LINK`] category, both ways round. Built once per answer; lookup
+/// only, so HashMap order never reaches an answer.
+pub(crate) struct LinkIndex {
+    pub(crate) files: FileIndex,
+    adj: HashMap<u64, Vec<u64>>,
+}
+
+impl LinkIndex {
+    pub(crate) fn build(merged: &MergedGraph) -> Self {
+        let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
+        for e in merged.all_edges() {
+            if e.from == e.to || NOT_A_LINK.contains(&e.category) {
+                continue;
+            }
+            adj.entry(e.from.0).or_default().push(e.to.0);
+            adj.entry(e.to.0).or_default().push(e.from.0);
+        }
+        LinkIndex {
+            files: FileIndex::build(merged),
+            adj,
+        }
+    }
+
+    /// How `file_a` and `file_b` of `repo` are joined ([`link_between`] from
+    /// `file_a`'s nodes to `file_b`'s): [`Link::None`] when either file holds
+    /// no node.
+    pub(crate) fn link(&self, repo: u64, file_a: &str, file_b: &str) -> Link {
+        let b: HashSet<u64> = self.files.nodes_in(repo, file_b).iter().copied().collect();
+        link_between(
+            &self.adj,
+            &self.files,
+            self.files.nodes_in(repo, file_a),
+            &b,
+        )
+    }
+}
+
 /// A co-change pair: (repo, file_a, file_b), `file_a < file_b`.
 type PairKey = (u64, String, String);
 
@@ -1079,7 +1124,8 @@ fn cochange_audit(merged: &MergedGraph, surface: &str) -> Vec<PairGap> {
     let mut gaps: Vec<PairGap> = Vec::new();
     let mut pairs = 0usize;
     if !edges.is_empty() {
-        let ix = FileIndex::build(merged);
+        let links = LinkIndex::build(merged);
+        let ix = &links.files;
         // One pair per (repo, file_a, file_b): the edge with the most
         // co-changes (first seen on a tie).
         let mut by_pair: BTreeMap<PairKey, PairCounts> = BTreeMap::new();
@@ -1112,18 +1158,8 @@ fn cochange_audit(merged: &MergedGraph, surface: &str) -> Vec<PairGap> {
         }
         pairs = by_pair.len();
 
-        let mut adj: HashMap<u64, Vec<u64>> = HashMap::new();
-        for e in merged.all_edges() {
-            if e.from == e.to || NOT_A_LINK.contains(&e.category) {
-                continue;
-            }
-            adj.entry(e.from.0).or_default().push(e.to.0);
-            adj.entry(e.to.0).or_default().push(e.from.0);
-        }
-
         for ((repo, fa, fb), (cochanges, ratio_permille, ma, mb)) in by_pair {
-            let b: HashSet<u64> = ix.nodes_in(repo, &fb).iter().copied().collect();
-            match link_between(&adj, &ix, ix.nodes_in(repo, &fa), &b) {
+            match links.link(repo, &fa, &fb) {
                 Link::Direct => direct += 1,
                 Link::Bridged => bridged += 1,
                 Link::None => {
