@@ -152,7 +152,7 @@ pub fn layout_meta(
             }),
         })
         .collect();
-    LayoutMeta { repos, parse_errors: parse_errors.to_vec() }
+    LayoutMeta { repos, parse_errors: parse_errors.to_vec(), code_spans_unresolved: 0 }
 }
 
 /// Write `merged` and `meta` as a sharded layout at `dir` (created if missing;
@@ -360,14 +360,20 @@ fn remove_orphan_shards(dir: &Path, live: &BTreeSet<String>) {
 /// each relative root joined onto `dir` and canonicalised (as joined when the
 /// path no longer exists), `parse_errors`, and the totals recomputed. A layout
 /// written without metadata loads with empty labels, roots and errors.
+///
+/// CODE cells come back as text when the source files under the recorded
+/// roots are unchanged (CD.7c); a span whose file moved, changed or is gone
+/// comes back as its `code_span` JSON (see `glia_store::read_merged_sharded_meta`).
 pub fn load_layout(dir: &Path) -> Result<GenerateResult, LoadError> {
-    read_layout(dir).map_err(|e| LoadError::from_store(dir, &e))
+    read_layout(dir).map(|(r, _)| r).map_err(|e| LoadError::from_store(dir, &e))
 }
 
 /// [`load_layout`] keeping the store's error, so [`load_or_rebuild`] can take
-/// its bare `rebuild_reason` (no directory prefix, no advice).
-fn read_layout(dir: &Path) -> Result<GenerateResult, StoreError> {
+/// its bare `rebuild_reason` (no directory prefix, no advice), and handing
+/// back how many CODE spans came back unresolved (CD.7c).
+fn read_layout(dir: &Path) -> Result<(GenerateResult, usize), StoreError> {
     let (merged, meta) = read_merged_sharded_meta(dir)?;
+    let unresolved = meta.code_spans_unresolved;
     let repo_labels: BTreeMap<u64, String> = meta
         .repos
         .iter()
@@ -396,14 +402,15 @@ fn read_layout(dir: &Path) -> Result<GenerateResult, StoreError> {
         property_count(&merged),
         merged.pass_undo.len(),
     );
-    Ok(GenerateResult {
+    let r = GenerateResult {
         merged,
         total_nodes,
         total_edges,
         parse_errors: meta.parse_errors,
         repo_labels,
         repo_roots,
-    })
+    };
+    Ok((r, unresolved))
 }
 
 /// How [`load_or_rebuild`] served a layout.
@@ -415,9 +422,12 @@ pub enum LoadOutcome {
     /// Rebuilt from its repo root(s). `reason` is the first thing found wrong,
     /// most specific first: `old format (manifest schema <v>, this build reads
     /// <MANIFEST_VERSION>)`, `written by another glia build (<stamp>)`,
-    /// `stale: sources changed since the layout was written`, `no layout`, or
-    /// the store's reason for a layout it could not read (`old format (no
-    /// preamble, ...)`, `shard <name> does not match its manifest hash`, ...).
+    /// `stale: sources changed since the layout was written`, `no layout`, the
+    /// store's reason for a layout it could not read (`old format (no
+    /// preamble, ...)`, `shard <name> does not match its manifest hash`, ...),
+    /// or, for a layout that read but whose CODE spans no longer match their
+    /// files (CD.7c), `source changed since the layout was written: <n> code
+    /// spans unresolved`.
     Rebuilt { reason: String },
 }
 
@@ -434,7 +444,12 @@ pub enum LoadOutcome {
 ///    known) [`is_gmap_stale`] for any root; no manifest at all is `no layout`.
 /// 3. No reason: [`load_layout`]. A failure the store classifies as
 ///    `needs_rebuild` (a damaged, missing or old-format shard) becomes the
-///    reason; any other failure (permissions, I/O) is returned as is.
+///    reason; any other failure (permissions, I/O) is returned as is. A layout
+///    that reads but hands back unresolved CODE spans (CD.7c: a span's file
+///    under its recorded root moved, changed or is gone, which the mtime scan
+///    misses when the edit kept an older mtime or the root itself is gone) is
+///    the reason `source changed since the layout was written: <n> code spans
+///    unresolved`.
 /// 4. With a reason: `rebuild` false, no roots, or a root that is not a
 ///    directory is a [`LoadError`] with `needs_rebuild` naming the reason and
 ///    the fix, and nothing is written (never a partial layout). Otherwise one
@@ -485,7 +500,10 @@ pub fn load_or_rebuild(
     let reason = match reason {
         Some(reason) => reason,
         None => match read_layout(dir) {
-            Ok(r) => return Ok((r, LoadOutcome::Fresh)),
+            Ok((r, 0)) => return Ok((r, LoadOutcome::Fresh)),
+            Ok((_, unresolved)) => format!(
+                "source changed since the layout was written: {unresolved} code spans unresolved"
+            ),
             Err(e) => match e.rebuild_reason() {
                 Some(reason) => reason,
                 None => return Err(LoadError::from_store(dir, &e)),

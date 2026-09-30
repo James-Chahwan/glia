@@ -151,6 +151,12 @@ impl PyGraph {
     /// their string (imports/state-var/doc cells included); Bytes payloads
     /// (cached embeddings) return "". Structured access instead of scraping
     /// `dense_text`. Empty if the node id is unknown.
+    ///
+    /// A CODE payload of a graph loaded from a layout (CD.7c) is the source
+    /// text while the repo's files are unchanged; when a file moved, changed
+    /// or is gone it is instead the span to fetch yourself,
+    /// `{"code_span":{"file":"src/a.rs","start":120,"end":480,"xxh64":"<16 hex>"}}`:
+    /// bytes `[start, end)` of `file` under the repo root, xxhash64 seed 0.
     fn node_cells(&self, node_id: u64) -> Vec<(u32, String)> {
         let id = NodeId(node_id);
         for g in &self.merged.graphs {

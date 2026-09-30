@@ -25,6 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use glia_code_domain::code_span::is_span_payload;
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{CellPayload, CellTypeId, Node, NodeId, NodeKindId};
 
@@ -653,11 +654,16 @@ fn position_file(n: &Node) -> Option<String> {
         .filter(|f| !f.is_empty())
 }
 
+/// The node's first CODE cell as text. A `code_span` JSON payload (CD.7c: a
+/// layout read whose source file moved, changed or is gone) is a reference,
+/// not code, so it is `None`: such a node has no body hash and a MODULE falls
+/// back to basename matching.
 fn code_text(n: &Node) -> Option<&str> {
     n.cells
         .iter()
         .find(|c| c.kind == CODE)
         .and_then(|c| match &c.payload {
+            p if is_span_payload(p) => None,
             CellPayload::Text(s) | CellPayload::Json(s) => Some(s.as_str()),
             CellPayload::Bytes(_) => None,
         })
@@ -782,6 +788,34 @@ mod tests {
         assert_ne!(body_hash(a), 0);
         assert_eq!(body_hash(a), body_hash(b));
         assert_eq!(body_hash("def f(): pass"), 0);
+    }
+
+    /// CD.7c: an unresolved CODE span handed out as JSON is not hashed as the
+    /// body; the text it stands for is.
+    #[test]
+    fn span_payload_has_no_body_hash() {
+        use glia_code_domain::code_span::CodeSpan;
+        use glia_core::Cell;
+        let body = "fn totals(rows: &[Row]) -> u64 {\n    rows.iter().map(|r| r.n).sum()\n}";
+        let node = |payload: CellPayload| Node {
+            id: NodeId(7),
+            repo: glia_core::RepoId(1),
+            confidence: glia_core::Confidence::Strong,
+            cells: vec![
+                Cell { kind: POSITION, payload: CellPayload::Json(r#"{"file":"a.rs","start_line":0}"#.into()) },
+                Cell { kind: CODE, payload },
+            ],
+        };
+        let text = node(CellPayload::Text(body.into()));
+        assert_eq!(code_text(&text), Some(body));
+        assert_ne!(code_text(&text).map_or(0, body_hash), 0, "the text has a body hash");
+        let span = CodeSpan::of("a.rs", 0, body.as_bytes());
+        let spanned = node(span.to_payload());
+        assert_eq!(code_text(&spanned), None, "a span is a reference, not code");
+        assert_eq!(code_text(&spanned).map_or(0, body_hash), 0, "no body hash");
+        // Other CODE JSON (queue / cron `sites`) is still read as before.
+        let sites = node(CellPayload::Json(r#"{"sites":[{"file":"a.rs","line":3}]}"#.into()));
+        assert!(code_text(&sites).is_some());
     }
 
     #[test]

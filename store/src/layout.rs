@@ -17,8 +17,8 @@ use glia_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeI
 use glia_graph::RepoGraph;
 
 use crate::code_section::{
-    InternStats, decode_repo_graph, encode_cross_edges, encode_repo_graph_counted,
-    expand_file_evidence,
+    CodeSource, CodeSpanStats, FsCodeSource, LayoutCounts, decode_repo_graph_counted,
+    encode_cross_edges, encode_repo_graph_counted, expand_file_evidence,
 };
 use crate::container::{
     Container, FORMAT_VERSION, MmapContainer, encode_file, hex_xxhash64, read_to_owned, set_cell,
@@ -278,10 +278,27 @@ pub struct RepoMeta {
 /// The layout-level metadata a sharded write records beside the shards and a
 /// read hands back (LC.7): the repos, sorted by id when written, and the
 /// build's parse errors in build order.
+///
+/// `code_spans_unresolved` (CD.7c) is set by a read only: the CODE spans that
+/// came back as `CodeSpan` JSON because their source file under the recorded
+/// repo root moved, changed or is gone. A writer ignores it (0 for a layout
+/// written without spans or read with every source in place).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LayoutMeta {
     pub repos: Vec<RepoMeta>,
     pub parse_errors: Vec<String>,
+    pub code_spans_unresolved: usize,
+}
+
+/// The [`CodeSource`] of a layout at `dir` whose manifest records `repos`:
+/// each recorded root resolved against `dir` (as [`RepoMeta::root`] is
+/// written). `None` when no root resolves: a write then keeps every CODE cell
+/// inline, a read hands every span out as JSON.
+fn layout_code_source(repos: &[RepoMeta], dir: &Path) -> Option<FsCodeSource> {
+    let source = FsCodeSource::new(
+        repos.iter().filter_map(|r| Some((r.id, dir.join(r.root.as_deref()?)))),
+    );
+    (!source.is_empty()).then_some(source)
 }
 
 /// Just the schema number, parsed before the full `Manifest` so a manifest of
@@ -409,7 +426,9 @@ fn check_foreign(f: &ForeignShard, taken: &[&str]) -> Result<(), StoreError> {
 /// strings:<s> evidence=<interned>/<kept_json>` line per write: `k` / `s` =
 /// files carrying a code / strings section, `interned` / `kept_json` = the
 /// EVIDENCE cells of every encoded file stored interned / left as written
-/// (CD.7b).
+/// (CD.7b). A layout with any CODE cell adds `[gmap] code spans: spanned=<S>
+/// inline=<I> saved=<B> bytes` (CD.7c): CODE cells stored as spans into the
+/// source / as written, and the bytes the spans saved.
 ///
 /// Shard names must be unique and non-empty — duplicates produce a manifest
 /// whose loader will reject it. Records no layout metadata: see
@@ -426,6 +445,12 @@ pub fn write_sharded(
 /// `meta.repos` sorted by id and `meta.parse_errors` in the order given, so
 /// the same build writes the same manifest bytes and the skip-when-unchanged
 /// check still holds.
+///
+/// CODE spans (CD.7c): every repo root `meta.repos` records, resolved against
+/// `dir`, is the source the shards' CODE cells are looked up in
+/// (`encode_repo_graph_with`); a CODE text found verbatim on its POSITION line
+/// is stored as a span, and the reader resolves it against the same recorded
+/// roots. No recorded root, no span.
 pub fn write_sharded_meta(
     shards: &[(&str, &RepoGraph)],
     cross_edges: &[Edge],
@@ -457,6 +482,9 @@ fn write_sharded_with(
         taken.push(&f.name);
     }
     std::fs::create_dir_all(dir)?;
+    // CD.7c: after the create, so a root relative to `dir` resolves.
+    let source = layout_code_source(&meta.repos, dir);
+    let source: Option<&dyn CodeSource> = source.as_ref().map(|s| s as &dyn CodeSource);
 
     // Phase 1 incremental rebuild: load prior manifest (if present) and
     // compare per-shard content hashes. Shards whose serialized bytes hash
@@ -475,13 +503,12 @@ fn write_sharded_with(
 
     let mut entries = Vec::with_capacity(shards.len());
     let mut shards_skipped = 0usize;
-    let (mut code_sections, mut strings_sections) = (0usize, 0usize);
-    let mut evidence = InternStats::default();
+    let mut counts = LayoutCounts::default();
     for (name, g) in shards {
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
-        let encoded = encode_repo_graph_counted(g)?;
-        encoded.count_into(&mut code_sections, &mut strings_sections, &mut evidence);
+        let encoded = encode_repo_graph_counted(g, source)?;
+        encoded.count_into(&mut counts);
         let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
 
@@ -534,7 +561,7 @@ fn write_sharded_with(
     } else {
         let shard_path = dir.join(CROSS_STACK_NAME);
         let encoded = encode_cross_edges(cross_edges)?;
-        encoded.count_into(&mut code_sections, &mut strings_sections, &mut evidence);
+        encoded.count_into(&mut counts);
         let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
         let unchanged = prior_manifest
@@ -588,11 +615,23 @@ fn write_sharded_with(
     // left as written across every encoded file.
     eprintln!(
         "[gmap] layout {}: shards={shard_files} format={FORMAT_VERSION} \
-         sections=code:{code_sections} strings:{strings_sections} evidence={}/{}",
+         sections=code:{} strings:{} evidence={}/{}",
         dir.display(),
-        evidence.interned,
-        evidence.kept_json,
+        counts.code_sections,
+        counts.strings_sections,
+        counts.evidence.interned,
+        counts.evidence.kept_json,
     );
+    // CD.7c marker, un-gated: one line per layout write that holds any CODE
+    // cell - how many were stored as spans into the source / as written, and
+    // the bytes the spans saved (text minus span payload).
+    let spans = counts.spans;
+    if spans.spanned + spans.inline > 0 {
+        eprintln!(
+            "[gmap] code spans: spanned={} inline={} saved={} bytes",
+            spans.spanned, spans.inline, spans.saved_bytes,
+        );
+    }
     // Diagnostic: emit how many shards were skipped (env-gated to keep
     // hot-path output clean by default; opt in via GLIA_STORE_VERBOSE=1).
     if std::env::var("GLIA_STORE_VERBOSE").as_deref() == Ok("1") {
@@ -868,6 +907,13 @@ pub fn read_merged_sharded(
 /// errors. A layout written without metadata reads back an empty
 /// [`LayoutMeta`]. Prints the same `[gmap] needs rebuild` line on failure.
 ///
+/// CODE spans (CD.7c) are read back from the source files under the roots the
+/// manifest records (resolved against `dir`): a span whose file is unchanged
+/// comes back as the CODE text it was written from; one whose file moved,
+/// changed or is gone comes back as its `CodeSpan` JSON and is counted in
+/// `LayoutMeta::code_spans_unresolved`. A layout holding any span prints
+/// `[gmap] code spans: rehydrated=<R> unresolved=<U>`.
+///
 /// The manifest's post-pass undo record (LC.10a) comes back on the graph, as
 /// `MergedGraph::pass_undo`, not in the [`LayoutMeta`]: it is the graph's
 /// state, and one carrier keeps the write and the read from disagreeing.
@@ -908,9 +954,21 @@ fn read_merged_sharded_inner(
     dir: &Path,
 ) -> Result<(glia_graph::MergedGraph, LayoutMeta), StoreError> {
     let sharded = ShardedMmap::open(dir)?;
+    let source = layout_code_source(&sharded.manifest.repos, dir);
+    let source: Option<&dyn CodeSource> = source.as_ref().map(|s| s as &dyn CodeSource);
     let mut graphs = Vec::with_capacity(sharded.shards.len());
+    let mut spans = CodeSpanStats::default();
     for (name, mmap) in &sharded.shards {
-        graphs.push(decode_repo_graph(mmap).map_err(|e| in_shard(name, e))?);
+        let (g, s) = decode_repo_graph_counted(mmap, source).map_err(|e| in_shard(name, e))?;
+        spans.absorb(s);
+        graphs.push(g);
+    }
+    // CD.7c marker, un-gated: one line per read of a layout holding spans.
+    if spans.has_spans() {
+        eprintln!(
+            "[gmap] code spans: rehydrated={} unresolved={}",
+            spans.rehydrated, spans.unresolved
+        );
     }
     for entry in sharded.manifest.shards.iter().filter(|e| !e.is_code()) {
         eprintln!("[gmap] skipped foreign shard {} graph_type={}", entry.name, entry.graph_type);
@@ -928,6 +986,7 @@ fn read_merged_sharded_inner(
     let meta = LayoutMeta {
         repos: sharded.manifest.repos.clone(),
         parse_errors: sharded.manifest.parse_errors.clone(),
+        code_spans_unresolved: spans.unresolved,
     };
     let pass_undo = pass_undo_from_entries(&sharded.manifest.pass_undo)?;
     Ok((
@@ -1467,6 +1526,7 @@ mod tests {
                 RepoMeta { id: 3, label: "api".into(), root: None },
             ],
             parse_errors: vec!["b.py: second".into(), "a.py: first".into()],
+            code_spans_unresolved: 0,
         };
         let dir = tmp.path().join("with");
         let written = write_merged_sharded_meta(&merged, &meta, &dir).unwrap();
@@ -1556,6 +1616,7 @@ mod tests {
         let meta = LayoutMeta {
             repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()) }],
             parse_errors: vec![],
+            code_spans_unresolved: 0,
         };
         let v2 = tmp.path().join("v2");
         write_merged_sharded_meta(&merged, &meta, &v2).unwrap();
@@ -2135,6 +2196,7 @@ mod tests {
         let meta = LayoutMeta {
             repos: vec![RepoMeta { id: 1, label: "repo".into(), root: Some("../repo".into()) }],
             parse_errors: vec![],
+            code_spans_unresolved: 0,
         };
         let other = dir.path().join("out2");
         write_merged_sharded_meta(&one_graph("test://custom"), &meta, &other).unwrap();
@@ -2164,6 +2226,7 @@ mod tests {
                 .map(|(i, n)| RepoMeta { id: i as u64 + 1, label: n.to_string(), root: Some(format!("../{n}")) })
                 .collect(),
             parse_errors: vec![],
+            code_spans_unresolved: 0,
         };
         let out = root("out");
         write_merged_sharded_meta(&one_graph("test://multi"), &meta, &out).unwrap();

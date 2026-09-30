@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use engram_core::{GMAP_FORMAT_VERSION, Gmap};
-use glia_engine::persist::{load_layout, persist_result};
+use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
 use glia_engram_export::{
@@ -256,9 +256,22 @@ fn run(args: &Args) -> i32 {
         None => None,
     };
     // The graph this gmap was exported from, for the next `--since` run. The
-    // gmap is complete without it, so a failure is a warning.
+    // gmap is complete without it, so a failure is a warning. Written with NO
+    // repo root: a layout that records its root stores CODE as spans into the
+    // sources (CD.7c), and this one is read back after those sources moved or
+    // changed - exactly when `detect_moves` needs the prior CODE (the body
+    // hash). Rootless, every CODE cell stays inline, a snapshot of the export.
     let history = history_dir(&out_path);
-    if let Err(e) = persist_result(&result, &history, "glia-export-engram") {
+    let no_roots = BTreeMap::new();
+    let written = persist_graph(
+        &result.merged,
+        &result.repo_labels,
+        &no_roots,
+        &result.parse_errors,
+        &history,
+        "glia-export-engram",
+    );
+    if let Err(e) = written {
         eprintln!(
             "[engram-export] warning: history not written to {}: {e} - the next --since run cannot detect moves",
             history.display()

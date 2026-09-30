@@ -484,3 +484,149 @@ fn v050_layout_rebuilds() {
     }
     assert_eq!(again.merged.cross_edges, r.merged.cross_edges);
 }
+
+/// CD.7c: every CODE span (file, byte range, xxh64) the raw shards of `dir`
+/// hold, decoded without a source, with its node's kind.
+fn raw_spans(dir: &Path) -> Vec<(glia_code_domain::code_span::CodeSpan, u32)> {
+    use glia_code_domain::code_span::CodeSpan;
+    let mut out = Vec::new();
+    for name in manifest_gmaps(dir).iter().filter(|n| n.as_str() != "cross_stack.gmap") {
+        let g = glia_store::decode_repo_graph(&MmapContainer::open(&dir.join(name)).unwrap()).unwrap();
+        for n in &g.nodes {
+            let kind = g.nav.kind_by_id.get(&n.id).map_or(0, |k| k.0);
+            for c in n.cells.iter().filter(|c| c.kind == glia_code_domain::cell_type::CODE) {
+                if let Some(span) = CodeSpan::from_payload(&c.payload) {
+                    out.push((span, kind));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// CD.7c: change one lowercase letter inside a span of a node whose kind is
+/// one of `kinds` in the layout at `dir` (sources under `repo`), the letter
+/// the fewest spans cover; how many spans cover it (a function's byte is also
+/// inside its MODULE's span: a MODULE carries its whole file as CODE).
+fn edit_inside(dir: &Path, repo: &Path, kinds: &[glia_core::NodeKindId]) -> usize {
+    let spans = raw_spans(dir);
+    let mut best: Option<(usize, String, usize)> = None;
+    for (s, kind) in &spans {
+        if !kinds.iter().any(|k| k.0 == *kind) {
+            continue;
+        }
+        let src = std::fs::read(repo.join(&s.file)).unwrap();
+        for k in s.start..s.end {
+            if !src[k as usize].is_ascii_lowercase() {
+                continue;
+            }
+            let covering =
+                spans.iter().filter(|(o, _)| o.file == s.file && (o.start..o.end).contains(&k)).count();
+            if best.as_ref().is_none_or(|(c, _, _)| covering < *c) {
+                best = Some((covering, s.file.clone(), k as usize));
+            }
+        }
+    }
+    let (covering, file, at) = best.expect("a lowercase letter inside a span of those kinds");
+    let path = repo.join(&file);
+    let mut src = std::fs::read(&path).unwrap();
+    src[at] = if src[at] == b'z' { b'y' } else { src[at] + 1 };
+    std::fs::write(&path, &src).unwrap();
+    covering
+}
+
+/// Move `<dir>/manifest.json`'s mtime 10 s past now, so the mtime scan reads
+/// the layout as fresh whatever changed before.
+fn manifest_mtime_ahead(dir: &Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(dir.join("manifest.json"))
+        .unwrap()
+        .set_modified(SystemTime::now() + Duration::from_secs(10))
+        .unwrap();
+}
+
+/// CD.7c acceptance (3): the backend fixture built with `build_go` and
+/// written by the store with its root recorded (as `store/tests/code_spans.rs`
+/// does), one byte changed after the write, and the manifest's mtime moved
+/// past it so `is_gmap_stale`'s mtime scan reads fresh (else the `stale:
+/// sources changed` branch answers before any read). The read finds the span
+/// no longer matches its file: the rebuild reason. The byte is one only the
+/// MODULE's span covers (the `package` clause), so exactly one span is
+/// unresolved; a byte inside a function is inside its module's span too
+/// (`edited_function_in_a_built_layout_rebuilds`).
+#[test]
+fn unresolved_code_span_rebuilds() {
+    let _env = env_guard(true);
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures/http_stack_smoke/backend"),
+        &repo,
+    );
+    let id = glia_core::RepoId::from_canonical("test://http_stack_smoke/backend");
+    let parses: Vec<_> = [("users/users.go", "users"), ("server/server.go", "server")]
+        .iter()
+        .map(|(rel, pkg)| {
+            let src = std::fs::read_to_string(repo.join(rel)).unwrap();
+            glia_parser_go::parse_file(&src, rel, pkg, "example.com/backend", id).unwrap()
+        })
+        .collect();
+    let merged = glia_graph::MergedGraph::new(vec![glia_graph::build_go(id, parses).unwrap()]);
+    let dir = tmp.path().join("layout");
+    let meta = glia_store::LayoutMeta {
+        repos: vec![glia_store::RepoMeta {
+            id: id.0,
+            label: "backend".into(),
+            root: Some("../repo".into()),
+        }],
+        parse_errors: vec![],
+        code_spans_unresolved: 0,
+    };
+    glia_store::write_merged_sharded_meta(&merged, &meta, &dir).unwrap();
+
+    let covering = edit_inside(&dir, &repo, &[glia_code_domain::node_kind::MODULE]);
+    assert_eq!(covering, 1, "a byte only the module's span covers");
+    manifest_mtime_ahead(&dir);
+    assert!(!glia_store::is_gmap_stale(&dir, &repo), "the mtime scan must not see the edit");
+
+    let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
+    assert_eq!(
+        rebuilt_reason(outcome),
+        "source changed since the layout was written: 1 code spans unresolved"
+    );
+    assert_matches_cold_build(&r, &repo);
+}
+
+/// CD.7c through the whole pipeline: a function edited in a `glia build`
+/// layout without the mtime moving. Every span covering the byte is
+/// unresolved (the function's and its MODULE's: the engine gives a MODULE its
+/// file's text as CODE), the layout rebuilds, and the rewritten layout spans
+/// the edited file: served fresh with every CODE cell the edited text.
+#[test]
+fn edited_function_in_a_built_layout_rebuilds() {
+    let _env = env_guard(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let d = sources(tmp.path());
+    let (dir, _) = persist_default(&d);
+    assert!(!raw_spans(&dir).is_empty(), "the default layout stores CODE as spans");
+
+    use glia_code_domain::node_kind::{FUNCTION, METHOD};
+    let covering = edit_inside(&dir, &d, &[FUNCTION, METHOD]);
+    assert_eq!(covering, 2, "the function's span and its module's");
+    manifest_mtime_ahead(&dir);
+    assert!(!glia_store::is_gmap_stale(&dir, &d), "the mtime scan must not see the edit");
+
+    let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
+    assert_eq!(
+        rebuilt_reason(outcome),
+        format!("source changed since the layout was written: {covering} code spans unresolved")
+    );
+    assert_matches_cold_build(&r, &d);
+    let (again, outcome) = load_or_rebuild(&dir, None, true).unwrap();
+    assert_fresh(&outcome);
+    let cold = generate_one(d.to_str().unwrap()).unwrap();
+    for (a, b) in again.merged.graphs.iter().zip(&cold.merged.graphs) {
+        assert_eq!(a.nodes, b.nodes, "every CODE cell reads back as the edited text");
+    }
+}

@@ -1148,8 +1148,10 @@ pub fn sidecar_path(out_path: &Path) -> std::path::PathBuf {
 
 /// `<out_path>.glia` — the directory beside a gmap where the bin records the
 /// glia graph that gmap was exported from (the LC.9 layout, written by
-/// `glia_engine::persist::persist_result`). A later `--since <out_path>` run
-/// loads it as the prior graph LB.6 `detect_moves` compares against. Copy it
+/// `glia_engine::persist::persist_graph` with no repo root, so its CODE stays
+/// inline rather than as spans into sources that will move, CD.7c). A later
+/// `--since <out_path>` run loads it as the prior graph LB.6 `detect_moves`
+/// compares against. Copy it
 /// with the gmap; keep `--out` outside the exported repo so the next build
 /// never walks it.
 pub fn history_dir(out_path: &Path) -> PathBuf {

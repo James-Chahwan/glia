@@ -18,15 +18,29 @@
 //! exact JSON (`expand_evidence`), so the in-memory graph is byte for byte the
 //! pre-3 graph. Both a code shard and `cross_stack.gmap` carry the section when
 //! they hold any interned payload.
+//!
+//! CODE spans (format 3, CD.7c): a CODE cell whose text is a verbatim slice of
+//! the file its node's first POSITION cell names, starting on the POSITION
+//! start line, is written as a `glia_code_domain::code_span::CodeSpan` - the
+//! file interned in the same `"strings"` table, the byte range and the xxh64
+//! of the slice (tag `0x02`) - when the writer is given a [`CodeSource`]. A
+//! reader given one reads the slice back as the text; a file that moved,
+//! changed or is absent (or a read with no source) yields the span as JSON
+//! (`CodeSpan::to_json`), counted unresolved ([`CodeSpanStats`]).
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::borrow::Cow;
+use std::cell::OnceCell;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 
+use glia_code_domain::code_span::{CODE_SPAN_TAG, CodeSpan};
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{
     CallSite, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use glia_core::{CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_core::{
+    Cell, CellPayload, CellTypeId, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
+};
 use glia_graph::{RepoGraph, SymbolTable};
 
 use crate::container::{
@@ -582,17 +596,273 @@ pub(crate) fn expand_file_evidence(
     }
 }
 
-/// Intern `edges` in place for writing and return the `"strings"` section to
-/// write beside them (`None` when nothing was interned) with the counts.
-/// `intern` false (a test's baseline) leaves every cell as written. An
-/// in-memory EVIDENCE cell that already holds an interned-looking payload is
-/// `Invalid`: its strings are not in this file's table, so it would read back
-/// as something else (or as `Corrupt`).
+// ============================================================================
+// CODE spans — CODE text as a range of its source file (format 3, CD.7c)
+// ============================================================================
+
+/// Where the CODE span codec reads a repo's source files: the writer to find
+/// each CODE text in its file, the reader to read it back.
+pub trait CodeSource {
+    /// The bytes of `file` - repo-relative, `/`-separated, as a POSITION cell
+    /// names it - in the repo `repo`. `None` when the repo is unknown or the
+    /// file cannot be read.
+    fn read(&self, repo: RepoId, file: &str) -> Option<Cow<'_, [u8]>>;
+}
+
+/// A [`CodeSource`] over repo roots on disk, keyed by `RepoId.0`: the roots a
+/// layout's manifest records (`RepoMeta::root`, resolved against the layout
+/// directory). Each root is canonicalised once, when built; one that does not
+/// exist is dropped, so its repo's spans stay inline on a write and read back
+/// unresolved.
+///
+/// A file resolves to `root.join(file)` only when `file` is relative and made
+/// of plain components (no `..`, no root or drive prefix) AND its canonical
+/// path still lies under the canonical root, so neither a hostile manifest nor
+/// a symlink reads outside the repo. It holds no file: the codec reads each
+/// file once per shard and drops them with the shard.
+#[derive(Debug, Clone, Default)]
+pub struct FsCodeSource {
+    roots: BTreeMap<u64, PathBuf>,
+}
+
+impl FsCodeSource {
+    /// A source over `roots` (`RepoId.0` -> repo root), each canonicalised;
+    /// a root that does not resolve is left out.
+    pub fn new(roots: impl IntoIterator<Item = (u64, PathBuf)>) -> Self {
+        let roots = roots
+            .into_iter()
+            .filter_map(|(id, root)| Some((id, std::fs::canonicalize(root).ok()?)))
+            .collect();
+        Self { roots }
+    }
+
+    /// True when no root resolved: every span would be unresolved.
+    pub fn is_empty(&self) -> bool {
+        self.roots.is_empty()
+    }
+}
+
+impl CodeSource for FsCodeSource {
+    fn read(&self, repo: RepoId, file: &str) -> Option<Cow<'_, [u8]>> {
+        let root = self.roots.get(&repo.0)?;
+        let rel = Path::new(file);
+        let plain = rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+        if file.is_empty() || !plain {
+            return None;
+        }
+        let path = std::fs::canonicalize(root.join(rel)).ok()?;
+        if !path.starts_with(root) {
+            return None;
+        }
+        std::fs::read(path).ok().map(Cow::Owned)
+    }
+}
+
+/// What the CODE span codec did. Written: `spanned` CODE cells stored as
+/// spans, `inline` stored as written (not a slice starting on the POSITION
+/// line, no POSITION, a JSON payload, no source), `saved_bytes` = the spanned
+/// texts' bytes minus their span payloads' bytes. Read: `rehydrated` spans
+/// read back as their text, `unresolved` handed out as `CodeSpan` JSON (the
+/// file moved, changed or is absent, or no source was given).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct CodeSpanStats {
+    pub spanned: usize,
+    pub inline: usize,
+    pub saved_bytes: i64,
+    pub rehydrated: usize,
+    pub unresolved: usize,
+}
+
+impl CodeSpanStats {
+    pub(crate) fn absorb(&mut self, other: CodeSpanStats) {
+        self.spanned += other.spanned;
+        self.inline += other.inline;
+        self.saved_bytes += other.saved_bytes;
+        self.rehydrated += other.rehydrated;
+        self.unresolved += other.unresolved;
+    }
+
+    /// Did the file(s) counted hold any span?
+    pub fn has_spans(&self) -> bool {
+        self.rehydrated + self.unresolved > 0
+    }
+}
+
+/// One source file of a shard: its bytes and, built on first use (the writer
+/// only), the byte offset each line starts at.
+struct SourceFile {
+    bytes: Vec<u8>,
+    line_starts: OnceCell<Vec<usize>>,
+}
+
+impl SourceFile {
+    /// Byte offset of the first place on 0-based `line` (any byte of the line,
+    /// its `\n` included) at which `text` occurs verbatim.
+    fn find_on_line(&self, line: usize, text: &[u8]) -> Option<usize> {
+        let starts = self.line_starts.get_or_init(|| {
+            let mut v = vec![0usize];
+            v.extend(self.bytes.iter().enumerate().filter(|(_, b)| **b == b'\n').map(|(i, _)| i + 1));
+            v
+        });
+        let from = *starts.get(line)?;
+        let to = starts.get(line + 1).map_or(self.bytes.len(), |next| next - 1);
+        let first = *text.first()?;
+        (from..=to).find(|&k| {
+            self.bytes.get(k) == Some(&first) && self.bytes.get(k..k + text.len()) == Some(text)
+        })
+    }
+}
+
+/// One shard's view of a [`CodeSource`]: every file read at most once, kept
+/// until the shard is encoded / decoded.
+struct ShardFiles<'s> {
+    source: &'s dyn CodeSource,
+    repo: RepoId,
+    files: HashMap<String, Option<SourceFile>>,
+}
+
+impl<'s> ShardFiles<'s> {
+    fn new(source: &'s dyn CodeSource, repo: RepoId) -> Self {
+        Self { source, repo, files: HashMap::new() }
+    }
+
+    fn get(&mut self, file: &str) -> Option<&SourceFile> {
+        if !self.files.contains_key(file) {
+            let read = self.source.read(self.repo, file).map(|b| SourceFile {
+                bytes: b.into_owned(),
+                line_starts: OnceCell::new(),
+            });
+            self.files.insert(file.to_string(), read);
+        }
+        self.files.get(file)?.as_ref()
+    }
+}
+
+/// `(file, 0-based start_line)` of the node's first POSITION cell that has
+/// both, JSON or text.
+fn first_position(cells: &[Cell]) -> Option<(String, usize)> {
+    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| {
+        let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+            return None;
+        };
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?.to_string();
+        let line = usize::try_from(v.get("start_line")?.as_u64()?).ok()?;
+        Some((file, line))
+    })
+}
+
+/// Store every CODE text of `nodes` found verbatim in its POSITION file,
+/// starting on the POSITION start line, as an interned span (the file in
+/// `strings`). Every other CODE cell is left as written.
+fn span_code_cells(
+    nodes: &mut [Node],
+    strings: &mut Interner<'_>,
+    files: &mut ShardFiles<'_>,
+) -> CodeSpanStats {
+    let mut stats = CodeSpanStats::default();
+    for n in nodes.iter_mut() {
+        let pos = first_position(&n.cells);
+        for c in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
+            let CellPayload::Text(text) = &c.payload else {
+                stats.inline += 1;
+                continue;
+            };
+            let found = pos.as_ref().and_then(|(file, line)| {
+                let at = files.get(file)?.find_on_line(*line, text.as_bytes())?;
+                Some(CodeSpan::of(file, at as u64, text.as_bytes()))
+            });
+            let Some(span) = found else {
+                stats.inline += 1;
+                continue;
+            };
+            let bytes = span.encode(strings.ix(&span.file));
+            stats.spanned += 1;
+            stats.saved_bytes += text.len() as i64 - bytes.len() as i64;
+            c.payload = CellPayload::Bytes(bytes);
+        }
+    }
+    stats
+}
+
+/// Read every CODE span of `nodes` back: the text when `files` holds the file
+/// unchanged, else the span as `CodeSpan` JSON (unresolved). A payload that
+/// does not decode is `Corrupt` naming the node.
+fn expand_code_spans<'s>(
+    nodes: &mut [Node],
+    table_len: usize,
+    string: &impl Fn(usize) -> Option<&'s str>,
+    mut files: Option<&mut ShardFiles<'_>>,
+) -> Result<CodeSpanStats, StoreError> {
+    let mut stats = CodeSpanStats::default();
+    for (i, n) in nodes.iter_mut().enumerate() {
+        let id = n.id.0;
+        for c in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
+            let CellPayload::Bytes(b) = &c.payload else {
+                continue;
+            };
+            if b.first() != Some(&CODE_SPAN_TAG) {
+                continue;
+            }
+            let span = CodeSpan::decode(b, table_len, string).map_err(|why| {
+                StoreError::Corrupt { detail: format!("CODE span of node {i} ({id}): {why}") }
+            })?;
+            let text = files
+                .as_deref_mut()
+                .and_then(|f| f.get(&span.file))
+                .and_then(|f| span.slice(&f.bytes))
+                .map(str::to_string);
+            c.payload = match text {
+                Some(text) => {
+                    stats.rehydrated += 1;
+                    CellPayload::Text(text)
+                }
+                None => {
+                    stats.unresolved += 1;
+                    span.to_payload()
+                }
+            };
+        }
+    }
+    Ok(stats)
+}
+
+/// Read the CODE spans of `nodes`, from the file `m` of repo `repo`, back
+/// through `source` with the file's own string table (see
+/// [`expand_code_spans`]); with no source every span is unresolved.
+fn expand_file_code_spans(
+    m: &MmapContainer,
+    nodes: &mut [Node],
+    repo: RepoId,
+    source: Option<&dyn CodeSource>,
+) -> Result<CodeSpanStats, StoreError> {
+    let mut files = source.map(|s| ShardFiles::new(s, repo));
+    match m.section::<ArchivedStringTable>(STRINGS_SECTION)? {
+        Some(table) => {
+            let strings = &table.strings;
+            let get = |i: usize| strings.get(i).map(|s| s.as_str());
+            expand_code_spans(nodes, strings.len(), &get, files.as_mut())
+        }
+        None => expand_code_spans(nodes, 0, &|_| None, files.as_mut()),
+    }
+}
+
+/// Intern `core`'s edge EVIDENCE and, given a `source`, its nodes' CODE spans
+/// in place for writing, and return the `"strings"` section to write beside
+/// them (`None` when nothing was interned) with the counts. EVIDENCE is
+/// interned first, in edge order, then span files in node order, so a graph
+/// with no span writes the table it wrote before CD.7c. `intern` false (a
+/// test's baseline) leaves every cell as written. An in-memory EVIDENCE or
+/// CODE cell that already holds an interned-looking payload is `Invalid`: its
+/// strings are not in this file's table, so it would read back as something
+/// else (or as `Corrupt`).
 fn intern_for_write(
-    edges: &mut [Edge],
+    core: &mut Container,
     intern: bool,
-) -> Result<(Option<EncodedSection>, InternStats), StoreError> {
-    let raw = edges.iter().position(|e| {
+    source: Option<&dyn CodeSource>,
+) -> Result<(Option<EncodedSection>, InternStats, CodeSpanStats), StoreError> {
+    let raw = core.edges.iter().position(|e| {
         e.cells.iter().any(|c| {
             c.kind == cell_type::EVIDENCE
                 && matches!(&c.payload, CellPayload::Bytes(b) if b.first() == Some(&EVIDENCE_TAG))
@@ -605,71 +875,112 @@ fn intern_for_write(
              read_to_owned's raw form is only written back through its own file"
         )));
     }
+    let raw_span = core.nodes.iter().position(|n| {
+        n.cells.iter().any(|c| {
+            c.kind == cell_type::CODE
+                && matches!(&c.payload, CellPayload::Bytes(b) if b.first() == Some(&CODE_SPAN_TAG))
+        })
+    });
+    if let Some(i) = raw_span {
+        return Err(StoreError::Invalid(format!(
+            "node {i} carries a CODE cell in the store's span Bytes form (tag \
+             {CODE_SPAN_TAG:#04x}); CODE is text (or code_span JSON) in memory, and \
+             read_to_owned's raw form is only written back through its own file"
+        )));
+    }
+    let code_cells = || {
+        core.nodes.iter().flat_map(|n| &n.cells).filter(|c| c.kind == cell_type::CODE).count()
+    };
     if !intern {
-        let kept_json = edges
+        let kept_json = core
+            .edges
             .iter()
             .flat_map(|e| &e.cells)
             .filter(|c| c.kind == cell_type::EVIDENCE)
             .count();
-        return Ok((None, InternStats { interned: 0, kept_json }));
+        let spans = CodeSpanStats { inline: code_cells(), ..CodeSpanStats::default() };
+        return Ok((None, InternStats { interned: 0, kept_json }, spans));
     }
     let mut table = StringTable::default();
-    let stats = intern_evidence(edges, &mut table);
+    let stats = intern_evidence(&mut core.edges, &mut table);
+    let spans = match source {
+        Some(source) => {
+            let mut files = ShardFiles::new(source, core.repo);
+            span_code_cells(&mut core.nodes, &mut Interner::new(&mut table), &mut files)
+        }
+        None => CodeSpanStats { inline: code_cells(), ..CodeSpanStats::default() },
+    };
     let section = if table.is_empty() {
         None
     } else {
         Some(encode_section(STRINGS_SECTION, &table)?)
     };
-    Ok((section, stats))
+    Ok((section, stats, spans))
 }
 
 // ============================================================================
 // RepoGraph codec — core + "code" section + "strings" section
 // ============================================================================
 
-/// One encoded file, and what the `[gmap] layout` marker counts about it.
+/// One encoded file, and what the `[gmap] layout` / `[gmap] code spans`
+/// markers count about it.
 pub(crate) struct EncodedFile {
     pub(crate) bytes: Vec<u8>,
     pub(crate) has_code: bool,
     pub(crate) has_strings: bool,
     pub(crate) evidence: InternStats,
+    pub(crate) spans: CodeSpanStats,
+}
+
+/// A layout write's running totals over its encoded files.
+#[derive(Default)]
+pub(crate) struct LayoutCounts {
+    pub(crate) code_sections: usize,
+    pub(crate) strings_sections: usize,
+    pub(crate) evidence: InternStats,
+    pub(crate) spans: CodeSpanStats,
 }
 
 impl EncodedFile {
     /// Fold this file's counts into a layout's running totals.
-    pub(crate) fn count_into(
-        &self,
-        code: &mut usize,
-        strings: &mut usize,
-        evidence: &mut InternStats,
-    ) {
-        *code += usize::from(self.has_code);
-        *strings += usize::from(self.has_strings);
-        evidence.absorb(self.evidence);
+    pub(crate) fn count_into(&self, counts: &mut LayoutCounts) {
+        counts.code_sections += usize::from(self.has_code);
+        counts.strings_sections += usize::from(self.has_strings);
+        counts.evidence.absorb(self.evidence);
+        counts.spans.absorb(self.spans);
     }
 }
 
-/// Encode `g` as the bytes of one `.gmap`, with what the `[gmap] layout`
-/// marker counts (code / strings sections written, EVIDENCE interned / kept).
-pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<EncodedFile, StoreError> {
-    encode_shard(g, true)
+/// Encode `g` as the bytes of one `.gmap`, CODE spans read through `source`
+/// when given, with what the layout markers count (code / strings sections
+/// written, EVIDENCE interned / kept, CODE spanned / inline).
+pub(crate) fn encode_repo_graph_counted(
+    g: &RepoGraph,
+    source: Option<&dyn CodeSource>,
+) -> Result<EncodedFile, StoreError> {
+    encode_shard(g, true, source)
 }
 
 /// `cross_stack.gmap`'s bytes: a core of `edges` (no nodes, no code section)
 /// plus the `"strings"` section their interned EVIDENCE needs.
 pub(crate) fn encode_cross_edges(edges: &[Edge]) -> Result<EncodedFile, StoreError> {
     let mut core = Container::for_cross_edges(edges.to_vec());
-    let (strings, evidence) = intern_for_write(&mut core.edges, true)?;
+    let (strings, evidence, spans) = intern_for_write(&mut core, true, None)?;
     let sections: Vec<EncodedSection> = strings.into_iter().collect();
     Ok(EncodedFile {
         bytes: encode_file(&mut core, &sections)?,
         has_code: false,
         has_strings: !sections.is_empty(),
         evidence,
+        spans,
     })
 }
 
-fn encode_shard(g: &RepoGraph, intern: bool) -> Result<EncodedFile, StoreError> {
+fn encode_shard(
+    g: &RepoGraph,
+    intern: bool,
+    source: Option<&dyn CodeSource>,
+) -> Result<EncodedFile, StoreError> {
     let mut core = code_core(g);
     let code = CodeSection::from_repo_graph(g);
     // LC.6 marker, un-gated: one line per encoded shard that carries an
@@ -688,10 +999,16 @@ fn encode_shard(g: &RepoGraph, intern: bool) -> Result<EncodedFile, StoreError> 
         sections.push(encode_section(CODE_SECTION, &code)?);
     }
     let has_code = !sections.is_empty();
-    let (strings, evidence) = intern_for_write(&mut core.edges, intern)?;
+    let (strings, evidence, spans) = intern_for_write(&mut core, intern, source)?;
     let has_strings = strings.is_some();
     sections.extend(strings);
-    Ok(EncodedFile { bytes: encode_file(&mut core, &sections)?, has_code, has_strings, evidence })
+    Ok(EncodedFile {
+        bytes: encode_file(&mut core, &sections)?,
+        has_code,
+        has_strings,
+        evidence,
+        spans,
+    })
 }
 
 /// Encode a `RepoGraph` as the bytes of one `.gmap`: the domain-free core
@@ -702,10 +1019,28 @@ fn encode_shard(g: &RepoGraph, intern: bool) -> Result<EncodedFile, StoreError> 
 /// unresolved refs or properties; no canonical EVIDENCE) is written without
 /// it. Deterministic: every map and set is flattened sorted by key, and the
 /// string table is filled in edge order. An edge whose EVIDENCE cell already
-/// holds the interned `Bytes` form (`read_to_owned`'s raw core, taken out of
-/// its file) is `StoreError::Invalid`.
+/// holds the interned `Bytes` form, or a node whose CODE cell holds the span
+/// `Bytes` form (`read_to_owned`'s raw core, taken out of its file), is
+/// `StoreError::Invalid`. Every CODE cell is written as it is in memory: see
+/// [`encode_repo_graph_with`] for spans.
 pub fn encode_repo_graph(g: &RepoGraph) -> Result<Vec<u8>, StoreError> {
-    Ok(encode_repo_graph_counted(g)?.bytes)
+    encode_repo_graph_with(g, None)
+}
+
+/// [`encode_repo_graph`] storing CODE as spans into the source (CD.7c) when
+/// `source` is given: a CODE `Text` payload found verbatim in the file its
+/// node's first POSITION cell names, starting at any byte of the POSITION
+/// start line, is written as that file (interned in the `"strings"` section,
+/// after the EVIDENCE strings, in node order), the byte range and the xxh64
+/// of the slice. Any other CODE cell (not found, no POSITION, a JSON payload,
+/// a file the source cannot read) is written as it is, so the encode is
+/// lossless whatever the source holds. Each file is read at most once per
+/// call. Deterministic for a given graph and given source bytes.
+pub fn encode_repo_graph_with(
+    g: &RepoGraph,
+    source: Option<&dyn CodeSource>,
+) -> Result<Vec<u8>, StoreError> {
+    Ok(encode_repo_graph_counted(g, source)?.bytes)
 }
 
 /// The inverse of `encode_repo_graph`: the core's nodes, edges and kinds plus
@@ -713,15 +1048,40 @@ pub fn encode_repo_graph(g: &RepoGraph) -> Result<Vec<u8>, StoreError> {
 /// EVIDENCE cell expanded back to its JSON ([`expand_evidence`]), so the graph
 /// equals the one written. A file without a code section (a nav-less graph, or
 /// `cross_stack.gmap`) decodes with empty nav / symbols / unresolved refs /
-/// properties. An interned payload that does not decode is `Corrupt`.
+/// properties. An interned payload that does not decode is `Corrupt`. With no
+/// source, every CODE span (CD.7c) decodes as its `CodeSpan` JSON
+/// (`{"code_span":{"file":..,"start":..,"end":..,"xxh64":..}}`): see
+/// [`decode_repo_graph_with`].
 pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
+    decode_repo_graph_with(m, None)
+}
+
+/// [`decode_repo_graph`] reading every CODE span back through `source`: the
+/// file's byte range, when it still hashes to the span's xxh64 and is UTF-8,
+/// becomes the `Text` it was written from; a file the source cannot read, too
+/// short, changed or not UTF-8 (and every span, with no source) yields the
+/// span's `CodeSpan` JSON instead. Each file is read at most once per call.
+pub fn decode_repo_graph_with(
+    m: &MmapContainer,
+    source: Option<&dyn CodeSource>,
+) -> Result<RepoGraph, StoreError> {
+    Ok(decode_repo_graph_counted(m, source)?.0)
+}
+
+/// [`decode_repo_graph_with`] plus how many spans were rehydrated /
+/// unresolved.
+pub(crate) fn decode_repo_graph_counted(
+    m: &MmapContainer,
+    source: Option<&dyn CodeSource>,
+) -> Result<(RepoGraph, CodeSpanStats), StoreError> {
     let mut core: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(m.archived()?)?;
     expand_file_evidence(m, &mut core.edges)?;
+    let spans = expand_file_code_spans(m, &mut core.nodes, core.repo, source)?;
     let code: CodeSection = match code_section_of(m)? {
         Some(archived) => rkyv::deserialize::<CodeSection, rkyv::rancor::Error>(archived)?,
         None => CodeSection::default(),
     };
-    Ok(RepoGraph {
+    let g = RepoGraph {
         repo: core.repo,
         nodes: core.nodes,
         edges: core.edges,
@@ -730,7 +1090,8 @@ pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
         unresolved_calls: code.unresolved_calls,
         unresolved_refs: code.unresolved_refs,
         properties: code.properties.into_iter().collect(),
-    })
+    };
+    Ok((g, spans))
 }
 
 /// The file's code section, validated and borrowed zero-copy; `None` when it
@@ -847,7 +1208,7 @@ mod tests {
     /// does, with interning disabled (every EVIDENCE cell stays JSON, no
     /// `"strings"` section) - the pre-format-3 shard of the same graph.
     fn encode_repo_graph_uninterned(g: &RepoGraph) -> Vec<u8> {
-        encode_shard(g, false).unwrap().bytes
+        encode_shard(g, false, None).unwrap().bytes
     }
 
     /// `n` edges over 5 emitters, 7 rules and 50 files, every basis, lines up
@@ -901,7 +1262,7 @@ mod tests {
     fn evidence_bytes_shrink() {
         let g = evidence_graph(10_000);
         let plain = encode_repo_graph_uninterned(&g);
-        let encoded = encode_repo_graph_counted(&g).unwrap();
+        let encoded = encode_repo_graph_counted(&g, None).unwrap();
         assert_eq!(encoded.evidence, InternStats { interned: 10_000, kept_json: 0 });
         assert!(encoded.has_strings && !encoded.has_code);
         let json_bytes: usize = g
@@ -1025,5 +1386,68 @@ mod tests {
         let path = tmp.path().join("vector.gmap");
         write_repo_graph(&g, &path).unwrap();
         assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().edges, g.edges);
+    }
+
+    /// CD.7c: the span scan finds a text at any byte of its line, byte
+    /// offsets past multi-byte chars, and nothing off the line or past EOF.
+    #[test]
+    fn find_on_line_is_byte_exact_and_line_bounded() {
+        let f = SourceFile {
+            bytes: "é = 1\n    fn b() {}\nfn c() {}".as_bytes().to_vec(),
+            line_starts: OnceCell::new(),
+        };
+        let at_b = f.bytes.windows(2).position(|w| w == b"fn").unwrap();
+        assert_eq!(f.find_on_line(1, b"fn b() {}"), Some(at_b));
+        assert_eq!(f.find_on_line(1, b"fn b() {}\nfn c"), Some(at_b), "a text may run past its line");
+        assert_eq!(f.find_on_line(0, b"fn b() {}"), None, "starts on line 1, not 0");
+        assert_eq!(f.find_on_line(2, b"fn c() {}"), Some(f.bytes.len() - 9));
+        assert_eq!(f.find_on_line(3, b"fn c() {}"), None, "no line 3");
+        assert_eq!(f.find_on_line(0, b"= 1"), Some(3), "after the two-byte e-acute");
+        assert_eq!(f.find_on_line(0, b""), None);
+    }
+
+    /// CD.7c: a CODE cell already in the on-disk span form is refused like raw
+    /// EVIDENCE (its file index points into another file's table); other CODE
+    /// bytes are written as they are.
+    #[test]
+    fn raw_code_span_is_not_written() {
+        let node = |payload: CellPayload| glia_core::Node {
+            id: NodeId(3),
+            repo: RepoId(1),
+            confidence: glia_core::Confidence::Strong,
+            cells: vec![glia_core::Cell { kind: cell_type::CODE, payload }],
+        };
+        let mut g = evidence_graph(1);
+        g.nodes = vec![node(CellPayload::Bytes(CodeSpan::of("a.rs", 0, b"x").encode(0)))];
+        match encode_repo_graph(&g) {
+            Err(StoreError::Invalid(why)) => assert!(why.contains("node 0"), "{why}"),
+            other => panic!("expected Invalid, got {:?}", other.map(|b| b.len())),
+        }
+        g.nodes = vec![node(CellPayload::Bytes(vec![0x03, 1]))];
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bytes.gmap");
+        write_repo_graph(&g, &path).unwrap();
+        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().nodes, g.nodes);
+    }
+
+    /// CD.7c: a span whose file index is outside the table is `Corrupt`
+    /// naming the node, like a malformed interned EVIDENCE.
+    #[test]
+    fn malformed_span_is_corrupt() {
+        let mut nodes = vec![glia_core::Node {
+            id: NodeId(9),
+            repo: RepoId(1),
+            confidence: glia_core::Confidence::Strong,
+            cells: vec![glia_core::Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Bytes(CodeSpan::of("a.rs", 0, b"x").encode(4)),
+            }],
+        }];
+        match expand_code_spans(&mut nodes, 1, &|i| (i == 0).then_some("a.rs"), None) {
+            Err(StoreError::Corrupt { detail }) => {
+                assert!(detail.contains("CODE span of node 0 (9)"), "{detail}")
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
     }
 }

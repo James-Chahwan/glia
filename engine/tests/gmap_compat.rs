@@ -39,9 +39,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use glia_engine::persist::{LoadOutcome, default_layout_dir, load_or_rebuild};
+use glia_engine::persist::{LoadOutcome, default_layout_dir, layout_meta, load_or_rebuild};
 use glia_engine::{BUILD_STAMP, ParseCache, generate_one, generate_one_incremental};
-use glia_store::{MANIFEST_VERSION, read_manifest_lenient, write_merged_sharded};
+use glia_store::{
+    MANIFEST_VERSION, read_manifest_lenient, write_merged_sharded, write_merged_sharded_meta,
+};
 
 /// Build identity of the code that wrote the capture (the README's pin).
 const PRE_LEAP_STAMP: &str = "0.4.18+p3d23e8828e7ba01a";
@@ -115,6 +117,17 @@ fn gmaps_in(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 fn clean_shards(clean: &Path, out: &Path) -> BTreeMap<String, Vec<u8>> {
     let r = generate_one(clean.to_str().expect("utf-8 path")).expect("clean build");
     write_merged_sharded(&r.merged, out).expect("write clean layout");
+    gmaps_in(out)
+}
+
+/// [`clean_shards`] written as the one writer (`persist_result`) writes a
+/// build: with its repo root recorded, so its CODE cells are stored as spans
+/// into the sources (CD.7c) like a rebuilt layout's. A span names the file
+/// relative to its root, so the clean copy's spans are the same bytes.
+fn rooted_clean_shards(clean: &Path, out: &Path) -> BTreeMap<String, Vec<u8>> {
+    let r = generate_one(clean.to_str().expect("utf-8 path")).expect("clean build");
+    let meta = layout_meta(&r.repo_labels, &r.repo_roots, &r.parse_errors, out);
+    write_merged_sharded_meta(&r.merged, &meta, out).expect("write clean layout");
     gmaps_in(out)
 }
 
@@ -310,7 +323,7 @@ fn leftovers_do_not_leak_into_the_graph() {
         ["[walk] skipped engine output .ai/repo-graph"],
         "{stderr}"
     );
-    let want = clean_shards(&m.clean, &m.root.join("clean-layout"));
+    let want = rooted_clean_shards(&m.clean, &m.root.join("clean-layout"));
     assert_same_shards(&gmaps_in(&default_layout_dir(&m.repo)), &want, "upgrade of the default dir");
 }
 
@@ -334,7 +347,7 @@ fn legacy_dir_load_rebuilds_with_the_old_format_reason() {
     assert!(lines_with(&stderr, "[gmap] legacy layout ignored: ").is_empty(), "{stderr}");
     assert!(gmaps_in(&m.repo.join(".glia")) == flat_before, "flat shards touched");
 
-    let want = clean_shards(&m.clean, &m.root.join("clean-layout"));
+    let want = rooted_clean_shards(&m.clean, &m.root.join("clean-layout"));
     assert_same_shards(&gmaps_in(&legacy), &want, "rebuild of the legacy dir");
 }
 
