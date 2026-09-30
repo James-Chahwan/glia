@@ -1,0 +1,116 @@
+{
+  "framework": "ts-arrow-class-fields",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "calls",
+  "cells": [
+    "typescript/calls"
+  ],
+  "note": "CA-10: an arrow-function or function-expression class field (`private handleX = (e) => {...}`, `onSave = function () {...}`, `static create = () => ...`, a React class component's `handleClick = () => {...}`) is a METHOD of its class (qname Class::field) whose body's calls are CALLS from it, and `this.field()` binds to it like a method. Non-function fields (`rafId = 0`, `label = 'hero'`, `#count = 0`, `state = {...}`) stay non-nodes. Angular / React / Vue files all parse through the TypeScript parser, so one visitor covers them. Dogfood: quokka ascii-quokka-hero.component.ts:470 handleMotionPreferenceChange -> stopAnimation (:474). Baseline (HEAD 2170ff8, leap wheel): METHOD 0/6, CALLS 0/6, DEFINES 0/1, forbid 0.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "HeroComponent/applyColor",
+      "note": "private arrow field"
+    },
+    {
+      "kind": "METHOD",
+      "name": "HeroComponent/handleMotionChange",
+      "note": "private arrow field with a parameter (quokka :470 shape)"
+    },
+    {
+      "kind": "METHOD",
+      "name": "HeroComponent/onSave",
+      "note": "function-expression field"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Store/increment",
+      "note": "plain JS class, arrow field"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Store/create",
+      "note": "static arrow field"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Counter/handleClick",
+      "note": "React class component event handler (.jsx)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "HeroComponent/handleMotionChange",
+      "to": "HeroComponent/stopAnimation",
+      "category": "CALLS",
+      "note": "the dogfood edge: arrow-field body -> method"
+    },
+    {
+      "from": "HeroComponent/applyColor",
+      "to": "HeroComponent/renderFrame",
+      "category": "CALLS",
+      "note": "arrow-field body -> method"
+    },
+    {
+      "from": "HeroComponent/ngAfterViewInit",
+      "to": "HeroComponent/applyColor",
+      "category": "CALLS",
+      "note": "this.applyColor() binds to the field METHOD"
+    },
+    {
+      "from": "HeroComponent/onSave",
+      "to": "HeroComponent/persist",
+      "category": "CALLS",
+      "note": "function-expression field body"
+    },
+    {
+      "from": "Store/increment",
+      "to": "Store/notify",
+      "category": "CALLS",
+      "note": "JS class arrow field"
+    },
+    {
+      "from": "Counter/handleClick",
+      "to": "Counter/bump",
+      "category": "CALLS",
+      "note": "React class arrow handler body"
+    },
+    {
+      "from": "HeroComponent",
+      "to": "HeroComponent/handleMotionChange",
+      "category": "DEFINES",
+      "note": "the class DEFINES the field METHOD"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "METHOD",
+      "name": "hero.component::HeroComponent::rafId",
+      "note": "a number-valued field is not a METHOD"
+    },
+    {
+      "kind": "METHOD",
+      "name": "hero.component::HeroComponent::label",
+      "note": "a string-valued field is not a METHOD"
+    },
+    {
+      "kind": "METHOD",
+      "name": "store::Store::#count",
+      "note": "a private data field is not a METHOD"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Counter::Counter::state",
+      "note": "React state object field is not a METHOD"
+    },
+    {
+      "from": "hero.component::HeroComponent",
+      "to": "hero.component::HeroComponent::stopAnimation",
+      "category": "CALLS",
+      "note": "the field body's calls belong to the field METHOD, never to the class"
+    }
+  ]
+}

@@ -14,7 +14,7 @@
 //! All code-domain primitives live in `glia-code-domain` and are
 //! re-exported from this crate for convenience.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
@@ -38,6 +38,17 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
+    parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, _)| parse)
+}
+
+/// [`parse_file`], plus the file's CG.1 function-field counters (the
+/// `[ts-fields]` marker's numbers), which the tests read back.
+fn parse_file_stats(
+    source: &str,
+    file_rel_path: &str,
+    module_qname: &str,
+    repo: RepoId,
+) -> Result<(FileParse, FnFieldStats), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     parser
@@ -81,8 +92,21 @@ pub fn parse_file(
             orm.declared, orm.table_cells, orm.repo_calls
         );
     }
+    // CG.1: function-valued class fields minted as METHODs, per file.
+    let ff = acc.fn_fields;
+    if ff.fields() + ff.shadowed > 0 {
+        eprintln!(
+            "[ts-fields] function fields={} (arrow={} function={}) calls={} shadowed={} \
+             file={file_rel_path}",
+            ff.fields(),
+            ff.arrow,
+            ff.function,
+            ff.calls,
+            ff.shadowed
+        );
+    }
 
-    resolve_intra_file(acc)
+    resolve_intra_file(acc).map(|parse| (parse, ff))
 }
 
 // ============================================================================
@@ -126,6 +150,30 @@ struct Acc {
     repo: Option<RepoId>,
     /// A13.15: this file's TypeORM evidence and the `[orm-typeorm]` counters.
     typeorm: TypeOrmFile,
+    /// CG.1: the `[ts-fields]` counters.
+    fn_fields: FnFieldStats,
+}
+
+/// CG.1: what one file's function-valued class fields gave the graph (the
+/// `[ts-fields]` marker).
+#[derive(Default, Clone, Copy)]
+struct FnFieldStats {
+    /// `x = (…) => …` fields minted as METHODs.
+    arrow: usize,
+    /// `x = function (…) {…}` and `x = function* (…) {…}` fields minted as METHODs.
+    function: usize,
+    /// Call sites (resolved or not) and client HTTP calls found in their bodies.
+    calls: usize,
+    /// Function fields whose name a method (or an earlier field) of the same
+    /// class already holds: the method keeps its node, the field mints none.
+    shadowed: usize,
+}
+
+impl FnFieldStats {
+    /// Function fields minted as METHODs.
+    fn fields(self) -> usize {
+        self.arrow + self.function
+    }
 }
 
 /// A13.15: what one file shows of TypeORM. The two import flags gate the
@@ -332,14 +380,36 @@ fn visit_class(
     let Some(body) = n.child_by_field_name("body") else {
         return;
     };
+    // CG.1: every method name of the body, declared before or after a field,
+    // so a function-valued field named like a method mints no second node.
+    let method_names: HashSet<&str> = {
+        let mut mc = body.walk();
+        body.named_children(&mut mc)
+            .filter(|m| m.kind() == "method_definition")
+            .filter_map(|m| child_text(m, "name", src))
+            .collect()
+    };
     let mut cursor = body.walk();
     for member in body.named_children(&mut cursor) {
         match member.kind() {
             "method_definition" => {
                 visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
             }
-            // The one class-field visitor: every per-field extraction goes here.
-            "public_field_definition" => visit_field(member, src, module_id, class_id, acc),
+            // `visit_field` reads a field's type and DI shape; a function-valued
+            // field is also a METHOD (CG.1).
+            "public_field_definition" => {
+                visit_field(member, src, module_id, class_id, acc);
+                visit_function_field(
+                    member,
+                    src,
+                    file_rel,
+                    &class_qname,
+                    class_id,
+                    repo,
+                    &method_names,
+                    acc,
+                );
+            }
             _ => {}
         }
     }
@@ -630,6 +700,99 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
         field_type,
         line: line_at(value),
     });
+}
+
+/// CG.1: a class field whose value is a function — `private onResize = (e) =>
+/// {…}`, `save = function () {…}`, `items = function* () {…}`, `static create =
+/// () => …`, `#tick = () => …` — is a METHOD `<class>::<field>`. It is called
+/// as `this.onResize()`, passed as a handler and holds behaviour, so it gets
+/// [`visit_method`]'s treatment: DEFINES from the class, the `class_methods`
+/// entry `this.m()` binds through (before `resolve_intra_file`, so a call from
+/// a method declared above the field binds too), the nav record, and a call
+/// walk of its body (an expression body or a block alike), whose calls, client
+/// HTTP calls and TypeORM sites are the field METHOD's. Parameters are not
+/// walked, as for a method.
+///
+/// Its CODE / POSITION / DOC are the field node's own: tree-sitter-typescript
+/// keeps a field's decorators INSIDE `public_field_definition`, so CB.4's
+/// [`first_decorator`] widening (for a `method_definition`, whose decorators
+/// are `class_body` siblings) does not apply. A computed, string or number
+/// name mints nothing, nor does any other value (`rafId = 0`, `users$ =
+/// this.api.list()`, `x = computed(() => …)`). A name a method of the class
+/// holds (`method_names`, collected before the member walk) or an earlier
+/// field took keeps that node and counts as `shadowed`, so no NodeId is
+/// pushed twice.
+#[allow(clippy::too_many_arguments)]
+fn visit_function_field(
+    field: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    class_qname: &str,
+    class_id: NodeId,
+    repo: RepoId,
+    method_names: &HashSet<&str>,
+    acc: &mut Acc,
+) {
+    let Some(value) = field.child_by_field_name("value") else {
+        return;
+    };
+    let arrow = match value.kind() {
+        "arrow_function" => true,
+        "function_expression" | "generator_function" => false,
+        _ => return,
+    };
+    let Some(name_node) = field.child_by_field_name("name") else {
+        return;
+    };
+    if !matches!(
+        name_node.kind(),
+        "property_identifier" | "private_property_identifier"
+    ) {
+        return;
+    }
+    // `#tick` keeps its `#`, as `visit_method` names `#m() {}`.
+    let name = text(name_node, src);
+    if method_names.contains(name) || acc.class_methods.contains_key(&(class_id, name.to_string()))
+    {
+        acc.fn_fields.shadowed += 1;
+        return;
+    }
+    let method_qname = format!("{class_qname}::{name}");
+    let method_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &method_qname);
+    acc.nodes.push(Node {
+        id: method_id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: build_cells(&field, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: class_id,
+        to: method_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.class_methods
+        .insert((class_id, name.to_string()), method_id);
+    acc.nav.record(
+        method_id,
+        name,
+        &method_qname,
+        node_kind::METHOD,
+        Some(class_id),
+    );
+
+    let before = acc.unresolved.len() + acc.endpoints.len();
+    if let Some(body) = value.child_by_field_name("body") {
+        collect_calls_in(body, src, method_id, Some(class_id), acc);
+    }
+    let after = acc.unresolved.len() + acc.endpoints.len();
+    acc.fn_fields.calls += after.saturating_sub(before);
+    if arrow {
+        acc.fn_fields.arrow += 1;
+    } else {
+        acc.fn_fields.function += 1;
+    }
 }
 
 /// The leading identifier of a decorator: `@Component({...})` → "Component",
@@ -4159,5 +4322,199 @@ export class Listener {
             "the JSDoc is DOC, not CODE: {code}"
         );
         assert_eq!(doc.as_deref(), Some("Handles y."));
+    }
+
+    // ------------------------------------------------------------------------
+    // CG.1: function-valued class fields are METHODs
+    // ------------------------------------------------------------------------
+
+    /// The simple names of the cross-file CallSites made from `from`.
+    fn call_site_names(parse: &FileParse, from: NodeId) -> Vec<String> {
+        parse
+            .calls
+            .iter()
+            .filter(|c| c.from == from)
+            .map(|c| match &c.qualifier {
+                CallQualifier::Bare(n) | CallQualifier::SelfMethod(n) => n.clone(),
+                CallQualifier::Attribute { name, .. }
+                | CallQualifier::ComplexReceiver { name, .. } => name.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The `[ts-fields]` counters of one parse, as `(fields, shadowed)`.
+    fn fn_field_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
+        let (_, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        (stats.fields(), stats.shadowed)
+    }
+
+    #[test]
+    fn arrow_field_is_a_method_with_its_calls() {
+        use glia_code_domain::evidence::{Basis, Evidence};
+        let src = "\
+class Hero {
+  stopAnimation(): void {}
+  renderFrame(t: number): void {}
+  private handleMotionPreferenceChange = (event: MediaQueryListEvent): void => {
+    if (event.matches) {
+      this.stopAnimation();
+      this.renderFrame(performance.now());
+    }
+  };
+}
+";
+        let parse = parse_file(src, "src/hero.component.ts", "src::hero", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::hero::Hero");
+        let field = id(node_kind::METHOD, "src::hero::Hero::handleMotionPreferenceChange");
+        assert!(has_node(&parse, field), "the arrow field is a METHOD");
+        assert!(has_edge(&parse, class, field, edge_category::DEFINES));
+        for (callee, row) in [("stopAnimation", 5), ("renderFrame", 6)] {
+            let to = id(node_kind::METHOD, &format!("src::hero::Hero::{callee}"));
+            let edge = parse
+                .edges
+                .iter()
+                .find(|e| e.from == field && e.to == to && e.category == edge_category::CALLS)
+                .unwrap_or_else(|| panic!("field -> {callee} resolves in-file"));
+            let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
+            assert_eq!((ev.line, ev.basis), (Some(row), Basis::Site), "{callee}");
+            assert_eq!(ev.rule.as_deref(), Some("intra_file"));
+        }
+        assert!(
+            !parse
+                .edges
+                .iter()
+                .any(|e| e.from == class && e.category == edge_category::CALLS),
+            "the class takes none of the field body's calls"
+        );
+        let (code, pos, _) = method_cells(&parse, "src::hero::Hero::handleMotionPreferenceChange");
+        assert!(pos.contains("\"start_line\":3,"), "the field's row: {pos}");
+        assert!(code.starts_with("private handleMotionPreferenceChange"), "CODE: {code}");
+        assert_eq!(fn_field_counts(src, "src/hero.component.ts", "src::hero"), (1, 0));
+    }
+
+    #[test]
+    fn this_call_binds_to_an_arrow_field() {
+        let src = "\
+class Hero {
+  ngAfterViewInit(): void { this.applyColor(); }
+  private applyColor = (): void => {};
+}
+";
+        let parse = parse_file(src, "src/hero.component.ts", "src::hero", repo()).unwrap();
+        let init = id(node_kind::METHOD, "src::hero::Hero::ngAfterViewInit");
+        let field = id(node_kind::METHOD, "src::hero::Hero::applyColor");
+        assert!(
+            has_edge(&parse, init, field, edge_category::CALLS),
+            "a method declared above the field binds `this.applyColor()` to it"
+        );
+        assert!(call_site_names(&parse, init).is_empty(), "{:?}", parse.calls);
+    }
+
+    #[test]
+    fn function_expression_and_generator_fields() {
+        let src = "\
+class C {
+  persist(): void {}
+  onSave = function (this: C) { this.persist(); };
+  items = function* (this: C) { yield this.persist(); };
+}
+";
+        let parse = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        let persist = id(node_kind::METHOD, "src::c::C::persist");
+        for field in ["onSave", "items"] {
+            let m = id(node_kind::METHOD, &format!("src::c::C::{field}"));
+            assert!(has_node(&parse, m), "{field} is a METHOD");
+            assert!(has_edge(&parse, m, persist, edge_category::CALLS), "{field} -> persist");
+        }
+        let (_, stats) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
+        assert_eq!((stats.arrow, stats.function, stats.calls), (0, 2, 2));
+    }
+
+    #[test]
+    fn static_and_private_fields() {
+        let src = "class Store { notify() {} #tick = () => this.notify(); static create = () => new Store(); }\n";
+        let parse = parse_file(src, "src/store.js", "src::store", repo()).unwrap();
+        let notify = id(node_kind::METHOD, "src::store::Store::notify");
+        let tick = id(node_kind::METHOD, "src::store::Store::#tick");
+        let create = id(node_kind::METHOD, "src::store::Store::create");
+        assert!(has_node(&parse, tick), "`#tick` keeps its `#`");
+        assert!(has_node(&parse, create), "a static arrow field is a METHOD");
+        assert!(has_edge(&parse, tick, notify, edge_category::CALLS));
+        assert!(
+            !parse.edges.iter().any(|e| e.from == create && e.category == edge_category::CALLS),
+            "`new Store()` is not a call"
+        );
+        assert!(call_site_names(&parse, create).is_empty(), "{:?}", parse.calls);
+    }
+
+    #[test]
+    fn non_function_fields_mint_nothing() {
+        let src = "\
+import { inject } from '@angular/core';
+import { ApiService } from './api.service';
+
+export class K {
+  rafId = 0;
+  label = 'x';
+  state = { n: 0 };
+  users$ = this.api.list();
+  private api = inject(ApiService);
+}
+";
+        let parse = parse_file(src, "src/k.component.ts", "src::k", repo()).unwrap();
+        for field in ["rafId", "label", "state", "users$", "api"] {
+            let m = id(node_kind::METHOD, &format!("src::k::K::{field}"));
+            assert!(!has_node(&parse, m), "{field} is data, not a METHOD");
+        }
+        assert!(
+            !parse.calls.iter().any(|c| matches!(
+                &c.qualifier,
+                CallQualifier::ComplexReceiver { name, .. } | CallQualifier::Attribute { name, .. }
+                    if name == "list"
+            )),
+            "a data field's initialiser is not walked: {:?}",
+            parse.calls
+        );
+        assert_eq!(inject_targets(&parse, "src::k", "src::k::K"), vec!["ApiService".to_string()]);
+        assert_eq!(fn_field_counts(src, "src/k.component.ts", "src::k"), (0, 0));
+    }
+
+    #[test]
+    fn shadowed_field_keeps_the_method() {
+        let src = "class K { f = () => a(); f() { b(); } }\n";
+        let parse = parse_file(src, "src/k.ts", "src::k", repo()).unwrap();
+        let f = id(node_kind::METHOD, "src::k::K::f");
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == f).count(), 1, "one node for `f`");
+        assert_eq!(call_site_names(&parse, f), vec!["b".to_string()], "the method's body only");
+        assert_eq!(fn_field_counts(src, "src/k.ts", "src::k"), (0, 1));
+
+        // A second field of one name keeps the first field's node.
+        let twice = "class K { g = () => a(); g = () => b(); }\n";
+        let parse = parse_file(twice, "src/k.ts", "src::k", repo()).unwrap();
+        let g = id(node_kind::METHOD, "src::k::K::g");
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == g).count(), 1);
+        assert_eq!(call_site_names(&parse, g), vec!["a".to_string()]);
+        assert_eq!(fn_field_counts(twice, "src/k.ts", "src::k"), (1, 1));
+    }
+
+    #[test]
+    fn arrow_field_http_call_is_the_fields() {
+        let src = "\
+export class UsersService {
+  constructor(private http: HttpClient) {}
+  load = () => this.http.get('/api/users');
+}
+";
+        let parse = parse_file(src, "src/users.service.ts", "src::users", repo()).unwrap();
+        let ep = endpoint_id(repo(), "GET", "/api/users");
+        let load = id(node_kind::METHOD, "src::users::UsersService::load");
+        let froms: Vec<NodeId> = parse
+            .edges
+            .iter()
+            .filter(|e| e.to == ep && e.category == edge_category::CALLS)
+            .map(|e| e.from)
+            .collect();
+        assert_eq!(froms, vec![load], "the field METHOD makes the HTTP call");
     }
 }
